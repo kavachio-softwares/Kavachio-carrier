@@ -1,0 +1,150 @@
+{
+  "_doc": "Per-template verify-gate fixtures. Each entry compiles its IR and runs it in DuckDB; the compiled rule must flag the fail_rows and pass the pass_rows. Single sheet 'S'. Run via tests/test_compiler_fixtures.py.",
+  "fixtures": [
+    {
+      "template": "required_field",
+      "ir": {"template": "required_field", "params": {"field": "Name"}},
+      "schema": {"S": ["Name"]},
+      "pass_rows": [{"Name": "Acme"}],
+      "fail_rows": [{"Name": ""}]
+    },
+    {
+      "template": "value_in_set",
+      "ir": {"template": "value_in_set", "params": {"field": "Status", "allowed": ["active"]}},
+      "schema": {"S": ["Status"]},
+      "pass_rows": [{"Status": "active"}],
+      "fail_rows": [{"Status": "closed"}]
+    },
+    {
+      "template": "value_not_in_set",
+      "ir": {"template": "value_not_in_set", "params": {"field": "Class", "excluded": ["nightclub"]}},
+      "schema": {"S": ["Class"]},
+      "pass_rows": [{"Class": "office"}],
+      "fail_rows": [{"Class": "Nightclub"}]
+    },
+    {
+      "template": "max_limit",
+      "ir": {"template": "max_limit", "params": {"field": "Limit", "max": 100}},
+      "schema": {"S": ["Limit"]},
+      "pass_rows": [{"Limit": "50"}],
+      "fail_rows": [{"Limit": "200"}]
+    },
+    {
+      "template": "min_limit",
+      "ir": {"template": "min_limit", "params": {"field": "Limit", "min": 100}},
+      "schema": {"S": ["Limit"]},
+      "pass_rows": [{"Limit": "200"}],
+      "fail_rows": [{"Limit": "50"}]
+    },
+    {
+      "template": "range_check",
+      "ir": {"template": "range_check", "params": {"field": "Limit", "min": 10, "max": 100}},
+      "schema": {"S": ["Limit"]},
+      "pass_rows": [{"Limit": "50"}],
+      "fail_rows": [{"Limit": "5"}]
+    },
+    {
+      "template": "pattern_check",
+      "ir": {"template": "pattern_check", "params": {"field": "Code", "pattern": "^[A-Z]{3}$"}},
+      "schema": {"S": ["Code"]},
+      "pass_rows": [{"Code": "ABC"}],
+      "fail_rows": [{"Code": "ab"}]
+    },
+    {
+      "template": "date_relation",
+      "ir": {"template": "date_relation", "params": {"field": "Eff", "op": "<", "other_field": "Exp"}},
+      "schema": {"S": ["Eff", "Exp"]},
+      "pass_rows": [{"Eff": "2020-01-01", "Exp": "2021-01-01"}],
+      "fail_rows": [{"Eff": "2021-01-01", "Exp": "2020-01-01"}]
+    },
+    {
+      "_note": "INCLUSIVE bound. 'must not fall after X' compiles to op '<=', so a date ON the boundary day is COMPLIANT — a transaction effective on the policy's last day, or a cancellation effective on the (restated) expiration date, must NOT be flagged. Covers both the bare-date and the Excel datetime ('… 00:00:00') spelling, which is what a real BDX cell holds.",
+      "template": "date_relation",
+      "ir": {"template": "date_relation", "params": {"field": "TranEff", "op": "<=", "other_field": "Exp"}},
+      "schema": {"S": ["TranEff", "Exp"]},
+      "pass_rows": [{"TranEff": "2026-04-15", "Exp": "2026-04-15"},
+                    {"TranEff": "2026-04-15 00:00:00", "Exp": "2026-04-15 00:00:00"},
+                    {"TranEff": "2026-03-31 00:00:00", "Exp": "2026-04-15 00:00:00"}],
+      "fail_rows": [{"TranEff": "2026-04-16", "Exp": "2026-04-15"},
+                    {"TranEff": "2026-04-16 00:00:00", "Exp": "2026-04-15 00:00:00"}]
+    },
+    {
+      "template": "conditional_required",
+      "ir": {"template": "conditional_required", "params": {"condition": {"field": "State", "op": "=", "value": "NJ"}, "required_field": "Tax"}},
+      "schema": {"S": ["State", "Tax"]},
+      "pass_rows": [{"State": "NJ", "Tax": "5"}, {"State": "NY", "Tax": ""}],
+      "fail_rows": [{"State": "NJ", "Tax": ""}]
+    },
+    {
+      "template": "conditional_value",
+      "ir": {"template": "conditional_value", "params": {"condition": {"field": "State", "op": "!=", "value": "California"}, "field": "Paper", "op": "=", "value": "Palms", "variation_values": ["Palms", "Palms Specialty", "Palms Specialty Insurance Company, Inc."]}},
+      "schema": {"S": ["State", "Paper"]},
+      "pass_rows": [{"State": "California", "Paper": "Other"}, {"State": "Texas", "Paper": "Palms"}, {"State": "Texas", "Paper": "Palms Specialty Insurance Company, Inc."}],
+      "fail_rows": [{"State": "Texas", "Paper": "Other"}]
+    },
+    {
+      "template": "conditional_all",
+      "ir": {"template": "conditional_all", "params": {"conditions": [{"field": "Paper", "op": "=", "value": "Specialty"}, {"field": "State", "op": "=", "value": "CA"}], "field": "Referral", "op": "=", "value": "Yes"}},
+      "schema": {"S": ["Paper", "State", "Referral"]},
+      "pass_rows": [{"Paper": "Specialty", "State": "CA", "Referral": "Yes"}, {"Paper": "Specialty", "State": "TX", "Referral": "No"}, {"Paper": "Other", "State": "CA", "Referral": "No"}],
+      "fail_rows": [{"Paper": "Specialty", "State": "CA", "Referral": "No"}]
+    },
+    {
+      "template": "period_duration",
+      "ir": {"template": "period_duration", "params": {"start_field": "Eff", "end_field": "Exp", "unit": "month", "op": "<=", "value": 12}},
+      "schema": {"S": ["Eff", "Exp"]},
+      "pass_rows": [{"Eff": "2020-01-01", "Exp": "2020-06-01"}],
+      "fail_rows": [{"Eff": "2020-01-01", "Exp": "2022-01-01"}]
+    },
+    {
+      "template": "aggregate_cap",
+      "ir": {"template": "aggregate_cap", "params": {"aggregation": "sum", "field": "TIV", "group_by": ["Policy"], "max": 1000}},
+      "schema": {"S": ["Policy", "TIV"]},
+      "pass_rows": [{"Policy": "A", "TIV": "400"}, {"Policy": "A", "TIV": "500"}],
+      "fail_rows": [{"Policy": "B", "TIV": "800"}, {"Policy": "B", "TIV": "800"}]
+    },
+    {
+      "template": "cross_field_math",
+      "ir": {"template": "cross_field_math", "params": {"result_field": "Total", "left_field": "Qty", "operator": "*", "right_field": "Price", "tolerance_pct": 0}},
+      "schema": {"S": ["Total", "Qty", "Price"]},
+      "pass_rows": [{"Total": "20", "Qty": "4", "Price": "5"}],
+      "fail_rows": [{"Total": "99", "Qty": "4", "Price": "5"}]
+    },
+    {
+      "template": "cross_field_compare",
+      "ir": {"template": "cross_field_compare", "params": {"field": "Fee", "op": ">=", "other_field": "GWP", "operator": "*", "factor": 0.125}},
+      "schema": {"S": ["Fee", "GWP"]},
+      "pass_rows": [{"Fee": "200", "GWP": "1000"}],
+      "fail_rows": [{"Fee": "50", "GWP": "1000"}]
+    },
+    {
+      "template": "uniqueness",
+      "ir": {"template": "uniqueness", "params": {"fields": ["PolicyNo"]}},
+      "schema": {"S": ["PolicyNo"]},
+      "pass_rows": [{"PolicyNo": "P1"}, {"PolicyNo": "P2"}],
+      "fail_rows": [{"PolicyNo": "P3"}, {"PolicyNo": "P3"}]
+    },
+    {
+      "template": "date_bound",
+      "ir": {"template": "date_bound", "params": {"field": "Eff", "op": ">=", "date": "2025-09-01"}},
+      "schema": {"S": ["Eff"]},
+      "pass_rows": [{"Eff": "2025-09-01"}, {"Eff": "2026-03-15"}],
+      "fail_rows": [{"Eff": "2025-08-31"}]
+    },
+    {
+      "template": "cross_field_or_value",
+      "ir": {"template": "cross_field_or_value", "params": {"field": "Fee", "op": ">=", "other_field": "GWP", "operator": "*", "factor": 0.125, "value": 15000, "bound": "greater"}},
+      "schema": {"S": ["Fee", "GWP"]},
+      "pass_rows": [{"Fee": "15000", "GWP": "8000"}, {"Fee": "25000", "GWP": "200000"}],
+      "fail_rows": [{"Fee": "82.625", "GWP": "661"}, {"Fee": "16000", "GWP": "200000"}, {"Fee": "= AE2 * 0.125", "GWP": "100000"}, {"Fee": "", "GWP": "100000"}]
+    },
+    {
+      "template": "cross_field_or_value",
+      "label": "cross_field_or_value_exact",
+      "ir": {"template": "cross_field_or_value", "params": {"field": "Fee", "op": "=", "other_field": "GWP", "operator": "*", "factor": 0.125, "value": 15000, "bound": "greater"}},
+      "schema": {"S": ["Fee", "GWP"]},
+      "pass_rows": [{"Fee": "15000", "GWP": "8000"}, {"Fee": "25000", "GWP": "200000"}, {"Fee": "45770.4999999", "GWP": "366164"}],
+      "fail_rows": [{"Fee": "16000", "GWP": "200000"}, {"Fee": "= AE2 * 0.125", "GWP": "100000"}, {"Fee": "0", "GWP": "100000"}]
+    }
+  ]
+}

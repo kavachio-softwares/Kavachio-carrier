@@ -1,0 +1,349 @@
+{
+  "_doc": "Seed for the rule_template DB catalog (loaded by catalog_store). This is VERSIONED DATA \u2014 the template contract metadata. The SQL builders that turn each template into DuckDB SQL stay in code (rule_compiler._BUILDERS), keyed by `name`. `field_params` is the declarative replacement for the old Python `fields` lambda: it tells the loader which params hold field names. engine is a vestigial legacy value (single DuckDB engine at runtime).",
+  "templates": [
+    {
+      "name": "required_field",
+      "engine": "ajv",
+      "rule_type": "required_field",
+      "description": "A field must be present and non-empty on every row.",
+      "required": [
+        "field"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ]
+      }
+    },
+    {
+      "name": "value_in_set",
+      "engine": "ajv",
+      "rule_type": "value_list",
+      "description": "A field's value must be one of an allowed set (enum). Optional `excluded` carves out values from that set in ONE rule (e.g. Territory: United States excluding Puerto Rico).",
+      "required": [
+        "field",
+        "allowed"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "include_scope": true
+      }
+    },
+    {
+      "name": "value_not_in_set",
+      "engine": "ajv",
+      "rule_type": "exclusion_single_row",
+      "description": "A field's value must NOT be one of an excluded set (exclusion).",
+      "required": [
+        "field",
+        "excluded"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "include_scope": true
+      }
+    },
+    {
+      "name": "max_limit",
+      "engine": "ajv",
+      "rule_type": "range_check",
+      "description": "A numeric field must be <= max (optionally within a row scope).",
+      "required": [
+        "field",
+        "max"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "include_scope": true
+      }
+    },
+    {
+      "name": "min_limit",
+      "engine": "ajv",
+      "rule_type": "range_check",
+      "description": "A numeric field must be >= min (optionally within a row scope).",
+      "required": [
+        "field",
+        "min"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "include_scope": true
+      }
+    },
+    {
+      "name": "range_check",
+      "engine": "ajv",
+      "rule_type": "range_check",
+      "description": "A numeric field must be between min and max inclusive.",
+      "required": [
+        "field",
+        "min",
+        "max"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "include_scope": true
+      }
+    },
+    {
+      "name": "pattern_check",
+      "engine": "ajv",
+      "rule_type": "pattern_check",
+      "description": "A field must match a regular expression.",
+      "required": [
+        "field",
+        "pattern"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "include_scope": true
+      }
+    },
+    {
+      "name": "date_relation",
+      "engine": "ajv",
+      "rule_type": "date_relation",
+      "description": "Two date fields in a row must satisfy field <op> other_field (op = compliant relation: <, <=, >, >=, =, !=).",
+      "required": [
+        "field",
+        "op",
+        "other_field"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field",
+          "other_field"
+        ]
+      }
+    },
+    {
+      "name": "conditional_required",
+      "engine": "ajv",
+      "rule_type": "conditional_required",
+      "description": "If condition.field <op> condition.value, required_field must be present.",
+      "required": [
+        "condition",
+        "required_field"
+      ],
+      "field_params": {
+        "field_keys": [
+          "required_field"
+        ],
+        "nested_field_paths": [
+          "condition.field"
+        ]
+      }
+    },
+    {
+      "name": "conditional_value",
+      "engine": "ajv",
+      "rule_type": "conditional_value",
+      "description": "If condition.field <op> condition.value, the target field must satisfy field <op> value. Use for 'unless/except' value rules, e.g. 'unless Insured State = California, Paper must be Specialty'. op = <,<=,>,>=,=,!=.",
+      "required": [
+        "condition",
+        "field",
+        "op",
+        "value"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "nested_field_paths": [
+          "condition.field"
+        ]
+      }
+    },
+    {
+      "name": "conditional_all",
+      "engine": "ajv",
+      "rule_type": "conditional_all",
+      "description": "MULTI-COLUMN condition: when ALL of `conditions` (a list of {field, op, value}) hold, the target field must satisfy field <op> value. Use when the requirement depends on TWO OR MORE columns at once, e.g. 'if <A> = <X> AND <B> = <Y> then <C> must be <Z>' -> conditions=[{field:<A>,op:'=',value:<X>},{field:<B>,op:'=',value:<Y>}], field:<C>, op:'=', value:<Z>. op = <,<=,>,>=,=,!=.",
+      "required": [
+        "conditions",
+        "field",
+        "op",
+        "value"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "condition_list_key": "conditions"
+      }
+    },
+    {
+      "name": "period_duration",
+      "engine": "custom",
+      "rule_type": "period_completeness",
+      "description": "datediff(unit, start_field, end_field) must satisfy a bound (unit = day|month|year). Use a RANGE with min and/or max when the duration has a lower and/or upper bound (e.g. min 12 and max 18 -> one rule, 12<=duration<=18); or a single op+value (op = compliant relation).",
+      "required": [
+        "start_field",
+        "end_field",
+        "unit"
+      ],
+      "field_params": {
+        "field_keys": [
+          "start_field",
+          "end_field"
+        ]
+      }
+    },
+    {
+      "name": "aggregate_cap",
+      "engine": "custom",
+      "rule_type": "aggregate_limit",
+      "description": "SUM/COUNT/DISTINCT_COUNT of a field, grouped, must stay within max/min (aggregation = sum|count|distinct_count).",
+      "required": [
+        "aggregation",
+        "field"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "list_field_keys": [
+          "group_by"
+        ]
+      }
+    },
+    {
+      "name": "cross_field_math",
+      "engine": "custom",
+      "rule_type": "cross_field_math",
+      "description": "result_field must equal left_field <operator> right_field within tolerance_pct (operator = + - * /).",
+      "required": [
+        "result_field",
+        "left_field",
+        "operator",
+        "right_field"
+      ],
+      "field_params": {
+        "field_keys": [
+          "result_field",
+          "left_field",
+          "right_field"
+        ]
+      }
+    },
+    {
+      "name": "cross_field_compare",
+      "engine": "custom",
+      "rule_type": "cross_field_compare",
+      "description": "A numeric field compared (INEQUALITY allowed) to another field, optionally scaled by a constant: field <op> other_field [operator factor]. Use for 'Fronting Fee >= 12.5% of GWP' (field=Fronting Fee, op='>=', other_field=GWP, operator='*', factor=0.125) or 'Administrator fees <= Company fees' (field=Admin, op='<=', other_field=Company). op = <,<=,>,>=,=,!=; operator = + - * / (omit for a plain field-to-field compare).",
+      "required": [
+        "field",
+        "op",
+        "other_field"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field",
+          "other_field"
+        ]
+      }
+    },
+    {
+      "name": "cross_field_or_value",
+      "engine": "custom",
+      "rule_type": "cross_field_or_value",
+      "description": "A numeric field compared to the GREATER (or LESSER) of a scaled other field OR a constant, in ONE rule: field <op> GREATEST/LEAST(other_field <operator> factor, value). Use for 'the greater of P% of B or $C' (bound=greater) or 'the lesser of P% of B or $C' (bound=lesser). e.g. 'Fronting Fee >= the greater of 12.5% of GWP or $15,000' -> field=Fronting Fee, op='>=', other_field=GWP, operator='*', factor=0.125, value=15000, bound='greater'. operator/factor optional.",
+      "required": [
+        "field",
+        "op",
+        "other_field",
+        "value"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field",
+          "other_field"
+        ]
+      }
+    },
+    {
+      "name": "uniqueness",
+      "engine": "custom",
+      "rule_type": "uniqueness",
+      "description": "The combination of fields must be unique across rows.",
+      "required": [
+        "fields"
+      ],
+      "field_params": {
+        "list_field_keys": [
+          "fields"
+        ]
+      }
+    },
+    {
+      "name": "date_bound",
+      "engine": "ajv",
+      "rule_type": "date_bound",
+      "description": "A date field must satisfy field <op> a FIXED calendar date (op = <,<=,>,>=,=,!=; date = ISO 'YYYY-MM-DD'). Use for a contract/program PERIOD BOUNDARY that bounds every policy row: the program period is the SUPERSET and each policy period is a SUBSET of it, so a policy inception date must be >= the Program Inception/Effective/Commencement Date, and a policy expiry date must be <= the Program Expiration/Termination/End Date. Unlike date_relation (two columns) this compares ONE date column to a constant from the contract.",
+      "required": [
+        "field",
+        "op",
+        "date"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field"
+        ],
+        "include_scope": true
+      }
+    },
+    {
+      "name": "cross_field_or_value",
+      "engine": "custom",
+      "rule_type": "cross_field_or_value",
+      "description": "A numeric field compared to the GREATER (or LESSER) of a scaled other field OR a constant, in ONE rule: field <op> GREATEST/LEAST(other_field <operator> factor, value). Use for 'the greater of P% of B or $C' (bound=greater) or 'the lesser of P% of B or $C' (bound=lesser) \u2014 a SINGLE combined bound, never a separate cross_field_compare + min/max pair. e.g. 'Fronting Fee >= the greater of 12.5% of GWP or $15,000' \u2192 field=Fronting Fee, op='>=', other_field=GWP, operator='*', factor=0.125, value=15000, bound='greater'. operator/factor optional (omit for a direct 'greater of B or C').",
+      "required": [
+        "field",
+        "op",
+        "other_field",
+        "value"
+      ],
+      "field_params": {
+        "field_keys": [
+          "field",
+          "other_field"
+        ]
+      }
+    }
+  ],
+  "rule_type_to_template": {
+    "date_bound": "date_bound",
+    "cross_field_or_value": "cross_field_or_value",
+    "required_field": "required_field",
+    "mandatory_in_output": "required_field",
+    "value_list": "value_in_set",
+    "format_check": "pattern_check",
+    "pattern_check": "pattern_check",
+    "range_check": "range_check",
+    "exclusion_single_row": "value_not_in_set",
+    "date_relation": "date_relation",
+    "conditional_required": "conditional_required",
+    "conditional_value": "conditional_value",
+    "conditional_all": "conditional_all",
+    "period_completeness": "period_duration",
+    "aggregate_limit": "aggregate_cap",
+    "cross_field_math": "cross_field_math",
+    "cross_field_compare": "cross_field_compare",
+    "uniqueness": "uniqueness",
+    "sliding_scale": "cross_field_math",
+    "referential_check": "value_in_set"
+  }
+}

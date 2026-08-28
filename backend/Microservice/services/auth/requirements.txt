@@ -1,0 +1,26 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pandas==2.2.2
+openpyxl==3.1.5
+glom==23.5.0
+google-genai==2.8.0
+python-multipart==0.0.9
+sqlalchemy==2.0.35
+pydantic==2.9.2
+python-dotenv==1.0.1
+json-repair==0.30.3
+psycopg2-binary==2.9.9
+PyMuPDF==1.24.10
+PyPDF2==3.0.1
+python-docx==1.1.2
+dotenv
+bcrypt>=4.0.0
+
+duckdb==1.5.4
+
+# JWT auth (access + refresh tokens)
+python-jose[cryptography]==3.5.0
+
+# --- Phase 3 extras ---
+redis==5.0.8
+

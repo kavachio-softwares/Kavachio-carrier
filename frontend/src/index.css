@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #F6F7F9;
+  --surface: #FFFFFF;
+  --surface-2: #F3F4F6;
+  --ink: #1A2032;
+  --ink-muted: #6B7280;
+  --border: #E5E7EB;
+  --navy: #1E2A4A;
+  --accent: #1F798D;
+}
+
+html, body, #root { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'Montserrat', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.card { @apply rounded-lg bg-white border border-border shadow-card; }
+.input {
+  @apply w-full px-3 py-2 rounded-md bg-white border border-border
+         focus:outline-none focus:ring-2 focus:ring-navy/15 focus:border-navy/40
+         text-sm placeholder:text-ink-soft;
+}
+.label { @apply block text-xs font-medium text-ink-muted mb-1.5; }
+.pill { @apply inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded-full; }
+.pill-green { @apply bg-emerald-50 text-emerald-700 border border-emerald-100; }
+.pill-amber { @apply bg-amber-50  text-amber-700  border border-amber-100; }
+.pill-red   { @apply bg-red-50    text-red-700    border border-red-100; }
+.pill-grey  { @apply bg-gray-100  text-gray-700   border border-gray-200; }
+.pill-blue  { @apply bg-blue-50   text-blue-700   border border-blue-100; }
+a { @apply text-accent hover:underline; }
+/* Same look as .proto .linkish (proto.css), but unscoped so it also works on
+   pages built with the Tailwind/ui component system (e.g. BordereauSetups.tsx)
+   that aren't wrapped in .proto. Resets button chrome too, since it's used on
+   both <span> and <button>. */
+.linkish {
+  background: none; border: none; padding: 0; font: inherit; cursor: pointer;
+  color: #077282; font-weight: 600; text-decoration: none;
+}
+.linkish:hover { text-decoration: underline; }
+.linkish.mut { color: #8B93A2; }
+/* Unavailable action: `.mut` alone only greys the text, so it still read as
+   clickable (pointer cursor + hover underline). Must come AFTER the :hover rule
+   above — the two selectors have equal specificity, so source order decides.
+   pointer-events stays enabled on purpose: the title tooltip explains WHY. */
+.linkish[aria-disabled="true"] { cursor: not-allowed; }
+.linkish[aria-disabled="true"]:hover { text-decoration: none; }
+table { @apply w-full text-sm; }
+/* Cells are centred app-wide — heading directly over its values. This is the
+   BASE rule for every table, `.proto` ones included, so it must live here rather
+   than only in proto.css: the BDX grid also renders inside modals that sit
+   outside a `.proto` root. Columns that opt out with `.r` / `text-right` still
+   win on specificity. */
+thead th {
+  @apply text-center text-[11px] uppercase tracking-wide font-semibold text-ink-muted
+         px-3 py-2 border-b border-border bg-surface-2/60;
+}
+tbody td { @apply px-3 py-2.5 border-b border-border align-top text-center; }
+/* A flex/grid child ignores text-align, so a cell holding a laid-out row (link +
+   sub-line, chips, action buttons) would still pack left. proto.css has this for
+   `.proto` pages; mirror it here so the Tailwind-built pages (Uploads, Outputs)
+   centre too. */
+tbody td > .flex,
+tbody td > div[class*="flex"] { justify-content: center; margin-left: auto; margin-right: auto; }
+/* First column reads as the row's identity (name/label) — left-aligned like a
+   normal list, while every other column keeps the centred base rule above.
+   `:where()` keeps this at zero specificity so any column already opting out
+   via `.r`/`.l`/`text-right`, and the Output Preview grid's own centred rule
+   (`.tbl-wrap.tbl-scroll-x`, proto.css), still win outright. */
+thead th:where(:first-child),
+tbody td:where(:first-child) { text-align: left; }
+tbody td:where(:first-child) > .flex,
+tbody td:where(:first-child) > div[class*="flex"] { justify-content: flex-start; margin-left: 0; margin-right: 0; }
+tbody tr:hover { @apply bg-surface-2/60; }
+
+/* --- loading affordances (components/Busy.tsx) ---------------------------- */
+/* Full-page blocking overlay for heavy operations: blurred backdrop + a
+   coin-flip spinner. The blur needs backdrop-filter; the rgba tint is the
+   graceful fallback where it's unsupported. */
+.k-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(246, 247, 249, 0.55);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.k-coin-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 68px;
+  height: 68px;
+}
+/* Spinner ring orbits around the static logo — the logo itself never moves. */
+.k-spinner-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: k-spin 0.8s linear infinite;
+}
+@keyframes k-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.k-coin {
+  display: block; /* the coin is a <span>; inline elements ignore width/height */
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent) 20%, #03A2A6);
+  box-shadow: 0 4px 14px rgba(31, 121, 141, 0.35);
+}
+.k-overlay-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  max-width: 420px;
+  text-align: center;
+  padding: 0 16px;
+}
+
+/* Logo variant of the flip spinner: the org's logo on a white disc so any
+   logo shape/color reads cleanly against the blurred backdrop. */
+.k-coin-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  padding: 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 14px rgba(17, 24, 39, 0.18);
+}
+.k-coin-logo img,
+.k-coin-logo svg {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 50%;
+}
+

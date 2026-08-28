@@ -1,0 +1,24 @@
+{
+  "_doc": "Seed for the vocabulary DB table (loaded by catalog_store). VERSIONED DATA — canonical value synonyms, editable without a deploy. Applied to IR literal params (allowed/excluded/scope) at generation time so rules bind to real BDX values. Canonical tokens are lower-case (the compiler lower/trims when comparing).",
+  "vocab": {
+    "territory": {
+      "us": ["usa", "u.s.", "u.s.a.", "united states", "united states of america", "us of a"],
+      "uk": ["u.k.", "united kingdom", "great britain", "gb", "gbr"],
+      "ca": ["canada", "can"]
+    },
+    "coverage_type": {
+      "cgl": ["commercial general liability", "general liability", "gl", "comm general liability"],
+      "auto": ["automobile", "motor", "commercial auto"],
+      "property": ["prop", "property damage"]
+    }
+  },
+  "field_class_hints": [
+    ["territory", "territory"],
+    ["country", "territory"],
+    ["region", "territory"],
+    ["coverage", "coverage_type"],
+    ["cover", "coverage_type"],
+    ["line of business", "coverage_type"],
+    ["lob", "coverage_type"]
+  ]
+}

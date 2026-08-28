@@ -1,0 +1,560 @@
+/* ============================================================================
+   proto.css — design system ported from kavachio_prototype-BothNavigation.html
+   ----------------------------------------------------------------------------
+   Everything is scoped under `.proto` (screen content) or `.proto-side`
+   (the left menu) so it does NOT leak into the other existing screens which
+   still rely on the global styles in index.css.
+   ============================================================================ */
+
+.proto, .proto-side {
+  --p-canvas:#F3F4F7; --p-surface:#FFFFFF; --p-surface-2:#F7F8FB; --p-surface-3:#EEF0F5;
+  --p-ink:#0E1320; --p-muted:#566071; --p-faint:#8B93A2; --p-border:#E5E8EE; --p-border-2:#D2D7E0;
+  --p-side-a:#161E2E; --p-side-b:#0E1320; --p-side-ink:#9AA3B4; --p-side-bright:#EDF0F6;
+  --p-side-line:#242C3C; --p-side-dim:#646F82;
+  --p-primary:#077282; --p-primary-h:#065E6B; --p-primary-soft:#E1F1F3;
+  --p-brand-grad:linear-gradient(135deg,#077282 0%,#03A2A6 100%);
+  --p-ok:#0E9F6E; --p-ok-soft:#E4F5EC; --p-ok-ink:#0A6E4C;
+  --p-warn:#C77A12; --p-warn-soft:#FBF0DC; --p-warn-ink:#8F580D;
+  --p-crit:#D32F45; --p-crit-soft:#FBE7EA; --p-crit-ink:#A31F31;
+  --p-info:#077282; --p-info-soft:#E1F1F3; --p-info-ink:#065E6B;
+  --p-r:12px; --p-r-sm:8px; --p-r-xs:6px; --p-r-pill:999px;
+  --p-sh-sm:0 1px 2px rgba(14,19,32,.06);
+  --p-sh:0 1px 3px rgba(14,19,32,.05),0 10px 26px -10px rgba(14,19,32,.12);
+  --p-mono:'JetBrains Mono',ui-monospace,monospace;
+  --p-disp:'Montserrat',sans-serif;
+}
+
+/* ---------------- Left menu / sidebar ---------------- */
+.proto-side{
+  width:256px;flex:0 0 auto;background:linear-gradient(178deg,var(--p-side-a),var(--p-side-b));
+  color:var(--p-side-ink);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;
+  box-shadow:inset -1px 0 0 rgba(255,255,255,.04);
+}
+/* Brand head — the Kavachio product mark, and the current organization as an
+   interactive "workspace" card beneath it (distinct from the flat brand above,
+   so the two never read as duplicate lockups). One hairline under the whole. */
+.proto-side .brandhead{border-bottom:1px solid var(--p-side-line);padding-bottom:14px}
+.proto-side .brand{display:flex;align-items:center;gap:12px;padding:20px 16px 0}
+.proto-side .shield{width:34px;height:34px;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(7,114,130,.45))}
+.proto-side img.shield{width:48px;height:48px;margin:-7px;object-fit:contain}
+.proto-side .brand h1{font-family:var(--p-disp);font-size:20px;letter-spacing:.2px;color:var(--p-side-bright);margin:0;font-weight:700;line-height:1}
+.proto-side .brand .tag{font-size:10px;color:var(--p-side-dim);letter-spacing:1.6px;text-transform:uppercase;margin-top:4px;font-weight:600}
+
+.proto-side .wscard{display:flex;align-items:center;gap:11px;width:calc(100% - 24px);margin:13px 12px 0;padding:9px 10px;border:0;border-radius:12px;text-align:left;cursor:pointer;font:inherit;color:inherit;background:rgba(255,255,255,.045);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),inset 0 1px 0 rgba(255,255,255,.05),0 1px 2px rgba(0,0,0,.28);transition:background .13s,box-shadow .13s}
+.proto-side .wscard:hover{background:rgba(255,255,255,.075);box-shadow:inset 0 0 0 1px rgba(3,162,166,.45),0 4px 12px -4px rgba(0,0,0,.4)}
+/* Operators can't open Organization settings — the card still shows the
+   workspace identity, but reads as a label rather than a control. */
+.proto-side .wscard-static,.proto-side .wscard-static:hover{cursor:default;background:rgba(255,255,255,.045);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),inset 0 1px 0 rgba(255,255,255,.05),0 1px 2px rgba(0,0,0,.28)}
+.proto-side .wscard:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+.proto-side .wscard-ava{position:relative;flex:0 0 auto;width:34px;height:34px}
+.proto-side .wscard-logo{width:34px;height:34px;border-radius:9px;object-fit:contain;background:transparent;padding:0;display:block}
+.proto-side .wscard-fallback{display:flex;align-items:center;justify-content:center;background:var(--p-brand-grad);color:#fff;font-size:12px;font-weight:700;padding:0;box-shadow:0 3px 8px rgba(7,114,130,.35)}
+.proto-side .wscard-dot{position:absolute;right:-2px;bottom:-2px;width:11px;height:11px;border-radius:50%;background:#34D399;box-shadow:0 0 0 2.5px #131a29,0 0 6px rgba(52,211,153,.5)}
+.proto-side .wscard-meta{min-width:0;flex:1;display:flex;flex-direction:column}
+.proto-side .wscard-name{font-size:13.5px;color:var(--p-side-bright);font-weight:600;line-height:1.15;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto-side .wscard-sub{font-size:9.5px;color:var(--p-side-dim);letter-spacing:1.4px;text-transform:uppercase;font-weight:600;margin-top:3px}
+.proto-side .wscard-go{color:var(--p-side-dim);flex:0 0 auto;opacity:.7;transition:transform .13s,color .13s,opacity .13s}
+.proto-side .wscard:hover .wscard-go{color:var(--p-side-bright);opacity:1;transform:translateX(2px)}
+.proto-side .nav{padding:14px 12px;overflow-y:auto;flex:1;min-height:0}
+.proto-side .group{margin:16px 10px 8px;font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:#5C6678;font-weight:700;display:flex;align-items:center;gap:8px}
+.proto-side .group::after{content:"";flex:1;height:1px;background:var(--p-side-line)}
+.proto-side a.item{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:var(--p-r-sm);color:var(--p-side-ink);font-size:13.5px;font-weight:500;margin-bottom:2px;position:relative;transition:background .12s,color .12s;text-decoration:none}
+.proto-side a.item:hover{background:rgba(255,255,255,.05);color:var(--p-side-bright)}
+.proto-side a.item.active{background:rgba(7,114,130,.16);color:#fff;font-weight:600}
+.proto-side a.item.active::before{content:"";position:absolute;left:-12px;top:8px;bottom:8px;width:3px;border-radius:0 3px 3px 0;background:var(--p-brand-grad)}
+.proto-side a.item .ic{width:18px;height:18px;flex:0 0 auto;opacity:.8}
+.proto-side a.item.active .ic{opacity:1}
+.proto-side .side-foot{padding:12px;border-top:1px solid var(--p-side-line)}
+.proto-side .side-user{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--p-r-sm)}
+.proto-side .side-user-link{cursor:pointer;transition:background .12s;outline:none}
+.proto-side .side-user-link:hover,.proto-side .side-user-link:focus-visible{background:rgba(255,255,255,.06)}
+.proto-side .side-user .av{width:32px;height:32px;border-radius:50%;background:var(--p-brand-grad);display:grid;place-items:center;color:#fff;font-size:12px;font-weight:600;flex:0 0 auto}
+.proto-side .side-user .nm{font-size:13px;color:var(--p-side-bright);font-weight:600;line-height:1.2}
+.proto-side .side-user .rl{font-size:11px;color:var(--p-side-dim)}
+.proto-side .side-ver{font-size:10.5px;color:var(--p-side-dim);text-align:center;padding-top:8px;letter-spacing:.3px}
+.proto-side .signout{display:flex;align-items:center;gap:6px;margin:6px auto 0;color:var(--p-side-dim);font-size:11px;background:transparent;border:0}
+.proto-side .signout:hover{color:var(--p-side-bright)}
+
+/* ---------------- Collapsed (icon-only) rail ----------------
+   Additive: applies ONLY when the aside also carries `.collapsed`, so the
+   expanded sidebar renders exactly as before. Icons keep their routes/handlers;
+   the `title` attributes provide hover tooltips while labels are hidden. */
+.proto-side{transition:width .18s ease}
+.proto-side .side-toggle{
+  position:absolute;top:22px;right:-13px;z-index:20;padding:0;
+  width:26px;height:26px;border-radius:50%;display:grid;place-items:center;cursor:pointer;
+  background:var(--p-side-a);color:var(--p-side-ink);border:1px solid var(--p-side-line);
+  box-shadow:0 2px 6px rgba(14,19,32,.28);transition:color .12s,background .12s;
+}
+.proto-side .side-toggle:hover{color:var(--p-side-bright);background:#1d2637}
+.proto-side.collapsed{width:74px}
+.proto-side.collapsed .brand{justify-content:center;gap:0;padding-left:0;padding-right:0}
+.proto-side.collapsed .brand>div{display:none}
+/* Org "workspace" card → just the org avatar (still opens Organization settings);
+   hide the org name, the uppercase "Organization" sublabel and the chevron. */
+.proto-side.collapsed .wscard{width:auto;margin:12px auto 0;padding:0;gap:0;background:transparent;box-shadow:none;justify-content:center}
+.proto-side.collapsed .wscard:hover{background:transparent;box-shadow:none}
+.proto-side.collapsed .wscard-meta,.proto-side.collapsed .wscard-go{display:none}
+.proto-side.collapsed .group{margin:14px 16px;gap:0;font-size:0;letter-spacing:0}
+.proto-side.collapsed a.item{justify-content:center;gap:0;padding:11px 0}
+.proto-side.collapsed .item-label{display:none}
+.proto-side.collapsed .side-user{justify-content:center;gap:0;padding:8px 0}
+.proto-side.collapsed .side-user>div{display:none}
+.proto-side.collapsed .signout{gap:0}
+.proto-side.collapsed .side-ver{display:none}
+
+/* ---------------- Screen shell ---------------- */
+.proto{background:var(--p-canvas);color:var(--p-ink);min-height:100vh;font-size:14px;line-height:1.45}
+.proto .view{padding:28px 34px 72px;max-width:1220px;animation:proto-rise .22s cubic-bezier(.2,.7,.3,1)}
+/* full-bleed variant: fill the available width (no 1220px cap) */
+.proto .view.full{max-width:none}
+/* Embedded variant: `.proto` is normally a whole SCREEN, so it paints the page
+   canvas and reserves a full viewport height. A proto-styled block nested in a
+   Tailwind page (e.g. the Submission Calendar section inside Bordereau Setup)
+   only needs the class to resolve `.proto .badge`, `.proto .field` etc — the
+   shell part would show up as a tall grey slab inside its host card. */
+.proto.proto-embed{background:transparent;min-height:0}
+@keyframes proto-rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.proto .mono{font-family:var(--p-mono)}
+
+.proto .page-head{display:flex;align-items:flex-start;gap:18px;margin-bottom:22px}
+.proto .page-head .t h2{font-family:var(--p-disp);font-size:25px;margin:0 0 4px;font-weight:600;letter-spacing:-.4px;line-height:1.1}
+.proto .page-head .t p{margin:0;color:var(--p-muted);font-size:14px;max-width:640px;line-height:1.5}
+/* section titles inside cards — Tailwind preflight resets h3 weight, restore it */
+.proto h3{font-weight:600}
+.proto .page-head .actions{margin-left:auto;display:flex;gap:10px;flex-wrap:wrap;flex:0 0 auto}
+
+/* buttons */
+.proto .btn{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--p-border-2);background:var(--p-surface);color:var(--p-ink);font-size:13px;font-weight:600;padding:8px 15px;border-radius:var(--p-r-sm);line-height:1;transition:.12s;box-shadow:var(--p-sh-sm);cursor:pointer}
+.proto .btn:hover{border-color:var(--p-faint);background:var(--p-surface-2)}
+.proto .btn:active{transform:translateY(1px)}
+.proto .btn:disabled{opacity:.55;cursor:not-allowed}
+.proto .btn.pri{background:var(--p-primary);border-color:var(--p-primary);color:#fff;box-shadow:0 1px 2px rgba(7,114,130,.3),0 6px 16px -6px rgba(7,114,130,.5)}
+.proto .btn.pri:hover{background:var(--p-primary-h);border-color:var(--p-primary-h)}
+.proto .btn.ghost{border-color:transparent;background:transparent;color:var(--p-primary);box-shadow:none}
+.proto .btn.ghost:hover{background:var(--p-primary-soft)}
+.proto .btn.sm{padding:6px 11px;font-size:12px}
+.proto .btn.danger{color:var(--p-crit);border-color:#F3D2D7}
+.proto .btn.danger:hover{background:var(--p-crit-soft);border-color:var(--p-crit)}
+.proto .btn .ic{width:15px;height:15px}
+
+/* cards & grid */
+.proto .card{background:var(--p-surface);border:1px solid var(--p-border);border-radius:var(--p-r);box-shadow:var(--p-sh);overflow:hidden}
+.proto .card.pad{padding:20px 22px}
+.proto .card-h{display:flex;align-items:center;gap:11px;padding:15px 20px;border-bottom:1px solid var(--p-border)}
+.proto .card-h h3{margin:0;font-size:15px;font-weight:600;letter-spacing:-.1px}
+.proto .card-h .ci{width:18px;height:18px;color:var(--p-faint)}
+.proto .card-h .sub{color:var(--p-faint);font-size:12.5px;font-weight:500}
+.proto .card-h .right{margin-left:auto;display:flex;gap:10px;align-items:center}
+.proto .grid{display:grid;gap:18px}
+/* Grid items default to min-width:auto, so a wide child (e.g. a preview table)
+   blows its column past the track and makes the whole page scroll sideways.
+   min-width:0 lets the column shrink so inner overflow-x:auto containers
+   (.tbl-wrap) scroll instead of the page. */
+.proto .grid>*{min-width:0}
+.proto .g-2{grid-template-columns:1fr 1fr}
+.proto .g-3{grid-template-columns:repeat(3,1fr)}
+.proto .g-12{grid-template-columns:1.8fr 1fr}
+.proto .g-3{grid-template-columns:repeat(3,1fr)}
+@media(max-width:1000px){.proto .g-2,.proto .g-3,.proto .g-12,.proto .g-3{grid-template-columns:1fr}}
+
+/* ---------------- dashboard: tiles ---------------- */
+.proto .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+@media(max-width:1000px){.proto .tiles{grid-template-columns:1fr 1fr}}
+/* 5-up KPI row (Platform Dashboard) — keeps all five tiles on one line on wide
+   screens, then steps down. Needs its own media rules: `.tiles.five` outranks
+   the `.tiles` ones above regardless of viewport. */
+.proto .tiles.five{grid-template-columns:repeat(5,1fr);gap:14px}
+@media(max-width:1400px){.proto .tiles.five{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:1000px){.proto .tiles.five{grid-template-columns:1fr 1fr}}
+.proto .tile{background:var(--p-surface);border:1px solid var(--p-border);border-radius:var(--p-r);padding:17px 18px;box-shadow:var(--p-sh);position:relative;overflow:hidden}
+.proto .tile .k{font-size:11.5px;color:var(--p-muted);font-weight:600;letter-spacing:.2px;display:flex;align-items:center;gap:7px}
+.proto .tile .v{font-family:var(--p-disp);font-size:30px;font-weight:600;margin-top:8px;letter-spacing:-1px;line-height:1}
+.proto .tile .v small{font-size:14px;color:var(--p-faint);font-weight:500;font-family:inherit;letter-spacing:0}
+.proto .tile .foot{font-size:12px;color:var(--p-faint);margin-top:7px}
+.proto .tile.alert{border-color:#F3D2D7}
+.proto .tile.alert::after{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--p-crit)}
+.proto .sevbar{display:flex;height:7px;border-radius:4px;overflow:hidden;margin-top:11px;gap:2px}
+.proto .sevbar i{display:block}
+.proto .sevbar .c{background:var(--p-crit)} .proto .sevbar .w{background:var(--p-warn)} .proto .sevbar .i{background:var(--p-info)}
+.proto .spark{display:flex;align-items:flex-end;gap:3px;height:30px;margin-top:10px}
+.proto .spark i{flex:1;background:var(--p-primary-soft);border-radius:2px;min-height:3px}
+.proto .spark i.hi{background:var(--p-primary)}
+
+/* status spine (left accent bar on a card) */
+.proto .spine{position:relative}
+.proto .spine::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--p-border-2)}
+.proto .spine.ok::before{background:var(--p-ok)}
+.proto .spine.crit::before{background:var(--p-crit)}
+.proto .spine.warn::before{background:var(--p-warn)}
+.proto .spine.info::before{background:var(--p-info)}
+
+/* key/value list */
+.proto .kv{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--p-border);font-size:13px}
+.proto .kv:last-child{border-bottom:0}
+.proto .kv .k{color:var(--p-muted)}
+.proto .kv .v{font-weight:600}
+
+/* numbered "how to" steps */
+.proto .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+@media(max-width:1000px){.proto .steps{grid-template-columns:1fr}}
+.proto .step{display:flex;gap:12px;align-items:flex-start}
+.proto .step .n{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;flex:0 0 auto;font-size:11px;font-weight:700;margin-top:1px}
+.proto .step h4{margin:0 0 4px;font-size:13px;font-weight:600}
+.proto .step p{margin:0;font-size:12.5px;color:var(--p-muted);line-height:1.5}
+.proto .step.s1 .n{background:var(--p-crit-soft);color:var(--p-crit-ink)}
+.proto .step.s2 .n{background:var(--p-warn-soft);color:var(--p-warn-ink)}
+.proto .step.s3 .n{background:var(--p-info-soft);color:var(--p-info-ink)}
+
+/* badges */
+.proto .badge{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:3px 10px;border-radius:var(--p-r-pill);line-height:1.35;white-space:nowrap}
+.proto .badge .d{width:6px;height:6px;border-radius:50%}
+.proto .b-ok{background:var(--p-ok-soft);color:var(--p-ok-ink)} .proto .b-ok .d{background:var(--p-ok)}
+.proto .b-crit{background:var(--p-crit-soft);color:var(--p-crit-ink)} .proto .b-crit .d{background:var(--p-crit)}
+.proto .b-warn{background:var(--p-warn-soft);color:var(--p-warn-ink)} .proto .b-warn .d{background:var(--p-warn)}
+.proto .b-info{background:var(--p-info-soft);color:var(--p-info-ink)} .proto .b-info .d{background:var(--p-info)}
+.proto .b-mut{background:var(--p-surface-3);color:var(--p-muted)} .proto .b-mut .d{background:var(--p-faint)}
+
+/* tables */
+.proto .tbl-wrap{overflow-x:auto}
+.proto table{width:100%;border-collapse:collapse;font-size:13px}
+
+/* Wide data grids (e.g. the Full Output viewer): a generated BDX can have far
+   more columns than fit on screen. `.proto table{width:100%}` above makes the
+   table shrink to the container, so it never overflows and no horizontal
+   scrollbar can appear — the columns just squeeze. This modifier lets the table
+   size to its CONTENT instead, so the wrapper actually scrolls sideways.
+   Deliberately NOT scoped under `.proto`: the grid also renders inside modals
+   that aren't descendants of a `.proto` root. */
+/* Owns BOTH scroll axes: its container is a flex box with overflow:hidden, so
+   the scrollbars stay pinned to the modal frame (the horizontal one remains on
+   screen instead of only being reachable after scrolling past every row). Being
+   the scroll container is also what the sticky header/first column freeze
+   against. min-width:0 lets a flex item actually shrink below its content. */
+.tbl-wrap.tbl-scroll-x{overflow:auto;flex:1;min-width:0}
+.tbl-wrap.tbl-scroll-x table{width:max-content;min-width:100%;border-collapse:collapse;font-size:13px}
+.tbl-wrap.tbl-scroll-x th,.tbl-wrap.tbl-scroll-x td{white-space:nowrap;text-align:center}
+/* A sticky cell needs an opaque background of its own or rows scroll through it.
+   Literal fallbacks because this grid also renders in modals that may sit
+   outside a `.proto` root, where the design-system vars aren't defined. */
+.tbl-wrap.tbl-scroll-x thead th{background:var(--p-surface-2,#F7F8FB)}
+/* Table cells are centred, headers included, so a column's heading sits over its
+   values instead of drifting left of them. `.r` (below) still wins for the
+   columns that are deliberately right-aligned, e.g. money and counts. */
+.proto thead th{text-align:center;font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--p-faint);font-weight:700;padding:11px 16px;border-bottom:1px solid var(--p-border);background:var(--p-surface-2)}
+.proto tbody td{padding:13px 16px;border-bottom:1px solid var(--p-border);vertical-align:middle;text-align:center}
+/* Cells whose content is laid out (a link + sub-line, chips, action buttons)
+   centre as a block too — text-align alone doesn't move a flex/grid child. */
+/* justify-content centres the items INSIDE the box; auto margins centre the
+   box itself, which is what a width-capped child (e.g. max-w-xs) needs —
+   text-align cannot move a block-level box. Auto margins resolve to 0 for a
+   full-width child, so uncapped cells are unaffected. */
+.proto tbody td>.flex,.proto tbody td>div[class*="flex"]{justify-content:center;margin-left:auto;margin-right:auto}
+/* First column is the row's identity (name/label) — left-aligned, every other
+   column stays centred per the base rule above. `:where()` keeps this at zero
+   specificity so `.r`/`.l` opt-outs and the Output Preview grid's own centred
+   rule (`.tbl-wrap.tbl-scroll-x` above) still win outright. */
+.proto thead th:where(:first-child),.proto tbody td:where(:first-child){text-align:left}
+.proto tbody td:where(:first-child)>.flex,.proto tbody td:where(:first-child)>div[class*="flex"]{justify-content:flex-start;margin-left:0;margin-right:0}
+.proto tbody tr:last-child td{border-bottom:0}
+.proto tbody tr:hover{background:transparent}
+.proto tbody tr.click{cursor:pointer;transition:background .1s}
+.proto tbody tr.click:hover{background:var(--p-surface-2)}
+.proto tbody tr.sel{background:var(--p-primary-soft)}
+.proto tbody tr.sel:hover{background:var(--p-primary-soft)}
+.proto td .sub{color:var(--p-faint);font-size:12px;margin-top:2px}
+/* `.r` used to mean "right-align this numeric column". Cells are centred
+   app-wide now, so `.r` centres too — it stays as a selector because ~14 call
+   sites still carry it and it remains the hook if a column ever needs to opt
+   back out. */
+.proto td.r,.proto thead th.r{text-align:center}
+/* `.l` opts a column back out of the app-wide centring — for identity columns
+   (filenames, names) that read better ragged-right from a common left edge. */
+.proto td.l,.proto thead th.l,.tbl-wrap.tbl-scroll-x th.l,.tbl-wrap.tbl-scroll-x td.l{text-align:left}
+.proto .linkish{color:var(--p-primary);font-weight:600;cursor:pointer;text-decoration:none}
+.proto .linkish:hover{text-decoration:underline}
+.proto .linkish.mut{color:var(--p-faint)}
+/* Unavailable action — see the matching note in index.css. Ordered after the
+   :hover rule above so it wins the equal-specificity tie. */
+.proto .linkish[aria-disabled="true"]{cursor:not-allowed}
+.proto .linkish[aria-disabled="true"]:hover{text-decoration:none}
+
+/* info tooltip: hover/focus reveal on a small "i" icon. The trigger stays
+   in-flow under .proto, but the bubble itself is portaled to document.body
+   (see components/InfoTip.tsx) and positioned via fixed coordinates from the
+   icon's own bounding rect — a plain position:absolute child would get
+   silently clipped the moment InfoTip sits inside a .card (overflow:hidden,
+   used for its rounded corners), and no z-index fixes that since overflow
+   clipping isn't a stacking-order problem. Styled standalone (not `.proto
+   .info-tip-bubble`, literal colors not var(--p-*)) because the portaled
+   node renders outside .proto's scope and can't see its custom properties.
+   z-index 9999 clears every other layer in the app (highest existing is the
+   1100 network bar in index.css). Position (top/left/transform) is set
+   inline by InfoTip.tsx — it flips above/below and clamps horizontally to
+   stay inside the viewport, so `transform` is intentionally left out of both
+   the base rule and the animation here (an animated transform would fight
+   the inline one each time placement flips); only opacity animates. */
+.proto .info-tip{position:relative;display:inline-flex;vertical-align:middle;margin-left:7px;outline:none}
+.proto .info-tip .ic{width:15px;height:15px;color:var(--p-faint);cursor:help}
+.proto .info-tip:hover .ic,.proto .info-tip:focus-within .ic{color:var(--p-primary)}
+.info-tip-bubble{
+  position:fixed;
+  width:230px;background:#0E1320;color:#fff;font-size:12px;font-weight:500;line-height:1.5;
+  padding:9px 11px;border-radius:8px;box-shadow:0 18px 44px -12px rgba(8,12,22,.5);
+  z-index:9999;pointer-events:none;animation:info-tip-rise .12s ease;
+}
+.info-tip-bubble[data-placement="above"]::after{
+  content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);
+  border:5px solid transparent;border-top-color:#0E1320;
+}
+.info-tip-bubble[data-placement="below"]::after{
+  content:"";position:absolute;bottom:100%;left:50%;transform:translateX(-50%);
+  border:5px solid transparent;border-bottom-color:#0E1320;
+}
+@keyframes info-tip-rise{from{opacity:0}to{opacity:1}}
+
+/* forms */
+.proto .field{margin-bottom:16px}
+.proto .field label{display:block;font-size:12px;font-weight:600;color:var(--p-muted);margin-bottom:6px}
+.proto .field input,.proto .field select,.proto .field textarea{width:100%;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:10px 12px;font-size:13.5px;font-family:inherit;background:var(--p-surface);color:var(--p-ink);transition:.12s}
+.proto .field select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238B93A2' stroke-width='2'><path d='M6 9l6 6 6-6'/></svg>");background-repeat:no-repeat;background-position:right 11px center;padding-right:34px}
+.proto .field input:focus,.proto .field select:focus,.proto .field textarea:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .field .hint{font-size:11.5px;color:var(--p-faint);margin-top:5px}
+.proto .row2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.proto .ro{background:var(--p-surface-3)!important;color:var(--p-muted)!important;cursor:not-allowed}
+
+/* search box + segmented control */
+.proto .search{display:flex;align-items:center;gap:9px;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:8px 12px;background:var(--p-surface);min-width:250px}
+.proto .search input{border:0;outline:0;font-size:13px;width:100%;background:transparent;color:var(--p-ink)}
+.proto .search .ic{width:16px;height:16px;color:var(--p-faint);flex:0 0 auto}
+.proto .seg{display:inline-flex;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);overflow:hidden;background:var(--p-surface)}
+.proto .seg button{border:0;background:transparent;padding:7px 13px;font-size:12.5px;font-weight:600;color:var(--p-muted);border-right:1px solid var(--p-border);cursor:pointer}
+.proto .seg button:last-child{border-right:0}
+.proto .seg button.on{background:var(--p-primary-soft);color:var(--p-primary)}
+.proto .seg.sm button{padding:5px 10px;font-size:11.5px}
+
+/* list filter bar: compact dropdown + date-range inputs (components/ListFilterBar) */
+.proto .fbar-select{
+  border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);
+  padding:8px 30px 8px 12px;font-size:12.5px;font-weight:600;color:var(--p-ink);
+  background-color:var(--p-surface);font-family:inherit;cursor:pointer;appearance:none;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238B93A2' stroke-width='2'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat:no-repeat;background-position:right 10px center;
+}
+.proto .fbar-select:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .fbar-daterange{display:flex;align-items:center;gap:8px}
+.proto .fbar-date{
+  border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);
+  padding:7px 10px;font-size:12.5px;color:var(--p-ink);background:var(--p-surface);font-family:inherit;
+}
+.proto .fbar-date:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+
+/* misc */
+.proto .note{font-size:12.5px;color:var(--p-muted);background:var(--p-surface-2);border:1px solid var(--p-border);border-radius:var(--p-r-sm);padding:11px 13px;line-height:1.5}
+.proto .note.warn{background:var(--p-warn-soft);border-color:#EAD7AE;color:var(--p-warn-ink)}
+.proto .note.ok{background:var(--p-ok-soft);border-color:#C5E7D3;color:var(--p-ok-ink)}
+.proto .tag-pill{font-family:var(--p-mono);font-size:11px;background:var(--p-surface-3);border:1px solid var(--p-border);border-radius:5px;padding:2px 7px;color:var(--p-muted)}
+.proto .divider{height:1px;background:var(--p-border);margin:18px 0}
+.proto .muted{color:var(--p-muted)}
+
+/* dropzone */
+.proto .drop{border:1.5px dashed var(--p-border-2);border-radius:var(--p-r);background:var(--p-surface-2);padding:24px;text-align:center;color:var(--p-muted);transition:.15s}
+.proto .drop.lg{padding:36px}
+.proto .drop .ic{width:30px;height:30px;color:var(--p-faint);margin:0 auto 10px;display:block}
+.proto .drop b{color:var(--p-ink)}
+.proto .drop.filled{border-style:solid;border-color:var(--p-ok);background:var(--p-ok-soft)}
+.proto .drop.filled .ic{color:var(--p-ok)}
+
+/* toggle switch */
+.proto .toggle{display:inline-flex;align-items:center;gap:9px;cursor:pointer;font-size:13px;font-weight:600;user-select:none}
+.proto .toggle .sw2{width:38px;height:21px;border-radius:var(--p-r-pill);background:var(--p-border-2);position:relative;transition:.16s;flex:0 0 auto}
+.proto .toggle .sw2::after{content:"";position:absolute;width:17px;height:17px;border-radius:50%;background:#fff;top:2px;left:2px;transition:.16s;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.proto .toggle .sw2.on{background:var(--p-ok)}
+.proto .toggle .sw2.on::after{left:19px}
+.proto .empty{text-align:center;color:var(--p-faint);font-size:13px;padding:34px 16px}
+
+/* modal / confirm dialog */
+.proto-modal-overlay{position:fixed;inset:0;background:rgba(10,14,22,.5);backdrop-filter:blur(2px);display:grid;place-items:center;z-index:200;padding:20px;animation:proto-rise .14s ease}
+.proto-modal{background:var(--p-surface);border-radius:var(--p-r);box-shadow:0 30px 70px -18px rgba(8,12,22,.55);width:440px;max-width:100%;overflow:hidden;font-size:14px;color:var(--p-ink)}
+.proto-modal .m-h{display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--p-border)}
+.proto-modal .m-h h3{margin:0;font-size:16px;font-weight:600;font-family:var(--p-disp)}
+.proto-modal .m-h .x{margin-left:auto;border:0;background:transparent;color:var(--p-faint);font-size:18px;line-height:1;cursor:pointer}
+.proto-modal .m-b{padding:18px 20px;font-size:13.5px;color:var(--p-muted);line-height:1.55}
+.proto-modal .m-b b{color:var(--p-ink)}
+.proto-modal .m-f{display:flex;gap:10px;justify-content:flex-end;padding:14px 20px;border-top:1px solid var(--p-border);background:var(--p-surface-2)}
+
+/* tenant-created success modal: a centered celebratory card instead of the
+   default left-aligned header/body/footer dialog */
+.proto-modal.tenant-success{padding:34px 28px 26px;text-align:center;animation:ts-pop .22s cubic-bezier(.2,.9,.3,1.3)}
+.proto-modal.tenant-success .ts-icon{width:56px;height:56px;margin:0 auto 18px}
+.proto-modal.tenant-success .ts-icon svg{width:100%;height:100%;display:block}
+.proto-modal.tenant-success .ts-title{margin:0 0 6px;font-size:19px;font-weight:700;font-family:var(--p-disp);letter-spacing:-.2px}
+.proto-modal.tenant-success .ts-org{margin:0 0 20px;color:var(--p-muted);font-size:13.5px;line-height:1.5}
+.proto-modal.tenant-success .ts-row{
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  background:var(--p-surface-2);border:1px solid var(--p-border);border-radius:var(--p-r-sm);
+  padding:11px 14px;font-size:12.5px;color:var(--p-ink);margin-bottom:12px;
+}
+.proto-modal.tenant-success .ts-row-ic{width:16px;height:16px;color:var(--p-primary);flex:0 0 auto}
+.proto-modal.tenant-success .ts-row b{word-break:break-all}
+.proto-modal.tenant-success .ts-sub{margin:0 0 22px;font-size:12px;color:var(--p-faint)}
+.proto-modal.tenant-success .ts-done{width:100%;justify-content:center}
+@keyframes ts-pop{from{opacity:0;transform:scale(.94) translateY(6px)}to{opacity:1;transform:none}}
+
+/* tabs */
+.proto .tabs{display:flex;gap:4px;border-bottom:1px solid var(--p-border);margin-bottom:18px}
+.proto .tabs button{border:0;background:transparent;padding:10px 16px;font-size:13.5px;font-weight:600;color:var(--p-muted);border-bottom:2px solid transparent;cursor:pointer}
+.proto .tabs button.on{color:var(--p-primary);border-bottom-color:var(--p-primary)}
+
+/* mapping-task grid (Map input format) */
+.proto .mt-banner{padding:11px 18px;background:var(--p-info-soft);border-bottom:1px solid var(--p-border);font-size:12px;color:var(--p-info-ink);line-height:1.5}
+.proto .mt-banner b{color:var(--p-info-ink);font-weight:700}
+.proto .mini-search{border:1px solid var(--p-border-2);border-radius:var(--p-r-xs);padding:6px 10px;font-size:12.5px;font-family:inherit;background:var(--p-surface);color:var(--p-ink);width:170px}
+.proto .mini-search:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .mthdr{display:grid;grid-template-columns:1fr 1fr 1.5fr 74px 0.9fr;gap:14px;padding:9px 18px;font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:var(--p-faint);font-weight:700;background:var(--p-surface-2);border-bottom:1px solid var(--p-border)}
+.proto .mtrow{display:grid;grid-template-columns:1fr 1fr 1.5fr 74px 0.9fr;gap:14px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--p-border)}
+.proto .mtrow:last-child{border-bottom:0}
+.proto .mtrow.lo{background:var(--p-warn-soft)}
+.proto .mtrow .src{font-family:var(--p-mono);font-size:12.5px;color:var(--p-ink)}
+.proto .mtrow .src .sh{color:var(--p-faint);font-size:11px}
+.proto .mtrow .out{font-family:var(--p-mono);font-size:12.5px;color:var(--p-muted)}
+.proto .mtrow .smp{font-family:var(--p-mono);font-size:11.5px;color:var(--p-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.proto .mtrow select{width:100%;border:1px solid var(--p-border-2);border-radius:var(--p-r-xs);padding:7px 9px;font-size:12.5px;background:var(--p-surface);color:var(--p-ink)}
+.proto .mtrow select:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .conf{font-size:10px;font-weight:700;letter-spacing:.3px;padding:2px 6px;border-radius:5px;background:var(--p-ok-soft);color:var(--p-ok-ink);display:inline-block}
+.proto .conf.lo{background:var(--p-warn-soft);color:var(--p-warn-ink)}
+
+/* searchable data-model field picker (Map input format) */
+.proto .fp-trigger{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--p-border-2);border-radius:var(--p-r-xs);padding:7px 9px;font-size:12.5px;font-family:var(--p-mono);background:var(--p-surface);color:var(--p-ink);cursor:pointer;line-height:1.3;text-align:left}
+.proto .fp-trigger:hover{border-color:var(--p-primary)}
+.proto .fp-trigger .ph{color:var(--p-faint);font-family:var(--p-disp)}
+.proto .fp-trigger .car{color:var(--p-faint);font-family:var(--p-disp);font-size:11px;flex:0 0 auto}
+.proto .fp-menu{position:fixed;z-index:60;background:var(--p-surface);border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);box-shadow:0 18px 44px -12px rgba(8,12,22,.45);overflow:auto;padding-bottom:4px}
+.proto .fp-menu .fp-search{display:block;width:calc(100% - 12px);margin:6px;border:1px solid var(--p-border-2);border-radius:var(--p-r-xs);padding:7px 9px;font-size:12.5px;font-family:inherit;background:var(--p-surface);color:var(--p-ink)}
+.proto .fp-menu .fp-search:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .fp-menu .fp-group{padding:7px 12px 3px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--p-faint)}
+.proto .fp-menu .fp-opt{display:block;width:100%;text-align:left;border:0;background:transparent;padding:6px 12px;font-size:12.5px;font-family:var(--p-mono);color:var(--p-ink);cursor:pointer}
+.proto .fp-menu .fp-opt:hover{background:var(--p-surface-2)}
+.proto .fp-menu .fp-opt.on{background:var(--p-primary-soft);color:var(--p-primary);font-weight:600}
+.proto .fp-menu .fp-empty{padding:8px 12px;font-size:11.5px;color:var(--p-faint)}
+
+@media(prefers-reduced-motion:reduce){.proto .view{animation:none}}
+
+/* --- multi-select (RecentRuns carrier filter) --------------------------- */
+.proto .ms{position:relative}
+.proto .ms-trigger{display:inline-flex;align-items:center;gap:8px;min-width:180px;max-width:260px;border:1px solid var(--p-border-2);background:var(--p-surface);color:var(--p-ink);font-size:13px;font-weight:600;padding:8px 12px;border-radius:var(--p-r-sm);line-height:1;box-shadow:var(--p-sh-sm);cursor:pointer;transition:.12s}
+.proto .ms-trigger:hover{border-color:var(--p-faint)}
+.proto .ms-trigger.active{border-color:var(--p-primary);background:var(--p-primary-soft);color:var(--p-primary)}
+.proto .ms-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.proto .ms-caret{flex:0 0 auto;color:var(--p-faint)}
+.proto .ms-trigger.active .ms-caret{color:var(--p-primary)}
+.proto .ms-clear{display:inline-flex;align-items:center;justify-content:center;color:var(--p-faint);border-radius:99px;padding:1px}
+.proto .ms-clear:hover{background:var(--p-surface-3);color:var(--p-ink)}
+
+.proto .ms-pop{position:absolute;z-index:40;top:calc(100% + 6px);left:0;width:280px;background:var(--p-surface);border:1px solid var(--p-border-2);border-radius:var(--p-r);box-shadow:0 10px 30px -8px rgba(14,19,32,.28);overflow:hidden}
+.proto .ms-search{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--p-border);color:var(--p-faint)}
+.proto .ms-search input{border:0;outline:0;font-size:13px;width:100%;background:transparent;color:var(--p-ink)}
+.proto .ms-list{max-height:260px;overflow-y:auto;padding:5px}
+.proto .ms-empty{padding:12px;font-size:12.5px;color:var(--p-faint);text-align:center}
+.proto .ms-opt{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--p-r-sm);cursor:pointer;font-size:13px;color:var(--p-ink)}
+.proto .ms-opt:hover{background:var(--p-surface-2)}
+.proto .ms-opt.on{background:var(--p-primary-soft)}
+.proto .ms-opt input{position:absolute;opacity:0;width:0;height:0}
+.proto .ms-box{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border:1.5px solid var(--p-border-2);border-radius:5px;background:var(--p-surface);color:#fff;transition:.12s}
+.proto .ms-opt.on .ms-box{background:var(--p-primary);border-color:var(--p-primary)}
+.proto .ms-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .ms-foot{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-top:1px solid var(--p-border);font-size:12px}
+
+/* --- dashboard entrance motion (KavachioAdminDashboard) ----------------- */
+/* Everything below is opt-in via a `kd-*` class, so no other page moves.   */
+@keyframes kd-rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@keyframes kd-fade{from{opacity:0}to{opacity:1}}
+@keyframes kd-draw{to{stroke-dashoffset:0}}
+@keyframes kd-grow{from{width:0}to{width:var(--kd-w)}}
+
+/* staggered card / tile / row entrance — delay comes from an inline --kd-d */
+.proto .kd-in{opacity:0;animation:kd-rise .5s cubic-bezier(.2,.7,.3,1) var(--kd-d,0s) both}
+.proto .kd-tr{opacity:0;animation:kd-fade .4s ease var(--kd-d,0s) both}
+
+/* area chart: strokes draw left→right, gradient fills wash in behind them */
+/* paths carry pathLength="1" so the dash math is resolution-independent */
+.proto .kd-line{stroke-dasharray:1;stroke-dashoffset:1;animation:kd-draw 1.15s cubic-bezier(.35,0,.2,1) var(--kd-d,0s) forwards}
+.proto .kd-area{opacity:0;animation:kd-fade .8s ease .3s forwards}
+
+/* top-broker bars grow from zero to their real width */
+.proto .kd-bar{width:0;animation:kd-grow .75s cubic-bezier(.2,.7,.3,1) var(--kd-d,0s) forwards}
+
+/* donut arcs sweep around (dasharray driven from React state) */
+.proto .kd-arc{transition:stroke-dasharray .9s cubic-bezier(.3,.8,.3,1)}
+
+/* mapping-queue count chips pop in */
+@keyframes kd-pop{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:none}}
+.proto .kd-chip{animation:kd-pop .45s cubic-bezier(.2,1.3,.4,1) var(--kd-d,0s) both}
+
+@media(prefers-reduced-motion:reduce){
+  .proto .kd-in,.proto .kd-tr,.proto .kd-chip{animation:none;opacity:1;transform:none}
+  .proto .kd-line{stroke-dasharray:none;animation:none}
+  .proto .kd-area{animation:none;opacity:1}
+  .proto .kd-bar{width:var(--kd-w);animation:none}
+  .proto .kd-arc{transition:none}
+}
+
+/* ---------------------------------------------------------------------------
+   Program Management — carrier picker (pages/ProgramManagement.tsx).
+   A carrier card is a button, so it needs its own hover/focus affordance; the
+   grid is auto-fill so the same markup works from a phone to a wide desktop.
+   --------------------------------------------------------------------------- */
+.proto .pm-search{width:100%;border:1px solid var(--p-border);border-radius:9px;
+  padding:9px 12px 9px 32px;font:inherit;font-size:13px;color:var(--p-ink);background:#fff}
+.proto .pm-search:focus{outline:none;border-color:var(--p-blue,#3149C6);
+  box-shadow:0 0 0 3px rgba(49,73,198,.12)}
+
+.proto .pm-label{font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;
+  color:var(--p-faint);margin:0 0 9px}
+
+.proto .pm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(252px,1fr));gap:12px}
+
+.proto .pm-card{display:flex;flex-direction:column;gap:11px;text-align:left;background:#fff;
+  border:1px solid var(--p-border);border-radius:12px;padding:14px 15px;cursor:pointer;
+  font:inherit;transition:border-color .15s,box-shadow .15s,transform .15s}
+.proto .pm-card:hover{border-color:#C7CEDE;box-shadow:0 6px 18px rgba(14,19,32,.08);transform:translateY(-1px)}
+.proto .pm-card:focus-visible{outline:none;border-color:var(--p-blue,#3149C6);
+  box-shadow:0 0 0 3px rgba(49,73,198,.16)}
+
+.proto .pm-card-top{display:flex;align-items:center;gap:10px;min-width:0}
+.proto .pm-ava{flex:0 0 32px;width:32px;height:32px;border-radius:9px;background:#EEF1F9;
+  color:#3149C6;font-size:11.5px;font-weight:800;letter-spacing:.3px;
+  display:flex;align-items:center;justify-content:center}
+.proto .pm-card-id{display:flex;flex-direction:column;min-width:0}
+/* Carrier names run long ("Obsidian Platinum Construction – Primary Carrier V1"),
+   so the name wraps to at most two lines and then clips, keeping every card the
+   same height instead of letting one long name stretch its whole row. */
+.proto .pm-card-name{font-size:13px;font-weight:700;color:var(--p-ink);line-height:1.35;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.proto .pm-card-sub{font-size:11px;color:var(--p-faint);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.proto .pm-card-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  border-top:1px solid var(--p-border);padding-top:9px;margin-top:auto;font-size:11.5px}
+.proto .pm-late{color:var(--p-crit);font-weight:700;background:#FDF0F1;
+  border-radius:999px;padding:2px 8px;white-space:nowrap}
+
+.proto .pm-chip{display:inline-flex;align-items:center;gap:7px;background:#fff;
+  border:1px solid var(--p-border);border-radius:999px;padding:5px 13px 5px 5px;
+  font:inherit;font-size:12.5px;font-weight:600;color:var(--p-ink);cursor:pointer;
+  transition:border-color .15s,box-shadow .15s}
+.proto .pm-chip:hover{border-color:#C7CEDE;box-shadow:0 3px 10px rgba(14,19,32,.07)}
+.proto .pm-chip-ava{width:22px;height:22px;border-radius:999px;background:#EEF1F9;color:#3149C6;
+  font-size:9.5px;font-weight:800;display:flex;align-items:center;justify-content:center}
+
+/* Loading placeholders — same box as a real card, so results land without the
+   grid resizing under the cursor. */
+.proto .pm-card.pm-skel{cursor:default;pointer-events:none;gap:9px;min-height:96px}
+.proto .pm-skel-line{height:11px;border-radius:6px;background:#EEF1F7;
+  animation:pm-pulse 1.2s ease-in-out infinite}
+@keyframes pm-pulse{0%,100%{opacity:1}50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){
+  .proto .pm-card{transition:none}
+  .proto .pm-card:hover{transform:none}
+  .proto .pm-skel-line{animation:none}
+}

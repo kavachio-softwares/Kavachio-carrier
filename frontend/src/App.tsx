@@ -1,0 +1,142 @@
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import Layout from "./components/Layout";
+import GlobalErrorPopup from "./components/GlobalErrorPopup";
+import Login from "./pages/Login";
+import ResetPassword from "./pages/ResetPassword";
+import Home from "./pages/Home";
+import Tenant from "./pages/Tenant";
+import Tenants from "./pages/Tenants";
+import AddTenant from "./pages/AddTenant";
+import TenantDetail from "./pages/TenantDetail";
+import Parties from "./pages/Parties";
+import AddParty from "./pages/AddParty";
+import PartyDetail from "./pages/PartyDetail";
+import Programs from "./pages/Programs";
+import ProgramManagement from "./pages/ProgramManagement";
+import AddProgram from "./pages/AddProgram";
+import ContractDetail from "./pages/ContractDetail";
+import Mapping from "./pages/Mapping";
+import DirectRun from "./pages/DirectRun";
+import DirectSetup from "./pages/DirectSetup";
+import BordereauSetups from "./pages/BordereauSetups";
+import BordereauSetupDetail from "./pages/BordereauSetupDetail";
+import BordereauSetupEdit from "./pages/BordereauSetupEdit";
+import AdminMappingTasks from "./pages/AdminMappingTasks";
+import KavachioAdminDashboard from "./pages/KavachioAdminDashboard";
+import Outputs from "./pages/Outputs";
+import OutputTemplate from "./pages/OutputTemplate";
+import UploadExceptions from "./pages/UploadExceptions";
+import RuleReview from "./pages/RuleReview";
+import Users from "./pages/Users";
+import RuleLibrary from "./pages/RuleLibrary";
+import RuleForm from "./pages/RuleForm";
+import RecentRuns from "./pages/RecentRuns";
+import Calendar from "./pages/Calendar";
+import AddUser from "./pages/AddUser";
+import Profile from "./pages/Profile";
+import Welcome from "./pages/Welcome";
+import { useEffect } from "react";
+import {
+  AUTH_EVENT, armAutoLogout, clearAuth, getUser, isRefreshTokenExpired,
+} from "./auth";
+import { canAccessPath, landingPath } from "./access";
+
+function RequireAuth({ children }: { children: JSX.Element }) {
+  // A stored user with an expired refresh token is a dead session — treat it
+  // as signed out immediately instead of waiting for the first 401.
+  if (isRefreshTokenExpired()) clearAuth();
+  if (!getUser()) return <Navigate to="/login" replace />;
+  return children;
+}
+
+// Role guard for the CURRENT url, driven by the ROUTE_ACCESS map in access.ts.
+// Wrapped around the whole authenticated tree, so hiding a sidebar item is no
+// longer the only thing standing between a role and a screen it may not use:
+// typing the URL (or following a stale bookmark, e.g. /admin/mapping-tasks as a
+// tenant_admin) lands on the role's own dashboard instead of mounting a screen
+// whose every request the backend would 403.
+function RequireAccess({ children }: { children: JSX.Element }) {
+  const { pathname } = useLocation();
+  if (!canAccessPath(pathname)) return <Navigate to={landingPath()} replace />;
+  return children;
+}
+
+// Role-based landing: Kavachio platform admins get their own Dashboard,
+// everyone else the tenant Home dashboard.
+function DefaultHome() {
+  return <Navigate to={landingPath()} replace />;
+}
+
+export default function App() {
+  // Log out automatically the moment the refresh token expires — even if the
+  // tab sits idle. Re-armed on login/logout (AUTH_EVENT for this tab, the
+  // native `storage` event for other tabs).
+  useEffect(() => {
+    armAutoLogout();
+    const rearm = () => armAutoLogout();
+    window.addEventListener(AUTH_EVENT, rearm);
+    window.addEventListener("storage", rearm);
+    return () => {
+      window.removeEventListener(AUTH_EVENT, rearm);
+      window.removeEventListener("storage", rearm);
+    };
+  }, []);
+
+  return (
+    <>
+    {/* Friendly popup for unexpected failures (5xx / server unreachable) on ANY
+        screen, login included — see api/client.ts + GlobalErrorPopup. */}
+    <GlobalErrorPopup />
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="/reset" element={<ResetPassword />} />
+      {/* /welcome is the tenant-admin first-run wizard — it has no Layout shell,
+          so it carries the guards itself. */}
+      <Route path="/welcome" element={<RequireAuth><RequireAccess><Welcome /></RequireAccess></RequireAuth>} />
+      <Route element={<RequireAuth><RequireAccess><Layout /></RequireAccess></RequireAuth>}>
+        <Route index element={<DefaultHome />} />
+        <Route path="/home" element={<Home />} />
+        <Route path="/admin/dashboard" element={<KavachioAdminDashboard />} />
+        <Route path="/tenant" element={<Tenant />} />      {/* Organization (this tenant's own settings) */}
+        <Route path="/tenants" element={<Tenants />} />    {/* Tenants directory (Kavachio platform admin) */}
+        <Route path="/tenants/new" element={<AddTenant />} />
+        <Route path="/tenants/:mga" element={<TenantDetail />} />
+        <Route path="/parties" element={<Parties />} />
+        <Route path="/parties/new" element={<AddParty />} />
+        <Route path="/parties/:id" element={<PartyDetail />} />
+        <Route path="/programs" element={<Programs />} />
+        {/* Carrier-scoped oversight dashboard. Without ?carrier= it renders its
+            own carrier picker, so the route needs no param of its own. */}
+        <Route path="/program-management" element={<ProgramManagement />} />
+        <Route path="/programs/new" element={<AddProgram />} />
+        <Route path="/programs/:programId/contracts/:contractId" element={<ContractDetail />} />
+        <Route path="/direct" element={<DirectRun />} />
+        <Route path="/direct/setup" element={<DirectSetup />} />
+        <Route path="/direct/setups" element={<BordereauSetups />} />
+        <Route path="/direct/setups/:id" element={<BordereauSetupDetail />} />
+        <Route path="/direct/setups/:id/edit" element={<BordereauSetupEdit />} />
+        <Route path="/admin/mapping-tasks" element={<AdminMappingTasks />} />
+        <Route path="/uploads/:uploadId/exceptions" element={<UploadExceptions />} />
+        <Route path="/uploads/:uploadId/exceptions/rule/:ruleId" element={<RuleReview />} />
+        <Route path="/uploads/mapper/:mapperId" element={<Mapping />} />
+        <Route path="/outputs" element={<Outputs />} />
+        <Route path="/outputs/new-template" element={<Outputs />} />
+        <Route path="/outputs/generate" element={<Outputs />} />
+        <Route path="/outputs/templates/:id" element={<OutputTemplate />} />
+        <Route path="/users" element={<Users />} />
+        {/* Rule library — managed BDX rules. tenant_admin sees their own tenant's
+            rules; kavachio_admin sees the platform-wide (global) rules. The
+            backend scopes the rows by role; ROUTE_ACCESS lets both in. */}
+        <Route path="/rule-library" element={<RuleLibrary />} />
+        <Route path="/rule-library/new" element={<RuleForm />} />
+        <Route path="/rule-library/:id/edit" element={<RuleForm />} />
+        <Route path="/runs" element={<RecentRuns />} />
+        <Route path="/calendar" element={<Calendar />} />
+        <Route path="/users/new" element={<AddUser />} />
+        <Route path="/profile" element={<Profile />} />
+      </Route>
+      <Route path="*" element={<DefaultHome />} />
+    </Routes>
+    </>
+  );
+}

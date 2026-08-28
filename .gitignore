@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+UI/
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+docs/
+Demo/
+
+# Azurite (local Azure Blob Storage emulator) data
+.azurite/
+backend/python-services/.azurite/
+
+# Env files
+.env
+backend/python-services/.venv/*
+backend/js-services/dist/*
+backend/js-services/package-lock.json
+frontend/node_modules/
+frontend/dist/
+# Local env overrides (per-developer)
+.env.local
+*.env.local 
+ai_call_trace/
+
+# graphify knowledge-graph output (regenerated locally, no API cost)
+graphify-out/
