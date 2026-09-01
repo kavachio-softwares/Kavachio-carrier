@@ -35,6 +35,7 @@ from app_routes import router as app_router, resolve_tenant_id, assert_tenant_ow
 from auth_deps import current_principal, Principal
 from validation_routes import router as validation_router
 from direct_routes import router as direct_router
+from hierarchy_routes import router as hierarchy_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -80,6 +81,7 @@ app.add_middleware(
 app.include_router(app_router)
 app.include_router(validation_router)
 app.include_router(direct_router)
+app.include_router(hierarchy_router)
 
 # C-9 — daily background sweep: create overdue / due-soon reminder events even
 # when nobody opens the calendar. In-process (asyncio), idempotent, off the event

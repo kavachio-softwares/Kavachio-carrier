@@ -13,7 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import and_, desc, func, or_, select, text
+from sqlalchemy import String, and_, desc, func, or_, select, text
 
 from db import (
     ActivityEvent, AdminMappingTask, AppUser, Contract, DirectFormat, ExportTemplate,
@@ -375,15 +375,17 @@ def extra_fields_adopt(mga: str, key: str, p: Principal = Depends(current_princi
 
 @router.get("/onboarding/status")
 def onboarding_status(mga: str, p: Principal = Depends(current_principal)):
-    """Drive the first-login wizard:
-      1. Tenant setup (legal name + tenant_type filled in) — MANDATORY.
-      2. Party directory (at least one party added) — MANDATORY.
-      3. Bordereau Setup (input + output + contract, activated) — NOT mandatory
-         here: it has its own permanent home in the app (the Bordereau Setup
-         screen) and can be finished anytime after onboarding, so it doesn't
-         gate `needs_onboarding`.
-    `needs_onboarding` is true until steps 1 and 2 are done (or the tenant
-    admin explicitly dismissed the wizard)."""
+    """Drive the first-login wizard, which walks the hierarchy in order:
+      1. Organization (legal name + tenant_type + currency) — MANDATORY.
+      2. Programme (at least one) — MANDATORY. A broker's reach IS its
+         program_broker rows, so a programme has to exist before step 3 has
+         anything to attach a broker to.
+      3. Broker (at least one, on a programme) — MANDATORY.
+    Bordereau Setup is deliberately NOT a step: it needs a live contract, which
+    is two moves further on (the broker uploads one, the carrier approves it).
+    It has its own permanent home in the sidebar.
+    `needs_onboarding` is true until steps 1-3 are done (or the tenant admin
+    explicitly dismissed the wizard)."""
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, p, mga)
         tc = s.query(Tenant).filter(Tenant.id == tid).first() if tid else None
@@ -398,8 +400,13 @@ def onboarding_status(mga: str, p: Principal = Depends(current_principal)):
         # Onboarding asks "did the user set these up in the app", so count only
         # app-created rows (is_app_managed) / real ingests (mapper_id), not the
         # BDX-ingested canonical rows.
+        # The broker step ticks for any PRODUCER the carrier added — an MGA, MGU
+        # or TPA counts the same as a broker. Still narrowed to those types, so
+        # an unrelated party (a reinsurer, say) cannot mark the step complete
+        # while the wizard lists nothing.
         has_party = bool(tid) and (s.query(exists().where(
-            and_(Party.tenant_id == tid, Party.is_app_managed.is_(True)))).scalar() or False)
+            and_(Party.tenant_id == tid, Party.is_app_managed.is_(True),
+                 func.cast(Party.party_type, String).in_(PRODUCER_PARTY_TYPES)))).scalar() or False)
         has_contract = bool(tid) and (s.query(exists().where(
             and_(Contract.tenant_id == tid, Contract.is_app_managed.is_(True)))).scalar() or False)
         has_program = bool(tid) and (s.query(exists().where(
@@ -420,13 +427,18 @@ def onboarding_status(mga: str, p: Principal = Depends(current_principal)):
             or False)
         bdx_ready = bool(has_upload or has_mapper or bordereau_ready)
         onboarding_skipped = bool(tc and tc.onboarding_skipped)
-        # Mandatory: Organization + at least one Trading Partner. Bordereau
-        # Setup is intentionally excluded — it's fully doable later from the
-        # app's own Bordereau Setup screen, so it shouldn't force the wizard
-        # back open on every login just because it's still unfinished.
-        mandatory_done = tenant_ready and has_party
+        # Mandatory: Organization + Programme — the two things the carrier
+        # owns outright. A broker is a RELATIONSHIP with another firm, so it is
+        # added from the Brokers screen when one exists; requiring it here only
+        # made carriers invent a placeholder to escape the wizard. Bordereau
+        # Setup is excluded for the same reason it always was: it needs a live
+        # contract, and has its own screen.
+        mandatory_done = tenant_ready and has_program
         return {
             "tenant_ready": tenant_ready,
+            # Step 2 of the wizard. Named alongside the older has_program so a
+            # frontend on either version reads the same fact.
+            "programs_ready": bool(has_program),
             "parties_ready": bool(has_party),
             "contract_ready": bool(has_contract),
             "bordereau_ready": bordereau_ready,
@@ -909,6 +921,13 @@ def tenants_list(
                 AppUser.role != "kavachio_admin").scalar() or 0
             setups = s.query(func.count(DirectFormat.id)).filter(
                 DirectFormat.tenant_id == t.id, DirectFormat.approved == 1).scalar() or 0
+            # What the carrier has built for itself. Kavachio creates neither —
+            # they are the proof that its own admin got started.
+            programmes = s.query(func.count(Program.id)).filter(
+                Program.tenant_id == t.id).scalar() or 0
+            brokers = s.query(func.count(Party.id)).filter(
+                Party.tenant_id == t.id,
+                func.cast(Party.party_type, String) == "broker").scalar() or 0
             items.append({
                 "mga": t.tenant_name,
                 "name": t.legal_name or (t.tenant_name or "").title(),
@@ -916,6 +935,8 @@ def tenants_list(
                 "tenant_type": t.tenant_type,
                 "users": int(users),
                 "setups": int(setups),
+                "programmes": int(programmes),
+                "brokers": int(brokers),
                 "is_active": bool(t.is_active),
                 "pending_invites": int(pending or 0),
                 "active_users": int(actives or 0),
@@ -940,7 +961,10 @@ class NewTenantBody(BaseModel):
 # dropdown options (frontend/src/pages/AddTenant.tsx); only enforced at
 # creation — existing tenants provisioned before this restriction are
 # untouched.
-NEW_TENANT_TYPES = {"mga", "mgu", "broker", "tpa"}
+# Kavachio sets up carriers, and only carriers. A broker is not a tenant at
+# all — it is a party a carrier adds on its own programmes, so it can never
+# be provisioned from here.
+NEW_TENANT_TYPES = {"carrier"}
 NEW_TENANT_CURRENCIES = {"USD", "GBP", "EUR", "CAD", "AUD"}
 
 
@@ -1079,6 +1103,14 @@ class PartyBody(BaseModel):
     is_active: Optional[bool] = True
     addresses: Optional[list] = None
     notes: Optional[str] = None
+
+
+# The organisations a carrier can put on a programme and receive business from.
+# Named once here because three places have to agree on it: this module's
+# onboarding check, hierarchy_routes._assert_broker, and the wizard's Type
+# dropdown. `program_broker.broker_party_id` keeps its column name for history;
+# "broker" there means "the producer on this programme", whichever of these it is.
+PRODUCER_PARTY_TYPES = ("mga", "mgu", "broker", "tpa")
 
 
 def _party_dict(p: Party, mga: Optional[str] = None) -> dict:
@@ -4503,7 +4535,7 @@ def users_list(
         # Tenant-WIDE admin count, independent of filters/paging — the "can't
         # remove the last admin" rule needs the true total, not just whatever
         # happens to be on the current page.
-        admin_raw = [raw for raw, norm in _ROLE_ALIASES.items() if norm == "tenant_admin"]
+        admin_raw = [raw for raw, norm in _ROLE_ALIASES.items() if norm == "carrier_admin"]
         total_admins = base.filter(AppUser.role.in_(admin_raw)).count()
 
         query = base
@@ -4534,6 +4566,93 @@ def users_list(
             ordered = ordered.offset((page - 1) * size).limit(size)
         items = [_user_dict(u, mga) for u in ordered.all()]
         return {"items": items, "total": total, "total_admins": int(total_admins),
+                "page": page, "page_size": page_size}
+
+
+@router.get("/admin/users")
+def admin_users_list(
+    q: Optional[str] = None,
+    role: Optional[str] = None,
+    status: Optional[str] = None,
+    page: Optional[int] = Query(None, ge=1),
+    page_size: Optional[int] = Query(None, ge=1, le=200),
+    _p: Principal = Depends(require_role("kavachio_admin")),
+):
+    """Every login on the platform, whoever they work for.
+
+    Kavachio creates exactly ONE of these — a carrier's first admin. That admin
+    invites their own colleagues and their brokers, and each broker adds its own
+    operators. This list exists so that when someone calls, the platform can say
+    who they are and whether they can get in. It is read-only on purpose: none
+    of these accounts is Kavachio's to change."""
+    from auth_deps import _ROLE_ALIASES, normalize_role
+    with SessionLocal() as s:
+        # A user belongs to a carrier (tenant_id) or to a broker
+        # (broker_party_id), never both — the chk_app_user_scope constraint
+        # enforces it — so the two outer joins can never double a row.
+        query = (s.query(AppUser, Tenant.legal_name, Tenant.tenant_name, Party.legal_name)
+                 .outerjoin(Tenant, Tenant.id == AppUser.tenant_id)
+                 .outerjoin(Party, Party.id == AppUser.broker_party_id))
+        if q and q.strip():
+            ql = f"%{q.strip().lower()}%"
+            query = query.filter(or_(
+                func.lower(AppUser.full_name).like(ql),
+                func.lower(AppUser.email).like(ql)))
+        if role:
+            raw = [r for r, n in _ROLE_ALIASES.items() if n == role]
+            query = query.filter(AppUser.role.in_(raw or [role]))
+        if status == "invited":
+            query = query.filter(AppUser.status.in_(("invited", "pending")))
+        elif status == "active":
+            query = query.filter(AppUser.status == "active")
+        elif status == "inactive":
+            query = query.filter(AppUser.status.notin_(("active", "invited", "pending")))
+
+        total = query.order_by(None).count()
+        ordered = query.order_by(AppUser.email)
+        if page is not None:
+            size = page_size or 10
+            ordered = ordered.offset((page - 1) * size).limit(size)
+
+        items = []
+        for u, t_legal, t_name, b_legal in ordered.all():
+            r = normalize_role(u.role)
+            if r == "kavachio_admin":
+                org, kind = "Kavachio", "kavachio"
+            elif b_legal:
+                org, kind = b_legal, "broker"
+            else:
+                org, kind = (t_legal or t_name or "—"), "carrier"
+            items.append({
+                "id": u.id, "full_name": u.full_name, "email": u.email,
+                "role": r, "status": u.status,
+                "org_name": org, "org_kind": kind,
+                "tenant_name": t_name, "broker_party_id": u.broker_party_id,
+                "created_at": _iso_utc(u.created_at),
+                "last_login_at": _iso_utc(u.last_login_at),
+            })
+
+        # Headline counts, over EVERY user rather than the current page.
+        def _n(*roles):
+            raw = [r for r, n in _ROLE_ALIASES.items() if n in roles]
+            return s.query(func.count(AppUser.id)).filter(
+                AppUser.role.in_(raw or list(roles))).scalar() or 0
+        counts = {
+            "total":          s.query(func.count(AppUser.id)).scalar() or 0,
+            "kavachio":       _n("kavachio_admin"),
+            "carrier_users":  _n("carrier_admin"),
+            "broker_users":   _n("broker_admin", "operator"),
+            "operators":      _n("operator"),
+            "never_signed_in": s.query(func.count(AppUser.id)).filter(
+                AppUser.last_login_at.is_(None)).scalar() or 0,
+            # How many ORGANISATIONS those people are spread across — "4 carrier
+            # users" reads very differently across one carrier than across four.
+            "carriers": s.query(func.count(func.distinct(AppUser.tenant_id))).filter(
+                AppUser.tenant_id.isnot(None)).scalar() or 0,
+            "brokers": s.query(func.count(func.distinct(AppUser.broker_party_id))).filter(
+                AppUser.broker_party_id.isnot(None)).scalar() or 0,
+        }
+        return {"items": items, "total": int(total), "counts": counts,
                 "page": page, "page_size": page_size}
 
 

@@ -28,21 +28,31 @@ export type { TenantBrand, User };
 // backend returns the new values, this mapping is a harmless pass-through.
 // TODO(backend): emit tenant_user / tenant_admin / kavachio_admin directly.
 // ---------------------------------------------------------------------------
-export type Role = "tenant_user" | "tenant_admin" | "kavachio_admin";
+// FOUR seats. kavachio_admin and carrier_admin are the CARRIER side; the two
+// broker seats belong to a BROKER organisation and sit on their own axis — a
+// broker admin is not "above" or "below" a carrier admin, it is elsewhere.
+export type Role =
+  | "kavachio_admin" | "carrier_admin" | "broker_admin" | "operator";
 
 const ROLE_ALIASES: Record<string, Role> = {
-  // legacy
-  admin: "tenant_admin",
-  ops: "tenant_user",
-  read_only: "tenant_user",
-  // new (pass-through)
-  tenant_admin: "tenant_admin",
-  tenant_user: "tenant_user",
+  // legacy MGA-era spellings — a tenant IS a carrier
+  admin: "carrier_admin",
+  ops: "carrier_admin",
+  read_only: "carrier_admin",
+  // current
   kavachio_admin: "kavachio_admin",
+  carrier_admin: "carrier_admin",
+  broker_admin: "broker_admin",
+  operator: "operator",
+  // legacy spellings from the MGA era — a tenant IS a carrier
+  tenant_admin: "carrier_admin",
+  tenant_user: "carrier_admin",
+  broker_operator: "operator",
 };
 
 export function normalizeRole(raw?: string | null): Role {
-  return ROLE_ALIASES[(raw ?? "").trim()] ?? "tenant_user";
+  // Unknown falls back to the least-privileged seat, never to an admin.
+  return ROLE_ALIASES[(raw ?? "").trim()] ?? "operator";
 }
 
 export function getUser(): User | null {
@@ -135,12 +145,16 @@ export function isKavachioAdmin(): boolean {
 /** Can perform tenant-admin actions. kavachio_admin is a superset. */
 export function isTenantAdmin(): boolean {
   const r = userRole();
-  return r === "tenant_admin" || r === "kavachio_admin";
+  return r === "carrier_admin" || r === "kavachio_admin";
 }
+// These labels were written when a tenant WAS a broker. In the carrier-centric
+// model a tenant is a CARRIER, so "tenant_admin = Broker Admin" named the wrong
+// organisation on every screen it appeared on.
 export const ROLE_LABEL: Record<Role, string> = {
-  tenant_user: "Operator",
-  tenant_admin: "Broker Admin",
   kavachio_admin: "Kavachio Admin",
+  carrier_admin:  "Carrier Admin",
+  broker_admin:   "Broker Admin",
+  operator:       "Operator",
 };
 
 // --- refresh-token expiry → automatic logout ---------------------------------

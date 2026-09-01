@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
+  FileCheck, Handshake,
 } from "lucide-react";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role } from "../auth";
 import { canAccessPath, hasRole } from "../access";
@@ -28,7 +29,7 @@ type Item = { to: string; label: string; icon: React.ElementType };
 const GROUPS: { title: string; requires?: Role; items: Item[] }[] = [
   {
     title: "Run",
-    requires: "tenant_admin",
+    requires: "carrier_admin",
     items: [
       { to: "/home", label: "Dashboard", icon: LayoutDashboard },
       // Hidden from the sidebar for now. The /program-management route still
@@ -36,6 +37,7 @@ const GROUPS: { title: string; requires?: Role; items: Item[] }[] = [
       // is commented out.
       // { to: "/program-management", label: "Program Management", icon: ClipboardList },
       { to: "/direct", label: "Process Bordereau", icon: Zap },
+      { to: "/approvals", label: "Approvals", icon: FileCheck },
       // My Calendar is deliberately NOT listed. Deadlines belong to a specific
       // carrier + program, so the calendar now lives inside that setup's own
       // screen where both are already fixed. The /calendar route still exists
@@ -46,15 +48,17 @@ const GROUPS: { title: string; requires?: Role; items: Item[] }[] = [
   },
   {
     title: "Configure",
-    requires: "tenant_admin",
+    requires: "carrier_admin",
     items: [
+      { to: "/programs", label: "Programmes", icon: Layers },
+      { to: "/brokers", label: "Brokers", icon: Handshake },
       { to: "/parties", label: "All Carriers", icon: Users2 },
       { to: "/direct/setups", label: "Bordereau Setups", icon: Layers },
     ],
   },
   {
     title: "Admin",
-    requires: "tenant_admin",
+    requires: "carrier_admin",
     items: [
       { to: "/tenant", label: "Organization", icon: Building2 },
       { to: "/users", label: "Users & Roles", icon: UserCog },
@@ -66,7 +70,7 @@ const GROUPS: { title: string; requires?: Role; items: Item[] }[] = [
     requires: "kavachio_admin",
     items: [
       { to: "/admin/mapping-tasks", label: "Data Mapping Queue", icon: Database },
-      { to: "/tenants", label: "Brokers", icon: Boxes },
+      { to: "/tenants", label: "Carriers", icon: Boxes },
     ],
   },
 ];
@@ -78,8 +82,9 @@ const ADMIN_GROUPS: typeof GROUPS = [
     title: "",
     items: [
       { to: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { to: "/tenants", label: "Carriers", icon: Boxes },
+      { to: "/admin/users", label: "Users & Roles", icon: UserCog },
       { to: "/admin/mapping-tasks", label: "Data Mapping Queue", icon: Database },
-      { to: "/tenants", label: "Brokers", icon: Boxes },
       { to: "/rule-library", label: "Rule Library", icon: ListChecks },
     ],
   },

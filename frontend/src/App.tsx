@@ -7,6 +7,7 @@ import Home from "./pages/Home";
 import Tenant from "./pages/Tenant";
 import Tenants from "./pages/Tenants";
 import AddTenant from "./pages/AddTenant";
+import AdminUsers from "./pages/AdminUsers";
 import TenantDetail from "./pages/TenantDetail";
 import Parties from "./pages/Parties";
 import AddParty from "./pages/AddParty";
@@ -40,6 +41,9 @@ import {
   AUTH_EVENT, armAutoLogout, clearAuth, getUser, isRefreshTokenExpired,
 } from "./auth";
 import { canAccessPath, landingPath } from "./access";
+import Brokers from "./pages/Brokers";
+import BrokerDetail from "./pages/BrokerDetail";
+import Approvals from "./pages/Approvals";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   // A stored user with an expired refresh token is a dead session — treat it
@@ -98,6 +102,7 @@ export default function App() {
         <Route path="/home" element={<Home />} />
         <Route path="/admin/dashboard" element={<KavachioAdminDashboard />} />
         <Route path="/tenant" element={<Tenant />} />      {/* Organization (this tenant's own settings) */}
+        <Route path="/admin/users" element={<AdminUsers />} />   {/* Everyone on the platform, read-only */}
         <Route path="/tenants" element={<Tenants />} />    {/* Tenants directory (Kavachio platform admin) */}
         <Route path="/tenants/new" element={<AddTenant />} />
         <Route path="/tenants/:mga" element={<TenantDetail />} />
@@ -105,6 +110,11 @@ export default function App() {
         <Route path="/parties/new" element={<AddParty />} />
         <Route path="/parties/:id" element={<PartyDetail />} />
         <Route path="/programs" element={<Programs />} />
+        {/* The carrier hierarchy: brokers are reached from the carrier, not
+            from a tenant — the same broker produces for several carriers. */}
+        <Route path="/brokers" element={<Brokers />} />
+        <Route path="/brokers/:brokerId" element={<BrokerDetail />} />
+        <Route path="/approvals" element={<Approvals />} />
         {/* Carrier-scoped oversight dashboard. Without ?carrier= it renders its
             own carrier picker, so the route needs no param of its own. */}
         <Route path="/program-management" element={<ProgramManagement />} />

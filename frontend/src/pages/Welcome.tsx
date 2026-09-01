@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  CheckCircle2, Sparkles, ArrowRight, Building2, Users2, SlidersHorizontal,
+  CheckCircle2, Sparkles, ArrowRight, Building2, Users2, Layers,
+  SlidersHorizontal,
 } from "lucide-react";
 import { api, getDeduped } from "../api/client";
 import { currentMga, getUser, setTenantBrand } from "../auth";
@@ -12,9 +13,9 @@ import { InfoTip } from "../components/InfoTip";
 import CountryOptions from "../components/CountryOptions";
 
 type Status = {
-  tenant_ready: boolean; parties_ready: boolean;
+  tenant_ready: boolean; programs_ready?: boolean; parties_ready: boolean;
   contract_ready: boolean; bordereau_ready: boolean; bdx_ready: boolean;
-  needs_onboarding: boolean;
+  has_program?: boolean; needs_onboarding: boolean;
 };
 type Tenant = {
   legal_name?: string; tenant_type?: string;
@@ -23,13 +24,10 @@ type Tenant = {
 const CURRENCIES = [
   "USD", "EUR", "GBP", "CAD", "AUD", "INR", "JPY", "CHF", "SGD", "AED",
 ];
-type Party = { id: number; legal_name: string };
+type Programme = { id: number; name: string; bdx_frequency?: string | null };
 
-const TENANT_TYPES = ["mga", "mgu", "broker", "tpa", "carrier", "reinsurer"];
-const PARTY_TYPES = ["carrier"];
-const PARTY_TYPE_LABEL: Record<string, string> = {
-  insurer: "Carrier"
-};
+const TENANT_TYPES = ["carrier"];
+const BDX_FREQUENCIES = ["monthly", "quarterly", "annually"];
 
 export default function Welcome() {
   const nav = useNavigate();
@@ -44,23 +42,24 @@ export default function Welcome() {
   // Step 1 — tenant ----------------------------------------------------------
   const [tenant, setTenant] = useState<Tenant | null>(null);
 
-  // Step 2 — parties ---------------------------------------------------------
-  const [parties, setParties] = useState<Party[]>([]);
-  const [newParty, setNewParty] = useState<{
-    legal_name: string; party_type: string; scope: string; domicile_country: string;
-  }>({
-    legal_name: "", party_type: "carrier", scope: "tenant", domicile_country: "",
-  });
+  // Step 2 — programmes ------------------------------------------------------
+  // A programme is the carrier's own book. Brokers are a relationship rather
+  // than part of setting yourself up, so they are added later from the Brokers
+  // screen — where the link to a programme is made.
+  const [programmes, setProgrammes] = useState<Programme[]>([]);
+  const [newProgramme, setNewProgramme] = useState<{
+    name: string; bdx_frequency: string;
+  }>({ name: "", bdx_frequency: "monthly" });
 
   async function reload() {
-    const [s, t, p] = await Promise.all([
+    const [s, t, pr] = await Promise.all([
       api.get<Status>(`/onboarding/status`, { params: { mga } }),
       getDeduped<Tenant>(`/tenants/${mga}`),
-      api.get(`/parties`, { params: { mga } }),
+      api.get<Programme[]>(`/programs`, { params: { mga } }),
     ]);
     setStatus(s.data);
-    setTenant(t.data);
-    setParties(p.data.items ?? []);
+    setTenant({ ...t.data, tenant_type: t.data?.tenant_type || "carrier" });
+    setProgrammes(pr.data ?? []);
   }
   useEffect(() => { void reload(); }, [mga]);
 
@@ -68,12 +67,17 @@ export default function Welcome() {
     setTenant(prev => prev ? { ...prev, [k]: v } : { [k]: v } as Tenant);
   }
 
+  const tenantDone     = !!status?.tenant_ready;
+  // Tolerate a backend that predates `programs_ready` by falling back to the
+  // long-standing has_program key.
+  const programmesDone = !!(status?.programs_ready ?? status?.has_program);
+  const allDone        = tenantDone && programmesDone;
+
   // The "active" step is the first not-yet-done one. The user can always skip.
   const activeStep = !status ? 1
-    : !status.tenant_ready ? 1
-    : !status.parties_ready ? 2
-    : !status.bordereau_ready ? 3
-    : 4;
+    : !tenantDone ? 1
+    : !programmesDone ? 2
+    : 3;
 
   // --- actions -------------------------------------------------------------
 
@@ -106,30 +110,28 @@ export default function Welcome() {
     } finally { setBusy(false); }
   }
 
-  async function addParty() {
-    if (!newParty.legal_name.trim()) return;
+  async function addProgramme() {
+    if (!newProgramme.name.trim()) return;
     setErr(null); setBusy(true);
     try {
-      await api.post<Party>(`/parties`,
+      await api.post<Programme>(`/programs`,
         {
-          legal_name: newParty.legal_name,
-          party_type: newParty.party_type,
-          scope: newParty.scope,
-          domicile_country: newParty.domicile_country || undefined,
+          name: newProgramme.name.trim(),
+          bdx_frequency: newProgramme.bdx_frequency,
+          status: "active",
         },
         { params: { mga } });
-      setNewParty({ legal_name: "", party_type: "carrier", scope: "tenant", domicile_country: "" });
+      setNewProgramme({ name: "", bdx_frequency: "monthly" });
       await reload();
+      setToast("Programme created.");
+      setTimeout(() => setToast(null), 3000);
     } catch (e: any) {
-      setErr(e?.response?.data?.detail ?? "Could not add party.");
+      setErr(e?.response?.data?.detail ?? "Could not create the programme.");
     } finally { setBusy(false); }
   }
 
-  // --- render --------------------------------------------------------------
 
-  const tenantDone    = !!status?.tenant_ready;
-  const partiesDone   = !!status?.parties_ready;
-  const bordereauDone = !!status?.bordereau_ready;
+  // --- render --------------------------------------------------------------
 
   return (
     <div className="min-h-screen bg-bg">
@@ -146,7 +148,7 @@ export default function Welcome() {
             Welcome, {user?.full_name?.split(" ")[0] ?? "there"} 👋
           </h1>
           <p className="text-ink-muted mt-2">
-            Three quick steps to set up your workspace. You can skip and do
+            Two quick steps to set up your workspace. You can skip and do
             these later from the sidebar.
           </p>
         </header>
@@ -169,12 +171,18 @@ export default function Welcome() {
                 <Field label="Organization type *">
                   <Select value={tenant?.tenant_type ?? ""}
                     onChange={e => patchTenant("tenant_type", e.target.value)}>
-                    <option value="">Select…</option>
+                    {/* A tenant provisioned as something else keeps its own
+                        value, so opening this wizard never rewrites it. */}
+                    {tenant?.tenant_type && !TENANT_TYPES.includes(tenant.tenant_type) && (
+                      <option value={tenant.tenant_type}>
+                        {tenant.tenant_type.toUpperCase()}
+                      </option>
+                    )}
                     {TENANT_TYPES.map(t =>
                       <option key={t} value={t}>{t.toUpperCase()}</option>)}
                   </Select>
                 </Field>
-                <Field label="Account code (read-only)">
+                <Field label="Workspace ID (read-only)">
                   <TextInput value={mga} readOnly className="bg-surface-2" />
                 </Field>
                 <Field label="Currency *">
@@ -243,95 +251,91 @@ export default function Welcome() {
                 );
               })()}
 
-              <div className="flex items-center gap-3">
-                <Button onClick={saveTenant}
-                  disabled={busy
-                    || !tenant?.legal_name?.trim()
-                    || !tenant?.tenant_type
-                    || !tenant?.currency}>
-                  <Building2 size={14} />
-                  Save Organization
-                </Button>
-                {err && <span className="text-sm text-danger">{err}</span>}
-              </div>
+              {/* A disabled button with no reason is a dead end — the user
+                  has to guess which of three required fields is empty. Name it. */}
+              {(() => {
+                const missing = [
+                  !tenant?.legal_name?.trim() && "Legal name",
+                  !tenant?.tenant_type && "Organization type",
+                  !tenant?.currency && "Currency",
+                ].filter(Boolean) as string[];
+                return (
+                  <div className="flex items-center gap-3">
+                    <Button onClick={saveTenant} disabled={busy || missing.length > 0}>
+                      <Building2 size={14} />
+                      Save Organization
+                    </Button>
+                    {missing.length > 0 && (
+                      <span className="text-sm text-ink-muted">
+                        Still needed: {missing.join(", ")}
+                      </span>
+                    )}
+                    {err && <span className="text-sm text-danger">{err}</span>}
+                  </div>
+                );
+              })()}
             </div>
           )}
         </Step>
 
         <Spacer />
 
-        {/* Step 2 — Trading Partner */}
-        <Step n={2} title="Carrier" done={partiesDone}
+        {/* Step 2 — Programme. The carrier's book is divided into programmes,
+            and every broker and contract below hangs off one, so it comes
+            before the broker rather than after it. */}
+        <Step n={2} title="Programme" done={programmesDone}
           locked={activeStep < 2}
-          hint="Add your first carrier.">
-          {partiesDone ? (
+          hint="Create your first programme — the book a broker will produce into.">
+          {programmesDone ? (
             <p className="text-sm text-emerald-700 flex items-center gap-2">
-              <CheckCircle2 size={16} /> {parties.length} carrier{parties.length === 1 ? "" : "s"} added.
+              <CheckCircle2 size={16} />
+              {programmes.length} programme{programmes.length === 1 ? "" : "s"} created
+              {programmes.length ? ` — ${programmes.map(p => p.name).join(", ")}` : ""}.
             </p>
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Legal name *">
-                  <TextInput value={newParty.legal_name}
-                    onChange={e => setNewParty({ ...newParty, legal_name: e.target.value })}
-                    placeholder="e.g. Pinnacle Insurance Co." />
+                <Field label="Programme name *">
+                  <TextInput value={newProgramme.name}
+                    onChange={e => setNewProgramme({ ...newProgramme, name: e.target.value })}
+                    placeholder="e.g. Coastal Property" />
                 </Field>
-                <Field label="Type *">
-                  <Select value={newParty.party_type}
-                    onChange={e => setNewParty({ ...newParty, party_type: e.target.value })}>
-                    {PARTY_TYPES.map(t =>
-                      <option key={t} value={t}>{PARTY_TYPE_LABEL[t] ?? t}</option>)}
-                  </Select>
-                </Field>
-                <Field label="Country">
-                  <Select value={newParty.domicile_country}
-                    onChange={e => setNewParty({ ...newParty, domicile_country: e.target.value })}>
-                    <option value="" disabled>Please select the carrier's country</option>
-                    <CountryOptions />
+                <Field label="Bordereau frequency">
+                  <Select value={newProgramme.bdx_frequency}
+                    onChange={e => setNewProgramme({ ...newProgramme, bdx_frequency: e.target.value })}>
+                    {BDX_FREQUENCIES.map(f =>
+                      <option key={f} value={f}>{f[0].toUpperCase() + f.slice(1)}</option>)}
                   </Select>
                 </Field>
               </div>
 
               <div className="flex items-center gap-3">
-                <Button onClick={addParty}
-                  disabled={busy || !newParty.legal_name.trim()}>
-                  <Users2 size={14} /> + Add Carrier
+                <Button onClick={addProgramme}
+                  disabled={busy || !newProgramme.name.trim()}>
+                  <Layers size={14} /> + Add Programme
                 </Button>
-                <InfoTip text="You can also create carriers directly inside Bordereau Setup." />
+                <InfoTip text="How often you expect a bordereau on this programme. You can change it later, and set exact due dates from the programme's calendar." />
               </div>
             </div>
           )}
         </Step>
 
-        <Spacer />
 
-        {/* Step 3 — Bordereau setup (input + output + contract, all in one place).
-            Optional here: it can also be finished anytime from the Bordereau
-            Setup screen in the sidebar, so it doesn't block leaving onboarding. */}
-        <Step n={3} title="Bordereau Setup" done={bordereauDone}
-          locked={activeStep < 3}
-          hint="Set up your input template, output template, and contract in one place. This step is optional—you can also configure them later from the sidebar.">
-          {bordereauDone ? (
-            <p className="text-sm text-emerald-700 flex items-center gap-2">
-              <CheckCircle2 size={16} /> Bordereau mapping configured &amp; activated.
-            </p>
-          ) : (
-            <div className="space-y-3">
-              <div className="rounded-md bg-blue-50 border border-blue-200 px-3 py-2 text-xs text-blue-800">
-                <strong>All in one place:</strong>
-                <ul className="mt-1.5 space-y-1 list-disc pl-4">
-                  <li>Upload input sample, output template and contract together.</li>
-                  <li>Kavachio maps input → output with confidence scores.</li>
-                  <li>Review, adjust and activate.</li>
-                  <li>Create carrier &amp; program right here.</li>
-                </ul>
-              </div>
-              <Button onClick={() => nav("/direct/setup")}>
-                <SlidersHorizontal size={14} /> Open Bordereau Setup <ArrowRight size={14} />
-              </Button>
-            </div>
-          )}
-        </Step>
+        {/* Finished — what exists now, and what the carrier does next. This
+            replaces the old jump straight into Bordereau Setup: that screen
+            needs a contract in hand, which is two steps further on. */}
+        {allDone && (
+          <>
+            <Spacer />
+            <FinishPanel
+              carrier={tenant?.legal_name || mga}
+              programmes={programmes}
+              onBrokers={() => nav("/brokers")}
+              onDashboard={() => nav("/home")}
+              onBordereau={() => nav("/direct/setup")}
+            />
+          </>
+        )}
 
         {err && <div className="mt-4 text-sm text-danger">{err}</div>}
 
@@ -340,10 +344,9 @@ export default function Welcome() {
             className="text-sm text-ink-muted hover:text-ink">
             Skip for Now →
           </button>
-          {/* Organization + Trading Partner are mandatory; Bordereau Setup is
-              not — it's reachable anytime from the sidebar — so this CTA
-              appears once the mandatory steps are done, not all three. */}
-          {tenantDone && partiesDone && (
+          {/* Once everything is done the finish panel carries the primary
+              action, so this duplicate CTA would only compete with it. */}
+          {!allDone && tenantDone && programmesDone && (
             <Button onClick={() => nav("/home")}>
               <Sparkles size={14} /> Go to Dashboard
             </Button>
@@ -351,6 +354,109 @@ export default function Welcome() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** The end of onboarding: what the carrier has set up, then the one thing to
+ *  do next. Adding brokers is that next thing rather than a step above,
+ *  because a broker is a relationship with another firm — it exists when
+ *  there is one, not because a wizard demanded a name. */
+function FinishPanel({ carrier, programmes, onBrokers, onDashboard, onBordereau }: {
+  carrier: string;
+  programmes: Programme[];
+  onBrokers: () => void;
+  onDashboard: () => void;
+  onBordereau: () => void;
+}) {
+  const rows: { label: string; value: string }[] = [
+    { label: "Carrier", value: carrier },
+    {
+      label: programmes.length === 1 ? "Programme" : "Programmes",
+      value: programmes.map(p => p.name).join(", ") || "—",
+    },
+  ];
+
+  const next: { title: string; body: string }[] = [
+    {
+      title: "Add the brokers you work with",
+      body: "Putting a broker on a programme is what lets them produce into it. Do that from the Brokers screen, when the relationship is real.",
+    },
+    {
+      title: "Invite the broker's admin",
+      body: "They get their own login and can upload the contract for your programme.",
+    },
+    {
+      title: "Approve the contract when it arrives",
+      body: "A contract a broker uploads waits for you. Approving it is what makes it live.",
+    },
+    {
+      title: "Set up the bordereau mapping",
+      body: "Once a contract is live, map their columns to your output layout.",
+    },
+  ];
+
+  return (
+    <section className="card overflow-hidden">
+      <div className="px-6 py-5 flex items-start gap-3"
+        style={{ background: "linear-gradient(135deg,#077282,#03A2A6)" }}>
+        <div className="w-9 h-9 rounded-full bg-white/15 grid place-items-center shrink-0">
+          <Sparkles size={18} className="text-white" />
+        </div>
+        <div>
+          <h2 className="text-base font-semibold text-white">Your workspace is ready</h2>
+          <p className="text-sm text-white/80 mt-0.5">
+            Your organization and your first programme are set up. Here is what you have.
+          </p>
+        </div>
+      </div>
+
+      <div className="px-6 py-5 space-y-5">
+        <dl className="divide-y divide-border rounded-md border border-border overflow-hidden">
+          {rows.map(r => (
+            <div key={r.label} className="grid grid-cols-3 gap-3 px-4 py-2.5 bg-white">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-ink-muted self-center">
+                {r.label}
+              </dt>
+              <dd className="col-span-2 text-sm text-ink">{r.value}</dd>
+            </div>
+          ))}
+        </dl>
+
+        <div>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-muted mb-3">
+            What happens next
+          </h3>
+          <ol className="space-y-3">
+            {next.map((n, i) => (
+              <li key={n.title} className="flex gap-3">
+                <span className="w-6 h-6 rounded-full bg-surface-2 text-ink-muted
+                  text-xs font-semibold grid place-items-center shrink-0 mt-0.5">
+                  {i + 1}
+                </span>
+                <div>
+                  <div className="text-sm font-medium text-ink">{n.title}</div>
+                  <div className="text-xs text-ink-muted mt-0.5">{n.body}</div>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-4 pt-1">
+          <Button onClick={onBrokers}>
+            <Users2 size={14} /> Add your brokers <ArrowRight size={14} />
+          </Button>
+          <button onClick={onDashboard}
+            className="inline-flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink">
+            <Sparkles size={13} /> Go to Dashboard
+          </button>
+          <button onClick={onBordereau}
+            className="inline-flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink">
+            <SlidersHorizontal size={13} /> Set up bordereau mapping
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 

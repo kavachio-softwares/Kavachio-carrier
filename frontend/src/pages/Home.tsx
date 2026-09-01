@@ -28,16 +28,19 @@ type Run = {
   source_upload_id: number | null;
 };
 const SUBTITLE: Record<Role, string> = {
-  tenant_user:    "What needs you today, and your most recent bordereau runs.",
-  tenant_admin:   "What needs you today, and your most recent bordereau runs.",
+  carrier_admin:  "What needs you today, and your most recent bordereau runs.",
   kavachio_admin: "Platform activity and your most recent bordereau runs.",
+  // Broker seats do not have a carrier Home yet — the API refuses a broker
+  // token on every carrier route, so these are placeholders, not promises.
+  broker_admin: "Your contracts and the files you have sent.",
+  operator:     "The files you have sent, and anything that needs fixing.",
 };
 
 export default function Home() {
   const mga = currentMga();
   const nav = useNavigate();
   const user = getUser();
-  const role = userRole() ?? "tenant_user";
+  const role = userRole() ?? "operator";
   const [stats, setStats] = useState<Stats | null>(null);
   // Whether this tenant still needs first-time setup (carrier + Bordereau).
   const [needsSetup, setNeedsSetup] = useState(false);
@@ -94,10 +97,10 @@ export default function Home() {
   const spark = stats?.runs_by_day;
   const sparkMax = spark && spark.length ? Math.max(...spark, 1) : 1;
 
-  // Operators can't run the org/carrier/Bordereau setup — that's a tenant-admin
-  // job. Until it's done, an operator gets a single notice instead of a dashboard
-  // with nothing behind it.
-  if (needsSetup && role === "tenant_user") {
+  // Only a carrier admin can run the org/carrier/Bordereau setup. Until it is
+  // done, anyone else gets a single notice instead of a dashboard with nothing
+  // behind it.
+  if (needsSetup && role !== "carrier_admin" && role !== "kavachio_admin") {
     return (
       <div className="proto">
         <div className="view full">

@@ -14,7 +14,7 @@ mga code, so the API still accepts an `mga` string and resolves it to a
 tenant_id via `_get_tenant_id` / `_ensure_tenant`.
 
 Env override:
-  DATABASE_URL  postgresql+psycopg2://postgres:postgres123@192.168.2.11:5432/kavachio
+  DATABASE_URL  postgresql+psycopg2://postgres:postgres123@192.168.2.11:5432/kavachio_carrier
 
 (`LOCAL_DB_URL` / `CANONICAL_DB_URL` are still honoured for backward
 compatibility — if set, they override DATABASE_URL.)

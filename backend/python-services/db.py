@@ -21,7 +21,7 @@ import os
 from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, Float, Index, Integer, String, JSON, DateTime, Date,
-    ForeignKey, Text, LargeBinary, Boolean, inspect, UniqueConstraint,
+    ForeignKey, Text, LargeBinary, Boolean, Numeric, inspect, UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, deferred, sessionmaker, relationship
 
@@ -461,6 +461,69 @@ class Contract(Base):
     # it is now retained here.
     blob_ref = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # --- carrier hierarchy -------------------------------------------------
+    # Which broker holds this contract with the carrier. A contract is always
+    # (programme x broker); program_broker says that pair is allowed at all.
+    broker_party_id = Column(Integer, ForeignKey("party.party_id"), nullable=True, index=True)
+    # The ONE approval in the platform. A contract a BROKER uploads waits for
+    # its carrier; a contract the CARRIER uploads is live immediately. Set by
+    # the DB trigger trg_set_contract_approval from who submitted it — never
+    # trust a client to say "approved".
+    # approved | pending_approval | rejected
+    approval_status = Column(String, default="approved")
+    submitted_by_user_id = Column(Integer, ForeignKey("app_user.user_id"), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    approved_by_user_id = Column(Integer, ForeignKey("app_user.user_id"), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    # The agreed most-premium-they-may-write for the term. A LIMIT from the
+    # wording — deliberately not estimated_total_premium, which is a forecast.
+    premium_cap_amount = Column(Numeric, nullable=True)
+    premium_cap_currency = Column(String, nullable=True)
+
+
+class ProgramBroker(Base):
+    """Which brokers may produce into which programme — the many-to-many that
+    makes the carrier hierarchy work.
+
+    ONE PROGRAMME HAS MANY BROKERS and ONE BROKER IS ON MANY PROGRAMMES, so the
+    pair lives in its own table rather than as a column on either side. It is
+    also the gate: a broker with no row here cannot hold a contract on that
+    programme, and removing the row stops new work without deleting history.
+    """
+    __tablename__ = "program_broker"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, nullable=True, index=True)
+    program_id = Column(Integer, ForeignKey("program.program_id"), nullable=False, index=True)
+    broker_party_id = Column(Integer, ForeignKey("party.party_id"), nullable=False, index=True)
+    # active | inactive. Never DELETE a pair that has contracts under it —
+    # set it inactive so the contracts keep their meaning.
+    status = Column(String, default="active")
+    assigned_by_user_id = Column(Integer, nullable=True)
+    created_by = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ContractApproval(Base):
+    """Every decision ever made on a contract.
+
+    The contract row holds the CURRENT state; this holds how it got there. A
+    contract can be submitted, rejected, re-submitted and approved — "why was
+    this rejected in June?" has to stay answerable after the fact.
+    """
+    __tablename__ = "contract_approval"
+    id = Column("approval_id", Integer, primary_key=True)
+    tenant_id = Column(Integer, nullable=False, index=True)
+    contract_id = Column(Integer, ForeignKey("contract.contract_id"), nullable=False, index=True)
+    # submitted | approved | rejected | withdrawn
+    action = Column(String, nullable=False)
+    acted_by_user_id = Column(Integer, nullable=False)
+    acted_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    note = Column(Text, nullable=True)
+    # What the carrier was looking at when it decided. A contract file can be
+    # replaced; the decision stays attached to the version it judged.
+    contract_file_hash = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
 class SheetBinding(Base):
@@ -582,6 +645,17 @@ class AppUser(Base):
     # Watermark for the platform_notification feed: rows created after this are
     # unread for this user. NULL = nothing read yet. See PlatformNotification.
     notifications_seen_at = Column(DateTime, nullable=True)
+    # --- carrier hierarchy -------------------------------------------------
+    # A BROKER user (broker_admin / broker_operator) belongs to a broker party,
+    # not to a carrier: the same broker produces for several carriers, so its
+    # login cannot be pinned to one tenant_id. Carrier and platform users have
+    # this NULL and carry tenant_id instead. Exactly one of the two is set —
+    # the DB enforces it as chk_app_user_scope.
+    broker_party_id = Column(Integer, ForeignKey("party.party_id"), nullable=True, index=True)
+    # Who invited this person. A carrier admin invites broker admins; a broker
+    # admin invites its own operators. Answers "who let this person in?".
+    invited_by_user_id = Column(Integer, ForeignKey("app_user.user_id"), nullable=True)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class ColumnMappingCache(Base):

@@ -42,7 +42,11 @@ const CURRENCIES: [string, string][] = [
 // The API normalizes every stored/legacy role string down to this 2-role
 // tenant vocabulary (kavachio_admin rows are filtered out server-side —
 // never surfaced on a tenant's own Users screen).
-const ROLE_LABEL: Record<string, string> = { tenant_admin: "Admin", tenant_user: "Operator" };
+const ROLE_LABEL: Record<string, string> = {
+  carrier_admin: "Carrier Admin",
+  broker_admin: "Broker Admin",
+  operator: "Operator",
+};
 
 // Single source of truth for a user's status bucket — used by both the
 // Status filter and the badge, so they can never drift out of sync.
@@ -326,7 +330,7 @@ export default function TenantDetail() {
                     return (
                       <tr key={u.id}>
                         <td><b>{u.full_name}</b><div className="sub">{u.email}</div></td>
-                        <td><span className={`badge ${role === "tenant_admin" ? "b-info" : "b-mut"}`}>
+                        <td><span className={`badge ${role === "carrier_admin" ? "b-info" : "b-mut"}`}>
                           <span className="d" />{ROLE_LABEL[role] ?? role}</span></td>
                         <td><span className={`badge ${us.cls}`}><span className="d" />{us.label}</span></td>
                         <td className="muted">{fmtDateTime(u.last_login_at)}</td>

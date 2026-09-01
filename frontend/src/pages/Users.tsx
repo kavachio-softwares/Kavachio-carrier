@@ -11,13 +11,18 @@ import { InviteSentModal } from "../components/InviteSentModal";
 
 type U = {
   id: number; email: string; full_name: string;
-  role: "tenant_admin" | "tenant_user"; status: string; mga: string;
+  role: string; status: string; mga: string;
   last_login_at?: string | null;
 };
 
-// The API normalizes every stored/legacy role string down to this 2-role
-// tenant vocabulary (kavachio_admin rows are filtered out server-side).
-const ROLE_LABEL: Record<string, string> = { tenant_admin: "Broker Admin", tenant_user: "Operator" };
+// The API normalizes every stored/legacy role string down to the four-role
+// vocabulary (kavachio_admin rows are filtered out server-side, so a tenant
+// never sees the platform account in its own list).
+const ROLE_LABEL: Record<string, string> = {
+  carrier_admin: "Carrier Admin",
+  broker_admin: "Broker Admin",
+  operator: "Operator",
+};
 
 // Single source of truth for a user's displayed status bucket — used by both
 // the Status filter and the badge, so they can never drift out of sync.
@@ -78,7 +83,7 @@ export default function Users() {
   const adminCount = extra?.total_admins ?? 0;
   function canRemove(u: U) {
     if (u.id === me?.id) return false;          // can't remove yourself
-    if (normalizeRole(u.role) === "tenant_admin" && adminCount <= 1) return false; // can't remove last admin
+    if (normalizeRole(u.role) === "carrier_admin" && adminCount <= 1) return false; // can't remove last admin
     return true;
   }
 
@@ -201,7 +206,7 @@ export default function Users() {
                 {pageRows.map(u => {
                   const sb = statusBadge(u.status);
                   const role = normalizeRole(u.role);
-                  const isAdminRow = role === "tenant_admin";
+                  const isAdminRow = role === "carrier_admin";
                   const invited = u.status === "pending" || u.status === "invited";
                   return (
                     <tr key={u.id}>

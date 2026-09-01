@@ -16,10 +16,16 @@
 import { matchPath } from "react-router-dom";
 import { userRole, type Role } from "./auth";
 
-// Roles are a superset chain: kavachio_admin ⊇ tenant_admin ⊇ tenant_user.
+// The CARRIER side is a superset chain: kavachio_admin ⊇ tenant_admin ⊇
+// tenant_user. The two BROKER seats are not part of that chain — they belong to
+// a broker organisation, not to a carrier — so they rank below everything and
+// pass no carrier gate. Broker sign-in is not wired up yet: the API already
+// refuses a broker token on every carrier route ("no tenant bound to this
+// user"), and ranking them here keeps the UI from disagreeing with it.
 const RANK: Record<Role, number> = {
-  tenant_user: 0,
-  tenant_admin: 1,
+  operator: -1,
+  broker_admin: -1,
+  carrier_admin: 1,
   kavachio_admin: 2,
 };
 
@@ -34,26 +40,30 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role }[] = [
   { pattern: "/admin/mapping-tasks", requires: "kavachio_admin" },
   // The column-mapping workflow is reached only from the queue above.
   { pattern: "/uploads/mapper/:mapperId", requires: "kavachio_admin" },
+  { pattern: "/admin/users", requires: "kavachio_admin" },
   { pattern: "/tenants", requires: "kavachio_admin" },
   { pattern: "/tenants/new", requires: "kavachio_admin" },
   { pattern: "/tenants/:mga", requires: "kavachio_admin" },
 
   // --- Tenant admin (org / carrier / setup / user administration) --------
-  { pattern: "/welcome", requires: "tenant_admin" },
+  { pattern: "/welcome", requires: "carrier_admin" },
   // Program Management — carrier-scoped oversight of the program book.
-  { pattern: "/program-management", requires: "tenant_admin" },
-  { pattern: "/tenant", requires: "tenant_admin" },
-  { pattern: "/users", requires: "tenant_admin" },
-  { pattern: "/users/new", requires: "tenant_admin" },
-  { pattern: "/direct/setup", requires: "tenant_admin" },
-  { pattern: "/direct/setups", requires: "tenant_admin" },
-  { pattern: "/direct/setups/:id", requires: "tenant_admin" },
-  { pattern: "/direct/setups/:id/edit", requires: "tenant_admin" },
+  { pattern: "/program-management", requires: "carrier_admin" },
+  { pattern: "/tenant", requires: "carrier_admin" },
+  { pattern: "/users", requires: "carrier_admin" },
+  // The one approval in the platform. Reading it is harmless, but only a
+  // carrier admin can decide — the API enforces that independently.
+  { pattern: "/approvals", requires: "carrier_admin" },
+  { pattern: "/users/new", requires: "carrier_admin" },
+  { pattern: "/direct/setup", requires: "carrier_admin" },
+  { pattern: "/direct/setups", requires: "carrier_admin" },
+  { pattern: "/direct/setups/:id", requires: "carrier_admin" },
+  { pattern: "/direct/setups/:id/edit", requires: "carrier_admin" },
   // Rule library — tenant_admin sees their own tenant's rules, kavachio_admin
   // the platform-wide ones. The backend scopes the rows by role.
-  { pattern: "/rule-library", requires: "tenant_admin" },
-  { pattern: "/rule-library/new", requires: "tenant_admin" },
-  { pattern: "/rule-library/:id/edit", requires: "tenant_admin" },
+  { pattern: "/rule-library", requires: "carrier_admin" },
+  { pattern: "/rule-library/new", requires: "carrier_admin" },
+  { pattern: "/rule-library/:id/edit", requires: "carrier_admin" },
 ];
 
 /** The minimum role a path needs, or null when any signed-in user may open it. */
