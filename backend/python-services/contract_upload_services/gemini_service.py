@@ -308,6 +308,95 @@ STAGE_B_MODEL = os.getenv("KAVACHIO_STAGEB_MODEL", "gemini-3.5-flash")
 SMALL_MODEL = os.getenv("KAVACHIO_SMALL_MODEL", "gemini-2.5-flash-lite")
 DETERMINISTIC_SEED = int(os.getenv("KAVACHIO_LLM_SEED", "7"))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPLICIT CONTEXT CACHING
+# Every batched prompt in this pipeline is "a very large fixed instruction block,
+# then a small variable payload at the tail" — Call 2 is 39,024 static chars with
+# the clauses last; Call 3 is ~49,000 static with the intents last. When a stage
+# makes several calls, that prefix is re-sent verbatim each time.
+#
+# Gemini's IMPLICIT cache already discounts some of this on its own, but only
+# opportunistically: on a measured run it caught 2 of 7 Call-2 batches and 5 of 10
+# Call-3 batches. An explicit CachedContent makes it deterministic — the prefix is
+# uploaded once and every later call in the same run references it by name.
+#
+# Three properties this implementation guarantees:
+#   IDENTICAL INPUT — the cached prefix and the live suffix are concatenated by the
+#     API in the same order they appear in the original prompt, so the model sees
+#     the same tokens in the same sequence. Nothing is summarized or dropped.
+#   FAIL-OPEN — any failure to create or use a cache falls back to sending the whole
+#     prompt, i.e. exactly today's behaviour. A cache problem can never fail a call.
+#   NOT FREE — cached content is billed for STORAGE while it lives, so a cache is
+#     only created when the caller says the prefix will be reused, and it is given a
+#     short TTL so nothing lingers past the upload that made it.
+#
+# ON by default; KAVACHIO_CONTEXT_CACHE=0 disables it and reverts to sending the
+# whole prompt on every call. Measured on the Demoshield pair: 99% of a Call-2
+# batch's input served from cache, including the FIRST call of the stage (implicit
+# caching cannot do that — it has nothing to match against until a call has landed).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CTX_CACHE_ON = os.getenv("KAVACHIO_CONTEXT_CACHE", "1") != "0"
+_CTX_CACHE_TTL = os.getenv("KAVACHIO_CONTEXT_CACHE_TTL", "600s")
+# Gemini refuses to cache content below a per-model floor; well under it a cache is
+# pure overhead anyway. 4096 is the conservative figure across 2.5/3.x Flash.
+_CTX_CACHE_MIN_TOKENS = int(os.getenv("KAVACHIO_CONTEXT_CACHE_MIN", "4096"))
+
+_ctx_caches: dict = {}        # (model, sha256(prefix)) -> cache name
+_ctx_lock = threading.Lock()
+
+
+def context_cache_for(prefix: str, model: str):
+    """Cache name for this exact prefix+model, creating it once. None = don't use.
+
+    Process-local and keyed by a hash of the prefix, so two stages with different
+    instruction blocks never share an entry, and repeated calls within one stage
+    reuse the same upload.
+    """
+    if not _CTX_CACHE_ON or not prefix:
+        return None
+    if estimate_tokens(prefix, model) < _CTX_CACHE_MIN_TOKENS:
+        return None
+    import hashlib
+    key = (model, hashlib.sha256(prefix.encode("utf-8")).hexdigest())
+    with _ctx_lock:
+        if key in _ctx_caches:
+            return _ctx_caches[key]
+    try:
+        cache = client.caches.create(
+            model=model,
+            config=types.CreateCachedContentConfig(
+                contents=[prefix], ttl=_CTX_CACHE_TTL),
+        )
+        name = getattr(cache, "name", None)
+    except Exception as exc:
+        # Model doesn't support caching, prefix under the floor, quota, network —
+        # all mean "send the whole prompt", which is what the caller already does.
+        print(f"[ctx-cache] not created ({type(exc).__name__}: {str(exc)[:120]}) "
+              f"— sending full prompt")
+        name = None
+    with _ctx_lock:
+        _ctx_caches[key] = name       # cache the failure too; don't retry per call
+    if name:
+        print(f"[ctx-cache] created {name} "
+              f"(~{estimate_tokens(prefix, model):,} tok, ttl {_CTX_CACHE_TTL})")
+    return name
+
+
+def release_context_caches():
+    """Delete every cache this process created. Storage is billed per hour, so an
+    upload should not leave one behind. Safe to call more than once."""
+    with _ctx_lock:
+        names = [n for n in _ctx_caches.values() if n]
+        _ctx_caches.clear()
+    for n in names:
+        try:
+            client.caches.delete(name=n)
+            print(f"[ctx-cache] released {n}")
+        except Exception as exc:
+            print(f"[ctx-cache] release failed for {n}: {exc}")
+
+
 def clean_gemini_response(text: str):
 
     if not text:
@@ -336,7 +425,13 @@ def _is_degenerate(text: str) -> bool:
 
 def call_gemini(prompt, label="LLM", temperature=None, seed=None,
                 response_schema=None, model=None, max_output_tokens=None,
-                thinking_budget=None):
+                thinking_budget=None, cache_split=None):
+    """`cache_split`: a marker string separating this prompt's fixed instruction
+    block from its variable payload (e.g. "\nUSER:\n"). When set AND context
+    caching is enabled, everything before the LAST occurrence of the marker is
+    uploaded once as a CachedContent and referenced by later calls instead of being
+    re-sent. The model receives the identical token sequence either way; only the
+    billing changes. Omit it (the default) to send the whole prompt as before."""
 
     _model = model or EXTRACTION_MODEL
     print(f"\n[{label}] Calling Gemini...")
@@ -355,7 +450,21 @@ def call_gemini(prompt, label="LLM", temperature=None, seed=None,
             f"{in_ceil} for {_model}; split before sending.",
             input_tokens=est_input, ceiling=in_ceil)
 
-    kwargs = {"model": _model, "contents": prompt}
+    # ── Context cache: split fixed prefix from variable payload ──────────
+    # Only the SUFFIX is sent; the prefix rides along as cached_content. Falls back
+    # to the whole prompt whenever a cache could not be made, so this can add cost
+    # savings but never a failure mode.
+    _cache_name = None
+    _contents = prompt
+    if cache_split and _CTX_CACHE_ON:
+        _cut = prompt.rfind(cache_split)
+        if _cut > 0:
+            _prefix, _suffix = prompt[:_cut], prompt[_cut:]
+            _cache_name = context_cache_for(_prefix, _model)
+            if _cache_name:
+                _contents = _suffix
+
+    kwargs = {"model": _model, "contents": _contents}
 
     # Build the generation config. temperature=0 + a fixed seed make decoding
     # reproducible; response_schema constrains the output to the IR shape so the
@@ -380,6 +489,8 @@ def call_gemini(prompt, label="LLM", temperature=None, seed=None,
         config["thinking_config"] = types.ThinkingConfig(
             thinking_budget=thinking_budget
         )
+    if _cache_name is not None:
+        config["cached_content"] = _cache_name
     if config:
         kwargs["config"] = config
 
@@ -399,6 +510,10 @@ def call_gemini(prompt, label="LLM", temperature=None, seed=None,
                   f"retrying without structured output.")
             config.pop("response_mime_type", None)
             config.pop("response_schema", None)
+            # cached_content must survive this rebuild, or the retry silently pays
+            # full price for a prompt whose prefix was already uploaded.
+            if _cache_name is not None:
+                config["cached_content"] = _cache_name
             kwargs["config"] = config or None
             if not config:
                 kwargs.pop("config", None)

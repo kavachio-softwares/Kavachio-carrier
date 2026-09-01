@@ -1899,6 +1899,23 @@ def build_ir_mapping_prompt_batch(
     # template repeats ~70 columns across every schedule sheet). The full list is
     # 800+ noisy entries that confuse field selection and truncate output; the
     # deduped list also surfaces each column's inferred value KIND for matching.
+    # BLOCK ORDER IS LOAD-BEARING — forced_block / relaxed_block / generic_block are
+    # emitted at the very END of this prompt, just before the USER payload, not up by
+    # the field list where they used to sit.
+    #
+    # They are the only parts that differ between this prompt's four variants (main /
+    # generic-library / forced-column rescue / relaxed retry). While they sat at ~1.3%
+    # of the prompt, the ~48,000 characters of instructions AFTER them landed at a
+    # different offset in every variant, so prefix caching saw four unrelated prompts
+    # and each variant paid full input price — measured: the library and retry calls
+    # cached 0 and 1,022 tokens of a ~15,800-token shared prefix.
+    #
+    # They now sit just INSIDE the USER turn, ahead of the batch itself. That places
+    # them on the payload side of the "\nUSER:\n" split that gemini_service uses for
+    # context caching, so all four variants share one identical, cacheable SYSTEM
+    # prefix and differ only in the small variable tail — which is the entire point.
+    # The MAIN variant is unaffected either way: all three blocks render as empty
+    # strings there, so its prompt is byte-identical before and after this change.
     unique_fields = dedup_template_fields(template_fields)
     fields_block = _template_fields_block(unique_fields)
     field_names = [f["name"] for f in unique_fields if f.get("name")]
@@ -2007,7 +2024,6 @@ names. Never invent or paraphrase a column name:
 {fields_block}
 
 VALID FIELD NAMES: {json.dumps(field_names)}
-{forced_block}{relaxed_block}{generic_block}
 MAPPING RULES:
 - USE THE DICTIONARY. When a field shows "means: …" (its documented definition
   from the template's data dictionary), bind by that MEANING, not by a shared
@@ -2103,6 +2119,22 @@ MAPPING RULES:
   row, i.e. every ordinary multi-transaction policy, and finds no real violation.
   Both `field` and `group_by[0]` MUST be in VALID FIELD NAMES; if either is
   missing, return "template": null.
+- cross_field_math params: {{"result_field":"<col holding the result>",
+  "left_field":"<col>", "operator":"+|-|*|/", "right_field":"<col>",
+  "tolerance_pct":<number>}} — for "A = B <op> C" identities.
+  A PERCENTAGE OPERAND IS NOT A REASON TO DECLINE. When an operand column stores
+  a rate on the 0-100 scale (a "23.5" meaning 23.5%, not 0.235), set
+  "left_is_percent"/"right_is_percent": true and the operand is divided by 100
+  before the arithmetic. When an operand is used as the REMAINDER after a rate is
+  taken off a base (a premium net of a ceding commission is base * (1 - rate)),
+  set "left_complement"/"right_complement": true. Decide the scale from the
+  column's SAMPLE VALUES, not its name: samples spanning 0-100 are a percent
+  operand, samples within 0-1 are already a fraction and need no flag.
+  So "ceded premium = gross written premium x ceded percentage" maps to
+  {{"result_field":"<ceded premium col>", "left_field":"<gross premium col>",
+  "operator":"*", "right_field":"<ceded % col>", "right_is_percent":true}} —
+  return "template": null ONLY when a required COLUMN is genuinely absent from
+  VALID FIELD NAMES, never because of an operand's scale.
 - cross_field_compare params: {{"field": "<the field>", "op": "<=|>=|<|>|=|!=",
   "other_field": "<the compared field>", "operator": "*", "factor": <number>}}.
   "<fee A> >= <P>% of <base B>" → {{"field":"<fee A col>", "op":">=",
@@ -2665,6 +2697,7 @@ CRITICAL:
 - Every field in params MUST be in VALID FIELD NAMES.
 
 USER:
+{forced_block}{relaxed_block}{generic_block}
 Batch of {len(intent_items)} rule intent(s) to map:
 
 {json.dumps(intent_items, indent=2)}

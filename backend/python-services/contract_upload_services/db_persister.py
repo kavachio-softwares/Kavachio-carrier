@@ -334,7 +334,8 @@ def normalize_upload_token(token):
 
 
 def build_extracted_payload(document_type, program_name, program_metadata,
-                            upload_token=None, reference_documents=None):
+                            upload_token=None, reference_documents=None,
+                            identity=None, regen_report=None):
     """The contract row's `extracted` JSON.
 
     `upload_token` is the caller's correlation id for THIS upload. It rides in
@@ -377,6 +378,14 @@ def build_extracted_payload(document_type, program_name, program_metadata,
             "external": refs.get("external") or [],
             "provided": refs.get("provided") or [],
         }
+    # Regeneration stability (see regen_reconcile.py). Both are nested DICTS for
+    # the same scalar-filter reason as `upload`: they must never leak into
+    # `_contract_constants`. `identity` holds the L1/L2b hashes FUTURE uploads
+    # match against; `regen_report` is the reconcile diff for THIS upload.
+    if identity:
+        payload["identity"] = dict(identity)
+    if regen_report:
+        payload["regen_report"] = regen_report
     return payload
 
 
@@ -404,6 +413,8 @@ def persist_pipeline_output(
     content_fingerprint=None,
     entity_fingerprint=None,
     upload_token=None,
+    identity=None,
+    prior_contract=None,
 ):
     """
     Persist `final_output` into the canonical Postgres tables.
@@ -418,6 +429,15 @@ def persist_pipeline_output(
     `upload_token` is an optional correlation id supplied by the caller that
     made the upload, recorded so that caller can find THIS contract afterwards
     even if it never received the response (see build_extracted_payload).
+
+    `identity` is regen_reconcile.identity_payload(...) — the L1/L2b hashes to
+    stash on the contract row so future uploads can recognise this document.
+    `prior_contract` is the upload route's identity-ladder hit
+    ({contract_id, level, ...}) or None; when None, the L3 (business-identity)
+    probe still runs here because it needs the extracted metadata. Either way a
+    hit triggers reconcile-and-carry-forward over `validation_rules` BEFORE
+    anything is inserted — see regen_reconcile.reconcile. Fail-open: any error
+    in that path falls back to persisting the generated set unchanged.
     """
 
     program_metadata = final_output.get("program_metadata") or {}
@@ -465,6 +485,99 @@ def persist_pipeline_output(
             )
 
         tenant_id = row[0]
+
+        # ── 1b) Regeneration stability: reconcile against a prior version ─
+        # The old decision is the default; this run only PROPOSES changes
+        # (rule_status='needs_review' rows the engine never executes). See
+        # regen_reconcile.py. KAVACHIO_CARRY_FORWARD=0 disables entirely.
+        regen_report = None
+        try:
+            from contract_upload_services import regen_reconcile as _rr
+            if _rr._enabled():
+                prior = prior_contract
+                if not prior:
+                    prior = _rr.find_prior_contract_l3(
+                        conn, tenant_id, program_metadata)
+                if prior and prior.get("contract_id"):
+                    prior_cid = prior["contract_id"]
+                    # Same template ⇔ the prior row's content_fingerprint (doc
+                    # text + template FIELD NAMES) equals this upload's. Only
+                    # then can old compiled SQL be trusted on the new sheets.
+                    prior_fp = conn.execute(
+                        text("""SELECT content_fingerprint FROM contract
+                                WHERE contract_id = :cid"""),
+                        {"cid": prior_cid},
+                    ).scalar()
+                    same_template = bool(
+                        content_fingerprint and prior_fp == content_fingerprint)
+                    # Column names of THIS template — lets the deterministic
+                    # provenance gates police rules the normalizer never saw
+                    # (carried-forward ones). See regen_reconcile.reconcile.
+                    _field_names = (meta or {}).get("template_field_names") or []
+                    old_rules = _rr.load_prior_rules(conn, prior_cid)
+                    if old_rules:
+                        validation_rules, regen_report = _rr.reconcile(
+                            old_rules, validation_rules,
+                            same_template=same_template,
+                            field_names=_field_names)
+                        # A check bound by an OLDER version but covered by
+                        # nothing in the current set is re-surfaced as an inert
+                        # proposal rather than lost for good.
+                        if same_template:
+                            _lin = [c["contract_id"] for c in
+                                    _rr.find_contract_lineage(
+                                        conn, tenant_id,
+                                        content_fp=content_fingerprint,
+                                        file_sha=(identity or {}).get("file_sha256"),
+                                        doc_sha=(identity or {}).get("doc_sha256"))
+                                    if c["contract_id"] != prior_cid]
+                            if _lin:
+                                _rec = _rr.recover_lost_coverage(
+                                    conn, _lin, validation_rules, regen_report)
+                                validation_rules = list(validation_rules) + _rec
+                        regen_report["prior_contract_id"] = prior_cid
+                        regen_report["match_level"] = prior.get("level")
+                        log.info(
+                            f"[Regen] prior contract {prior_cid} "
+                            f"({prior.get('level')}, same_template="
+                            f"{same_template}): carried "
+                            f"{regen_report['carried']}, proposals "
+                            f"{regen_report['params_changed'] + regen_report['column_changed'] + regen_report['only_in_new'] + regen_report['values_narrowed']}, "
+                            f"not regenerated {regen_report['only_in_old']}, "
+                            f"replaced-on-gate {regen_report.get('replaced_failing_gate', 0)}, "
+                            f"paused-on-gate {regen_report.get('carried_paused_by_gate', 0)}, "
+                            f"dupes {regen_report.get('duplicates_paused', 0)}, "
+                            f"recovered {regen_report.get('recovered_from_lineage', 0)}")
+                        try:
+                            import pipeline_log as plog
+                            plog.log("REGEN", "CARRY",
+                                     f"prior contract {prior_cid} matched at "
+                                     f"{prior.get('level')}",
+                                     f"{regen_report['identical']} identical kept, "
+                                     f"{regen_report['only_in_new']} new + "
+                                     f"{regen_report['params_changed'] + regen_report['column_changed'] + regen_report['values_narrowed']} changed -> review, "
+                                     f"{regen_report['only_in_old']} not regenerated (carried)")
+                        except Exception:
+                            pass
+        except Exception as _regen_exc:  # noqa: BLE001 — fail-open by design
+            print(f"[Regen] carry-forward skipped ({_regen_exc}) — "
+                  f"persisting the generated set unchanged")
+            regen_report = None
+
+        # Behavioural duplicate guard — runs on EVERY upload, not just
+        # regenerations. Two rules enforcing the same check on the same column
+        # with the same values report every violation twice, and a first-time
+        # setup can produce that pair just as easily as a regeneration can (the
+        # model names rules freely, so only behaviour identifies them).
+        try:
+            from contract_upload_services import regen_reconcile as _rr2
+            _dupe_report = regen_report if isinstance(regen_report, dict) else {"details": []}
+            _rr2.dedupe_behavioural_twins(validation_rules, _dupe_report)
+            _n = _dupe_report.get("duplicates_paused") or 0
+            if _n:
+                log.info(f"[Regen] {_n} duplicate rule(s) paused for review")
+        except Exception as _dexc:  # noqa: BLE001 — fail-open
+            print(f"[Regen] duplicate check skipped ({_dexc})")
 
         # ── 2) INSERT contract → contract_id ─────────────────────────────
         inception = _parse_date(_meta_scalar(program_metadata.get("inception_date")), today)
@@ -528,6 +641,8 @@ def persist_pipeline_output(
                     program_metadata,
                     upload_token,
                     reference_documents,
+                    identity=identity,
+                    regen_report=regen_report,
                 )),
                 "output_template_id":  output_template_id,
                 "content_fingerprint": content_fingerprint,

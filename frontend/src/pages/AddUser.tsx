@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
+import { InviteSentModal } from "../components/InviteSentModal";
 
 export default function AddUser() {
   const mga = currentMga();
@@ -86,29 +87,13 @@ export default function AddUser() {
       </div>
 
       {created && (
-        <div className="proto-modal-overlay">
-          <div className="proto-modal tenant-success" onClick={e => e.stopPropagation()}>
-            <div className="ts-icon">
-              <svg viewBox="0 0 56 56" fill="none" aria-hidden="true">
-                <circle cx="28" cy="28" r="28" fill="var(--p-ok-soft)" />
-                <path d="M18 28.5l6.5 6.5L38 21" stroke="var(--p-ok)" strokeWidth="3"
-                  strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </div>
-            <h3 className="ts-title">User created</h3>
-            <p className="ts-org">{created.name} has been added to your organization.</p>
-            <div className="ts-row">
-              <svg className="ts-row-ic" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                <rect x="2.5" y="4.5" width="15" height="11" rx="2" stroke="currentColor" strokeWidth="1.4" />
-                <path d="M3 5.5l7 5.5 7-5.5" stroke="currentColor" strokeWidth="1.4"
-                  strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <span>Invite sent to <b>{created.email}</b></span>
-            </div>
-            <p className="ts-sub">They'll set a password and sign in.</p>
-            <button className="btn pri ts-done" onClick={() => nav("/users")}>Done</button>
-          </div>
-        </div>
+        <InviteSentModal
+          title="User created"
+          message={`${created.name} has been added to your organization.`}
+          email={created.email}
+          note="They'll set a password and sign in."
+          onDone={() => nav("/users")}
+        />
       )}
     </div>
   );

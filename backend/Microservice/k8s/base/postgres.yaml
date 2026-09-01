@@ -1,0 +1,19 @@
+# PostgreSQL is EXTERNAL / managed (RDS / Cloud SQL / on-prem) - NOT run in-cluster.
+# This ExternalName Service is just a stable in-cluster alias: pods keep using the
+# hostname "postgres", and Kubernetes DNS resolves it to the managed endpoint. So
+# DATABASE_URL can stay ...@postgres:5432/kavachio without hard-coding the real host
+# into every workload. Set externalName below to your managed endpoint's DNS.
+#
+# (If your managed DB is reachable only by IP, delete this file and put the full
+#  host in DATABASE_URL in the secret instead, or use an Endpoints-backed Service.)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: kavachio
+spec:
+  type: ExternalName
+  externalName: REPLACE_ME.your-managed-postgres.example.com   # <-- managed DB DNS
+  ports:
+    - port: 5432
+      targetPort: 5432

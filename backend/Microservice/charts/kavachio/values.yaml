@@ -1,0 +1,54 @@
+# Default values shared by all environments.
+global:
+  namespace: kavachio
+  imagePullPolicy: IfNotPresent
+
+secretName: kavachio-secrets
+
+services:
+  auth:
+    port: 8001
+    replicas: 2
+    image: kavachio/auth-service
+    tag: latest
+  tenant-admin:
+    port: 8007
+    replicas: 2
+    image: kavachio/tenant-admin-service
+    tag: latest
+  mapper:
+    port: 8002
+    replicas: 2
+    image: kavachio/mapper-service
+    tag: latest
+  ingestion:
+    port: 8003
+    replicas: 2
+    image: kavachio/ingestion-service
+    tag: latest
+  validation:
+    port: 8004
+    replicas: 2
+    image: kavachio/validation-service
+    tag: latest
+  export:
+    port: 8005
+    replicas: 2
+    image: kavachio/export-service
+    tag: latest
+  contract:
+    port: 8006
+    replicas: 2
+    image: kavachio/contract-service
+    tag: latest
+
+gateway:
+  image: kavachio/gateway
+  tag: latest
+  replicas: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPU: 70

@@ -30,6 +30,8 @@ import os
 import json
 import datetime
 
+import pipeline_log as plog
+
 from contract_upload_services.gemini_service import (
     call_gemini, DETERMINISTIC_SEED, STAGE_B_MODEL, plan_token_batches,
     would_truncate,
@@ -70,6 +72,10 @@ _CALL3_OUTPUT_RATIO = float(os.getenv("KAVACHIO_CALL3_OUTPUT_RATIO", "1.0"))
 # otherwise reproduce the same "no field" result). Deterministic verify still
 # gates whatever the retry picks, so a non-zero temp here is safe.
 _CALL3_RETRY_TEMP = float(os.getenv("KAVACHIO_CALL3_RETRY_TEMP", "0.4"))
+# Hard cap on the optimistic path's fallback ladder. Bounds the worst case: even if
+# every round fails, Call 3 can cost at most one big call plus this many retry
+# rounds — never an unbounded halving loop.
+_CALL3_FALLBACK_ROUNDS = int(os.getenv("KAVACHIO_CALL3_FALLBACK_ROUNDS", "3"))
 
 
 def _safe_parse(raw: str, label: str) -> dict | None:
@@ -413,10 +419,13 @@ def _run_mapping_batches(items, template_fields, batch_size, forced_field=None,
     retry so its output can differ."""
     mapped = {}
     total = len(items)
-    n_batches = (total + batch_size - 1) // batch_size
-    for b in range(0, total, batch_size):
-        batch = items[b:b + batch_size]
-        b_num = b // batch_size + 1
+    # Fewest batches that respect the cap, filled EVENLY — see _plan_batches. A
+    # Call-3 batch carries a ~15,800-token prefix whatever it holds, so a runt batch
+    # is the most expensive way to ask about a handful of intents.
+    from contract_upload_services.contract_data_classifier import _plan_batches
+    batches = _plan_batches(items, batch_size)
+    n_batches = len(batches)
+    for b_num, batch in enumerate(batches, 1):
         parsed = None
         # A batch is generic-library-sourced when EVERY item carries a negative
         # clause_id (see generic_rule_library._build_intents) — these calls are
@@ -433,6 +442,10 @@ def _run_mapping_batches(items, template_fields, batch_size, forced_field=None,
                 seed=DETERMINISTIC_SEED,
                 max_output_tokens=65536,
                 thinking_budget=16384,
+                # Everything before "USER:" is the ~49,000-char catalog + field list
+                # + instructions. Identical across all four prompt variants now that
+                # forced/relaxed/generic blocks sit at the tail.
+                cache_split="\nUSER:\n",
             )
             parsed = _safe_parse(raw, f"Call3-Map-{b_num}")
         except Exception as exc:
@@ -762,58 +775,149 @@ def map_intents_to_ir(clauses, intent_clfs, template_fields=None, batch_size=Non
                 "clause_text":      (clause.get("text") or "")[:600],
             })
 
-    # Auto-chunk large intent sets. One mapping call over many intents dilutes the
-    # model's attention and it leaves mappable intents UNMAPPED (→ review) even when
-    # a good column exists. Above _CALL3_SINGLE_MAX intents, chunk proactively so
-    # each intent gets enough attention. Small sets keep the single-call path.
-    # (forced_field is the human review-queue path — leave it on one call.)
-    # TWO independent limits, whichever trips first:
-    #   COUNT — attention dilution (see above). No token arithmetic predicts it.
-    #   SIZE  — the answer plus thinking would not fit the output budget. The count
-    #           is blind to intent LENGTH, and a Call-3 intent carries clause_text,
-    #           so intents grow with contract complexity. _CALL3_SINGLE_MAX was
-    #           measured on one contract; this check measures whatever it is given.
-    # The thinking budget is subtracted because thinking is drawn from the SAME
-    # max_output_tokens pot as the answer.
-    if batch_size is None and forced_field is None:
-        _think = int(_os.getenv("KAVACHIO_CALL3_THINKING", "16384"))
-        over, est, limit = would_truncate(
-            _json.dumps(items, default=str), _think, model=STAGE_B_MODEL,
+    # NOTE: there is deliberately NO pre-emptive chunking decision here any more.
+    # The old code split on a COUNT threshold (_CALL3_SINGLE_MAX) because attention
+    # dilution is not predictable from token arithmetic — but that meant paying for
+    # 10 batches on every upload to insure against a failure that might not happen.
+    # _map_optimistically below inverts it: send everything, MEASURE how much came
+    # back unbound, and only then split — sizing the retry from the data rather than
+    # from a constant. The count constants are kept only as the floor/ceiling the
+    # budget sizer clamps to.
+
+    def _partition(its):
+        """Contract-derived vs generic-library intents.
+
+        _run_mapping_batches derives its `is_generic` prompt flag as "EVERY item in
+        this batch has a negative clause_id". Library intents are appended AFTER the
+        contract ones, so unless the contract count is a multiple of the chunk size
+        ONE boundary batch used to carry both — and, being mixed, was sent with the
+        CONTRACT prompt. A library intent in that batch was then judged under "always
+        find the closest field" instead of the "decline rather than guess" wording
+        written for it, the opposite of what the flag is for (and contrary to
+        build_ir_mapping_prompt_batch's own docstring, which states the two are never
+        mixed). Partitioning first makes every batch homogeneous.
+        """
+        return ([it for it in its if it["clause_id"] >= 0],
+                [it for it in its if it["clause_id"] < 0])
+
+    def _size_by_budget(its):
+        """Batch size DERIVED FROM THIS DATA, not a fixed count.
+
+        The real ceiling on a mapping call is the output budget: the answer plus the
+        thinking budget must fit in max_output_tokens. would_truncate() measures
+        exactly that for a given payload using this stage's own answer/data ratio, so
+        we can ask "how many of THESE intents fit?" instead of guessing 8. A contract
+        with long clause_text gets smaller batches; a terse one gets larger — no magic
+        number, and it adapts to a template/contract this code has never seen.
+        """
+        if not its:
+            return 1
+        think = int(_os.getenv("KAVACHIO_CALL3_THINKING", "16384"))
+        _over, est, limit = would_truncate(
+            _json.dumps(its, default=str), think, model=STAGE_B_MODEL,
             ratio=_CALL3_OUTPUT_RATIO)
-        if len(items) > _CALL3_SINGLE_MAX or over:
-            batch_size = _CALL3_AUTO_BATCH
-            why = (f"{len(items)} intents > {_CALL3_SINGLE_MAX}"
-                   if len(items) > _CALL3_SINGLE_MAX
-                   else f"estimated answer+thinking ~{est} tok > output budget {limit}")
-            print(f"[Call 3] {why}; auto-chunking.")
+        answer, room = est - think, limit - think
+        if answer <= 0 or room <= 0:
+            return _CALL3_AUTO_BATCH
+        # Fill the budget, with a floor so a pathological item still makes progress.
+        size = max(1, min(len(its), int(len(its) * room / answer)))
+        plog.log("CALL3", "SIZING", f"{len(its)} intent(s) -> batch size {size}",
+                 f"answer ~{answer:,.0f} tok + think {think:,} of {limit:,.0f} budget; "
+                 f"room for answer {room:,.0f}")
+        return size
+
+    def _map_optimistically(its, label):
+        """ONE call for everything; fall back only on a MEASURED, REAL failure.
+
+        What counts as failure matters enormously here, and only one of the two
+        "unbound" outcomes is one:
+
+          MISSING KEY  — we sent the intent and got no row back. That is a dropped
+                         or truncated answer, i.e. a genuine defect, and re-asking
+                         a smaller batch can fix it.
+          template null — the mapper CONSIDERED the intent and declined to bind it,
+                         because no column of this template can represent it. That
+                         is a correct answer, not a defect. Most of the review queue
+                         is made of these. Retrying them in smaller batches cannot
+                         change the answer — it just re-buys the same null, which is
+                         how an earlier version of this function spent 55 calls
+                         halving its way to 1 on intents that were never bindable.
+
+        So: retry the missing, never the declined. Declined intents already get ONE
+        relaxed re-ask further down (the `still` / auto-retry block), which is the
+        right place for them because it changes the PROMPT rather than the batch
+        size. Anything still unbound after that routes to review, as designed.
+        """
+        if not its:
+            return {}
+        plog.log("CALL3", "ATTEMPT", f"{label}: {len(its)} intent(s) in ONE call")
+        got = _run_mapping_batches(its, template_fields, len(its), forced_field,
+                                   forced_fields=forced_fields)
+
+        def _missing(pool):
+            return [it for it in pool
+                    if (it["clause_id"], it["intent_index"]) not in got]
+
+        declined = sum(
+            1 for it in its
+            if (it["clause_id"], it["intent_index"]) in got
+            and not (got.get((it["clause_id"], it["intent_index"])) or {}).get("template"))
+        bad = _missing(its)
+        if not bad:
+            print(f"[Call 3] {label}: {len(its)} intent(s) answered in ONE call "
+                  f"({declined} declined → relaxed retry / review).")
+            plog.log("CALL3", "OK", f"{label}: all {len(its)} answered in ONE call",
+                     f"{declined} DECLINED (no matching column) — a valid verdict, "
+                     f"NOT a reason to re-batch; they go to relaxed retry / review")
+            return got
+
+        print(f"[Call 3] {label}: single call dropped {len(bad)}/{len(its)} intent(s) "
+              f"— re-running just those in budget-sized batches.")
+        size = _size_by_budget(bad)
+        plog.log("CALL3", "FALLBACK",
+                 f"{label}: {len(bad)} item(s) -> {-(-len(bad)//size)} batch(es) of {size}",
+                 f"single call DROPPED {len(bad)}/{len(its)} (missing from the answer). "
+                 f"{declined} declined intents are NOT retried here")
+        # Hard round cap: a bounded ladder, never an open-ended halving loop.
+        for _round in range(_CALL3_FALLBACK_ROUNDS):
+            before = len(bad)
+            got.update(_run_mapping_batches(bad, template_fields, size, forced_field,
+                                            forced_fields=forced_fields))
+            bad = _missing(bad)
+            if not bad:
+                print(f"[Call 3] {label}: all intents recovered.")
+                break
+            if len(bad) >= before:
+                if size <= 1:
+                    break
+                size = max(1, size // 2)
+                print(f"[Call 3] {label}: no progress; halving batch to {size}.")
+                plog.log("CALL3", "HALVE", f"{label}: batch size -> {size}",
+                         f"round {_round + 1}/{_CALL3_FALLBACK_ROUNDS} made no progress "
+                         f"({len(bad)} still missing)")
+        if bad:
+            print(f"[Call 3] {label}: {len(bad)} intent(s) still unanswered after "
+                  f"{_CALL3_FALLBACK_ROUNDS} round(s) — routing to review.")
+            plog.log("CALL3", "DROPPED", f"{label}: {len(bad)} intent(s) never answered",
+                     f"hit the {_CALL3_FALLBACK_ROUNDS}-round cap — routed to review "
+                     f"rather than retried forever")
+        return got
 
     # (clause_id, intent_index) -> mapped IR dict
     mapped = {}
     if items:
-        if batch_size:
-            print(f"\n[Call 3] Mapping {len(items)} intent(s) → IR in chunks of {batch_size}.")
-            mapped = _run_mapping_batches(items, template_fields, batch_size,
-                                          forced_field, forced_fields=forced_fields)
-            # A chunk may still truncate/drop an intent — retry any missing ones.
-            missing = [it for it in items
-                       if (it["clause_id"], it["intent_index"]) not in mapped]
-            if missing:
-                print(f"[Call 3] chunked pass incomplete ({len(missing)}/{len(items)}); "
-                      f"retrying those in chunks of {_CALL3_AUTO_BATCH}.")
-                mapped.update(_run_mapping_batches(missing, template_fields, _CALL3_AUTO_BATCH,
-                                                   forced_field, forced_fields=forced_fields))
+        if forced_field is not None:
+            # Human-resolution / rescue path: the column is already chosen, so there
+            # is nothing to be optimistic about — keep the existing single pass.
+            mapped = _run_mapping_batches(items, template_fields,
+                                          batch_size or len(items), forced_field,
+                                          forced_fields=forced_fields)
         else:
-            print(f"\n[Call 3] Mapping {len(items)} intent(s) → IR in 1 call.")
-            mapped = _run_mapping_batches(items, template_fields, len(items),
-                                          forced_field, forced_fields=forced_fields)
-            # If the single call truncated, retry just the missing intents.
-            missing = [it for it in items
-                       if (it["clause_id"], it["intent_index"]) not in mapped]
-            if missing:
-                print(f"[Call 3] single call incomplete ({len(missing)}/{len(items)}); "
-                      f"retrying those in chunks of 8.")
-                mapped.update(_run_mapping_batches(missing, template_fields, 8,
-                                                   forced_field, forced_fields=forced_fields))
+            contract_items, generic_items = _partition(items)
+            print(f"\n[Call 3] Mapping {len(items)} intent(s) → IR "
+                  f"({len(contract_items)} contract, {len(generic_items)} library).")
+            mapped = _map_optimistically(contract_items, "contract")
+            mapped.update(_map_optimistically(generic_items, "library"))
 
     # Deterministic backstop for unmapped numeric LIMIT/CAP intents. The mapper
     # occasionally leaves a clear limit/cap clause unmapped (e.g. it won't accept an

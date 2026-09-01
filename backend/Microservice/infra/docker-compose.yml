@@ -1,0 +1,187 @@
+# Kavachio - local microservices stack (Phase 2 + 3)
+# Usage:  cd infra && cp .env.example .env && docker compose up --build
+name: kavachio
+
+services:
+  # PostgreSQL is an EXTERNAL / managed database - it is NOT run by this stack.
+  # Services connect to it via DATABASE_URL in .env (point it at the managed endpoint).
+  # This container is a throwaway LOCAL-DEV convenience only; it stays OFF unless you
+  # opt in:  docker compose --profile localdb up
+  postgres:
+    image: postgres:16
+    profiles: ["localdb"]
+    environment:
+      POSTGRES_DB: kavachio
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kavachio"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Local Azure Blob emulator — only for testing STORAGE_BACKEND=azure. OFF by
+  # default; start with:  docker compose --profile azure up
+  # Then in .env set STORAGE_BACKEND=azure and point the connection string's
+  # BlobEndpoint at http://azurite:10000/devstoreaccount1
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    profiles: ["azure"]
+    command: azurite-blob --blobHost 0.0.0.0 --blobPort 10000
+    ports:
+      - "10000:10000"
+
+  auth-service:
+    build:
+      context: ..
+      dockerfile: services/auth/Dockerfile
+    image: kavachio/auth-service:local
+    env_file: .env
+    environment:
+      SERVICE_PORT: "8001"
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  tenant-admin-service:
+    build:
+      context: ..
+      dockerfile: services/tenant-admin/Dockerfile
+    image: kavachio/tenant-admin-service:local
+    env_file: .env
+    environment:
+      SERVICE_PORT: "8007"
+    ports:
+      - "8007:8007"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  mapper-service:
+    build:
+      context: ..
+      dockerfile: services/mapper/Dockerfile
+    image: kavachio/mapper-service:local
+    env_file: .env
+    environment:
+      SERVICE_PORT: "8002"
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  ingestion-service:
+    build:
+      context: ..
+      dockerfile: services/ingestion/Dockerfile
+    image: kavachio/ingestion-service:local
+    env_file: .env
+    environment:
+      SERVICE_PORT: "8003"
+    ports:
+      - "8003:8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  validation-service:
+    build:
+      context: ..
+      dockerfile: services/validation/Dockerfile
+    image: kavachio/validation-service:local
+    env_file: .env
+    environment:
+      SERVICE_PORT: "8004"
+    ports:
+      - "8004:8004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  export-service:
+    build:
+      context: ..
+      dockerfile: services/export/Dockerfile
+    image: kavachio/export-service:local
+    env_file: .env
+    environment:
+      SERVICE_PORT: "8005"
+    ports:
+      - "8005:8005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  contract-service:
+    build:
+      context: ..
+      dockerfile: services/contract/Dockerfile
+    image: kavachio/contract-service:local
+    env_file: .env
+    environment:
+      SERVICE_PORT: "8006"
+    ports:
+      - "8006:8006"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    image: kavachio/gateway:local
+    ports:
+      - "8080:80"
+    depends_on:
+      - auth-service
+      - tenant-admin-service
+      - mapper-service
+      - ingestion-service
+      - validation-service
+      - export-service
+      - contract-service
+    restart: unless-stopped
+
+volumes:
+  pgdata:

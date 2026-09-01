@@ -629,12 +629,21 @@ def _pin_contract_identifier_to_effective_date(mapped, rules, template_fields):
     # abbreviation is caught while a longer word that merely CONTAINS the letters
     # (e.g. "coefficient", "effort") is not. A column qualifies when it carries an
     # effective-token AND a date-token.
-    _EFF_TOKENS = {"effective", "eff"}
-    _DATE_TOKENS = {"date", "dt", "dte"}
+    _EFF_TOKENS = {"effective", "eff", "inception"}
+    # "inception" columns usually carry no separate date-token ("PolicyInception"),
+    # so it satisfies BOTH the effective- and the date-token requirement.
+    _DATE_TOKENS = {"date", "dt", "dte", "inception"}
     _POLICY_TOKENS = {"policy", "pol"}
 
     def _toks(name: str) -> set:
-        return {t for t in re.split(r"[^a-z0-9]+", (name or "").lower()) if t}
+        # Split camelCase BEFORE lowering — "PolicyInception" is policy+inception,
+        # not one opaque token. Without this, a template whose policy date column
+        # is camelCase has no policy-token match and the FALLBACK picks whatever
+        # other effective-date column exists (measured: 'Reins Eff Date', which
+        # put a required-field check on the reinsurance date). Same failure
+        # family as the camelCase BDX-header fix in the state/zip pipeline.
+        name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name or "")
+        return {t for t in re.split(r"[^a-z0-9]+", name.lower()) if t}
 
     def _is_effective_date(name: str) -> bool:
         n = (name or "").lower()
@@ -667,6 +676,16 @@ def _pin_contract_identifier_to_effective_date(mapped, rules, template_fields):
                 if params.get("field") != eff:
                     params["field"] = eff
                     ir["params"] = params
+                    # The mapper's reason described ITS binding; this is now a
+                    # different one. Rewrite it so the rule doesn't contradict
+                    # itself (the reason/binding gate pauses self-contradictory
+                    # mappings) and the audit trail states what actually happened.
+                    ir["reason"] = (
+                        f"Deterministically pinned to '{eff}': the check "
+                        f"resolves a policy to its contract by the policy "
+                        f"effective date (see rule description), regardless of "
+                        f"what the rule NAME suggested to the mapper."
+                    )
                     pinned += 1
             else:
                 ir["template"] = None

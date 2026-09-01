@@ -1,0 +1,9 @@
+# Production overrides
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPU: 65
+services:
+  ingestion: { replicas: 3 }
+  mapper: { replicas: 3 }

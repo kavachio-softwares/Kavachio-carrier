@@ -921,6 +921,53 @@ class MissingBdxColumn(Base):
     )
 
 
+class AiResponseCache(Base):
+    """Memo of a model answer, keyed by a hash of the EXACT input that produced it.
+
+    Several calls in the upload pipeline ask a question whose answer does not
+    depend on the file being uploaded at all:
+
+      generic_bind   — binding Kavachio's generic rule library to an output
+                       template's columns. Depends only on (library rows,
+                       template fields), so every contract uploaded against the
+                       same template re-bought the identical answer. It is also
+                       the expensive one: on a measured run the library was 50 of
+                       the 80 Call-3 items, and Call 3 is ~59% of the bill.
+      formula_infer  — which output-template columns are arithmetically computed.
+                       Depends only on the column catalog.
+      var_topup      — alternate real-world spellings for an enum rule's values.
+                       Depends only on (field, values).
+
+    A hit returns the SAME payload the model returned, so downstream behaviour is
+    identical either way — every call runs at temperature 0 with a fixed seed, so
+    a cached answer IS what a re-ask returns.
+
+    `cache_key` is a SHA-256 over every input that can change the answer, so a
+    template edit, a rule-library edit or a catalog bump all miss rather than
+    serving something stale.
+
+    Fail-open by design (see ai_cache.py): any error reading or writing this table
+    is swallowed and the caller makes the model call.
+
+    Requires migration 19_ai_response_cache.sql on RLS/prod (dev auto-creates via
+    ``Base.metadata.create_all``)."""
+    __tablename__ = "ai_response_cache"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, index=True, nullable=True)  # FK -> tenant.tenant_id
+    # Which question this answers. Namespaces the key space so two callers can
+    # never collide even if their inputs happened to hash alike.
+    kind = Column(String, nullable=False)
+    cache_key = Column(String, nullable=False)   # sha256 hex, see ai_cache.make_key
+    payload = Column(JSON, nullable=False)       # the answer, verbatim
+    hits = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("kind", "cache_key", name="uq_ai_response_cache"),
+        Index("ix_ai_response_cache_tenant_kind", "tenant_id", "kind"),
+    )
+
+
 def exception_severity_counts(exceptions) -> tuple:
     """(critical, warning, info) totals for an OutputExport exceptions list.
     Severity aliases mirror the dashboard's normalization (_norm_sev)."""

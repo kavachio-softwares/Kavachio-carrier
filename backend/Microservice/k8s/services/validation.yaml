@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: validation-service
+  namespace: kavachio
+  labels: { app: validation-service }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: validation-service }
+  template:
+    metadata:
+      labels: { app: validation-service }
+    spec:
+      containers:
+        - name: validation-service
+          image: kavachio/validation-service:latest
+          ports:
+            - containerPort: 8004
+          envFrom:
+            - secretRef: { name: kavachio-secrets }
+          env:
+            - name: SERVICE_PORT
+              value: "8004"
+          readinessProbe:
+            httpGet: { path: /health/db, port: 8004 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /health, port: 8004 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: validation-service
+  namespace: kavachio
+spec:
+  selector: { app: validation-service }
+  ports:
+    - port: 8004
+      targetPort: 8004
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: validation-service
+  namespace: kavachio
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: validation-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

@@ -1,0 +1,73 @@
+------------------------------------------------------------------------------------------------------------
+TIMING run=7499   total 60.6s (1.0 min)
+   Call 1 extraction             60.3s  99.6%  #######################################
+   PDF parse (no AI)              0.3s   0.4%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN d168  started 2026-08-26 16:47:36  |  contract=tmp2joi63l7.pdf template_fields=87
+============================================================================================================
+16:47:36 | run=d168 | CALL2    | ATTEMPT   | 55 clause(s) in ONE call | est answer ~18,205 of 45,875 tok budget (40%)
+16:48:22 | run=d168 | CALL2    | SPOTCHECK | re-asked 8 of 31 rejected clause(s) | longest first — length is what dilutes attention
+16:48:22 | run=d168 | CALL2    | DILUTED   | clause(s) [26, 25] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+16:48:22 | run=d168 | CALL2    | SIZING    | 23 clause(s) -> batch size 12 | answer ~7,232 tok of 45,875 budget; fits 145, capped at _CALL2_SINGLE_MAX=12
+16:48:22 | run=d168 | CALL2    | FALLBACK  | 23 item(s) -> 2 batch(es) of 12 | DILUTED; re-asking only still-rejected clauses — 32 of 55 already trusted (accepted, or re-checked by the spot-check)
+16:48:33 | run=d168 | CACHE    | HIT       | generic_bind 574c90146b0c | answer reused — this model call did NOT happen
+16:48:33 | run=d168 | CALL3    | SKIPPED   | library bind for 49 rule(s) served from cache | answer depends only on (library rows, template fields) — no contract input, so it is reused rather than re-bought
+16:48:33 | run=d168 | CALL3    | ATTEMPT   | contract: 32 intent(s) in ONE call
+16:49:45 | run=d168 | CALL3    | OK        | contract: all 32 answered in ONE call | 10 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+16:50:37 | run=d168 | CACHE    | HIT       | formula_infer 2531480a553a | answer reused — this model call did NOT happen
+16:50:37 | run=d168 | CACHE    | HIT       | var_topup a6469d527fe9 | answer reused — this model call did NOT happen
+------------------------------------------------------------------------------------------------------------
+TIMING run=d168   total 185.1s (3.1 min)
+   Call 3 mapping               123.9s  66.9%  ##########################
+   Call 2 intents                57.5s  31.1%  ############
+   Verify + compile (no AI)       1.0s   0.5%  
+   Formula inference              0.0s   0.0%  
+   (other / overlap)              2.6s
+------------------------------------------------------------------------------------------------------------
+17:20:46 | run=2c82 | CALL2    | SIZING    | 23 clause(s) -> batch size 23 | tokens allow 326; attention cap 27 (single call diluted at 55; bisecting to 27)
+17:20:46 | run=2c82 | CALL2    | SIZING    | 23 clause(s) -> batch size 12 | tokens allow 326; attention cap 12 (no observed failure to bisect; using measured-safe 12)
+17:20:46 | run=2c82 | CALL2    | SIZING    | 80 clause(s) -> batch size 75 | tokens allow 326; attention cap 75 (single call diluted at 150; bisecting to 75)
+17:23:13 | run=8fb3 | CALL2    | SIZING    | 23 clause(s) -> batch size 23 | tokens allow 326; attention cap 27 (single call diluted at 55; bisecting to 27)
+17:23:13 | run=8fb3 | CALL2    | SIZING    | 23 clause(s) -> batch size 23 | tokens allow 113; attention cap 27 (single call diluted at 55; bisecting to 27)
+17:23:13 | run=8fb3 | CALL2    | SIZING    | 23 clause(s) -> batch size 23 | tokens allow 47; attention cap 27 (single call diluted at 55; bisecting to 27)
+17:23:13 | run=8fb3 | CALL2    | SIZING    | 23 clause(s) -> batch size 18 | tokens allow 18; attention cap 27 (single call diluted at 55; bisecting to 27)
+17:23:13 | run=8fb3 | CALL2    | SIZING    | 23 clause(s) -> batch size 6 | tokens allow 6; attention cap 27 (single call diluted at 55; bisecting to 27)
+17:23:13 | run=8fb3 | CALL2    | SIZING    | 23 clause(s) -> batch size 1 | tokens allow 1; attention cap 27 (single call diluted at 55; bisecting to 27)
+
+============================================================================================================
+RUN 296e  started 2026-08-27 08:46:53  |  contract=tmpjw7jtqwa.pdf template_fields=87
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=296e   total 92.4s (1.5 min)
+   Call 1 extraction             92.1s  99.7%  #######################################
+   PDF parse (no AI)              0.2s   0.3%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN 8bd2  started 2026-08-27 08:50:02  |  contract=tmp232864__.pdf template_fields=87
+============================================================================================================
+08:50:02 | run=8bd2 | CALL2    | ATTEMPT   | 46 clause(s) in ONE call | est answer ~17,390 of 45,875 tok budget (38%)
+08:50:44 | run=8bd2 | CALL2    | SPOTCHECK | re-asked 8 of 22 rejected clause(s) | longest first — length is what dilutes attention
+08:50:44 | run=8bd2 | CALL2    | DILUTED   | clause(s) [24, 23] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+08:50:44 | run=8bd2 | CALL2    | SIZING    | 14 clause(s) -> batch size 14 | tokens allow 148; attention cap 23 (single call diluted at 46; bisecting to 23)
+08:50:44 | run=8bd2 | CALL2    | FALLBACK  | 14 item(s) -> 1 batch(es) of 14 | round 1/2; 32 of 46 already trusted (accepted, or re-checked by the spot-check)
+08:50:57 | run=8bd2 | CALL2    | SPOTCHECK | re-asked 8 of 14 rejected clause(s) | longest first — length is what dilutes attention
+08:50:57 | run=8bd2 | CALL2    | OK        | single call accepted for all 14 clause(s) | spot-check found no false negatives
+08:50:57 | run=8bd2 | CACHE    | HIT       | generic_bind 574c90146b0c | answer reused — this model call did NOT happen
+08:50:57 | run=8bd2 | CALL3    | SKIPPED   | library bind for 49 rule(s) served from cache | answer depends only on (library rows, template fields) — no contract input, so it is reused rather than re-bought
+08:50:57 | run=8bd2 | CALL3    | ATTEMPT   | contract: 32 intent(s) in ONE call
+08:53:32 | run=8bd2 | CALL3    | OK        | contract: all 32 answered in ONE call | 9 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+08:54:17 | run=8bd2 | CACHE    | HIT       | formula_infer 2531480a553a | answer reused — this model call did NOT happen
+08:54:17 | run=8bd2 | CACHE    | MISS      | var_topup 8859cf58cd39 | no stored answer for this exact input — model call required
+------------------------------------------------------------------------------------------------------------
+TIMING run=8bd2   total 263.0s (4.4 min)
+   Call 3 mapping               200.1s  76.1%  ##############################
+   Call 2 intents                55.0s  20.9%  ########
+   Verify + compile (no AI)       5.2s   2.0%  
+   Formula inference              0.0s   0.0%  
+   (other / overlap)              2.7s
+------------------------------------------------------------------------------------------------------------

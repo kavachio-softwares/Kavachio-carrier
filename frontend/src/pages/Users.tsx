@@ -7,6 +7,7 @@ import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { InviteSentModal } from "../components/InviteSentModal";
 
 type U = {
   id: number; email: string; full_name: string;
@@ -40,7 +41,10 @@ export default function Users() {
   const mga = currentMga();
   const me = getUser();
   const nav = useNavigate();
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ kind: "ok" | "warn"; text: string } | null>(null);
+  // A successful resend is confirmed with the SAME popup as a first-time
+  // invite (Invite User), not a small inline banner.
+  const [resent, setResent] = useState<{ name: string; email: string } | null>(null);
   const [q, setQ] = useState("");
   const [roleFilter, setRoleFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
@@ -99,7 +103,7 @@ export default function Users() {
     setRemoveBusy(true); setRemoveErr(null);
     try {
       await api.delete(`/users/${removeTarget.id}`);
-      setMsg(`${removeTarget.email} was removed.`);
+      setMsg({ kind: "ok", text: `${removeTarget.email} was removed.` });
       setRemoveTarget(null);
       reload();
     } catch (e: any) {
@@ -111,13 +115,17 @@ export default function Users() {
   }
 
   // Resend invite → re-issues a set-password email to an invited user.
+  // Success is confirmed with the invite popup (same one as Invite User) so
+  // both ways of sending an invite look identical; only a failure falls back
+  // to an inline banner.
   async function resend(u: U) {
     setMsg(null);
     try {
       await api.post(`/users/${u.id}/resend-invite`);
-      setMsg(`Invite re-sent to ${u.email}.`);
+      setResent({ name: u.full_name || u.email, email: u.email });
     } catch (e: any) {
-      setMsg(e?.response?.data?.detail ?? `Couldn't resend the invite to ${u.email} — please try again.`);
+      setMsg({ kind: "warn", text: e?.response?.data?.detail
+        ?? `Couldn't resend the invite to ${u.email} — please try again.` });
     }
     reload();
   }
@@ -152,7 +160,17 @@ export default function Users() {
         </div>
 
         {msg && (
-          <div className="note ok" style={{ marginBottom: 14, maxWidth: 560 }}>{msg}</div>
+          <div className={`note ${msg.kind}`} style={{ marginBottom: 14, maxWidth: 560 }}>{msg.text}</div>
+        )}
+
+        {resent && (
+          <InviteSentModal
+            title="Invite re-sent"
+            message={`A new sign-up link is on its way to ${resent.name}.`}
+            email={resent.email}
+            note="The earlier link no longer works — they'll set a password with this one."
+            onDone={() => setResent(null)}
+          />
         )}
 
         <div className="card">

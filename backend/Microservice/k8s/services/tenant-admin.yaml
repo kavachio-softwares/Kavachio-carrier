@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tenant-admin-service
+  namespace: kavachio
+  labels: { app: tenant-admin-service }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: tenant-admin-service }
+  template:
+    metadata:
+      labels: { app: tenant-admin-service }
+    spec:
+      containers:
+        - name: tenant-admin-service
+          image: kavachio/tenant-admin-service:latest
+          ports:
+            - containerPort: 8007
+          envFrom:
+            - secretRef: { name: kavachio-secrets }
+          env:
+            - name: SERVICE_PORT
+              value: "8007"
+          readinessProbe:
+            httpGet: { path: /health/db, port: 8007 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /health, port: 8007 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenant-admin-service
+  namespace: kavachio
+spec:
+  selector: { app: tenant-admin-service }
+  ports:
+    - port: 8007
+      targetPort: 8007
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tenant-admin-service
+  namespace: kavachio
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tenant-admin-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

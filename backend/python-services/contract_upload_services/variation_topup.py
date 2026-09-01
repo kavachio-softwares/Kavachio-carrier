@@ -276,6 +276,22 @@ def prefill_variation_topups(synth_outputs, *, ai=None, minimum=None):
             return None
 
     n_vals = sum(len(r["values"]) for r in requests)
+
+    # COST: "how else is 'Guam' written on a bordereau?" is a property of the VALUE,
+    # not of the contract that happens to name it — so the same enum values re-bought
+    # the same spellings on every upload. `requests` is the literal prompt input, so
+    # keying on it is exact: a different column or a different value set misses.
+    # Memo keys are tuples, which JSON cannot represent, so the payload is stored as
+    # a list of [field, value, spellings] rows and rebuilt on read.
+    try:
+        import ai_cache
+        _key = ai_cache.make_key("var_topup_v1", requests, minimum)
+        _hit = ai_cache.get("var_topup", _key)
+    except Exception:
+        _key, _hit = None, None
+    if _hit is not None:
+        return {(f, v): list(sp) for f, v, sp in _hit}
+
     print(f"[VARIATION-TOPUP] batching {n_vals} value(s) across {len(requests)} "
           f"column(s) into ONE call.")
     try:
@@ -295,6 +311,14 @@ def prefill_variation_topups(synth_outputs, *, ai=None, minimum=None):
         print("[VARIATION-TOPUP] batch returned nothing usable; "
               "falling back to per-rule calls.")
         return None
+    if _key:
+        # Tuple keys -> JSON-safe rows. Not cached when the batch failed above
+        # (we return None there), so a transient failure is always retried.
+        try:
+            ai_cache.put("var_topup", _key,
+                         [[f, v, list(sp)] for (f, v), sp in memo.items()])
+        except Exception:
+            pass
     return memo
 
 

@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mapper-service
+  namespace: kavachio
+  labels: { app: mapper-service }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: mapper-service }
+  template:
+    metadata:
+      labels: { app: mapper-service }
+    spec:
+      containers:
+        - name: mapper-service
+          image: kavachio/mapper-service:latest
+          ports:
+            - containerPort: 8002
+          envFrom:
+            - secretRef: { name: kavachio-secrets }
+          env:
+            - name: SERVICE_PORT
+              value: "8002"
+          readinessProbe:
+            httpGet: { path: /health/db, port: 8002 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /health, port: 8002 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mapper-service
+  namespace: kavachio
+spec:
+  selector: { app: mapper-service }
+  ports:
+    - port: 8002
+      targetPort: 8002
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mapper-service
+  namespace: kavachio
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mapper-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

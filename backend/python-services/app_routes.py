@@ -994,6 +994,49 @@ def tenants_create(body: NewTenantBody,
         return _tenant_dict(t)
 
 
+@router.post("/tenants/{mga}/resend-invite")
+def tenant_resend_invite(mga: str,
+                         _p: Principal = Depends(require_role("kavachio_admin"))):
+    """Re-issue this broker's onboarding invite (Brokers list -> "Resend Link").
+
+    Without this, a broker whose invite mail was deleted / lost / expired before
+    they onboarded had NO way back in: they have no password to reset, so
+    "Forgot password" can't help them either, and the Kavachio admin could only
+    delete and re-create the org. Every user of this tenant still sitting on a
+    pending invite gets a FRESH token + set-password email; stamping a new token
+    invalidates the previous link, so an old copy can't be used afterwards.
+
+    Platform-admin only — it is driven from the platform-admin Brokers screen.
+    (Per-USER resend lives at POST /users/{user_id}/resend-invite.)
+    """
+    with SessionLocal() as s:
+        tid = _get_tenant_id(s, mga)
+        if tid is None:
+            raise HTTPException(404, "broker not found")
+        # kavachio_admin is a cross-tenant platform role, never one of this
+        # org's own members — same exclusion the /tenants list counts use, so
+        # the link the UI shows and the users we mail are the same set.
+        pending = (s.query(AppUser)
+                   .filter(AppUser.tenant_id == tid,
+                           AppUser.role != "kavachio_admin",
+                           AppUser.status.in_(("invited", "pending")))
+                   .order_by(AppUser.id).all())
+        if not pending:
+            raise HTTPException(409, "this broker has no pending invite to resend")
+        org = _tenant_display(s, tid)
+        # Stamp every fresh token and commit ONCE, then send. _send_invite_email
+        # is best-effort and never raises, so sending after the commit can't
+        # leave a user holding a token that was rolled back.
+        recipients = [(u.email, u.full_name, _make_invite_link(u)) for u in pending]
+        s.commit()
+        for email, name, link in recipients:
+            _send_invite_email(email, link, name, org)
+        emails = [e for e, _n, _l in recipients]
+        _log(mga, _actor(_p), "invite_resent", target=mga,
+             details={"emails": emails, "count": len(emails), "scope": "tenant"})
+        return {"ok": True, "sent": len(emails), "emails": emails}
+
+
 @router.get("/tenants/{mga}")
 def tenant_get(mga: str, principal: Principal = Depends(current_principal)):
     with SessionLocal() as s:
@@ -1706,6 +1749,38 @@ async def program_contract_upload(
         )
         entity_fp = compute_entity_fingerprint(program_id, contract_filename)
 
+        # ── Regeneration stability (regen_reconcile.py) ──────────────────
+        # L1/L2/L2b identity ladder, pre-LLM and TENANT-wide: is this upload a
+        # version of a contract we already know? A hit does NOT skip generation
+        # (unlike the exact-reuse short-circuit) — it makes the persister
+        # reconcile the fresh rules against the prior contract's, so settled
+        # decisions carry forward and changes become review proposals.
+        regen_identity = None
+        prior_contract = None
+        try:
+            from contract_upload_services.regen_reconcile import (
+                identity_payload, find_prior_contract,
+            )
+            regen_identity = identity_payload(contents, document_text)
+            from db import canonical_engine as _regen_ce
+            from sqlalchemy import text as _regen_text
+            with _regen_ce.connect() as _regen_conn:
+                _tid = _regen_conn.execute(
+                    _regen_text("SELECT tenant_id FROM program WHERE program_id = :pid"),
+                    {"pid": program_id},
+                ).scalar()
+                prior_contract = find_prior_contract(
+                    _regen_conn, _tid, content_fp=content_fp,
+                    file_sha=(regen_identity or {}).get("file_sha256"),
+                    doc_sha=(regen_identity or {}).get("doc_sha256"))
+            if prior_contract:
+                print(f"[Regen] prior version found: contract "
+                      f"{prior_contract['contract_id']} "
+                      f"(match {prior_contract['level']}) — reconcile will run "
+                      f"at persist time.")
+        except Exception as _regen_exc:  # noqa: BLE001 — fail-open
+            print(f"[Regen] identity ladder skipped: {_regen_exc}")
+
         # Contract-only re-upload ("Upload new version") must ALWAYS regenerate
         # rules — it is intentionally NOT skippable. Only the combined
         # contract + output-template flow (/setup) is allowed to skip via the
@@ -1799,6 +1874,8 @@ async def program_contract_upload(
                 output_template_id=output_template_id,
                 content_fingerprint=content_fp,
                 entity_fingerprint=entity_fp,
+                identity=regen_identity,
+                prior_contract=prior_contract,
                 # Correlation id from the caller that made this upload. Recorded
                 # so that caller can still identify THIS contract if the response
                 # never reaches it — extraction can outlive the request, and the
@@ -2132,6 +2209,8 @@ async def program_setup(
 
         content_fp = None
         entity_fp = None
+        regen_identity = None
+        prior_contract = None
         if not (continue_anyway or resume_token):
             parsed_doc = await run_in_threadpool(extract_document_data, tmp_path)
             document_text = build_llm_context(parsed_doc)
@@ -2140,6 +2219,37 @@ async def program_setup(
             )
             entity_fp = compute_entity_fingerprint(program_id, contract_file.filename)
 
+            # ── Regeneration stability (regen_reconcile.py) ──────────────────
+            # L1/L2/L2b identity ladder, pre-LLM and TENANT-wide: is this upload a
+            # version of a contract we already know? A hit does NOT skip generation
+            # (unlike the exact-reuse short-circuit) — it makes the persister
+            # reconcile the fresh rules against the prior contract's, so settled
+            # decisions carry forward and changes become review proposals.
+            regen_identity = None
+            prior_contract = None
+            try:
+                from contract_upload_services.regen_reconcile import (
+                    identity_payload, find_prior_contract,
+                )
+                regen_identity = identity_payload(contract_bytes, document_text)
+                from db import canonical_engine as _regen_ce
+                from sqlalchemy import text as _regen_text
+                with _regen_ce.connect() as _regen_conn:
+                    _tid = _regen_conn.execute(
+                        _regen_text("SELECT tenant_id FROM program WHERE program_id = :pid"),
+                        {"pid": program_id},
+                    ).scalar()
+                    prior_contract = find_prior_contract(
+                        _regen_conn, _tid, content_fp=content_fp,
+                        file_sha=(regen_identity or {}).get("file_sha256"),
+                        doc_sha=(regen_identity or {}).get("doc_sha256"))
+                if prior_contract:
+                    print(f"[Regen] prior version found: contract "
+                          f"{prior_contract['contract_id']} "
+                          f"(match {prior_contract['level']}) — reconcile will run "
+                          f"at persist time.")
+            except Exception as _regen_exc:  # noqa: BLE001 — fail-open
+                print(f"[Regen] identity ladder skipped: {_regen_exc}")
             # Set KAVACHIO_DISABLE_CONTRACT_REUSE=1 to force a full re-run (skip the
             # identical-upload short-circuit) — useful when testing pipeline changes.
             reusable = (None if os.getenv("KAVACHIO_DISABLE_CONTRACT_REUSE")
@@ -2256,6 +2366,8 @@ async def program_setup(
                     output_template_id=resolved_template_id,
                     content_fingerprint=content_fp,
                     entity_fingerprint=entity_fp,
+                    identity=regen_identity,
+                    prior_contract=prior_contract,
                 )
             except Exception as pe:
                 print(f"[Persist] ERROR (non-fatal): {pe}")

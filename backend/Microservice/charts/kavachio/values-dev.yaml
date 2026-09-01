@@ -1,0 +1,7 @@
+# Dev overrides
+global:
+  imagePullPolicy: Always
+autoscaling:
+  enabled: false
+services:
+  ingestion: { replicas: 1 }

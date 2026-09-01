@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kavachio
+description: Kavachio microservices (auth, mapper, ingestion, validation, export, contract, tenant-admin)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

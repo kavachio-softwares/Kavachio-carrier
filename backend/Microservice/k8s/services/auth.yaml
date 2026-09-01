@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: kavachio
+  labels: { app: auth-service }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: auth-service }
+  template:
+    metadata:
+      labels: { app: auth-service }
+    spec:
+      containers:
+        - name: auth-service
+          image: kavachio/auth-service:latest
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - secretRef: { name: kavachio-secrets }
+          env:
+            - name: SERVICE_PORT
+              value: "8001"
+          readinessProbe:
+            httpGet: { path: /health/db, port: 8001 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /health, port: 8001 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+  namespace: kavachio
+spec:
+  selector: { app: auth-service }
+  ports:
+    - port: 8001
+      targetPort: 8001
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: auth-service
+  namespace: kavachio
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: auth-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

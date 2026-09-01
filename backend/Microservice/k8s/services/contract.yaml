@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: contract-service
+  namespace: kavachio
+  labels: { app: contract-service }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: contract-service }
+  template:
+    metadata:
+      labels: { app: contract-service }
+    spec:
+      containers:
+        - name: contract-service
+          image: kavachio/contract-service:latest
+          ports:
+            - containerPort: 8006
+          envFrom:
+            - secretRef: { name: kavachio-secrets }
+          env:
+            - name: SERVICE_PORT
+              value: "8006"
+          readinessProbe:
+            httpGet: { path: /health/db, port: 8006 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /health, port: 8006 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: contract-service
+  namespace: kavachio
+spec:
+  selector: { app: contract-service }
+  ports:
+    - port: 8006
+      targetPort: 8006
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: contract-service
+  namespace: kavachio
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: contract-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

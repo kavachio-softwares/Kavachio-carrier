@@ -51,6 +51,9 @@ DEFAULT_CROSS_FIELD_TOLERANCE_PCT = float(
 # entries are popped on use. Fine for the interactive upload flow.
 _EXTRACTION_RESUME_CACHE: dict = {}
 
+import ai_cache
+import pipeline_log as plog
+
 from contract_upload_services.constants import (
     RULE_CLASS_LIBRARY,
     DEFAULT_RULE_AUTO_TRUST_THRESHOLD
@@ -983,6 +986,15 @@ def infer_formula_annotations(template_fields):
             f"   e.g. [{', '.join(str(s) for s in (f.get('samples') or [])[:3])}]"
             if f.get("samples") else "")
         for f in fields)
+    # COST: the answer depends ONLY on this column catalog — nothing from the
+    # contract reaches this prompt — so every upload against a template re-bought
+    # it. `catalog` is the literal prompt input, which makes it the exact and
+    # complete key: two uploads building the same catalog would get the same
+    # answer, and any rename / added column / changed sample rewrites it.
+    _key = ai_cache.make_key("formula_infer_v1", catalog)
+    _cached = ai_cache.get("formula_infer", _key)
+    if _cached is not None:
+        return dict(_cached)
     prompt = f"""You are analyzing the columns of an insurance bordereau (BDX) reporting template.
 Each line is a column name and up to 3 sample values.
 
@@ -1035,6 +1047,11 @@ COLUMNS:
         # columns (contain an operator) — a bare copy is not a formula.
         if tgt in names and expr and any(op in expr for op in "+-*/"):
             out[tgt] = expr
+    # Store even an EMPTY result: "this template has no computed columns" is a real,
+    # reusable answer, and not storing it would re-ask on every upload for exactly
+    # the templates where the call finds nothing. Only a FAILED call (the `except`
+    # above, which returns early) skips the store, so a transient error is retried.
+    ai_cache.put("formula_infer", _key, out)
     return out
 
 
@@ -2847,6 +2864,50 @@ def derive_territory_exclusion_entries(synth_outputs, clauses, template_fields):
 _STAGE1_OUTPUT_RATIO = float(os.getenv("KAVACHIO_STAGE1_OUTPUT_RATIO", "2.5"))
 
 
+def _generic_bind_key(lib_rules, template_fields):
+    """Cache key for the generic-library → output-template binding.
+
+    Covers exactly the two things that answer depends on:
+      • every library row's IDENTITY AND CONTENT — id, name, class, logic, severity.
+        The id alone is not enough: editing a rule's wording changes what the mapper
+        binds it to while the row keeps its id. tenant_id rides along so a tenant
+        rule can never be served from a global-only bind, or vice versa.
+      • every template field the prompt shows the model — name, sheet, canonical
+        field, and the samples it matches value KIND on. A renamed or added column
+        must invalidate; re-uploading the same template must not.
+
+    Sorted, because neither load_generic_rules nor the template parser guarantees a
+    stable order across runs and an ordering flip must not look like a new answer.
+
+    Returns None when there is nothing to bind — that disables the cache for this
+    upload rather than keying on an empty set.
+    """
+    if not lib_rules or not template_fields:
+        return None
+    rules_part = sorted(
+        (r.get("id"), r.get("rule_name"), r.get("class_name"),
+         r.get("validation_logic"), r.get("severity"), r.get("tenant_id"))
+        for r in lib_rules
+    )
+    # Key on EXACTLY what the mapping prompt renders for each field, and nothing
+    # more — see prompt_builder._template_fields_block. Over-specifying here is not
+    # "safer": it makes the key move on input the model never sees, so the cache
+    # misses forever. That is precisely what canonical_field did — the prompt
+    # deliberately hides it (a wrong upstream tag used to override a column's real
+    # meaning), and it is assigned by the template-mapping LLM call, so it differed
+    # on every run and produced a fresh key every time.
+    fields_part = sorted(
+        (f.get("name"),
+         tuple(f.get("sheets") or [f.get("sheet")]),
+         (" ".join(str(f.get("description")).split())[:140]
+          if f.get("description") else None),
+         tuple(f.get("allowed_values") or [])[:15],
+         tuple(str(s) for s in (f.get("samples") or [])[:3]))
+        for f in template_fields if f.get("name")
+    )
+    return ai_cache.make_key("generic_bind_v1", rules_part, fields_part)
+
+
 def _derive_pages_per_chunk(pdf_data, thinking_budget=16384, default=8):
     """Pages per fallback chunk, sized from THIS document's own text density.
 
@@ -3072,6 +3133,7 @@ class ValidationRuleGenerator:
                         {"program_metadata": {}, "commercial_terms": [], "clauses": []})
             else:
                 try:
+                  with plog.stage("Call 1 extraction"):
                     raw = call_gemini(
                         ext_prompt,
                         label="Pipeline1-FullDocument",
@@ -3268,7 +3330,8 @@ class ValidationRuleGenerator:
         # also carries an `intents` list that Call 3 maps to output fields.
         # -------------------------------------------------
 
-        classifications = extract_rule_intents(clauses_extracted)
+        with plog.stage("Call 2 intents"):
+            classifications = extract_rule_intents(clauses_extracted)
 
         # Update each clause's rule_generation_status from the verdict
         for clause, classification in zip(clauses_extracted, classifications):
@@ -3338,19 +3401,59 @@ class ValidationRuleGenerator:
             print(f"\n[Generic] {len(lib_clauses)} library rule(s) merged into the "
                   f"Call-3 mapping call (tenant_id={tenant_id}).")
 
-        synth_outputs = map_intents_to_ir(
-            clauses_extracted + lib_clauses,
-            classifications   + lib_intents,
-            template_fields=template_fields,
-        )
+        # ── COST: memoize the library half of the Call-3 bind ────────────────
+        # Binding a library rule asks "which column of THIS output template means
+        # 'Insured ZIP Code'?" — a question about the LIBRARY and the TEMPLATE, with
+        # no input from the contract being uploaded. Every contract uploaded against
+        # the same template re-bought the identical answer, and it is the most
+        # expensive answer in the pipeline to buy: on a measured run the library was
+        # 50 of the 80 Call-3 items, and Call 3 was ~59% of the bill.
+        #
+        # Safe because the key covers everything that can change the answer (see
+        # _generic_bind_key) and every call runs at temperature 0 with a fixed seed,
+        # so the cached answer IS what a re-ask returns. A hit skips ONLY the library
+        # intents — map_intents_to_ir partitions contract from library intents, so
+        # the contract half's batches are identical whether this hits or misses.
+        _lib_key = _generic_bind_key(lib_rules, template_fields)
+        _lib_cached = ai_cache.get("generic_bind", _lib_key) if _lib_key else None
 
-        # Split the answer back apart. is_generic_entry keys on the sign of
-        # clause_id (library rules carry the negated library row id), so this is
-        # exact rather than a name match. After these two lines synth_outputs holds
-        # precisely what it held before the merge, and every injector below runs
-        # unchanged and never sees a library rule.
-        generic_mapped = [e for e in synth_outputs if is_generic_entry(e)]
-        synth_outputs  = [e for e in synth_outputs if not is_generic_entry(e)]
+        if _lib_cached is not None:
+            print(f"[Generic] reusing cached bind for {len(lib_clauses)} library "
+                  f"rule(s) — their Call-3 mapping is skipped entirely.")
+            plog.log("CALL3", "SKIPPED",
+                     f"library bind for {len(lib_clauses)} rule(s) served from cache",
+                     "answer depends only on (library rows, template fields) — "
+                     "no contract input, so it is reused rather than re-bought")
+            with plog.stage("Call 3 mapping"):
+                synth_outputs = map_intents_to_ir(
+                    clauses_extracted,
+                    classifications,
+                    template_fields=template_fields,
+                )
+            generic_mapped = _lib_cached
+        else:
+            with plog.stage("Call 3 mapping"):
+                synth_outputs = map_intents_to_ir(
+                    clauses_extracted + lib_clauses,
+                    classifications   + lib_intents,
+                    template_fields=template_fields,
+                )
+
+            # Split the answer back apart. is_generic_entry keys on the sign of
+            # clause_id (library rules carry the negated library row id), so this is
+            # exact rather than a name match. After these two lines synth_outputs holds
+            # precisely what it held before the merge, and every injector below runs
+            # unchanged and never sees a library rule.
+            generic_mapped = [e for e in synth_outputs if is_generic_entry(e)]
+            synth_outputs  = [e for e in synth_outputs if not is_generic_entry(e)]
+
+            # Store the library half only, and never an EMPTY one: a cache entry that
+            # binds nothing would suppress every library rule on every future upload
+            # against this template. A run that mapped nothing (failed or truncated
+            # batch) is deliberately left uncached so the next upload retries it.
+            if _lib_key and generic_mapped:
+                ai_cache.put("generic_bind", _lib_key, generic_mapped,
+                             tenant_id=tenant_id)
 
         # #7b — MERGE CONTRADICTORY SIBLING ENUMS (deterministic, generic).
         # Sibling program tables ("<identifying label>: <name A>" / "<name B>" /
@@ -3431,7 +3534,8 @@ class ValidationRuleGenerator:
         # `formula` that isn't already set from a real annotation row), and safe
         # (wrapped; a failure just yields nothing). See infer_formula_annotations.
         try:
-            _ai_formulas = infer_formula_annotations(template_fields)
+            with plog.stage("Formula inference"):
+                _ai_formulas = infer_formula_annotations(template_fields)
         except Exception as _exc:
             print(f"[Call 3] AI formula inference skipped ({_exc})")
             _ai_formulas = {}
@@ -3557,12 +3661,13 @@ class ValidationRuleGenerator:
 
         # Each IR is verified (validate → vocab-normalize → field-existence →
         # compile → guard/dry-run) and routed to exactly one destination.
-        validation_rules, review_queue, control_register = normalize_ir_outputs(
-            synth_outputs,
-            contract_ctx,
-            output_schema,
-            group_members=group_members,
-        )
+        with plog.stage("Verify + compile (no AI)"):
+            validation_rules, review_queue, control_register = normalize_ir_outputs(
+                synth_outputs,
+                contract_ctx,
+                output_schema,
+                group_members=group_members,
+            )
         # Kept under the legacy name for the final-output builder below.
         dropped = review_queue
 
@@ -3604,6 +3709,7 @@ class ValidationRuleGenerator:
             # what the contract still defers to.
             external_references=external_references,
             reference_documents=reference_documents,
+            template_fields=template_fields,
         )
 
         # # -------------------------------------------------
@@ -3770,8 +3876,7 @@ class ValidationRuleGenerator:
         review_queue=None,
         control_register=None,
         external_references=None,
-        reference_documents=None,
-    ):
+        reference_documents=None, template_fields=None):
 
         review_queue = review_queue or []
         control_register = control_register or []
@@ -3818,6 +3923,15 @@ class ValidationRuleGenerator:
                 "program_name":        program_name,
                 "contract_rule_count": 0,
                 "validation_rule_count": len(validation_rules),
+                # The output template's column names. Carried here so the
+                # PERSIST side can run the same field-aware deterministic gates
+                # over rules it did not generate (rules carried forward from a
+                # prior version of this contract) — see
+                # regen_reconcile.apply_gates. Names only: no samples, no
+                # descriptions, so this stays small.
+                "template_field_names": sorted(
+                    {f.get("name") for f in (template_fields or []) if f.get("name")}
+                ),
 
                 "pipeline_1_summary": {
                     "clauses_extracted_count":  len(clauses_extracted),

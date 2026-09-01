@@ -4061,6 +4061,178 @@ def _cc_scope_key(params):
     return json.dumps({"scope": sc, "sheets": sheets}, sort_keys=True, default=str)
 
 
+def _gate_reason_binding_disagreement(rules, output_schema):
+    """Pause a rule whose mapping explanation names a DIFFERENT column than the
+    one it actually bound.
+
+    The defect this catches (validated on a real regression): a library rule
+    whose ir.reason said "Mapped 'Contract Identifier' to 'Policy No' …" while
+    params.field — and justification.mapped_field with it — held 'Reins Eff
+    Date', a date column. The structural type check can't object (required_field
+    is type-agnostic), so the internal contradiction is the only signal.
+
+    Deterministic and vocabulary-free: quoted strings in ir.reason count ONLY
+    when they exactly match a template field name, so prose like "'auto' is a
+    type of 'unit'" contributes nothing. The rule is paused only when the
+    reason's field names and the bound field names are BOTH non-empty and share
+    no member — agreement on any one field passes (multi-field reasons routinely
+    quote several bound columns).
+    """
+    known = {str(f.get("name")) for f in
+             (getattr(output_schema, "template_fields", None) or [])
+             if f.get("name")}
+    if not known:
+        return rules
+    for r in rules:
+        if not isinstance(r, dict) or r.get("rule_status") != "active":
+            continue
+        ir = r.get("ir") or {}
+        reason = str(ir.get("reason") or "")
+        if not reason:
+            continue
+        quoted_fields = {q for q in re.findall(r"'([^']+)'", reason) if q in known}
+        if not quoted_fields:
+            continue
+        p = ir.get("params") or {}
+        bound = {v for k, v in p.items()
+                 if isinstance(v, str) and v in known}
+        cond = p.get("condition")
+        if isinstance(cond, dict) and cond.get("field") in known:
+            bound.add(cond["field"])
+        bound.update(a for a in (ir.get("field_aliases") or [])
+                     if isinstance(a, str) and a in known)
+        if bound and not (quoted_fields & bound):
+            _cc_downgrade(
+                r, "needs_review",
+                f"The mapping's own explanation names "
+                f"{sorted(quoted_fields)} but the rule is bound to "
+                f"{sorted(bound)} — the binding contradicts its reasoning; "
+                f"confirm the intended column.")
+    return rules
+
+
+def _gate_untraceable_referral_flagsets(rules):
+    """Pause a referral whose trigger values cannot be traced to the contract.
+
+    Referral polarity is the one failure with no downstream signal: a flipped
+    trigger set ("flag 'NO'" instead of "flag 'Yes'") is a well-formed rule that
+    fires on exactly the wrong rows. _unflip_required_value_referrals catches
+    the flips that contradict a requirement rule; this catches the rest by
+    provenance: every value a referral FLAGS should be traceable to the clause
+    that created it (the clause text, or the bound column's own name — "(Y/N)"
+    headers name their codes). A flag set with NO traceable member means the
+    orientation was invented by the mapper, not read from the contract — that
+    is precisely how the inverted facultative referral was born, so it goes to
+    review for a human to confirm the direction ONCE (carry-forward then
+    remembers the confirmed orientation on every future regeneration).
+
+    Values with any trace survive untouched: "Alaska"/"Hawaii" appear in their
+    clause, authorised-paper names appear in theirs — those referrals never see
+    this gate. Disable with KAVACHIO_REFERRAL_TRACE_GATE=0.
+    """
+    if os.getenv("KAVACHIO_REFERRAL_TRACE_GATE", "1") == "0":
+        return rules
+
+    def _norm(t):
+        return re.sub(r"[^a-z0-9 ]", " ", str(t or "").lower())
+
+    for r in rules:
+        if not isinstance(r, dict) or not r.get("is_referral"):
+            continue
+        if r.get("rule_status") != "active":
+            continue
+        ir = r.get("ir") or {}
+        if ir.get("template") not in ("value_in_set", "value_not_in_set"):
+            continue
+        p = ir.get("params") or {}
+        flags = [v for v in (p.get("excluded") or p.get("allowed") or [])
+                 if isinstance(v, str) and v.strip()]
+        if not flags:
+            continue
+        universe = " ".join(_norm(t) for t in (
+            r.get("source_verbatim_text"), p.get("field")))
+        tokens = set(universe.split())
+        traced = False
+        for v in flags:
+            nv = _norm(v).strip()
+            if nv and (nv in universe or
+                       any(t in tokens for t in nv.split() if len(t) >= 2)):
+                traced = True
+                break
+        if not traced:
+            _cc_downgrade(
+                r, "needs_review",
+                f"None of the values this referral flags "
+                f"({flags[:6]}) appear in the clause it was read from — the "
+                f"trigger direction cannot be verified from the contract. "
+                f"Confirm whether these are the rows that require referral.")
+    return rules
+
+
+
+class _NameOnlySchema:
+    """Minimal stand-in for OutputSchema carrying only `template_fields`.
+
+    The two provenance gates need nothing but the set of valid column NAMES, so
+    a caller that has names (the persist side, which holds
+    metadata.template_field_names) can run them without rebuilding a full
+    OutputSchema — which would need the template's samples and data dictionary.
+    """
+
+    def __init__(self, field_names):
+        self.template_fields = [{"name": n} for n in (field_names or []) if n]
+
+
+def apply_provenance_gates(rules, field_names=None, output_schema=None):
+    """Run the deterministic provenance gates over ANY rule list.
+
+    Exposed because these gates must also police rules this module did not
+    generate: on a regeneration, rules carried forward from a prior version of
+    the contract bypass the whole normalizer, so without this a defect that was
+    admitted once would be re-admitted forever (see regen_reconcile).
+
+    Rules are mutated in place (paused via _cc_downgrade) and the list is
+    returned. Rules whose dicts came from the DB carry their IR under
+    `rule_spec.ir` rather than a top-level `ir`, so both shapes are accepted.
+    """
+    schema = output_schema or _NameOnlySchema(field_names)
+    # DB-shaped rows keep the IR inside rule_spec; give the gates the top-level
+    # `ir`/`is_referral` view they expect, without copying the rules.
+    shimmed = []
+    for r in rules:
+        if not isinstance(r, dict):
+            continue
+        if "ir" not in r:
+            spec = r.get("rule_spec")
+            if isinstance(spec, dict) and isinstance(spec.get("ir"), dict):
+                r["ir"] = spec["ir"]
+        if "is_referral" not in r:
+            spec = r.get("rule_spec") if isinstance(r.get("rule_spec"), dict) else {}
+            ct = r.get("canonical_target") if isinstance(r.get("canonical_target"), dict) else {}
+            r["is_referral"] = bool(spec.get("referral") or ct.get("is_referral"))
+        shimmed.append(r)
+    _gate_reason_binding_disagreement(shimmed, schema)
+    _gate_untraceable_referral_flagsets(shimmed)
+    return rules
+
+
+def gate_failures(rule, field_names=None, output_schema=None):
+    """Which gates a rule FAILS, without mutating it. Returns a list of reasons.
+
+    Used to compare a carried rule against its freshly generated twin: a defect
+    the old rule carries and the new one does not is the one case where the new
+    answer should win. Works on a shallow copy so the caller's rule is untouched.
+    """
+    probe = dict(rule)
+    probe["rule_status"] = "active"
+    probe["rule_description"] = ""
+    probe["rule_spec"] = dict(probe.get("rule_spec") or {})
+    apply_provenance_gates([probe], field_names, output_schema)
+    if probe.get("rule_status") == "active":
+        return []
+    return [(probe.get("rule_description") or "").strip()]
+
+
 def _cc_downgrade(r, status, why):
     """Stop enforcing a rule, recording WHY somewhere a human will actually see.
 
@@ -4760,6 +4932,12 @@ def normalize_ir_outputs(synth_outputs, contract_ctx, output_schema,
     # once every rule is built, because the evidence is a sibling rule requiring
     # that same value on that same column.
     validation_rules = _unflip_required_value_referrals(validation_rules, output_schema)
+    # Two provenance gates (see each function): a binding that contradicts
+    # its own mapping reason, and a referral whose trigger set traces to
+    # nothing in its clause. Both PAUSE the rule (needs_review) — never
+    # guess a correction.
+    validation_rules = _gate_reason_binding_disagreement(validation_rules, output_schema)
+    validation_rules = _gate_untraceable_referral_flagsets(validation_rules)
 
     # One clause, one requirement: drop the carve-out restated as a prohibition
     # and the duplicate emitted in referral form. Runs after the polarity fix so

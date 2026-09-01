@@ -4,6 +4,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
 
+import pipeline_log as plog
 from contract_upload_services.document_extractors import extract_document_data
 from contract_upload_services.validation_rule_generator import ValidationRuleGenerator
 
@@ -53,6 +54,9 @@ class ContractExtractionService:
                 call (used by "Continue Anyway").
         """
         print(f"\nProcessing Contract: {file_path}")
+        # One header per contract so concurrent uploads stay separable in the file.
+        plog.new_run(f"contract={os.path.basename(file_path)} "
+                     f"template_fields={len(template_fields or [])}")
 
         # -------------------------------------------------
         # STEP 1 — Extract document data
@@ -64,7 +68,11 @@ class ContractExtractionService:
             extracted_data = {"pages": []}
         else:
             print("\nExtracting document data...")
-            extracted_data = extract_document_data(file_path)
+            # PDF parse + OCR. No model call — worth timing precisely because it is
+            # the one slow step that is NOT the model, so it tells you whether a slow
+            # upload is the network or the document.
+            with plog.stage("PDF parse (no AI)"):
+                extracted_data = extract_document_data(file_path)
 
         # -------------------------------------------------
         # STEP 2 — Generate validation rules
@@ -73,6 +81,10 @@ class ContractExtractionService:
 
         print("Generating validation rules...")
 
+        # Context caches are billed for STORAGE while they live, so this contract's
+        # caches are released in the `finally` below no matter how it ends. They are
+        # keyed by prefix content, so a NEXT contract against the same template
+        # simply re-creates one — correctness never depends on them surviving.
         validation_rules = (
             self.validation_generator.generate_validation_rules_json(
                 extracted_data,
@@ -85,6 +97,15 @@ class ContractExtractionService:
                 tenant_id=tenant_id,
             )
         )
+
+        try:
+            from contract_upload_services.gemini_service import release_context_caches
+            release_context_caches()
+        except Exception as _exc:
+            print(f"[ctx-cache] release skipped: {_exc}")
+
+        # Timing summary closes the run's block in pipeline_decisions.log.
+        plog.finish_run()
 
         # Halted before rule generation — return the partial payload as-is so
         # the route can prompt the user about the referenced documents.

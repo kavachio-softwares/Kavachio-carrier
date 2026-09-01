@@ -7,6 +7,7 @@ import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { InviteSentModal } from "../components/InviteSentModal";
 
 type Tenant = {
   mga: string; name: string; code: string;
@@ -55,11 +56,18 @@ export default function Tenants() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const dq = useDebouncedValue(q, 300);
+  // Resend-invite feedback: a SUCCESS opens the same popup as a first-time
+  // invite (Add Broker); a failure falls back to an inline banner. `resending`
+  // is the row whose request is still in flight, so its link can't be
+  // double-clicked.
+  const [resent, setResent] = useState<{ org: string; email: string } | null>(null);
+  const [msg, setMsg] = useState<{ kind: "ok" | "warn"; text: string } | null>(null);
+  const [resending, setResending] = useState<string | null>(null);
 
   // TRUE server-side pagination: the backend filters + pages; we send the
   // current filters and receive just this page + the matching total.
   const filterKey = `${dq}|${type}|${status}|${dateFrom}|${dateTo}`;
-  const { page, setPage, items, total, loading, pageCount } = useServerList<Tenant>(
+  const { page, setPage, items, total, loading, pageCount, reload } = useServerList<Tenant>(
     (page, pageSize) =>
       api.get<{ items: Tenant[]; total: number }>("/tenants", {
         params: {
@@ -77,6 +85,25 @@ export default function Tenants() {
 
   const filtersActive = q !== "" || type !== "" || status !== "" || dateFrom !== "" || dateTo !== "";
   function clearFilters() { setQ(""); setType(""); setStatus(""); setDateFrom(""); setDateTo(""); }
+
+  // Resend the onboarding link for a broker that never completed onboarding —
+  // the invite mail was deleted, lost or has expired. The server issues a FRESH
+  // token to every user of that org still on a pending invite (which also
+  // invalidates the old link) and re-sends the set-password email.
+  async function resendInvite(t: Tenant) {
+    setMsg(null); setResending(t.mga);
+    try {
+      const { data } = await api.post<{ sent: number; emails: string[] }>(
+        `/tenants/${encodeURIComponent(t.mga)}/resend-invite`);
+      setResent({ org: t.name, email: (data?.emails ?? []).join(", ") });
+      // Re-issuing resets status to "invited" — refetch so the badge and the
+      // pending count on screen match what the server now holds.
+      reload();
+    } catch (e: any) {
+      setMsg({ kind: "warn", text: e?.response?.data?.detail
+        ?? `Couldn't resend the invite for ${t.name} — please try again.` });
+    } finally { setResending(null); }
+  }
 
   if (!isAdmin) {
     return (
@@ -101,6 +128,22 @@ export default function Tenants() {
             <button className="btn pri" onClick={() => nav("/tenants/new")}>＋ Add Broker</button>
           </div>
         </div>
+
+        {msg && (
+          <div className={`note ${msg.kind}`} style={{ marginBottom: 14, maxWidth: 640 }}>
+            {msg.text}
+          </div>
+        )}
+
+        {resent && (
+          <InviteSentModal
+            title="Invite re-sent"
+            message={`${resent.org} can finish setting up their account.`}
+            email={resent.email}
+            note="The earlier link no longer works — they'll set a password with this one."
+            onDone={() => setResent(null)}
+          />
+        )}
 
         <div className="card">
           <ListFilterBar
@@ -147,6 +190,24 @@ export default function Tenants() {
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="r">
                         <span className="linkish" onClick={() => nav(`/tenants/${encodeURIComponent(t.mga)}`)}>View</span>
+                        {/* Only offered while the org actually has an outstanding
+                            invite — nothing to resend once everyone has onboarded.
+                            While the request is in flight the element carries NO
+                            click handler, so it can't be fired twice. */}
+                        {(t.pending_invites ?? 0) > 0 && (
+                          <>
+                            {" · "}
+                            {resending === t.mga ? (
+                              <span className="linkish mut" aria-disabled="true">Sending…</span>
+                            ) : (
+                              <span className="linkish" onClick={() => resendInvite(t)}
+                                title={`Re-send the onboarding link to ${t.pending_invites} pending ${
+                                  t.pending_invites === 1 ? "user" : "users"} of ${t.name}`}>
+                                Resend Link
+                              </span>
+                            )}
+                          </>
+                        )}
                       </td>
                     </tr>
                   );
