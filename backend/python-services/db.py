@@ -383,6 +383,15 @@ class Party(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # --- carrier hierarchy -------------------------------------------------
+    # "Has this broker actually come on board?" — not_invited | invited |
+    # active | suspended, NULL for parties that are not producers.
+    #
+    # READ-ONLY from here. It is derived from app_user by the DB triggers
+    # trg_set_broker_onboarding / trg_refresh_broker_onboarding, so assigning
+    # it in Python is silently overruled on the way to the table. Nothing in
+    # the app should ever write it — change the people, and this follows.
+    onboarding_status = Column(String, nullable=True)
 
 
 class PartyContact(Base):

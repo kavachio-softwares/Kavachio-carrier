@@ -58,6 +58,9 @@ def _broker_dict(p: Party) -> dict:
         "dba_name": p.dba_name,
         "party_type": p.party_type,
         "is_active": p.is_active,
+        # Has this broker come on board? Derived by the database from their
+        # people, so it is a read here and never something the API decides.
+        "onboarding_status": p.onboarding_status,
         "created_at": _iso_utc(p.created_at),
     }
 

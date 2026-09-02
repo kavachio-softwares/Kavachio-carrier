@@ -12,6 +12,7 @@ import { getBroker, type BrokerDetail as Detail } from "../api/hierarchy";
 import { fmtStamp } from "../utils/date";
 import Card from "../components/ui/Card";
 import { PageBody, PageHeader } from "../components/Layout";
+import { OnboardingBadge } from "../components/OnboardingBadge";
 
 const APPROVAL_LABEL: Record<string, { text: string; cls: string }> = {
   approved:         { text: "Live",        cls: "bg-success/10 text-success" },
@@ -87,6 +88,21 @@ export default function BrokerDetail() {
           </Card>
 
           <Card title="Their people" className="md:col-span-2">
+            {/* The onboarding badge sits here rather than by the title because
+                this is where it comes from — it is derived from the very list
+                underneath it, so the two can never appear to disagree. */}
+            <div className="mb-3 flex items-center gap-2 text-sm">
+              <OnboardingBadge status={b.onboarding_status} />
+              <span className="text-ink-muted">
+                {b.onboarding_status === "active"
+                  ? "Someone here has signed in."
+                  : b.onboarding_status === "invited"
+                    ? "Invited, but nobody has used the link yet."
+                    : b.onboarding_status === "suspended"
+                      ? "The company is switched off — nobody here can sign in."
+                      : "Nobody here has been given a login yet."}
+              </span>
+            </div>
             {b.users.length === 0 ? (
               <p className="text-sm text-ink-muted">
                 Nobody from this broker has a login yet.

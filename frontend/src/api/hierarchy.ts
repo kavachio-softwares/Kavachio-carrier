@@ -41,6 +41,8 @@ export type BrokerSummary = {
   dba_name?: string | null;
   party_type: string;
   is_active: boolean;
+  /** Derived by the DB from their people: not_invited | invited | active | suspended. */
+  onboarding_status: string | null;
   created_at: string | null;
   programmes: { id: number; name: string; status: string }[];
   contract_count: number;
@@ -60,6 +62,8 @@ export type BrokerDetail = {
   dba_name?: string | null;
   party_type: string;
   is_active: boolean;
+  /** Derived by the DB from their people: not_invited | invited | active | suspended. */
+  onboarding_status: string | null;
   created_at: string | null;
   programmes: { id: number; name: string; status: string; assigned_at: string | null }[];
   contracts: {

@@ -13,6 +13,7 @@ import { Users2, Loader2, AlertTriangle, Layers } from "lucide-react";
 import { getBrokers, type BrokerSummary } from "../api/hierarchy";
 import Card from "../components/ui/Card";
 import { PageBody, PageHeader } from "../components/Layout";
+import { OnboardingBadge } from "../components/OnboardingBadge";
 
 export default function Brokers() {
   const [rows, setRows] = useState<BrokerSummary[] | null>(null);
@@ -65,6 +66,7 @@ export default function Brokers() {
               <thead>
                 <tr className="text-left text-ink-muted border-b border-border">
                   <th className="pb-2 font-medium">Broker</th>
+                  <th className="pb-2 font-medium">Onboarding</th>
                   <th className="pb-2 font-medium">On your programmes</th>
                   <th className="pb-2 font-medium text-right">Contracts</th>
                   <th className="pb-2 font-medium text-right">Waiting</th>
@@ -79,6 +81,11 @@ export default function Brokers() {
                         {b.legal_name}
                       </Link>
                       {b.dba_name && <div className="text-ink-muted text-xs">{b.dba_name}</div>}
+                    </td>
+                    {/* Whether anyone there can actually sign in — separate from
+                        whether you have given them a programme to work on. */}
+                    <td className="py-3">
+                      <OnboardingBadge status={b.onboarding_status} />
                     </td>
                     <td className="py-3">
                       {b.programmes.length === 0 ? (
