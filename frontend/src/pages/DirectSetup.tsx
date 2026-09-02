@@ -120,15 +120,17 @@ export default function DirectSetup() {
   };
 
   // scope
-  const [carriers, setCarriers] = useState<Party[]>([]);
+  // The carrier is no longer picked: a tenant IS the carrier. This holds the
+  // tenant's own carrier party, resolved once from /my-carrier-party, purely so
+  // the pipeline/fingerprint rows that still carry a carrier_party_id keep
+  // getting the right value.
+  const [carrierName, setCarrierName] = useState<string>("");
   const [programs, setPrograms] = useState<Program[]>([]);
   const [carrierId, setCarrierId] = useState<number | "">("");
   const [programId, setProgramId] = useState<number | "">("");
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   // The input template (DirectFormat) currently loaded in the editor.
   const [loadedSetupId, setLoadedSetupId] = useState<number | null>(null);
-  const [creatingCarrier, setCreatingCarrier] = useState(false);
-  const [newCarrierName, setNewCarrierName] = useState("");
   const [creatingProgram, setCreatingProgram] = useState(false);
   const [programForm, setProgramForm] = useState<ProgramForm>(EMPTY_PROGRAM);
   const [createBusy, setCreateBusy] = useState(false);
@@ -247,24 +249,25 @@ export default function DirectSetup() {
 
   // ---- scope loaders -------------------------------------------------------
   useEffect(() => {
-    api.get(`/parties`, { params: { mga, party_type: "carrier" } })
-      .then(r => setCarriers(Array.isArray(r.data) ? r.data : (r.data?.items ?? [])))
-      .catch(() => setCarriers([]));
+    // Who this carrier is, not which carrier to use. Resolved once so the
+    // stored carrier_party_id stays correct without ever asking the user.
+    api.get<{ id: number; legal_name: string }>(`/my-carrier-party`, { params: { mga } })
+      .then(r => { setCarrierId(r.data.id); setCarrierName(r.data.legal_name ?? ""); })
+      .catch(() => { setCarrierId(""); setCarrierName(""); });
   }, [mga]);
   useEffect(() => {
-    // Changing the carrier invalidates any mapping/preview shown for the old
-    // scope. Clear it immediately (the program reset below re-runs the load).
+    // The carrier owns its programmes directly, so this is the whole scope
+    // picker now: pick a programme of your own book.
     resetEditor();
     setPrograms([]); setProgramId("");
-    if (carrierId === "") return;
-    api.get(`/parties/${carrierId}/programs`)
+    api.get(`/programs`, { params: { mga } })
       // Inactive programs are hidden here — you can't build a setup on them.
       .then(r => {
         const list: Program[] = Array.isArray(r.data) ? r.data : (r.data?.items ?? []);
         setPrograms(list.filter(p => p.status !== "inactive"));
       })
       .catch(() => setPrograms([]));
-  }, [carrierId]);
+  }, [mga]);
   // Reset the mapping editor AND everything staged for a build (used when the
   // scope changes or a setup is deleted). The staged files belong to the scope
   // they were picked under — carrying a BDX/contract/template upload over to a
@@ -350,29 +353,14 @@ export default function DirectSetup() {
   }
 
   // Setup/template name is derived from the scope — no separate field needed.
-  const carrierName = carriers.find(c => c.id === carrierId)?.legal_name ?? "";
   const programName = programs.find(p => p.id === programId)?.name ?? "";
   const setupName = [carrierName, programName].filter(Boolean).join(" — ") || "Direct setup";
   // The uploads are all scoped to a (carrier, program) pair — nothing picked
   // yet means there's nowhere for a file to attach to, so every drop zone
   // stays disabled until both are selected.
-  const scopeIncomplete = carrierId === "" || programId === "";
+  const scopeIncomplete = programId === "";
 
   // ---- inline create of carrier / program ---------------------------------
-  async function createCarrier() {
-    if (!newCarrierName.trim()) return;
-    setCreateBusy(true); setErr(null);
-    try {
-      const { data } = await api.post(`/parties`,
-        { party_type: "carrier", legal_name: newCarrierName.trim() }, { params: { mga } });
-      // Carry is_active through: the option list filters on it, so an append
-      // that omits it drops the carrier the user just created until a reload.
-      setCarriers(prev => [...prev,
-        { id: data.id, legal_name: data.legal_name, is_active: data.is_active ?? true }]);
-      setCarrierId(data.id);
-      setCreatingCarrier(false); setNewCarrierName("");
-    } catch (e: unknown) { setErr(errText(e)); } finally { setCreateBusy(false); }
-  }
   async function createProgram() {
     if (!programForm.name.trim() || carrierId === "") return;
     setCreateBusy(true); setErr(null);
@@ -1131,43 +1119,15 @@ export default function DirectSetup() {
 
         <Card title="1 · Scope & Uploads">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl">
+            {/* The carrier is who you are, not a choice. Shown so the scope
+                is unambiguous, but there is nothing here to pick. */}
             <Field label="Carrier">
-              {creatingCarrier ? (
-                <div className="flex gap-1.5">
-                  <TextInput autoFocus value={newCarrierName} placeholder="New carrier name"
-                    onChange={e => setNewCarrierName(e.target.value)}
-                    onKeyDown={e => { if (e.key === "Enter") createCarrier(); }} />
-                  <Button className="!py-1.5" onClick={createCarrier} disabled={createBusy}>
-                    Create</Button>
-                  <Button variant="ghost" className="!py-1.5"
-                    onClick={() => { setCreatingCarrier(false); setNewCarrierName(""); }}>✕</Button>
-                </div>
-              ) : (
-                <Select value={carrierId} onChange={e => {
-                  if (e.target.value === "__new__") {
-                    // Switching to "create new" abandons the current scope — clear
-                    // the loaded setup, contracts and program so nothing from the
-                    // previously-selected carrier lingers. setCarrierId("") cascades
-                    // through the scope effects (clears program → editor → contracts).
-                    setCreatingCarrier(true);
-                    setCreatingProgram(false); setProgramForm(EMPTY_PROGRAM);
-                    setCarrierId("");
-                    return;
-                  }
-                  setCarrierId(e.target.value ? Number(e.target.value) : "");
-                }}>
-                  <option value="">Select Carrier…</option>
-                  {/* GET /parties already excludes inactive parties; this is a
-                      backstop. `!== false` so a record without the flag stays
-                      visible rather than silently vanishing. */}
-                  {carriers.filter(c => c.is_active !== false)
-                    .map(c => <option key={c.id} value={c.id}>{c.legal_name}</option>)}
-                  <option value="__new__">➕ Create New Carrier…</option>
-                </Select>
-              )}
+              <div className="input flex items-center bg-surface-2 text-ink-muted">
+                {carrierName || mga}
+              </div>
             </Field>
             <Field label="Program">
-              <Select value={creatingProgram ? "__new__" : programId} disabled={carrierId === ""} onChange={e => {
+              <Select value={creatingProgram ? "__new__" : programId} onChange={e => {
                 if (e.target.value === "__new__") {
                   // Clear the loaded setup + contracts for the previously-selected
                   // program. setProgramId("") cascades through the scope effects
@@ -1181,7 +1141,7 @@ export default function DirectSetup() {
               }}>
                 <option value="">Select Program…</option>
                 {programs.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                {carrierId !== "" && <option value="__new__">➕ Add New Program…</option>}
+                <option value="__new__">➕ Add New Program…</option>
               </Select>
             </Field>
           </div>

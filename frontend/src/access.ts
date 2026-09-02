@@ -34,13 +34,54 @@ const RANK: Record<Role, number> = {
 // Anything NOT listed needs only a signed-in user, which keeps today's flows
 // (Dashboard, Process Bordereau, carriers, programs, outputs, exception triage)
 // open to every role exactly as before.
-export const ROUTE_ACCESS: { pattern: string; requires: Role }[] = [
+// `requires` is a MINIMUM on the superset chain. `only` is an EXACT set, for
+// the few paths where the chain cannot express the rule: broker_admin and
+// operator rank the same (neither outranks the other), so a screen that belongs
+// to the admin alone has to name it. Same field, same meaning, as Layout's
+// sidebar groups.
+export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] = [
   // --- Platform admin (Kavachio staff, cross-tenant) ---------------------
   { pattern: "/admin/dashboard", requires: "kavachio_admin" },
   { pattern: "/admin/mapping-tasks", requires: "kavachio_admin" },
   // The column-mapping workflow is reached only from the queue above.
   { pattern: "/uploads/mapper/:mapperId", requires: "kavachio_admin" },
   { pattern: "/admin/users", requires: "kavachio_admin" },
+
+  // --- Broker seats --------------------------------------------------------
+  // broker_admin and operator share a rank, so both reach these and neither
+  // reaches anything above.
+  { pattern: "/broker", requires: "broker_admin", only: ["broker_admin"] },
+  // An operator is a seat inside the broker, not a manager of it: their own
+  // landing screen, and no access to the admin views above.
+  { pattern: "/operator", requires: "operator", only: ["operator"] },
+  { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
+  // The broker staffs itself here. An operator is a seat inside that team, not
+  // a manager of it, so this one is the admin's alone — the database says the
+  // same thing (only a broker admin may create an operator).
+  { pattern: "/broker/users", requires: "broker_admin", only: ["broker_admin"] },
+
+  // --- Carrier screens -----------------------------------------------------
+  // These were unlisted, and an unlisted path falls through to "any signed-in
+  // user". Harmless while everyone signing in was a carrier user; the moment a
+  // broker could sign in they got the whole carrier app by default. Listing
+  // them explicitly is what actually closes that.
+  { pattern: "/direct", requires: "carrier_admin" },
+  { pattern: "/parties", requires: "carrier_admin" },
+  { pattern: "/parties/new", requires: "carrier_admin" },
+  { pattern: "/parties/:id", requires: "carrier_admin" },
+  { pattern: "/programs", requires: "carrier_admin" },
+  { pattern: "/programs/new", requires: "carrier_admin" },
+  { pattern: "/programs/:programId/contracts/:contractId", requires: "carrier_admin" },
+  { pattern: "/brokers", requires: "carrier_admin" },
+  { pattern: "/brokers/:brokerId", requires: "carrier_admin" },
+  { pattern: "/outputs", requires: "carrier_admin" },
+  { pattern: "/outputs/new-template", requires: "carrier_admin" },
+  { pattern: "/outputs/generate", requires: "carrier_admin" },
+  { pattern: "/outputs/templates/:id", requires: "carrier_admin" },
+  { pattern: "/uploads/:uploadId/exceptions", requires: "carrier_admin" },
+  { pattern: "/uploads/:uploadId/exceptions/rule/:ruleId", requires: "carrier_admin" },
+  { pattern: "/runs", requires: "carrier_admin" },
+  { pattern: "/calendar", requires: "carrier_admin" },
   { pattern: "/tenants", requires: "kavachio_admin" },
   { pattern: "/tenants/new", requires: "kavachio_admin" },
   { pattern: "/tenants/:mga", requires: "kavachio_admin" },
@@ -66,10 +107,14 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role }[] = [
   { pattern: "/rule-library/:id/edit", requires: "carrier_admin" },
 ];
 
+/** The rule covering a path, or null when any signed-in user may open it. */
+function ruleFor(pathname: string) {
+  return ROUTE_ACCESS.find(r => matchPath({ path: r.pattern, end: true }, pathname)) ?? null;
+}
+
 /** The minimum role a path needs, or null when any signed-in user may open it. */
 export function requiredRoleFor(pathname: string): Role | null {
-  const hit = ROUTE_ACCESS.find(r => matchPath({ path: r.pattern, end: true }, pathname));
-  return hit ? hit.requires : null;
+  return ruleFor(pathname)?.requires ?? null;
 }
 
 /** True when `role` satisfies `required` (superset chain). */
@@ -80,8 +125,10 @@ export function hasRole(required: Role, role: Role | null = userRole()): boolean
 /** True when the current user may open `pathname`. */
 export function canAccessPath(pathname: string, role: Role | null = userRole()): boolean {
   if (role === null) return false;               // signed out — RequireAuth handles it
-  const required = requiredRoleFor(pathname);
-  return required === null || hasRole(required, role);
+  const rule = ruleFor(pathname);
+  if (rule === null) return true;                // unlisted → any signed-in user
+  if (rule.only) return rule.only.includes(role);
+  return hasRole(rule.requires, role);
 }
 
 /**
@@ -90,5 +137,10 @@ export function canAccessPath(pathname: string, role: Role | null = userRole()):
  * second forbidden page (a platform admin has no tenant Home, and vice versa).
  */
 export function landingPath(role: Role | null = userRole()): string {
-  return role === "kavachio_admin" ? "/admin/dashboard" : "/home";
+  if (role === "kavachio_admin") return "/admin/dashboard";
+  // A broker seat has no carrier Home — every card on it reads carrier data
+  // they are refused, so they would land on a page of blanks.
+  if (role === "broker_admin") return "/broker";
+  if (role === "operator") return "/operator";
+  return "/home";
 }

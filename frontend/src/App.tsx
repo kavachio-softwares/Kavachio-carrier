@@ -8,6 +8,10 @@ import Tenant from "./pages/Tenant";
 import Tenants from "./pages/Tenants";
 import AddTenant from "./pages/AddTenant";
 import AdminUsers from "./pages/AdminUsers";
+import BrokerDashboard from "./pages/BrokerDashboard";
+import OperatorHome from "./pages/OperatorHome";
+import BrokerContracts from "./pages/BrokerContracts";
+import BrokerUsers from "./pages/BrokerUsers";
 import TenantDetail from "./pages/TenantDetail";
 import Parties from "./pages/Parties";
 import AddParty from "./pages/AddParty";
@@ -102,6 +106,11 @@ export default function App() {
         <Route path="/home" element={<Home />} />
         <Route path="/admin/dashboard" element={<KavachioAdminDashboard />} />
         <Route path="/tenant" element={<Tenant />} />      {/* Organization (this tenant's own settings) */}
+        {/* Broker seats. Everything here is READ of what a carrier gave them. */}
+        <Route path="/broker" element={<BrokerDashboard />} />
+        <Route path="/operator" element={<OperatorHome />} />   {/* the broker's day-to-day seat */}
+        <Route path="/broker/contracts" element={<BrokerContracts />} />
+        <Route path="/broker/users" element={<BrokerUsers />} />   {/* The broker staffs itself */}
         <Route path="/admin/users" element={<AdminUsers />} />   {/* Everyone on the platform, read-only */}
         <Route path="/tenants" element={<Tenants />} />    {/* Tenants directory (Kavachio platform admin) */}
         <Route path="/tenants/new" element={<AddTenant />} />

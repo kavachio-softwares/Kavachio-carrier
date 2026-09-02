@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
-import { setAuth, isKavachioAdmin, isTenantAdmin } from "../auth";
+import { setAuth, isKavachioAdmin, isTenantAdmin, userRole } from "../auth";
 import { armLoginNotice } from "../api/notifications";
 import KavachioLogo from "../components/KavachioLogo";
 import { PasswordInput } from "../components/ui/PasswordInput";
@@ -32,6 +32,14 @@ export default function Login() {
       // them straight there instead of the tenant Home dashboard.
       if (isKavachioAdmin()) {
         nav("/admin/dashboard");
+        return;
+      }
+      // A broker seat has its own landing screen. It must not fall through to
+      // the carrier Home or the onboarding check below — both read carrier data
+      // a broker is refused, so it would land on a page of blanks.
+      const r = userRole();
+      if (r === "broker_admin" || r === "operator") {
+        nav("/broker");
         return;
       }
       // Only tenant admins run the org / carrier / Bordereau setup, so only they

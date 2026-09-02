@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
   FileCheck, Handshake,
 } from "lucide-react";
-import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role } from "../auth";
+import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
 import { api, getDeduped } from "../api/client";
 import { GlobalLoadingOverlay } from "./Busy";
@@ -22,11 +22,29 @@ type Item = { to: string; label: string; icon: React.ElementType };
 // Nav grouped to match the prototype's sidebar. All existing destinations are
 // preserved; each item is shown only when the current role may actually open it
 // (ROUTE_ACCESS in access.ts).
-// `requires` on a GROUP gates only the section HEADER (matching the prototype's
-// data-roles on the group label); items still render when the header is hidden —
-// so an Operator sees Dashboard / Process / Trading Partners as a flat,
-// header-less list.
-const GROUPS: { title: string; requires?: Role; items: Item[] }[] = [
+// `requires` is a MINIMUM on the superset chain (carrier_admin satisfies a
+// broker_admin requirement). `only` is an EXACT set, for sections that belong
+// to one side of the platform and must not leak to the other: a carrier admin
+// outranks a broker but has no business on the broker's screens.
+const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[] = [
+  {
+    // The broker's own world. They create no carriers and no programmes — a
+    // carrier puts them on one, and everything here follows from that.
+    title: "",
+    only: ["broker_admin", "operator"],
+    items: [
+      // Two landing screens, one per seat. canAccessPath() shows each role only
+      // its own — an admin asks "what is holding me up", an operator asks "what
+      // do I have to run". ROUTE_ACCESS marks both `only`, so neither leaks.
+      { to: "/broker", label: "Dashboard", icon: LayoutDashboard },
+      { to: "/operator", label: "Dashboard", icon: LayoutDashboard },
+      { to: "/broker/contracts", label: "My Contracts", icon: FileCheck },
+      // Admin-only inside the broker's own group: an operator is a seat in
+      // this team, not a manager of it. canAccessPath() filters it out for
+      // them (ROUTE_ACCESS marks the path `only: ["broker_admin"]`).
+      { to: "/broker/users", label: "Users & Roles", icon: UserCog },
+    ],
+  },
   {
     title: "Run",
     requires: "carrier_admin",
@@ -173,7 +191,11 @@ export default function Layout() {
   // (ROUTE_ACCESS — the same map RequireAccess enforces), and each group HEADER
   // by the group's own `requires`. Roles are a superset chain, so tenant_admin+
   // passes tenant_admin gates, etc.
-  const canSee = (requires?: Role) => requires === undefined || hasRole(requires);
+  const canSee = (g: { requires?: Role; only?: Role[] }) => {
+    const r = userRole();
+    if (g.only) return r !== null && g.only.includes(r);
+    return g.requires === undefined || hasRole(g.requires);
+  };
   const groups = isKavachioAdmin()
     ? ADMIN_GROUPS
     : GROUPS
@@ -250,9 +272,13 @@ export default function Layout() {
         </div>
 
         <nav className="nav">
-          {groups.map(group => (
+          {/* `requires` gates the ITEMS, not just the heading. It used to gate
+              only the title, so a broker signing in saw every carrier link
+              under a missing header and could click straight into screens
+              that are not theirs. */}
+          {groups.filter(canSee).map(group => (
             <div key={group.title}>
-              {group.title && canSee(group.requires) && <div className="group">{group.title}</div>}
+              {group.title && <div className="group">{group.title}</div>}
               {group.items.map(({ to, label, icon: Icon }) => {
                 const subScreenActive = subScreenOwner(loc.pathname, loc.search) === to;
                 return (

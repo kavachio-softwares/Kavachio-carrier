@@ -1125,6 +1125,36 @@ def _party_dict(p: Party, mga: Optional[str] = None) -> dict:
     }
 
 
+@router.get("/my-carrier-party")
+def my_carrier_party(mga: str, p: Principal = Depends(current_principal)):
+    """The carrier party that IS this tenant.
+
+    In the carrier-centric model a tenant no longer picks which carrier it is
+    writing for — it IS the carrier. Screens that still have to store a
+    carrier_party_id (Bordereau Setup, pipelines, fingerprints) ask here instead
+    of showing a dropdown. Find-or-create, keyed on the stable natural id
+    `carrier::<tenant_id>`, so a tenant has exactly one of these forever and a
+    renamed organisation never spawns a second.
+    """
+    from ingester import _ensure_carrier_party
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, p, mga)
+        party_id = _ensure_carrier_party(s, tid)
+        if party_id is None:
+            raise HTTPException(500, "could not resolve this carrier's own party record")
+        s.commit()
+        party = s.get(Party, party_id)
+        tenant = s.query(Tenant).filter(Tenant.id == tid).first()
+        # The placeholder is created as "Tenant <id> Carrier". Once the org has
+        # a real legal name, show that instead — same row, better label.
+        wanted = (tenant.legal_name or "").strip() if tenant else ""
+        if wanted and party is not None and party.legal_name != wanted:
+            party.legal_name = wanted
+            s.commit()
+        return {"id": party_id,
+                "legal_name": (party.legal_name if party else None) or mga}
+
+
 @router.get("/parties")
 def parties_list(
     mga: str,
