@@ -1646,7 +1646,7 @@ def calendar_sweep(mga: Optional[str] = None,
 async def program_contract_upload(
     program_id: int,
     file: UploadFile = File(...),
-    output_template_id: int = Form(...),
+    output_template_id: Optional[int] = Form(default=None),
     # WHICH BROKER this contract is with. A contract is a (programme x broker)
     # pair, and the hierarchy lists contracts UNDER the broker that holds them
     # (hierarchy_routes: `c.broker_party_id == party.id`). Without this the row
@@ -1663,15 +1663,30 @@ async def program_contract_upload(
     upload_token: Optional[str] = Form(default=None),
     principal: Principal = Depends(current_principal),
 ):
-    """Upload a contract PDF linked to an existing Output Template.
+    """Upload a contract PDF, optionally linked to an Output Template.
 
-    The Output Template must exist before uploading a contract.
-    Contract fields are mapped to Output Template fields by the LLM —
-    not to the canonical data model directly.
+    WITH a template, the whole pipeline runs: contract fields are mapped to that
+    template's field names by the LLM — not to the canonical data model directly
+    (Contract Fields → Output Template Fields → Data Model Fields) — and the
+    clauses become compiled validation rules.
 
-    Hierarchy: Contract Fields → Output Template Fields → Data Model Fields.
+    WITHOUT one, the contract is still read and its CLAUSES are still saved; it
+    simply stops before rule generation, because a rule is written against an
+    output template's columns and there are none to write against. The clauses
+    that carry a rule are recorded as awaiting a template rather than discarded.
+    This is what lets a contract be added on its own — from a broker's page,
+    before any bordereau work exists — and picked up by a setup later.
 
     Only one contract can be Active per Output Template at any time.
+
+    `broker_party_id` says WHICH broker holds this contract with the carrier. A
+    contract is always (programme × broker), so a caller that knows the broker —
+    the nested carrier route, and the Add Contract flow on the broker's own page
+    — passes it here and the row is filed under that broker instead of landing
+    as a carrier-held contract nobody's page can show. It also narrows what this
+    upload supersedes: replacing one broker's contract must not retire another
+    broker's on the same programme. Optional, because the setup builder uploads
+    at (carrier, programme) scope and those contracts genuinely have no broker.
 
     Reference documents: when the contract DEFERS rule content to an external
     document ("Excluded Classes: per the Purchasing Guidelines on file"), the
@@ -1701,36 +1716,51 @@ async def program_contract_upload(
         if not prog:
             raise HTTPException(404, "program not found")
         assert_tenant_owns(principal, prog.tenant_id)
-        tmpl = s.get(ExportTemplate, output_template_id)
-        if not tmpl:
+        # Optional. A named template must exist and be this tenant's; NO named
+        # template is a valid state, not an error — see the docstring.
+        tmpl = s.get(ExportTemplate, output_template_id) if output_template_id else None
+        if output_template_id and not tmpl:
             raise HTTPException(
                 status_code=400,
                 detail=f"Output Template {output_template_id} not found. "
                        "Create or select an Output Template before uploading a contract.",
             )
-        assert_tenant_owns(principal, tmpl.tenant_id)
-        # The broker must actually be ON this programme. `program_broker` is the
-        # grant, so a broker without a row there cannot hold a contract on it —
-        # checking here stops a mistyped id being stamped onto the contract and
-        # silently hiding it from the programme tree.
+        if tmpl:
+            assert_tenant_owns(principal, tmpl.tenant_id)
+        # A named broker must actually be ON this programme. program_broker is
+        # the gate that says the pair may produce at all, so filing a contract
+        # under a pair the carrier never created is refused here rather than
+        # written and discovered later by a screen that cannot explain it.
         if broker_party_id is not None:
-            _link = (s.query(ProgramBroker)
-                      .filter(ProgramBroker.program_id == program_id,
-                              ProgramBroker.broker_party_id == broker_party_id)
-                      .first())
-            if _link is None:
+            link = (s.query(ProgramBroker)
+                    .filter(ProgramBroker.program_id == program_id,
+                            ProgramBroker.broker_party_id == broker_party_id)
+                    .first())
+            if link is None:
                 raise HTTPException(
-                    400, "That broker is not on this programme — put them on it first.")
+                    status_code=400,
+                    detail="That broker is not on this programme, so they cannot "
+                           "hold a contract on it. Put them on the programme first.")
+            if link.status != "active":
+                raise HTTPException(
+                    status_code=400,
+                    detail="That broker has been taken off this programme, so no "
+                           "new contract can be filed under them.")
         # Use the shared builder so the data-dictionary enrichment (description,
         # allowed_values, format, required) reaches the LLM mapper — building the
-        # list inline here previously dropped it.
-        template_fields = _template_fields_from_structure(tmpl.structure)
+        # list inline here previously dropped it. Empty with no template, which
+        # is what stops the pipeline after the clauses.
+        template_fields = _template_fields_from_structure(tmpl.structure) if tmpl else []
 
-    print(
-        f"[Contract] Template-aware extraction: "
-        f"output_template_id={output_template_id}, "
-        f"{len(template_fields)} template field(s)"
-    )
+    if template_fields:
+        print(
+            f"[Contract] Template-aware extraction: "
+            f"output_template_id={output_template_id}, "
+            f"{len(template_fields)} template field(s)"
+        )
+    else:
+        print("[Contract] No output template — reading clauses only; "
+              "no rules will be generated.")
 
     # -------------------------------------------------
     # SAVE TEMP FILE
@@ -2045,6 +2075,12 @@ async def program_contract_upload(
                 )
                 if schedule_key is not None:
                     sib_q = sib_q.filter(Contract.schedule_key == schedule_key)
+                # A contract is (programme × broker): replacing what THIS broker
+                # holds must leave every other broker's contract on the same
+                # programme alone. With no broker named the scope is the whole
+                # programme, exactly as before.
+                if broker_party_id is not None:
+                    sib_q = sib_q.filter(Contract.broker_party_id == broker_party_id)
                 for sib in sib_q.all():
                     sib.status = "superseded"
                 new_c = s.get(Contract, cid)
@@ -2054,6 +2090,13 @@ async def program_contract_upload(
                         new_c.blob_ref = contract_blob_ref
                     if schedule_key is not None:
                         new_c.schedule_key = schedule_key
+                    # The persister writes the contract at (tenant, programme)
+                    # scope — it has no notion of the broker level. Filing it
+                    # under the broker is what makes it reachable from their
+                    # page, from the approvals queue, and from a broker-scoped
+                    # setup; without it every contract reads as carrier-held.
+                    if broker_party_id is not None:
+                        new_c.broker_party_id = broker_party_id
                     # A program is "active" once it has an active contract.
                     if prog:
                         prog.status = "active"
@@ -2070,6 +2113,8 @@ async def program_contract_upload(
                         "extracted":          c.extracted,
                         "output_template_id": c.output_template_id,
                         "schedule_key":       c.schedule_key,
+                        "broker_party_id":    c.broker_party_id,
+                        "approval_status":    c.approval_status,
                         "created_at":         _iso_utc(c.created_at),
                     }
 
@@ -2080,6 +2125,7 @@ async def program_contract_upload(
                          details={
                              "program_id": program_id,
                              "output_template_id": output_template_id,
+                             "broker_party_id": broker_party_id,
                              "contract_id": (persist_result or {}).get("contract_id"),
                              "filename": contract_filename,
                              "status": (contract_obj or {}).get("status"),

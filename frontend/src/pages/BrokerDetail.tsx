@@ -7,12 +7,14 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Loader2, FileText, Layers, UserCog, Upload } from "lucide-react";
+import { ArrowLeft, Loader2, FileText, Layers, UserCog, Plus } from "lucide-react";
 import { getBroker, type BrokerDetail as Detail } from "../api/hierarchy";
 import { fmtStamp } from "../utils/date";
 import Card from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
 import { PageBody, PageHeader } from "../components/Layout";
 import { OnboardingBadge } from "../components/OnboardingBadge";
+import AddContractModal from "../components/AddContractModal";
 
 const APPROVAL_LABEL: Record<string, { text: string; cls: string }> = {
   approved:         { text: "Live",        cls: "bg-success/10 text-success" },
@@ -24,9 +26,10 @@ export default function BrokerDetail() {
   const { brokerId } = useParams();
   const [b, setB] = useState<Detail | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  // Which programme a new contract is for. Only asked when the broker is
-  // on more than one — see the Contracts card action.
-  const [uploadProg, setUploadProg] = useState("");
+  const [adding, setAdding] = useState(false);
+  // What the last add produced, so the page can say where it went rather than
+  // leaving the user to spot a new row.
+  const [added, setAdded] = useState<{ id: number; programId: number } | null>(null);
 
   const load = useCallback(() => {
     if (!brokerId) return;
@@ -102,12 +105,12 @@ export default function BrokerDetail() {
               <OnboardingBadge status={b.onboarding_status} />
               <span className="text-ink-muted">
                 {b.onboarding_status === "active"
-                  ? "Someone here has signed in."
+                  ? "— User access is enabled."
                   : b.onboarding_status === "invited"
-                    ? "Invited, but nobody has used the link yet."
+                    ? "— Awaiting user activation."
                     : b.onboarding_status === "suspended"
-                      ? "The company is switched off — nobody here can sign in."
-                      : "Nobody here has been given a login yet."}
+                      ? "— User access is currently disabled."
+                      : "Not onboarded — No user access has been provisioned."}
               </span>
             </div>
             {b.users.length === 0 ? (
@@ -136,54 +139,32 @@ export default function BrokerDetail() {
           </Card>
         </div>
 
-        <Card
-          title="Contracts"
-          action={
-            // A contract belongs to a (programme x broker) pair, and this screen
-            // is the broker across ALL their programmes — so the programme is
-            // the one thing still missing. With a single programme there is
-            // nothing to ask, so it links straight through.
-            live.length === 0 ? (
-              <span className="text-xs text-ink-muted">
-                Put them on a programme first
-              </span>
-            ) : live.length === 1 ? (
-              <Link
-                to={`/direct/setup?program_id=${live[0].id}&broker_party_id=${b.id}`}
-                className="inline-flex items-center gap-1 rounded bg-navy px-2.5 py-1 text-sm font-medium text-white hover:bg-navy-dark"
-              >
-                <Upload size={13} /> Upload contract
-              </Link>
-            ) : (
-              <div className="flex items-center gap-1.5">
-                <select
-                  className="rounded border border-border px-2 py-1 text-sm"
-                  value={uploadProg}
-                  onChange={e => setUploadProg(e.target.value)}
-                >
-                  <option value="">For which programme…</option>
-                  {live.map(pr => (
-                    <option key={pr.id} value={pr.id}>{pr.name}</option>
-                  ))}
-                </select>
-                <Link
-                  to={uploadProg
-                    ? `/direct/setup?program_id=${uploadProg}&broker_party_id=${b.id}`
-                    : "#"}
-                  aria-disabled={!uploadProg}
-                  onClick={e => { if (!uploadProg) e.preventDefault(); }}
-                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-sm font-medium text-white ${
-                    uploadProg ? "bg-navy hover:bg-navy-dark" : "pointer-events-none bg-navy/40"}`}
-                >
-                  <Upload size={13} /> Upload
-                </Link>
-              </div>
-            )
-          }
-        >
+        <Card title="Contracts" action={
+          // A contract belongs to a (programme x broker) pair, so a broker on no
+          // live programme has nothing for one to sit under. Saying that here,
+          // on the disabled button, beats letting the click open a dialog whose
+          // only content is the same refusal.
+          live.length === 0 ? (
+            <span className="text-xs text-ink-muted">Put them on a programme first</span>
+          ) : (
+            <Button onClick={() => setAdding(true)}>
+              <Plus size={15} /> Add Contract
+            </Button>
+          )
+        }>
+          {added && (
+            <div className="mb-3 rounded-md bg-emerald-50 px-3 py-2 text-[12.5px] text-emerald-800">
+              Contract read and its clauses saved —{" "}
+              <Link to={`/programs/${added.programId}/contracts/${added.id}`}
+                className="underline font-medium">see what it produced</Link>. A
+              Bordereau Setup for this broker can use it without reading it again.
+            </div>
+          )}
           {b.contracts.length === 0 ? (
             <p className="text-sm text-ink-muted">
-              No contracts with this broker yet.
+              No contracts with this broker yet. Add one and it is read straight
+              away — the same reading Bordereau Setup does, so a setup can use it
+              without going over the document a second time.
             </p>
           ) : (
             <table className="w-full text-sm">
@@ -201,10 +182,21 @@ export default function BrokerDetail() {
                   return (
                     <tr key={c.id} className="border-b border-border last:border-0">
                       <td className="py-3">
-                        <span className="inline-flex items-center gap-2">
-                          <FileText size={14} className="text-ink-muted" />
-                          {c.filename ?? `Contract ${c.id}`}
-                        </span>
+                        {/* Opens what the contract PRODUCED — its clauses and the
+                            rules written from them. That page is the whole point
+                            of adding one here, so the name is the way in. */}
+                        {c.program_id != null ? (
+                          <Link to={`/programs/${c.program_id}/contracts/${c.id}`}
+                            className="inline-flex items-center gap-2 text-navy hover:underline">
+                            <FileText size={14} className="text-ink-muted" />
+                            {c.filename ?? `Contract ${c.id}`}
+                          </Link>
+                        ) : (
+                          <span className="inline-flex items-center gap-2">
+                            <FileText size={14} className="text-ink-muted" />
+                            {c.filename ?? `Contract ${c.id}`}
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 text-ink-muted">
                         {c.inception_dt && c.expiry_dt ? `${c.inception_dt} → ${c.expiry_dt}` : "—"}
@@ -222,6 +214,18 @@ export default function BrokerDetail() {
             </table>
           )}
         </Card>
+
+        <AddContractModal
+          open={adding}
+          onClose={() => setAdding(false)}
+          broker={{ id: b.id, legal_name: b.legal_name }}
+          programmes={b.programmes}
+          onAdded={(contractId, programId) => {
+            setAdded({ id: contractId, programId });
+            // Re-read the broker so the new contract appears in the table with
+            // the term and approval state the server actually recorded.
+            load();
+          }} />
       </PageBody>
     </>
   );

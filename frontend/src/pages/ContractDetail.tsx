@@ -182,8 +182,17 @@ export default function ContractDetail() {
                 </span>
               }>
               {groups.length === 0 ? (
+                /* Distinguish "nothing came out of it" from "nothing could yet".
+                   A contract added before any Bordereau Setup exists has no
+                   template to write rules against, and that is a complete,
+                   expected outcome — not a failed extraction. */
                 <p className="text-sm text-ink-muted py-2">
-                  No validation rules were generated for this contract.
+                  {data.output_template
+                    ? "No validation rules were generated for this contract."
+                    : "No output template was in place when this contract was read, "
+                      + "and a rule is written against a template's columns — so its "
+                      + "clauses were saved but no rules were written yet. The "
+                      + "rule-bearing ones are listed below."}
                 </p>
               ) : (
                 <div className="space-y-3">
@@ -241,10 +250,15 @@ export default function ContractDetail() {
                   </span>
                 }>
                 <p className="text-xs text-ink-muted mb-3">
-                  These clauses are rule-bearing but couldn't be auto-mapped to an
-                  output template field, even after an automatic retry. Pick the
-                  field each one applies to and add a reference note describing the
-                  rule logic to enforce — then generate its validation rule.
+                  {data.output_template
+                    ? <>These clauses are rule-bearing but couldn't be auto-mapped to an
+                        output template field, even after an automatic retry. Pick the
+                        field each one applies to and add a reference note describing the
+                        rule logic to enforce — then generate its validation rule.</>
+                    : <>These clauses carry a rule, but this contract was read with no
+                        output template, so there were no columns to bind them to. They
+                        are held here until a Bordereau Setup gives this programme a
+                        template — the document does not need reading again.</>}
                 </p>
                 <div className="space-y-3">
                   {reviewClauses.map((rc, i) => (

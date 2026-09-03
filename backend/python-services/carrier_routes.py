@@ -194,6 +194,9 @@ async def broker_contract_upload(
     return await _app.program_contract_upload(
         program_id=scope.program_id, file=file,
         output_template_id=output_template_id, schedule_key=schedule_key,
+        # The broker is part of the address here, so the contract is filed
+        # under them rather than landing as a carrier-held one.
+        broker_party_id=scope.broker_party_id,
         reference_files=reference_files, continue_anyway=continue_anyway,
         resume_token=resume_token, enable_reference_halt=enable_reference_halt,
         upload_token=upload_token, principal=scope.acting,

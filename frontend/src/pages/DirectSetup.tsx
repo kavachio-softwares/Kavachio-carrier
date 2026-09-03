@@ -15,8 +15,8 @@ import { Field, Select, TextInput } from "../components/ui/Field";
 import { InfoTip } from "../components/ui/InfoTip";
 import { LoadingOverlay } from "../components/Busy";
 import { MissingColumnsList, UnmappedClausesList } from "../components/MissingColumnsNote";
-import { errText, MissingColumnsResp, ProgramContractRow, newUploadToken,
-         pickRecoveredContract } from "../utils/directSetup";
+import { errText, MissingColumnsResp, scheduleOf } from "../utils/directSetup";
+import { uploadContract, type ExternalReference } from "../api/contracts";
 import CreateOutputTemplate from "../components/CreateOutputTemplate";
 import { SHOW_BDX_TEMPLATE_BUILDER } from "../featureFlags";
 import OutputTemplateState from "../components/OutputTemplateState";
@@ -77,21 +77,9 @@ const PROGRAM_META_KEYS: (keyof ProgramForm)[] = [
   "product_line", "distribution_channel", "territory", "status",
 ];
 
-// Derive a schedule identity from a file/sheet name: "Palms Sch H Current BDX"
-// → "Schedule H". Mirrors the backend _sb_propose_schedule matcher so an
-// uploaded contract auto-binds to the schedule sheet it belongs to.
-// Separators (._-) are normalized to spaces first so real-world names like
-// "… Schedule F_rss.pdf" still match (an underscore blocks the \b boundary).
-function scheduleOf(name: string | null | undefined): string | null {
-  const m = (name || "").toLowerCase().replace(/[._-]+/g, " ")
-    .match(/\bsch(?:edule)?\s*([a-z0-9])\b/);
-  return m ? `Schedule ${m[1].toUpperCase()}` : null;
-}
-
-// External document(s) a contract defers rules to (halt payload shape).
-type RefsHaltRefs = Array<{
-  document_name?: string; version_or_date?: string; source_texts?: string[];
-}>;
+// External document(s) a contract defers rules to (halt payload shape). The
+// shape comes from the upload module that produces it, so the two cannot drift.
+type RefsHaltRefs = ExternalReference[];
 
 // One sheet of a template's structure — only the fields the sheet-review modal
 // needs are typed; the rest ride along untouched so the structure PUTs back whole.
@@ -792,133 +780,35 @@ export default function DirectSetup() {
     type UpResult = { cid: number | null } | {
       halt: { refs: RefsHaltRefs; resumeToken: string | null } };
 
-    // The contract this program already has, by id. Snapshotted BEFORE each
-    // upload so the contract an upload CREATES can be identified afterwards by
-    // id alone — no clock comparison, so a browser/server clock skew can't
-    // pick the wrong row.
-    const contractIdsNow = async (): Promise<Set<number>> => {
-      try {
-        const { data } = await api.get<Array<{ id: number }>>(
-          `/programs/${programId}/contracts`, { silent: true });
-        return new Set((Array.isArray(data) ? data : []).map(c => c.id));
-      } catch { return new Set(); }
-    };
-
-    // Recover the contract id when the upload's ANSWER was lost.
-    //
-    // A contract can take well over half an hour to extract: a long document
-    // falls back to per-section extraction, then Call 2 runs once per clause and
-    // Call 3 once per intent chunk — 75+ sequential model calls is normal. The
-    // response is streamed with whitespace heartbeats so an idle-connection
-    // timeout never fires, but an ingress that caps TOTAL request duration cuts
-    // the connection regardless, and the browser is then left holding a 200
-    // whose body is only heartbeat whitespace — which axios cannot parse and
-    // hands back as a raw string.
-    //
-    // Crucially the server does NOT stop: the pipeline task outlives the request
-    // and persists the contract and its rules minutes later. (Observed: the
-    // browser gave up at 04:50:31 while the server was still running Call-3
-    // retries at 04:52:33.) So "no id in the response" means the answer was
-    // lost, not that there is no contract — wait for the row the work produces
-    // instead of treating the build as contract-less. The window has to cover
-    // the REMAINDER of a run that may already be ~30 min in; polling is one
-    // small request every 15s, so waiting too long costs far less than
-    // discarding a contract that was about to land.
-    const RECOVER_TIMEOUT_MS = 30 * 60_000;
-    const RECOVER_POLL_MS = 15_000;
-    const recoverContractId = async (
-      file: File, before: Set<number>, token: string,
-    ): Promise<number | null> => {
-      const deadline = Date.now() + RECOVER_TIMEOUT_MS;
-      for (;;) {
-        try {
-          const { data } = await api.get<ProgramContractRow[]>(
-            `/programs/${programId}/contracts`, { silent: true });
-          const hit = pickRecoveredContract(data, {
-            token, before, filename: file.name, templateId: tid });
-          if (hit != null) return hit;
-        } catch { /* keep waiting — a failed poll is not a failed upload */ }
-        if (Date.now() >= deadline) return null;
-        // Deliberately says nothing about the dropped connection. Nothing has
-        // gone wrong from where the user sits — the contract is being read, and
-        // that is the only fact they can act on. Naming the transport here read
-        // as an error for something that is working exactly as intended.
-        setStep(`Still reading “${file.name}” on the server. A long contract `
-              + `takes a while — checking again every ${RECOVER_POLL_MS / 1000}s…`);
-        await new Promise(res => setTimeout(res, RECOVER_POLL_MS));
-      }
-    };
-
+    // One contract, uploaded and identified. The whole job — the correlation
+    // id, the pause when the contract defers to a document nobody supplied, and
+    // the long wait when the answer to a slow upload is lost in transit — lives
+    // in api/contracts so the Add Contract flow on a broker's page behaves
+    // identically. This screen only says WHAT to upload and what to do next.
     const uploadOne = async (
       file: File, scheduleKey: string | null,
       opts?: { continueAnyway?: boolean; resumeToken?: string | null },
     ): Promise<UpResult> => {
-      const fd = new FormData();
-      fd.append("output_template_id", String(tid));
-      fd.append("file", file);
-      // Which broker this contract is with. The wizard already knows — it is
-      // the scope picked at the top — and without sending it the contract is
-      // saved with no broker and then shows under nobody on the programme,
-      // because the hierarchy lists contracts under the broker that holds them.
-      if (scope.brokerPartyId !== "") {
-        fd.append("broker_party_id", String(scope.brokerPartyId));
-      }
-      if (scheduleKey) fd.append("schedule_key", scheduleKey);
-      allRefs.forEach(f => fd.append("reference_files", f));
-      // HALT when the contract defers rules to an external document that wasn't
-      // provided — the user chooses: upload it, or continue anyway. Skipped by
-      // the backend when reference docs were already attached above, or when
-      // this is the continue-anyway resume below.
-      fd.append("enable_reference_halt", "true");
-      if (opts?.continueAnyway) {
-        fd.append("continue_anyway", "true");
-        if (opts.resumeToken) fd.append("resume_token", opts.resumeToken);
-      }
-      // Correlation id for THIS upload, so the contract it creates can be
-      // identified exactly rather than inferred, even when two builds of the
-      // same setup run at once or an earlier attempt's contract lands late.
-      const token = newUploadToken();
-      fd.append("upload_token", token);
-      const before = await contractIdsNow();
-      let r: { data?: Record<string, unknown> } | null = null;
-      try {
-        r = await api.post(`/programs/${programId}/contracts`, fd);
-      } catch (e) {
-        // A response the server actually sent (4xx/5xx, or the in-body pipeline
-        // failure the interceptor re-throws) is a real error and must surface.
-        // A transport-level failure carries no response — same lost-answer case
-        // as an unparseable body, so fall through to recovery.
-        if ((e as { response?: unknown })?.response) throw e;
-      }
-      const body = (r?.data ?? {}) as Record<string, unknown>;
-      if (body.status === "references_required") {
-        return { halt: { refs: (body.external_references ?? []) as RefsHaltRefs,
-                         resumeToken: (body.resume_token ?? null) as string | null } };
-      }
-      // Extraction proceeded but still names external document(s) it didn't
-      // have (continue-anyway path) — collect for the post-build warning.
-      const ext = ((body.extraction_output as { external_references?: unknown })
-        ?.external_references ?? []) as Array<{ document_name?: string }>;
-      const covered = (n: string) => allRefs.some(rf => {
-        const a = rf.name.toLowerCase(), b = n.toLowerCase();
-        return a.includes(b.slice(0, 12)) || b.includes(a.replace(/\.[a-z]+$/, "").slice(0, 12));
+      const res = await uploadContract({
+        programId: Number(programId),
+        outputTemplateId: tid,
+        file,
+        // The setup's own scope. Null when the setup covers the whole
+        // programme, which is what every setup built before the broker level
+        // existed looks like.
+        brokerPartyId: scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId),
+        scheduleKey,
+        referenceFiles: allRefs,
+        // HALT when the contract defers rules to an external document that
+        // wasn't provided — the user chooses: upload it, or continue anyway.
+        enableReferenceHalt: true,
+        continueAnyway: opts?.continueAnyway,
+        resumeToken: opts?.resumeToken,
+        onProgress: setStep,
       });
-      const names = (ext.map(x => x?.document_name).filter(Boolean) as string[])
-        .filter(n => !covered(n));
-      if (names.length) missing.push({ contract: file.name, refs: names });
-      const persisted = body.persisted as { contract_id?: number } | undefined;
-      let cid = (body.id ?? persisted?.contract_id ?? null) as number | null;
-      if (cid == null) cid = await recoverContractId(file, before, token);
-      // Still nothing: the contract genuinely never landed. Fail the build —
-      // carrying on would bind the setup to NO contract, which renders every
-      // rule the contract produced invisible behind a green success screen.
-      if (cid == null) {
-        throw new Error(
-          `“${file.name}” was uploaded but no contract came back from the `
-          + `server, so this setup has no contract to take its rules from. `
-          + `Please run the build again.`);
-      }
-      return { cid };
+      if ("halt" in res) return res;
+      if (res.deferred.length) missing.push({ contract: file.name, refs: res.deferred });
+      return { cid: res.cid };
     };
 
     // Upload each contract; tag it with the schedule its filename names (so
