@@ -39,6 +39,8 @@ from carrier_scope import (
 )
 from db import SessionLocal, Tenant
 
+_NOT_FOUND_FILE = "not found"
+
 router = APIRouter(tags=["carrier"])
 
 _C = "/carriers/{carrier_id}"
@@ -307,3 +309,295 @@ def contract_policy_detail(scope: CarrierScope = Depends(policy_scope)):
     from db import CanonicalSession
     with CanonicalSession() as cs:
         return fetch_policy(cs, scope.policy_id)
+
+
+# ── 6. the bordereau run — under the CONTRACT ───────────────────────────────
+# Steps 6 and 7 of the workflow at the top of this file: the broker submits a
+# bordereau and reads its own validation results.
+#
+# THE RUN HANGS OFF THE CONTRACT, not off the programme or the broker. A
+# bordereau is validated against a contract's rules, so the contract is what
+# decides whether a file passes — and a broker with two contracts on one
+# programme is answering to two different sets of rules. Naming the programme
+# alone would leave "which rules?" unanswered and mix both contracts' history
+# into one list. The chain already says this: contract sits between broker and
+# policy, and a run is what turns a file into policies.
+#
+# The flat /direct/* lane cannot serve a broker at all. Every one of those
+# handlers calls resolve_tenant_id(), which reads principal.tenant_id — and a
+# broker seat carries no tenant of its own (auth_deps.Principal), so it answers
+# "no tenant bound to this user". That is correct for a flat route: nothing in
+# `?mga=carrier` proves the broker may act for that carrier. Under the chain it
+# IS proved, one path segment at a time, so scope.acting can state the carrier
+# and delegate to the very same handler.
+#
+# SETUP IS NOT HERE ON PURPOSE. Building the setup — the input template, the
+# column mapping, the rules — stays the carrier's: it is what defines a valid
+# file. The broker RUNS against what the carrier built.
+
+def _carrier_party_id(s, carrier_id: int) -> int:
+    """The party row that IS this carrier.
+
+    Resolved here rather than asked of the caller. The carrier's own screens
+    fetch it from /my-carrier-party, but a broker has no business knowing a
+    carrier's internal party ids — and letting it send one would be a way to aim
+    a run at another carrier's setup. Same find-or-create, keyed on
+    `carrier::<tenant_id>`, so this is the same row that screen returns.
+    """
+    from ingester import _ensure_carrier_party
+    pid = _ensure_carrier_party(s, carrier_id)
+    if pid is None:
+        raise HTTPException(500, "could not resolve this carrier's own party record")
+    s.commit()
+    return pid
+
+
+@router.get(_T + "/bordereau")
+def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
+    """Can a bordereau be run against this contract yet, and against what.
+
+    Two things have to be true, and they fail for completely different reasons,
+    so they are reported separately rather than as one "not ready":
+
+      the contract is live      a contract the carrier has not approved governs
+                                nothing, so there are no rules to validate on
+      a setup exists            the carrier has built the (programme × broker)
+                                setup that says how to read the spreadsheet
+
+    Neither is something the broker can fix themselves, which is exactly why
+    the answer is a reason and not an upload box that fails on submit.
+    """
+    from db import Contract, DirectFormat, ExportTemplate, Pipeline
+    with SessionLocal() as s:
+        c = s.get(Contract, scope.contract_id)
+        if c is not None and (c.approval_status or "approved") != "approved":
+            return {
+                "ready": False,
+                "reason": ("This contract is not live yet — the carrier has "
+                           "still to approve it. Until they do, there are no "
+                           "rules to check your file against."),
+                "setup": None,
+            }
+
+        cpid = _carrier_party_id(s, scope.carrier_id)
+
+        # Mirrors direct_run's resolution order exactly, so what this endpoint
+        # calls ready is what will actually be used. The setup is per
+        # (carrier, programme, broker) — the CONTRACT supplies the rules, not
+        # the layout, which is why one setup can serve several contracts.
+        def _pipe(broker: Optional[int], active_only: bool):
+            q = (s.query(Pipeline)
+                 .filter(Pipeline.tenant_id == scope.carrier_id,
+                         Pipeline.carrier_party_id == cpid,
+                         Pipeline.program_id == scope.program_id))
+            if active_only:
+                q = q.filter(Pipeline.status == "active")
+            q = q.filter(Pipeline.broker_party_id == broker if broker is not None
+                         else Pipeline.broker_party_id.is_(None))
+            return q.order_by(Pipeline.id.desc()).first()
+
+        def _payload(pipe: Pipeline, held_by: str):
+            tpl = (s.get(ExportTemplate, pipe.output_template_id)
+                   if pipe.output_template_id else None)
+            return {
+                "id": pipe.id,
+                "name": pipe.name,
+                "status": pipe.status,
+                # Whose setup this is. A broker running on the programme-wide
+                # setup should know that is what happened — it explains why the
+                # expected columns are not the ones discussed for their book.
+                "held_by": held_by,
+                "output_template": ({"id": tpl.id, "name": tpl.name} if tpl else None),
+            }
+
+        pipe, held_by = _pipe(scope.broker_party_id, True), "broker"
+        if pipe is None:
+            pipe, held_by = _pipe(None, True), "programme"
+        if pipe is not None:
+            return {"ready": True, "reason": None, "setup": _payload(pipe, held_by)}
+
+        # The pre-pipeline fallback direct_run still honours: an approved
+        # DirectFormat with no pipeline built around it yet.
+        fmt = (s.query(DirectFormat)
+               .filter(DirectFormat.tenant_id == scope.carrier_id,
+                       DirectFormat.carrier_party_id == cpid,
+                       DirectFormat.program_id == scope.program_id,
+                       DirectFormat.approved == 1)
+               .order_by(DirectFormat.id.desc()).first())
+        if fmt is not None:
+            return {"ready": True, "reason": None, "setup": {
+                "id": None, "name": fmt.name, "status": "active",
+                "held_by": "programme", "output_template": None}}
+
+        # NOT READY — and the two reasons are not the same thing.
+        #
+        # A setup that exists but was never ACTIVATED is the common case, and
+        # reporting it as "no setup has been built" is both wrong and useless:
+        # it sends the carrier off to build a second one when the first is
+        # sitting there a click away from live. So look again without the status
+        # filter and say which of the two it is.
+        draft, held_by = _pipe(scope.broker_party_id, False), "broker"
+        if draft is None:
+            draft, held_by = _pipe(None, False), "programme"
+        if draft is not None:
+            return {
+                "ready": False,
+                "reason": ("Your carrier has built the bordereau setup for this "
+                           "programme but has not made it live yet. Nothing can "
+                           "be submitted against a setup that is still a draft — "
+                           "ask them to activate it."),
+                "setup": _payload(draft, held_by),
+            }
+
+        return {
+            "ready": False,
+            "reason": ("The carrier has not built the bordereau setup for this "
+                       "programme yet. Until they do there is nothing to "
+                       "validate your file against."),
+            "setup": None,
+        }
+
+
+@router.post(_T + "/runs")
+async def contract_bordereau_run(
+    file: UploadFile = File(...),
+    filename: Optional[str] = Form(default=None),
+    skip_rows: int = Form(default=0),
+    # The pre-submission self-check (workflow step 7): run every validation and
+    # return the fix-list WITHOUT ingesting or recording a run. This is the
+    # whole point of giving the broker the lane — they find out what is wrong
+    # before the carrier does, not after.
+    check_only: bool = Form(default=False),
+    scope: CarrierScope = Depends(contract_scope),
+):
+    """Step 6 — submit a bordereau against this contract."""
+    import direct_routes as _direct
+    with SessionLocal() as s:
+        cpid = _carrier_party_id(s, scope.carrier_id)
+    return await _direct.direct_run(
+        mga=scope.mga,
+        carrier_party_id=cpid,
+        program_id=scope.program_id,
+        file=file,
+        filename=filename,
+        # Who ran it, for the audit trail — attributable to the broker rather
+        # than to a tenant code that means nothing on their side.
+        actor=f"broker:{scope.broker_party_id}",
+        skip_rows=skip_rows,
+        check_only=check_only,
+        broker_party_id=scope.broker_party_id,
+        contract_id=scope.contract_id,
+        principal=scope.acting,
+    )
+
+
+@router.get(_T + "/runs")
+def contract_bordereau_runs(limit: int = Query(default=20, le=100),
+                            scope: CarrierScope = Depends(contract_scope)):
+    """What has been submitted against this contract, newest first."""
+    import direct_routes as _direct
+    with SessionLocal() as s:
+        cpid = _carrier_party_id(s, scope.carrier_id)
+    # page/page_size are passed EXPLICITLY. Their declared defaults are fastapi
+    # Query(...) objects, which only become None when FastAPI resolves the
+    # request — calling the handler directly leaves the Query instance in place,
+    # and `if page is not None` would take the paginated branch with a Query
+    # object where an int belongs.
+    #
+    # Both broker AND contract are passed. Filtering on the setup alone would
+    # leak: two brokers on one programme share a DirectFormat, so each would
+    # read the other's filenames, row counts and exception counts.
+    return _direct.direct_runs(
+        mga=scope.mga,
+        carrier_party_id=cpid,
+        program_id=scope.program_id,
+        broker_party_id=scope.broker_party_id,
+        contract_id=scope.contract_id,
+        page=None,
+        page_size=None,
+        limit=limit,
+        principal=scope.acting,
+    )
+
+
+def _scoped_export(s, scope: CarrierScope, export_id: int):
+    """An export row, checked to belong to THIS point in the chain.
+
+    Not assert_tenant_owns(), which is all /export/downloads/{id}/* does: for a
+    broker acting on this carrier that would pass for every export the carrier
+    holds, including the runs of the other brokers on the same programme. The
+    export carries its own denormalised carrier/programme/broker/contract — the
+    scope the run was actually made for — so that is what is compared.
+
+    404 (not 403) on every miss, for the same reason as the rest of the chain:
+    a 403 would confirm the id exists.
+    """
+    from db import OutputExport
+    row = s.get(OutputExport, export_id)
+    if (row is None
+            or row.tenant_id != scope.carrier_id
+            or row.program_id != scope.program_id
+            or row.broker_party_id != scope.broker_party_id
+            or row.contract_id != scope.contract_id):
+        raise HTTPException(404, _NOT_FOUND_FILE)
+    return row
+
+
+@router.get(_T + "/runs/{export_id}/data")
+def contract_bordereau_data(export_id: int,
+                            full: bool = False,
+                            marks: bool = False,
+                            sheet: Optional[str] = None,
+                            offset: int = 0,
+                            limit: Optional[int] = None,
+                            row_indices: Optional[str] = None,
+                            scope: CarrierScope = Depends(contract_scope)):
+    """The rendered rows of one of this contract's runs, for in-site viewing.
+
+    What the output preview and "See All Rows" read. Same payload as
+    /export/downloads/{id}/data — `marks=1` returns the failed-validation cells
+    so the preview highlights exactly what the downloaded file does, `full=1`
+    lifts the preview row cap — but reachable by the broker that produced the
+    run, which the flat route is not (it resolves the tenant from the token, and
+    a broker seat has none).
+    """
+    import main as _main
+    with SessionLocal() as s:
+        _scoped_export(s, scope, export_id)
+    # Scope is proven above; the delegated handler re-checks tenant ownership
+    # against the pinned principal, which is the carrier this request was just
+    # authorized for.
+    return _main.export_download_data(
+        export_id=export_id, full=full, marks=marks, sheet=sheet,
+        offset=offset, limit=limit, row_indices=row_indices,
+        principal=scope.acting,
+    )
+
+
+@router.get(_T + "/runs/{export_id}/file")
+def contract_bordereau_download(export_id: int,
+                                scope: CarrierScope = Depends(contract_scope)):
+    """Download the output one of this contract's runs produced.
+
+    NOT a delegation to /export/downloads/{id}/file. That route's only guard is
+    assert_tenant_owns(), which for a broker acting on this carrier would pass
+    for EVERY export the carrier holds — including the runs of the other brokers
+    on the same programme. The scope is checked against the export's own
+    denormalised carrier/programme/broker/contract instead, which is the scope
+    the run was actually made for.
+    """
+    from fastapi import Response
+    import storage
+    from output_serializers import content_type_for_filename
+
+    with SessionLocal() as s:
+        row = _scoped_export(s, scope, export_id)
+        data = storage.resolve_bytes(row.blob_ref, row.blob)
+        if not data:
+            raise HTTPException(404, _NOT_FOUND_FILE)
+        name = row.filename or f"bordereau-{export_id}.xlsx"
+        return Response(
+            content=data,
+            media_type=content_type_for_filename(name),
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )

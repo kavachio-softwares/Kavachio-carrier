@@ -768,6 +768,13 @@ export default function DirectSetup() {
       const fd = new FormData();
       fd.append("output_template_id", String(tid));
       fd.append("file", file);
+      // Which broker this contract is with. The wizard already knows — it is
+      // the scope picked at the top — and without sending it the contract is
+      // saved with no broker and then shows under nobody on the programme,
+      // because the hierarchy lists contracts under the broker that holds them.
+      if (scope.brokerPartyId !== "") {
+        fd.append("broker_party_id", String(scope.brokerPartyId));
+      }
       if (scheduleKey) fd.append("schedule_key", scheduleKey);
       allRefs.forEach(f => fd.append("reference_files", f));
       // HALT when the contract defers rules to an external document that wasn't

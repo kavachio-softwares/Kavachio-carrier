@@ -76,6 +76,22 @@ def _contract_source(s, c: Contract, broker_id: int) -> str:
 
 # --- what the carrier has given this broker ---------------------------------
 
+@router.get("/broker/me")
+def broker_me(p: Principal = Depends(current_principal)):
+    """Who this seat belongs to.
+
+    The broker's own party id, needed by any screen that has to build a
+    carrier-centric path (/carriers/{c}/programs/{p}/brokers/{b}/...). The
+    broker never PICKS this — it is read off their user row, exactly as every
+    other endpoint here does — but the URL has to carry it, so the screen has
+    to be able to ask.
+    """
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        me = s.query(Party).filter(Party.id == bid).first()
+        return {"id": bid, "name": (me.legal_name if me else "—"), "role": p.role}
+
+
 @router.get("/broker/carriers")
 def broker_carriers(p: Principal = Depends(current_principal)):
     """The carriers that have put this broker on at least one programme.

@@ -11,6 +11,7 @@ import AdminUsers from "./pages/AdminUsers";
 import BrokerDashboard from "./pages/BrokerDashboard";
 import OperatorHome from "./pages/OperatorHome";
 import BrokerContracts from "./pages/BrokerContracts";
+import BrokerBordereau from "./pages/BrokerBordereau";
 import BrokerUsers from "./pages/BrokerUsers";
 import TenantDetail from "./pages/TenantDetail";
 import Parties from "./pages/Parties";
@@ -51,7 +52,6 @@ import {
 import { canAccessPath, landingPath } from "./access";
 import BrokerDetail from "./pages/BrokerDetail";
 import Brokers from "./pages/Brokers";
-import Approvals from "./pages/Approvals";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   // A stored user with an expired refresh token is a dead session — treat it
@@ -114,6 +114,9 @@ export default function App() {
         <Route path="/broker" element={<BrokerDashboard />} />
         <Route path="/operator" element={<OperatorHome />} />   {/* the broker's day-to-day seat */}
         <Route path="/broker/contracts" element={<BrokerContracts />} />
+        {/* The broker's monthly run. Both broker seats reach it: an admin
+            submits, and an operator is the seat added to do exactly this. */}
+        <Route path="/broker/bordereau" element={<BrokerBordereau />} />
         <Route path="/broker/users" element={<BrokerUsers />} />   {/* The broker staffs itself */}
         <Route path="/admin/users" element={<AdminUsers />} />   {/* Everyone on the platform, read-only */}
         <Route path="/tenants" element={<Tenants />} />    {/* Tenants directory (Kavachio platform admin) */}
@@ -127,7 +130,6 @@ export default function App() {
             from a tenant — the same broker produces for several carriers. */}
         <Route path="/brokers" element={<Brokers />} />
         <Route path="/brokers/:brokerId" element={<BrokerDetail />} />
-        <Route path="/approvals" element={<Approvals />} />
         {/* Carrier-scoped oversight dashboard. Without ?carrier= it renders its
             own carrier picker, so the route needs no param of its own. */}
         <Route path="/program-management" element={<ProgramManagement />} />

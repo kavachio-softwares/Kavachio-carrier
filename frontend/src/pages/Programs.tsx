@@ -74,9 +74,17 @@ export default function Programs() {
                     onClick={() => nav(`/programs/${p.id}/brokers`)}
                   >
                     <td className="py-3">
-                      <div className="flex items-center gap-2 font-medium text-navy">
+                      {/* A link, not just a clickable row. The row handler alone
+                          gave no affordance — nothing looked clickable, so the
+                          programme read as a dead label — and it could not be
+                          opened in a new tab or reached by keyboard. */}
+                      <Link
+                        to={`/programs/${p.id}/brokers`}
+                        onClick={e => e.stopPropagation()}
+                        className="flex items-center gap-2 font-medium text-navy hover:underline"
+                      >
                         <Layers size={14} className="shrink-0" /> {p.name}
-                      </div>
+                      </Link>
                       {p.product_line && (
                         <div className="text-xs text-ink-muted">{p.product_line}</div>
                       )}

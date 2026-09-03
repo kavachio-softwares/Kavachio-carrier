@@ -38,6 +38,9 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // do I have to run". ROUTE_ACCESS marks both `only`, so neither leaks.
       { to: "/broker", label: "Dashboard", icon: LayoutDashboard },
       { to: "/operator", label: "Dashboard", icon: LayoutDashboard },
+      // The monthly run — the reason a broker has a login at all, so it sits
+      // directly under the dashboards rather than below the reference screens.
+      { to: "/broker/bordereau", label: "Process Bordereau", icon: Zap },
       { to: "/broker/contracts", label: "My Contracts", icon: FileCheck },
       // Admin-only inside the broker's own group: an operator is a seat in
       // this team, not a manager of it. canAccessPath() filters it out for
@@ -55,7 +58,6 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // is commented out.
       // { to: "/program-management", label: "Program Management", icon: ClipboardList },
       { to: "/direct", label: "Process Bordereau", icon: Zap },
-      { to: "/approvals", label: "Approvals", icon: FileCheck },
       // My Calendar is deliberately NOT listed. Deadlines belong to a specific
       // carrier + program, so the calendar now lives inside that setup's own
       // screen where both are already fixed. The /calendar route still exists

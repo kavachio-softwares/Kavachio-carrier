@@ -1,42 +1,21 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { History, AlertTriangle } from "lucide-react";
-import { api, downloadFile } from "../api/client";
+import { api } from "../api/client";
 import { LoadingOverlay } from "../components/Busy";
+import { Dropzone } from "../components/Dropzone";
 import { Modal } from "../components/ui/Modal";
 import { currentMga, isTenantAdmin } from "../auth";
-import {
-  InlineAllRows, HighlightGrid, firstDataSheet, HL_BG, HL_BD,
-  HL_WARN_BG, HL_WARN_BD, type Sheet,
-} from "../components/OutputRows";
+import { type Sheet } from "../components/OutputRows";
+import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
 import { useBrokerContractScope } from "../components/BrokerContractScope";
 import { resolveOutputTemplate, type ResolveResult } from "../api/outputTemplate";
 
 type Party = { id: number; legal_name: string; is_active?: boolean };
 type Program = { id: number; name: string; status?: string; party_id?: number | null };
 type Pipeline = { id: number; name: string | null; status: "draft" | "active" | "superseded"; has_supplement?: boolean };
-type GoverningContract = {
-  sheet: string; contract_id: number | null;
-  contract_filename: string | null; fallback: boolean;
-};
-// One row/field validation finding (the DuckDB engine's exception shape).
-type RunException = {
-  severity?: string; sheet?: string; row?: number;
-  column?: string; field?: string; rule_name?: string;
-  policy_number?: string; actual_value?: string | number;
-  expected_value?: string | number; reason?: string; message?: string;
-};
-type RunResp = {
-  export_id: number; filename: string; row_count: number;
-  exception_count: number; exceptions: RunException[];
-  status: string; datamodel_mapped: boolean; admin_task_id: number | null;
-  datamodel_queued?: boolean;
-  format_drift: boolean;
-  governing_contracts?: GoverningContract[];
-  // True when produced by the pre-submission self-check (V-5) — not ingested,
-  // not recorded as a run.
-  check_only?: boolean;
-};
+// The run payload and its parts live with the component that renders them, so
+// this screen and the broker's cannot describe the same response differently.
 export default function DirectRun() {
   const mga = currentMga();
   const nav = useNavigate();
@@ -65,14 +44,6 @@ export default function DirectRun() {
   // The multi-table refusal from /direct/run — shown as a modal, not the banner.
   const [multiTableModal, setMultiTableModal] = useState<string | null>(null);
   const [preview, setPreview] = useState<Sheet | null>(null);
-  // "See all rows": the full output (every sheet, all rows, with the same
-  // highlighting), fetched on demand and expanded IN the Output Preview card —
-  // the same layout as the Exception Triage BDX Review, but read-only. Cached
-  // once loaded so re-expanding is instant; cleared whenever a new run/scope
-  // replaces the output.
-  const [showAll, setShowAll] = useState(false);
-  const [allSheets, setAllSheets] = useState<Sheet[] | null>(null);
-  const [allBusy, setAllBusy] = useState(false);
   // Whether this tenant still needs first-time setup (carrier + Bordereau).
   const [needsSetup, setNeedsSetup] = useState(false);
 
@@ -108,7 +79,7 @@ export default function DirectRun() {
   // the Dropzone on a cleared selection never leaves a stale file behind.
   useEffect(() => {
     setResult(null); setPreview(null); setErr(null);
-    setShowAll(false); setAllSheets(null); setFile(null);
+    setFile(null);
   }, [carrierId, programId, scope.brokerPartyId, scope.contractId]);
 
   // Resolve the output template for whatever is selected right now.
@@ -194,7 +165,6 @@ export default function DirectRun() {
     }
     setMode(checkOnly ? "check" : "run");
     setBusy(true); setErr(null); setResult(null); setPreview(null);
-    setShowAll(false); setAllSheets(null);
     try {
       const fd = new FormData();
       fd.append("mga", mga);
@@ -212,9 +182,9 @@ export default function DirectRun() {
       // Best-effort output preview for the result card. marks=1 so the flagged
       // cells match the downloaded file's highlighting; show the real data sheet
       // (not a spec/instruction sheet).
-      api.get<{ sheets: Sheet[] }>(`/export/downloads/${data.export_id}/data?marks=1`)
-        .then(r => setPreview(firstDataSheet(r.data.sheets ?? [])))
-        .catch(() => setPreview(null));
+      fetchPreview({ file: id => `/export/downloads/${id}/file`,
+                     data: (id, q) => `/export/downloads/${id}/data?${q}` },
+                   data.export_id).then(setPreview);
     } catch (e: unknown) {
       const a = e as { response?: { data?: { detail?: string } }; message?: string };
       const msg = a?.response?.data?.detail ?? a?.message ?? "Run failed.";
@@ -223,41 +193,7 @@ export default function DirectRun() {
     } finally { setBusy(false); }
   }
 
-  // "See all rows": expand the full output (every sheet, all rows) in place, with
-  // the same highlighting as the download. Fetched once (full=1 lifts the row cap,
-  // marks=1 returns the flagged cells) and cached for instant re-expand.
-  async function openAllRows() {
-    if (!result) return;
-    setShowAll(true);
-    if (allSheets) return;
-    setAllBusy(true);
-    try {
-      const { data } = await api.get<{ sheets: Sheet[] }>(
-        `/export/downloads/${result.export_id}/data?full=1&marks=1`);
-      setAllSheets(Array.isArray(data.sheets) ? data.sheets : []);
-    } catch { setAllSheets([]); }
-    finally { setAllBusy(false); }
-  }
 
-  // Download the self-check findings as a one-row-per-exception CSV — the
-  // broker's downloadable fix-list. Self-contained (the exceptions already carry
-  // every field), so it doesn't depend on the review-page's grouped exporter.
-  function downloadFixList() {
-    if (!result) return;
-    const header = ["Severity", "Rule", "Policy", "Sheet", "Column",
-                    "Actual value", "Expected", "Reason"];
-    const cell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const rows = result.exceptions.map(e => [
-      e.severity, e.rule_name, e.policy_number, e.sheet,
-      e.column ?? e.field, e.actual_value, e.expected_value,
-      e.reason ?? e.message,
-    ].map(cell).join(","));
-    const csv = [header.map(cell).join(","), ...rows].join("\n");
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    const a = document.createElement("a");
-    a.href = url; a.download = `check_${result.filename.replace(/\.[^.]+$/, "")}.csv`;
-    a.click(); URL.revokeObjectURL(url);
-  }
 
   // All required fields for either action: a carrier + program with an active
   // setup to run against, and a file to run it on.
@@ -271,8 +207,6 @@ export default function DirectRun() {
   const canSubmit = carrierId !== "" && programId !== "" && hasSetup === true
     && !!file && !templateMissing && !templateMismatch;
 
-  const isCheck = !!result?.check_only;
-  const resultSpine = !result ? "" : result.status === "clean" ? "ok" : "warn";
 
   return (
     <div className="proto">
@@ -530,187 +464,34 @@ export default function DirectRun() {
             </div>
 
             {/* ---------------- result ---------------- */}
+            {/* Rendered by the SHARED component, so the broker's Process
+                Bordereau shows exactly this and cannot drift from it. Only the
+                URLs differ: a carrier reads /export/downloads/*, a broker reads
+                the same export through the carrier-centric chain. */}
             {result && (
-              <>
-                <div className={`card spine ${resultSpine} pad`}
-                  style={{ margin: "18px 0", display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
-                  <div style={{ flex: 1, minWidth: 220 }}>
-                    <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 3 }}>
-                      {isCheck && result.status === "clean"
-                        ? <span style={{ color: "var(--p-ok)" }}>✓ Ready to send — no issues found</span>
-                        : <>
-                            {result.row_count.toLocaleString()} rows {isCheck ? "checked" : "validated"}
-                            {result.status === "clean"
-                              ? <span style={{ color: "var(--p-ok)" }}> · Clean</span>
-                              : <span style={{ color: "var(--p-crit)" }}> · {result.exception_count.toLocaleString()} {isCheck ? "to fix" : "exceptions"}</span>}
-                          </>}
-                    </div>
-                    <div style={{ color: "var(--p-muted)", fontSize: 13 }}>
-                      {isCheck
-                        ? "Self-check only — nothing was sent or saved. Fix any issues and check again, or Generate BDX to send."
-                        : "Output generated. Exceptions don't block the file — review, or fix and re-run."}
-                    </div>
-                  </div>
-                  {isCheck && result.exception_count > 0 && (
-                    <button className="btn" onClick={downloadFixList}>Download Fix-List (CSV)</button>
-                  )}
-                  <button className="btn"
-                    onClick={() => downloadFile(`/export/downloads/${result.export_id}/file`, result.filename)
-                      .catch(() => setErr("We couldn't download that file — please try again."))}>
-                    {isCheck ? "Download Checked File" : "Download BDX"}
+              <RunResult
+                result={result}
+                preview={preview}
+                urls={{
+                  file: id => `/export/downloads/${id}/file`,
+                  data: (id, q) => `/export/downloads/${id}/data?${q}`,
+                }}
+                onError={setErr}
+                actions={!result.check_only && result.exception_count > 0 ? (
+                  <button className="btn pri"
+                    onClick={() => nav(`/uploads/${result.export_id}/exceptions?download=${result.export_id}&from=direct`)}>
+                    Review Exceptions
                   </button>
-                  {!isCheck && result.exception_count > 0 && (
-                    <button className="btn pri"
-                      onClick={() => nav(`/uploads/${result.export_id}/exceptions?download=${result.export_id}&from=direct`)}>
-                      Review Exceptions
-                    </button>
-                  )}
-                </div>
-
-                {/* Self-check fix-list: row/field findings inline so the broker can
-                    correct the file before sending. Read-only (no accept/reject —
-                    a check is a look, not a submission). */}
-                {isCheck && result.exceptions.length > 0 && (
-                  <div className="card" style={{ marginBottom: 18 }}>
-                    <div className="card-h">
-                      <h3>What to Fix Before Sending</h3>
-                      <span className="sub">{result.exception_count.toLocaleString()} finding{result.exception_count === 1 ? "" : "s"}</span>
-                    </div>
-                    <div className="tbl-wrap">
-                      <table>
-                        <thead>
-                          <tr><th>Severity</th><th>Policy</th><th>Field</th><th>Value</th><th>Why</th></tr>
-                        </thead>
-                        <tbody>
-                          {result.exceptions.slice(0, 200).map((e, i) => {
-                            const sev = (e.severity || "").toLowerCase();
-                            const tone = sev.includes("crit") || sev === "error" ? "var(--p-crit)"
-                              : sev.includes("warn") ? "var(--p-warn, #b45309)" : "var(--p-muted)";
-                            return (
-                              <tr key={i}>
-                                <td style={{ color: tone, fontWeight: 600, whiteSpace: "nowrap" }}>
-                                  {sev.includes("crit") || sev === "error" ? "Critical" : sev.includes("warn") ? "Warning" : (e.severity || "Info")}
-                                </td>
-                                <td className="mono">{e.policy_number ?? (e.row != null ? `Row ${e.row}` : "—")}</td>
-                                <td>{e.column ?? e.field ?? "—"}{e.sheet ? <span className="sub" style={{ marginLeft: 6 }}>{e.sheet}</span> : null}</td>
-                                <td className="mono">{e.actual_value != null ? String(e.actual_value) : "—"}</td>
-                                <td style={{ color: "var(--p-muted)" }}>{e.reason ?? e.message ?? "—"}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                    {result.exceptions.length > 200 && (
-                      <div className="note" style={{ margin: 12 }}>
-                        Showing the first 200 of {result.exception_count.toLocaleString()} — download the CSV for the full list.
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Governing contracts — which contract validated each output
-                    sheet. Compact one-liner for a single contract; a table when
-                    schedules are governed by different contracts. */}
-                {result.governing_contracts && result.governing_contracts.length > 0 && (() => {
-                  const gcs = result.governing_contracts!;
-                  const withContract = gcs.filter(g => g.contract_id != null);
-                  const distinct = new Set(withContract.map(g => g.contract_id));
-                  const nameOf = (g: GoverningContract) =>
-                    g.contract_filename || `Contract #${g.contract_id}`;
-                  // One-liner only when EVERY sheet is governed by the same contract.
-                  if (distinct.size === 1 && withContract.length === gcs.length) {
-                    return (
-                      <div className="note" style={{ marginBottom: 18 }}>
-                        All output sheets validated against <strong>{nameOf(gcs[0])}</strong>.
-                      </div>
-                    );
-                  }
-                  return (
-                    <div className="card" style={{ marginBottom: 18 }}>
-                      <div className="card-h">
-                        <h3>Governing Contracts</h3>
-                        <span className="sub">
-                          {distinct.size} contract{distinct.size === 1 ? "" : "s"} · {withContract.length}/{gcs.length} sheets covered
-                        </span>
-                      </div>
-                      <div className="tbl-wrap">
-                        <table>
-                          <thead>
-                            <tr><th>Output Sheet</th><th>Enforced By</th></tr>
-                          </thead>
-                          <tbody>
-                            {gcs.map(g => (
-                              <tr key={g.sheet}>
-                                <td className="mono">{g.sheet}</td>
-                                <td>
-                                  {g.contract_id != null
-                                    ? <>{nameOf(g)}{g.fallback && <span className="sub" style={{ marginLeft: 8 }}>(default)</span>}</>
-                                    : <span className="sub">No contract</span>}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                {result.format_drift && (
-                  <div className="note warn" style={{ marginBottom: 18 }}>
-                    This file's columns differ from the setup's input template — the output may be incomplete.{" "}
-                    {/* Bordereau Setup is admin-only (see access.ts), so an Operator
-                        gets the ask-your-admin wording rather than a link that
-                        bounces them straight back to the dashboard. */}
-                    {admin
-                      ? <span className="linkish" onClick={() => nav(setupHref())}>Review the Setup →</span>
-                      : <b>Ask your admin to review the setup.</b>}
-                  </div>
-                )}
-                {!isCheck && !result.datamodel_mapped && (
-                  <div className="note" style={{ marginBottom: 18 }}>
-                    New input format — a one-time admin task was raised to map it to the data model
-                    {result.admin_task_id ? ` (task #${result.admin_task_id})` : ""}. Delivery is complete regardless.
-                  </div>
-                )}
-
-                {/* Output Preview — the first rows by default, expanding in place
-                    to the whole output (every sheet, all rows) rather than into a
-                    modal. Read-only: this is the just-generated file, decisions
-                    are made on the Exception Triage screen. */}
-                {preview && preview.rows.length > 1 && (
-                  showAll ? (
-                    <InlineAllRows
-                      title="Output Preview"
-                      subtitle={`${result.filename} — cells that failed validation are highlighted, the same as in the downloaded file. Hover a cell to see why.`}
-                      sheets={allSheets ?? []}
-                      busy={allBusy}
-                      actions={<button className="btn sm" onClick={() => setShowAll(false)}>Show Less</button>}
-                    />
-                  ) : (
-                    <div className="card">
-                      <div className="card-h">
-                        <h3>Output Preview</h3>
-                        <span className="sub" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                          {preview.sheet} · first {Math.min(5, preview.rows.length - 1)} of {preview.rows.length - 1} rows
-                          <button className="btn sm" onClick={openAllRows}>See All Rows</button>
-                        </span>
-                      </div>
-                      {(preview.marks?.length ?? 0) > 0 && (
-                        <div className="note" style={{ margin: "10px 12px 10px", display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                          <span style={{ width: 13, height: 13, borderRadius: 3, background: HL_BG, border: `1px solid ${HL_BD}`, display: "inline-block", flex: "0 0 auto" }} />
-                          <span style={{ width: 13, height: 13, borderRadius: 3, background: HL_WARN_BG, border: `1px solid ${HL_WARN_BD}`, display: "inline-block", flex: "0 0 auto", marginLeft: -4 }} />
-                          Cells that failed validation are highlighted — critical in red, warnings in orange, the same as in the downloaded file. Hover a cell to see why.
-                        </div>
-                      )}
-                      <div className="tbl-wrap">
-                        <HighlightGrid sheet={preview} limit={5} sticky />
-                      </div>
-                    </div>
-                  )
-                )}
-              </>
+                ) : null}
+                footNote={
+                  // Bordereau Setup is admin-only (see access.ts), so an
+                  // Operator gets the ask-your-admin wording rather than a link
+                  // that bounces them back to the dashboard.
+                  admin
+                    ? <span className="linkish" onClick={() => nav(setupHref())}>Review the Setup →</span>
+                    : <b>Ask your admin to review the setup.</b>
+                }
+              />
             )}
 
             {admin ? (
@@ -721,55 +502,6 @@ export default function DirectRun() {
           </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-function Dropzone({ file, onPick, disabled, lockedReason }: {
-  file: File | null; onPick: (f: File | null) => void; disabled?: boolean; lockedReason?: string;
-}) {
-  const [drag, setDrag] = useState(false);
-  const ref = useRef<HTMLInputElement>(null);
-  // Whenever the selection is cleared (Clear button, Remove link, or a
-  // carrier/program change), also reset the native input's value. Otherwise the
-  // input keeps the old file path and re-picking the SAME file fires no change
-  // event — so the file never re-selects and the button stays disabled.
-  useEffect(() => { if (!file && ref.current) ref.current.value = ""; }, [file]);
-  return (
-    <div
-      onClick={() => !disabled && ref.current?.click()}
-      onDragOver={e => { e.preventDefault(); if (!disabled) setDrag(true); }}
-      onDragLeave={() => setDrag(false)}
-      onDrop={e => {
-        e.preventDefault(); setDrag(false);
-        if (disabled) return;
-        const f = e.dataTransfer.files?.[0]; if (f) onPick(f);
-      }}
-      className={`drop lg${file ? " filled" : ""}${disabled ? " disabled" : ""}`}
-      style={{
-        cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1,
-        ...(drag ? { borderColor: "var(--p-primary)", background: "var(--p-primary-soft)" } : {}),
-      }}>
-      <input ref={ref} type="file" accept=".xlsx,.xls,.csv,.xml,.json" style={{ display: "none" }} disabled={disabled}
-        onClick={e => e.stopPropagation()}
-        onChange={e => onPick(e.target.files?.[0] ?? null)} />
-      <svg className="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-        <path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M5 3h9l5 5v13H5z" /><path d="M9 14h6M9 17h4" />
-      </svg>
-      {file ? (
-        <div>
-          <b>{file.name}</b>
-          <div style={{ fontSize: 12, marginTop: 4 }}>
-            Drag a new file to replace ·{" "}
-            <span className="linkish" onClick={e => { e.stopPropagation(); onPick(null); if (ref.current) ref.current.value = ""; }}>Remove</span>
-          </div>
-        </div>
-      ) : (
-        <div>
-          <b>Click to Upload</b> or Drag &amp; Drop
-          <div style={{ fontSize: 12, marginTop: 4 }}>.xlsx, .xls, .csv</div>
-        </div>
-      )}
     </div>
   );
 }

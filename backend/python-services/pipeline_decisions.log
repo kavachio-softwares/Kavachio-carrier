@@ -85,3 +85,41 @@ TIMING run=3697   total 112.0s (1.9 min)
    PDF parse (no AI)              0.2s   0.2%  
    (other / overlap)              0.0s
 ------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN c74f  started 2026-09-03 14:27:57  |  contract=tmpg2b_l1vp.pdf template_fields=87
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=c74f   total 54.0s (0.9 min)
+   Call 1 extraction             53.5s  99.1%  #######################################
+   PDF parse (no AI)              0.5s   0.9%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN 442e  started 2026-09-03 14:28:58  |  contract=tmp55jcu_cv.pdf template_fields=87
+============================================================================================================
+14:28:58 | run=442e | CALL2    | ATTEMPT   | 55 clause(s) in ONE call | est answer ~18,205 of 45,875 tok budget (40%)
+14:29:49 | run=442e | CALL2    | SPOTCHECK | re-asked 8 of 31 rejected clause(s) | longest first — length is what dilutes attention
+14:29:49 | run=442e | CALL2    | DILUTED   | clause(s) [26, 25] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+14:29:49 | run=442e | CALL2    | SIZING    | 23 clause(s) -> batch size 23 | tokens allow 145; attention cap 27 (single call diluted at 55; bisecting to 27)
+14:29:49 | run=442e | CALL2    | FALLBACK  | 23 item(s) -> 1 batch(es) of 23 | round 1/2; 32 of 55 already trusted (accepted, or re-checked by the spot-check)
+14:30:06 | run=442e | CALL2    | SPOTCHECK | re-asked 8 of 22 rejected clause(s) | longest first — length is what dilutes attention
+14:30:06 | run=442e | CALL2    | DILUTED   | clause(s) [13] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+14:30:06 | run=442e | CALL2    | SIZING    | 14 clause(s) -> batch size 12 | tokens allow 161; attention cap 12 (single call diluted at 23; bisecting to 12)
+14:30:06 | run=442e | CALL2    | FALLBACK  | 14 item(s) -> 2 batch(es) of 12 | round 2/2; 41 of 55 already trusted (accepted, or re-checked by the spot-check)
+14:30:15 | run=442e | CACHE    | MISS      | generic_bind 574c90146b0c | no stored answer for this exact input — model call required
+14:30:15 | run=442e | CALL3    | ATTEMPT   | contract: 33 intent(s) in ONE call
+14:31:40 | run=442e | CALL3    | OK        | contract: all 33 answered in ONE call | 13 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+14:31:40 | run=442e | CALL3    | ATTEMPT   | library: 49 intent(s) in ONE call
+14:33:30 | run=442e | CALL3    | OK        | library: all 49 answered in ONE call | 24 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+14:34:45 | run=442e | CACHE    | MISS      | formula_infer 2531480a553a | no stored answer for this exact input — model call required
+14:35:06 | run=442e | CACHE    | MISS      | var_topup ceffd0b9da4d | no stored answer for this exact input — model call required
+------------------------------------------------------------------------------------------------------------
+TIMING run=442e   total 376.8s (6.3 min)
+   Call 3 mapping               270.0s  71.7%  ############################
+   Call 2 intents                76.6s  20.3%  ########
+   Formula inference             20.5s   5.4%  ##
+   Verify + compile (no AI)       6.9s   1.8%  
+   (other / overlap)              2.8s
+------------------------------------------------------------------------------------------------------------

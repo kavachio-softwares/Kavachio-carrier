@@ -1647,6 +1647,14 @@ async def program_contract_upload(
     program_id: int,
     file: UploadFile = File(...),
     output_template_id: int = Form(...),
+    # WHICH BROKER this contract is with. A contract is a (programme x broker)
+    # pair, and the hierarchy lists contracts UNDER the broker that holds them
+    # (hierarchy_routes: `c.broker_party_id == party.id`). Without this the row
+    # is created with a NULL broker and appears under nobody — the contract
+    # exists, the setup exists, and the programme still looks empty.
+    # Optional: a carrier-held contract that predates the broker level, and any
+    # caller that does not know the broker, still works exactly as before.
+    broker_party_id: Optional[int] = Form(default=None),
     schedule_key: Optional[str] = Form(default=None),
     reference_files: Optional[list[UploadFile]] = File(default=None),
     continue_anyway: bool = Form(default=False),
@@ -1701,6 +1709,18 @@ async def program_contract_upload(
                        "Create or select an Output Template before uploading a contract.",
             )
         assert_tenant_owns(principal, tmpl.tenant_id)
+        # The broker must actually be ON this programme. `program_broker` is the
+        # grant, so a broker without a row there cannot hold a contract on it —
+        # checking here stops a mistyped id being stamped onto the contract and
+        # silently hiding it from the programme tree.
+        if broker_party_id is not None:
+            _link = (s.query(ProgramBroker)
+                      .filter(ProgramBroker.program_id == program_id,
+                              ProgramBroker.broker_party_id == broker_party_id)
+                      .first())
+            if _link is None:
+                raise HTTPException(
+                    400, "That broker is not on this programme — put them on it first.")
         # Use the shared builder so the data-dictionary enrichment (description,
         # allowed_values, format, required) reaches the LLM mapper — building the
         # list inline here previously dropped it.
@@ -1953,6 +1973,17 @@ async def program_contract_upload(
                 upload_token=upload_token,
             )
             print(f"[persist_result] {persist_result}")
+
+            # Stamp the broker onto the row persistence just created. Done here
+            # rather than inside db_persister so the extraction pipeline keeps
+            # one job; the id was already checked against this programme above.
+            _cid = (persist_result or {}).get("contract_id")
+            if _cid and broker_party_id:
+                with SessionLocal() as _s:
+                    _c = _s.get(Contract, _cid)
+                    if _c is not None:
+                        _c.broker_party_id = broker_party_id
+                        _s.commit()
 
         except Exception as persist_exc:
             persist_warning = f"persistence failed: {persist_exc}"

@@ -108,9 +108,12 @@ export default function Brokers() {
                           {b.user_count} user{b.user_count === 1 ? "" : "s"}
                         </span>
                         {b.pending_approvals > 0 && (
-                          <Link to="/approvals" className="text-warn hover:underline">
-                            {b.pending_approvals} awaiting your approval
-                          </Link>
+                          // Still worth surfacing — a contract they submitted is
+                          // not live until it is approved — but there is no
+                          // Approvals screen to link to any more.
+                          <span className="text-warn">
+                            {b.pending_approvals} awaiting approval
+                          </span>
                         )}
                       </div>
                       {b.programmes.length > 0 && (

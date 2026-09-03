@@ -55,6 +55,10 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // landing screen, and no access to the admin views above.
   { pattern: "/operator", requires: "operator", only: ["operator"] },
   { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
+  // Both broker seats, unlike the rest of this block. Running the bordereau IS
+  // the operator's job — the seat exists for it — and an admin does it too, so
+  // this is the one broker screen that is not the admin's alone.
+  { pattern: "/broker/bordereau", requires: "operator", only: ["broker_admin", "operator"] },
   // The broker staffs itself here. An operator is a seat inside that team, not
   // a manager of it, so this one is the admin's alone — the database says the
   // same thing (only a broker admin may create an operator).
@@ -99,7 +103,6 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   { pattern: "/users", requires: "carrier_admin" },
   // The one approval in the platform. Reading it is harmless, but only a
   // carrier admin can decide — the API enforces that independently.
-  { pattern: "/approvals", requires: "carrier_admin" },
   { pattern: "/users/new", requires: "carrier_admin" },
   { pattern: "/direct/setup", requires: "carrier_admin" },
   { pattern: "/direct/setups", requires: "carrier_admin" },

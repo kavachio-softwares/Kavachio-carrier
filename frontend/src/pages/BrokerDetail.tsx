@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Loader2, FileText, Layers, UserCog } from "lucide-react";
+import { ArrowLeft, Loader2, FileText, Layers, UserCog, Upload } from "lucide-react";
 import { getBroker, type BrokerDetail as Detail } from "../api/hierarchy";
 import { fmtStamp } from "../utils/date";
 import Card from "../components/ui/Card";
@@ -24,6 +24,9 @@ export default function BrokerDetail() {
   const { brokerId } = useParams();
   const [b, setB] = useState<Detail | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Which programme a new contract is for. Only asked when the broker is
+  // on more than one — see the Contracts card action.
+  const [uploadProg, setUploadProg] = useState("");
 
   const load = useCallback(() => {
     if (!brokerId) return;
@@ -49,6 +52,10 @@ export default function BrokerDetail() {
       </PageBody>
     </>
   );
+
+  // Only programmes the broker is still ON can take a new contract — a link
+  // that was taken off keeps its contracts readable but produces nothing more.
+  const live = b.programmes.filter(p => p.status === "active");
 
   return (
     <>
@@ -129,9 +136,55 @@ export default function BrokerDetail() {
           </Card>
         </div>
 
-        <Card title="Contracts">
+        <Card
+          title="Contracts"
+          action={
+            // A contract belongs to a (programme x broker) pair, and this screen
+            // is the broker across ALL their programmes — so the programme is
+            // the one thing still missing. With a single programme there is
+            // nothing to ask, so it links straight through.
+            live.length === 0 ? (
+              <span className="text-xs text-ink-muted">
+                Put them on a programme first
+              </span>
+            ) : live.length === 1 ? (
+              <Link
+                to={`/direct/setup?program_id=${live[0].id}&broker_party_id=${b.id}`}
+                className="inline-flex items-center gap-1 rounded bg-navy px-2.5 py-1 text-sm font-medium text-white hover:bg-navy-dark"
+              >
+                <Upload size={13} /> Upload contract
+              </Link>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <select
+                  className="rounded border border-border px-2 py-1 text-sm"
+                  value={uploadProg}
+                  onChange={e => setUploadProg(e.target.value)}
+                >
+                  <option value="">For which programme…</option>
+                  {live.map(pr => (
+                    <option key={pr.id} value={pr.id}>{pr.name}</option>
+                  ))}
+                </select>
+                <Link
+                  to={uploadProg
+                    ? `/direct/setup?program_id=${uploadProg}&broker_party_id=${b.id}`
+                    : "#"}
+                  aria-disabled={!uploadProg}
+                  onClick={e => { if (!uploadProg) e.preventDefault(); }}
+                  className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-sm font-medium text-white ${
+                    uploadProg ? "bg-navy hover:bg-navy-dark" : "pointer-events-none bg-navy/40"}`}
+                >
+                  <Upload size={13} /> Upload
+                </Link>
+              </div>
+            )
+          }
+        >
           {b.contracts.length === 0 ? (
-            <p className="text-sm text-ink-muted">No contracts with this broker yet.</p>
+            <p className="text-sm text-ink-muted">
+              No contracts with this broker yet.
+            </p>
           ) : (
             <table className="w-full text-sm">
               <thead>

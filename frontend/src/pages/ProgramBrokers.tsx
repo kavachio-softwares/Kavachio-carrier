@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, FileText, Plus, Layers } from "lucide-react";
+import { ArrowLeft, FileText, Plus, Layers, Upload } from "lucide-react";
 import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
 import {
@@ -21,6 +21,45 @@ import {
   type HierarchyProgramme, type BrokerSummary,
 } from "../api/hierarchy";
 import { OnboardingBadge } from "../components/OnboardingBadge";
+import { BrokerOnboarding } from "../components/BrokerOnboarding";
+import { api } from "../api/client";
+import { currentMga } from "../auth";
+
+/**
+ * One bordereau setup, as this screen needs it. `broker_party_id` NULL means a
+ * PROGRAMME-WIDE setup: it was built before the broker level existed, or built
+ * for the programme deliberately, and it covers every broker on it. That is why
+ * a broker with no setup of its own is not necessarily blocked — the resolution
+ * order here is the same one /direct/run uses.
+ */
+type Setup = {
+  id: number;
+  name: string | null;
+  status: "draft" | "active" | "superseded";
+  broker_party_id: number | null;
+  broker_name: string | null;
+  output_template_name: string | null;
+  contracts: { contract_id: number; filename: string | null }[];
+};
+
+/**
+ * The setup a given broker on this programme would actually run against.
+ *
+ * Same resolution order as /direct/run: the broker's OWN active setup first,
+ * then the programme-wide one. Getting this order wrong in the UI would be
+ * worse than showing nothing — a card reading "no setup" next to a broker who
+ * can run perfectly well would send the carrier off to build a duplicate.
+ */
+function setupFor(setups: Setup[] | null, brokerId: number):
+  { setup: Setup; heldBy: "broker" | "programme" } | null {
+  if (!setups) return null;
+  const active = setups.filter(s => s.status === "active");
+  const own = active.find(s => s.broker_party_id === brokerId);
+  if (own) return { setup: own, heldBy: "broker" };
+  const shared = active.find(s => s.broker_party_id == null);
+  if (shared) return { setup: shared, heldBy: "programme" };
+  return null;
+}
 
 export default function ProgramBrokers() {
   const { programId } = useParams();
@@ -28,6 +67,9 @@ export default function ProgramBrokers() {
   const nav = useNavigate();
 
   const [prog, setProg] = useState<HierarchyProgramme | null>(null);
+  // Every bordereau setup on this programme, fetched ONCE for the whole screen
+  // — one request per broker card would be N requests for one list.
+  const [setups, setSetups] = useState<Setup[] | null>(null);
   const [all, setAll] = useState<BrokerSummary[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -43,6 +85,16 @@ export default function ProgramBrokers() {
       })
       .catch(() => setErr("Could not load this programme."));
     getBrokers().then(setAll).catch(() => setAll([]));
+    // The bordereau setups on this programme, so each broker card can say
+    // whether that (programme × broker) pair can actually be run.
+    //
+    // /pipelines, not /direct/setup: the latter lists raw direct_format rows
+    // with no status filter, so a setup that was built but never ACTIVATED
+    // counts as done. Only an ACTIVE pipeline means runnable, which is the same
+    // thing /direct/run resolves.
+    api.get<Setup[]>("/pipelines", { params: { mga: currentMga(), program_id: pid } })
+      .then(r => setSetups(Array.isArray(r.data) ? r.data : []))
+      .catch(() => setSetups([]));
   }, [pid]);
 
   useEffect(load, [load]);
@@ -125,7 +177,11 @@ export default function ProgramBrokers() {
               disabled={addable.length === 0}
             >
               <option value="">
-                {addable.length === 0 ? "Every broker you hold is already on this programme" : "Choose a broker…"}
+                {all.length === 0
+                  ? "You have no brokers yet"
+                  : addable.length === 0
+                    ? "Every broker you hold is already on this programme"
+                    : "Choose a broker…"}
               </option>
               {addable.map(b => (
                 <option key={b.id} value={b.id}>
@@ -139,10 +195,16 @@ export default function ProgramBrokers() {
             >
               <Plus size={14} /> Add
             </button>
-            <Link to="/users/new" className="text-sm text-navy hover:underline">
-              Invite a new broker →
-            </Link>
           </div>
+          <p className="mt-2.5 text-xs text-ink-muted">
+            {all.length === 0
+              ? <>You hold no brokers yet. A broker is created by inviting its
+                  first admin, from <b className="font-medium">Brokers</b> —
+                  then it can be put on this programme.</>
+              : <>Only brokers you already hold are listed. To bring a new one on
+                  board, invite it from{" "}
+                  <b className="font-medium">Brokers</b>.</>}
+          </p>
         </Card>
 
         {prog.brokers.length === 0 ? (
@@ -157,6 +219,7 @@ export default function ProgramBrokers() {
             {prog.brokers.map(b => {
               const meta = all.find(x => x.id === b.id);
               const off = b.link_status !== "active";
+              const sx = setupFor(setups, b.id);
               return (
                 <Card key={b.id}>
                   <div className="mb-3 flex flex-wrap items-center gap-2.5">
@@ -183,12 +246,94 @@ export default function ProgramBrokers() {
                     )}
                   </div>
 
+                  {/* Where this broker has got to ON THIS PROGRAMME. Hidden once
+                      they are ready — a card with nothing outstanding should
+                      not carry a status strip. */}
+                  <BrokerOnboarding
+                    onboardingStatus={meta?.onboarding_status}
+                    onProgramme={!off}
+                    contractCount={b.contracts.length}
+                  />
+
+                  {/* THE BORDEREAU SETUP for this (programme × broker) pair.
+                      Shown on the broker card because that is the pair it
+                      belongs to — the programme-level answer ("this programme
+                      has a setup") cannot tell you whether THIS broker can run,
+                      which is the thing anyone actually needs to know.
+
+                      Only once there is a contract: a setup is built from one,
+                      so offering it earlier would be a dead end. */}
+                  {b.contracts.length > 0 && (
+                    <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded border border-border bg-surface-2/50 px-2.5 py-2 text-xs">
+                      <Layers size={12} className="shrink-0 text-ink-muted" />
+                      {sx ? (
+                        <>
+                          <Link
+                            to={`/direct/setups/${sx.setup.id}`}
+                            className="font-medium text-navy hover:underline"
+                          >
+                            {sx.setup.name ?? `Setup ${sx.setup.id}`}
+                          </Link>
+                          <span className="text-ink-muted">
+                            {sx.heldBy === "broker"
+                              ? "built for this broker"
+                              : "the programme's shared setup — every broker on it runs this"}
+                          </span>
+                          {sx.setup.output_template_name && (
+                            <span className="text-ink-soft">
+                              → {sx.setup.output_template_name}
+                            </span>
+                          )}
+                          <span className="flex-1" />
+                          {sx.heldBy === "programme" && !off && (
+                            <Link
+                              to={`/direct/setup?program_id=${prog.id}&broker_party_id=${b.id}`}
+                              className="text-navy hover:underline"
+                            >
+                              Build one just for them
+                            </Link>
+                          )}
+                        </>
+                      ) : setups === null ? (
+                        <span className="text-ink-muted">Checking bordereau setup…</span>
+                      ) : (
+                        <>
+                          <span className="text-warn">
+                            No bordereau setup — they have a contract but cannot
+                            send you files yet.
+                          </span>
+                          <span className="flex-1" />
+                          {!off && (
+                            <Link
+                              to={`/direct/setup?program_id=${prog.id}&broker_party_id=${b.id}`}
+                              className="font-medium text-navy hover:underline"
+                            >
+                              Set up bordereau →
+                            </Link>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   {/* Contracts belong to the PAIR, so they are listed under the
                       broker that produced them rather than on the programme. */}
                   {b.contracts.length === 0 ? (
-                    <p className="text-sm text-ink-muted">
-                      No contracts with this broker on this programme yet.
-                    </p>
+                    // No contract yet: this IS the next thing to do for this
+                    // broker, so it is the one prominent action on the card.
+                    <div className="flex flex-wrap items-center gap-3">
+                      <p className="text-sm text-ink-muted">
+                        No contracts with this broker on this programme yet.
+                      </p>
+                      {!off && (
+                        <Link
+                          to={`/direct/setup?program_id=${prog.id}&broker_party_id=${b.id}`}
+                          className="inline-flex items-center gap-1 rounded bg-navy px-2.5 py-1 text-sm font-medium text-white hover:bg-navy-dark"
+                        >
+                          <Upload size={13} /> Upload contract
+                        </Link>
+                      )}
+                    </div>
                   ) : (
                     <ul className="space-y-1.5">
                       {b.contracts.map(c => (
@@ -212,6 +357,21 @@ export default function ProgramBrokers() {
                           </button>
                         </li>
                       ))}
+                      {!off && (
+                        <li className="pt-1">
+                          {/* To the broker's own page, not straight into the
+                              wizard: a second contract is usually a decision
+                              about what they already hold, so it starts from
+                              seeing that — across every programme, not just
+                              this one. The upload lives there. */}
+                          <Link
+                            to={`/brokers/${b.id}`}
+                            className="inline-flex items-center gap-1 px-2 text-sm text-ink-muted hover:text-navy hover:underline"
+                          >
+                            <Plus size={13} /> Add another contract
+                          </Link>
+                        </li>
+                      )}
                     </ul>
                   )}
                 </Card>

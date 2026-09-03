@@ -43,6 +43,8 @@ from intake_routes import router as intake_router
 # Feature 10.2 — the machine-to-machine way in (/v1). API-key auth, not JWT.
 from intake_api_routes import router as intake_api_router
 from carrier_routes import router as carrier_router
+# The carrier's own business-segment list, assigned when a programme is made.
+from segment_routes import router as segment_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -104,6 +106,7 @@ app.include_router(broker_router)
 app.include_router(output_template_router)
 app.include_router(intake_router)
 app.include_router(intake_api_router)
+app.include_router(segment_router)
 
 
 def _mark_deprecated_aliases() -> None:

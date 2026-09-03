@@ -2447,6 +2447,11 @@ def pipeline_list(
     carrier_party_id: Optional[int] = None,
     program_id: Optional[int] = None,
     broker_party_id: Optional[int] = None,
+    # Narrow to the runs made against ONE contract. A bordereau is validated
+    # against a contract's rules, so this is the scope the broker's own history
+    # is read at — a broker with two contracts on one programme is answering to
+    # two different sets of rules and should not see them mixed.
+    contract_id: Optional[int] = None,
     q: Optional[str] = None,
     status: Optional[str] = None,
     page: Optional[int] = Query(None, ge=1),
@@ -2678,6 +2683,11 @@ def direct_runs(
     carrier_party_id: Optional[int] = None,
     carrier_ids: Optional[str] = None,  # comma-separated — RecentRuns.tsx's multi-select
     program_id: Optional[int] = None,
+    # Narrow to ONE broker's own submissions. The carrier never sends this (it
+    # wants the whole programme); the broker's nested route always does, because
+    # two brokers on the same programme share a setup and would otherwise read
+    # each other's run history off the same DirectFormat.
+    broker_party_id: Optional[int] = None,
     q: Optional[str] = None,
     result: Optional[str] = None,       # "clean" | "exceptions"
     date_from: Optional[str] = None,
@@ -2734,6 +2744,13 @@ def direct_runs(
             query = query.filter(DirectFormat.carrier_party_id.in_(ids))
         if program_id is not None:
             query = query.filter(DirectFormat.program_id == program_id)
+        # Filtered on the EXPORT, not the format: the format is the shared
+        # setup, while output_exports.broker_party_id is the scope the run was
+        # actually made for (stamped by _render_landing from run_scope).
+        if broker_party_id is not None:
+            query = query.filter(OutputExport.broker_party_id == broker_party_id)
+        if contract_id is not None:
+            query = query.filter(OutputExport.contract_id == contract_id)
         if result == "clean":
             query = query.filter(OutputExport.status == "clean")
         elif result == "exceptions":

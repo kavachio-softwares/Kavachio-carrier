@@ -16,8 +16,15 @@ import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
 import { addProgrammeBroker, getBrokers, type BrokerSummary } from "../api/hierarchy";
 import { OnboardingBadge } from "../components/OnboardingBadge";
+import { getSegments, addSegment, type Segment } from "../api/segments";
 
-const SEGMENTS = ["Casualty", "Property", "Specialty Property", "Marine", "Financial Lines"];
+// Segments are the CARRIER's own list now (api/segments), not a fixed five —
+// a carrier that writes Cyber or Aviation can say so. Loaded on mount; the
+// first load seeds the five this constant used to hold, so nothing a carrier
+// already selected disappears.
+// Sentinel for the dropdown's "add" option. Not a segment name, and no
+// real name can collide with it.
+const ADD_SEGMENT = "__add_segment__";
 const FREQUENCIES = ["Monthly", "Quarterly"];
 
 export default function AddProgram() {
@@ -25,10 +32,38 @@ export default function AddProgram() {
   const nav = useNavigate();
 
   const [name, setName] = useState("");
-  const [segment, setSegment] = useState(SEGMENTS[0]);
+  const [segments, setSegments] = useState<Segment[]>([]);
+  const [segment, setSegment] = useState("");
+  const [newSegment, setNewSegment] = useState("");
+  const [addingSegment, setAddingSegment] = useState(false);
+  const [creatingSegment, setCreatingSegment] = useState(false);
+  const [segErr, setSegErr] = useState("");
   const [productLine, setProductLine] = useState("");
   const [frequency, setFrequency] = useState(FREQUENCIES[0]);
   const [status, setStatus] = useState("active");
+
+  // The carrier's segments. Selecting the first keeps the form immediately
+  // valid, exactly as the hard-coded list did.
+  useEffect(() => {
+    getSegments()
+      .then(rows => { setSegments(rows); setSegment(p => p || rows[0]?.name || ""); })
+      .catch(() => setSegErr("Could not load your business segments."));
+  }, []);
+
+  async function createSegment() {
+    const name = newSegment.trim();
+    if (!name) return;
+    setAddingSegment(true); setSegErr("");
+    try {
+      const created = await addSegment(name);
+      setSegments(rows => [...rows, created]);
+      setSegment(created.name);          // pick what you just made
+      setNewSegment("");
+      setCreatingSegment(false);         // back to the dropdown, now including it
+    } catch (e: any) {
+      setSegErr(e?.response?.data?.detail ?? "Could not add that segment.");
+    } finally { setAddingSegment(false); }
+  }
 
   const [brokers, setBrokers] = useState<BrokerSummary[] | null>(null);
   const [picked, setPicked] = useState<Set<number>>(new Set());
@@ -119,10 +154,48 @@ export default function AddProgram() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
                   <label className="mb-1 block text-xs font-medium text-ink-muted">Business segment</label>
-                  <select className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
-                    value={segment} onChange={e => setSegment(e.target.value)}>
-                    {SEGMENTS.map(s => <option key={s} value={s}>{s}</option>)}
-                  </select>
+                  {/* Adding a segment is an option IN the dropdown, not a second
+                      control beside it: naming a new segment and picking an
+                      existing one are the same decision, so they share one
+                      control. Choosing "+ Add a segment…" swaps this select for
+                      the text field in place, and picking/cancelling swaps back. */}
+                  {!creatingSegment ? (
+                    <select className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
+                      value={segment}
+                      onChange={e => {
+                        if (e.target.value === ADD_SEGMENT) { setCreatingSegment(true); setSegErr(""); }
+                        else setSegment(e.target.value);
+                      }}>
+                      {segments.length === 0 && <option value="">Loading…</option>}
+                      {segments.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                      <option value={ADD_SEGMENT}>+ Add a segment…</option>
+                    </select>
+                  ) : (
+                    <div className="flex gap-1.5">
+                      <input
+                        className="min-w-0 flex-1 rounded border border-border px-2.5 py-1.5 text-sm"
+                        autoFocus placeholder="e.g. Cyber"
+                        value={newSegment}
+                        onChange={e => setNewSegment(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") { e.preventDefault(); createSegment(); }
+                          if (e.key === "Escape") { setCreatingSegment(false); setNewSegment(""); setSegErr(""); }
+                        }}
+                      />
+                      <button type="button"
+                        className="shrink-0 rounded bg-navy px-2.5 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:opacity-50"
+                        onClick={createSegment}
+                        disabled={!newSegment.trim() || addingSegment}>
+                        {addingSegment ? "Adding…" : "Add"}
+                      </button>
+                      <button type="button"
+                        className="shrink-0 rounded border border-border px-2 py-1.5 text-sm hover:border-navy"
+                        onClick={() => { setCreatingSegment(false); setNewSegment(""); setSegErr(""); }}>
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                  {segErr && <div className="mt-1 text-xs text-warn">{segErr}</div>}
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-ink-muted">Product line</label>

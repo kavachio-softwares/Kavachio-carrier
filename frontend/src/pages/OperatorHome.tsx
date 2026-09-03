@@ -12,6 +12,7 @@
  * looks like a fault.
  */
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { getOperatorHome, type OperatorHome as Home } from "../api/broker";
 
 export default function OperatorHome() {
@@ -95,9 +96,11 @@ export default function OperatorHome() {
             <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>Nothing to run yet</h3>
             <p className="muted" style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
               You are on {c.programmes === 1 ? "a programme" : `${c.programmes} programmes`} for{" "}
-              {carrierNames}, but no BDX setup has been built yet. A setup is what
-              tells Kavachio how to read your spreadsheet — your broker admin
-              builds it once per contract, and then you can process files against it.
+              {carrierNames}, but no bordereau setup has been built yet. A setup
+              is what tells Kavachio how to read your spreadsheet, and the
+              CARRIER builds it — it is what defines a valid file, so it is
+              theirs to decide. Nobody on your side can unblock this; ask your
+              carrier contact.
             </p>
           </div>
         )}
@@ -112,6 +115,9 @@ export default function OperatorHome() {
             </div>
             <div className="empty">
               No runs yet — process a bordereau and it will appear here.
+              <div style={{ marginTop: 12 }}>
+                <Link className="btn pri" to="/broker/bordereau">Process a bordereau</Link>
+              </div>
             </div>
           </div>
         )}

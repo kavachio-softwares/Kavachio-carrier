@@ -8,6 +8,7 @@
  * needs — after it, the setup and everything downstream is theirs to do.
  */
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   getBrokerContracts, getBrokerCarriers,
   type BrokerContract, type BrokerCarrier,
@@ -99,12 +100,16 @@ export default function BrokerContracts() {
               <thead>
                 <tr>
                   <th>Contract</th><th>Carrier</th><th>Programme</th>
-                  <th>Term</th><th>Source</th><th>Approval</th><th>BDX Setup</th>
+                  <th>Term</th><th>Source</th><th>Approval</th><th>Bordereau</th>
                 </tr>
               </thead>
               <tbody>
                 {shown.map(c => {
                   const a = approval(c);
+                  // A live contract is one you can actually produce against,
+                  // so the column offers the thing to DO rather than a status
+                  // word — "Not set up yet" named a screen the broker has no
+                  // access to and could do nothing about.
                   const canSetUp = c.approval_status === "approved";
                   return (
                     <tr key={c.id}>
@@ -123,7 +128,9 @@ export default function BrokerContracts() {
                         <span className={`badge ${a.cls}`}><span className="d" />{a.label}</span>
                       </td>
                       <td className={canSetUp ? "" : "muted"}>
-                        {canSetUp ? "Not set up yet" : "Locked"}
+                        {canSetUp
+                          ? <Link to="/broker/bordereau">Process bordereau →</Link>
+                          : "Locked"}
                       </td>
                     </tr>
                   );
