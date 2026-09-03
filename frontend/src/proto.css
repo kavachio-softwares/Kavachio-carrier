@@ -279,6 +279,34 @@
 .proto .linkish[aria-disabled="true"]{cursor:not-allowed}
 .proto .linkish[aria-disabled="true"]:hover{text-decoration:none}
 
+/* Link-styled BUTTONS for row actions. The table actions used to be bare
+   <span>s separated by a space, so "Switch off Collect now" read as a single
+   control and neither was reachable by keyboard. These are real buttons with a
+   visible focus ring; `.sep` is the hairline dot that divides them. */
+.proto .linkbtn{
+  appearance:none;background:none;border:0;padding:0;margin:0;font:inherit;
+  color:var(--p-primary);font-weight:600;font-size:12.5px;cursor:pointer;
+  line-height:1.3;border-radius:3px;
+}
+.proto .linkbtn:hover:not(:disabled){text-decoration:underline}
+.proto .linkbtn:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+.proto .linkbtn.mut{color:var(--p-muted)}
+.proto .linkbtn.mut:hover:not(:disabled){color:var(--p-ink)}
+.proto .linkbtn.crit{color:var(--p-crit)}
+.proto .linkbtn:disabled{color:var(--p-faint);cursor:not-allowed}
+.proto .sep{color:var(--p-border-2);font-size:12px;user-select:none}
+
+/* A minted API key: shown once, so it has to look like something you copy. */
+.proto .keybox{
+  display:flex;align-items:center;gap:10px;padding:11px 13px;
+  background:var(--p-surface-3);border:1px solid var(--p-border-2);
+  border-radius:var(--p-r-sm);
+}
+.proto .keybox code{
+  font-family:var(--p-mono);font-size:12px;word-break:break-all;flex:1;
+  color:var(--p-ink);background:none;border:0;padding:0;
+}
+
 /* info tooltip: hover/focus reveal on a small "i" icon. The trigger stays
    in-flow under .proto, but the bubble itself is portaled to document.body
    (see components/InfoTip.tsx) and positioned via fixed coordinates from the
@@ -557,4 +585,158 @@
   .proto .pm-card{transition:none}
   .proto .pm-card:hover{transform:none}
   .proto .pm-skel-line{animation:none}
+}
+
+/* ---------------------------------------------------------------------------
+   Feature 10 — intake screens (FilesArrive.tsx / FilesReceived.tsx).
+
+   Two problems these solve. On "How Files Arrive", one row per CHANNEL crammed
+   every broker into stacked cells — three addresses in one cell, three names in
+   the next — and you matched them by vertical position, so adding a broker
+   shifted everything. Here a channel is a collapsible group and each broker is
+   a card you read across. On "Files Received", two tables split by outcome put
+   held files under a heading reading "Turned away on arrival", contradicting
+   their own badge; one filtered list replaces both.
+
+   Tokens only — no new colours beyond the two soft tints already implied by
+   --p-warn / --p-crit.
+   --------------------------------------------------------------------------- */
+
+/* An amber sibling to .tile.alert, for a count that needs a decision rather
+   than a count that has already gone wrong. */
+.proto .tile.warnl{border-color:#EBD9BA}
+.proto .tile.warnl::after{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--p-warn)}
+
+.proto .faint{color:var(--p-faint)}
+
+/* ── channel groups (How Files Arrive) ─────────────────────────────────── */
+.proto .chan-grp{border-bottom:1px solid var(--p-border)}
+.proto .chan-grp:last-of-type{border-bottom:0}
+.proto .chan-hd{display:flex;align-items:center;gap:11px;width:100%;padding:13px 20px;
+  background:var(--p-surface);border:0;cursor:pointer;text-align:left;font:inherit}
+.proto .chan-hd:hover{background:var(--p-surface-2)}
+.proto .chan-hd:focus-visible{outline:2px solid var(--p-primary);outline-offset:-2px}
+/* A rotating chevron rather than a glyph, so it animates and needs no font. */
+.proto .chan-hd .caret{width:6px;height:6px;border-right:1.6px solid var(--p-faint);
+  border-bottom:1.6px solid var(--p-faint);transform:rotate(45deg);margin-top:-3px;
+  transition:transform .15s;flex:0 0 auto}
+.proto .chan-hd[aria-expanded="false"] .caret{transform:rotate(-45deg);margin-top:0}
+.proto .chan-hd .ttl{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+  font-weight:700;color:var(--p-faint)}
+.proto .chan-hd .meta{margin-left:auto;font-size:12px;color:var(--p-faint);font-weight:500;
+  text-align:right}
+
+.proto .routes{padding:0 20px 14px;display:grid;gap:9px}
+.proto .route{border:1px solid var(--p-border);border-radius:var(--p-r-sm);
+  background:var(--p-surface-2);padding:12px 14px;position:relative}
+/* A route that looks live and accepts nothing — an API route with no key. The
+   spine is the whole point: it is legible before any text is read. */
+.proto .route.needs{border-color:#EBD9BA;background:#FEFBF5}
+.proto .route.needs::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;
+  border-radius:var(--p-r-sm) 0 0 var(--p-r-sm);background:var(--p-warn)}
+.proto .route-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.proto .route-top .who{font-weight:600;font-size:13.5px}
+.proto .route-top .prog{font-size:12.5px;color:var(--p-muted)}
+/* Italic grey because "Any" is not a programme name — and for an API route it
+   means the sender has to name one on every file. */
+.proto .route-top .prog.any{color:var(--p-faint);font-style:italic}
+.proto .route-top .rt{margin-left:auto;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.proto .route-cnt{font-family:var(--p-mono);font-size:12px;color:var(--p-muted);
+  min-width:14px;text-align:right}
+/* The address is the deliverable of this screen — people are usually about to
+   paste it into an email — so it gets its own line rather than a shared cell. */
+.proto .route-addr{display:flex;align-items:center;gap:9px;margin-top:9px;padding-top:9px;
+  border-top:1px dashed var(--p-border-2)}
+.proto .route-addr code{font-family:var(--p-mono);font-size:11.5px;color:var(--p-muted);
+  word-break:break-all;flex:1}
+.proto .route-sub{font-size:11.5px;color:var(--p-faint);margin-top:7px}
+.proto .unbuilt{padding:13px 20px;display:flex;align-items:center;gap:11px;flex-wrap:wrap;
+  background:var(--p-surface-2);font-size:12.5px;color:var(--p-faint);
+  border-top:1px solid var(--p-border)}
+.proto .unbuilt .ttl{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:700}
+
+/* ── filter bar + one queue (Files Received) ───────────────────────────── */
+.proto .filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.proto .chip{appearance:none;font:inherit;display:inline-flex;align-items:center;gap:7px;
+  padding:6px 13px;border-radius:var(--p-r-pill);font-size:12.5px;font-weight:600;
+  border:1px solid var(--p-border-2);background:var(--p-surface);color:var(--p-muted);
+  cursor:pointer;transition:.12s}
+.proto .chip:hover{border-color:var(--p-faint);color:var(--p-ink)}
+.proto .chip:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+.proto .chip .n{font-family:var(--p-mono);font-size:11px;opacity:.75}
+/* The selected chip fills with its OWN colour, so the filter you are in is the
+   same colour as the rows it leaves on screen. */
+.proto .chip[aria-pressed="true"]{background:var(--p-primary);border-color:var(--p-primary);color:#fff}
+.proto .chip[aria-pressed="true"] .n{opacity:.9}
+.proto .chip.warnc[aria-pressed="true"]{background:var(--p-warn);border-color:var(--p-warn)}
+.proto .chip.critc[aria-pressed="true"]{background:var(--p-crit);border-color:var(--p-crit)}
+.proto .filters .spacer{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.proto .sel{appearance:none;font:inherit;font-size:12.5px;padding:6px 26px 6px 11px;
+  border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);background:var(--p-surface);
+  color:var(--p-muted);cursor:pointer;
+  background-image:linear-gradient(45deg,transparent 50%,var(--p-faint) 50%),
+                   linear-gradient(135deg,var(--p-faint) 50%,transparent 50%);
+  background-position:calc(100% - 13px) 13px,calc(100% - 9px) 13px;
+  background-size:4px 4px,4px 4px;background-repeat:no-repeat}
+.proto .sel:focus-visible{outline:2px solid var(--p-primary);outline-offset:1px}
+
+/* State as a 3px spine on the first cell, so the shape of a day reads before
+   any word is read. */
+.proto tr.arow{cursor:pointer;transition:background .1s}
+.proto tr.arow:hover{background:var(--p-surface-3)}
+.proto tr.arow:focus-visible{outline:2px solid var(--p-primary);outline-offset:-2px}
+.proto tr.arow td:first-child{position:relative;padding-left:19px}
+.proto tr.arow td:first-child::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px}
+.proto tr.arow.held td:first-child::before{background:var(--p-warn)}
+.proto tr.arow.away td:first-child::before{background:var(--p-crit)}
+.proto tr.arow.held{background:#FEFCF7}
+.proto tr.arow.away{background:#FEF9FA}
+.proto .fname{font-weight:600;font-size:13px;word-break:break-all}
+.proto .rowacts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:7px}
+
+/* ── the row drawer ────────────────────────────────────────────────────── */
+/* "Why was my file refused?" is the most common support question, and the
+   answer was one truncated line in a table cell. */
+.proto .scrim{position:fixed;inset:0;background:rgba(14,19,32,.42);opacity:0;
+  pointer-events:none;transition:opacity .18s;z-index:40}
+.proto .scrim.on{opacity:1;pointer-events:auto}
+.proto .drawer{position:fixed;top:0;right:0;bottom:0;width:min(460px,92vw);z-index:41;
+  background:var(--p-surface);border-left:1px solid var(--p-border);
+  box-shadow:-16px 0 44px -20px rgba(14,19,32,.4);
+  transform:translateX(100%);transition:transform .2s cubic-bezier(.2,.7,.3,1);
+  display:flex;flex-direction:column}
+.proto .drawer.on{transform:none}
+.proto .drawer-h{padding:18px 20px;border-bottom:1px solid var(--p-border);
+  display:flex;align-items:flex-start;gap:12px}
+.proto .drawer-h h4{margin:0 0 4px;font-size:15px;font-weight:600;word-break:break-all}
+.proto .drawer-h .ref{font-family:var(--p-mono);font-size:11px;color:var(--p-faint)}
+.proto .drawer-b{padding:18px 20px;overflow-y:auto;flex:1}
+.proto .drawer-f{padding:14px 20px;border-top:1px solid var(--p-border);display:flex;
+  gap:9px;flex-wrap:wrap;background:var(--p-surface-2)}
+.proto .closeb{margin-left:auto;appearance:none;background:none;border:0;font-size:20px;
+  line-height:1;color:var(--p-faint);cursor:pointer;padding:0 2px}
+.proto .closeb:hover{color:var(--p-ink)}
+.proto .closeb:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+
+.proto .checks{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:2px}
+.proto .checks li{display:grid;grid-template-columns:20px 1fr;gap:9px;align-items:start;
+  font-size:12.5px;padding:7px 8px;border-radius:var(--p-r-xs)}
+.proto .checks li .m{font-size:12px;line-height:1.5;text-align:center}
+.proto .checks li.pass .m{color:var(--p-ok)}
+.proto .checks li.fail{background:var(--p-warn-soft)}
+.proto .checks li.fail .m{color:var(--p-warn)}
+.proto .checks li.fail .t{color:var(--p-warn-ink);font-weight:600}
+.proto .checks li.stop{background:var(--p-crit-soft)}
+.proto .checks li.stop .m{color:var(--p-crit)}
+.proto .checks li.stop .t{color:var(--p-crit-ink);font-weight:600}
+/* The checks run in order and stop at the first failure, so the ones after it
+   genuinely never ran. Showing them as ticks would be a lie. */
+.proto .checks li.skip{color:var(--p-faint)}
+.proto .checks li.skip .m{color:var(--p-border-2)}
+.proto .checks li .why{display:block;color:var(--p-muted);font-size:11.5px;margin-top:2px}
+.proto .sub-h{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:700;
+  color:var(--p-faint);margin:18px 0 2px}
+
+@media (prefers-reduced-motion:reduce){
+  .proto .drawer,.proto .scrim,.proto .chan-hd .caret,.proto .chip,.proto tr.arow{transition:none}
 }

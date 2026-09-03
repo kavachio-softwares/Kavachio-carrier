@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, Handshake,
+  FileCheck, Handshake, Server, Inbox,
 } from "lucide-react";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
@@ -72,6 +72,10 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       { to: "/brokers", label: "Brokers", icon: Handshake },
       { to: "/parties", label: "All Carriers", icon: Users2 },
       { to: "/direct/setups", label: "Bordereau Setups", icon: Layers },
+      // Set up once when a broker is onboarded, then rarely touched — which
+      // is why the ways in sit under Configure and not in the monthly run.
+      { to: "/intake", label: "How Files Arrive", icon: Server },
+      { to: "/intake/arrivals", label: "Files Received", icon: Inbox },
     ],
   },
   {

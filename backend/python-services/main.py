@@ -37,6 +37,10 @@ from validation_routes import router as validation_router
 from direct_routes import router as direct_router
 from hierarchy_routes import router as hierarchy_router
 from broker_routes import router as broker_router
+# Feature 10 — file intake channels ("How Files Arrive" / "Files Received").
+from intake_routes import router as intake_router
+# Feature 10.2 — the machine-to-machine way in (/v1). API-key auth, not JWT.
+from intake_api_routes import router as intake_api_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -84,12 +88,25 @@ app.include_router(validation_router)
 app.include_router(direct_router)
 app.include_router(hierarchy_router)
 app.include_router(broker_router)
+app.include_router(intake_router)
+app.include_router(intake_api_router)
 
 # C-9 — daily background sweep: create overdue / due-soon reminder events even
 # when nobody opens the calendar. In-process (asyncio), idempotent, off the event
 # loop; opt-out via SWEEP_SCHEDULER_ENABLED=0. See sweep_scheduler.py.
 import sweep_scheduler  # noqa: E402
 sweep_scheduler.start(app)
+
+# 10.1 — SFTP collector. Looks in each broker's folder every few minutes. OFF
+# unless SFTP_POLLER_ENABLED=1, so nothing changes until it is turned on.
+import sftp_poller  # noqa: E402
+sftp_poller.start(app)
+
+# 10.3 — email collector. Reads the intake mailbox every few minutes. OFF unless
+# EMAIL_POLLER_ENABLED=1 *and* a mailbox is configured, so a deployment with no
+# IMAP settings behaves exactly as it did before.
+import email_poller  # noqa: E402
+email_poller.start(app)
 
 
 # --- DB audit middleware ---------------------------------------------------

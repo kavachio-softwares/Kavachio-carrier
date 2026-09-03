@@ -37,6 +37,9 @@ import RuleLibrary from "./pages/RuleLibrary";
 import RuleForm from "./pages/RuleForm";
 import RecentRuns from "./pages/RecentRuns";
 import Calendar from "./pages/Calendar";
+// Feature 10 — file intake channels.
+import FilesArrive from "./pages/FilesArrive";
+import FilesReceived from "./pages/FilesReceived";
 import AddUser from "./pages/AddUser";
 import Profile from "./pages/Profile";
 import Welcome from "./pages/Welcome";
@@ -151,6 +154,9 @@ export default function App() {
         <Route path="/rule-library/:id/edit" element={<RuleForm />} />
         <Route path="/runs" element={<RecentRuns />} />
         <Route path="/calendar" element={<Calendar />} />
+        {/* How a broker's file reaches you, and everything that has landed. */}
+        <Route path="/intake" element={<FilesArrive />} />
+        <Route path="/intake/arrivals" element={<FilesReceived />} />
         <Route path="/users/new" element={<AddUser />} />
         <Route path="/profile" element={<Profile />} />
       </Route>

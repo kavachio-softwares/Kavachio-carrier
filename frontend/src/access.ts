@@ -82,6 +82,10 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   { pattern: "/uploads/:uploadId/exceptions/rule/:ruleId", requires: "carrier_admin" },
   { pattern: "/runs", requires: "carrier_admin" },
   { pattern: "/calendar", requires: "carrier_admin" },
+  // How files reach this carrier, and everything that has landed. Carrier-only:
+  // the routes name the carrier's brokers and their folder addresses.
+  { pattern: "/intake", requires: "carrier_admin" },
+  { pattern: "/intake/arrivals", requires: "carrier_admin" },
   { pattern: "/tenants", requires: "kavachio_admin" },
   { pattern: "/tenants/new", requires: "kavachio_admin" },
   { pattern: "/tenants/:mga", requires: "kavachio_admin" },

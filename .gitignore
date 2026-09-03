@@ -30,3 +30,5 @@ ai_call_trace/
 
 # graphify knowledge-graph output (regenerated locally, no API cost)
 graphify-out/
+# SFTP intake landing zone (local dev). Broker files, never committed.
+backend/python-services/sftp-root/
