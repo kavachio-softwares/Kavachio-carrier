@@ -73,6 +73,7 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   { pattern: "/programs/new", requires: "carrier_admin" },
   { pattern: "/programs/:programId/brokers", requires: "carrier_admin" },
   { pattern: "/programs/:programId/contracts/:contractId", requires: "carrier_admin" },
+  { pattern: "/brokers", requires: "carrier_admin" },
   { pattern: "/brokers/:brokerId", requires: "carrier_admin" },
   { pattern: "/outputs", requires: "carrier_admin" },
   { pattern: "/outputs/new-template", requires: "carrier_admin" },

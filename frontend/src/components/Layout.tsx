@@ -67,10 +67,17 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
   {
     title: "Configure",
     requires: "carrier_admin",
+    // Ordered as the work actually happens: a programme is created, brokers
+    // are put on it, and each (programme × broker) pair then gets its
+    // bordereau setup. Reading the section top to bottom IS the flow.
     items: [
       { to: "/programs", label: "Programmes", icon: Layers },
-      { to: "/parties", label: "All Carriers", icon: Users2 },
-      { to: "/direct/setups", label: "Bordereau Setups", icon: Layers },
+      // Brokers, not carriers. Kavachio creates carriers (Platform → Carriers)
+      // and this tenant IS one — what a carrier manages is the brokers that
+      // produce into its programmes. The old "All Carriers" entry pointed at
+      // /parties, a leftover from when a tenant was an MGA that held carriers.
+      { to: "/brokers", label: "Brokers", icon: Users2 },
+      { to: "/direct/setups", label: "Bordereau Setup", icon: Layers },
       // Set up once when a broker is onboarded, then rarely touched — which
       // is why the ways in sit under Configure and not in the monthly run.
       //
@@ -132,14 +139,15 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Programmes now own their own sub-screens (create, and a programme's
   // brokers), so they highlight Programmes rather than the old party directory.
   if (under("/programs")) return "/programs";
-  // A broker's page has no nav entry of its own any more: brokers are created
-  // on Users & Roles and opened from the programme they sit on.
-  if (under("/brokers")) return "/programs";
+  // Brokers have their own entry again, so a broker's page highlights it
+  // rather than borrowing the programme's.
+  if (under("/brokers")) return "/brokers";
   // An output template is part of a Bordereau Setup, and that is where the user
-  // came from — highlighting "All Carriers" while they review a template they
+  // came from — highlighting anything else while they review a template they
   // opened from the setup screen makes the sidebar lie about where they are.
-  if (pathname.startsWith("/outputs/templates")) return "/direct/setups";
-  if (under("/outputs")) return "/parties";
+  // The whole /outputs area belongs to that setup: /parties is no longer in the
+  // sidebar, so pointing at it would highlight nothing at all.
+  if (under("/outputs")) return "/direct/setups";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";

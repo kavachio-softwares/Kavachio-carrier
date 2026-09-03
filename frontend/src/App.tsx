@@ -50,6 +50,7 @@ import {
 } from "./auth";
 import { canAccessPath, landingPath } from "./access";
 import BrokerDetail from "./pages/BrokerDetail";
+import Brokers from "./pages/Brokers";
 import Approvals from "./pages/Approvals";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -124,6 +125,7 @@ export default function App() {
         <Route path="/programs" element={<Programs />} />
         {/* The carrier hierarchy: brokers are reached from the carrier, not
             from a tenant — the same broker produces for several carriers. */}
+        <Route path="/brokers" element={<Brokers />} />
         <Route path="/brokers/:brokerId" element={<BrokerDetail />} />
         <Route path="/approvals" element={<Approvals />} />
         {/* Carrier-scoped oversight dashboard. Without ?carrier= it renders its
