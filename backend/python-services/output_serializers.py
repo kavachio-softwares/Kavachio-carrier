@@ -22,6 +22,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import zipfile
 from datetime import date, datetime
 from decimal import Decimal
@@ -65,6 +66,38 @@ def content_type_for_filename(filename: str | None) -> str:
     return _CONTENT_TYPES[".xlsx"]
 
 
+def safe_filename(name: str, fallback: str = "export") -> str:
+    """A download name that survives being mailed, zipped and re-opened.
+
+    Template names read well on screen — "Carrier 1 — Programme A — Bridge
+    Brokers" — and badly as filenames: the em-dash is non-ASCII, and a file
+    called ``Carrier_1_—_Programme_A.xlsx`` renders differently (or not at all)
+    depending on where it lands. Dashes and slashes become plain hyphens,
+    everything else unprintable is dropped, and runs of separators collapse.
+    The name is still recognisable — that is the point of doing this rather than
+    slugging it down to ``carrier_1_programme_a``.
+    """
+    import unicodedata
+    # Decompose accents to their ASCII base ("Zürich" -> "Zurich") rather than
+    # deleting the letter.
+    text = unicodedata.normalize("NFKD", str(name or ""))
+    # Non-ASCII that has no ASCII base — the em-dash in "Carrier 1 — Programme A"
+    # among them — is dropped here, leaving the spaces around it to collapse
+    # into the single separator below. That is deliberate: "Carrier_1_Programme_A"
+    # reads better than "Carrier_1_-_Programme_A".
+    text = text.encode("ascii", "ignore").decode("ascii")
+    out = []
+    for ch in text:
+        if ch.isalnum() or ch in "-_.()[]":
+            out.append(ch)
+        elif ch in " \t/\\":
+            out.append("_")
+    cleaned = "".join(out)
+    cleaned = re.sub(r"_{2,}", "_", cleaned)
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("_-. ")
+    return cleaned or fallback
+
+
 def ensure_extension(name: str, ext: str) -> str:
     """Give ``name`` the extension ``ext``, replacing any known data extension."""
     lower = name.lower()
@@ -105,11 +138,17 @@ def _text_value(val: Any) -> str:
 
 # --- serializers ------------------------------------------------------------
 
+def _headers(sheet: dict) -> list[str]:
+    """What the file calls each column. Falls back to the keys for any caller
+    that still passes the old single-list shape."""
+    return sheet.get("headers") or sheet.get("columns") or []
+
+
 def _sheet_csv_bytes(sheet: dict) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf)
     cols = sheet.get("columns") or []
-    writer.writerow(cols)
+    writer.writerow(_headers(sheet))
     for row in sheet.get("rows") or []:
         writer.writerow([_text_value(row.get(c)) for c in cols])
     return buf.getvalue().encode("utf-8")
@@ -143,8 +182,9 @@ def _to_json(sheets: list[dict]) -> bytes:
     obj: dict[str, list[dict]] = {}
     for sheet in sheets:
         cols = sheet.get("columns") or []
+        heads = _headers(sheet)
         obj[str(sheet.get("sheet_name", ""))] = [
-            {c: _json_value(row.get(c)) for c in cols}
+            {h: _json_value(row.get(c)) for c, h in zip(cols, heads)}
             for row in (sheet.get("rows") or [])
         ]
     return json.dumps(obj, indent=2, ensure_ascii=False).encode("utf-8")
@@ -154,14 +194,17 @@ def _to_xml(sheets: list[dict]) -> bytes:
     parts = ['<?xml version="1.0" encoding="UTF-8"?>', "<workbook>"]
     for sheet in sheets:
         cols = sheet.get("columns") or []
+        heads = _headers(sheet)
         parts.append(f'  <sheet name="{escape(str(sheet.get("sheet_name", "")), {chr(34): "&quot;"})}">')
         for row in (sheet.get("rows") or []):
             parts.append("    <row>")
-            for c in cols:
+            for c, h in zip(cols, heads):
                 # Column names can contain spaces/symbols, so carry them as a
-                # `name` attribute rather than risk an invalid XML tag name.
+                # `name` attribute rather than risk an invalid XML tag name. The
+                # attribute is the column's NAME IN THE FILE, so a renamed field
+                # reads the same here as it does in the xlsx and the csv.
                 parts.append(
-                    f'      <cell name="{escape(str(c), {chr(34): "&quot;"})}">'
+                    f'      <cell name="{escape(str(h), {chr(34): "&quot;"})}">'
                     f"{escape(_text_value(row.get(c)))}</cell>"
                 )
             parts.append("    </row>")
@@ -188,12 +231,22 @@ def serialize(sheets: list[dict], fmt: str) -> bytes:
 
 # --- adapters from each lane's row model to the neutral shape ---------------
 
-def _structure_columns(structure: dict, sheet_name: str) -> list[str]:
+def _structure_columns(structure: dict, sheet_name: str) -> tuple[list[str], list[str]]:
+    """(row keys, header texts) for one sheet.
+
+    They used to be one list, which was fine while a column's heading and the
+    key its values are stored under were always the same string. Renaming a
+    field separates them: the file shows the new heading, the rows are still
+    keyed by the original. Only the fields still switched on are returned, in
+    the order the user arranged them — the same rule the xlsx writer follows,
+    so a CSV and an XLSX of one template can never disagree.
+    """
+    from output_template_fields import active_columns, header_of
     for sh in structure.get("sheets", []):
         if sh.get("sheet_name") == sheet_name:
-            cols = sorted(sh.get("columns", []), key=lambda c: c.get("column_index", 0))
-            return [c.get("column_name") for c in cols if c.get("column_name")]
-    return []
+            cols = [c for c in active_columns(sh) if c.get("column_name")]
+            return ([c["column_name"] for c in cols], [header_of(c) for c in cols])
+    return ([], [])
 
 
 def sheets_from_blocks(structure: dict, blocks: list[dict]) -> list[dict]:
@@ -201,9 +254,9 @@ def sheets_from_blocks(structure: dict, blocks: list[dict]) -> list[dict]:
     out: list[dict] = []
     for block in blocks:
         name = block.get("sheet", "")
+        keys, heads = _structure_columns(structure, name)
         out.append({
-            "sheet_name": name,
-            "columns": _structure_columns(structure, name),
+            "sheet_name": name, "columns": keys, "headers": heads,
             "rows": block.get("records") or [],
         })
     return out
@@ -217,9 +270,9 @@ def sheets_from_projected(structure: dict, projected: dict[str, list[dict]]) -> 
     out: list[dict] = []
     for sh in structure.get("sheets", []):
         name = sh.get("sheet_name", "")
+        keys, heads = _structure_columns(structure, name)
         out.append({
-            "sheet_name": name,
-            "columns": _structure_columns(structure, name),
+            "sheet_name": name, "columns": keys, "headers": heads,
             "rows": projected.get(name) or [],
         })
     return out

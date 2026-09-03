@@ -14,7 +14,7 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
 type SetupContract = { contract_id: number; sheet_key: string | null; filename: string | null };
 type Setup = {
-  id: number; name: string | null;
+  id: number; name: string | null; broker_name: string | null;
   carrier_party_id: number | null; carrier_name: string | null;
   program_id: number | null; program_name: string | null;
   input_format_name: string | null; output_template_name: string | null;
@@ -185,6 +185,7 @@ export default function BordereauSetups() {
                   <tr>
                     <th className="py-[11px] px-4 text-[10.5px] tracking-[.5px] uppercase text-[#8B93A2] font-bold border-b border-[#E5E8EE] bg-[#F7F8FB]">Carrier</th>
                     <th className="py-[11px] px-4 text-[10.5px] tracking-[.5px] uppercase text-[#8B93A2] font-bold border-b border-[#E5E8EE] bg-[#F7F8FB]">Program</th>
+                    <th className="py-[11px] px-4 text-[10.5px] tracking-[.5px] uppercase text-[#8B93A2] font-bold border-b border-[#E5E8EE] bg-[#F7F8FB]">Broker</th>
                     <th className="py-[11px] px-4 text-[10.5px] tracking-[.5px] uppercase text-[#8B93A2] font-bold border-b border-[#E5E8EE] bg-[#F7F8FB]">Status</th>
                     <th className="py-[11px] px-4 text-[10.5px] tracking-[.5px] uppercase text-[#8B93A2] font-bold border-b border-[#E5E8EE] bg-[#F7F8FB]">Modified</th>
                     <th className="py-[11px] px-4 text-[10.5px] tracking-[.5px] uppercase text-[#8B93A2] font-bold border-b border-[#E5E8EE] bg-[#F7F8FB]">Actions</th>
@@ -193,11 +194,13 @@ export default function BordereauSetups() {
                 <tbody>
                   {pageRows.map(r => {
                     const sb = statusBadge(r.status);
+                    console.log('hello', r.carrier_name, r.program_name, r.status, r.broker_name);
                     return (
                     <tr key={r.id} className="group">
                       <td className="py-[13px] px-4 align-middle font-medium text-[#0E1320] border-b border-[#E5E8EE] group-last:border-b-0">{r.carrier_name ?? "—"}</td>
                       <td className="py-[13px] px-4 align-middle border-b border-[#E5E8EE] group-last:border-b-0">{r.program_name ?? "—"}</td>
-                      <td className="py-[13px] px-4 align-middle border-b border-[#E5E8EE] group-last:border-b-0">
+                      <td className="py-[13px] px-4 align-middle border-b border-[#E5E8EE] group-last:border-b-0">{r.broker_name ?? "—"}</td>
+                       <td className="py-[13px] px-4 align-middle border-b border-[#E5E8EE] group-last:border-b-0">
                         <span className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-2.5 py-[3px] rounded-full ${sb.bg} ${sb.text}`}>
                           <span className={`w-1.5 h-1.5 rounded-full ${sb.dot}`} />
                           {STATUS_LABEL[r.status] ?? r.status}

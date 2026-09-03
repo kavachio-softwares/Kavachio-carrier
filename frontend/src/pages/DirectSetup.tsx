@@ -1,9 +1,9 @@
 import { useMemo, useState, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, FileSpreadsheet, ShieldCheck, FileUp, FileText,
   FileSpreadsheet as FileOut, FileWarning, UploadCloud, ShieldAlert, ArrowRight,
-  Save, Trash2,
+  Save, Trash2, Sparkles,
 } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga, isTenantAdmin } from "../auth";
@@ -17,6 +17,14 @@ import { LoadingOverlay } from "../components/Busy";
 import { MissingColumnsList, UnmappedClausesList } from "../components/MissingColumnsNote";
 import { errText, MissingColumnsResp, ProgramContractRow, newUploadToken,
          pickRecoveredContract } from "../utils/directSetup";
+import CreateOutputTemplate from "../components/CreateOutputTemplate";
+import { SHOW_BDX_TEMPLATE_BUILDER } from "../featureFlags";
+import OutputTemplateState from "../components/OutputTemplateState";
+import MappingReview, { type MappingReviewData } from "../components/MappingReview";
+import {
+  BoundContracts, BrokerSelect, useBrokerContractScope,
+} from "../components/BrokerContractScope";
+import { resolveOutputTemplate, type ResolveResult } from "../api/outputTemplate";
 
 // ---- types -----------------------------------------------------------------
 type Party = { id: number; legal_name: string; is_active?: boolean };
@@ -30,6 +38,8 @@ type RouteT = { output_sheet: string; sources: { input_sheet: string }[]; filter
 type Routing = { version: number; mode: string; confidence: string; routes: RouteT[] };
 type UploadResp = {
   landing_id: number; format_id: number; known_format: boolean;
+  /** How each output column got its source — see MappingReview. */
+  mapping_review?: MappingReviewData | null;
   input_sheets: string[]; output_sheets: string[];
   input_columns: Record<string, string[]>;
   sheet_routing: Routing;
@@ -150,6 +160,30 @@ export default function DirectSetup() {
   const [suppCurrentName, setSuppCurrentName] = useState<string | null>(null);
   const [savingSupp, setSavingSupp] = useState(false);
 
+  // The broker and contract this setup is for. Optional at every step: a
+  // programme with no brokers on it, and every setup built before the broker
+  // level existed, simply leaves them blank.
+  const scope = useBrokerContractScope(programId);
+  // The output template already agreed for the scope on screen, if any —
+  // together with HOW SPECIFIC the match was, so the user is told when they are
+  // looking at the programme's template rather than this contract's.
+  const [resolved, setResolved] = useState<ResolveResult | null>(null);
+  const [resolving, setResolving] = useState(false);
+  // Bumped after a template is created so the scope is re-resolved from the
+  // server rather than patched up locally.
+  const [resolveTick, setResolveTick] = useState(0);
+  const [showCreateTemplate, setShowCreateTemplate] = useState(false);
+  // The template this session just made. Held so the screen can hand the user
+  // the one link that matters next — the full column list, with any required
+  // column that has nothing to fill it named there rather than in the dialog
+  // they have already closed.
+  const [justCreated, setJustCreated] = useState<{ id: number; name: string } | null>(null);
+  // "Create Output BDX Template" needs both sides of the job in front of it —
+  // the bordereau to see what can be filled, the contract to see what must be
+  // reported. When one is missing this names it instead of opening a dialog
+  // that could only produce a worse answer.
+  const [createGate, setCreateGate] = useState<string[] | null>(null);
+
   // the three uploads
   const [outFile, setOutFile] = useState<File | null>(null);
   // Contracts to upload on Build (REQUIRED, one or more). When more than one,
@@ -225,6 +259,9 @@ export default function DirectSetup() {
     inputSheets: number; outputSheets: number; contracts: number;
     rules: number; fieldsWithRules: number; totalFields: number;
     sheetsBoundToContract: number; deferredCount: number;
+    // How each output column got its source. Shown here because a required
+    // column with no source is invisible until the file is opened.
+    mappingReview: MappingReviewData | null;
     // Columns the contract expects that the uploaded bordereau doesn't carry —
     // checked once at the end of the build and stored, so this modal and the
     // setup's own page show the same finding. null = the check didn't run
@@ -268,6 +305,39 @@ export default function DirectSetup() {
       })
       .catch(() => setPrograms([]));
   }, [mga]);
+
+  // Arriving from Process Bordereau with a selection already made. The screen
+  // that sent the user here knows the carrier, the programme and the broker —
+  // asking for them again would be asking a question that has been answered.
+  // Applied once the programme list is in (a programme cannot be selected
+  // before it is listed), and only while nothing has been picked by hand.
+  const [params, setParams] = useSearchParams();
+  useEffect(() => {
+    if (!programs.length) return;
+    const wanted = Number(params.get("program_id") || 0);
+    if (!wanted || !programs.some(p => p.id === wanted)) return;
+    setProgramId(prev => (prev === "" ? wanted : prev));
+    // Consumed: a reload, or a later change of programme, must not snap the
+    // selection back to where the link pointed.
+    const next = new URLSearchParams(params);
+    next.delete("program_id");
+    next.delete("carrier_party_id");
+    setParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [programs]);
+
+  // The broker too, once the programme's broker list has arrived. Separate
+  // because the list only loads after the programme is chosen, and a broker
+  // cannot be selected before it is there.
+  useEffect(() => {
+    const wanted = Number(params.get("broker_party_id") || 0);
+    if (!wanted || !scope.brokers.some(b => b.id === wanted)) return;
+    if (scope.brokerPartyId === "") scope.setBrokerPartyId(wanted);
+    const next = new URLSearchParams(params);
+    next.delete("broker_party_id");
+    setParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope.brokers]);
   // Reset the mapping editor AND everything staged for a build (used when the
   // scope changes or a setup is deleted). The staged files belong to the scope
   // they were picked under — carrying a BDX/contract/template upload over to a
@@ -315,6 +385,26 @@ export default function DirectSetup() {
   // this scope's saved setup automatically.
   useEffect(() => { resetEditor(); refreshExisting({ autoLoad: true }); }, [programId]);
 
+  // Which output template the four levels currently point at. Re-run on every
+  // scope change so the answer on screen always describes what is selected, and
+  // again whenever a template is created — the server's answer, never a guess
+  // assembled here, because it also reports which SETUP would run.
+  useEffect(() => {
+    if (programId === "") { setResolved(null); return; }
+    let stale = false;
+    setResolving(true);
+    resolveOutputTemplate(mga, {
+      program_id: Number(programId),
+      carrier_party_id: carrierId === "" ? null : Number(carrierId),
+      broker_party_id: scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId),
+      contract_id: scope.contractId === "" ? null : Number(scope.contractId),
+    })
+      .then(r => { if (!stale) setResolved(r); })
+      .catch(() => { if (!stale) setResolved(null); })
+      .finally(() => { if (!stale) setResolving(false); });
+    return () => { stale = true; };
+  }, [mga, programId, carrierId, scope.brokerPartyId, scope.contractId, resolveTick]);
+
   // Load saved per-schedule contract bindings whenever the active format changes.
   useEffect(() => {
     const fid = up?.format_id;
@@ -358,7 +448,23 @@ export default function DirectSetup() {
   // The uploads are all scoped to a (carrier, program) pair — nothing picked
   // yet means there's nowhere for a file to attach to, so every drop zone
   // stays disabled until both are selected.
-  const scopeIncomplete = programId === "";
+  // Nothing can be uploaded until the scope is real. A programme is not a
+  // production relationship on its own — a bordereau arrives FROM a broker,
+  // under a contract the carrier approved — so until a broker has been put on
+  // the programme there is nobody for this setup to be for, and every upload
+  // box stays shut with the reason said out loud rather than accepting files
+  // into a scope that cannot be finished.
+  //
+  // `hasBrokers === null` means the answer has not arrived yet; the boxes stay
+  // shut for that moment too rather than flickering open and closed.
+  //
+  // ONE CARVE-OUT: a programme that already has a saved setup keeps working.
+  // Those were built before the broker level existed, and locking their owner
+  // out of editing them would be a worse fault than the one this prevents.
+  const noBrokerYet = programId !== "" && scope.hasBrokers === false
+    && pipelines.length === 0;
+  const scopeIncomplete =
+    programId === "" || (scope.hasBrokers !== true && pipelines.length === 0);
 
   // ---- inline create of carrier / program ---------------------------------
   async function createProgram() {
@@ -486,10 +592,38 @@ export default function DirectSetup() {
     setSel(prev => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n; });
   }
 
+  // What the template builder still needs. An input format already saved on
+  // the loaded setup counts as the input side; a contract already approved for
+  // the scope counts as the contract side — neither has to be re-uploaded.
+  function missingForCreate(): string[] {
+    const missing: string[] = [];
+    if (!inputFile && !up?.format_id) missing.push("the input template");
+    if (contractFiles.length === 0 && scope.boundContracts.length === 0)
+      missing.push("the contract");
+    return missing;
+  }
+
+  function openCreateTemplate() {
+    const missing = missingForCreate();
+    if (missing.length) { setCreateGate(missing); return; }
+    setErr(null);
+    setShowCreateTemplate(true);
+  }
+
   // ---- build setup from the uploads ----------------------------------------
   async function buildSetup() {
-    if (carrierId === "" || programId === "" || !outFile || !inputFile || contractFiles.length === 0) {
-      setErr("Pick carrier & program, an output + input file, and at least one contract."); return;
+    // The output template no longer has to be an uploaded file: one created
+    // from a reporting standard or from the contract counts too, and when the
+    // scope already resolves to one there is nothing to upload at all.
+    const existingTemplateId = resolved?.template?.id ?? 0;
+    if (carrierId === "" || programId === "" || !inputFile || contractFiles.length === 0) {
+      setErr("Pick a program, an input file and at least one contract."); return;
+    }
+    // No output template, and none uploaded? Offer the two ways to make one
+    // rather than refusing — this is the fork in the road, not an error.
+    if (!outFile && !existingTemplateId) {
+      openCreateTemplate();
+      return;
     }
     if (outputSheetOpts && outputSheetSel.size === 0) {
       setErr("Select at least one output sheet to include."); return;
@@ -500,6 +634,13 @@ export default function DirectSetup() {
     setBuilding(true); setErr(null); setMsg(null); setUp(null); setRefsHalt(null); setSheetReview(null);
     // setBuildInfoOpen(true);  // build-info popup disabled — see the commented modal below
     try {
+      if (!outFile) {
+        // The scope already has a template — one created from a reporting
+        // standard or from the contract. Nothing to create, so go straight to
+        // contracts + mapping against it.
+        await buildContracts(existingTemplateId);
+        return;
+      }
       // 1) Output template. Creating it runs the AI header classifier that tags
       // each tab data vs reference (lookup). We PAUSE here and let the user review
       // that split before any rules are generated — the modal drives step 2 + 3.
@@ -809,6 +950,7 @@ export default function DirectSetup() {
       totalFields: of.data.fields.length,
       sheetsBoundToContract: nMapped, deferredCount: missing.length,
       missing: missingCols,
+      mappingReview: u.data.mapping_review ?? null,
     });
   }
 
@@ -891,6 +1033,9 @@ export default function DirectSetup() {
     }
     const { data } = await api.post<{ id: number }>(`/pipelines`, {
       name: setupName, carrier_party_id: carrierId, program_id: programId,
+      // Null when no broker was picked — which is what every setup built
+      // before this looked like, so nothing existing changes.
+      broker_party_id: scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId),
       input_format_id: fid, output_template_id: tid, contracts,
     }, { params: { mga } });
     return data.id;
@@ -1031,6 +1176,15 @@ export default function DirectSetup() {
                 </div>
               </div>
             </div>
+            {/* The mapping ladder's verdict. A required output column with no
+                confident source will be EMPTY in the delivered file, so it is
+                said here rather than found later. */}
+            {buildSummary.mappingReview && (
+              <div className="mt-4 text-left">
+                <MappingReview review={buildSummary.mappingReview} compact />
+              </div>
+            )}
+
             {buildSummary.deferredCount > 0 && (
               <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 text-amber-800 text-xs px-3 py-2.5 text-left">
                 <AlertTriangle size={14} className="mt-0.5 shrink-0" />
@@ -1115,7 +1269,68 @@ export default function DirectSetup() {
           footer={<Button variant="danger" onClick={() => setMultiTableModal(null)}>Got It</Button>}>
           <p className="text-sm text-ink">{multiTableModal}</p>
         </Modal>
+
+        {/* Both sides, before the columns can be decided. */}
+        <Modal open={createGate != null} size="lg"
+          title={<span className="flex items-center gap-2">
+            <AlertTriangle size={17} className="text-amber-500" />
+            Upload {(createGate ?? []).join(" and ")} first
+          </span>}
+          onClose={() => setCreateGate(null)}
+          footer={<Button onClick={() => setCreateGate(null)}>Got It</Button>}>
+          <div className="space-y-2 text-sm text-ink">
+            <p>
+              The output BDX template is worked out from two things, and{" "}
+              {(createGate ?? []).length === 1
+                ? `${createGate?.[0]} is missing.`
+                : "neither is here yet."}
+            </p>
+            <ul className="list-disc pl-5 space-y-1 text-ink-muted">
+              <li>
+                <b>The input template</b> — a sample of the bordereau you
+                receive. A reporting standard publishes hundreds of columns per
+                territory and most of them will not apply to this binder; your
+                own file is what says which ones can actually be filled.
+              </li>
+              <li>
+                <b>The contract</b> — what this binder is obliged to report.
+                Its terms are read to work out the columns the standard does not
+                cover, and to keep the ones it does.
+              </li>
+            </ul>
+            <p className="text-ink-muted">
+              Add {(createGate ?? []).join(" and ")} above, then try again.
+            </p>
+          </div>
+        </Modal>
         {msg && <Banner kind="ok"><CheckCircle2 size={15} /> {msg}</Banner>}
+
+        {justCreated && (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3.5
+            flex items-start gap-3">
+            <CheckCircle2 size={17} className="text-emerald-600 mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium text-emerald-900">
+                Output template “{justCreated.name}” created
+              </div>
+              <p className="text-[12.5px] text-emerald-800 mt-0.5 leading-relaxed">
+                Open it to see the file it produces as a spreadsheet, check the
+                columns and their sources, and deal with anything the standard
+                requires that your bordereau does not carry. Your uploads here
+                stay put while you do.
+              </p>
+              <div className="flex gap-2 mt-2">
+                <Button variant="secondary"
+                  onClick={() => navigate(`/outputs/templates/${justCreated.id}`)}>
+                  Review the columns <ArrowRight size={14} />
+                </Button>
+                <Button variant="ghost" onClick={() => setJustCreated(null)}>
+                  Later — build the setup
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <Card title="1 · Scope & Uploads">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl">
@@ -1144,7 +1359,35 @@ export default function DirectSetup() {
                 <option value="__new__">➕ Add New Program…</option>
               </Select>
             </Field>
+
+            {/* The broker. The contract follows from it rather than being asked
+                for again — see BrokerContractScope for why. */}
+            <BrokerSelect scope={scope} disabled={scopeIncomplete} />
           </div>
+          <div className="max-w-2xl mt-3">
+            <BoundContracts scope={scope} programPicked={programId !== ""} />
+          </div>
+
+          {/* Why everything below is shut. Said once, where the answer is —
+              not repeated on each of the five upload boxes. */}
+          {noBrokerYet && (
+            <div className="max-w-2xl mt-3 rounded-md border border-amber-300
+              bg-amber-50 px-3 py-2.5 text-[12px] text-amber-800 leading-relaxed">
+              <div className="font-medium flex items-center gap-1.5">
+                <AlertTriangle size={14} /> No broker on this programme yet
+              </div>
+              <p className="mt-1">
+                A bordereau arrives from a broker, under a contract you have
+                approved — so there is nobody for this setup to be for until one
+                is on the programme. Put a broker on it from the{" "}
+                <button type="button" className="underline font-medium"
+                  onClick={() => navigate("/users/new")}>Users &amp; Roles</button>{" "}
+                screen and the uploads below open up. A programme that already
+                has a saved setup is not held shut this way — those predate the
+                broker level and stay editable.
+              </p>
+            </div>
+          )}
 
           {creatingProgram && (
             <div className="mt-4 max-w-3xl rounded-lg border border-border bg-surface-2 p-4 space-y-3">
@@ -1223,12 +1466,44 @@ export default function DirectSetup() {
                 hint="Only the checked sheets are mapped to the output." />
             </div>
             <div className="space-y-2">
-              <FilePick label="Output Template" icon={<FileOut size={15} />} file={outFile} tone="sky" required
-                onPick={f => pickFileWithSheets("output", f)} hint="The required BDX layout"
+              <FilePick label="Output Template" icon={<FileOut size={15} />} file={outFile} tone="sky"
+                required={!resolved?.template}
+                onPick={f => pickFileWithSheets("output", f)}
+                hint={SHOW_BDX_TEMPLATE_BUILDER
+                  ? "Upload the layout you have been asked for, or build one here"
+                  : "Upload the layout you have been asked for"}
+                // No altAction when the builder is off, which puts the card back
+                // to opening the file dialog wherever you click it.
+                altAction={SHOW_BDX_TEMPLATE_BUILDER ? {
+                  label: "Create BDX Template",
+                  onClick: openCreateTemplate,
+                  hint: "Built from a reporting standard or the contract, and "
+                      + "checked against your bordereau",
+                } : undefined}
                 disabled={scopeIncomplete} />
               <SheetPicker kind="output" options={outputSheetOpts}
                 selected={outputSheetSel} onToggle={n => toggleSheet("output", n)}
                 hint="The generated output will contain only the checked sheets." />
+              {/* The "not configured" case is NOT reported here any more: the
+                  box above now carries both ways to fix it, and saying it twice
+                  read as a fault rather than as a choice.
+
+                  The whole box is off while the builder is: it names the
+                  template a scope already has, says which way it was built and
+                  links into the field editor, all of which belong to the flow
+                  being kept off screen. Note that it also carries two real
+                  warnings — a template inherited from a broader scope, and a
+                  setup built against a different template — so those go quiet
+                  too until the flag comes back on. */}
+              {SHOW_BDX_TEMPLATE_BUILDER && (
+                <OutputTemplateState
+                  resolving={resolving} resolved={resolved}
+                  disabled={scopeIncomplete}
+                  uploading={!!outFile}
+                  hideMissing
+                  onCreate={openCreateTemplate}
+                  onOpen={id => navigate(`/outputs/templates/${id}`)} />
+              )}
             </div>
 
             {/* Supplementary data — optional, uploaded ONCE here like the templates.
@@ -1314,10 +1589,17 @@ export default function DirectSetup() {
           )}
 
           <div className="mt-4 flex items-center gap-3">
-            <Button onClick={buildSetup} disabled={building || !inputFile || !outFile || contractFiles.length === 0}
-              title={!building && (!inputFile || !outFile || contractFiles.length === 0)
-                ? "Upload the input template, output template and at least one contract to continue"
-                : undefined}
+            {/* Deliberately NOT gated on having an output template: without one
+                the click OFFERS the two ways to create it (see buildSetup), which
+                is the whole point. Gating it here would leave a user staring at a
+                dead button with no way to find out what is missing. */}
+            <Button onClick={buildSetup}
+              disabled={building || !inputFile || contractFiles.length === 0}
+              title={!building && (!inputFile || contractFiles.length === 0)
+                ? "Upload the input template and at least one contract to continue"
+                : (!building && !outFile && !resolved?.template
+                    ? "No output template yet — you'll be offered the two ways to create one"
+                    : undefined)}
               className="!px-5 !py-2.5 !text-[13.5px] !rounded-lg
                 shadow-md hover:shadow-lg hover:brightness-110 transition disabled:hover:brightness-100
                 disabled:shadow-none">
@@ -1541,6 +1823,43 @@ export default function DirectSetup() {
           </div>
         </Modal>
 
+        {/* Not mounted at all while the builder is off, so nothing of it can
+            be reached by a stray state change during a demo. */}
+        {SHOW_BDX_TEMPLATE_BUILDER && <CreateOutputTemplate
+          open={showCreateTemplate}
+          onClose={() => setShowCreateTemplate(false)}
+          mga={mga}
+          programId={programId === "" ? 0 : Number(programId)}
+          carrierPartyId={carrierId === "" ? null : Number(carrierId)}
+          brokerPartyId={scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId)}
+          contractId={scope.contractId === "" ? null : Number(scope.contractId)}
+          scopeNames={{
+            carrier: carrierName || mga,
+            programme: programs.find(p => p.id === programId)?.name ?? null,
+            broker: scope.brokerName,
+            contract: scope.contractName,
+          }}
+          // Both sides of the job. The bordereau says which of a territory's
+          // published columns can actually be filled; the contracts say what
+          // has to be reported — including one staged here and not uploaded
+          // yet, which is the ordinary case on a first setup.
+          inputFile={inputFile}
+          inputSheets={[...inputSheetSel]}
+          contractFiles={contractFiles}
+          boundContracts={scope.boundContracts}
+          onCreated={t => {
+            setShowCreateTemplate(false);
+            setTemplateId(t.id);
+            // Ask the server again rather than assemble the answer here: it is
+            // the only thing that knows which setup would run against it.
+            setResolveTick(n => n + 1);
+            setMsg(null);
+            // The uploads staged here are NOT thrown away by reviewing the
+            // template — the card below links out and the user comes back to
+            // the same screen with the same files attached.
+            setJustCreated({ id: t.id, name: t.name });
+          }} />}
+
         {/* Save / Activate / Delete for the setup just built (or loaded) in this
             scope. Editing the mapping itself still happens on the setup's own
             page (the "Open / Edit" button) — this bar only persists, activates
@@ -1641,10 +1960,16 @@ const DROP_TONES = {
 } as const;
 type DropTone = keyof typeof DROP_TONES;
 
-function FilePick({ label, icon, file, onPick, accept, hint, tone, required, disabled }: {
+function FilePick({ label, icon, file, onPick, accept, hint, tone, required, disabled,
+                   altAction }: {
   label: string; icon: React.ReactNode; file: File | null;
   onPick: (f: File | null) => void; accept?: string; hint?: string; tone: DropTone; required?: boolean;
   disabled?: boolean;
+  /** A second way to satisfy this box, offered INSIDE it. The output template
+   *  can be uploaded or created, and those are equal choices — putting the
+   *  second one in a separate panel underneath made it read as an error
+   *  message rather than as the other half of the same decision. */
+  altAction?: { label: string; onClick: () => void; hint?: string };
 }) {
   const [drag, setDrag] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
@@ -1654,9 +1979,13 @@ function FilePick({ label, icon, file, onPick, accept, hint, tone, required, dis
   // — otherwise re-picking the SAME file fires no change event and silently
   // attaches nothing.
   useEffect(() => { if (!file && ref.current) ref.current.value = ""; }, [file]);
+  // With two actions offered, clicking the box itself is ambiguous — the
+  // buttons say which is which, so the whole-card click only stands when there
+  // is one thing it could mean.
+  const cardOpens = !altAction || !!file;
   return (
     <div
-      onClick={() => { if (!disabled) ref.current?.click(); }}
+      onClick={() => { if (!disabled && cardOpens) ref.current?.click(); }}
       onDragOver={e => { e.preventDefault(); if (!disabled) setDrag(true); }}
       onDragLeave={() => setDrag(false)}
       onDrop={e => {
@@ -1666,7 +1995,7 @@ function FilePick({ label, icon, file, onPick, accept, hint, tone, required, dis
       }}
       className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
-          : `cursor-pointer ${drag ? "border-navy bg-navy/5" : file ? "border-emerald-300 bg-emerald-50/40" : t.idle}`}`}>
+          : `${cardOpens ? "cursor-pointer" : ""} ${drag ? "border-navy bg-navy/5" : file ? "border-emerald-300 bg-emerald-50/40" : t.idle}`}`}>
       <input ref={ref} type="file" accept={accept ?? ".xlsx,.xls,.csv,.xml,.json"} className="hidden" disabled={disabled}
         onClick={e => e.stopPropagation()}
         onChange={e => onPick(e.target.files?.[0] ?? null)} />
@@ -1683,6 +2012,29 @@ function FilePick({ label, icon, file, onPick, accept, hint, tone, required, dis
         </div>
       ) : disabled ? (
         <div className="text-[11px] text-ink-muted">Select a carrier and program first</div>
+      ) : altAction ? (
+        <div className="text-[11px] text-ink-muted">
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <button type="button"
+              onClick={e => { e.stopPropagation(); ref.current?.click(); }}
+              className={`inline-flex items-center gap-1 rounded-md border border-border
+                bg-white px-2.5 py-1 font-medium transition hover:border-brand
+                hover:bg-surface-2 ${t.cta}`}>
+              <UploadCloud size={12} /> Upload BDX Layout
+            </button>
+            <span className="text-ink-soft">or</span>
+            <button type="button"
+              onClick={e => { e.stopPropagation(); altAction.onClick(); }}
+              className="inline-flex items-center gap-1 rounded-md border border-border
+                bg-white px-2.5 py-1 font-medium text-ink transition
+                hover:border-brand hover:bg-surface-2">
+              <Sparkles size={12} /> {altAction.label}
+            </button>
+          </div>
+          {hint ? <div className="mt-1.5 opacity-80">{hint}</div> : null}
+          {altAction.hint
+            ? <div className="mt-0.5 text-ink-soft">{altAction.hint}</div> : null}
+        </div>
       ) : (
         <div className="text-[11px] text-ink-muted">
           <span className={`inline-flex items-center gap-1 font-medium ${t.cta}`}>

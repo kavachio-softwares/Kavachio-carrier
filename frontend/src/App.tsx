@@ -19,6 +19,7 @@ import PartyDetail from "./pages/PartyDetail";
 import Programs from "./pages/Programs";
 import ProgramManagement from "./pages/ProgramManagement";
 import AddProgram from "./pages/AddProgram";
+import ProgramBrokers from "./pages/ProgramBrokers";
 import ContractDetail from "./pages/ContractDetail";
 import Mapping from "./pages/Mapping";
 import DirectRun from "./pages/DirectRun";
@@ -48,7 +49,6 @@ import {
   AUTH_EVENT, armAutoLogout, clearAuth, getUser, isRefreshTokenExpired,
 } from "./auth";
 import { canAccessPath, landingPath } from "./access";
-import Brokers from "./pages/Brokers";
 import BrokerDetail from "./pages/BrokerDetail";
 import Approvals from "./pages/Approvals";
 
@@ -124,13 +124,13 @@ export default function App() {
         <Route path="/programs" element={<Programs />} />
         {/* The carrier hierarchy: brokers are reached from the carrier, not
             from a tenant — the same broker produces for several carriers. */}
-        <Route path="/brokers" element={<Brokers />} />
         <Route path="/brokers/:brokerId" element={<BrokerDetail />} />
         <Route path="/approvals" element={<Approvals />} />
         {/* Carrier-scoped oversight dashboard. Without ?carrier= it renders its
             own carrier picker, so the route needs no param of its own. */}
         <Route path="/program-management" element={<ProgramManagement />} />
         <Route path="/programs/new" element={<AddProgram />} />
+        <Route path="/programs/:programId/brokers" element={<ProgramBrokers />} />   {/* the mesh, managed */}
         <Route path="/programs/:programId/contracts/:contractId" element={<ContractDetail />} />
         <Route path="/direct" element={<DirectRun />} />
         <Route path="/direct/setup" element={<DirectSetup />} />

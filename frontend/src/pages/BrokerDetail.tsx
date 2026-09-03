@@ -55,8 +55,8 @@ export default function BrokerDetail() {
       <PageHeader
         title={b.legal_name}
         subtitle="What this broker holds with you. Anything they do for another carrier is not shown here — and your book is not shown to them."
-        action={<Link to="/brokers" className="text-sm text-navy hover:underline inline-flex items-center gap-1">
-          <ArrowLeft size={14} /> All brokers
+        action={<Link to="/programs" className="text-sm text-navy hover:underline inline-flex items-center gap-1">
+          <ArrowLeft size={14} /> Programmes
         </Link>}
       />
       <PageBody>

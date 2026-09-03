@@ -18,6 +18,7 @@ from sqlalchemy import String, and_, desc, func, or_, select, text
 from db import (
     ActivityEvent, AdminMappingTask, AppUser, Contract, DirectFormat, ExportTemplate,
     GenericRuleSpecification, Mapper, OutputExport, Party, PartyContact, Program,
+    ProgramBroker,
     SessionLocal, Tenant, Upload, SheetBinding, ReferenceDocument, SubmissionSchedule,
     ExpectedSubmission,
 )
@@ -1005,7 +1006,14 @@ def tenants_create(body: NewTenantBody,
             admin_user = AppUser(
                 email=body.admin_email.strip().lower(),
                 full_name=body.admin_name or body.admin_email.split("@")[0].title(),
-                role="admin", status="invited", tenant_id=tid)
+                # 'carrier_admin', not the legacy 'admin' — the column only
+                # accepts the four role names (chk_app_user_role).
+                role="carrier_admin", status="invited", tenant_id=tid,
+                # Kavachio is inviting this person, and every login has to say
+                # who let it in (trg_enforce_invitation_chain). This is the one
+                # place a carrier's FIRST admin is created, so the platform
+                # admin doing it is the answer.
+                invited_by_user_id=_p.user_id)
             s.add(admin_user)
         # Invite the first admin with a tokened set-password link.
         invite_link = _make_invite_link(admin_user) if admin_user else None
@@ -2503,14 +2511,34 @@ async def program_setup(
 
 @router.get("/programs/{program_id}/contracts")
 def program_contracts_list(program_id: int,
+                           broker_party_id: Optional[int] = None,
+                           approved_only: bool = False,
                            principal: Principal = Depends(current_principal)):
+    """Contracts on a programme.
+
+    `broker_party_id` narrows to one broker's contracts. It deliberately also
+    returns the programme's CARRIER-HELD contracts (broker_party_id NULL) —
+    those were written before the broker level existed and still govern the
+    programme, so hiding them would make an existing setup look empty.
+
+    `approved_only` drops anything still waiting on the carrier: only a live
+    contract can have an output template built on it.
+
+    Both default off, so an existing caller gets exactly what it always did.
+    """
     with SessionLocal() as s:
         prog = s.get(Program, program_id)
         if not prog:
             raise HTTPException(404, "program not found")
         assert_tenant_owns(principal, prog.tenant_id)
-        rows = s.query(Contract).filter(Contract.program_id == program_id)\
-                .order_by(Contract.id.desc()).all()
+        q = s.query(Contract).filter(Contract.program_id == program_id)
+        if broker_party_id is not None:
+            q = q.filter(or_(Contract.broker_party_id == broker_party_id,
+                             Contract.broker_party_id.is_(None)))
+        if approved_only:
+            q = q.filter(func.coalesce(Contract.approval_status, "approved")
+                         == "approved")
+        rows = q.order_by(Contract.id.desc()).all()
         # Clause count per contract = rows in clauses_extracted (defensive: the
         # table may be absent on minimal DBs).
         counts: dict[int, int] = {}
@@ -2529,12 +2557,25 @@ def program_contracts_list(program_id: int,
         # where it is stored. Null for every contract written before this
         # existed, and for any upload that didn't send one.
         from contract_upload_services.db_persister import extracted_upload_token
+        # broker_party_id / approval_status / the term are read-side additions:
+        # the columns already existed on the row, they were simply never
+        # returned. Every existing key is unchanged.
+        broker_names = {}
+        broker_ids = {c.broker_party_id for c in rows if c.broker_party_id}
+        if broker_ids:
+            broker_names = {p.id: p.legal_name for p in
+                            s.query(Party).filter(Party.id.in_(broker_ids)).all()}
         return [{"id": c.id, "filename": c.filename, "status": c.status,
                  "extracted": c.extracted,
                  "upload_token": extracted_upload_token(c.extracted),
                  "clause_count": counts.get(c.id, 0),
                  "output_template_id": c.output_template_id,
                  "schedule_key": c.schedule_key,
+                 "broker_party_id": c.broker_party_id,
+                 "broker_name": broker_names.get(c.broker_party_id),
+                 "approval_status": c.approval_status or "approved",
+                 "inception_dt": c.inception_dt.isoformat() if c.inception_dt else None,
+                 "expiry_dt": c.expiry_dt.isoformat() if c.expiry_dt else None,
                  "created_at": _iso_utc(c.created_at)}
                 for c in rows]
 
@@ -4534,6 +4575,10 @@ class UserBody(BaseModel):
     role: Optional[str] = "ops"
     status: Optional[str] = "active"
     password: Optional[str] = None
+    # Required when role is broker_admin, ignored otherwise. A broker seat
+    # belongs to a BROKER, not to the carrier doing the inviting — the same
+    # broker produces for several carriers, so it cannot be pinned to one.
+    broker_party_id: Optional[int] = None
 
 
 def _user_dict(u: AppUser, mga: Optional[str] = None) -> dict:
@@ -4557,10 +4602,23 @@ def users_list(
     from auth_deps import _ROLE_ALIASES
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
+
+        # Brokers are invited from this screen too, so their people belong on
+        # it. Which brokers count is not "who created the party" — it is every
+        # broker on one of this carrier's programmes, plus any this carrier
+        # added to its own directory. Same rule the Brokers directory used.
+        broker_ids = {r[0] for r in s.query(ProgramBroker.broker_party_id)
+                      .filter(ProgramBroker.tenant_id == tid).all()}
+        broker_ids |= {r[0] for r in s.query(Party.id).filter(
+            Party.tenant_id == tid,
+            func.cast(Party.party_type, String).in_(PRODUCER_PARTY_TYPES)).all()}
+
         # kavachio_admin is a cross-tenant platform role, not a member of this
         # tenant's org — never surfaced on a tenant's own Users screen.
-        base = s.query(AppUser).filter(AppUser.tenant_id == tid,
-                                       AppUser.role != "kavachio_admin")
+        base = s.query(AppUser).filter(
+            or_(AppUser.tenant_id == tid,
+                AppUser.broker_party_id.in_(broker_ids) if broker_ids else False),
+            AppUser.role != "kavachio_admin")
 
         # Tenant-WIDE admin count, independent of filters/paging — the "can't
         # remove the last admin" rule needs the true total, not just whatever
@@ -4594,7 +4652,19 @@ def users_list(
         if page is not None:
             size = page_size or 10
             ordered = ordered.offset((page - 1) * size).limit(size)
-        items = [_user_dict(u, mga) for u in ordered.all()]
+        rows = ordered.all()
+        # "Carrier Admin" and "Broker Admin" both appear on this list now, so a
+        # row has to say which organisation it is an admin OF.
+        names = {p.id: p.legal_name for p in s.query(Party).filter(
+            Party.id.in_({u.broker_party_id for u in rows if u.broker_party_id} or {-1})).all()}
+        carrier_name = _tenant_display(s, tid) or mga
+        items = []
+        for u in rows:
+            d = _user_dict(u, mga)
+            d["broker_party_id"] = u.broker_party_id
+            d["org_name"] = names.get(u.broker_party_id, "—") if u.broker_party_id else carrier_name
+            d["org_kind"] = "broker" if u.broker_party_id else "carrier"
+            items.append(d)
         return {"items": items, "total": total, "total_admins": int(total_admins),
                 "page": page, "page_size": page_size}
 
@@ -4686,29 +4756,112 @@ def admin_users_list(
                 "page": page, "page_size": page_size}
 
 
+def _assert_manages_user(s, principal: Principal, u: AppUser) -> None:
+    """Guard the by-id user routes now that BROKER people appear on the
+    carrier's Users screen too.
+
+    A carrier owns its own staff outright. It also created each broker's FIRST
+    admin, so it may resend or withdraw that. An OPERATOR is not its to touch —
+    that seat belongs to the broker, and only the broker's own admin manages it.
+
+    404 rather than 403 for anything outside the carrier's reach: an id must
+    not reveal whether it exists somewhere else on the platform.
+    """
+    if principal.is_platform_admin:
+        return
+    if u.tenant_id is not None:
+        if u.tenant_id != principal.tenant_id:
+            raise HTTPException(404, "user not found")
+        return
+    if not u.broker_party_id:
+        raise HTTPException(404, "user not found")
+    reachable = (s.query(ProgramBroker)
+                  .filter(ProgramBroker.broker_party_id == u.broker_party_id,
+                          ProgramBroker.tenant_id == principal.tenant_id).first())
+    if not reachable:
+        party = s.query(Party).filter(Party.id == u.broker_party_id).first()
+        if not party or party.tenant_id != principal.tenant_id:
+            raise HTTPException(404, "user not found")
+    if u.role == "operator":
+        raise HTTPException(
+            403, "Operators belong to the broker. Their own admin adds and removes them.")
+
+
 @router.post("/users")
 def users_create(mga: str, body: UserBody,
                  principal: Principal = Depends(require_role("tenant_admin"))):
+    """Invite someone: a colleague at this carrier, or a broker's first admin.
+
+    Three things the database insists on, which this endpoint used to get wrong
+    and fail with a 500 rather than a message:
+
+      * the role must be one of the four — a stored 'admin'/'ops' fails
+        chk_app_user_role, so the legacy value is normalized first;
+      * every login must record who invited it (trg_enforce_invitation_chain),
+        so invited_by_user_id is the signed-in admin;
+      * a broker seat belongs to a broker and to NO carrier
+        (chk_app_user_scope), so tenant_id and broker_party_id swap over.
+
+    Operators are deliberately refused. They belong to the broker, one level
+    down — their own admin creates them.
+    """
     from auth_utils import hash_password
+    from auth_deps import normalize_role
+
+    role = normalize_role(body.role)
+    if role == "operator":
+        raise HTTPException(
+            400, "Operators are added by the broker's own admin, not by you. "
+                 "Invite their Broker Admin and they take it from there.")
+    if role == "kavachio_admin":
+        raise HTTPException(403, "Kavachio staff accounts are not created here.")
+
     with SessionLocal() as s:
-        if s.query(AppUser).filter(AppUser.email == body.email.lower()).first():
+        tid = resolve_tenant_id(s, principal, mga)
+        if s.query(AppUser).filter(AppUser.email == body.email.strip().lower()).first():
             raise HTTPException(409, "Email already exists")
+
+        # Where this person lands. Exactly one of the two is ever set.
+        broker_id = None
+        if role == "broker_admin":
+            if not body.broker_party_id:
+                raise HTTPException(400, "Choose which broker this admin belongs to.")
+            # Must be a broker this carrier actually holds — otherwise a carrier
+            # could seat an admin at someone else's broker.
+            party = s.query(Party).filter(Party.id == body.broker_party_id).first()
+            # 404, not 403, on anything that is not this carrier's broker — a
+            # wrong id must not reveal whether it exists somewhere else.
+            if not party or str(party.party_type) not in PRODUCER_PARTY_TYPES:
+                raise HTTPException(404, "broker not found")
+            on_a_programme = (s.query(ProgramBroker)
+                               .filter(ProgramBroker.broker_party_id == party.id,
+                                       ProgramBroker.tenant_id == tid).first())
+            if not on_a_programme and party.tenant_id != tid:
+                raise HTTPException(404, "broker not found")
+            broker_id, tid = party.id, None
+
         # No password supplied → this is an INVITE: create the user as "invited"
         # and email a tokened set-password link (same page as password reset).
         invited = not body.password
         hashed = hash_password(body.password) if body.password else None
         u = AppUser(email=body.email.strip().lower(),
-                    full_name=body.full_name, role=body.role or "ops",
+                    full_name=body.full_name, role=role,
                     status="invited" if invited else (body.status or "active"),
                     password=hashed,
-                    tenant_id=resolve_tenant_id(s, principal, mga))
+                    tenant_id=tid, broker_party_id=broker_id,
+                    # Who let this person in. Without it the database refuses
+                    # the row outright.
+                    invited_by_user_id=principal.user_id)
         s.add(u)
         link = _make_invite_link(u) if invited else None
         s.commit(); s.refresh(u)
+        org = _tenant_display(s, u.tenant_id) if u.tenant_id else (
+            s.query(Party).filter(Party.id == broker_id).first().legal_name if broker_id else None)
         if invited and link:
-            _send_invite_email(u.email, link, u.full_name, _tenant_display(s, u.tenant_id))
+            _send_invite_email(u.email, link, u.full_name, org)
         _log(mga, _actor(principal), "user_invited" if invited else "user_created", target=str(u.id),
-             details={"email": u.email, "full_name": u.full_name, "role": u.role, "status": u.status})
+             details={"email": u.email, "full_name": u.full_name, "role": u.role,
+                      "status": u.status, "broker_party_id": broker_id})
         return _user_dict(u, mga)
 
 
@@ -4720,7 +4873,7 @@ def users_resend_invite(user_id: int,
         u = s.get(AppUser, user_id)
         if not u:
             raise HTTPException(404, "user not found")
-        assert_tenant_owns(principal, u.tenant_id)
+        _assert_manages_user(s, principal, u)
         if u.status not in ("invited", "pending"):
             raise HTTPException(409, "this user has already accepted their invite")
         link = _make_invite_link(u)
@@ -4739,10 +4892,13 @@ def users_update(user_id: int, body: UserBody,
         u = s.get(AppUser, user_id)
         if not u:
             raise HTTPException(404, "user not found")
-        assert_tenant_owns(principal, u.tenant_id)
+        _assert_manages_user(s, principal, u)
         u.full_name = body.full_name
         if body.role:
-            u.role = body.role
+            # Same reason as on create: the column only accepts the four names,
+            # so a legacy 'admin'/'ops' from an older client is mapped, not stored.
+            from auth_deps import normalize_role
+            u.role = normalize_role(body.role)
         if body.status:
             u.status = body.status
         if body.password:
@@ -4766,15 +4922,48 @@ def users_update(user_id: int, body: UserBody,
 @router.delete("/users/{user_id}")
 def users_delete(user_id: int,
                  principal: Principal = Depends(require_role("tenant_admin"))):
+    from auth_deps import normalize_role, db_role_values
     with SessionLocal() as s:
         u = s.get(AppUser, user_id)
         if not u:
             raise HTTPException(404, "user not found")
-        assert_tenant_owns(principal, u.tenant_id)
-        _u_tenant_id = u.tenant_id
-        _u_email = u.email
-        _u_role = u.role
-        s.delete(u); s.commit()
+        _assert_manages_user(s, principal, u)
+
+        # Guards the UI already shows, enforced here too — the screen is not
+        # the authority, and a bookmarked request bypasses it entirely.
+        if u.id == principal.user_id:
+            raise HTTPException(409, "You cannot remove your own account.")
+        if normalize_role(u.role) == "carrier_admin" and u.tenant_id:
+            others = (s.query(func.count(AppUser.id))
+                       .filter(AppUser.tenant_id == u.tenant_id,
+                               AppUser.role.in_(db_role_values("carrier_admin")),
+                               AppUser.id != u.id).scalar() or 0)
+            if others == 0:
+                raise HTTPException(
+                    409, "This is the only admin — add another before removing this one.")
+
+        _u_tenant_id, _u_email, _u_role = u.tenant_id, u.email, u.role
+
+        # Someone who has invited people, approved a contract or assigned a
+        # broker is referenced from other rows. Deleting them would either fail
+        # or erase the answer to "who did this?" — so they are SUSPENDED
+        # instead. Access goes immediately either way; the record survives.
+        # Same principle as taking a broker off a programme that has contracts.
+        invited = (s.query(func.count(AppUser.id))
+                    .filter(AppUser.invited_by_user_id == u.id).scalar() or 0)
+        suspended = False
+        if invited:
+            u.status = "suspended"; suspended = True; s.commit()
+        else:
+            try:
+                s.delete(u); s.commit()
+            except IntegrityError:
+                # Referenced from somewhere else (a contract they submitted, a
+                # broker they assigned). Same answer, without enumerating every
+                # foreign key that might ever point here.
+                s.rollback()
+                u = s.get(AppUser, user_id)
+                u.status = "suspended"; suspended = True; s.commit()
         try:
             from audit import log_activity, actor_email
             log_activity(_u_tenant_id, actor_email(principal.user_id), "user_deleted",
@@ -4785,7 +4974,9 @@ def users_delete(user_id: int,
                          })
         except Exception:  # noqa: BLE001
             pass
-        return {"ok": True}
+        return {"ok": True, "suspended": suspended,
+                "message": (f"{_u_email} can no longer sign in. Their account is kept "
+                            "because other records name them.") if suspended else None}
 
 
 class ProfileBody(BaseModel):

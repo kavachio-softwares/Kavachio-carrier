@@ -37,6 +37,7 @@ from validation_routes import router as validation_router
 from direct_routes import router as direct_router
 from hierarchy_routes import router as hierarchy_router
 from broker_routes import router as broker_router
+from output_template_routes import router as output_template_router
 # Feature 10 — file intake channels ("How Files Arrive" / "Files Received").
 from intake_routes import router as intake_router
 # Feature 10.2 — the machine-to-machine way in (/v1). API-key auth, not JWT.
@@ -88,6 +89,9 @@ app.include_router(validation_router)
 app.include_router(direct_router)
 app.include_router(hierarchy_router)
 app.include_router(broker_router)
+# Output BDX template: create from a reporting standard or a contract, edit,
+# validate, and resolve the one that applies to a carrier+programme+broker+contract.
+app.include_router(output_template_router)
 app.include_router(intake_router)
 app.include_router(intake_api_router)
 
@@ -2778,6 +2782,21 @@ def _export_to_dict(r: OutputExport, with_exceptions: bool = False,
         "exception_count": r.exception_count or 0,
         "status": r.status or "clean",
         "created_at": _iso_utc(r.created_at),
+        # What this file was made from and for (plan section 22). All read-side
+        # additions of columns that already exist on the row — every key above
+        # is unchanged, so no existing caller is affected. NULL on any export
+        # generated before the scope was recorded, which is the honest answer:
+        # we do not know, rather than a guess.
+        "template_version": getattr(r, "template_version", None),
+        "output_format": getattr(r, "output_format", None),
+        "pipeline_id": getattr(r, "pipeline_id", None),
+        "carrier_party_id": getattr(r, "carrier_party_id", None),
+        "program_id": getattr(r, "program_id", None),
+        "broker_party_id": getattr(r, "broker_party_id", None),
+        "contract_id": getattr(r, "contract_id", None),
+        # {"status","checked_sheets","issue_count","issues"} when a sample
+        # output BDX was configured for the template; None when none was.
+        "sample_comparison": getattr(r, "sample_comparison", None),
     }
     if with_exceptions:
         excs = _attach_recommendations(r.exceptions or [])

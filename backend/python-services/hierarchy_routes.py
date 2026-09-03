@@ -146,12 +146,26 @@ def programme_brokers(program_id: int, principal: Principal = Depends(current_pr
                         Contract.approval_status == "pending_approval")
                 .scalar() or 0
             )
+            # Counted apart from `contract_count`, which includes contracts
+            # still waiting on the carrier. A screen that offers a broker
+            # because they "have 1 contract" and then says the programme has
+            # nothing approved is telling the user two different things; this is
+            # the number that decides whether they can actually be worked with.
+            approved = (
+                s.query(func.count(Contract.id))
+                .filter(Contract.program_id == program_id,
+                        Contract.broker_party_id == party.id,
+                        func.coalesce(Contract.approval_status, "approved")
+                        == "approved")
+                .scalar() or 0
+            )
             d = _broker_dict(party)
             d.update({
                 "link_id": link.id,
                 "status": link.status,
                 "assigned_at": _iso_utc(link.created_at),
                 "contract_count": contracts,
+                "approved_contract_count": approved,
                 "pending_approvals": pending,
             })
             out.append(d)
@@ -301,6 +315,88 @@ def broker_directory(principal: Principal = Depends(current_principal)):
                 .filter(AppUser.broker_party_id == pid).scalar() or 0
             )
         return sorted(by_broker.values(), key=lambda b: (b["legal_name"] or "").lower())
+
+
+class NewBrokerBody(BaseModel):
+    legal_name: str
+    party_type: str = "broker"
+    # The broker's FIRST admin. Optional, but leaving it out is what produces a
+    # broker nobody can sign in as — the screen says so.
+    admin_name: Optional[str] = None
+    admin_email: Optional[str] = None
+    # Put them straight onto a programme. Optional, because a carrier may add a
+    # broker to its directory before deciding which programme they belong on.
+    program_id: Optional[int] = None
+
+
+@router.post("/brokers")
+def broker_create(body: NewBrokerBody,
+                  principal: Principal = Depends(require_role("carrier_admin"))):
+    """Bring a broker on board: the organisation, its first admin, and
+    optionally the programme it produces into — in ONE step.
+
+    These three used to be three separate screens, and the middle one had
+    nowhere to start from: inviting a broker admin needed a broker that only
+    the Brokers screen could create, and the Brokers screen had no way to
+    create one. So a carrier could not onboard a broker at all.
+
+    They belong together anyway. A broker organisation with no admin is a name
+    nobody can sign in as, and a broker on no programme cannot produce. Doing
+    all three at once means what you end up with actually works.
+    """
+    from app_routes import _make_invite_link, _send_invite_email
+
+    name = (body.legal_name or "").strip()
+    if not name:
+        raise HTTPException(400, "Give the broker a name.")
+    if body.party_type not in PRODUCER_PARTY_TYPES:
+        raise HTTPException(422, f"party_type must be one of {sorted(PRODUCER_PARTY_TYPES)}")
+    email = (body.admin_email or "").strip().lower()
+
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal)
+
+        # Checked BEFORE anything is created, so a taken email never leaves
+        # behind a broker with no admin invited.
+        if email and s.query(AppUser).filter(AppUser.email == email).first():
+            raise HTTPException(409, "That email is already in use.")
+        if s.query(Party).filter(Party.tenant_id == tid,
+                                 func.lower(Party.legal_name) == name.lower()).first():
+            raise HTTPException(409, f"You already work with a broker called {name}.")
+        if body.program_id:
+            _assert_programme(s, body.program_id, principal, tid)
+
+        party = Party(tenant_id=tid, party_type=body.party_type, legal_name=name,
+                      scope="tenant", is_app_managed=True, is_active=True)
+        s.add(party); s.flush()
+
+        if body.program_id:
+            s.add(ProgramBroker(tenant_id=tid, program_id=body.program_id,
+                                broker_party_id=party.id, status="active",
+                                assigned_by_user_id=principal.user_id))
+
+        admin, link = None, None
+        if email:
+            admin = AppUser(
+                email=email,
+                full_name=(body.admin_name or "").strip() or email.split("@")[0].title(),
+                role="broker_admin", status="invited",
+                # A broker seat belongs to the broker and to NO carrier — the
+                # same broker produces for several (chk_app_user_scope).
+                tenant_id=None, broker_party_id=party.id,
+                invited_by_user_id=principal.user_id)
+            s.add(admin)
+            link = _make_invite_link(admin)
+
+        s.commit(); s.refresh(party)
+        if admin and link:
+            _send_invite_email(admin.email, link, admin.full_name, party.legal_name)
+
+        d = _broker_dict(party)
+        d.update({"admin_invited": bool(admin),
+                  "admin_email": admin.email if admin else None,
+                  "program_id": body.program_id})
+        return d
 
 
 @router.get("/brokers/{broker_party_id}")
@@ -543,6 +639,11 @@ def hierarchy(principal: Principal = Depends(current_principal)):
                 "id": p.id,
                 "name": p.name,
                 "status": p.status,
+                # What kind of business it is, so the Programmes list can say
+                # more than a name — the same two fields the create screen asks.
+                "business_segment": p.business_segment,
+                "product_line": p.product_line,
+                "bdx_frequency": p.bdx_frequency,
                 "broker_count": len(brokers),
                 "contract_count": sum(len(b["contracts"]) for b in brokers),
                 "brokers": brokers,

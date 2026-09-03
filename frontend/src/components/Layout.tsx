@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, Handshake, Server, Inbox,
+  FileCheck, Server, Inbox,
 } from "lucide-react";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
@@ -69,7 +69,6 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     requires: "carrier_admin",
     items: [
       { to: "/programs", label: "Programmes", icon: Layers },
-      { to: "/brokers", label: "Brokers", icon: Handshake },
       { to: "/parties", label: "All Carriers", icon: Users2 },
       { to: "/direct/setups", label: "Bordereau Setups", icon: Layers },
       // Set up once when a broker is onboarded, then rarely touched — which
@@ -125,7 +124,17 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Programs / Outputs are the orphaned party → program → template → output
   // stepper — no sidebar entry of their own, so they roll up under Trading
   // Partners (programs/contracts are scoped to a carrier).
-  if (under("/programs") || under("/outputs")) return "/parties";
+  // Programmes now own their own sub-screens (create, and a programme's
+  // brokers), so they highlight Programmes rather than the old party directory.
+  if (under("/programs")) return "/programs";
+  // A broker's page has no nav entry of its own any more: brokers are created
+  // on Users & Roles and opened from the programme they sit on.
+  if (under("/brokers")) return "/programs";
+  // An output template is part of a Bordereau Setup, and that is where the user
+  // came from — highlighting "All Carriers" while they review a template they
+  // opened from the setup screen makes the sidebar lie about where they are.
+  if (pathname.startsWith("/outputs/templates")) return "/direct/setups";
+  if (under("/outputs")) return "/parties";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";

@@ -26,6 +26,8 @@ _ISO_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 
+import output_template_fields as otf
+
 
 def to_validation_blocks(
     structure: dict, output_rows_by_sheet: dict[str, list[dict]]
@@ -66,7 +68,11 @@ def render_output(
 ) -> bytes:
     """Write the projected output rows into an xlsx. Uses the template (style
     preserving) when provided, else a plain workbook."""
-    if template_bytes:
+    # Styling is copied from the sample workbook BY POSITION, so it can only be
+    # used while the template still occupies the sample's positions. Once a
+    # field has been switched off or the order changed, the two have diverged
+    # and the plain writer below is the correct — and only honest — result.
+    if template_bytes and not otf.diverged_from_sample(structure):
         try:
             return _render_with_template(structure, output_rows_by_sheet, template_bytes)
         except Exception:  # noqa: BLE001 — never fail the delivery on styling
@@ -76,20 +82,20 @@ def render_output(
     wb.remove(wb.active)
     for sh in structure.get("sheets", []):
         ws = wb.create_sheet(title=(sh.get("sheet_name") or "Sheet")[:31])
-        cols = sorted(sh.get("columns", []), key=lambda c: c.get("column_index", 0))
-        for c in cols:
-            col_idx = c.get("column_index", 0) + 1
-            ws.cell(row=1, column=col_idx,
-                    value=c.get("column_name") or f"Column {col_idx}")
+        # The user's own order, and only the fields still switched on.
+        cols = otf.active_columns(sh)
+        for pos, c in enumerate(cols, start=1):
+            # The user's name for the column, not the internal key.
+            ws.cell(row=1, column=pos, value=otf.header_of(c))
         rows = output_rows_by_sheet.get(sh.get("sheet_name", ""), [])
         for r, row in enumerate(rows, start=2):
-            for c in cols:
+            for pos, c in enumerate(cols, start=1):
                 name = c.get("column_name")
                 if not name:
                     continue
                 val = _coerce_cell(row.get(name))
                 if val is not None:
-                    ws.cell(row=r, column=c.get("column_index", 0) + 1, value=val)
+                    ws.cell(row=r, column=pos, value=val)
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -129,8 +135,11 @@ def _render_with_template(
         for c in cols:
             col_idx = c.get("column_index", 0) + 1
             cell = ws.cell(row=header_row_1b, column=col_idx)
-            if cell.value is None or not str(cell.value).strip():
-                cell.value = c.get("column_name") or f"Column {col_idx}"
+            # Fill a blank header — and overwrite the sample's own wording when
+            # the user has renamed the column, because then their word is the
+            # point. An untouched column keeps the sample's exact header text.
+            if cell.value is None or not str(cell.value).strip() or otf.is_renamed(c):
+                cell.value = otf.header_of(c)
 
         # Free up merged ranges in the data area so every cell can be written.
         for mr in list(ws.merged_cells.ranges):

@@ -13,6 +13,10 @@ type U = {
   id: number; email: string; full_name: string;
   role: string; status: string; mga: string;
   last_login_at?: string | null;
+  /** Broker people appear here too now — this says which organisation. */
+  broker_party_id?: number | null;
+  org_name?: string | null;
+  org_kind?: "carrier" | "broker";
 };
 
 // The API normalizes every stored/legacy role string down to the four-role
@@ -22,6 +26,13 @@ const ROLE_LABEL: Record<string, string> = {
   carrier_admin: "Carrier Admin",
   broker_admin: "Broker Admin",
   operator: "Operator",
+};
+
+// What each seat can actually do — the reason anyone reads this table.
+const ROLE_CAN_DO: Record<string, string> = {
+  carrier_admin: "Everything you can, including approving contracts",
+  broker_admin: "Their contracts and file setups; adds their own staff",
+  operator: "Processing and exceptions only",
 };
 
 // Single source of truth for a user's displayed status bucket — used by both
@@ -83,6 +94,7 @@ export default function Users() {
   const adminCount = extra?.total_admins ?? 0;
   function canRemove(u: U) {
     if (u.id === me?.id) return false;          // can't remove yourself
+    if (normalizeRole(u.role) === "operator") return false;  // the broker's seat, not yours
     if (normalizeRole(u.role) === "carrier_admin" && adminCount <= 1) return false; // can't remove last admin
     return true;
   }
@@ -107,8 +119,11 @@ export default function Users() {
     if (!removeTarget) return;
     setRemoveBusy(true); setRemoveErr(null);
     try {
-      await api.delete(`/users/${removeTarget.id}`);
-      setMsg({ kind: "ok", text: `${removeTarget.email} was removed.` });
+      const { data } = await api.delete<{ suspended?: boolean; message?: string | null }>(
+        `/users/${removeTarget.id}`);
+      // Someone other records name is suspended rather than deleted, so the
+      // trail of who did what stays readable. Say which happened.
+      setMsg({ kind: "ok", text: data?.message ?? `${removeTarget.email} was removed.` });
       setRemoveTarget(null);
       reload();
     } catch (e: any) {
@@ -157,7 +172,11 @@ export default function Users() {
         <div className="page-head">
           <div className="t">
             <h2>Users &amp; Roles</h2>
-            <p>Your team and what they can do. Two roles: Broker Admin and Operator.</p>
+            <p>
+              Everyone who signs in on your side of the platform — your own team,
+              and the admins at the brokers who send you files. Operators are added
+              by their own broker, so they appear here but are not yours to change.
+            </p>
           </div>
           <div className="actions">
             <button className="btn pri" onClick={() => nav("/users/new")}>＋ Invite User</button>
@@ -200,7 +219,8 @@ export default function Users() {
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Name</th><th>Role</th><th>Status</th><th>Last Sign-In</th><th></th></tr>
+                <tr><th>Name</th><th>Organisation</th><th>Role</th><th>Can do</th>
+                  <th>Status</th><th>Last Sign-In</th><th></th></tr>
               </thead>
               <tbody>
                 {pageRows.map(u => {
@@ -214,11 +234,20 @@ export default function Users() {
                         <b>{u.full_name}</b>
                         <div className="sub">{u.email}</div>
                       </td>
+                      {/* Which organisation this person is an admin OF. Without
+                          it "Broker Admin" says the seat but not the company. */}
+                      <td>
+                        {u.org_name ?? "—"}
+                        <div className="sub">
+                          {u.org_kind === "broker" ? "Broker" : "Your organisation"}
+                        </div>
+                      </td>
                       <td>
                         <span className={`badge ${isAdminRow ? "b-info" : "b-mut"}`}>
                           <span className="d" />{ROLE_LABEL[role] ?? role}
                         </span>
                       </td>
+                      <td className="l">{ROLE_CAN_DO[role] ?? "—"}</td>
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">
@@ -246,7 +275,9 @@ export default function Users() {
                           <span className="linkish mut" aria-disabled="true"
                             title={u.id === me?.id
                               ? "You can't remove your own account."
-                              : "This is the only admin — add another before removing this one."}>
+                              : normalizeRole(u.role) === "operator"
+                                ? "Operators belong to the broker. Their own admin adds and removes them."
+                                : "This is the only admin — add another before removing this one."}>
                             Remove
                           </span>
                         )}
@@ -266,7 +297,9 @@ export default function Users() {
         </div>
 
         <div className="note" style={{ marginTop: 14, maxWidth: 560 }}>
-          Role labels match the invite dialog exactly. You can't remove yourself or the last admin.
+          Bringing a broker on board? Invite their admin above — the broker
+          organisation is created with the invitation. Put them on a programme
+          from Programmes; until then they cannot produce.
         </div>
       </div>
 

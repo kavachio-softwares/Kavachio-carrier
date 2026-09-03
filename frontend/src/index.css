@@ -79,6 +79,39 @@ tbody td:where(:first-child) > .flex,
 tbody td:where(:first-child) > div[class*="flex"] { justify-content: flex-start; margin-left: 0; margin-right: 0; }
 tbody tr:hover { @apply bg-surface-2/60; }
 
+/* The output-template preview draws the delivered file as a real spreadsheet,
+   so it opts out of the app-wide table styling above. A heading in a
+   spreadsheet is the file's OWN header text — shown exactly as it will be
+   written, at readable size — not a small-caps column label; and its values
+   read left, the way a cell does. Scoped by class so nothing else moves. */
+.sheet-grid thead th {
+  @apply text-[12.5px] normal-case tracking-normal font-semibold text-ink
+         px-2 py-2 text-center;
+}
+.sheet-grid thead tr:first-child th {
+  @apply text-[11px] font-normal text-ink-soft py-0;
+}
+.sheet-grid tbody td { @apply px-2 py-1.5 align-middle text-left; }
+.sheet-grid thead th:where(:first-child),
+.sheet-grid tbody td:where(:first-child) { text-align: center; }
+.sheet-grid tbody tr:hover { background: transparent; }
+
+/* A scrolling list with its heading pinned to the top (the create-template
+   proposal). The app-wide `thead th` background above is 60% transparent, which
+   is fine for a header that scrolls away with its table and wrong for one that
+   stays put: rows passing underneath show straight through it and the two sets
+   of words land on top of each other. So the cells get an OPAQUE background of
+   their own and the stacking order to sit above the rows — on the `th`, not the
+   `thead`, because a row group's background is not painted for a sticky header
+   in a border-collapsed table. The headings sit on their bottom edge so a
+   two-line one still lines up with the row beneath it. */
+.proposal-grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  @apply bg-surface-2 border-b border-border align-bottom;
+}
+
 /* --- loading affordances (components/Busy.tsx) ---------------------------- */
 /* Full-page blocking overlay for heavy operations: blurred backdrop + a
    coin-flip spinner. The blur needs backdrop-filter; the rgba tint is the

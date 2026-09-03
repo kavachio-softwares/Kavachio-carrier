@@ -41,7 +41,7 @@ from app_routes import _iso_utc, _parse_client_dt
 from db import (
     ActivityEvent, AdminMappingTask, CanonicalSession, Contract, DirectFormat,
     ExportTemplate, LandingRecord, Mapper, MissingBdxColumn, OutputExport, Party,
-    Pipeline, PipelineContract, Program, SessionLocal, Tenant,
+    Pipeline, PipelineContract, Program, ReferenceDocument, SessionLocal, Tenant,
     exception_severity_counts,
 )
 from exporter import parse_template, spec_sheet_names, is_reference_sheet
@@ -737,24 +737,33 @@ async def direct_upload(
                 routing = fmt.sheet_routing
                 column_mapping = fmt.column_mapping
                 candidates = fmt.candidates or {}
+                # A format we have seen before keeps the reasoning it was built
+                # with — re-deciding would risk moving a column somebody had
+                # already confirmed.
+                decisions = fmt.mapping_decisions or {}
                 fmt.hit_count = (fmt.hit_count or 1) + 1
             else:
                 routing = dl.propose_sheet_routing(input_sheets, output_sheets)
-                column_mapping, candidates = await run_in_threadpool(
+                # A previously-confirmed mapping for this format outranks
+                # everything the proposer finds — a re-run must never move a
+                # column somebody already fixed by hand.
+                column_mapping, candidates, decisions = await run_in_threadpool(
                     dm.propose_column_mapping, cols_by_sheet, structure, routing,
-                    samples_by_sheet)
+                    samples_by_sheet, (fmt.column_mapping if fmt else None), True)
                 if fmt is None:
                     fmt = DirectFormat(
                         tenant_id=tid, name=name, fingerprint=fp,
                         output_template_id=output_template_id, contract_id=contract_id,
                         carrier_party_id=carrier_party_id, program_id=program_id,
                         sheet_routing=routing, column_mapping=column_mapping,
-                        candidates=candidates, datamodel_mapped=False, approved=0)
+                        candidates=candidates, mapping_decisions=decisions,
+                        datamodel_mapped=False, approved=0)
                     s.add(fmt)
                 else:
                     fmt.sheet_routing = routing
                     fmt.column_mapping = column_mapping
                     fmt.candidates = candidates
+                    fmt.mapping_decisions = decisions
                     fmt.contract_id = contract_id or fmt.contract_id
                     fmt.carrier_party_id = carrier_party_id or fmt.carrier_party_id
                     fmt.program_id = program_id or fmt.program_id
@@ -840,6 +849,11 @@ async def direct_upload(
             "sheet_routing": routing,
             "column_mapping": column_mapping,
             "candidates": candidates,
+            # What the mapper could and could not decide. The build screen shows
+            # this straight away, because a required column with nothing behind
+            # it is the one problem that looks like a success until the file is
+            # opened by whoever is waiting for it.
+            "mapping_review": _mapping_review(decisions),
             "row_count": landing["row_count"],
         }
 
@@ -867,6 +881,10 @@ class PipelineCreate(BaseModel):
     name: Optional[str] = None
     carrier_party_id: int
     program_id: int
+    # Which broker this setup is for. Optional: a setup that covers the whole
+    # programme leaves it unset, which is what every setup built before the
+    # broker level existed looks like.
+    broker_party_id: Optional[int] = None
     input_format_id: int
     output_template_id: int
     contracts: list[PipelineContractIn] = []
@@ -874,6 +892,7 @@ class PipelineCreate(BaseModel):
 
 class PipelineUpdate(BaseModel):
     name: Optional[str] = None
+    broker_party_id: Optional[int] = None
     input_format_id: Optional[int] = None
     output_template_id: Optional[int] = None
     contracts: Optional[list[PipelineContractIn]] = None  # replaces the set when given
@@ -1151,6 +1170,7 @@ def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
     # having to look each id up separately.
     _carrier = s.get(Party, p.carrier_party_id) if p.carrier_party_id else None
     _program = s.get(Program, p.program_id) if p.program_id else None
+    _broker = s.get(Party, p.broker_party_id) if p.broker_party_id else None
     _out_tpl = s.get(ExportTemplate, p.output_template_id) if p.output_template_id else None
     _pcs = _pipeline_contracts(s, p.id)
     _contracts_by_id = {}
@@ -1191,6 +1211,8 @@ def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
         "carrier_name": _carrier.legal_name if _carrier else None,
         "program_id": p.program_id,
         "program_name": _program.name if _program else None,
+        "broker_party_id": p.broker_party_id,
+        "broker_name": _broker.legal_name if _broker else None,
         "input_format_id": p.input_format_id,
         "input_format_name": _df.name if _df else None,
         "output_template_id": p.output_template_id,
@@ -1221,11 +1243,16 @@ def _activate_pipeline(s, p: Pipeline) -> None:
     ready, reason = _pipeline_ready(s, p)
     if not ready:
         raise HTTPException(400, reason)
-    # Supersede other active pipelines for the same (carrier, program).
+    # Supersede other active pipelines for the same (carrier, program, broker).
+    # Including the broker means one programme can run a different input layout
+    # per broker — and, because a pre-broker setup has broker_party_id NULL and
+    # only ever collides with another NULL, nothing that exists today changes.
     s.query(Pipeline).filter(
         Pipeline.tenant_id == p.tenant_id,
         Pipeline.carrier_party_id == p.carrier_party_id,
         Pipeline.program_id == p.program_id,
+        (Pipeline.broker_party_id.is_(None) if p.broker_party_id is None
+         else Pipeline.broker_party_id == p.broker_party_id),
         Pipeline.id != p.id,
         Pipeline.status == "active",
     ).update({Pipeline.status: "superseded"})
@@ -1525,11 +1552,118 @@ def _principal_name(principal) -> Optional[str]:
         return None
 
 
+def _scope_template_conflict(s, tid: int, scope: dict, pipe, fmt) -> Optional[str]:
+    """Is the setup about to run the one this scope actually agreed on?
+
+    Returns a user-facing reason to refuse, or None to proceed.
+
+    The two ways this goes wrong are worth separating, because the fix differs:
+    nothing agreed for the scope at all (make a template), versus something
+    agreed that the running setup was not built against (make a setup for this
+    scope). Both otherwise end in a file that looks delivered and carries no
+    rows, which is the failure mode this exists to prevent.
+    """
+    from output_template_routes import _resolve as _resolve_output_template
+    agreed, level = _resolve_output_template(
+        s, tid, scope.get("carrier_party_id"), scope.get("program_id"),
+        scope.get("broker_party_id"), scope.get("contract_id"))
+    if agreed is None:
+        return ("no output BDX template is configured for this carrier, "
+                "programme, broker and contract — create one on the Bordereau "
+                "Setup page first")
+    running = (pipe.output_template_id if pipe else fmt.output_template_id)
+    if running == agreed.id:
+        return None
+    # Different VERSIONS of one template share a name and a layout lineage; the
+    # setup's mapping was learned against the version it was built with, and
+    # that version is what it must keep using.
+    running_row = s.get(ExportTemplate, running) if running else None
+    if running_row and running_row.name == agreed.name:
+        return None
+    return (
+        f"this bordereau is scoped to a {level} whose output template is "
+        f"'{agreed.name}', but the setup that runs here was built against "
+        f"'{running_row.name if running_row else 'a different template'}'. "
+        f"A setup's mapping is learned against one output template, so running "
+        f"it against another would produce a file with the right column "
+        f"headings and no data. Build a Bordereau Setup for this scope first.")
+
+
+def _mapping_review(decisions: Optional[dict]) -> dict:
+    """A short summary of the mapping ladder's verdict, for the setup screen.
+
+    Three numbers and two lists. `unresolved_required` is the one that matters:
+    those columns will be EMPTY in the delivered file, and the plan is explicit
+    that they must not be silently generated as if all were well.
+    """
+    decisions = decisions or {}
+    auto = review = 0
+    unresolved: list[dict] = []
+    ambiguous: list[dict] = []
+    for sheet, rows in decisions.items():
+        for d in rows or []:
+            if d.get("status") in ("AUTO_MAPPED", "MANUALLY_CONFIRMED"):
+                auto += 1
+                continue
+            review += 1
+            entry = {"sheet": sheet, "field": d.get("display_name"),
+                     "field_key": d.get("field_key"),
+                     "confidence": d.get("confidence"),
+                     "reason": d.get("reason"),
+                     "candidates": [c.get("source") for c in (d.get("candidates") or [])][:4]}
+            if d.get("required"):
+                unresolved.append(entry)
+            else:
+                ambiguous.append(entry)
+    return {
+        "checked": auto + review,
+        "auto_mapped": auto,
+        "needs_review": review,
+        # Required and unmapped — blocks a clean delivery.
+        "unresolved_required": unresolved,
+        # Optional and unmapped — worth a look, not a blocker.
+        "unmapped_optional": ambiguous,
+        "threshold": _semantic_threshold(),
+    }
+
+
+def _semantic_threshold() -> float:
+    from semantic_mapping import min_confidence
+    return min_confidence()
+
+
+def _output_sample_layout(s, template_id: Optional[int]) -> Optional[dict]:
+    """The sample output BDX configured for a template, if one was supplied.
+
+    The sample is a REFERENCE ARTIFACT, not the template — the recipient sends
+    "here is what the file should look like", and we keep it beside the template
+    to check ourselves against. It is stored as a ReferenceDocument (kind
+    ``output_sample``) whose ``extracted`` already holds the parsed column list,
+    so checking a generated file costs a dictionary comparison rather than
+    re-reading a workbook on every run.
+
+    None when no sample was configured — which is normal, not a failure.
+    """
+    if not template_id:
+        return None
+    try:
+        rows = (s.query(ReferenceDocument)
+                .filter(ReferenceDocument.kind == "output_sample")
+                .order_by(ReferenceDocument.id.desc()).limit(50).all())
+        for r in rows:
+            ex = r.extracted or {}
+            if ex.get("template_id") == template_id and ex.get("sheets"):
+                return {"sheets": ex["sheets"]}
+    except Exception as e:  # noqa: BLE001 — a missing sample never blocks a run
+        log.warning("output sample lookup skipped: %s", e)
+    return None
+
+
 async def _render_landing(
     landing_id: int, contract_id: Optional[int], filename: Optional[str],
     actor: Optional[str], extra_consts: dict, auto_ingest: bool = False,
     reuse_export_id: Optional[int] = None, pipeline_id: Optional[int] = None,
-    check_only: bool = False,
+    check_only: bool = False, scope: Optional[dict] = None,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -1568,6 +1702,9 @@ async def _render_landing(
             eff_output_template_id = fmt.output_template_id
             sheet_contracts = fmt.sheet_contracts or {}
             fallback_contract_id = fmt.contract_id
+        # The template here is always the SETUP's own — see this module's
+        # _scope_template_conflict for why a run can never be pointed at a
+        # different one. The scope has already selected WHICH setup runs.
         tpl = s.get(ExportTemplate, eff_output_template_id)
         if not tpl:
             raise HTTPException(404, "output template not found")
@@ -1629,6 +1766,10 @@ async def _render_landing(
         datamodel_mapped = bool(fmt.datamodel_mapped)
         format_id = fmt.id
         out_template_id = eff_output_template_id
+        out_template_version = tpl.version or 1
+        # Parsed once when the sample was configured, so comparing costs a
+        # dictionary diff here rather than re-reading a workbook every run.
+        sample_layout = _output_sample_layout(s, tpl.id)
 
     # Pure projection (offload heavy work from the event loop).
     routed = dl.apply_routing(landing_data, routing)
@@ -1765,7 +1906,10 @@ async def _render_landing(
         output_bytes = await run_in_threadpool(
             _serialize_output, _sheets_from_projected(structure, projected), output_format)
 
-    raw = filename or f"{(template_name or 'export').replace(' ', '_')}"
+    # Template names read well on screen and badly as filenames — see
+    # output_serializers.safe_filename for what it strips and why.
+    from output_serializers import safe_filename as _safe_name
+    raw = _safe_name(filename or template_name or "export")
     # Force the extension to match the template's output format (multi-sheet CSV
     # becomes a .zip bundle).
     fname = _ensure_ext(raw, _output_ext(output_format, n_sheets))
@@ -1777,6 +1921,18 @@ async def _render_landing(
         _ct_for(fname))
 
     sev_crit, sev_warn, sev_info = exception_severity_counts(exceptions)
+    # Does the file we just wrote match the sample the recipient supplied?
+    # Advisory only (plan section 15): a sample is optional, and a difference is
+    # something for a person to look at, never a reason to withhold a delivery.
+    sample_report = None
+    if sample_layout:
+        try:
+            from output_template_validation import compare_with_sample
+            sample_report = compare_with_sample(
+                _sheets_from_projected(structure, projected), sample_layout)
+        except Exception as e:  # noqa: BLE001
+            log.warning("sample comparison skipped: %s", e)
+
     with SessionLocal() as s:
         out = s.get(OutputExport, reuse_export_id) if reuse_export_id else None
         if out is None:
@@ -1789,7 +1945,19 @@ async def _render_landing(
                 critical_count=sev_crit, warning_count=sev_warn,
                 info_count=sev_info,
                 status="has_exceptions" if exceptions else "clean",
-                blob=exp_bytes, blob_ref=exp_ref)
+                blob=exp_bytes, blob_ref=exp_ref,
+                # What this file was made from and for. template_version is the
+                # one that has to be right: a later edit forks the template, and
+                # this download must keep pointing at the layout it was actually
+                # written with.
+                template_version=out_template_version,
+                output_format=output_format,
+                pipeline_id=pipeline_id,
+                carrier_party_id=(scope or {}).get("carrier_party_id"),
+                program_id=(scope or {}).get("program_id"),
+                broker_party_id=(scope or {}).get("broker_party_id"),
+                contract_id=(scope or {}).get("contract_id") or eff_contract_id,
+                sample_comparison=sample_report)
             s.add(out)
         else:
             # Re-render in place — same export id/header, refreshed file + exceptions.
@@ -1805,6 +1973,9 @@ async def _render_landing(
             out.blob = exp_bytes
             out.blob_ref = exp_ref
             out.generated_by = actor or out.generated_by
+            out.template_version = out_template_version
+            out.output_format = output_format
+            out.sample_comparison = sample_report
         s.add(ActivityEvent(
             tenant_id=tenant_id, actor=actor,
             action="direct_output_checked" if check_only else "direct_output_generated",
@@ -2179,6 +2350,9 @@ def direct_format_editor(format_id: int,
         routing = f.sheet_routing or dl.propose_sheet_routing(input_sheets, output_sheets)
         column_mapping = f.column_mapping or {}
         candidates = f.candidates or {}
+        # NULL on a setup built before the mapper recorded its reasoning; the
+        # review then shows nothing rather than claiming everything was fine.
+        mapping_decisions = f.mapping_decisions or {}
         contract_id = f.contract_id
         template_id = f.output_template_id
         sheet_contracts = f.sheet_contracts
@@ -2205,6 +2379,7 @@ def direct_format_editor(format_id: int,
         "input_sheets": input_sheets, "input_columns": input_columns,
         "output_sheets": output_sheets, "sheet_routing": routing,
         "column_mapping": column_mapping, "candidates": candidates,
+        "mapping_review": _mapping_review(mapping_decisions),
         "fields": fields,
     }
 
@@ -2255,6 +2430,7 @@ def pipeline_create(body: PipelineCreate, mga: Optional[str] = None,
         pipe = Pipeline(
             tenant_id=tid, name=body.name,
             carrier_party_id=body.carrier_party_id, program_id=body.program_id,
+            broker_party_id=body.broker_party_id,
             input_format_id=body.input_format_id,
             output_template_id=body.output_template_id, status="draft")
         s.add(pipe)
@@ -2270,6 +2446,7 @@ def pipeline_list(
     mga: str,
     carrier_party_id: Optional[int] = None,
     program_id: Optional[int] = None,
+    broker_party_id: Optional[int] = None,
     q: Optional[str] = None,
     status: Optional[str] = None,
     page: Optional[int] = Query(None, ge=1),
@@ -2289,6 +2466,12 @@ def pipeline_list(
             query = query.filter(Pipeline.carrier_party_id == carrier_party_id)
         if program_id is not None:
             query = query.filter(Pipeline.program_id == program_id)
+        if broker_party_id is not None:
+            # A broker's own setup, plus any programme-wide setup that also
+            # applies to them — asking for one broker must not hide the setup
+            # that covers everybody.
+            query = query.filter(or_(Pipeline.broker_party_id == broker_party_id,
+                                     Pipeline.broker_party_id.is_(None)))
         if status:
             query = query.filter(Pipeline.status == status)
         # Setups whose program has been deactivated are hidden everywhere the
@@ -2378,6 +2561,8 @@ def pipeline_update(pipeline_id: int, body: PipelineUpdate,
         assert_tenant_owns(principal, p.tenant_id)
         if body.name is not None:
             p.name = body.name
+        if body.broker_party_id is not None:
+            p.broker_party_id = body.broker_party_id
         if body.input_format_id is not None:
             p.input_format_id = body.input_format_id
         if body.output_template_id is not None:
@@ -2611,6 +2796,12 @@ async def direct_run(
     actor: Optional[str] = Form(default=None),
     skip_rows: int = Form(default=0),
     check_only: bool = Form(default=False),
+    # The broker and contract this bordereau is FOR. Both optional: a setup made
+    # before the broker level existed sends neither and behaves exactly as it
+    # always has. When they ARE sent, they pick the output template the four
+    # levels agreed on — see plan sections 18/19.
+    broker_party_id: Optional[int] = Form(default=None),
+    contract_id: Optional[int] = Form(default=None),
     principal: Principal = Depends(current_principal),
 ):
     """DATA step: ops uploads a real data file for a carrier + program. Uses the
@@ -2632,12 +2823,22 @@ async def direct_run(
         # Resolve the active PIPELINE for this carrier+program — that's the
         # config a run executes against. The pipeline's Input Template (a
         # DirectFormat) supplies the input layout below.
-        pipe = (s.query(Pipeline)
-                .filter(Pipeline.tenant_id == tid,
-                        Pipeline.carrier_party_id == carrier_party_id,
-                        Pipeline.program_id == program_id,
-                        Pipeline.status == "active")
-                .order_by(Pipeline.id.desc()).first())
+        def _active_pipeline(broker: Optional[int]):
+            q = (s.query(Pipeline)
+                 .filter(Pipeline.tenant_id == tid,
+                         Pipeline.carrier_party_id == carrier_party_id,
+                         Pipeline.program_id == program_id,
+                         Pipeline.status == "active"))
+            q = q.filter(Pipeline.broker_party_id == broker if broker is not None
+                         else Pipeline.broker_party_id.is_(None))
+            return q.order_by(Pipeline.id.desc()).first()
+
+        # This broker's own setup first, then the programme-wide one. A broker
+        # with no setup of its own runs on the programme's, which is what every
+        # setup looks like today.
+        pipe = _active_pipeline(broker_party_id) if broker_party_id else None
+        if pipe is None:
+            pipe = _active_pipeline(None)
         if pipe and pipe.input_format_id:
             fmt = s.get(DirectFormat, pipe.input_format_id)
         else:
@@ -2701,7 +2902,26 @@ async def direct_run(
 
         fp = signature_hash(signature_multi(sheets_dict))
         drift = bool(fmt.fingerprint and fmt.fingerprint != fp)
-        eff_contract_id = fmt.contract_id
+        eff_contract_id = contract_id or fmt.contract_id
+
+        # A scope was named, so the output template must be the one agreed for
+        # it. Refuse rather than fall back onto an unrelated template — the
+        # screen offers to create one (plan section 19).
+        run_scope = ({"carrier_party_id": carrier_party_id,
+                      "program_id": program_id,
+                      "broker_party_id": broker_party_id,
+                      "contract_id": contract_id}
+                     if (broker_party_id or contract_id) else None)
+
+        # The setup that will run, and the template agreed for the scope. When
+        # they disagree, refuse: the mapping below belongs to the setup's
+        # template, so writing into the other one yields headings with nothing
+        # under them.
+        if run_scope is not None:
+            conflict = _scope_template_conflict(s, tid, run_scope, pipe, fmt)
+            if conflict:
+                raise HTTPException(400, conflict)
+
         rec = LandingRecord(
             tenant_id=tid, format_id=fmt.id, source_filename=file.filename,
             fingerprint=fp, data=landing, row_count=landing["row_count"],
@@ -2723,7 +2943,7 @@ async def direct_run(
         result = await _render_landing(
             landing_id, None if pipeline_id else eff_contract_id,
             filename, actor or mga, {}, auto_ingest=not check_only,
-            pipeline_id=pipeline_id, check_only=check_only)
+            pipeline_id=pipeline_id, check_only=check_only, scope=run_scope)
         result["format_drift"] = drift
         if supp_stats is not None:
             result["supplement"] = supp_stats

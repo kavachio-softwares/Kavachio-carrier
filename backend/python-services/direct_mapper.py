@@ -9,9 +9,17 @@ Two layers, so the engine is usable (and testable) without the network:
   2. propose_for_sheet()  fills the rest with Gemini when GEMINI_API_KEY is set,
                           otherwise returns only the heuristic mapping.
 
+Since the semantic-mapping work, layer 1 is no longer the whole story: the
+heuristic and the model are both treated as EVIDENCE, and `semantic_mapping`
+decides what may be accepted without a person. A column only becomes a `copy`
+rule when it clears the confidence bar AND its values suit the field's type; the
+rest are recorded as decisions for review rather than quietly mapped.
+
 Output of propose_column_mapping():
   column_mapping  {output_sheet: {output_col: rule}}   (see direct_lane rule shapes)
   candidates      {output_sheet: {output_col: [{source, confidence}, ...]}}
+  decisions       {output_sheet: [Decision.to_dict(), ...]}  — how each field
+                  was decided, including the ones deliberately left unmapped
 """
 from __future__ import annotations
 
@@ -24,6 +32,7 @@ from typing import Any
 # Appendix 2 §2.7/§2.8 output defaults. Dependency-free module — importing it
 # here does not pull SQLAlchemy or open a connection.
 from bdx_defaults import with_output_default
+import semantic_mapping as sm
 
 log = logging.getLogger("bdx.direct_mapper")
 
@@ -189,12 +198,62 @@ def _gemini_enrich(
     return out
 
 
+def model_column_candidates(
+    output_cols: list[str], input_cols: list[str], samples: dict[str, list[str]],
+) -> dict[str, dict]:
+    """What the model thinks each of these output columns means, if anything.
+
+    The public door onto the enrichment above. It exists because the output-
+    template builder asks the SAME question at a different moment — before a
+    template exists, to work out which of a standard's published columns the
+    incoming file could actually fill — and one door means one prompt, one
+    retry policy and one snap-back-to-a-real-column rule for both callers.
+
+    A PROPOSAL, never a decision: ``semantic_mapping`` is what accepts or
+    refuses whatever comes back (plan section 12).
+    """
+    return _gemini_enrich(output_cols, input_cols, samples)
+
+
+def _output_fields_for_sheet(output_structure: dict, sheet_name: str) -> list[dict]:
+    """The output columns of one sheet, with the metadata the ladder needs.
+
+    Falls back to the first sheet the same way `output_columns_for_sheet` does,
+    and completes any column that predates the field metadata — so a template
+    built before this still maps.
+    """
+    sheets = (output_structure or {}).get("sheets", [])
+    chosen = next((sh for sh in sheets
+                   if str(sh.get("sheet_name")) == str(sheet_name)), None)
+    if chosen is None and sheets:
+        chosen = sheets[0]
+    if not chosen:
+        return []
+    out = []
+    for c in chosen.get("columns", []):
+        name = c.get("column_name")
+        if not name:
+            continue
+        if not c.get("active", True):
+            continue
+        out.append({
+            "column_name": name,
+            "display_name": c.get("display_name") or name,
+            "field_key": c.get("field_key") or _norm(name).replace(" ", "_"),
+            "data_type": c.get("data_type"),
+            "required": bool(c.get("required")),
+        })
+    return out
+
+
 def propose_column_mapping(
     input_cols_by_sheet: dict[str, list[str]],
     output_structure: dict,
     routing: dict,
     samples_by_sheet: dict[str, dict[str, list[str]]] | None = None,
-) -> tuple[dict[str, dict], dict[str, dict]]:
+    existing_mapping: dict[str, dict] | None = None,
+    with_decisions: bool = False,
+):
     """Propose an input→output column mapping for every output sheet.
 
     `input_cols_by_sheet`   {input_sheet: [col, ...]}
@@ -205,8 +264,10 @@ def propose_column_mapping(
     Returns (column_mapping, candidates) keyed by OUTPUT sheet.
     """
     samples_by_sheet = samples_by_sheet or {}
+    existing_mapping = existing_mapping or {}
     column_mapping: dict[str, dict] = {}
     candidates_out: dict[str, dict] = {}
+    decisions_out: dict[str, list[dict]] = {}
 
     for route in (routing or {}).get("routes", []):
         out_sheet = route.get("output_sheet")
@@ -224,15 +285,48 @@ def propose_column_mapping(
                 in_samples.setdefault(c, vals)
 
         out_cols = output_columns_for_sheet(output_structure, out_sheet)
-        mapping, candidates, unmatched = heuristic_match(in_cols, out_cols)
+        out_fields = _output_fields_for_sheet(output_structure, out_sheet)
 
+        # The heuristic runs first purely to find out which columns it CANNOT
+        # place — that shortlist is all the model is asked about, which keeps the
+        # prompt small. Neither result is accepted here; both are evidence.
+        _, _, unmatched = heuristic_match(in_cols, out_cols)
+        semantic = {}
         if unmatched:
-            enriched = _gemini_enrich(unmatched, in_cols, in_samples)
-            for out_col, hit in enriched.items():
-                mapping[out_col] = {"kind": "copy", "source": hit["source"]}
-                candidates[out_col] = [{"source": hit["source"],
-                                        "confidence": hit["confidence"],
-                                        "kind": "copy"}] + candidates.get(out_col, [])
+            semantic = model_column_candidates(unmatched, in_cols, in_samples)
+
+        # The one place that decides. Confidence bar, data-type compatibility
+        # and the ambiguity rule all live in semantic_mapping, so the model can
+        # propose but never conclude.
+        # A stored mapping is a RULE ({"kind":"copy","source":...}); the ladder
+        # wants the source column. Only `copy` rules name one — a const or a
+        # transform is not a column mapping and must not masquerade as a
+        # confirmed one.
+        prior = {
+            col: rule.get("source")
+            for col, rule in (existing_mapping.get(out_sheet) or {}).items()
+            if isinstance(rule, dict) and rule.get("kind") == "copy" and rule.get("source")
+        }
+        decisions = sm.resolve_sheet(
+            out_fields, in_cols, in_samples, existing=prior, semantic=semantic)
+
+        mapping: dict[str, dict] = {}
+        candidates: dict[str, list[dict]] = {}
+        for d, f in zip(decisions, out_fields):
+            col = f["column_name"]
+            candidates[col] = [
+                {"source": c["source"], "confidence": c["confidence"],
+                 "kind": "copy", "method": c.get("method"),
+                 "compatible": c.get("compatible", True)}
+                for c in d.candidates]
+            if d.mapped:
+                mapping[col] = {"kind": "copy", "source": d.source}
+        decisions_out[out_sheet] = [d.to_dict() for d in decisions]
+        if any(d.status == sm.REVIEW_REQUIRED for d in decisions):
+            log.info("sheet %r: %d of %d output columns need a look",
+                     out_sheet,
+                     sum(1 for d in decisions if d.status == sm.REVIEW_REQUIRED),
+                     len(decisions))
 
         # Appendix 2 §2.7 / §2.8 — stamp the agreed COALESCE default onto the
         # columns those sections name, so the DELIVERED FILE carries 'Unknown' /
@@ -260,4 +354,8 @@ def propose_column_mapping(
         column_mapping[out_sheet] = mapping
         candidates_out[out_sheet] = candidates
 
+    # Two-value return by default: every existing caller unpacks a pair, and
+    # this stays a drop-in for them.
+    if with_decisions:
+        return column_mapping, candidates_out, decisions_out
     return column_mapping, candidates_out

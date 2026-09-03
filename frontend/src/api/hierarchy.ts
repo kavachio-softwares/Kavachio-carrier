@@ -28,6 +28,9 @@ export type HierarchyProgramme = {
   id: number;
   name: string;
   status: string | null;
+  business_segment: string | null;
+  product_line: string | null;
+  bdx_frequency: string | null;
   broker_count: number;
   contract_count: number;
   brokers: HierarchyBroker[];
@@ -128,3 +131,16 @@ export const rejectContract = (contractId: number, note: string) =>
 
 export const getApprovalHistory = (contractId: number) =>
   api.get<ApprovalEvent[]>(`/contracts/${contractId}/approvals`).then(r => r.data);
+
+/** Bring a broker on board: the organisation, its first admin and (optionally)
+ *  the programme it produces into, in one call. Doing them separately is what
+ *  used to leave a carrier with a broker nobody could sign in as. */
+export const createBroker = (body: {
+  legal_name: string;
+  party_type?: string;
+  admin_name?: string;
+  admin_email?: string;
+  program_id?: number;
+}) => api.post<BrokerSummary & {
+  admin_invited: boolean; admin_email: string | null; program_id: number | null;
+}>("/brokers", body).then(r => r.data);

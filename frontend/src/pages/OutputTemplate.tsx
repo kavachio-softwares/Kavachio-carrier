@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, Wand2,
@@ -10,6 +10,8 @@ import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import { Select, TextInput } from "../components/ui/Field";
 import { PageBody, PageHeader } from "../components/Layout";
+import OutputTemplateFields from "../components/OutputTemplateFields";
+import TemplateSheetPreview from "../components/TemplateSheetPreview";
 import { LoadingOverlay } from "../components/Busy";
 
 type ExtraDef = {
@@ -23,6 +25,17 @@ type TplColumn = {
   canonical_field: string | null; confidence?: number | null;
   candidates?: Candidate[];
   transform: string | null; static_value: string | null;
+  // The field-builder's half of the same column. Written by
+  // `output_template_fields.complete_structure`, so every template has them on
+  // read even if it predates them — which is what lets the sheet preview draw
+  // the file exactly as it would be delivered.
+  display_name?: string | null;
+  required?: boolean | null;
+  system_required?: boolean | null;
+  active?: boolean | null;
+  display_order?: number | null;
+  data_type?: string | null;
+  input_match?: { column?: string | null; confidence?: number | null } | null;
 };
 type TplSheet = {
   sheet_name: string; header_row: number; data_start_row: number;
@@ -94,6 +107,16 @@ export default function OutputTemplate() {
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // Bumped when the grid above changes a column, so the field builder below
+  // re-reads rather than showing the list as it was a moment ago.
+  const [fieldsKey, setFieldsKey] = useState(0);
+
+  // Re-read after the field builder saves, so the sheet preview above it shows
+  // the rename / reorder / removal that was just made rather than the layout as
+  // it was when the page opened.
+  const reloadTemplate = useCallback(() => {
+    api.get<Template>(`/export/template/${id}`).then(r => setT(r.data));
+  }, [id]);
 
   useEffect(() => {
     api.get<Template>(`/export/template/${id}`).then(r => setT(r.data));
@@ -246,6 +269,33 @@ export default function OutputTemplate() {
             </div>
           )}
         </Card>
+
+        {/* The template AS THE SPREADSHEET IT BECOMES. A layout is read across,
+            not down: which headings sit together, how wide the file runs, which
+            ones are mandatory. None of that is visible in a list of field rows,
+            and it is the first thing anyone opening a template wants to know. */}
+        <Card>
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div className="flex items-center gap-2">
+              <Layers size={15} className="text-accent shrink-0" />
+              <h3 className="text-sm font-medium">The file this template produces</h3>
+            </div>
+            <span className="text-xs text-ink-muted">
+              Active columns only, in delivery order, under the names the file
+              will carry — edit them below.
+            </span>
+          </div>
+          <TemplateSheetPreview sheets={t.structure?.sheets ?? []}
+            templateId={Number(id)}
+            onChanged={() => { reloadTemplate(); setFieldsKey(k => k + 1); }} />
+        </Card>
+
+        {/* The blueprint itself: which columns the delivered file carries, what
+            feeds each one, and in what order. The mapping review below is the
+            other half of the same template — this decides WHAT the fields are,
+            that decides where their values come from. */}
+        <OutputTemplateFields templateId={Number(id)} refreshKey={fieldsKey}
+          onSaved={reloadTemplate} />
 
         {contractMapping?.contract && (
           <Card>

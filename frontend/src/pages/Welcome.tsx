@@ -330,7 +330,7 @@ export default function Welcome() {
             <FinishPanel
               carrier={tenant?.legal_name || mga}
               programmes={programmes}
-              onBrokers={() => nav("/brokers")}
+              onBrokers={() => nav("/users/new")}
               onDashboard={() => nav("/home")}
               onBordereau={() => nav("/direct/setup")}
             />

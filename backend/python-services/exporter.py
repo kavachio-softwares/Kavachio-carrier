@@ -301,6 +301,51 @@ def parse_template(file_bytes: bytes, filename: str | None = None) -> dict[str, 
     return {"sheets": []}
 
 
+def extract_single_sheet(
+    file_bytes: bytes,
+    sheet_name: str,
+    drop_rows: int = 0,
+    drop_cols: int = 0,
+    rename_to: str | None = None,
+) -> bytes:
+    """Return a NEW xlsx workbook holding only `sheet_name` from `file_bytes`,
+    optionally dropping the first `drop_rows` rows and/or `drop_cols` columns.
+
+    Purpose: published reporting standards (Lloyd's Coverholder Reporting
+    Standards, say) bundle many jurisdiction tabs in one file, and each tab
+    prefixes the real header with a code row ("CR0013 | CR0014 | …") and a
+    leading label column ("Field"). Slicing those away leaves the published field
+    names as row 1, so the normal `parse_template` header detection and
+    `propose_template_mapping` pipeline work unchanged — no special-casing.
+
+    `rename_to` retitles the kept worksheet (truncated to Excel's 31-char limit).
+    Use this rather than overriding `parse_template`'s `sheet_name` afterwards:
+    the STORED blob and the parsed structure must agree on the worksheet title,
+    or style-preserving generation (`_generate_with_template`, which matches
+    sheets to the blob BY TITLE) can't find the sheet and writes a blank tab.
+
+    Raises KeyError if `sheet_name` is not in the workbook. Styling of the kept
+    sheet survives the openpyxl load/save round-trip.
+    """
+    wb = load_workbook(io.BytesIO(file_bytes))
+    if sheet_name not in wb.sheetnames:
+        raise KeyError(sheet_name)
+    for title in list(wb.sheetnames):
+        if title != sheet_name:
+            del wb[title]
+    ws = wb[sheet_name]
+    if drop_rows > 0:
+        ws.delete_rows(1, drop_rows)
+    if drop_cols > 0:
+        ws.delete_cols(1, drop_cols)
+    if rename_to:
+        ws.title = str(rename_to)[:31]
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 # ---- Data-dictionary / spec sheets -----------------------------------------
 # Some BDX workbooks ship a spec sheet per data sheet (e.g. "POL" describing the
 # columns in "POL Data") with a Field_Name + Description layout. The Description
@@ -1635,8 +1680,12 @@ def _generate_with_template(
         for c in cols:
             col_idx = c["column_index"] + 1
             cell = ws.cell(row=header_row_1b, column=col_idx)
-            if cell.value is None or not str(cell.value).strip():
-                cell.value = c.get("column_name") or f"Column {col_idx}"
+            # See direct_render._render_with_template: a renamed column carries
+            # the user's wording into the file; an untouched one keeps the
+            # sample's own header verbatim.
+            from output_template_fields import header_of as _hdr, is_renamed as _renamed
+            if cell.value is None or not str(cell.value).strip() or _renamed(c):
+                cell.value = _hdr(c)
 
         row_merge_spans: list[tuple[int, int]] = []
         for mr in list(ws.merged_cells.ranges):
@@ -1741,10 +1790,14 @@ def build_output_records(
     Returns:
         [ {"sheet": <name>, "records": [ {column_name: value, ...}, ... ]}, ... ]
     """
+    from output_template_fields import active_columns as _active
     policies = _normalize_datetime(policies)
     out: list[dict] = []
     for sh in structure["sheets"]:
-        cols = sorted(sh["columns"], key=lambda c: c["column_index"])
+        # A field the user removed must not reappear in the values validation
+        # runs against, or the exception list would report on a column that is
+        # not in the delivered file.
+        cols = _active(sh)
         records: list[dict] = []
         row_strategy = sh.get("row_strategy") or "policy"
         for policy in policies:
@@ -1776,7 +1829,10 @@ def generate_workbook(
     """Build an xlsx according to `structure` + assembled policies."""
     policies = _normalize_datetime(policies)
 
-    if template_bytes:
+    # See direct_render.render_output: the sample's styling is positional, so it
+    # only applies while the template still matches the sample's layout.
+    from output_template_fields import diverged_from_sample as _diverged
+    if template_bytes and not _diverged(structure):
         try:
             return _generate_with_template(structure, policies, template_bytes)
         except Exception as e:

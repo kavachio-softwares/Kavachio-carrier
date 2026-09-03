@@ -32,3 +32,8 @@ ai_call_trace/
 graphify-out/
 # SFTP intake landing zone (local dev). Broker files, never committed.
 backend/python-services/sftp-root/
+
+# TypeScript incremental build cache — generated on every build, so it
+# conflicts on every pull if it is tracked.
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo

@@ -239,6 +239,27 @@ class ExportTemplate(Base):
     # be usable for validation/generation.
     carrier_party_id = Column(Integer, nullable=True)
     contract_id = Column(Integer, nullable=True)
+    # An output template is agreed at CARRIER + PROGRAMME + BROKER + CONTRACT —
+    # the same four levels a contract already sits at. contract_id alone implies
+    # the other three (a contract carries its program_id and broker_party_id),
+    # but they are stored here too so a template can be resolved for a scope in
+    # one indexed read, and so a template can exist ABOVE contract level (broker
+    # set, contract NULL) as a default for that broker's contracts.
+    # All four are NULLABLE: templates created before this existed keep working
+    # at (carrier, program) scope — see _resolve_output_template.
+    program_id = Column(Integer, nullable=True, index=True)
+    broker_party_id = Column(Integer, nullable=True, index=True)
+    # Where this template's field list came from, so the editor and the
+    # validator know which rules apply to it:
+    #   uploaded  — the user's own sample workbook (the original, default path)
+    #   standard  — generated from a bundled reporting standard (Lloyd's v5.2)
+    #   contract  — generated from the contract's extracted clauses + the
+    #               standard field library
+    source_kind = Column(String, nullable=True)
+    # Provenance for a `standard` template: {"standard","version","jurisdiction"}.
+    # Read back by the validator to decide which fields are mandatory. Also set
+    # on `contract` templates to record which standard supplied the base fields.
+    standard_meta = Column(JSON, nullable=True)
     # The full output layout — every sheet AND every column definition. The
     # per-sheet `columns` list is ~99% of it (half a MB for an 11-sheet
     # template), and only the single-template endpoints ever render it, so it
@@ -271,6 +292,25 @@ class OutputExport(Base):
     tenant_id = Column(Integer, index=True, nullable=True)  # FK -> tenant.tenant_id (enforced in DB)
     template_id = Column(Integer, nullable=True)
     template_name = Column(String, nullable=True)
+    # WHICH VERSION of that template produced this file. A template can be
+    # edited after a file was generated from it; without this the January
+    # download would silently start describing itself with February's layout.
+    template_version = Column(Integer, nullable=True)
+    # The scope the run was for, denormalised so history can be filtered and
+    # re-read without walking back through the pipeline (which can be edited,
+    # superseded or deleted). NULL on every export generated before this.
+    pipeline_id = Column(Integer, nullable=True, index=True)
+    carrier_party_id = Column(Integer, nullable=True, index=True)
+    program_id = Column(Integer, nullable=True, index=True)
+    broker_party_id = Column(Integer, nullable=True, index=True)
+    contract_id = Column(Integer, nullable=True, index=True)
+    # The format actually written (xlsx | csv | xml | json) — the template's
+    # output_format at generation time, which can change afterwards.
+    output_format = Column(String, nullable=True)
+    # Result of checking the generated file against the template's sample
+    # workbook: {"status", "checked", "issues":[...]}; NULL when no sample was
+    # configured, which is not a failure — see plan section 14.
+    sample_comparison = _payload(Column(JSON, nullable=True))
     filename = Column(String, nullable=False)
     source_upload_id = Column(Integer, nullable=True)
     policy_ids = Column(JSON, nullable=True)          # canonical policy_ids exported
@@ -641,10 +681,11 @@ class AppUser(Base):
     tenant_id = Column(Integer, nullable=True)
     email = Column(String, unique=True, index=True, nullable=False)
     full_name = Column(String, nullable=False)
-    # DB default is 'tenant_user'; existing rows use 'admin'/'ops'. Role
-    # vocabulary normalization + CHECK constraints are a deferred phase, so
-    # the ORM default stays 'ops' to preserve current behavior for now.
-    role = Column(String, default="ops")
+    # One of the four: kavachio_admin | carrier_admin | broker_admin | operator.
+    # chk_app_user_role rejects anything else, so the old 'ops' default was a
+    # trap — any insert that forgot to name a role failed at COMMIT. The
+    # fallback is the LEAST-privileged seat, matching normalize_role().
+    role = Column(String, default="operator")
     status = Column(String, default="active")
     password = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -809,6 +850,12 @@ class DirectFormat(Base):
     sheet_routing = Column(JSON, nullable=True)
     column_mapping = Column(JSON, nullable=True)
     candidates = Column(JSON, nullable=True)
+    # HOW each output column got its source — method, confidence, status and the
+    # runners-up. `column_mapping` says what won; this says why, and it also
+    # records the fields deliberately left unmapped because nothing cleared the
+    # confidence bar. Without it a mapping is an assertion nobody can check.
+    # {output_sheet: [semantic_mapping.Decision.to_dict(), ...]}
+    mapping_decisions = _payload(Column(JSON, nullable=True))
     datamodel_mapped = Column(Boolean, default=False)
     datamodel_mapper_id = Column(Integer, nullable=True)
     approved = Column(Integer, default=0)
@@ -923,6 +970,10 @@ class Pipeline(Base):
     program_id = Column(Integer, index=True, nullable=True)         # FK -> program.program_id
     input_format_id = Column(Integer, index=True, nullable=True)    # FK -> direct_format.id
     output_template_id = Column(Integer, index=True, nullable=True)  # FK -> export_templates.id
+    # Which broker this setup is for. NULL on every setup built before the
+    # broker level existed — those stay (carrier, program) setups and keep
+    # running exactly as they did, so this is purely additive.
+    broker_party_id = Column(Integer, index=True, nullable=True)     # FK -> party.party_id
     # draft (never activated) | active (the one runs use) | superseded (replaced
     # by a newer active pipeline for the same carrier+program).
     status = Column(String, default="draft")
@@ -1219,6 +1270,26 @@ def init_db():
         _ensure_column(conn, inspector, "export_templates", "carrier_party_id", "INTEGER")
         _ensure_column(conn, inspector, "export_templates", "contract_id", "INTEGER")
         _ensure_column(conn, inspector, "export_templates", "output_format", "VARCHAR DEFAULT 'xlsx'")
+        # Output BDX template scoped at carrier + programme + broker + contract.
+        # Nullable with no backfill: an existing template keeps resolving at
+        # (carrier, program) scope, so no existing setup changes behaviour.
+        _ensure_column(conn, inspector, "export_templates", "program_id", "INTEGER")
+        _ensure_column(conn, inspector, "export_templates", "broker_party_id", "INTEGER")
+        _ensure_column(conn, inspector, "export_templates", "source_kind", "VARCHAR")
+        _ensure_column(conn, inspector, "export_templates", "standard_meta", json_type)
+        # The Bordereau Setup's broker level (NULL = a pre-broker setup).
+        _ensure_column(conn, inspector, "pipeline", "broker_party_id", "INTEGER")
+        # Generated-output metadata (plan section 22). template_version is the
+        # one that matters: it keeps a historical download pinned to the layout
+        # it was actually written with.
+        _ensure_column(conn, inspector, "output_exports", "template_version", "INTEGER")
+        _ensure_column(conn, inspector, "output_exports", "pipeline_id", "INTEGER")
+        _ensure_column(conn, inspector, "output_exports", "carrier_party_id", "INTEGER")
+        _ensure_column(conn, inspector, "output_exports", "program_id", "INTEGER")
+        _ensure_column(conn, inspector, "output_exports", "broker_party_id", "INTEGER")
+        _ensure_column(conn, inspector, "output_exports", "contract_id", "INTEGER")
+        _ensure_column(conn, inspector, "output_exports", "output_format", "VARCHAR")
+        _ensure_column(conn, inspector, "output_exports", "sample_comparison", json_type)
         _ensure_column(conn, inspector, "tenant", "onboarding_skipped", "BOOLEAN DEFAULT FALSE")
         # _ensure_column(conn, inspector, "program", "canonical_program_id", "INTEGER")
         # tenant_configs folded into `tenant` and dropped (see db_repair_notes.md)
@@ -1243,6 +1314,9 @@ def init_db():
         # Direct-lane setup scoping (carrier + program)
         _ensure_column(conn, inspector, "direct_format", "carrier_party_id", "INTEGER")
         _ensure_column(conn, inspector, "direct_format", "program_id", "INTEGER")
+        # Mapping traceability. NULL on every format built before it existed —
+        # their mapping still runs, it simply has no recorded reasoning.
+        _ensure_column(conn, inspector, "direct_format", "mapping_decisions", json_type)
         # Group 3: added to expected_submission after the table already existed, so
         # create_all won't add it — ALTER it in (default false backfills old rows).
         _ensure_column(conn, inspector, "expected_submission", "overdue_notified",

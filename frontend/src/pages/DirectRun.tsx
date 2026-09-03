@@ -9,9 +9,11 @@ import {
   InlineAllRows, HighlightGrid, firstDataSheet, HL_BG, HL_BD,
   HL_WARN_BG, HL_WARN_BD, type Sheet,
 } from "../components/OutputRows";
+import { useBrokerContractScope } from "../components/BrokerContractScope";
+import { resolveOutputTemplate, type ResolveResult } from "../api/outputTemplate";
 
 type Party = { id: number; legal_name: string; is_active?: boolean };
-type Program = { id: number; name: string; status?: string };
+type Program = { id: number; name: string; status?: string; party_id?: number | null };
 type Pipeline = { id: number; name: string | null; status: "draft" | "active" | "superseded"; has_supplement?: boolean };
 type GoverningContract = {
   sheet: string; contract_id: number | null;
@@ -41,6 +43,12 @@ export default function DirectRun() {
   const admin = isTenantAdmin();
 
   const [carriers, setCarriers] = useState<Party[]>([]);
+  // A tenant IS a carrier, and its own carrier party is not "app managed", so
+  // it never appears in /parties — which left this dropdown empty and the whole
+  // screen unusable. Resolve it the way Bordereau Setup does and show it as a
+  // fact rather than a choice. The dropdown below stays for any tenant that
+  // genuinely does have several carrier parties to pick between.
+  const [ownCarrier, setOwnCarrier] = useState<Party | null>(null);
   const [programs, setPrograms] = useState<Program[]>([]);
   const [programsLoading, setProgramsLoading] = useState(false);
   const [carrierId, setCarrierId] = useState<number | "">("");
@@ -68,7 +76,27 @@ export default function DirectRun() {
   // Whether this tenant still needs first-time setup (carrier + Bordereau).
   const [needsSetup, setNeedsSetup] = useState(false);
 
-  const carrierName = carriers.find(c => c.id === carrierId)?.legal_name ?? "";
+  // The rest of the chain. Both optional: a programme with no brokers on it
+  // runs exactly as it always did.
+  const scope = useBrokerContractScope(programId);
+  // Which output template these four levels resolve to. Checked BEFORE the run
+  // so "no template for this contract" is answered here, with a way out, rather
+  // than as a failure after the file has been uploaded.
+  const [tpl, setTpl] = useState<ResolveResult | null>(null);
+  const [tplLoading, setTplLoading] = useState(false);
+
+  /** The Bordereau Setup screen, opened on the selection made here. */
+  function setupHref(): string {
+    const p = new URLSearchParams();
+    if (carrierId !== "") p.set("carrier_party_id", String(carrierId));
+    if (programId !== "") p.set("program_id", String(programId));
+    if (scope.brokerPartyId !== "") p.set("broker_party_id", String(scope.brokerPartyId));
+    const q = p.toString();
+    return q ? `/direct/setup?${q}` : "/direct/setup";
+  }
+
+  const carrierName = carriers.find(c => c.id === carrierId)?.legal_name
+    ?? (ownCarrier?.id === carrierId ? ownCarrier.legal_name : "") ?? "";
   const programName = programs.find(p => p.id === programId)?.name ?? "";
   // Carrier picked, program list finished loading, and it came back empty →
   // this carrier has no program yet. Surface it instead of a silent, empty
@@ -81,12 +109,39 @@ export default function DirectRun() {
   useEffect(() => {
     setResult(null); setPreview(null); setErr(null);
     setShowAll(false); setAllSheets(null); setFile(null);
-  }, [carrierId, programId]);
+  }, [carrierId, programId, scope.brokerPartyId, scope.contractId]);
+
+  // Resolve the output template for whatever is selected right now.
+  useEffect(() => {
+    if (programId === "" || carrierId === "") { setTpl(null); return; }
+    let stale = false;
+    setTplLoading(true);
+    resolveOutputTemplate(mga, {
+      program_id: Number(programId),
+      carrier_party_id: Number(carrierId),
+      broker_party_id: scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId),
+      contract_id: scope.contractId === "" ? null : Number(scope.contractId),
+    })
+      .then(r => { if (!stale) setTpl(r); })
+      .catch(() => { if (!stale) setTpl(null); })
+      .finally(() => { if (!stale) setTplLoading(false); });
+    return () => { stale = true; };
+  }, [mga, carrierId, programId, scope.brokerPartyId, scope.contractId]);
 
   useEffect(() => {
     api.get(`/parties`, { params: { mga, party_type: "carrier" } })
       .then(r => setCarriers(Array.isArray(r.data) ? r.data : (r.data?.items ?? [])))
       .catch(() => setCarriers([]));
+  }, [mga]);
+  useEffect(() => {
+    api.get<{ id: number; legal_name: string }>(`/my-carrier-party`, { params: { mga } })
+      .then(r => {
+        setOwnCarrier({ id: r.data.id, legal_name: r.data.legal_name });
+        // Selecting it here is what makes the programme list load — the rest of
+        // the screen already keys off carrierId and needs no other change.
+        setCarrierId(prev => (prev === "" ? r.data.id : prev));
+      })
+      .catch(() => setOwnCarrier(null));
   }, [mga]);
   // Operators can process as soon as there's an approved Bordereau Setup to run
   // against (`bordereau_ready`) — not gated on the whole onboarding wizard (which
@@ -100,12 +155,20 @@ export default function DirectRun() {
     setPrograms([]); setProgramId(""); setHasSetup(null); setSetup(null);
     if (carrierId === "") { setProgramsLoading(false); return; }
     setProgramsLoading(true);
-    api.get<Program[]>(`/parties/${carrierId}/programs`)
+    // The tenant's own programmes. This used to read /parties/{id}/programs,
+    // which only finds programmes explicitly linked to a carrier PARTY — and a
+    // programme belongs to the tenant, so that column is normally empty and the
+    // dropdown came back empty with it. A programme that IS linked to a party is
+    // still narrowed to the selected carrier below, so both shapes work.
+    api.get<Program[]>(`/programs`, { params: { mga } })
       // Inactive programs are hidden here — they can't be run against.
-      .then(r => setPrograms(Array.isArray(r.data) ? r.data.filter(p => p.status !== "inactive") : []))
+      .then(r => setPrograms(Array.isArray(r.data)
+        ? r.data.filter(p => p.status !== "inactive"
+            && (p.party_id == null || p.party_id === carrierId))
+        : []))
       .catch(() => setPrograms([]))
       .finally(() => setProgramsLoading(false));
-  }, [carrierId]);
+  }, [carrierId, mga]);
   useEffect(() => {
     setHasSetup(null); setSetup(null);
     if (programId === "" || carrierId === "") return;
@@ -139,6 +202,10 @@ export default function DirectRun() {
       fd.append("program_id", String(programId));
       fd.append("file", file);
       fd.append("actor", mga);
+      // Sent only when picked. Without them the run resolves its template the
+      // way it always has — from the programme's active setup.
+      if (scope.brokerPartyId !== "") fd.append("broker_party_id", String(scope.brokerPartyId));
+      if (scope.contractId !== "") fd.append("contract_id", String(scope.contractId));
       if (checkOnly) fd.append("check_only", "true");
       const { data } = await api.post<RunResp>(`/direct/run`, fd);
       setResult(data);
@@ -194,7 +261,15 @@ export default function DirectRun() {
 
   // All required fields for either action: a carrier + program with an active
   // setup to run against, and a file to run it on.
-  const canSubmit = carrierId !== "" && programId !== "" && hasSetup === true && !!file;
+  // A scope was named but has no output template? Then there is nothing to
+  // generate INTO, and the fix is to create one — not to upload and fail.
+  const templateMissing = tpl !== null && !tpl.found;
+  // Or there IS one, but the setup that runs here was built against a different
+  // template. Running anyway would deliver a file with the right headings and
+  // no data, so it is blocked here as well as on the server.
+  const templateMismatch = !!tpl?.found && !!tpl.setup && !tpl.setup.matches;
+  const canSubmit = carrierId !== "" && programId !== "" && hasSetup === true
+    && !!file && !templateMissing && !templateMismatch;
 
   const isCheck = !!result?.check_only;
   const resultSpine = !result ? "" : result.status === "clean" ? "ok" : "warn";
@@ -208,7 +283,8 @@ export default function DirectRun() {
         <div className="page-head">
           <div className="t">
             <h2>Process Bordereau</h2>
-            <p>Pick the carrier and program, drop the file, generate the validated output.</p>
+            <p>Pick who the bordereau is for, drop the file, generate the
+              validated output.</p>
           </div>
         </div>
 
@@ -239,6 +315,8 @@ export default function DirectRun() {
           <p className="text-sm">{multiTableModal}</p>
         </Modal>
 
+
+
         <div>
           {/* ---------------- setup + upload + previous runs ---------------- */}
           <div>
@@ -246,18 +324,28 @@ export default function DirectRun() {
               <div className="row2">
                 <div className="field">
                   <label>Carrier</label>
-                  <select value={carrierId} onChange={e => setCarrierId(e.target.value ? Number(e.target.value) : "")}>
-                    <option value="">Select Carrier…</option>
-                    {/* `!== false`, not `=== true`: the API treats a null flag as
-                        active and returns those rows, so `=== true` would hide them. */}
-                    {carriers
-                      .filter(c => c.is_active !== false)
-                      .map(c => (
-                        <option key={c.id} value={c.id}>
-                          {c.legal_name}
-                        </option>
-                      ))}
-                  </select>
+                  {ownCarrier && carriers.length === 0 ? (
+                    // Nothing to choose between: this tenant's own carrier is
+                    // who the bordereau is for.
+                    <input value={ownCarrier.legal_name} readOnly disabled />
+                  ) : (
+                    <select value={carrierId}
+                      onChange={e => setCarrierId(e.target.value ? Number(e.target.value) : "")}>
+                      <option value="">Select Carrier…</option>
+                      {/* `!== false`, not `=== true`: the API treats a null flag as
+                          active and returns those rows, so `=== true` would hide them. */}
+                      {ownCarrier && !carriers.some(c => c.id === ownCarrier.id) && (
+                        <option value={ownCarrier.id}>{ownCarrier.legal_name}</option>
+                      )}
+                      {carriers
+                        .filter(c => c.is_active !== false)
+                        .map(c => (
+                          <option key={c.id} value={c.id}>
+                            {c.legal_name}
+                          </option>
+                        ))}
+                    </select>
+                  )}
                 </div>
                 <div className="field">
                   <label>Program</label>
@@ -273,6 +361,105 @@ export default function DirectRun() {
                   </select>
                 </div>
               </div>
+
+              {/* Broker, then contract. Each narrows the next, and both narrow
+                  which output template the run writes into. Left blank, the run
+                  behaves exactly as it did before they existed. */}
+              {/* The broker. The contract comes with them — a contract belongs
+                  to one (programme, broker) pair, so there is nothing left to
+                  ask once the broker is known. */}
+              <div className="row2">
+                <div className="field">
+                  <label>Broker</label>
+                  <select value={scope.brokerPartyId}
+                    disabled={programId === "" || scope.brokers.length === 0}
+                    onChange={e => scope.setBrokerPartyId(
+                      e.target.value ? Number(e.target.value) : "")}>
+                    <option value="">
+                      {programId === "" ? "Select a program first"
+                        : scope.brokers.length === 0 ? "No brokers on this program"
+                        : "All brokers"}
+                    </option>
+                    {scope.brokers.map(b => (
+                      <option key={b.id} value={b.id}>{b.legal_name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Contract</label>
+                  <input readOnly disabled value={
+                    programId === "" ? "Select a program first"
+                      : scope.contractsLoading ? "Finding the live contracts…"
+                      : scope.contracts.length === 0
+                        ? "No approved contract for this selection"
+                        : scope.contracts.length === 1
+                          ? (scope.contracts[0].filename
+                             || `Contract ${scope.contracts[0].id}`)
+                          : `${scope.contracts.length} contracts on this broker`} />
+                </div>
+              </div>
+
+              {/* Which output template this run would write into — answered
+                  before the file is uploaded, not after. */}
+              {programId !== "" && (
+                tplLoading ? (
+                  <div className="note" style={{ marginBottom: 16 }}>
+                    Checking which output template applies…
+                  </div>
+                ) : tpl && !tpl.found ? (
+                  <div className="note warn" style={{ marginBottom: 16 }}>
+                    <b>Output BDX Template not configured.</b> Nothing has been
+                    agreed for{" "}
+                    {[tpl.scope_names.carrier, tpl.scope_names.programme,
+                      tpl.scope_names.broker, tpl.scope_names.contract]
+                      .filter(Boolean).join(" · ")}
+                    , so there is nothing to generate into.{" "}
+                    {/* To the SETUP screen, not a dialog on this one. A template
+                        is only half of what a run needs — the other half is the
+                        setup that maps your bordereau into it — and building the
+                        template here left the user back on a screen that still
+                        could not run. The setup screen does both, in order, with
+                        the scope already filled in. */}
+                    <span className="linkish" onClick={() => nav(setupHref())}>
+                      Set Up the Output BDX Template →
+                    </span>
+                  </div>
+                ) : templateMismatch ? (
+                  <div className="note warn" style={{ marginBottom: 16 }}>
+                    <b>This setup writes into a different template.</b> The
+                    output template agreed for this selection is{" "}
+                    <b>{tpl!.template!.name}</b>, but the setup that runs here —{" "}
+                    <b>{tpl!.setup!.name}</b> — was built against{" "}
+                    <b>{tpl!.setup!.output_template_name}</b>. A setup learns its
+                    mapping from one output template, so running it against
+                    another would produce a file with the right column headings
+                    and no data in it. Build a Bordereau Setup for this
+                    selection first —{" "}
+                    <span className="linkish" onClick={() => nav(setupHref())}>
+                      Bordereau Setup →
+                    </span>
+                  </div>
+                ) : tpl?.template ? (
+                  <div className="note" style={{ marginBottom: 16, display: "flex",
+                    alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    Output template <b>{tpl.template.name}</b>
+                    <span className="tag-pill">v{tpl.template.version}</span>
+                    <span className="tag-pill">{tpl.template.output_format.toUpperCase()}</span>
+                    {tpl.template.standard_meta?.jurisdiction && (
+                      <span className="tag-pill">
+                        {tpl.template.standard_meta.standard}{" "}
+                        {tpl.template.standard_meta.jurisdiction}
+                      </span>
+                    )}
+                    {scope.contractId !== "" && tpl.match_level !== "contract" && (
+                      <span style={{ fontSize: 11.5, color: "var(--p-faint)" }}>
+                        — this is the {tpl.match_level}'s template, not one made
+                        for the selected contract.
+                      </span>
+                    )}
+                  </div>
+                ) : null
+              )}
 
               {/* <div style={{ fontSize: 11.5, color: "var(--p-faint)", margin: "-6px 0 14px" }}>
                 Only carriers &amp; programs with an <b>active setup</b> generate output — there's no
@@ -304,7 +491,7 @@ export default function DirectRun() {
                 <div className="note warn" style={{ marginBottom: 16 }}>
                   {admin ? (
                     <>No active setup for this carrier + program.{" "}
-                      <span className="linkish" onClick={() => nav("/direct/setup")}>Configure It →</span></>
+                      <span className="linkish" onClick={() => nav(setupHref())}>Configure It →</span></>
                   ) : (
                     <>No setup for this carrier. <b>Ask your admin to configure it.</b></>
                   )}
@@ -477,7 +664,7 @@ export default function DirectRun() {
                         gets the ask-your-admin wording rather than a link that
                         bounces them straight back to the dashboard. */}
                     {admin
-                      ? <span className="linkish" onClick={() => nav("/direct/setup")}>Review the Setup →</span>
+                      ? <span className="linkish" onClick={() => nav(setupHref())}>Review the Setup →</span>
                       : <b>Ask your admin to review the setup.</b>}
                   </div>
                 )}
@@ -527,7 +714,7 @@ export default function DirectRun() {
             )}
 
             {admin ? (
-              <div className="note" style={{ marginTop: 14 }}>Missing a setup? <span className="linkish" onClick={() => nav("/direct/setup")}>Configure It →</span></div>
+              <div className="note" style={{ marginTop: 14 }}>Missing a setup? <span className="linkish" onClick={() => nav(setupHref())}>Configure It →</span></div>
             ) : (
               <div className="note" style={{ marginTop: 14 }}>No setup for a carrier? <b>Ask your admin to configure it.</b></div>
             )}
