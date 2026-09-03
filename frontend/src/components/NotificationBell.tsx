@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Bell, X } from "lucide-react";
-import { currentMga } from "../auth";
+import { currentMga, isBrokerSeat } from "../auth";
 import { getActivity, type ActivityEvent } from "../api/activity";
 import { listPrograms, type ProgramLite } from "../api/calendar";
 
@@ -101,12 +101,22 @@ export default function NotificationBell({
   }, [placement]);
 
   // Program names (to label a reminder by program, since the event carries only id).
-  useEffect(() => { listPrograms().then(setPrograms).catch(() => setPrograms([])); }, [mga]);
+  // Not for a broker seat: /programs is carrier-tenant data and a broker has no
+  // tenant, so this is a guaranteed 403 rather than a request that might work.
+  useEffect(() => {
+    if (isBrokerSeat()) return;
+    listPrograms().then(setPrograms).catch(() => setPrograms([]));
+  }, [mga]);
 
   // Fetch once when the bell mounts. Asks for reminder events ONLY, so the limit
   // is spent on what this list actually shows — the feed is shared with every
   // other activity this tenant records.
   useEffect(() => {
+    // Same reason as above: the activity feed is this TENANT's, and a broker
+    // seat is bound to none. currentMga() hands back the literal "default" for
+    // them, which resolves to nothing — so the call cannot succeed and is not
+    // worth making.
+    if (isBrokerSeat()) return;
     let live = true;
     getActivity(mga, NOTIFY_LIMIT, NOTIFY_ACTIONS)
       .then(e => { if (live) setEvents(e); }).catch(() => {});

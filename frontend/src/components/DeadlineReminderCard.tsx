@@ -11,12 +11,13 @@
 // dismissing here also clears the bell's badge and vice versa. Two separate
 // notions of "seen" would contradict each other on screen.
 //
-// Self-gating: renders nothing when there is nothing unread, and nothing for
-// Kavachio platform admins (they get PlatformNotificationCard; the submission
-// calendar is a broker-side feature).
+// Self-gating: renders nothing when there is nothing unread, nothing for
+// Kavachio platform admins (they get PlatformNotificationCard), and nothing for
+// a BROKER seat — the submission calendar is carrier-tenant data, and a broker
+// carries no tenant, so there is nothing here it could ever read.
 import { useEffect, useMemo, useState } from "react";
 import { CalendarClock, X } from "lucide-react";
-import { currentMga, isKavachioAdmin } from "../auth";
+import { currentMga, isBrokerSeat, isKavachioAdmin } from "../auth";
 import { getActivity, type ActivityEvent } from "../api/activity";
 import { listPrograms, type ProgramLite } from "../api/calendar";
 import {
@@ -52,7 +53,12 @@ export default function DeadlineReminderCard() {
   // is on screen.
 
   useEffect(() => {
-    if (isKavachioAdmin()) return;
+    // Neither of these users has a tenant these endpoints can resolve: a
+    // platform admin spans every tenant, a broker seat belongs to none. Both
+    // would fire /activity and /programs and get "no tenant bound to this
+    // user" — noise in the console and in the network log for a card that then
+    // renders nothing anyway.
+    if (isKavachioAdmin() || isBrokerSeat()) return;
     let live = true;
     getActivity(mga, NOTIFY_LIMIT, NOTIFY_ACTIONS)
       .then(e => { if (live) setEvents(e); })
@@ -112,7 +118,7 @@ export default function DeadlineReminderCard() {
         b.newest.localeCompare(a.newest));
   }, [pending, programs]);
 
-  if (dismissed || isKavachioAdmin() || pending.length === 0) return null;
+  if (dismissed || isKavachioAdmin() || isBrokerSeat() || pending.length === 0) return null;
 
   const dismiss = () => {
     // Puts THIS CARD away. It does not clear a single reminder — closing the

@@ -142,6 +142,19 @@ export function userRole(): Role | null {
 export function isKavachioAdmin(): boolean {
   return userRole() === "kavachio_admin";
 }
+/** A BROKER seat (broker_admin or operator).
+ *
+ * These users belong to a broker organisation, not to a carrier, so their token
+ * carries no tenant at all — currentMga() falls back to the literal "default"
+ * for them. Any carrier-tenant call they make is answered "no tenant bound to
+ * this user", which is correct on the server and useless in the UI. Anything
+ * that reads tenant-scoped data has to check this BEFORE fetching, not handle
+ * the 403 afterwards.
+ */
+export function isBrokerSeat(): boolean {
+  const r = userRole();
+  return r === "broker_admin" || r === "operator";
+}
 /** Can perform tenant-admin actions. kavachio_admin is a superset. */
 export function isTenantAdmin(): boolean {
   const r = userRole();

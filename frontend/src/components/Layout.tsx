@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
   FileCheck, Server, Inbox,
 } from "lucide-react";
-import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
+import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
 import { api, getDeduped } from "../api/client";
 import { GlobalLoadingOverlay } from "./Busy";
@@ -354,7 +354,11 @@ export default function Layout() {
               <div className="rl">{roleLabel}</div>
             </div>
           </div>
-            {!isKavachioAdmin() && <NotificationBell />}
+            {/* Carrier seats only. The bell reads the tenant's activity feed
+                and its programmes; a platform admin spans every tenant and a
+                broker belongs to none, so for both it is a bell that can only
+                ever be empty. */}
+            {!isKavachioAdmin() && !isBrokerSeat() && <NotificationBell />}
           </div>
           <button className="signout" title="Sign out" onClick={() => {
             // Send the refresh token in the body, read SYNCHRONOUSLY here. The

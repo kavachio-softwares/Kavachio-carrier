@@ -2688,6 +2688,11 @@ def direct_runs(
     # two brokers on the same programme share a setup and would otherwise read
     # each other's run history off the same DirectFormat.
     broker_party_id: Optional[int] = None,
+    # Narrow to the runs made against ONE contract. A bordereau is validated
+    # against a contract's rules, so this is the scope the broker's own history
+    # is read at — a broker with two contracts on one programme is answering to
+    # two different sets of rules and should not see them mixed.
+    contract_id: Optional[int] = None,
     q: Optional[str] = None,
     result: Optional[str] = None,       # "clean" | "exceptions"
     date_from: Optional[str] = None,
