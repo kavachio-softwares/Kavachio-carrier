@@ -265,8 +265,8 @@ def _check_is_spreadsheet(filename: str, file_bytes: bytes) -> Optional[str]:
     return None
 
 
-def _check_can_open(filename: str, file_bytes: bytes) -> Optional[str]:
-    if count_rows(filename, file_bytes) is None:
+def _check_can_open(rows: Optional[int]) -> Optional[str]:
+    if rows is None:
         return ("We could not open it. Half-uploaded and password-protected "
                 "files look fine until you try to read them.")
     return None
@@ -317,8 +317,7 @@ def _check_not_duplicate(session, tenant_id: int, sha: str,
             f"Loading it again would count the premium twice.")
 
 
-def _check_has_rows(filename: str, file_bytes: bytes) -> Optional[str]:
-    rows = count_rows(filename, file_bytes)
+def _check_has_rows(rows: Optional[int]) -> Optional[str]:
     if rows == 0:
         return ("Held — the file opened but has no rows in it. An empty file "
                 "usually means an export that failed silently.")
@@ -381,14 +380,17 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
     is wired. Doing it here would change how existing uploads behave.
     """
     sha = hashlib.sha256(file_bytes).hexdigest()
+    # Counted once and kept. Two of the six checks need it, and Files Received
+    # wants to show it — a bordereau is measured in rows, not kilobytes.
+    row_count = count_rows(filename, file_bytes)
 
     reason: Optional[str] = None
     for check in (
         lambda: _check_is_spreadsheet(filename, file_bytes),
-        lambda: _check_can_open(filename, file_bytes),
+        lambda: _check_can_open(row_count),
         lambda: _check_known_sender(route),
         lambda: _check_not_duplicate(session, tenant_id, sha, route),
-        lambda: _check_has_rows(filename, file_bytes),
+        lambda: _check_has_rows(row_count),
         lambda: _check_live_contract(session, route),
     ):
         reason = check()
@@ -414,6 +416,7 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
         claimed_sender=claimed_sender,
         filename=filename,
         file_size_bytes=len(file_bytes),
+        row_count=row_count,
         file_hash_sha256=sha,
         received_at=datetime.now(timezone.utc),
         outcome=outcome,

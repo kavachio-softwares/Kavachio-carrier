@@ -650,10 +650,6 @@
 .proto .route-addr code{font-family:var(--p-mono);font-size:11.5px;color:var(--p-muted);
   word-break:break-all;flex:1}
 .proto .route-sub{font-size:11.5px;color:var(--p-faint);margin-top:7px}
-.proto .unbuilt{padding:13px 20px;display:flex;align-items:center;gap:11px;flex-wrap:wrap;
-  background:var(--p-surface-2);font-size:12.5px;color:var(--p-faint);
-  border-top:1px solid var(--p-border)}
-.proto .unbuilt .ttl{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:700}
 
 /* ── filter bar + one queue (Files Received) ───────────────────────────── */
 .proto .filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}

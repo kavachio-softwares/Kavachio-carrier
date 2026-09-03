@@ -88,6 +88,10 @@ class FileArrival(Base):
     claimed_sender = Column(Text, nullable=True)
     filename = Column(Text, nullable=False)
     file_size_bytes = Column(BigInteger, nullable=True)
+    # Rows in the file, as counted by the arrival checks. NULL is "we could not
+    # open it"; 0 is "we opened it and it is empty". The checks already tell
+    # those apart, so the column has to as well.
+    row_count = Column(Integer, nullable=True)
     file_hash_sha256 = Column(Text, nullable=True, index=True)
     received_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     outcome = Column(Text, nullable=False)          # accepted | turned_away

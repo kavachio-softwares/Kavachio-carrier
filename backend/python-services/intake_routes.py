@@ -388,6 +388,11 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
         names = _broker_names(s, tid)
         routes = {r.id: r for r in s.query(IntakeRoute)
                   .filter(IntakeRoute.tenant_id == tid).all()}
+        # A route pinned to a programme (10.2) is what tells an arrival which
+        # programme it belongs to. A broker-wide route knows WHO but not WHICH,
+        # and the screen shows that honestly rather than guessing.
+        prog_names = {p.id: p.name for p in
+                      s.query(Program).filter(Program.tenant_id == tid).all()}
 
         out = []
         for a in rows:
@@ -402,7 +407,15 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
                 "broker_name": names.get(a.matched_broker_party_id),
                 "claimed_sender": a.claimed_sender,
                 "file_size_bytes": a.file_size_bytes,
+                # Rows, not kilobytes — what a bordereau is actually measured
+                # in. NULL on rows that arrived before the column existed.
+                "row_count": a.row_count,
                 "file_hash_sha256": a.file_hash_sha256,
+                # The programme the route is pinned to, so the screen does not
+                # have to join arrivals to routes itself.
+                "program_id": getattr(route, "program_id", None) if route else None,
+                "program_name": prog_names.get(
+                    getattr(route, "program_id", None)) if route else None,
                 "received_at": _iso_utc(a.received_at),
                 "outcome": a.outcome,
                 "turned_away_reason": a.turned_away_reason,

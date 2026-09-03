@@ -88,10 +88,18 @@ export type Arrival = {
   broker_name: string | null;
   claimed_sender: string | null;
   file_size_bytes: number | null;
+  /** Rows in the file, counted by the arrival checks. `null` means we could
+   *  not open it — which is not the same as 0, "we opened it and it is empty".
+   *  Also null on arrivals that landed before the column existed. */
+  row_count: number | null;
   file_hash_sha256: string | null;
   received_at: string | null;
   outcome: Outcome;
   turned_away_reason: string | null;
+  /** The programme the route this file arrived on is pinned to. Null for a
+   *  broker-wide route: the broker is known, the programme is not. */
+  program_id: number | null;
+  program_name: string | null;
   sender_notified_at: string | null;
   sender_notified_via: string | null;
   bdx_upload_id: number | null;

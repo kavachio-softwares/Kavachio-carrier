@@ -16,16 +16,26 @@
 // Styled with `.proto` (proto.css) to match the wireframe, like FilesArrive.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  isHeld, listArrivals, listRoutes,
-  type Arrival, type Channel, type IntakeRoute,
-} from "../api/intake";
+import { isHeld, listArrivals, type Arrival, type Channel } from "../api/intake";
 import { fmtStamp } from "../utils/date";
 
-const CAME_IN_BY: Record<Channel, string> = {
-  upload: "Uploaded", email: "Emailed", sftp: "Server folder",
-  api: "Sent by machine", cloud_folder: "Shared folder",
+// Each door gets a name and a tone, as in the carrier-centric design: email is
+// the one with a reply path so it reads as info, an upload was done by a person
+// so it reads as ok, and the two machine doors are quiet greys.
+const CAME_IN_BY: Record<Channel, { label: string; tone: "ok" | "info" | "mut" }> = {
+  upload: { label: "Uploaded", tone: "ok" },
+  email: { label: "Emailed", tone: "info" },
+  sftp: { label: "Server folder", tone: "mut" },
+  api: { label: "Sent by machine", tone: "mut" },
+  cloud_folder: { label: "Shared folder", tone: "mut" },
 };
+
+// Every real way in, in the order the filter offers them. This is a fixed list
+// rather than "whichever doors happen to appear in the rows", because a door
+// with nothing through it yet is exactly the one you want to filter to in order
+// to find that out — and leaving "Uploaded" out until a hand-uploaded file
+// turned up made it look as though uploads were not counted here at all.
+const WAY_IN_ORDER: Channel[] = ["upload", "email", "sftp", "api"];
 
 // The six checks in the order land_file() runs them. That order is the whole
 // point: it stops at the FIRST failure, so a file that fails check three has
@@ -69,7 +79,7 @@ function state(a: Arrival): Exclude<Filter, "all"> {
 }
 
 function Badge({ tone, children }:
-  { tone: "ok" | "warn" | "crit" | "mut"; children: React.ReactNode }) {
+  { tone: "ok" | "warn" | "crit" | "mut" | "info"; children: React.ReactNode }) {
   return <span className={`badge b-${tone}`}><span className="d" />{children}</span>;
 }
 
@@ -78,6 +88,20 @@ function bytes(n: number | null): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** Rows, not kilobytes — a bordereau is measured in rows. `null` is "we could
+ *  not open it", which is why it is a dash and not a zero. */
+function rowsOf(n: number | null): string {
+  return n == null ? "—" : n.toLocaleString();
+}
+
+/** The action at the end of the row. Every one of them opens the drawer, so
+ *  the word says what you will be doing there rather than naming the control:
+ *  a held file needs a decision, a refused one needs an explanation. */
+function actionLabel(a: Arrival): string {
+  const st = state(a);
+  return st === "held" ? "Decide →" : st === "away" ? "Why →" : "Open →";
 }
 
 /** The line under the filename: what happened, in the fewest words that are
@@ -90,7 +114,6 @@ function subline(a: Arrival): string {
 export default function FilesReceived() {
   const nav = useNavigate();
   const [rows, setRows] = useState<Arrival[] | null>(null);
-  const [routes, setRoutes] = useState<IntakeRoute[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -103,10 +126,7 @@ export default function FilesReceived() {
   const load = useCallback(async () => {
     setBusy(true);
     try {
-      // Routes come along for the programme column: an arrival records which
-      // route it came in on, and the route is what knows the programme.
-      const [arrivals, r] = await Promise.all([listArrivals(), listRoutes()]);
-      setRows(arrivals.rows); setRoutes(r.routes); setErr(null);
+      setRows((await listArrivals()).rows); setErr(null);
     } catch (e: any) {
       setErr(e?.response?.data?.detail ?? e?.message ?? "Failed to load.");
     } finally { setBusy(false); }
@@ -122,17 +142,6 @@ export default function FilesReceived() {
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
-  const routeById = useMemo(
-    () => new Map(routes.map(r => [r.route_id, r])), [routes]);
-
-  /** The programme a file belongs to, when the route it arrived on names one.
-   *  A broker-wide route knows WHO but not WHICH, so this is honestly blank
-   *  rather than guessed. */
-  const programmeOf = useCallback((a: Arrival): string | null => {
-    const r = a.route_id != null ? routeById.get(a.route_id) : undefined;
-    return r?.program_name ?? null;
-  }, [routeById]);
-
   const all = rows ?? [];
 
   const counts = useMemo(() => {
@@ -147,20 +156,23 @@ export default function FilesReceived() {
     };
   }, [all]);
 
-  // The dropdowns offer only what is actually in the list — a filter that can
-  // only ever return nothing is worse than no filter.
+  // Brokers and programmes come from the rows — those are open sets, and a
+  // filter naming a broker who has never sent anything is just noise. The ways
+  // in are a closed set, so all of them are offered.
   const options = useMemo(() => ({
-    channels: [...new Set(all.map(a => a.channel).filter((c): c is Channel => !!c))],
+    channels: [...new Set([...WAY_IN_ORDER,
+      ...all.map(a => a.channel).filter((c): c is Channel => !!c)])],
     brokers: [...new Set(all.map(a => a.broker_name).filter((b): b is string => !!b))].sort(),
-    programmes: [...new Set(all.map(programmeOf).filter((p): p is string => !!p))].sort(),
-  }), [all, programmeOf]);
+    programmes: [...new Set(all.map(a => a.program_name)
+      .filter((p): p is string => !!p))].sort(),
+  }), [all]);
 
   const shown = useMemo(() => all.filter(a =>
     (filter === "all" || state(a) === filter) &&
     (!fChannel || a.channel === fChannel) &&
     (!fBroker || a.broker_name === fBroker) &&
-    (!fProgramme || programmeOf(a) === fProgramme)
-  ), [all, filter, fChannel, fBroker, fProgramme, programmeOf]);
+    (!fProgramme || a.program_name === fProgramme)
+  ), [all, filter, fChannel, fBroker, fProgramme]);
 
   const filtered = filter !== "all" || !!fChannel || !!fBroker || !!fProgramme;
 
@@ -228,7 +240,7 @@ export default function FilesReceived() {
             <select className="sel" value={fChannel} onChange={e => setFChannel(e.target.value)}>
               <option value="">Any way in</option>
               {options.channels.map(c => (
-                <option key={c} value={c}>{CAME_IN_BY[c]}</option>))}
+                <option key={c} value={c}>{CAME_IN_BY[c].label}</option>))}
             </select>
             <select className="sel" value={fBroker} onChange={e => setFBroker(e.target.value)}>
               <option value="">Any broker</option>
@@ -278,7 +290,7 @@ export default function FilesReceived() {
               <table>
                 <thead>
                   <tr><th>File</th><th>Came in by</th><th>From</th><th>Programme</th>
-                    <th>Size</th><th>When</th></tr>
+                    <th>Rows</th><th>What happened</th><th>When</th><th /></tr>
                 </thead>
                 <tbody>
                   {shown.map(a => {
@@ -290,22 +302,34 @@ export default function FilesReceived() {
                         onKeyDown={e => { if (e.key === "Enter") setOpen(a); }}>
                         <td>
                           <div className="fname">{a.filename}</div>
-                          <div className="rowacts">
-                            {st === "ok"
-                              ? (a.bdx_upload_id ? <Badge tone="ok">Processed</Badge>
-                                : <Badge tone="ok">Passed every check</Badge>)
-                              : st === "held" ? <Badge tone="warn">Held</Badge>
-                              : <Badge tone="crit">Turned away</Badge>}
-                            {sub && <span className="faint" style={{ fontSize: 11.5 }}>{sub}</span>}
-                          </div>
+                          {/* Capped, because a refusal reason is a whole
+                              sentence and the full one is in the drawer. */}
+                          {sub && <div className="sub" style={{ maxWidth: 330 }}>{sub}</div>}
                         </td>
-                        <td className="muted">{a.channel ? CAME_IN_BY[a.channel] : "—"}</td>
+                        {/* The way in is a badge, not plain text: it is the one
+                            thing on the row that is a fixed set of five, and it
+                            is read by shape rather than word. */}
+                        <td>{a.channel
+                          ? <Badge tone={CAME_IN_BY[a.channel].tone}>
+                              {CAME_IN_BY[a.channel].label}</Badge>
+                          : <span className="muted">—</span>}</td>
                         <td>{a.broker_name ?? <span className="muted">unknown sender</span>}</td>
                         <td className="muted">
-                          {programmeOf(a) ?? <span className="faint">—</span>}</td>
-                        <td className="mono">{bytes(a.file_size_bytes)}</td>
-                        <td className="faint" style={{ fontSize: 12.5 }}>
+                          {a.program_name ?? <span className="faint">—</span>}</td>
+                        <td className="mono">{rowsOf(a.row_count)}</td>
+                        <td>
+                          {st === "ok"
+                            ? (a.bdx_upload_id ? <Badge tone="ok">Processed</Badge>
+                              : <Badge tone="ok">Waiting to be run</Badge>)
+                            : st === "held" ? <Badge tone="warn">Held</Badge>
+                            : <Badge tone="crit">Turned away</Badge>}
+                        </td>
+                        <td className="mono faint" style={{ fontSize: 12 }}>
                           {fmtStamp(a.received_at)}</td>
+                        {/* Every row ends in the one thing you would do next.
+                            All of them open the drawer — the word just says
+                            what you will find when you get there. */}
+                        <td><span className="linkish">{actionLabel(a)}</span></td>
                       </tr>);
                   })}
                 </tbody>
@@ -322,9 +346,7 @@ export default function FilesReceived() {
         </div>
       </section>
 
-      <ArrivalDrawer arrival={open} programme={open ? programmeOf(open) : null}
-        route={open?.route_id != null ? routeById.get(open.route_id) ?? null : null}
-        onClose={() => setOpen(null)} />
+      <ArrivalDrawer arrival={open} onClose={() => setOpen(null)} />
     </div>
   );
 }
@@ -332,9 +354,8 @@ export default function FilesReceived() {
 // ── the row drawer ──────────────────────────────────────────────────────────
 // The decision sits directly beneath the evidence for it, which is the whole
 // reason this is a drawer and not a tooltip.
-function ArrivalDrawer({ arrival, programme, route, onClose }: {
-  arrival: Arrival | null; programme: string | null;
-  route: IntakeRoute | null; onClose: () => void;
+function ArrivalDrawer({ arrival, onClose }: {
+  arrival: Arrival | null; onClose: () => void;
 }) {
   const st = arrival ? state(arrival) : "ok";
   const failed = arrival && st !== "ok" ? failedCheck(arrival.turned_away_reason) : -1;
@@ -363,7 +384,10 @@ function ArrivalDrawer({ arrival, programme, route, onClose }: {
               </span></div>
             <div className="kv"><span className="k">Came in by</span>
               <span className="v">
-                {arrival.channel ? CAME_IN_BY[arrival.channel] : "—"}</span></div>
+                {arrival.channel
+                  ? <Badge tone={CAME_IN_BY[arrival.channel].tone}>
+                      {CAME_IN_BY[arrival.channel].label}</Badge>
+                  : "—"}</span></div>
             {/* Which key or which folder, not just which channel — it is how
                 you tell two of a broker's systems apart. */}
             <div className="kv"><span className="k">Sender</span>
@@ -372,15 +396,16 @@ function ArrivalDrawer({ arrival, programme, route, onClose }: {
             <div className="kv"><span className="k">From</span>
               <span className="v">
                 {arrival.broker_name ?? "unknown sender"}
-                {programme ? ` → ${programme}` : ""}</span></div>
-            {route && route.program_name == null && (
+                {arrival.program_name ? ` → ${arrival.program_name}` : ""}</span></div>
+            {!arrival.program_name && (
               <div className="kv"><span className="k">Programme</span>
                 <span className="v faint" style={{ fontWeight: 500 }}>
                   this way in is not tied to one</span></div>)}
             <div className="kv"><span className="k">Received</span>
               <span className="v">{fmtStamp(arrival.received_at)}</span></div>
-            <div className="kv"><span className="k">Size</span>
-              <span className="v mono">{bytes(arrival.file_size_bytes)}</span></div>
+            <div className="kv"><span className="k">Size · rows</span>
+              <span className="v mono">{bytes(arrival.file_size_bytes)}
+                {" · "}{rowsOf(arrival.row_count)} rows</span></div>
             {/* How a resend gets spotted — the duplicate check is a comparison
                 of exactly this. */}
             <div className="kv"><span className="k">Fingerprint</span>

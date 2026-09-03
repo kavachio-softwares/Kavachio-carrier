@@ -2,7 +2,7 @@
 //
 // A broker should not have to log in to send you a file. Most already email
 // their spreadsheet or drop it on a server, and asking them to change that is
-// usually what stalls a new programme. So there are five ways in, and whichever
+// usually what stalls a new programme. So there are four ways in, and whichever
 // one a file uses it lands in the same queue and gets the same checks.
 //
 // This is a Configure screen, not part of the monthly run: a route is set up
@@ -47,7 +47,12 @@ const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }
     hint: "S3 · SharePoint · Google Drive",
   },
 };
-const CHANNEL_ORDER: Channel[] = ["upload", "email", "sftp", "api", "cloud_folder"];
+
+// The ways in this carrier actually uses. `cloud_folder` is in the Channel type
+// because the database still knows the value, but it is not a requirement here
+// and is deliberately absent — a door nobody asked for reading "Not built yet"
+// is noise, not honesty.
+const CHANNEL_ORDER: Channel[] = ["upload", "email", "sftp", "api"];
 
 // What a server folder actually does. Fixed behaviour, not settings — which is
 // why it reads as a description and not as a form.
@@ -151,7 +156,7 @@ export default function FilesArrive() {
   useEffect(() => { load(); }, [load]);
 
   // One row per channel, with its routes hung underneath. A channel with no
-  // routes still renders — it is one of the five whether or not it is used, and
+  // routes still renders — it is one of the four whether or not it is used, and
   // that is what lets email and API light up a row later rather than needing a
   // redesign.
   const byChannel = useMemo(() => {
@@ -198,11 +203,10 @@ export default function FilesArrive() {
   const heldOrAway = (data?.tiles.held ?? 0) + (data?.tiles.turned_away ?? 0);
 
   // Upload always shows — it is real and needs no setup. Everything else shows
-  // if it can be created or already has routes; the rest is honestly unbuilt.
+  // if it can be created or already has routes.
   const creatable = data?.creatable ?? [];
   const builtChannels = CHANNEL_ORDER.filter(c =>
     c === "upload" || creatable.includes(c) || (byChannel.get(c) ?? []).length > 0);
-  const unbuiltChannels = CHANNEL_ORDER.filter(c => !builtChannels.includes(c));
 
   async function toggle(route: IntakeRoute) {
     setBusy(true);
@@ -226,7 +230,7 @@ export default function FilesArrive() {
         <div className="note" style={{ marginBottom: 18 }}>
           <b>A broker does not have to log in to send you a file.</b> Most brokers already
           email their spreadsheet or drop it on a server, and asking them to change that is
-          usually the thing that stalls a new programme. So Kavachio gives you five ways in.
+          usually the thing that stalls a new programme. So Kavachio gives you four ways in.
           Whichever one a file uses, it lands in the same queue and gets the same checks.{" "}
           <b>You do this once, when a broker is onboarded</b>, and then rarely again — which is
           why it sits under Configure rather than in the monthly run. The files that come in
@@ -350,24 +354,14 @@ export default function FilesArrive() {
             );
           })}
 
-          {/* Two table rows reading "Not set up" implied you had forgotten to
-              configure them, when in fact they do not exist yet. One honest
-              line instead. */}
-          {unbuiltChannels.length > 0 && (
-            <div className="unbuilt">
-              <span className="ttl">Not built yet</span>
-              <span>{unbuiltChannels.map(c => CHANNEL_COPY[c].title).join("  ·  ")}</span>
-            </div>
-          )}
-
           <CardNote>
             <b>The way in never changes what happens next.</b> A spreadsheet that arrives by
             email and the same spreadsheet sent by machine end up in exactly the same place,
             checked in exactly the same way. It only changes how the file got here.
           </CardNote>
           <CardNote>
-            <b>So what does “Add a way in” do, if there are only five?</b> It does not invent a
-            sixth. It gives one broker <b>their own address</b> on one of the five, so Kavachio
+            <b>So what does “Add a way in” do, if there are only four?</b> It does not invent a
+            fifth. It gives one broker <b>their own address</b> on one of the four, so Kavachio
             never has to work out who sent what.
           </CardNote>
         </div>
@@ -973,7 +967,7 @@ function AddRouteModal({ open, brokers, programmesByBroker, creatable, mailbox,
           <>
             {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
             <div className="note" style={{ marginBottom: 14 }}>
-              There are only five ways a file can reach you and you cannot invent a sixth. What
+              There are only four ways a file can reach you and you cannot invent a fifth. What
               this does is give <b>one broker their own address</b> on one of them, so you never
               have to work out who sent what.
             </div>
@@ -1002,7 +996,6 @@ function AddRouteModal({ open, brokers, programmesByBroker, creatable, mailbox,
                   : channel === "email"
                   ? "They attach the spreadsheet to an email, the way most brokers already do. We read the mailbox every five minutes and take the attachments off."
                   : "Their system writes the file into a folder of their own and we pick it up every five minutes."}
-                {" "}Shared folders are not built yet.
               </div>
               {channel === "email" && !mailReady && (
                 <div className="hint" style={{ color: "var(--p-warn)" }}>
