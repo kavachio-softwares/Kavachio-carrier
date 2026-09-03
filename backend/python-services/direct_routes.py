@@ -2087,7 +2087,14 @@ async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None
         landing_id = lr[0] if lr else None
         if landing_id is None:
             raise HTTPException(404, "no direct-lane landing record for this export")
-        assert_tenant_owns(principal, lr[1])
+        # Guarded on the EXPORT, not on the landing's tenant: the export is what
+        # carries the broker this run was made for, and a broker seat has no
+        # tenant for the old comparison to match.
+        from carrier_scope import assert_can_read_export
+        _exp = s.get(OutputExport, export_id)
+        if _exp is None:
+            raise HTTPException(404, "export not found")
+        assert_can_read_export(s, principal, _exp)
     # Re-render IN PLACE so the export id/header stays stable across Re-generate.
     return await _render_landing(int(landing_id), None, None,
                                  (body.actor if body else None) or _principal_email(principal), {},

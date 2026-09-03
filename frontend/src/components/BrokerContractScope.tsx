@@ -1,11 +1,13 @@
 /**
  * The Broker half of the scope picker — and the contract it brings with it.
  *
- * THE CONTRACT IS NOT A CHOICE. A contract already belongs to exactly one
- * (programme, broker) pair, so once the broker is picked the contract is
- * decided: asking again would only offer one answer, or invite a user to file
- * work against a pairing the carrier never created. So this exposes ONE select
- * — the broker — and binds their live contracts behind it.
+ * ONE SELECT, THEN AT MOST ONE MORE. A contract belongs to exactly one
+ * (programme, broker) pair, so the broker narrows the field to what that
+ * pairing holds — which is why the broker is asked for first and asked for on
+ * its own. What that leaves is either a single contract, which is not a choice
+ * and is simply reported, or several, which IS one: a broker with three live
+ * contracts has three different sets of terms and only the user knows which
+ * govern the bordereau being set up. ContractPicker asks in that case only.
  *
  * BOTH ARE OPTIONAL. A programme with no brokers on it, and every setup made
  * before the broker level existed, leave them blank and keep working at
@@ -27,6 +29,7 @@
  * so the screen can say what is waiting, and attached to nothing.
  */
 import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, FileText } from "lucide-react";
 import { Field, Select } from "./ui/Field";
 import {
   getProgrammeBrokers, getScopedContracts,
@@ -154,7 +157,7 @@ export function BrokerSelect({ scope, disabled }: {
             programme-wide setup on the carrier's own contracts. A placeholder
             cannot say that and stay a placeholder, so ProgrammeWideNote says it
             under the dropdown instead. */}
-        <option value="">Select Broker…</option>
+        <option value="" disabled>Select Broker…</option>
         {scope.brokers.map(b => (
           <option key={b.id} value={b.id}>
             {b.legal_name} — {brokerNote(b)}
@@ -181,10 +184,36 @@ function brokerNote(b: ProgrammeBroker): string {
   return "no contract yet";
 }
 
-/** What the broker pick brought with it — shown, never chosen. */
-export function BoundContracts({ scope, programPicked }: {
+/** The contracts on file for this scope — and WHICH of them the setup uses.
+ *
+ *  This was a read-only list, on the reasoning stated at the top of the file:
+ *  a contract belongs to one (programme, broker) pair, so the broker decides
+ *  it and asking again would only offer one answer.
+ *
+ *  That holds for a broker with ONE contract. It does not hold for a broker
+ *  with several. There the list bound every one of them, so a setup ran all of
+ *  a broker's contracts against the same bordereau — and which contract governs
+ *  the bordereau is a real question that only the user can answer. So when
+ *  there is something to choose, this asks.
+ *
+ *  ONE AT A TIME. These are radios, not tick boxes: a setup runs on one
+ *  contract, and picking a second replaces the first rather than adding to it.
+ *  Two contracts bound at once is what produced the behaviour above.
+ *
+ *  One contract is still not a choice: it arrives selected (see DirectSetup's
+ *  default) and this reads as the report it always was.
+ *
+ *  Selection lives in the PARENT, not here, because the Contracts field below
+ *  shows the same contract and can drop it. Two copies of that state would let
+ *  the radio and the chip disagree about what the build will actually run.
+ */
+export function ContractPicker({ scope, programPicked, selectedId, onSelect, onClear }: {
   scope: ReturnType<typeof useBrokerContractScope>;
   programPicked: boolean;
+  /** The one contract this setup runs on, or null while none is picked. */
+  selectedId: number | null;
+  onSelect: (id: number) => void;
+  onClear: () => void;
 }) {
   if (!programPicked) return null;
 
@@ -198,6 +227,8 @@ export function BoundContracts({ scope, programPicked }: {
   }
   if (scope.contractsLoading) return <Hint>Finding the live contracts…</Hint>;
 
+  // Nothing on file for this pairing. There is nothing to pick, so no picker —
+  // the field below is where a contract gets uploaded instead.
   if (scope.contracts.length === 0) {
     // Nothing bound, but that can mean two different things and only one of
     // them is a problem. Contracts DO exist here — they just belong to brokers
@@ -230,30 +261,84 @@ export function BoundContracts({ scope, programPicked }: {
     );
   }
 
+  const many = scope.contracts.length > 1;
+  const chosen = scope.contracts.some(c => c.id === selectedId);
+
   return (
-    <div className="rounded-md border border-border bg-surface-2 px-3 py-2">
-      <div className="text-[10.5px] uppercase tracking-wide text-ink-soft">
-        Contract{scope.contracts.length === 1 ? "" : "s"} bound to this selection
+    <div className="rounded-lg border border-border bg-white px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase
+          tracking-wide text-ink-muted">
+          <FileText size={12} className="text-ink-soft" />
+          {many
+            ? "Choose the contract this setup runs on"
+            : "Contract bound to this selection"}
+        </div>
+        {/* No "select all" — there is no such state. Clear stays: leaving the
+            contract out and uploading a replacement is a real thing to want,
+            and a radio cannot be unset by clicking it again. */}
+        {chosen && (
+          <button type="button" className="text-[11px] text-navy hover:underline shrink-0"
+            onClick={onClear}>Clear</button>
+        )}
       </div>
-      <ul className="mt-1 space-y-0.5">
-        {scope.contracts.map(c => (
-          <li key={c.id} className="text-[12.5px] flex items-center gap-2 min-w-0">
-            <span className="truncate">{c.filename || `Contract ${c.id}`}</span>
-            <span className="text-[11px] text-ink-soft shrink-0">
-              {c.broker_name ? c.broker_name : "carrier held"}
-            </span>
-          </li>
-        ))}
+
+      <ul className="mt-1.5 space-y-1">
+        {scope.contracts.map(c => {
+          const on = c.id === selectedId;
+          return (
+            <li key={c.id}>
+              {/* A radio even when there is only one, though that one arrives
+                  already selected and so asks nothing. It is there because the
+                  Contracts field below can drop a contract from the build, and
+                  a state you can leave needs a way back into. */}
+              <label className={`flex min-w-0 cursor-pointer items-center gap-2.5 rounded-md
+                border px-2.5 py-2 text-[12.5px] transition
+                ${on ? "border-navy/40 bg-navy/[0.05]"
+                     : "border-transparent hover:border-border hover:bg-surface-2"}`}>
+                <input type="radio" name="bdx-setup-contract" checked={on}
+                  className="shrink-0 accent-navy"
+                  onChange={() => onSelect(c.id)} />
+                <span className={`min-w-0 flex-1 truncate ${on ? "font-medium" : "text-ink-muted"}`}>
+                  {c.filename || `Contract ${c.id}`}
+                </span>
+                <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10.5px] text-ink-muted">
+                  {c.broker_name ? c.broker_name : "carrier held"}
+                </span>
+              </label>
+            </li>
+          );
+        })}
       </ul>
-      <p className="text-[11px] text-ink-soft mt-1">
-        {scope.contracts.length === 1
-          ? "A contract belongs to one programme and one broker, so picking the broker decides it."
-          : scope.contracts.some(c => !c.broker_name)
-            ? "The carrier's own contracts govern the programme whichever broker is picked, so they are included too."
-            : "This broker holds more than one live contract, so the setup covers all of them."}
-      </p>
-      {/* Bound the carrier's own, but the programme also holds broker contracts
-          nobody has asked for. Say so, or the list reads as the whole truth. */}
+
+      {/* What the current pick means for the build. The empty case is the one
+          that matters: nothing selected and nothing uploaded is a setup with no
+          contract, and the Build button would refuse it with a message that
+          does not mention the list the user is looking at. */}
+      {!chosen ? (
+        <p className="mt-2 flex items-start gap-1.5 rounded-md bg-warn/10 px-2.5 py-1.5
+          text-[11.5px] leading-relaxed text-warn">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+          <span>
+            {many
+              ? "None selected — pick the contract this bordereau is written under, or upload one on the Contracts field below."
+              : "Left out — pick it to put it back, or upload a replacement on the Contracts field below."}
+          </span>
+        </p>
+      ) : many ? (
+        <p className="text-[11px] text-ink-soft mt-1">
+          One contract at a time — picking another replaces this one.
+        </p>
+      ) : (
+        <p className="text-[11px] text-ink-soft mt-1">
+          A contract belongs to one programme and one broker, so picking the
+          broker decides it.
+        </p>
+      )}
+
+      {/* Listed the ones this pick reaches, but the programme also holds broker
+          contracts nobody has asked for. Say so, or the list reads as the whole
+          truth. */}
       {scope.awaitingBroker.length > 0 && (
         <p className="text-[11px] text-ink-soft mt-1">
           {scope.awaitingBroker.length} more on this programme belong to{" "}

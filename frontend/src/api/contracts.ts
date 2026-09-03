@@ -217,3 +217,37 @@ export async function uploadContract(
   } : null;
   return { cid, deferred, counts };
 }
+
+/** Rules a contract already on file produced for one Output Template. */
+export type GeneratedRules = {
+  ok: boolean;
+  contract_id: number;
+  output_template_id: number;
+  /** Present only when nothing was done because it already had been. */
+  skipped?: string;
+  created: number;
+  clauses?: number;
+  rules?: number;
+};
+
+/**
+ * Write a contract's rules for an Output Template, from the clauses it already
+ * has — no re-upload, no re-read.
+ *
+ * A contract added on a broker's page before the programme had a template stops
+ * after its clauses: rules name a template's COLUMNS, so there was nothing to
+ * write them against, and every rule-bearing clause was parked awaiting one.
+ * A setup built on that contract used to take its id and run, and the pipeline
+ * came out with zero contract rules and no explanation. This finishes it.
+ *
+ * Slow (the same model calls an upload makes, minus the document read) and safe
+ * to call again: a contract already done for this template reports `skipped`.
+ */
+export async function generateContractRules(opts: {
+  programId: number; contractId: number; outputTemplateId: number;
+}): Promise<GeneratedRules> {
+  const { data } = await api.post<GeneratedRules>(
+    `/programs/${opts.programId}/contracts/${opts.contractId}/generate-rules`,
+    { output_template_id: opts.outputTemplateId });
+  return data;
+}

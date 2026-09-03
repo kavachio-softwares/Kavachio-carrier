@@ -3710,6 +3710,192 @@ def resolve_clause_routing(program_id: int, contract_id: int, clause_id: int,
     }
 
 
+class ContractGenerateRulesBody(BaseModel):
+    # The Output Template the rules must be written against. Rules name that
+    # template's columns, so a contract has no rules until one is chosen.
+    output_template_id: int
+    actor: Optional[str] = None
+    mga: Optional[str] = None
+
+
+@router.post("/programs/{program_id}/contracts/{contract_id}/generate-rules")
+def contract_generate_rules(program_id: int, contract_id: int,
+                            body: ContractGenerateRulesBody,
+                            principal: Principal = Depends(current_principal)):
+    """Turn a contract's ALREADY-EXTRACTED clauses into rules for an Output
+    Template — without reading the document again.
+
+    WHY THIS EXISTS. A contract can be added on a broker's page before the
+    programme has an Output Template. Every rule is written against a template's
+    COLUMNS, so that run stops after the clauses: the contract is saved with
+    output_template_id NULL and each rule-bearing clause is parked `in_review`,
+    which the Add Contract screen states plainly ("held until a Bordereau Setup
+    exists — the contract itself will not need reading again").
+
+    Nothing then finished the job. A setup built on such a contract took its id
+    and ran, and the user got a pipeline reporting ZERO contract rules with no
+    explanation. This is the missing half.
+
+    Only Pipeline 2 runs (Call 2 intents → Call 3 mapping → derivers → verify).
+    Pipeline 1 is skipped because its output is already in clauses_extracted —
+    and the source document is not retained, so re-reading it is not merely
+    wasteful, it is impossible.
+    """
+    from contract_upload_services.validation_rule_generator import ValidationRuleGenerator
+    from contract_upload_services import db_persister
+
+    with SessionLocal() as s:
+        contract = s.get(Contract, contract_id)
+        if not contract or contract.program_id != program_id:
+            raise HTTPException(404, "contract not found for this program")
+        assert_tenant_owns(principal, contract.tenant_id)
+        tmpl = s.get(ExportTemplate, body.output_template_id)
+        if not tmpl:
+            raise HTTPException(404, "output template not found")
+        assert_tenant_owns(principal, tmpl.tenant_id)
+
+        template_fields = _template_fields_from_structure(tmpl.structure)
+        if not template_fields:
+            raise HTTPException(
+                400, "that output template has no fields to write rules against")
+
+        tenant_id = contract.tenant_id
+        tenant_mga = body.mga or _tenant_name(s, tenant_id)
+        bound_template_id = contract.output_template_id
+
+        # What this contract already carries. Counting matters twice over: a
+        # second pass would DOUBLE every rule, and a contract already bound to a
+        # different template holds rules naming columns this template does not
+        # have — mixing the two sets would leave rules that can never match.
+        live_rules = s.execute(
+            text("""SELECT COUNT(*) FROM validation_rule
+                     WHERE contract_id = :cid AND rule_status <> 'disabled'"""),
+            {"cid": contract_id}).scalar() or 0
+
+        rows = s.execute(
+            text("""SELECT clause_id, contract_id, clause_type, title, text,
+                           page_number, section_header
+                      FROM clauses_extracted
+                     WHERE contract_id = :cid
+                     ORDER BY clause_id"""),
+            {"cid": contract_id}).mappings().all()
+
+    if live_rules and bound_template_id == body.output_template_id:
+        # Already done for THIS template. Saying so is the answer; doing it
+        # again would double the rule set.
+        return {"ok": True, "skipped": "already_generated",
+                "contract_id": contract_id,
+                "output_template_id": body.output_template_id,
+                "rules": int(live_rules), "created": 0}
+
+    if live_rules and bound_template_id is not None:
+        raise HTTPException(
+            409,
+            f"this contract already carries {live_rules} rule(s) written against "
+            f"output template {bound_template_id}. Rules name a template's own "
+            f"columns, so they cannot be mixed — upload the contract again "
+            f"against this template instead.")
+
+    if live_rules:
+        # Rules, but the contract was never bound to a template: an earlier run
+        # of THIS route wrote some and then failed, because the binding is the
+        # last thing it does. Nothing can be reading them — every path finds a
+        # contract's rules through its template — and leaving them would double
+        # the set on this pass. So the interrupted attempt is cleared, and the
+        # regeneration below is a clean one rather than an addition to a half.
+        # Through the ORM, not raw SQL: rule_sql's physical columns are
+        # entity-prefixed (rule_sql_rule_id, rule_sql_contract_id) and only the
+        # mapping knows it, so a hand-written WHERE on `rule_id` would not find
+        # a single row.
+        from db import RuleSql
+        with SessionLocal() as s:
+            s.query(RuleSql).filter(RuleSql.contract_id == contract_id).delete(
+                synchronize_session=False)
+            s.execute(text("DELETE FROM validation_rule WHERE contract_id = :cid"),
+                      {"cid": contract_id})
+            s.execute(text("""UPDATE clauses_extracted
+                                 SET rule_generation_status = 'in_review',
+                                     generated_rule_count = 0
+                               WHERE contract_id = :cid
+                                 AND rule_generation_status = 'rules_generated'"""),
+                      {"cid": contract_id})
+            s.commit()
+        print(f"[generate-rules] cleared {live_rules} rule(s) left by an "
+              f"interrupted earlier attempt on contract {contract_id}")
+
+    clauses = [dict(r) for r in rows]
+    if not clauses:
+        raise HTTPException(
+            400, "this contract has no extracted clauses to build rules from")
+
+    # Heavy: the same batched model calls a fresh upload makes, minus the
+    # extraction call. FastAPI runs a sync route in a worker thread, so blocking
+    # here is fine — and this is minutes, not the half-hour a full read costs.
+    gen = ValidationRuleGenerator(tenant_id=tenant_id, program_id=program_id)
+    p2 = gen.run_pipeline_2(clauses, template_fields, contract_id,
+                            tenant_id=tenant_id)
+    validation_rules = p2["validation_rules"]
+
+    # Persist per SOURCE CLAUSE — that is the unit persist_resolved_rules writes,
+    # and it also flips the clause out of the review queue as it goes.
+    #
+    # NOT every rule has one. The generic rule library rides through Pipeline 2
+    # beside the contract's own clauses and carries the NEGATED library row id as
+    # its source_clause_id (that sign is how is_generic_entry tells the halves
+    # apart). Those ids are not clauses of this contract, and
+    # validation_rule.source_clause_id has a foreign key to clauses_extracted —
+    # so writing one is a hard database error. The full-upload path resolves
+    # every id through its local→db clause map, where a library rule simply
+    # misses and lands NULL; anything this contract does not own is given the
+    # same answer here.
+    own_clause_ids = {c["clause_id"] for c in clauses}
+    by_clause: dict = {}
+    for r in validation_rules:
+        if not isinstance(r, dict):
+            continue
+        cid = r.get("source_clause_id")
+        by_clause.setdefault(cid if cid in own_clause_ids else None, []).append(r)
+
+    created: list = []
+    for clause_id, rules in by_clause.items():
+        created += db_persister.persist_resolved_rules(
+            contract_id=contract_id, program_id=program_id, tenant_id=tenant_id,
+            db_clause_id=clause_id,
+            output_template_id=body.output_template_id,
+            validation_rules=rules,
+            actor=body.actor or "system",
+            created_by="template_binding",
+        )
+
+    # The contract now speaks this template's language. Say so on the row, or
+    # every reader that looks up a template's contract still finds nothing —
+    # which is exactly the empty result this route exists to fix.
+    with SessionLocal() as s:
+        c = s.get(Contract, contract_id)
+        if c:
+            c.output_template_id = body.output_template_id
+            if c.status in (None, "", "drafted"):
+                c.status = "active"
+            s.commit()
+
+    _log(tenant_mga, body.actor, "contract.rules_generated",
+         target=f"contract:{contract_id}",
+         details={"program_id": program_id,
+                  "output_template_id": body.output_template_id,
+                  "clauses": len(clauses),
+                  "rules_created": len(created)})
+
+    return {
+        "ok": True,
+        "contract_id": contract_id,
+        "output_template_id": body.output_template_id,
+        "clauses": len(clauses),
+        "created": len(created),
+        "review_queue": len(p2["review_queue"]),
+        "control_register": len(p2["control_register"]),
+    }
+
+
 @router.delete("/programs/{program_id}/contracts/{contract_id}/rules/{rule_id}")
 def rule_delete(program_id: int, contract_id: int, rule_id: int,
                 mga: Optional[str] = None, actor: Optional[str] = None,

@@ -170,6 +170,9 @@ function subScreenOwner(pathname: string, search: string): string | null {
     const from = new URLSearchParams(search).get("from");
     if (from === "home") return "/home";
     if (from === "direct") return "/direct";
+    // A broker reviewing its own run's exceptions came from THEIR Process
+    // Bordereau, which is a different path from the carrier's.
+    if (from === "broker") return "/broker/bordereau";
   }
   return null;
 }
@@ -386,12 +389,18 @@ export function PageHeader({ title, subtitle, action }:
   { title: string | null; subtitle?: string; action?: React.ReactNode }) {
   return (
     <div className="px-8 pt-7 pb-4 border-b border-border bg-white">
-      <div className="flex items-end justify-between gap-4">
-        <div>
+      <div className="flex items-start justify-between gap-6">
+        {/* The subtitle is capped and the action is held at its natural width.
+            Without both, a long subtitle ate the row and squeezed the button
+            until its label wrapped mid-phrase — the page's primary action,
+            broken across two lines by a sentence of explanation. */}
+        <div className="min-w-0">
           <h1 className="text-[22px] font-semibold tracking-tight">{title}</h1>
-          {subtitle && <p className="text-sm text-ink-muted mt-1">{subtitle}</p>}
+          {subtitle && (
+            <p className="text-sm text-ink-muted mt-1 max-w-3xl leading-relaxed">{subtitle}</p>
+          )}
         </div>
-        {action}
+        {action && <div className="shrink-0 pt-0.5">{action}</div>}
       </div>
     </div>
   );
