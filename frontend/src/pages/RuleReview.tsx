@@ -52,7 +52,18 @@ export default function RuleReview() {
     ?? groups.find(g => String(g.ruleId) === ruleId && !g.checkKind)
     ?? groups.find(g => String(g.ruleId) === ruleId);
 
-  const backLink = `/uploads/${uploadId}/exceptions${downloadId ? `?download=${downloadId}` : ""}`;
+  // `from` is carried BACK as well as in. UploadExceptions puts it on the link
+  // that reaches this screen; dropping it on the way home lost the context that
+  // decides both the sidebar highlight and where its own back button goes —
+  // which for a broker is a different Process Bordereau from the carrier's.
+  const backLink = (() => {
+    const qs = new URLSearchParams();
+    if (downloadId) qs.set("download", String(downloadId));
+    const from = params.get("from");
+    if (from) qs.set("from", from);
+    const q = qs.toString();
+    return `/uploads/${uploadId}/exceptions${q ? `?${q}` : ""}`;
+  })();
 
   // Summary of the decisions already recorded on this rule (from the saved
   // statuses). Handed to the Exceptions screen on the way back so it can remind

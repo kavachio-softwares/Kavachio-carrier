@@ -7,6 +7,7 @@ import {
 import { groupByRule, exportCSV, buildReverseSpec, tallyDecisions } from "../components/ExceptionCards";
 import RuleExplanationBlock, { hasExplanation } from "../components/RuleExplanation";
 import { downloadFile } from "../api/client";
+import { isBrokerSeat } from "../auth";
 import { CheckCircle2 } from "lucide-react";
 import { LoadingOverlay } from "../components/Busy";
 import BdxInlineReview from "../components/BdxInlineReview";
@@ -53,6 +54,24 @@ export default function UploadExceptions() {
   // row, failed cells highlighted and actionable in place). The modal viewer is
   // still used elsewhere; here the review happens inline.
   const [bdxOpen, setBdxOpen] = useState(false);
+
+  // Where "back" goes. This used to be a hardcoded /direct, which is the
+  // CARRIER's Process Bordereau — a broker reviewing their own run was sent to
+  // a route access.ts refuses them, and bounced to their dashboard.
+  //
+  // `from` is already carried through every link into this screen (it is what
+  // keeps the sidebar highlight honest), so it is the same answer, and the
+  // label follows the destination rather than always claiming "Process
+  // Bordereau". The role check is the fallback for a deep link or a bookmark
+  // that carries no `from` at all.
+  const back = (() => {
+    if (fromParam === "broker") return { to: "/broker/bordereau", label: "Process Bordereau" };
+    if (fromParam === "home") return { to: "/home", label: "Dashboard" };
+    if (fromParam === "direct") return { to: "/direct", label: "Process Bordereau" };
+    return isBrokerSeat()
+      ? { to: "/broker/bordereau", label: "Process Bordereau" }
+      : { to: "/direct", label: "Process Bordereau" };
+  })();
 
   // Success confirmation — a "Done" modal the reviewer must acknowledge,
   // confirming a Fix & re-run finished (which previously completed silently
@@ -192,8 +211,8 @@ export default function UploadExceptions() {
             </p>
           </div>
           <div className="actions">
-            <button className="btn" onClick={() => navigate("/direct")}>
-              ← Process Bordereau
+            <button className="btn" onClick={() => navigate(back.to)}>
+              ← {back.label}
             </button>
             {allGroups.length > 0 && (
               <button className="btn" onClick={() => exportCSV(allGroups, downloadId ? `export_${downloadId}` : `upload_${uploadId}`, revSpec)}>
