@@ -8,6 +8,19 @@ export type MappingRule = { kind: "copy" | "const" | "source_sheet"; source?: st
 export type SheetRoute = { output_sheet: string; sources: { input_sheet: string }[]; filter: unknown };
 export type SheetRouting = { version: number; mode: string; confidence: string; routes: SheetRoute[] };
 
+// Derive a schedule identity from a file/sheet name: "Palms Sch H Current BDX"
+// → "Schedule H". Mirrors the backend _sb_propose_schedule matcher so an
+// uploaded contract auto-binds to the schedule sheet it belongs to.
+// Separators (._-) are normalized to spaces first so real-world names like
+// "… Schedule F_rss.pdf" still match (an underscore blocks the \b boundary).
+// Shared: a contract added from a broker's page must be given the SAME schedule
+// the setup builder would have given it, or the two would supersede each other.
+export function scheduleOf(name: string | null | undefined): string | null {
+  const m = (name || "").toLowerCase().replace(/[._-]+/g, " ")
+    .match(/\bsch(?:edule)?\s*([a-z0-9])\b/);
+  return m ? `Schedule ${m[1].toUpperCase()}` : null;
+}
+
 export const sheetFieldKey = (sheet: string, col: string) => `${sheet}||${col}`;
 
 // column_mapping is keyed {output_sheet: {output_field: rule}}. Split it into:

@@ -3338,6 +3338,63 @@ class ValidationRuleGenerator:
             clause["rule_generation_status"] = resolve_status(classification)
             clause["classification"] = classification
 
+        # -------------------------------------------------
+        # NO OUTPUT TEMPLATE — the run ends here, with the clauses.
+        # -------------------------------------------------
+        # Every rule is written against an output template's COLUMNS: Call 3
+        # binds each intent to one of them, and the verify gate refuses any rule
+        # referencing a column the template does not have (rule_ir.validate_ir).
+        # With no template there are no columns, so Call 3 would ask the model to
+        # bind every intent to an empty list and the gate would then refuse all
+        # of its answers — the most expensive call in the pipeline, bought to
+        # produce nothing.
+        #
+        # So a contract read without one stops at what it CAN produce: its
+        # clauses, and the verdict on which of them carry a rule. Those verdicts
+        # go to the review bucket naming the reason, so the work is visible and
+        # can be finished the moment a template exists — rather than the contract
+        # looking as though it had nothing to say.
+        if not template_fields:
+            review_queue, control_register = [], []
+            for clause, classification in zip(clauses_extracted, classifications):
+                entry = {
+                    "clause_id":   clause.get("clause_id"),
+                    "clause_text": clause.get("text"),
+                    "source_page": clause.get("page_number") or clause.get("page"),
+                }
+                if classification.get("is_rule_bearing"):
+                    review_queue.append({
+                        **entry,
+                        "reason": "no output template yet — this clause carries a "
+                                  "rule, but a rule can only be written against an "
+                                  "output template's columns",
+                    })
+                else:
+                    control_register.append({
+                        **entry,
+                        "reason": classification.get("reasoning")
+                                  or "non-rule-bearing clause (obligation / governance)",
+                    })
+            print(f"\n[Pipeline 2] No output template — stopping after clauses: "
+                  f"{len(clauses_extracted)} clause(s), "
+                  f"{len(review_queue)} awaiting a template, "
+                  f"{len(control_register)} to control register. No rules written.")
+            return self._build_final_output(
+                source_file=source_file,
+                contract_id=contract_id,
+                program_metadata=program_metadata,
+                commercial_terms=commercial_terms,
+                clauses_extracted=clauses_extracted,
+                classifications=classifications,
+                validation_rules=[],
+                dropped_candidates=[],
+                review_queue=review_queue,
+                control_register=control_register,
+                external_references=external_references,
+                reference_documents=reference_documents,
+                template_fields=None,
+            )
+
         # # Persist Stage A classification side-car JSON (mirrors Stage B files).
         # save_stage_a_output(
         #     clauses_extracted,
