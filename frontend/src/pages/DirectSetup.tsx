@@ -24,7 +24,9 @@ import MappingReview, { type MappingReviewData } from "../components/MappingRevi
 import {
   BoundContracts, BrokerSelect, useBrokerContractScope,
 } from "../components/BrokerContractScope";
-import { resolveOutputTemplate, type ResolveResult } from "../api/outputTemplate";
+import {
+  resolveOutputTemplate, type ResolveResult, type ScopedContract,
+} from "../api/outputTemplate";
 
 // ---- types -----------------------------------------------------------------
 type Party = { id: number; legal_name: string; is_active?: boolean };
@@ -55,6 +57,9 @@ type Pipeline = {
   input_format_id: number | null; output_template_id: number | null;
   ready: boolean; ready_reason: string;
   contracts: { contract_id: number; sheet_key: string | null }[];
+  /** Who the setup is for. NULL is a programme-wide setup — one made before the
+   *  broker level existed, or deliberately built to cover everybody. */
+  broker_party_id: number | null; broker_name: string | null;
 };
 
 // Program metadata captured on inline create — mirrors the Programs screen.
@@ -189,6 +194,13 @@ export default function DirectSetup() {
   // Contracts to upload on Build (REQUIRED, one or more). When more than one,
   // sheetContractMap assigns each output sheet to a contract (by index).
   const [contractFiles, setContractFiles] = useState<File[]>([]);
+  // Contracts ALREADY uploaded for this (programme, broker) — carried in from
+  // the scope rather than asked for again. A contract belongs to exactly one
+  // pairing, so once the broker is picked the ones on file are decided; making
+  // someone re-upload a document the carrier has already approved is asking
+  // them to do work the system has already done, and it creates a second
+  // contract row for the same paper.
+  const [reusedContracts, setReusedContracts] = useState<ScopedContract[]>([]);
   const [sheetContractMap, setSheetContractMap] = useState<Record<string, number>>({});
   const [inputFile, setInputFile] = useState<File | null>(null);
 
@@ -198,6 +210,36 @@ export default function DirectSetup() {
   // (Path B). Accumulated across rounds so a partial upload doesn't drop the
   // earlier ones.
   const [refFiles, setRefFiles] = useState<File[]>([]);
+
+  // Pull in whatever the scope already holds whenever the pairing changes. Keyed
+  // on the ids, not the array, because the scope refetches and hands back a new
+  // array each time — resetting on identity alone would undo a removal the
+  // moment anything else re-rendered.
+  const boundIds = scope.boundContracts.map(c => c.id).join(",");
+  useEffect(() => {
+    setReusedContracts(scope.boundContracts);
+    // The sheet→contract map indexes into the staged list, so it cannot survive
+    // that list being rebuilt from a different pairing.
+    setSheetContractMap({});
+  }, [boundIds]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The contracts this build will use, in one list: the ones already on file
+  // first, then anything newly picked. Everything downstream — the extraction
+  // loop, the schedule auto-match, the sheet map, the counts — reads THIS, so a
+  // reused contract and an uploaded one are the same thing to the build. The
+  // only difference is that a reused one already has its id and skips
+  // extraction entirely.
+  type StagedContract =
+    | { kind: "existing"; id: number; name: string }
+    | { kind: "file"; file: File; name: string };
+  const staged = useMemo<StagedContract[]>(() => [
+    ...reusedContracts.map(c => ({
+      kind: "existing" as const, id: c.id,
+      name: c.filename || `Contract ${c.id}`,
+    })),
+    ...contractFiles.map(f => ({ kind: "file" as const, file: f, name: f.name })),
+  ], [reusedContracts, contractFiles]);
+
   // Build paused waiting for reference docs: holds the already-created output
   // template id (so we re-run only the contract + mapping steps, not recreate
   // the template) + the referenced doc names to show the user.
@@ -342,22 +384,39 @@ export default function DirectSetup() {
   // scope changes or a setup is deleted). The staged files belong to the scope
   // they were picked under — carrying a BDX/contract/template upload over to a
   // different carrier would build that carrier's setup from the wrong files.
-  function resetEditor() {
+  /** Drop the editor state belonging to a scope that is no longer selected.
+   *
+   *  `keepUploads` is for a change WITHIN a programme — picking the broker. The
+   *  bordereau and the templates are the same documents whichever broker they
+   *  are filed against, and someone who staged three files and then narrowed
+   *  the scope has not asked for that work to be thrown away. What always goes
+   *  is everything the OLD scope decided: the loaded setup, the mapping, a
+   *  paused build, and the sheet→contract bindings — those index into a staged
+   *  list that the broker pick rebuilds. */
+  function resetEditor(opts?: { keepUploads?: boolean }) {
     setUp(null); setRouting(null); setOutFields([]);
     setSel({}); setExtra({}); setRowSheet({});
     setContractId(null); setTemplateId(null); setLoadedSetupId(null);
     setDeferredRefs([]);
+    // Bindings and a paused build belong to the scope that produced them,
+    // never to the next one — cleared whichever kind of change this is.
+    setSheetContractMap({}); setRefsHalt(null);
+    setSuppCurrentName(null);
+    setBuildSummary(null); setStep("");
+    // The banners as well. "Loaded setup for editing." is a statement about the
+    // setup that WAS loaded, so leaving it up after the scope changes tells
+    // someone a setup was found for a programme that has none — and an error
+    // from the previous programme reads as a fault in the new one.
+    setMsg(null); setErr(null);
+    if (opts?.keepUploads) return;
     // Staged uploads + everything derived from them.
     setOutFile(null); setInputFile(null); setContractFiles([]);
-    setSheetContractMap({}); setRefFiles([]); setRefsHalt(null);
-    setSuppFile(null); setSuppCurrentName(null);
+    setRefFiles([]); setSuppFile(null);
     // Sheet pickers / review derived from the staged workbooks.
     setSheetReview(null);
     setInputSheetOpts(null); setInputSheetSel(new Set());
     setOutputSheetOpts(null); setOutputSheetSel(new Set());
     setCollapsedSheets(new Set());
-    // Result + progress banners from the previous scope's build.
-    setBuildSummary(null); setStep("");
   }
   // Load the saved setups for the current scope. When `autoLoad` is set (on a
   // fresh carrier + program pick) the saved setup is loaded into the editor
@@ -365,9 +424,28 @@ export default function DirectSetup() {
   // only draft. Callers after a build/save pass no options (list refresh only).
   function refreshExisting(opts?: { autoLoad?: boolean }) {
     if (programId === "" || carrierId === "") { setPipelines([]); return; }
-    api.get(`/pipelines`, { params: { mga, carrier_party_id: carrierId, program_id: programId } })
+    // Scoped to the broker as well, not just carrier + programme. A setup is
+    // built against a contract and a contract belongs to one broker, so a list
+    // that stops at the programme offers setups built on somebody else's terms
+    // — and "load the active one" would then load the wrong setup entirely.
+    // The server keeps programme-wide setups (broker_party_id NULL) in the
+    // answer, so asking for one broker never hides the setup covering everyone.
+    api.get(`/pipelines`, { params: {
+      mga, carrier_party_id: carrierId, program_id: programId,
+      broker_party_id: scope.brokerPartyId === "" ? undefined : scope.brokerPartyId,
+    } })
       .then(r => {
-        const list: Pipeline[] = Array.isArray(r.data) ? r.data : [];
+        const all: Pipeline[] = Array.isArray(r.data) ? r.data : [];
+        // Sending no broker means the server applies no broker filter, so this
+        // comes back holding every broker's setups. With nobody picked, a setup
+        // built for ONE broker is not in scope — it was built on that broker's
+        // contract, and listing it (worse, auto-loading it) puts someone in an
+        // editor for terms they did not ask for. Programme-wide setups stay:
+        // they belong to no broker, which is exactly the current scope, and it
+        // is how a programme with no brokers on it keeps working at all.
+        const list = scope.brokerPartyId === ""
+          ? all.filter(p => p.broker_party_id == null)
+          : all;
         setPipelines(list);
         if (opts?.autoLoad) {
           // Auto-load the active pipeline's input template (else the only one) —
@@ -381,9 +459,20 @@ export default function DirectSetup() {
       })
       .catch(() => setPipelines([]));
   }
-  // On a scope change, drop any editor state from the previous scope, then load
-  // this scope's saved setup automatically.
-  useEffect(() => { resetEditor(); refreshExisting({ autoLoad: true }); }, [programId]);
+  // On a scope change, drop the editor state from the previous scope, then load
+  // this scope's saved setup automatically. The BROKER is part of that scope:
+  // it decides which contract is in play, so it has to reload the same way a
+  // programme change does — but it must not take the staged uploads with it,
+  // which is what `keepUploads` is for. Tracked with a ref rather than two
+  // effects because the hook clears the broker as part of a programme change,
+  // so both would fire for what is really one event.
+  const prevProgramId = useRef<number | "">("");
+  useEffect(() => {
+    const programChanged = prevProgramId.current !== programId;
+    prevProgramId.current = programId;
+    resetEditor({ keepUploads: !programChanged });
+    refreshExisting({ autoLoad: true });
+  }, [programId, scope.brokerPartyId]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // Which output template the four levels currently point at. Re-run on every
   // scope change so the answer on screen always describes what is selected, and
@@ -598,8 +687,7 @@ export default function DirectSetup() {
   function missingForCreate(): string[] {
     const missing: string[] = [];
     if (!inputFile && !up?.format_id) missing.push("the input template");
-    if (contractFiles.length === 0 && scope.boundContracts.length === 0)
-      missing.push("the contract");
+    if (staged.length === 0) missing.push("the contract");
     return missing;
   }
 
@@ -616,7 +704,7 @@ export default function DirectSetup() {
     // from a reporting standard or from the contract counts too, and when the
     // scope already resolves to one there is nothing to upload at all.
     const existingTemplateId = resolved?.template?.id ?? 0;
-    if (carrierId === "" || programId === "" || !inputFile || contractFiles.length === 0) {
+    if (carrierId === "" || programId === "" || !inputFile || staged.length === 0) {
       setErr("Pick a program, an input file and at least one contract."); return;
     }
     // No output template, and none uploaded? Offer the two ways to make one
@@ -839,10 +927,19 @@ export default function DirectSetup() {
     // (with the new reference docs, or continue-anyway).
     const start = resume?.fromIndex ?? 0;
     const cids: (number | null)[] = resume ? [...resume.cids] : [];
-    for (let i = start; i < contractFiles.length; i++) {
-      setStep(`Extracting contract ${i + 1}/${contractFiles.length}…`);
+    for (let i = start; i < staged.length; i++) {
+      const entry = staged[i];
+      // Already extracted, approved and sitting against this (programme,
+      // broker). Re-uploading it would spend minutes re-reading the same paper
+      // and leave a duplicate contract row behind, so take the id and move on.
+      if (entry.kind === "existing") {
+        setStep(`Using the contract already on file (${entry.name})…`);
+        cids.push(entry.id);
+        continue;
+      }
+      setStep(`Extracting contract ${i + 1}/${staged.length}…`);
       const res = await uploadOne(
-        contractFiles[i], scheduleOf(contractFiles[i].name),
+        entry.file, scheduleOf(entry.name),
         i === start && resume?.continueAnyway
           ? { continueAnyway: true, resumeToken: resume?.resumeToken }
           : undefined,
@@ -852,7 +949,7 @@ export default function DirectSetup() {
         // this exact contract (upload the docs, or continue anyway).
         setRefsHalt({
           templateId: tid, refs: res.halt.refs, resumeToken: res.halt.resumeToken,
-          multi: { index: i, cids: [...cids], contractName: contractFiles[i].name },
+          multi: { index: i, cids: [...cids], contractName: entry.name },
         });
         setRefsHaltDismissed(false);
         setMsg(null);
@@ -871,14 +968,14 @@ export default function DirectSetup() {
     // Auto-match runs for ANY contract count, so a lone Schedule-H contract binds
     // ONLY to the H sheet and never leaks onto the others. A contract whose name
     // has no schedule stays unbound → it's the default/fallback for the format.
-    const schedOfContract = contractFiles.map(f => scheduleOf(f.name));
+    const schedOfContract = staged.map(e => scheduleOf(e.name));
     const autoIdx = (sh: string): number => {
       const sched = scheduleOf(sh);
       return sched ? schedOfContract.findIndex(s => s === sched) : -1;
     };
     const map: Record<string, number> = {};
     for (const sh of outputSheetSel) {
-      const idx = (contractFiles.length > 1 && sh in sheetContractMap)
+      const idx = (staged.length > 1 && sh in sheetContractMap)
         ? sheetContractMap[sh] : autoIdx(sh);
       if (idx >= 0 && cids[idx] != null) map[sh] = cids[idx] as number;
     }
@@ -951,7 +1048,7 @@ export default function DirectSetup() {
     setBuildSummary({
       pipelineId: pid,
       inputSheets: u.data.input_sheets.length, outputSheets: u.data.output_sheets.length,
-      contracts: contractFiles.length,
+      contracts: staged.length,
       rules: ruleIds.size,
       fieldsWithRules: of.data.fields.filter(f => (f.clauses?.length ?? 0) > 0).length,
       totalFields: of.data.fields.length,
@@ -964,7 +1061,7 @@ export default function DirectSetup() {
   // One sentence naming what paused, used by both the dialog and the card that
   // stands in for it — a multi-contract build has to say WHICH contract stopped.
   const refsHaltTitle = refsHalt?.multi
-    ? `Contract ${refsHalt.multi.index + 1} of ${contractFiles.length} `
+    ? `Contract ${refsHalt.multi.index + 1} of ${staged.length} `
       + `(${refsHalt.multi.contractName}) refers to a document that wasn't provided`
     : "This contract refers to a document that wasn't provided";
 
@@ -1543,6 +1640,25 @@ export default function DirectSetup() {
             <div className="space-y-2">
               <ContractPick
                 files={contractFiles}
+                /* Already approved for this programme and broker — shown here
+                   so the required field is satisfied without asking for the
+                   same document twice. Removable, because replacing a contract
+                   with a newer one is a real thing to want. */
+                existing={reusedContracts.map(c => ({
+                  id: c.id, name: c.filename || `Contract ${c.id}`,
+                  from: c.broker_name,
+                }))}
+                onRemoveExisting={id =>
+                  setReusedContracts(cs => cs.filter(c => c.id !== id))}
+                loadingExisting={scope.contractsLoading}
+                /* Contracts DO exist for this programme, they just belong to a
+                   broker nobody has picked. Without this the field reads as
+                   "nothing on file" and the next thing someone does is upload a
+                   second copy of a contract already approved. */
+                awaitingBroker={scope.awaitingBroker.length > 0
+                  ? { contracts: scope.awaitingBroker.length,
+                      brokers: scope.awaitingBrokerCount }
+                  : null}
                 onAdd={fs => setContractFiles(cs => {
                   const seen = new Set(cs.map(c => `${c.name}|${c.size}`));
                   return [...cs, ...fs.filter(f => !seen.has(`${f.name}|${f.size}`))];
@@ -1567,7 +1683,7 @@ export default function DirectSetup() {
             </div>
           </div>
 
-          {!up?.format_id && !building && contractFiles.length > 1 && outputSheetOpts && outputSheetSel.size > 0 && (
+          {!up?.format_id && !building && staged.length > 1 && outputSheetOpts && outputSheetSel.size > 0 && (
             <div className="mt-4">
               <div className="text-sm font-medium mb-1">Map Contracts to Schedule Sheets</div>
               <p className="text-xs text-ink-muted mb-2">
@@ -1577,8 +1693,8 @@ export default function DirectSetup() {
               </p>
               <div className="grid grid-cols-1  gap-2 max-w-3xl">
                 {[...outputSheetSel].map(sh => {
-                  const auto = contractFiles.findIndex(
-                    f => scheduleOf(f.name) && scheduleOf(f.name) === scheduleOf(sh));
+                  const auto = staged.findIndex(
+                    e => scheduleOf(e.name) && scheduleOf(e.name) === scheduleOf(sh));
                   return (
                     <div key={sh} className="flex items-center gap-2 text-sm">
                       <span className="w-48 truncate">{sh}</span>
@@ -1586,7 +1702,10 @@ export default function DirectSetup() {
                         value={sheetContractMap[sh] ?? auto}
                         onChange={e => setSheetContractMap(m => ({ ...m, [sh]: Number(e.target.value) }))}>
                         <option value={-1}>— No Contract —</option>
-                        {contractFiles.map((f, i) => <option key={i} value={i}>{f.name}</option>)}
+                        {staged.map((e, i) => (
+                          <option key={i} value={i}>
+                            {e.name}{e.kind === "existing" ? " (on file)" : ""}
+                          </option>))}
                       </select>
                     </div>
                   );
@@ -1601,8 +1720,8 @@ export default function DirectSetup() {
                 is the whole point. Gating it here would leave a user staring at a
                 dead button with no way to find out what is missing. */}
             <Button onClick={buildSetup}
-              disabled={building || !inputFile || contractFiles.length === 0}
-              title={!building && (!inputFile || contractFiles.length === 0)
+              disabled={building || !inputFile || staged.length === 0}
+              title={!building && (!inputFile || staged.length === 0)
                 ? "Upload the input template and at least one contract to continue"
                 : (!building && !outFile && !resolved?.template
                     ? "No output template yet — you'll be offered the two ways to create one"
@@ -1617,9 +1736,17 @@ export default function DirectSetup() {
           {pipelines.length > 0 && (
             <div className="mt-3 rounded-md border border-border p-3">
               <div className="flex items-center gap-1.5 text-sm font-medium mb-2">
-                <ShieldCheck size={15} /> Saved Setups for This Carrier + Program
+                {/* The heading names the scope it is actually showing. Saying
+                    "Carrier + Program" while the list is narrowed to a broker
+                    is how someone concludes a setup has gone missing. */}
+                <ShieldCheck size={15} />{" "}
+                {scope.brokerName
+                  ? <>Saved Setups for This Programme + {scope.brokerName}</>
+                  : <>Programme-wide Saved Setups</>}
                 <span className="text-[11px] rounded-full px-2 py-0.5 bg-surface-2 text-ink-muted">{pipelines.length}</span>
-                <InfoTip text="Every setup saved for this carrier + program is listed here. Pick this carrier + program and its active setup loads automatically — no separate load step needed. Activating any setup here replaces whichever one was previously active for this carrier + program." />
+                <InfoTip text={scope.brokerName
+                  ? `Setups built for ${scope.brokerName} on this programme, plus any programme-wide setup that also covers them. A setup is built against a contract and a contract belongs to one broker, so another broker's setups are not listed here. The active one loads automatically. Activating a setup replaces whichever was previously active for the same scope.`
+                  : "Setups on this programme that are not tied to a broker — they cover everyone on it. Pick a broker above to see the setups built on their contract. The active setup for the current scope loads automatically, and activating one replaces whichever was previously active for that same scope."} />
               </div>
               <ul className="space-y-1.5">
                 {pipelines.map(p => (
@@ -1628,6 +1755,12 @@ export default function DirectSetup() {
                     <span className={`text-[11px] rounded-full px-2 py-0.5 ${p.status === "active"
                       ? "bg-emerald-100 text-emerald-700" : "bg-surface-2 text-ink-muted"}`}>
                       {p.status === "active" ? "Active" : p.status === "superseded" ? "Superseded" : "Draft"}</span>
+                    {/* Which of the two kinds this is. Without it a programme-wide
+                        setup sitting beside a broker's own looks identical, and
+                        activating the wrong one is silent. */}
+                    <span className="text-[11px] text-ink-soft">
+                      {p.broker_name ?? "programme-wide"}
+                    </span>
                     {/* <span className="text-xs text-ink-muted">#{p.id}</span> */}
                     <div className="ml-auto flex gap-1.5">
                       <Button variant="ghost" className="!py-1"
@@ -2111,11 +2244,24 @@ function ReferencePick({ files, onAdd, onRemoveAt, disabled }: {
 // REQUIRED multi-file contract picker (dashed box, matches FilePick/ReferencePick).
 // Picking rules are unchanged from the button this replaced: several at once, added
 // over rounds, de-duplicated by name+size so re-picking one doesn't double it up.
-function ContractPick({ files, onAdd, onRemoveAt, disabled }: {
-  files: File[]; onAdd: (fs: File[]) => void; onRemoveAt: (i: number) => void; disabled?: boolean;
+function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
+                       awaitingBroker, onAdd, onRemoveAt, disabled }: {
+  files: File[];
+  /** Contracts already approved for the chosen programme + broker. They satisfy
+   *  the requirement exactly as an upload does — the build takes their id and
+   *  skips extraction entirely. */
+  existing?: { id: number; name: string; from: string | null }[];
+  onRemoveExisting?: (id: number) => void;
+  loadingExisting?: boolean;
+  /** Approved contracts on the programme that the current pick does not bind,
+   *  because they belong to a broker nobody has chosen. */
+  awaitingBroker?: { contracts: number; brokers: number } | null;
+  onAdd: (fs: File[]) => void; onRemoveAt: (i: number) => void; disabled?: boolean;
 }) {
   const [drag, setDrag] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
+  const onFile = existing ?? [];
+  const have = onFile.length + files.length;
   return (
     <div
       onClick={() => { if (!disabled) ref.current?.click(); }}
@@ -2128,16 +2274,34 @@ function ContractPick({ files, onAdd, onRemoveAt, disabled }: {
       }}
       className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
-          : `cursor-pointer ${drag ? "border-navy bg-navy/5" : files.length ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.rose.idle}`}`}>
+          : `cursor-pointer ${drag ? "border-navy bg-navy/5" : have ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.rose.idle}`}`}>
       <input ref={ref} type="file" multiple accept=".pdf,.docx" className="hidden" disabled={disabled}
         onClick={e => e.stopPropagation()}
         onChange={e => { const fs = Array.from(e.target.files || []); if (ref.current) ref.current.value = ""; if (fs.length) onAdd(fs); }} />
       <div className="flex items-center justify-center gap-1.5 text-sm font-medium mb-1">
-        <span className={files.length ? "text-emerald-600" : DROP_TONES.rose.icon}><FileText size={15} /></span>
+        <span className={have ? "text-emerald-600" : DROP_TONES.rose.icon}><FileText size={15} /></span>
         Contracts <span className="text-red-500">*</span>
       </div>
-      {files.length > 0 ? (
+      {have > 0 ? (
         <div className="space-y-1">
+          {/* Already on file. Listed before the new picks because that is the
+              order the build stages them in, so "Contract 2 of 3" during a
+              build names the same document the user can see here. */}
+          {onFile.map(c => (
+            <div key={`e${c.id}`}
+              className="flex items-center justify-center gap-1.5 text-[11px] text-emerald-700">
+              <CheckCircle2 size={12} className="shrink-0" />
+              <span className="truncate min-w-0">{c.name}</span>
+              <span className="text-[10px] text-ink-soft shrink-0">
+                on file{c.from ? ` · ${c.from}` : " · carrier held"}
+              </span>
+              {onRemoveExisting && (
+                <button className="text-ink-muted hover:text-danger ml-0.5 shrink-0"
+                  title="Leave this one out — upload a replacement instead"
+                  onClick={e => { e.stopPropagation(); onRemoveExisting(c.id); }}>✕</button>
+              )}
+            </div>
+          ))}
           {files.map((f, i) => (
             <div key={i} className="flex items-center justify-center gap-1.5 text-[11px] text-emerald-700">
               <CheckCircle2 size={12} className="shrink-0" />
@@ -2148,6 +2312,18 @@ function ContractPick({ files, onAdd, onRemoveAt, disabled }: {
           ))}
           <div className={`text-[11px] font-medium inline-flex items-center gap-1 pt-0.5 ${DROP_TONES.rose.cta}`}>
             <UploadCloud size={12} /> Add More
+          </div>
+        </div>
+      ) : loadingExisting ? (
+        <div className="text-[11px] text-ink-muted">Looking for a contract already on file…</div>
+      ) : awaitingBroker ? (
+        <div className="text-[11px] text-amber-700 px-2">
+          {awaitingBroker.contracts} contract
+          {awaitingBroker.contracts === 1 ? "" : "s"} already on file for this
+          programme, held by {awaitingBroker.brokers} broker
+          {awaitingBroker.brokers === 1 ? "" : "s"}.
+          <div className="mt-0.5 text-ink-muted">
+            <b>Pick the broker above</b> to use theirs — or upload one here.
           </div>
         </div>
       ) : disabled ? (
