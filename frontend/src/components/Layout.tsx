@@ -73,8 +73,13 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       { to: "/direct/setups", label: "Bordereau Setups", icon: Layers },
       // Set up once when a broker is onboarded, then rarely touched — which
       // is why the ways in sit under Configure and not in the monthly run.
-      { to: "/intake", label: "How Files Arrive", icon: Server },
-      { to: "/intake/arrivals", label: "Files Received", icon: Inbox },
+      //
+      // TEMPORARILY HIDDEN from the menu. The routes, the access rules and the
+      // links between the two screens all still work — /intake and
+      // /intake/arrivals are reachable by URL and from each other. Put these
+      // two lines back to show them again.
+      // { to: "/intake", label: "How Files Arrive", icon: Server },
+      // { to: "/intake/arrivals", label: "Files Received", icon: Inbox },
     ],
   },
   {
