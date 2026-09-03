@@ -61,7 +61,7 @@ export function fetchPreview(urls: RunUrls, exportId: number): Promise<Sheet | n
 }
 
 export function RunResult({
-  result, preview, urls, onError, actions, footNote,
+  result, preview, urls, onError, actions, footNote, findings = "check-only",
 }: {
   result: RunResp;
   preview: Sheet | null;
@@ -69,6 +69,20 @@ export function RunResult({
   onError?: (msg: string) => void;
   /** Screen-specific buttons in the summary bar (Review Exceptions, etc.). */
   actions?: React.ReactNode;
+  /**
+   * When to show the findings table and the fix-list CSV.
+   *
+   * "check-only" (the default) is right for the CARRIER: after a real run they
+   * go to Exception Triage, where the findings can actually be decided on, so
+   * repeating them here read-only would be a worse copy of a better screen.
+   *
+   * "always" is right for the BROKER, who has no triage screen — /uploads/:id/
+   * exceptions is carrier_admin-only, and deciding exceptions is not their job
+   * anyway. Without this they submit, are told "14 exceptions", and are given
+   * nothing to act on. Seeing what failed is exactly what lets them fix the
+   * file and send it again.
+   */
+  findings?: "check-only" | "always";
   /** Screen-specific line under the notes (e.g. who to ask about a drift). */
   footNote?: React.ReactNode;
 }) {
@@ -78,6 +92,7 @@ export function RunResult({
 
   const isCheck = !!result.check_only;
   const spine = result.status === "clean" ? "ok" : "warn";
+  const listFindings = findings === "always" || isCheck;
 
   // "See all rows": the full output (every sheet, all rows) with the same
   // highlighting as the download, expanded IN PLACE rather than in a modal.
@@ -132,10 +147,14 @@ export function RunResult({
           <div style={{ color: "var(--p-muted)", fontSize: 13 }}>
             {isCheck
               ? "Self-check only — nothing was sent or saved. Fix any issues and check again, or Generate BDX to send."
-              : "Output generated. Exceptions don't block the file — review, or fix and re-run."}
+              : actions
+                ? "Output generated. Exceptions don't block the file — review, or fix and re-run."
+                // No triage screen for this user, so don't tell them to "review":
+                // what they can do is read the list below and send a fixed file.
+                : "Sent. Exceptions don't block the file — the carrier has it either way. Fix what's listed below and send again if you need to."}
           </div>
         </div>
-        {isCheck && result.exception_count > 0 && (
+        {listFindings && result.exception_count > 0 && (
           <button className="btn" onClick={downloadFixList}>Download Fix-List (CSV)</button>
         )}
         <button className="btn"
@@ -146,12 +165,13 @@ export function RunResult({
         {actions}
       </div>
 
-      {/* The fix-list, inline, so the findings can be corrected before sending.
-          Read-only — a check is a look, not a submission. */}
-      {isCheck && result.exceptions.length > 0 && (
+      {/* The findings, inline. Read-only in both cases: on a check because a
+          check is a look, not a submission; on a real run because whoever sees
+          this list here is the party that has no triage screen. */}
+      {listFindings && result.exceptions.length > 0 && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-h">
-            <h3>What to Fix Before Sending</h3>
+            <h3>{isCheck ? "What to Fix Before Sending" : "What Failed Validation"}</h3>
             <span className="sub">
               {result.exception_count.toLocaleString()} finding{result.exception_count === 1 ? "" : "s"}
             </span>

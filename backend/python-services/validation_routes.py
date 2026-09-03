@@ -1499,14 +1499,22 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
     of adding another. Returns {ok, updated, skipped, writeback}."""
     with SessionLocal() as s:
         exp = s.execute(
-            text("SELECT id, tenant_id, template_id, source_upload_id, policy_ids "
+            text("SELECT id, tenant_id, template_id, source_upload_id, policy_ids, "
+                 "program_id, broker_party_id "
                  "FROM output_exports WHERE id = :id"), {"id": export_id},
         ).mappings().first()
         if not exp:
             raise HTTPException(404, "export not found")
-        # Ownership guard (by-id / IDOR-prone): the export (its owning MGA tenant)
-        # must belong to the caller's tenant; platform admin bypasses.
-        assert_tenant_owns(principal, exp["tenant_id"])
+        # Ownership guard (by-id / IDOR-prone). Not assert_tenant_owns: a BROKER
+        # seat carries no tenant, and the broker that produced a run decides the
+        # exceptions on its own file. The export's denormalised
+        # program_id/broker_party_id are what answer that — see
+        # carrier_scope.assert_can_read_export. Platform admin bypasses.
+        from types import SimpleNamespace
+        from carrier_scope import assert_can_read_export
+        assert_can_read_export(s, principal, SimpleNamespace(
+            tenant_id=exp["tenant_id"], program_id=exp["program_id"],
+            broker_party_id=exp["broker_party_id"]))
         # Direct-lane export? (output built from a landing_record, not canonical)
         landing = s.execute(
             text("SELECT id FROM landing_record WHERE output_export_id = :id "

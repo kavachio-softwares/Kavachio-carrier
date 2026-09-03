@@ -239,3 +239,59 @@ def policy_scope(policy_id: int = Path(..., ge=1),
     with CanonicalSession() as cs:
         resolve_policy(cs, scope.contract_id, policy_id)
     return CarrierScope(**{**scope.__dict__, "policy_id": policy_id})
+
+
+# --- reading one generated export, from either side --------------------------
+
+def assert_can_read_export(s, p: Principal, export_row) -> None:
+    """May this principal see this generated output?
+
+    assert_tenant_owns() cannot answer it. That guard compares the row's tenant
+    against principal.tenant_id, and a BROKER seat has no tenant — so every
+    /export/downloads/* route 404s for them, which is why a broker could run a
+    bordereau and then not open its exceptions.
+
+    Widening assert_tenant_owns itself would be wrong: it guards mappers,
+    uploads, templates and contracts too, and "the broker owns it" is meaningless
+    for most of those. So this is export-specific, and states the rule once:
+
+      platform admin  any export
+      carrier seat    an export belonging to their tenant (unchanged)
+      broker seat     an export STAMPED with their broker_party_id, and only
+                      while they are still on the programme it was run for —
+                      output_exports carries carrier/programme/broker/contract
+                      denormalised precisely so this is answerable without
+                      walking back through a pipeline that may since have been
+                      edited or deleted.
+
+    A broker taken off a programme therefore loses access to those runs, which
+    matches every other read on their side (broker_routes starts from the same
+    program_broker rows).
+
+    404, never 403, on a miss: a 403 confirms the id exists.
+    """
+    if p.is_platform_admin:
+        return
+    if not p.is_broker:
+        if getattr(export_row, "tenant_id", None) != p.tenant_id:
+            raise HTTPException(404, _NOT_FOUND)
+        return
+
+    own = broker_party_id_of(s, p)
+    row_broker = getattr(export_row, "broker_party_id", None)
+    if own is None or row_broker is None or int(row_broker) != int(own):
+        raise HTTPException(404, _NOT_FOUND)
+
+    # Still on the programme it was run for. An export predating the broker
+    # level carries no programme; it also carries no broker, so it was already
+    # refused above.
+    prog = getattr(export_row, "program_id", None)
+    if prog is None:
+        raise HTTPException(404, _NOT_FOUND)
+    link = (s.query(ProgramBroker)
+              .filter(ProgramBroker.program_id == prog,
+                      ProgramBroker.broker_party_id == own,
+                      func.coalesce(ProgramBroker.status, "active") == "active")
+              .first())
+    if link is None:
+        raise HTTPException(404, _NOT_FOUND)

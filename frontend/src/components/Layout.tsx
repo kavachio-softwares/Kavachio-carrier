@@ -170,6 +170,9 @@ function subScreenOwner(pathname: string, search: string): string | null {
     const from = new URLSearchParams(search).get("from");
     if (from === "home") return "/home";
     if (from === "direct") return "/direct";
+    // A broker reviewing its own run's exceptions came from THEIR Process
+    // Bordereau, which is a different path from the carrier's.
+    if (from === "broker") return "/broker/bordereau";
   }
   return null;
 }

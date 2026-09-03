@@ -83,8 +83,17 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   { pattern: "/outputs/new-template", requires: "carrier_admin" },
   { pattern: "/outputs/generate", requires: "carrier_admin" },
   { pattern: "/outputs/templates/:id", requires: "carrier_admin" },
-  { pattern: "/uploads/:uploadId/exceptions", requires: "carrier_admin" },
-  { pattern: "/uploads/:uploadId/exceptions/rule/:ruleId", requires: "carrier_admin" },
+  // Exception triage. Open to BROKER seats too, not only the carrier: a broker
+  // who ran a bordereau has to be able to see what failed on their own file and
+  // correct it. The screen is scoped by the export id in the path, and the
+  // server decides what that id may be — output_exports carries the broker the
+  // run was made for, so a broker reaches its OWN runs and 404s on anyone
+  // else's (carrier_scope.assert_can_read_export). Listing the roles here only
+  // stops the UI bouncing them before the server ever gets asked.
+  { pattern: "/uploads/:uploadId/exceptions", requires: "operator",
+    only: ["carrier_admin", "kavachio_admin", "broker_admin", "operator"] },
+  { pattern: "/uploads/:uploadId/exceptions/rule/:ruleId", requires: "operator",
+    only: ["carrier_admin", "kavachio_admin", "broker_admin", "operator"] },
   { pattern: "/runs", requires: "carrier_admin" },
   { pattern: "/calendar", requires: "carrier_admin" },
   // How files reach this carrier, and everything that has landed. Carrier-only:

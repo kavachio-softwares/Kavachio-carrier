@@ -32,7 +32,7 @@
  * not approved governs nothing, and is named with the reason rather than hidden.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { History } from "lucide-react";
 import { getBrokerContracts, type BrokerContract } from "../api/broker";
 import {
@@ -59,6 +59,7 @@ const label = (c: BrokerContract) =>
   `${c.filename ?? `Contract ${c.id}`} — ${c.programme.name} (${c.carrier.name})`;
 
 export default function BrokerBordereau() {
+  const nav = useNavigate();
   const [brokerId, setBrokerId] = useState<number | null>(null);
   const [contracts, setContracts] = useState<BrokerContract[] | null>(null);
   const [contractId, setContractId] = useState<number | "">("");
@@ -288,6 +289,24 @@ export default function BrokerBordereau() {
             preview={preview}
             urls={urls}
             onError={setErr}
+            // A broker has no Exception Triage screen to be sent to — that
+            // route is carrier_admin-only, and deciding exceptions is the
+            // carrier's call, not theirs. So the findings are listed HERE, on
+            // a real submission as much as on a check: being told "14
+            // exceptions" with nothing to act on is not a result.
+            findings="always"
+            // The SAME Exception Triage screen the carrier uses. The export id
+            // in the path is what scopes it, and the server only hands back an
+            // export stamped with this broker — so this opens their own run and
+            // nobody else's. `from=broker` keeps the sidebar highlight on
+            // Process Bordereau when they get there.
+            actions={!result.check_only && result.exception_count > 0 ? (
+              <button className="btn pri"
+                onClick={() => nav(`/uploads/${result.export_id}/exceptions`
+                                   + `?download=${result.export_id}&from=broker`)}>
+                Review Exceptions
+              </button>
+            ) : null}
             footNote={<b>Ask your carrier to review the setup.</b>}
           />
         )}
@@ -310,8 +329,21 @@ export default function BrokerBordereau() {
                       <td className="muted">{r.created_at ? fmtDate(r.created_at) : "—"}</td>
                       <td>{r.row_count ?? 0}</td>
                       <td>
+                        {/* The count IS the way in. It used to be a dead badge:
+                            the one number on the row a person actually wants to
+                            act on, and nothing to click. Opens the same
+                            Exception Triage screen a fresh run does. */}
                         {r.exception_count
-                          ? <span className="badge b-warn"><span className="d" />{r.exception_count}</span>
+                          ? (r.export_id != null
+                              ? <button
+                                  className="badge b-warn"
+                                  style={{ border: 0, cursor: "pointer", font: "inherit" }}
+                                  title="See what failed on this file"
+                                  onClick={() => nav(`/uploads/${r.export_id}/exceptions`
+                                                     + `?download=${r.export_id}&from=broker`)}>
+                                  <span className="d" />{r.exception_count}
+                                </button>
+                              : <span className="badge b-warn"><span className="d" />{r.exception_count}</span>)
                           : <span className="badge b-ok"><span className="d" />Clean</span>}
                       </td>
                       <td>
@@ -319,12 +351,24 @@ export default function BrokerBordereau() {
                             a bare href would resolve against the FRONTEND
                             origin and 404. It also carries the auth header. */}
                         {r.export_id != null && urls && (
-                          <button className="btn sm"
-                            onClick={() => downloadFile(urls.file(r.export_id!),
-                                                        r.filename ?? undefined)
-                              .catch(() => setErr("We couldn't download that file — please try again."))}>
-                            Download
-                          </button>
+                          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                            {/* Spelled out as well as on the count, because a
+                                clean run has no count to click and a reviewer
+                                scanning the last column should still find it. */}
+                            {!!r.exception_count && (
+                              <button className="btn sm"
+                                onClick={() => nav(`/uploads/${r.export_id}/exceptions`
+                                                   + `?download=${r.export_id}&from=broker`)}>
+                                Review
+                              </button>
+                            )}
+                            <button className="btn sm"
+                              onClick={() => downloadFile(urls.file(r.export_id!),
+                                                          r.filename ?? undefined)
+                                .catch(() => setErr("We couldn't download that file — please try again."))}>
+                              Download
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>

@@ -32,6 +32,7 @@ from db import (
 )
 from exporter import generate_workbook, build_output_records, parse_template, propose_template_mapping
 from app_routes import router as app_router, resolve_tenant_id, assert_tenant_owns, _iso_utc
+from carrier_scope import assert_can_read_export
 from auth_deps import current_principal, Principal
 from validation_routes import router as validation_router
 from direct_routes import router as direct_router
@@ -2448,6 +2449,11 @@ def _export_file_row(s, export_id: int):
         OutputExport.blob,
         OutputExport.blob_ref,
         OutputExport.template_id,
+        # Loaded eagerly because assert_can_read_export reads them on every one
+        # of these routes. Left out, each would lazy-load as a separate query
+        # per request — the exact cost this column list exists to avoid.
+        OutputExport.program_id,
+        OutputExport.broker_party_id,
     )])
 
 
@@ -2458,6 +2464,11 @@ def _export_meta_row(s, export_id: int):
         OutputExport.filename,
         OutputExport.blob_ref,
         OutputExport.template_id,
+        # Loaded eagerly because assert_can_read_export reads them on every one
+        # of these routes. Left out, each would lazy-load as a separate query
+        # per request — the exact cost this column list exists to avoid.
+        OutputExport.program_id,
+        OutputExport.broker_party_id,
     )])
 
 
@@ -3639,7 +3650,9 @@ def export_download_get(export_id: int,
         r = s.get(OutputExport, export_id)
         if not r:
             raise HTTPException(404, "export not found")
-        assert_tenant_owns(principal, r.tenant_id)
+        # Not assert_tenant_owns: a BROKER seat has no tenant, so that guard
+        # 404s them out of the exceptions for a run they made themselves.
+        assert_can_read_export(s, principal, r)
         return _export_to_dict(r, with_exceptions=True, mga=_tenant_name(s, r.tenant_id))
 
 
@@ -3650,7 +3663,7 @@ def export_download_file(export_id: int,
         r = _export_file_row(s, export_id)
         if not r:
             raise HTTPException(404, "export file not found")
-        assert_tenant_owns(principal, r.tenant_id)
+        assert_can_read_export(s, principal, r)
         data = storage.resolve_bytes(r.blob_ref, r.blob)
         if not data:
             raise HTTPException(404, "export file not found")
@@ -3697,7 +3710,7 @@ def export_download_data(export_id: int,
         r = _export_file_row(s, export_id)
         if not r:
             raise HTTPException(404, "export file not found")
-        assert_tenant_owns(principal, r.tenant_id)
+        assert_can_read_export(s, principal, r)
         data = storage.resolve_bytes(r.blob_ref, r.blob)
         if not data:
             raise HTTPException(404, "export file not found")
@@ -3858,7 +3871,7 @@ def export_download_data_stream(export_id: int,
         r = _export_meta_row(s, export_id)
         if not r:
             raise HTTPException(404, "export file not found")
-        assert_tenant_owns(principal, r.tenant_id)
+        assert_can_read_export(s, principal, r)
         digest = _export_blob_digest(s, export_id)
         if not digest and not r.blob_ref:
             raise HTTPException(404, "export file not found")
