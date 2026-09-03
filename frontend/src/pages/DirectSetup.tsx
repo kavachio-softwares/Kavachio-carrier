@@ -22,7 +22,7 @@ import { SHOW_BDX_TEMPLATE_BUILDER } from "../featureFlags";
 import OutputTemplateState from "../components/OutputTemplateState";
 import MappingReview, { type MappingReviewData } from "../components/MappingReview";
 import {
-  BoundContracts, BrokerSelect, useBrokerContractScope,
+  ContractPicker, BrokerSelect, useBrokerContractScope,
 } from "../components/BrokerContractScope";
 import {
   resolveOutputTemplate, type ResolveResult, type ScopedContract,
@@ -205,10 +205,13 @@ export default function DirectSetup() {
   // moment anything else re-rendered.
   const boundIds = scope.boundContracts.map(c => c.id).join(",");
   useEffect(() => {
-    setReusedContracts(scope.boundContracts);
-    // The sheet→contract map indexes into the staged list, so it cannot survive
-    // that list being rebuilt from a different pairing.
-    setSheetContractMap({});
+    // ONE contract on file is not a choice — it is the only answer, so it is
+    // selected on arrival and the required field is satisfied without asking.
+    // SEVERAL is a choice, and taking it silently was the bug: every one of a
+    // broker's contracts went into the build, so several sets of terms ran
+    // against one bordereau and nothing on the screen said so. Nothing is
+    // pre-selected in that case; ContractPicker asks which — one of them.
+    setReusedContracts(scope.boundContracts.length === 1 ? scope.boundContracts : []);
   }, [boundIds]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // The contracts this build will use, in one list: the ones already on file
@@ -227,6 +230,15 @@ export default function DirectSetup() {
     })),
     ...contractFiles.map(f => ({ kind: "file" as const, file: f, name: f.name })),
   ], [reusedContracts, contractFiles]);
+
+  // The sheet→contract map stores POSITIONS in that list, so any change to what
+  // is in it — a different pairing, a contract un-ticked in the picker, an
+  // upload removed — silently repoints every sheet at whatever slid into its
+  // index. Nothing would report it: the sheet would just be validated against
+  // the wrong contract. So the map is dropped whenever the list it indexes
+  // changes, and the name auto-match re-fills it.
+  const stagedKey = staged.map(e => e.name).join("|");
+  useEffect(() => { setSheetContractMap({}); }, [stagedKey]);
 
   // Build paused waiting for reference docs: holds the already-created output
   // template id (so we re-run only the contract + mapping steps, not recreate
@@ -669,6 +681,20 @@ export default function DirectSetup() {
     setSel(prev => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n; });
   }
 
+  // What Build is still waiting for, in the user's terms. A contract can now be
+  // missing in two different ways — none on file at all, or some on file with
+  // none ticked — and "upload one" is the wrong advice for the second.
+  function missingForBuild(): string[] {
+    const missing: string[] = [];
+    if (!inputFile) missing.push("the input template");
+    if (staged.length === 0) {
+      missing.push(scope.boundContracts.length > 0
+        ? "a contract — pick one above, or upload it"
+        : "a contract");
+    }
+    return missing;
+  }
+
   // What the template builder still needs. An input format already saved on
   // the loaded setup counts as the input side; a contract already approved for
   // the scope counts as the contract side — neither has to be re-uploaded.
@@ -693,7 +719,10 @@ export default function DirectSetup() {
     // scope already resolves to one there is nothing to upload at all.
     const existingTemplateId = resolved?.template?.id ?? 0;
     if (carrierId === "" || programId === "" || !inputFile || staged.length === 0) {
-      setErr("Pick a program, an input file and at least one contract."); return;
+      setErr(carrierId === "" || programId === ""
+        ? "Pick a carrier and program first."
+        : `Still needed: ${missingForBuild().join("; ")}.`);
+      return;
     }
     // No output template, and none uploaded? Offer the two ways to make one
     // rather than refusing — this is the fork in the road, not an error.
@@ -1359,7 +1388,16 @@ export default function DirectSetup() {
             <BrokerSelect scope={scope} disabled={scopeIncomplete} />
           </div>
           <div className="max-w-2xl mt-3">
-            <BoundContracts scope={scope} programPicked={programId !== ""} />
+            {/* Which contract on file this setup runs on — ONE of them. The
+                radio and the "on file" chip on the Contracts field below are
+                the SAME state (reusedContracts, held at a single entry), so
+                clearing it here removes the chip and dropping the chip clears
+                the radio. */}
+            <ContractPicker scope={scope} programPicked={programId !== ""}
+              selectedId={reusedContracts[0]?.id ?? null}
+              onSelect={id => setReusedContracts(
+                scope.boundContracts.filter(c => c.id === id))}
+              onClear={() => setReusedContracts([])} />
           </div>
 
           {/* Why everything below is shut. Said once, where the answer is —
@@ -1545,6 +1583,8 @@ export default function DirectSetup() {
                    broker nobody has picked. Without this the field reads as
                    "nothing on file" and the next thing someone does is upload a
                    second copy of a contract already approved. */
+                unselectedOnFile={reusedContracts.length === 0
+                  ? scope.boundContracts.length : 0}
                 awaitingBroker={scope.awaitingBroker.length > 0
                   ? { contracts: scope.awaitingBroker.length,
                       brokers: scope.awaitingBrokerCount }
@@ -1612,7 +1652,7 @@ export default function DirectSetup() {
             <Button onClick={buildSetup}
               disabled={building || !inputFile || staged.length === 0}
               title={!building && (!inputFile || staged.length === 0)
-                ? "Upload the input template and at least one contract to continue"
+                ? `Still needed: ${missingForBuild().join("; ")}`
                 : (!building && !outFile && !resolved?.template
                     ? "No output template yet — you'll be offered the two ways to create one"
                     : undefined)}
@@ -1876,7 +1916,10 @@ export default function DirectSetup() {
           inputFile={inputFile}
           inputSheets={[...inputSheetSel]}
           contractFiles={contractFiles}
-          boundContracts={scope.boundContracts}
+          /* The contracts the user actually picked — not everything the scope
+             holds. Reading the field list from a contract this setup was told
+             to leave out would build the template against the wrong terms. */
+          boundContracts={reusedContracts}
           onCreated={t => {
             setShowCreateTemplate(false);
             setTemplateId(t.id);
@@ -2135,7 +2178,8 @@ function ReferencePick({ files, onAdd, onRemoveAt, disabled }: {
 // Picking rules are unchanged from the button this replaced: several at once, added
 // over rounds, de-duplicated by name+size so re-picking one doesn't double it up.
 function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
-                       awaitingBroker, onAdd, onRemoveAt, disabled }: {
+                       awaitingBroker, unselectedOnFile, onAdd, onRemoveAt,
+                       disabled }: {
   files: File[];
   /** Contracts already approved for the chosen programme + broker. They satisfy
    *  the requirement exactly as an upload does — the build takes their id and
@@ -2146,6 +2190,10 @@ function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
   /** Approved contracts on the programme that the current pick does not bind,
    *  because they belong to a broker nobody has chosen. */
   awaitingBroker?: { contracts: number; brokers: number } | null;
+  /** Contracts on file for THIS pairing that the picker above has left
+   *  unticked. Without this the field's empty state reads as "upload one" while
+   *  the contract the user wants is sitting one control away. */
+  unselectedOnFile?: number;
   onAdd: (fs: File[]) => void; onRemoveAt: (i: number) => void; disabled?: boolean;
 }) {
   const [drag, setDrag] = useState(false);
@@ -2206,6 +2254,14 @@ function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
         </div>
       ) : loadingExisting ? (
         <div className="text-[11px] text-ink-muted">Looking for a contract already on file…</div>
+      ) : unselectedOnFile ? (
+        <div className="text-[11px] text-amber-700 px-2">
+          {unselectedOnFile} contract{unselectedOnFile === 1 ? "" : "s"} on file
+          for this selection, none chosen.
+          <div className="mt-0.5 text-ink-muted">
+            <b>Pick one above</b> to use it — or upload a different one here.
+          </div>
+        </div>
       ) : awaitingBroker ? (
         <div className="text-[11px] text-amber-700 px-2">
           {awaitingBroker.contracts} contract
