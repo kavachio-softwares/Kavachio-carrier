@@ -104,11 +104,22 @@ export default function AddUser() {
               <input value={full_name} autoFocus placeholder="e.g. Priya Nair"
                 onChange={e => setName(e.target.value)} />
             </div>
-            <div className="field" style={{ marginBottom: 0 }}>
+            <div className="field">
               <label>Email</label>
               <input type="email" value={email} placeholder="name@company.com"
                 onChange={e => setEmail(e.target.value)} />
               <div className="hint">The invite and password-setup link are sent here.</div>
+            </div>
+            {/* Sits with the person who is being invited, though it is SAVED on
+                the organisation (party.party_type) — one invitation creates
+                both, so which card it appears in is a question of where it
+                reads best, not of where the value lives. */}
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Type</label>
+              <select value={brokerType} onChange={e => setBrokerType(e.target.value)}>
+                {PARTY_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+              <div className="hint">What kind of intermediary they are.</div>
             </div>
           </div>
 
@@ -117,19 +128,11 @@ export default function AddUser() {
             <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>The broker</h3>
             {/* The broker organisation itself. Created with this invitation —
                 this person becomes its first admin. */}
-            <div className="row2">
-              <div className="field">
-                <label>Broker name</label>
-                <input value={brokerName} placeholder="e.g. Marlowe Broking Ltd"
-                  onChange={e => setBrokerName(e.target.value)} />
-                <div className="hint">The organisation they will run.</div>
-              </div>
-              <div className="field">
-                <label>Type</label>
-                <select value={brokerType} onChange={e => setBrokerType(e.target.value)}>
-                  {PARTY_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                </select>
-              </div>
+            <div className="field">
+              <label>Broker Organisation name</label>
+              <input value={brokerName} placeholder="e.g. Marlowe Broking Ltd"
+                onChange={e => setBrokerName(e.target.value)} />
+              <div className="hint">The organisation they will run.</div>
             </div>
 
             <div className="hint" style={{ marginBottom: 12 }}>
