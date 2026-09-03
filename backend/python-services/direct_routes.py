@@ -164,7 +164,7 @@ def _apply_output_corrections(projected: dict, corrections: list[dict]) -> dict:
 
 
 def _tenant_id(s, mga: str) -> Optional[int]:
-    row = s.execute(text("SELECT tenant_id FROM tenant WHERE tenant_name=:m LIMIT 1"),
+    row = s.execute(text("SELECT tenant_id FROM tenant WHERE tenant_code=:m LIMIT 1"),
                     {"m": mga}).fetchone()
     return row[0] if row else None
 
@@ -195,7 +195,7 @@ def assert_tenant_owns(principal: Principal, tenant_id: Optional[int]) -> None:
 def _tenant_name(s, tenant_id) -> Optional[str]:
     if not tenant_id:
         return None
-    row = s.execute(text("SELECT tenant_name FROM tenant WHERE tenant_id=:t LIMIT 1"),
+    row = s.execute(text("SELECT tenant_code FROM tenant WHERE tenant_id=:t LIMIT 1"),
                     {"t": tenant_id}).fetchone()
     return row[0] if row else None
 

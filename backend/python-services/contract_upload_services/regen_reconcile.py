@@ -115,7 +115,7 @@ def find_prior_contract(conn, tenant_id, content_fp=None, file_sha=None,
     if file_sha:
         probes.append(("L1", "c.extracted->'identity'->>'file_sha256' = :v", file_sha))
     if content_fp:
-        probes.append(("L2", "c.content_fingerprint = :v", content_fp))
+        probes.append(("L2", "c.row_hash = :v", content_fp))
     if doc_sha:
         probes.append(("L2b", "c.extracted->'identity'->>'doc_sha256' = :v", doc_sha))
 
@@ -170,7 +170,7 @@ def find_prior_contract_l3(conn, tenant_id, program_metadata,
         text("""
             SELECT c.contract_id, c.output_template_id,
                    c.extracted->'program_metadata' AS meta,
-                   c.inception_dt::text AS inception
+                   c.contract_inception_date::text AS inception
             FROM   contract c
             WHERE  c.tenant_id = :tid
               AND  c.is_current_version IS TRUE
@@ -787,7 +787,7 @@ def find_contract_lineage(conn, tenant_id, content_fp=None, file_sha=None,
     from sqlalchemy import text
     conds, params = [], {"tid": tenant_id, "skip": exclude_contract_id}
     if content_fp:
-        conds.append("c.content_fingerprint = :fp"); params["fp"] = content_fp
+        conds.append("c.row_hash = :fp"); params["fp"] = content_fp
     if file_sha:
         conds.append("c.extracted->'identity'->>'file_sha256' = :fs"); params["fs"] = file_sha
     if doc_sha:

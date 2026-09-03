@@ -248,7 +248,7 @@ def _get_tenant_id(session, mga: str) -> Optional[int]:
     """Look up the canonical tenant_id for an mga code, or None if not found."""
     from sqlalchemy import text
     row = session.execute(
-        text("SELECT tenant_id FROM tenant WHERE tenant_name=:m LIMIT 1"),
+        text("SELECT tenant_id FROM tenant WHERE tenant_code=:m LIMIT 1"),
         {"m": mga}).fetchone()
     return row[0] if row else None
 
@@ -291,7 +291,7 @@ def _tenant_name(session, tenant_id: Optional[int]) -> Optional[str]:
         return None
     from sqlalchemy import text
     row = session.execute(
-        text("SELECT tenant_name FROM tenant WHERE tenant_id=:t LIMIT 1"),
+        text("SELECT tenant_code FROM tenant WHERE tenant_id=:t LIMIT 1"),
         {"t": tenant_id}).fetchone()
     return row[0] if row else None
 
@@ -1836,7 +1836,7 @@ async def program_contract_upload(
             from sqlalchemy import text as _regen_text
             with _regen_ce.connect() as _regen_conn:
                 _tid = _regen_conn.execute(
-                    _regen_text("SELECT tenant_id FROM program WHERE program_id = :pid"),
+                    _regen_text("SELECT program_tenant_id FROM program WHERE program_id = :pid"),
                     {"pid": program_id},
                 ).scalar()
                 prior_contract = find_prior_contract(
@@ -2306,7 +2306,7 @@ async def program_setup(
                 from sqlalchemy import text as _regen_text
                 with _regen_ce.connect() as _regen_conn:
                     _tid = _regen_conn.execute(
-                        _regen_text("SELECT tenant_id FROM program WHERE program_id = :pid"),
+                        _regen_text("SELECT program_tenant_id FROM program WHERE program_id = :pid"),
                         {"pid": program_id},
                     ).scalar()
                     prior_contract = find_prior_contract(
@@ -2723,10 +2723,13 @@ def program_contract_detail(program_id: int, contract_id: int,
 
         term_rows = s.execute(
             text("""
-                SELECT term_id, term_category, term_definition,
-                       extracted_from_clause_ref, extraction_confidence
-                FROM contract_terms
-                WHERE contract_id = :cid
+                SELECT term_id,
+                       term_type            AS term_category,
+                       term_definition,
+                       term_source_reference AS extracted_from_clause_ref,
+                       NULL                 AS extraction_confidence
+                FROM contract_term
+                WHERE term_contract_id = :cid
                 ORDER BY term_id
             """),
             {"cid": contract_id},

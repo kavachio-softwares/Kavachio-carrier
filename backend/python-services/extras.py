@@ -25,7 +25,7 @@ No new tables. Three existing JSONB stores power the feature:
         }}
 
   • `<entity>.extras` JSONB columns (canonical: policy, claim, coverage,
-    premium_transaction, insured_location, building) — actual ingested
+    premium_transaction, risk_location, policyholder) — actual ingested
     values, one JSON object per entity row.
 
 This module wraps reads/writes against those three stores.
@@ -46,7 +46,7 @@ XF_PREFIX = "_xf:"
 DEFAULT_ENTITY = "policy"
 ALLOWED_ENTITIES = (
     "policy", "claim", "coverage", "premium_transaction",
-    "insured_location", "building",
+    "risk_location", "policyholder",
 )
 ALLOWED_DATA_TYPES = ("string", "number", "currency", "date", "bool")
 

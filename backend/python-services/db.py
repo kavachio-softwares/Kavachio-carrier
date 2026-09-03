@@ -172,13 +172,13 @@ class Upload(Base):
     """One row per /bdx/upload call. Use its id to fetch the rows it produced."""
     __tablename__ = "upload"
     id = Column("upload_id", Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=False)
+    tenant_id = Column(Integer, nullable=False)  # ops tenancy column
     party_id = Column(Integer, nullable=True, index=True)
     mapper_id = Column(Integer, ForeignKey("mappers.id"), nullable=True)
-    source_file = Column(String)
+    source_file = Column("upload_filename", String)
     sheets = Column(JSON)               # list of sheet names parsed
     counts_by_sheet = Column(JSON)      # {sheet: row_count}
-    total_rows = Column(Integer, default=0)
+    total_rows = Column("upload_rows_total", Integer, default=0)
     source_blob = _payload(Column(LargeBinary, nullable=True))
     # Blob-storage pointer (Azure/Azurite); see Mapper.source_blob_ref.
     source_blob_ref = Column(String, nullable=True)
@@ -354,14 +354,17 @@ class Tenant(Base):
     """
     __tablename__ = "tenant"
     id = Column("tenant_id", Integer, primary_key=True)
-    tenant_name = Column(String, unique=True, index=True, nullable=False)  # legacy mga code
-    legal_name = Column(String, nullable=True)
-    tenant_type = Column(String, nullable=True)  # party_type_e enum in DB
+    # v4: tenant_code is the unique business identifier (holds the legacy mga
+    # code); tenant_legal_name is the display/legal name.
+    tenant_name = Column("tenant_code", String, unique=True, index=True, nullable=False)
+    legal_name = Column("tenant_legal_name", String, nullable=True)
+    tenant_type = Column(String, nullable=True)
+    # --- operational columns (outside the canonical model) -----------------
     address = Column(JSON, nullable=True)
     currency = Column(String, nullable=True)      # ISO 4217 (USD, EUR, GBP …)
     logo = Column(Text, nullable=True)            # org logo as a data URL (sidebar co-brand)
     internal_codes = Column(JSON, nullable=True)  # JSONB free-form
-    is_active = Column(Boolean, default=True)
+    is_active = Column("tenant_is_active", Boolean, default=True)
     # Set once the tenant admin explicitly dismisses the first-login onboarding
     # wizard ("Skip for now"). Without this, needs_onboarding (below) is purely
     # derived from setup state, so a tenant that skips before finishing Bordereau
@@ -386,16 +389,17 @@ class GenericRuleSpecification(Base):
     must be one of the supported operator classes (see that module's
     SUPPORTED_CLASSES) or the rule generates nothing.
     """
-    __tablename__ = "generic_rule_specification"
-    id = Column(Integer, primary_key=True)
-    rule_name = Column(Text, nullable=False)
-    severity = Column(String, nullable=False, default="Major")   # Critical | Major | Minor
-    class_name = Column(String, nullable=False)                  # supported operator class
-    validation_logic = Column(Text, nullable=True)               # human-readable logic
-    is_generic = Column(Boolean, nullable=False, default=True)
+    __tablename__ = "generic_rule_spec"
+    id = Column("generic_rule_id", Integer, primary_key=True)
+    rule_name = Column("generic_rule_name", Text, nullable=False)
+    severity = Column("generic_rule_severity", String, nullable=False, default="Major")
+    class_name = Column("generic_rule_class_name", String, nullable=False)
+    validation_logic = Column("generic_rule_logic", Text, nullable=True)
+    is_generic = Column(Boolean, nullable=False, default=True)   # ops column
     # NULL = global (all tenants); a tenant_id = private to that tenant.
-    tenant_id = Column(Integer, ForeignKey("tenant.tenant_id"), nullable=True, index=True)
-    is_active = Column(Boolean, nullable=False, default=True)    # enable/disable switch
+    tenant_id = Column("generic_rule_tenant_id", Integer,
+                       ForeignKey("tenant.tenant_id"), nullable=True, index=True)
+    is_active = Column("generic_rule_is_active", Boolean, nullable=False, default=True)
     created_by = Column(Integer, nullable=True)                  # app_user.id of the author
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -405,20 +409,33 @@ class Party(Base):
     """Counterparty / insured / carrier directory entry (S-03 / S-03a)."""
     __tablename__ = "party"
     id = Column("party_id", Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=True)
-    # True = created via the app (the directory shows these); False = BDX-ingested
-    # into the canonical data model. Replaces the old "mga IS NOT NULL" marker.
+    tenant_id = Column("party_tenant_id", Integer, nullable=True)
+    party_type = Column(String, nullable=False)
+    legal_name = Column("party_legal_name", String, nullable=False, index=True)
+    # Stable business identifier (v4). The ingester keys synthetic parties on it.
+    reference = Column("party_reference", String, nullable=True, index=True)
+    tax_id = Column("party_tax_id", String, nullable=True)
+    naic_company_code = Column("party_naic_company_code", String, nullable=True)
+    address_line1 = Column("party_address_line1", String, nullable=True)
+    city = Column("party_city", String, nullable=True)
+    subdivision = Column("party_subdivision", String, nullable=True)
+    postal_code = Column("party_postal_code", String, nullable=True)
+    country = Column("party_country", String, nullable=True)
+    sanctions_status = Column("party_sanctions_status", String, nullable=True)
+    verified_by_user_id = Column("party_verified_by_user_id", Integer, nullable=True)
+    is_active = Column("party_is_active", Boolean, default=True)
+    extras = Column("party_extras", JSON, nullable=True)
+    # --- operational columns (outside the canonical model) -----------------
+    # True = created via the app (the directory shows these); False = BDX-ingested.
+    # v4 sends bordereau-read names to ingested_party instead, but this marker
+    # still separates curated rows from ingester-minted ambient parties.
     is_app_managed = Column(Boolean, default=True)
     scope = Column(String, default="tenant")
-    party_type = Column(String, nullable=False)
-    legal_name = Column(String, nullable=False, index=True)
     dba_name = Column(String, nullable=True)
-    tax_id = Column(String, nullable=True)
     naics_code = Column(String, nullable=True)
     am_best_rating = Column(String, nullable=True)
     domicile_country = Column(String, nullable=True)
     primary_jurisdiction = Column(String, nullable=True)
-    is_active = Column(Boolean, default=True)
     addresses = Column(JSON, nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -451,15 +468,20 @@ class Program(Base):
     """Program (S-05). Metadata can be AI-extracted from a contract."""
     __tablename__ = "program"
     id = Column("program_id", Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=True)
+    tenant_id = Column("program_tenant_id", Integer, nullable=True)
+    name = Column("program_name", String, nullable=False)
+    bdx_frequency = Column("program_bordereau_frequency", String, nullable=True)
+    business_segment = Column("program_business_segment", String, nullable=True)
+    product_line = Column("program_product_line", String, nullable=True)
+    annual_statement_lob = Column("program_annual_statement_line_of_business",
+                                  String, nullable=True)
+    due_after_days = Column("program_due_after_days", Integer, nullable=True)
+    canonical_status = Column("program_status", String, nullable=True)
+    # --- operational columns (outside the canonical model) -----------------
     is_app_managed = Column(Boolean, default=True)  # see Party.is_app_managed
     party_id = Column(Integer, ForeignKey("party.party_id"), nullable=True, index=True)
-    name = Column("program_name", String, nullable=False)
     lead_carrier = Column(String, nullable=True)
     admin_party = Column(String, nullable=True)
-    bdx_frequency = Column(String, nullable=True)
-    business_segment = Column(String, nullable=True)
-    product_line = Column(String, nullable=True)
     distribution_channel = Column(String, nullable=True)
     territory = Column(String, nullable=True)
     commercial_terms = Column(JSON, nullable=True)
@@ -479,8 +501,9 @@ class Contract(Base):
     """
     __tablename__ = "contract"
     id = Column("contract_id", Integer, primary_key=True)
-    program_id = Column(Integer, ForeignKey("program.program_id"), index=True, nullable=True)
-    tenant_id = Column(Integer, nullable=True)
+    program_id = Column("contract_program_id", Integer,
+                        ForeignKey("program.program_id"), index=True, nullable=True)
+    tenant_id = Column(Integer, nullable=True)  # ops tenancy column (see canonical.tenant_col)
     is_app_managed = Column(Boolean, default=True)  # see Party.is_app_managed
     # Output Template this contract is bound to (1 contract → 1 template)
     output_template_id = Column(Integer, nullable=True, index=True)
@@ -497,8 +520,8 @@ class Contract(Base):
     # here is a read-side addition: NO migration, no new column.
     # expiry_dt is what the Program Management screen calls the "term end" — the
     # date a continuation / renewal decision is due.
-    inception_dt = Column(Date, nullable=True)
-    expiry_dt = Column(Date, nullable=True)
+    inception_dt = Column("contract_inception_date", Date, nullable=True)
+    expiry_dt = Column("contract_expiry_date", Date, nullable=True)
     filename = Column(String, nullable=True)
     status = Column("status_ops", String, default="drafted")
     extracted = Column(JSON, nullable=True)
@@ -513,20 +536,23 @@ class Contract(Base):
     # --- carrier hierarchy -------------------------------------------------
     # Which broker holds this contract with the carrier. A contract is always
     # (programme x broker); program_broker says that pair is allowed at all.
-    broker_party_id = Column(Integer, ForeignKey("party.party_id"), nullable=True, index=True)
+    broker_party_id = Column("contract_broker_party_id", Integer,
+                             ForeignKey("party.party_id"), nullable=True, index=True)
     # The ONE approval in the platform. A contract a BROKER uploads waits for
     # its carrier; a contract the CARRIER uploads is live immediately. Set by
     # the DB trigger trg_set_contract_approval from who submitted it — never
     # trust a client to say "approved".
     # approved | pending_approval | rejected
-    approval_status = Column(String, default="approved")
-    submitted_by_user_id = Column(Integer, ForeignKey("app_user.user_id"), nullable=True)
+    approval_status = Column("contract_approval_status", String, default="approved")
+    submitted_by_user_id = Column("contract_submitted_by_id", Integer,
+                                  ForeignKey("app_user.user_id"), nullable=True)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
-    approved_by_user_id = Column(Integer, ForeignKey("app_user.user_id"), nullable=True)
+    approved_by_user_id = Column("contract_approved_by_id", Integer,
+                                 ForeignKey("app_user.user_id"), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
     # The agreed most-premium-they-may-write for the term. A LIMIT from the
-    # wording — deliberately not estimated_total_premium, which is a forecast.
-    premium_cap_amount = Column(Numeric, nullable=True)
+    # wording — deliberately not an estimate, which is a forecast.
+    premium_cap_amount = Column("contract_premium_cap_amount", Numeric, nullable=True)
     premium_cap_currency = Column(String, nullable=True)
 
 
@@ -540,14 +566,16 @@ class ProgramBroker(Base):
     programme, and removing the row stops new work without deleting history.
     """
     __tablename__ = "program_broker"
-    id = Column(Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=True, index=True)
-    program_id = Column(Integer, ForeignKey("program.program_id"), nullable=False, index=True)
-    broker_party_id = Column(Integer, ForeignKey("party.party_id"), nullable=False, index=True)
+    id = Column("program_broker_id", Integer, primary_key=True)
+    tenant_id = Column(Integer, nullable=True, index=True)  # ops tenancy column
+    program_id = Column("program_broker_program_id", Integer,
+                        ForeignKey("program.program_id"), nullable=False, index=True)
+    broker_party_id = Column("program_broker_party_id", Integer,
+                             ForeignKey("party.party_id"), nullable=False, index=True)
     # active | inactive. Never DELETE a pair that has contracts under it —
     # set it inactive so the contracts keep their meaning.
-    status = Column(String, default="active")
-    assigned_by_user_id = Column(Integer, nullable=True)
+    status = Column("program_broker_status", String, default="active")
+    assigned_by_user_id = Column("program_broker_assigned_by_id", Integer, nullable=True)
     created_by = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -562,16 +590,17 @@ class ContractApproval(Base):
     """
     __tablename__ = "contract_approval"
     id = Column("approval_id", Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=False, index=True)
-    contract_id = Column(Integer, ForeignKey("contract.contract_id"), nullable=False, index=True)
+    tenant_id = Column(Integer, nullable=False, index=True)  # ops tenancy column
+    contract_id = Column("approval_contract_id", Integer,
+                         ForeignKey("contract.contract_id"), nullable=False, index=True)
     # submitted | approved | rejected | withdrawn
-    action = Column(String, nullable=False)
-    acted_by_user_id = Column(Integer, nullable=False)
-    acted_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    note = Column(Text, nullable=True)
+    action = Column("approval_action", String, nullable=False)
+    acted_by_user_id = Column("approval_acted_by_id", Integer, nullable=False)
+    acted_at = Column("approval_acted_at", DateTime(timezone=True), default=datetime.utcnow)
+    note = Column("approval_note", Text, nullable=True)
     # What the carrier was looking at when it decided. A contract file can be
     # replaced; the decision stays attached to the version it judged.
-    contract_file_hash = Column(String, nullable=True)
+    contract_file_hash = Column("approval_file_hash", String, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -658,16 +687,16 @@ class RuleSql(Base):
       cannot_process  -> generation/guard failed twice; show a message to the user
     """
     __tablename__ = "rule_sql"
-    id = Column(Integer, primary_key=True)
-    rule_id = Column(Integer, index=True, nullable=False)
-    contract_id = Column(Integer, index=True, nullable=True)
-    template_id = Column(Integer, index=True, nullable=True)
-    schema_hash = Column(String, nullable=True)
-    rule_hash = Column(String, nullable=True)
-    sql_text = Column(Text, nullable=True)
-    status = Column(String, default="ok")          # ok | cannot_process
-    message = Column(Text, nullable=True)           # why it cannot be processed
-    attempts = Column(Integer, default=0)
+    id = Column("rule_sql_id", Integer, primary_key=True)
+    rule_id = Column("rule_sql_rule_id", Integer, index=True, nullable=False)
+    contract_id = Column("rule_sql_contract_id", Integer, index=True, nullable=True)
+    template_id = Column("rule_sql_template_id", Integer, index=True, nullable=True)
+    schema_hash = Column("rule_sql_schema_hash", String, nullable=True)
+    rule_hash = Column("rule_sql_rule_hash", String, nullable=True)
+    sql_text = Column("rule_sql_text", Text, nullable=True)
+    status = Column("rule_sql_status", String, default="ok")   # ok | cannot_process
+    message = Column("rule_sql_message", Text, nullable=True)  # why it cannot be processed
+    attempts = Column("rule_sql_attempts", Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -678,15 +707,15 @@ class AppUser(Base):
     see docs/db_repair_notes.md)."""
     __tablename__ = "app_user"
     id = Column("user_id", Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    full_name = Column(String, nullable=False)
+    tenant_id = Column("user_tenant_id", Integer, nullable=True)
+    email = Column("user_email", String, unique=True, index=True, nullable=False)
+    full_name = Column("user_full_name", String, nullable=False)
     # One of the four: kavachio_admin | carrier_admin | broker_admin | operator.
     # chk_app_user_role rejects anything else, so the old 'ops' default was a
     # trap — any insert that forgot to name a role failed at COMMIT. The
     # fallback is the LEAST-privileged seat, matching normalize_role().
-    role = Column(String, default="operator")
-    status = Column(String, default="active")
+    role = Column("user_role", String, default="operator")
+    status = Column("user_status", String, default="active")
     password = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login_at = Column(DateTime, nullable=True)  # set on each successful /auth/login
@@ -701,10 +730,12 @@ class AppUser(Base):
     # login cannot be pinned to one tenant_id. Carrier and platform users have
     # this NULL and carry tenant_id instead. Exactly one of the two is set —
     # the DB enforces it as chk_app_user_scope.
-    broker_party_id = Column(Integer, ForeignKey("party.party_id"), nullable=True, index=True)
+    broker_party_id = Column("user_broker_party_id", Integer,
+                             ForeignKey("party.party_id"), nullable=True, index=True)
     # Who invited this person. A carrier admin invites broker admins; a broker
     # admin invites its own operators. Answers "who let this person in?".
-    invited_by_user_id = Column(Integer, ForeignKey("app_user.user_id"), nullable=True)
+    invited_by_user_id = Column("user_invited_by_id", Integer,
+                                ForeignKey("app_user.user_id"), nullable=True)
     accepted_at = Column(DateTime(timezone=True), nullable=True)
 
 
@@ -1377,6 +1408,23 @@ def init_db():
         # Which clause a missing-column finding was quoted from (added after the
         # table shipped; create_all only CREATEs, it never ALTERs).
         _ensure_column(conn, inspector, "missing_bdx_columns", "clause_label", "VARCHAR")
+
+        # v4 model: tables shared between the ops ORM and the canonical schema
+        # (tenant, party, program, contract, app_user, upload, …) are created
+        # by Base.metadata first, so canonical create_all skips them and any
+        # canonical column the ORM doesn't map — the lineage/SCD-2 block, the
+        # business columns only the ingester writes — would be missing on a
+        # fresh DB. ALTER every missing canonical column in (idempotent).
+        from canonical import CANONICAL_TABLES as _CANON
+        for _t_name, _t in _CANON.items():
+            if not inspector.has_table(_t_name):
+                continue                      # canonical create_all will build it
+            for _col in _t.c:
+                try:
+                    _ddl = _col.type.compile(dialect=engine.dialect)
+                except Exception:  # noqa: BLE001 — fall back to a safe type
+                    _ddl = "VARCHAR"
+                _ensure_column(conn, inspector, _t_name, _col.name, _ddl)
 
     # Canonical: add `extras` JSONB column to each row-strategy entity table
     # so user-defined fields (the `_xf:*` mapping prefix) have a home.

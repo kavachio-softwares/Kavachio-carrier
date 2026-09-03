@@ -113,7 +113,7 @@ JOIN_KEY_FIELDS = {
     "policy_number",
     "program_name",
     "tenant_name",
-    "external_policy_number",
+    "policy_umr",
 }
 
 ROLE_PREFIXED_BASES = {
@@ -777,7 +777,7 @@ def _looks_like_template_row(record: dict[str, dict]) -> bool:
 
     A real bordereau row MUST have at least one of:
       - policy.policy_number containing a digit
-      - policy.policy_effective_dt containing a digit
+      - policy.policy_effective_date containing a digit
       - claim.claim_number containing a digit
       - any numeric (int/float) value anywhere in the record
     Anything else is treated as a footer/template/junk row.
@@ -788,7 +788,7 @@ def _looks_like_template_row(record: dict[str, dict]) -> bool:
     def has_digit(v: Any) -> bool:
         return isinstance(v, str) and any(ch.isdigit() for ch in v)
 
-    if has_digit(pol.get("policy_number")) or has_digit(pol.get("policy_effective_dt")):
+    if has_digit(pol.get("policy_number")) or has_digit(pol.get("policy_effective_date")):
         return False
     if has_digit(clm.get("claim_number")):
         return False

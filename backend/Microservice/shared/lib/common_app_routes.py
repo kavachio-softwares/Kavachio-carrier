@@ -277,7 +277,7 @@ def _get_tenant_id(session, mga: str) -> Optional[int]:
     """Look up the canonical tenant_id for an mga code, or None if not found."""
     from sqlalchemy import text
     row = session.execute(
-        text("SELECT tenant_id FROM tenant WHERE tenant_name=:m LIMIT 1"),
+        text("SELECT tenant_id FROM tenant WHERE tenant_code=:m LIMIT 1"),
         {"m": mga}).fetchone()
     return row[0] if row else None
 
@@ -317,7 +317,7 @@ def _tenant_name(session, tenant_id: Optional[int]) -> Optional[str]:
         return None
     from sqlalchemy import text
     row = session.execute(
-        text("SELECT tenant_name FROM tenant WHERE tenant_id=:t LIMIT 1"),
+        text("SELECT tenant_code FROM tenant WHERE tenant_id=:t LIMIT 1"),
         {"t": tenant_id}).fetchone()
     return row[0] if row else None
 

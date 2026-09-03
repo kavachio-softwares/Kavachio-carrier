@@ -416,10 +416,13 @@ def program_contract_detail(program_id: int, contract_id: int,
 
         term_rows = s.execute(
             text("""
-                SELECT term_id, term_category, term_definition,
-                       extracted_from_clause_ref, extraction_confidence
-                FROM contract_terms
-                WHERE contract_id = :cid
+                SELECT term_id,
+                       term_type            AS term_category,
+                       term_definition,
+                       term_source_reference AS extracted_from_clause_ref,
+                       NULL                 AS extraction_confidence
+                FROM contract_term
+                WHERE term_contract_id = :cid
                 ORDER BY term_id
             """),
             {"cid": contract_id},

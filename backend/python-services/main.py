@@ -42,6 +42,7 @@ from output_template_routes import router as output_template_router
 from intake_routes import router as intake_router
 # Feature 10.2 — the machine-to-machine way in (/v1). API-key auth, not JWT.
 from intake_api_routes import router as intake_api_router
+from carrier_routes import router as carrier_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -84,6 +85,15 @@ app.add_middleware(
     max_age=3600,
 )
 
+# The CANONICAL carrier-centric API: carrier → programme → broker → contract
+# → policy (carrier_routes.py). Registered FIRST so its nested paths win when a
+# flat legacy path could also match.
+app.include_router(carrier_router)
+
+# The flat routes the nested ones replace. Kept working so nothing breaks
+# mid-migration; every workflow path here has a canonical equivalent under
+# /carriers/{carrier_id}/… and is marked deprecated in the OpenAPI schema by
+# _mark_deprecated_aliases() below. Remove them once no caller is left.
 app.include_router(app_router)
 app.include_router(validation_router)
 app.include_router(direct_router)
@@ -94,6 +104,33 @@ app.include_router(broker_router)
 app.include_router(output_template_router)
 app.include_router(intake_router)
 app.include_router(intake_api_router)
+
+
+def _mark_deprecated_aliases() -> None:
+    """Flag the flat workflow routes as deprecated in the OpenAPI schema.
+
+    Marking rather than deleting: the frontend and any external caller keep
+    working, while /docs shows which paths are superseded and the generated
+    clients emit deprecation warnings. Matching is by path PREFIX against the
+    canonical chain, so a route that has no nested equivalent (auth, the data
+    model, the rule library, platform admin) is deliberately left alone.
+    """
+    superseded = (
+        "/programs", "/contracts", "/approvals", "/brokers", "/hierarchy",
+    )
+    note = ("Deprecated — use the carrier-centric equivalent under "
+            "/carriers/{carrier_id}/programs/{program_id}/brokers/"
+            "{broker_party_id}/contracts/{contract_id}. ")
+    for r in app.routes:
+        path = getattr(r, "path", "")
+        if path.startswith("/carriers"):
+            continue
+        if any(path == s or path.startswith(s + "/") for s in superseded):
+            r.deprecated = True
+            r.description = note + (r.description or "")
+
+
+_mark_deprecated_aliases()
 
 # C-9 — daily background sweep: create overdue / due-soon reminder events even
 # when nobody opens the calendar. In-process (asyncio), idempotent, off the event
@@ -548,7 +585,7 @@ class UpdateMapperBody(BaseModel):
 def _get_tenant_id(session, mga: str) -> Optional[int]:
     """Resolve an mga code (tenant_name) to its tenant_id, or None."""
     row = session.execute(
-        text("SELECT tenant_id FROM tenant WHERE tenant_name=:m LIMIT 1"),
+        text("SELECT tenant_id FROM tenant WHERE tenant_code=:m LIMIT 1"),
         {"m": mga}).fetchone()
     return row[0] if row else None
 
@@ -566,7 +603,7 @@ def _tenant_name(session, tenant_id: Optional[int]) -> Optional[str]:
         cache = session._tenant_name_cache = {}
     if tenant_id not in cache:
         row = session.execute(
-            text("SELECT tenant_name FROM tenant WHERE tenant_id=:t LIMIT 1"),
+            text("SELECT tenant_code FROM tenant WHERE tenant_id=:t LIMIT 1"),
             {"t": tenant_id}).fetchone()
         cache[tenant_id] = row[0] if row else None
     return cache[tenant_id]
@@ -1057,8 +1094,10 @@ def uploads_list(mga: Optional[str] = None, limit: int = 50,
         # so we never transfer the actual file bytes across the network.
         ut = Upload.__table__
         cols = [
-            ut.c.upload_id, ut.c.tenant_id, ut.c.mapper_id, ut.c.source_file,
-            ut.c.sheets, ut.c.counts_by_sheet, ut.c.total_rows, ut.c.ingested_at,
+            ut.c.upload_id, ut.c.tenant_id, ut.c.mapper_id,
+            ut.c.upload_filename.label("source_file"),
+            ut.c.sheets, ut.c.counts_by_sheet,
+            ut.c.upload_rows_total.label("total_rows"), ut.c.ingested_at,
             case(
                 (ut.c.source_blob.isnot(None) | ut.c.source_blob_ref.isnot(None), True),
                 else_=False,
@@ -1226,8 +1265,7 @@ def uploads_source_rows(upload_id: int, policy_numbers: str = "",
 
 # Tables that exist 1:1 with a policy — merge scalar (later non-null wins).
 _SCALAR_TABLES = {
-    "policy", "program", "contract", "tenant",
-    "parametric_coverage_detail",
+    "policy", "policyholder", "program", "contract", "tenant",
     # `extras` isn't a canonical table — it's a {entity: {key: value}} dict
     # produced by mapper.apply_spec_multi when `_xf:*` entries are in the
     # spec. Treat it as scalar so merging across sheets preserves the dict
@@ -1355,8 +1393,8 @@ def dwh_list(
 
     Each item is one policy reassembled by joining the canonical tables:
         policy (scalar) ← program (scalar parent)
-        + insured_location[] + building[] + coverage[] + premium_transaction[]
-        + claim[] + party_role_in_policy[] + …
+        + risk_location[] + coverage[] + premium_transaction[]
+        + claim[] + tax_line[] + commission_line[] + …
 
     Filter by `upload_id` to scope to a specific /bdx/upload call. When
     `upload_id` is supplied, ALL policies for that upload are returned.

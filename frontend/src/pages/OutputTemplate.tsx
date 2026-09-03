@@ -79,8 +79,9 @@ const OUTPUT_FORMATS: { value: string; label: string }[] = [
   { value: "json", label: "JSON (.json)" },
 ];
 
+// Keep in sync with exporter.ROW_STRATEGY_TABLES (backend).
 const STRATEGIES = ["policy", "claim", "coverage", "premium_transaction",
-                    "insured_location", "building"];
+                    "risk_location"];
 const TRANSFORMS = ["", "upper", "lower", "date", "money", "int", "str"];
 
 type ModelField = { key: string; table: string; column: string; type: string;

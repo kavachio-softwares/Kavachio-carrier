@@ -525,13 +525,14 @@ def _resolve_contract_id(s, body, policy_id) -> Optional[int]:
         return cid
     # Last resort: the policy's own contract_id (often NULL).
     return s.execute(
-        text("SELECT contract_id FROM policy WHERE policy_id = :p"), {"p": policy_id}
+        text("SELECT policy_contract_id FROM policy WHERE policy_id = :p"), {"p": policy_id}
     ).scalar()
 
 
 def _scope_for_policy(s, policy_id: int):
     row = s.execute(
-        text("SELECT tenant_id, contract_id FROM policy WHERE policy_id = :p"),
+        text("SELECT tenant_id, policy_contract_id AS contract_id "
+             "FROM policy WHERE policy_id = :p"),
         {"p": policy_id},
     ).mappings().first()
     if not row:

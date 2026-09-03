@@ -59,16 +59,14 @@ log = logging.getLogger("bdx.exporter")
 # ---- Domain constants -------------------------------------------------------
 
 SCALAR_TABLES = {
-    "policy", "program", "contract", "tenant",
-    "parametric_coverage_detail",
+    "policy", "policyholder", "program", "contract", "tenant",
 }
 
 COLLECTION_TABLES = {
-    "coverage", "premium_transaction", "premium_invoice",
-    "insured_location", "policy_attributes",
-    "claim", "party_role_in_policy", "building",
-    "policy_fee", "tax_or_surcharge", "commission",
-    "party_address", "party_contact", "party_license",
+    "coverage", "premium_transaction", "risk_location",
+    "claim", "claim_transaction", "claim_fee_line", "claim_reserve",
+    "tax_line", "commission_line", "coverage_participation",
+    "ingested_party", "party_license",
 }
 
 ROW_STRATEGY_TABLES = {
@@ -76,26 +74,27 @@ ROW_STRATEGY_TABLES = {
     "claim": "claim",
     "coverage": "coverage",
     "premium_transaction": "premium_transaction",
-    "insured_location": "insured_location",
-    "building": "building",
+    "risk_location": "risk_location",
 }
 
 # Tables always included regardless of row_strategy (join keys live here).
-_ALWAYS_INCLUDED_TABLES = {"policy", "program", "contract", "tenant"}
+_ALWAYS_INCLUDED_TABLES = {"policy", "policyholder", "program", "contract", "tenant"}
 
 # row_strategy → primary tables to include in the field catalog sent to LLM.
 _STRATEGY_TABLES: dict[str, set[str]] = {
-    "policy":               {"policy", "program", "contract", "tenant",
-                             "insured_location", "coverage", "party_address",
-                             "party_contact", "party_role_in_policy", "party_license",
-                             "commission", "premium_transaction"},
-    "claim":                {"claim", "policy", "program", "insured_location"},
-    "coverage":             {"coverage", "policy", "program", "premium_transaction",
-                             "commission"},
-    "premium_transaction":  {"premium_transaction", "policy", "program", "coverage",
-                             "commission", "tax_or_surcharge", "policy_fee"},
-    "insured_location":     {"insured_location", "policy", "program", "building"},
-    "building":             {"building", "insured_location", "policy", "program"},
+    "policy":               {"policy", "policyholder", "program", "contract", "tenant",
+                             "risk_location", "coverage", "ingested_party",
+                             "party_license", "commission_line",
+                             "premium_transaction"},
+    "claim":                {"claim", "claim_transaction", "claim_fee_line",
+                             "claim_reserve", "policy", "policyholder", "program",
+                             "risk_location"},
+    "coverage":             {"coverage", "coverage_participation", "policy",
+                             "policyholder", "program", "premium_transaction",
+                             "commission_line"},
+    "premium_transaction":  {"premium_transaction", "policy", "policyholder",
+                             "program", "coverage", "commission_line", "tax_line"},
+    "risk_location":        {"risk_location", "policy", "policyholder", "program"},
 }
 
 MAX_SAMPLES = 5
@@ -734,9 +733,9 @@ _HEURISTIC_RULES: list[tuple[re.Pattern, str | None, str]] = [
     # wins, so specific/prefixed patterns precede generic ones.
     # --- Policy dates (prefixed) ---------------------------------------------
     (re.compile(r"policy.?effective|pol.?eff.?date|policy.?eff\b|policy.?inception"),
-     None, "policy_effective_dt"),
+     None, "policy_effective_date"),
     (re.compile(r"policy.?expir|pol.?exp.?date|policy.?exp\b|policy.?end"),
-     None, "policy_expiration_dt"),
+     None, "policy_expiration_date"),
     # --- Program dates — MUST come before generic "program" rule below -------
     (re.compile(r"program.?effective|program.?start|program.?from|program.?eff|program.?inception"),
      None, "program_valid_from"),
@@ -744,71 +743,67 @@ _HEURISTIC_RULES: list[tuple[re.Pattern, str | None, str]] = [
      None, "program_valid_until"),
     # --- Contract dates -------------------------------------------------------
     (re.compile(r"contract.?effective|contract.?from|contract.?start|contract.?inception"),
-     None, "contract_inception_dt"),
+     None, "contract_inception_date"),
     (re.compile(r"contract.?expir|contract.?to|contract.?end"),
-     None, "contract_expiry_dt"),
+     None, "contract_expiry_date"),
     # --- Identifiers ----------------------------------------------------------
-    (re.compile(r"external.?policy|ext.?pol"),
-     None, "external_policy_number"),
+    (re.compile(r"\bumr\b|unique.?market.?ref"),
+     None, "policy_umr"),
     (re.compile(r"certificate.?(no|number|ref)\b|cert.?no\b|\bcert\b"),
-     None, "certificate_number"),
+     None, "policy_certificate_reference"),
     (re.compile(r"claim.?number|claim.?no\b|clm.?no\b"),
      None, "claim_number"),
     (re.compile(r"policy.?(number|ref|reference|no|id)\b|pol.?no\b|polno\b"),
      None, "policy_number"),
     # --- Insured name (specific — avoid 'Insured State/City/Zip' columns) ----
     (re.compile(r"insured.?name|named.?insured|name.?of.?insured|policyholder|insured.?legal"),
-     None, "insured_legal_name"),
+     None, "policyholder_legal_name"),
     # --- Premium / financial (before the carrier-name rule, so 'Net Premium
     #     to Carrier' is treated as a premium, not a carrier name) ------------
     (re.compile(r"net.?prem"),
-     "numeric", "net_premium"),
-    (re.compile(r"carrier.?gross.?prem|carrier.?prem"),
-     "numeric", "carrier_gross_premium"),
-    (re.compile(r"technical.?prem"),
-     "numeric", "technical_premium"),
+     "numeric", "premium_transaction_net_premium_amount"),
     (re.compile(r"\btria\b|terror"),
-     "numeric", "tria_premium"),
+     "numeric", "premium_transaction_terrorism_premium_amount"),
     # Specific premium phrasings only — NOT a bare "premium" (which would
     # wrongly swallow "Premium Tax", "Premium Fee", etc.).
     (re.compile(r"gross.?written.?prem|gwp\b|written.?prem|gross.?prem|annual.?prem|total.?prem"),
-     "numeric", "total_gross_premium"),
+     "numeric", "premium_transaction_total_gross_written_premium_amount"),
     (re.compile(r"commission.?amount|comm.?amount|\bcommission\b"),
-     "numeric", "commission_amount"),
+     "numeric", "premium_transaction_commission_amount"),
     # --- Carrier / issuing-company NAME (specific — never bare 'carrier') ----
     (re.compile(r"issuing.?(company|carrier|entity)|writing.?company|carrier.?(entity|name|company)|\bcarrier\b.*\b(name|entity|company)\b"),
-     None, "carrier_legal_name"),
+     None, "ingested_party_legal_name"),
     # --- Accounting period ----------------------------------------------------
     (re.compile(r"accounting.?(yr|period|yrmo)"),
-     "yyyymm", "premium_transaction_accounting_period"),
+     "yyyymm", "premium_transaction_accounting_date"),
     # --- Transaction ----------------------------------------------------------
     (re.compile(r"transaction.?type|trans.?type|tran.?type"),
-     None, "policy_transaction_type"),
+     None, "premium_transaction_type"),
     (re.compile(r"transaction.?date|trans.?date|tran.?date"),
-     None, "transaction_effective_dt"),
+     None, "premium_transaction_effective_date"),
     # --- Limits ---------------------------------------------------------------
     (re.compile(r"occurrence.?limit|per.?occurrence|each.?occurrence|occ.?limit"),
-     "numeric", "occurrence_limit"),
+     "numeric", "coverage_occurrence_limit"),
     (re.compile(r"aggregate.?limit|general.?aggregate|agg.?limit"),
-     "numeric", "aggregate_limit"),
+     "numeric", "coverage_aggregate_limit"),
     # --- Coverage / class / line of business ---------------------------------
     (re.compile(r"line.?of.?business|\blob\b|class.?of.?business|risk.?class|coverage.?type|cvg.?type|\bclass\b"),
-     None, "coverage_type"),
+     None, "coverage_code"),
     # --- Location -------------------------------------------------------------
     (re.compile(r"state.?code|risk.?state|ins.?state|domicile.?state|\bstate\b"),
-     None, "insured_location_state_code"),
+     None, "risk_location_subdivision"),
     (re.compile(r"zip.?code|postal.?code|zip\b"),
-     None, "insured_location_zip_code"),
+     None, "risk_location_postal_code"),
     (re.compile(r"\bcity\b"),
-     None, "insured_location_city"),
+     None, "risk_location_city"),
     (re.compile(r"\bcountry\b"),
-     None, "insured_location_country"),
+     None, "risk_location_country"),
     # --- Generic (unprefixed) policy dates — LAST among dates so prefixed
     #     program/contract/coverage rules above win first --------------------
     (re.compile(r"\beffective.?date\b|\binception.?date\b|\beffective\b"),
-     None, "policy_effective_dt"),
+     None, "policy_effective_date"),
     (re.compile(r"\bexpir|\bexpiry\b|\bexpiration\b"),
-     None, "policy_expiration_dt"),
+     None, "policy_expiration_date"),
     # --- Program name — LAST so date patterns above take priority ------------
     (re.compile(r"program.?name|program\b"),
      None, "program_name"),
@@ -912,28 +907,28 @@ def _build_sheet_prompt(
 
     disambiguation = """
 CRITICAL DISAMBIGUATION — common mistakes to avoid:
-- "Program Effective Date" / "Program Start" / "Program From"
-    → program_valid_from   NOT program_name
-- "Program Expiry" / "Program End" / "Program To"
-    → program_valid_until  NOT program_name
 - "Policy Effective Date" / "Inception Date"
-    → policy_effective_dt  NOT program_valid_from
+    → policy_effective_date  NOT a program or contract field
 - "Policy Expiry" / "Policy Expiration"
-    → policy_expiration_dt  NOT policy_effective_dt
-- "Contract Effective" → contract_inception_dt
+    → policy_expiration_date  NOT policy_effective_date
+- "Contract Effective" → contract_inception_date
 - "Program Name" / "Program" (text values like "GL 2024")
     → program_name  (only when samples are text names, not dates)
-- "Commission" with numeric samples → commission_amount
+- "Commission" with numeric samples → premium_transaction_commission_amount
 - "Insured Name" / "Named Insured" / "Insured / Named Insured"
-    → insured_legal_name   (the POLICYHOLDER's name)
+    → policyholder_legal_name   (the POLICYHOLDER's name)
 - "Issuing Company" / "Carrier" / "Carrier Entity" / "Writing Company"
-    → carrier_legal_name   (the CARRIER's name; never insured_legal_name)
-- "Class of Business" / "Risk Class" / "Line of Business" → coverage_type
-- "Annual Premium" / "Written Premium" / "Gross Premium" → total_gross_premium
-- "Net Premium" / "Net Premium to Carrier" → net_premium
-- "Per Occurrence Limit" / "Occurrence Limit" → occurrence_limit
-- "General Aggregate" / "Aggregate Limit" → aggregate_limit
-- "Commission Rate" with % or decimal samples → commission_rate
+    → ingested_party_legal_name  (an organisation read off the file;
+      never policyholder_legal_name)
+- "Class of Business" / "Risk Class" / "Line of Business" → coverage_code
+- "Annual Premium" / "Written Premium" / "Gross Premium"
+    → premium_transaction_total_gross_written_premium_amount
+- "Net Premium" / "Net Premium to Carrier"
+    → premium_transaction_net_premium_amount
+- "Per Occurrence Limit" / "Occurrence Limit" → coverage_occurrence_limit
+- "General Aggregate" / "Aggregate Limit" → coverage_aggregate_limit
+- "Commission Rate" with % or decimal samples
+    → premium_transaction_commission_percent
 - A date column → look for a field whose name contains the same date concept
   (effective, expiry, inception, cancellation, etc.), NOT a name/text field
 """
@@ -957,7 +952,7 @@ CRITICAL DISAMBIGUATION — common mistakes to avoid:
         "OUTPUT FORMAT — strict compact JSON, no prose, no markdown:\n"
         '{"sheet_name":"...","row_strategy":"policy","columns":['
         '{"column_index":0,"candidates":[{"c":"policy_number","s":0.95},'
-        '{"c":"external_policy_number","s":0.40}]}'
+        '{"c":"policy_umr","s":0.40}]}'
         "]}\n\n"
         f"CANONICAL FIELDS for row_strategy={row_strategy}:\n"
         f"{fields_text}\n\n"

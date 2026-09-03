@@ -87,8 +87,8 @@ def find_reusable_contract(program_id, content_fingerprint):
             text("""
                 SELECT contract_id
                 FROM   contract
-                WHERE  program_id = :pid
-                  AND  content_fingerprint = :fp
+                WHERE  contract_program_id = :pid
+                  AND  row_hash = :fp
                   AND  COALESCE(status_ops, '') <> 'failed'
                 ORDER BY contract_id DESC
                 LIMIT 1

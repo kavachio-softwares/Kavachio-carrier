@@ -10,7 +10,7 @@ Single entry point:
 
 Mapping (per db_tables_info.docx):
   program_metadata          → UPDATE program  +  program_field_extraction audit
-  commercial_terms          → contract_terms
+  commercial_terms          → contract_term
   clauses_extracted         → clauses_extracted
   validation_rules          → validation_rule
 
@@ -474,7 +474,7 @@ def persist_pipeline_output(
 
         # ── 1) Lookup program → tenant_id ────────────────────────────────
         row = conn.execute(
-            text("SELECT tenant_id FROM program WHERE program_id = :pid"),
+            text("SELECT program_tenant_id FROM program WHERE program_id = :pid"),
             {"pid": program_id}
         ).first()
 
@@ -504,7 +504,7 @@ def persist_pipeline_output(
                     # text + template FIELD NAMES) equals this upload's. Only
                     # then can old compiled SQL be trusted on the new sheets.
                     prior_fp = conn.execute(
-                        text("""SELECT content_fingerprint FROM contract
+                        text("""SELECT row_hash FROM contract
                                 WHERE contract_id = :cid"""),
                         {"cid": prior_cid},
                     ).scalar()
@@ -600,7 +600,7 @@ def persist_pipeline_output(
                 UPDATE contract
                 SET    is_current_version = FALSE,
                        valid_until = now()
-                WHERE  program_id = :pid
+                WHERE  contract_program_id = :pid
                   AND  is_current_version IS TRUE
             """),
             {"pid": program_id},
@@ -612,10 +612,12 @@ def persist_pipeline_output(
         contract_id = conn.execute(
             text("""
                 INSERT INTO contract
-                    (tenant_id, program_id, umr, contract_name, contract_type,
-                     inception_dt, expiry_dt, filename, status_ops, extracted,
+                    (tenant_id, contract_program_id, contract_primary_umr,
+                     contract_name, contract_type,
+                     contract_inception_date, contract_expiry_date,
+                     filename, status_ops, extracted,
                      output_template_id, is_app_managed,
-                     content_fingerprint, entity_fingerprint,
+                     row_hash, row_key,
                      is_current_version, valid_from)
                 VALUES
                     (:tenant_id, :program_id, :umr, :contract_name, :contract_type,
@@ -669,9 +671,9 @@ def persist_pipeline_output(
                 UPDATE program SET
                     program_name          = COALESCE(program_name, :program_name),
                     distribution_channel  = COALESCE(:distribution_channel, distribution_channel),
-                    business_segment      = COALESCE(:business_segment, business_segment),
-                    product_line          = COALESCE(:product_line, product_line),
-                    bdx_frequency         = COALESCE(:bdx_frequency, bdx_frequency),
+                    program_business_segment = COALESCE(:business_segment, program_business_segment),
+                    program_product_line  = COALESCE(:product_line, program_product_line),
+                    program_bordereau_frequency = COALESCE(:bdx_frequency, program_bordereau_frequency),
                     claims_basis          = COALESCE(:claims_basis, claims_basis),
                     extracted_from_contract_id = :contract_id,
                     extraction_confidence = :extraction_confidence,
@@ -728,7 +730,7 @@ def persist_pipeline_output(
             )
             pfe_count += 1
 
-        # ── 5) INSERT contract_terms (one per commercial term) ───────────
+        # ── 5) INSERT contract_term (one per commercial term) ────────────
         term_count = 0
         for term in commercial_terms:
 
@@ -737,13 +739,13 @@ def persist_pipeline_output(
 
             conn.execute(
                 text("""
-                    INSERT INTO contract_terms
-                        (tenant_id, contract_id, term_category, term_definition,
-                         extracted_from_clause_ref, extraction_confidence)
+                    INSERT INTO contract_term
+                        (tenant_id, term_contract_id, term_type, term_definition,
+                         term_source_reference)
                     VALUES
                         (:tenant_id, :contract_id, :term_category,
                          CAST(:term_definition AS JSONB),
-                         :clause_ref, :confidence)
+                         :clause_ref)
                 """),
                 {
                     "tenant_id":       tenant_id,
@@ -751,7 +753,6 @@ def persist_pipeline_output(
                     "term_category":   term.get("term_type") or "other",
                     "term_definition": _jsonb(term.get("value")),
                     "clause_ref":      (term.get("source_text") or "")[:500] or None,
-                    "confidence":      _clamp_conf(term.get("confidence")),
                 }
             )
             term_count += 1

@@ -18,11 +18,11 @@ Scope = the pure-canonical per-policy tables the assembler assembles into a poli
 (VERSIONED_TABLES). Two distinct reasons keep tables OUT of scope:
   * tenant / program / contract — shared ancestors; one row serves many policies,
     so per-policy versioning would wrongly affect siblings.
-  * party / party_contact — physically shadowed by an ops table (db.py) that has
-    no SCD columns, so they can't be versioned. (party_contact is still assembled
-    for export; a flagged party_contact field is simply reported not-editable.)
-Tables defined in data_model.py but never assembled/ingested (layer,
-layer_participation, claim_exposure) also can't be flagged or edited.
+  * party / policyholder — party is physically shadowed by an ops table (db.py)
+    with no SCD columns; policyholder is a shared ancestor (one insured serves
+    many policies), so a per-policy edit would wrongly affect siblings.
+Tables defined in data_model.py but never assembled/ingested (cession,
+reinsurance_arrangement, …) also can't be flagged or edited.
 
 NOTHING here writes to the database. `build_scd2_sql` returns a self-contained
 PostgreSQL transaction the operator runs by hand. Re-validation (so an edit can't
@@ -45,11 +45,10 @@ from canonical import CANONICAL_TABLES, pk_column
 # (tenant/program/contract) and shadowed tables (party, party_contact) are out of
 # scope. Keep this in sync with scripts/scd2_modify_here.sql and assembler._active.
 VERSIONED_TABLES = {
-    "policy", "coverage", "premium_transaction", "premium_invoice",
-    "insured_location", "policy_attributes", "claim",
-    "parametric_coverage_detail", "party_role_in_policy",
-    "policy_fee", "tax_or_surcharge", "commission", "building",
-    "party_address", "party_license",
+    "policy", "coverage", "premium_transaction", "risk_location", "claim",
+    "claim_transaction", "claim_fee_line", "claim_reserve",
+    "tax_line", "commission_line", "coverage_participation",
+    "party_license",
 }
 
 # SCD-2 bookkeeping columns set explicitly on the new version (never blind-copied).
@@ -383,7 +382,7 @@ def build_scd2_sql(*, table: str, pk_col: str, target_id: int,
                  f"({pk_col}=%), but inserted % — nothing changed', {tid}, n;")
     lines.append("  END IF;")
     for eid in (exception_ids or []):
-        lines.append("  UPDATE validation_exception SET status = 'resolved' "
+        lines.append("  UPDATE validation_exception SET exception_status = 'resolved' "
                      f"WHERE exception_id = {int(eid)};")
     lines.append("END $$;")
     lines.append("COMMIT;")
@@ -394,5 +393,5 @@ def tables_touched(table: str, exception_id: Optional[int]) -> list[str]:
     out = [f"{table} (retire current row → is_current_version=FALSE; "
            "INSERT new active version, SAME id, version_no+1)"]
     if exception_id is not None:
-        out.append("validation_exception (status → resolved)")
+        out.append("validation_exception (exception_status → resolved)")
     return out

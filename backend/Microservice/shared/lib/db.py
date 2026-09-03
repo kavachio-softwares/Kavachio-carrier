@@ -153,13 +153,13 @@ class Upload(Base):
     """One row per /bdx/upload call. Use its id to fetch the rows it produced."""
     __tablename__ = "upload"
     id = Column("upload_id", Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=False)
+    tenant_id = Column(Integer, nullable=False)  # ops tenancy column
     party_id = Column(Integer, nullable=True, index=True)
     mapper_id = Column(Integer, ForeignKey("mappers.id"), nullable=True)
-    source_file = Column(String)
+    source_file = Column("upload_filename", String)
     sheets = Column(JSON)               # list of sheet names parsed
     counts_by_sheet = Column(JSON)      # {sheet: row_count}
-    total_rows = Column(Integer, default=0)
+    total_rows = Column("upload_rows_total", Integer, default=0)
     source_blob = Column(LargeBinary, nullable=True)
     # Blob-storage pointer (Azure/Azurite); see Mapper.source_blob_ref.
     source_blob_ref = Column(String, nullable=True)
@@ -280,13 +280,16 @@ class Tenant(Base):
     """
     __tablename__ = "tenant"
     id = Column("tenant_id", Integer, primary_key=True)
-    tenant_name = Column(String, unique=True, index=True, nullable=False)  # legacy mga code
-    legal_name = Column(String, nullable=True)
-    tenant_type = Column(String, nullable=True)  # party_type_e enum in DB
+    # v4: tenant_code is the unique business identifier (holds the legacy mga
+    # code); tenant_legal_name is the display/legal name.
+    tenant_name = Column("tenant_code", String, unique=True, index=True, nullable=False)
+    legal_name = Column("tenant_legal_name", String, nullable=True)
+    tenant_type = Column(String, nullable=True)
+    # --- operational columns (outside the canonical model) -----------------
     address = Column(JSON, nullable=True)
     currency = Column(String, nullable=True)      # ISO 4217 (USD, EUR, GBP …)
     internal_codes = Column(JSON, nullable=True)  # JSONB free-form
-    is_active = Column(Boolean, default=True)
+    is_active = Column("tenant_is_active", Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -295,20 +298,28 @@ class Party(Base):
     """Counterparty / insured / carrier directory entry (S-03 / S-03a)."""
     __tablename__ = "party"
     id = Column("party_id", Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=True)
-    # True = created via the app (the directory shows these); False = BDX-ingested
-    # into the canonical data model. Replaces the old "mga IS NOT NULL" marker.
+    tenant_id = Column("party_tenant_id", Integer, nullable=True)
+    party_type = Column(String, nullable=False)
+    legal_name = Column("party_legal_name", String, nullable=False, index=True)
+    # Stable business identifier (v4). The ingester keys synthetic parties on it.
+    reference = Column("party_reference", String, nullable=True, index=True)
+    tax_id = Column("party_tax_id", String, nullable=True)
+    naic_company_code = Column("party_naic_company_code", String, nullable=True)
+    address_line1 = Column("party_address_line1", String, nullable=True)
+    city = Column("party_city", String, nullable=True)
+    subdivision = Column("party_subdivision", String, nullable=True)
+    postal_code = Column("party_postal_code", String, nullable=True)
+    country = Column("party_country", String, nullable=True)
+    is_active = Column("party_is_active", Boolean, default=True)
+    # --- operational columns (outside the canonical model) -----------------
+    # True = created via the app (the directory shows these); False = BDX-ingested.
     is_app_managed = Column(Boolean, default=True)
     scope = Column(String, default="tenant")
-    party_type = Column(String, nullable=False)
-    legal_name = Column(String, nullable=False, index=True)
     dba_name = Column(String, nullable=True)
-    tax_id = Column(String, nullable=True)
     naics_code = Column(String, nullable=True)
     am_best_rating = Column(String, nullable=True)
     domicile_country = Column(String, nullable=True)
     primary_jurisdiction = Column(String, nullable=True)
-    is_active = Column(Boolean, default=True)
     addresses = Column(JSON, nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -332,15 +343,16 @@ class Program(Base):
     """Program (S-05). Metadata can be AI-extracted from a contract."""
     __tablename__ = "program"
     id = Column("program_id", Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=True)
+    tenant_id = Column("program_tenant_id", Integer, nullable=True)
+    name = Column("program_name", String, nullable=False)
+    bdx_frequency = Column("program_bordereau_frequency", String, nullable=True)
+    business_segment = Column("program_business_segment", String, nullable=True)
+    product_line = Column("program_product_line", String, nullable=True)
+    # --- operational columns (outside the canonical model) -----------------
     is_app_managed = Column(Boolean, default=True)  # see Party.is_app_managed
     party_id = Column(Integer, ForeignKey("party.party_id"), nullable=True, index=True)
-    name = Column("program_name", String, nullable=False)
     lead_carrier = Column(String, nullable=True)
     admin_party = Column(String, nullable=True)
-    bdx_frequency = Column(String, nullable=True)
-    business_segment = Column(String, nullable=True)
-    product_line = Column(String, nullable=True)
     distribution_channel = Column(String, nullable=True)
     territory = Column(String, nullable=True)
     commercial_terms = Column(JSON, nullable=True)
@@ -360,8 +372,9 @@ class Contract(Base):
     """
     __tablename__ = "contract"
     id = Column("contract_id", Integer, primary_key=True)
-    program_id = Column(Integer, ForeignKey("program.program_id"), index=True, nullable=True)
-    tenant_id = Column(Integer, nullable=True)
+    program_id = Column("contract_program_id", Integer,
+                        ForeignKey("program.program_id"), index=True, nullable=True)
+    tenant_id = Column(Integer, nullable=True)  # ops tenancy column
     is_app_managed = Column(Boolean, default=True)  # see Party.is_app_managed
     # Output Template this contract is bound to (1 contract → 1 template)
     output_template_id = Column(Integer, nullable=True, index=True)
@@ -466,16 +479,16 @@ class RuleSql(Base):
       cannot_process  -> generation/guard failed twice; show a message to the user
     """
     __tablename__ = "rule_sql"
-    id = Column(Integer, primary_key=True)
-    rule_id = Column(Integer, index=True, nullable=False)
-    contract_id = Column(Integer, index=True, nullable=True)
-    template_id = Column(Integer, index=True, nullable=True)
-    schema_hash = Column(String, nullable=True)
-    rule_hash = Column(String, nullable=True)
-    sql_text = Column(Text, nullable=True)
-    status = Column(String, default="ok")          # ok | cannot_process
-    message = Column(Text, nullable=True)           # why it cannot be processed
-    attempts = Column(Integer, default=0)
+    id = Column("rule_sql_id", Integer, primary_key=True)
+    rule_id = Column("rule_sql_rule_id", Integer, index=True, nullable=False)
+    contract_id = Column("rule_sql_contract_id", Integer, index=True, nullable=True)
+    template_id = Column("rule_sql_template_id", Integer, index=True, nullable=True)
+    schema_hash = Column("rule_sql_schema_hash", String, nullable=True)
+    rule_hash = Column("rule_sql_rule_hash", String, nullable=True)
+    sql_text = Column("rule_sql_text", Text, nullable=True)
+    status = Column("rule_sql_status", String, default="ok")   # ok | cannot_process
+    message = Column("rule_sql_message", Text, nullable=True)  # why it cannot be processed
+    attempts = Column("rule_sql_attempts", Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -486,14 +499,14 @@ class AppUser(Base):
     see docs/db_repair_notes.md)."""
     __tablename__ = "app_user"
     id = Column("user_id", Integer, primary_key=True)
-    tenant_id = Column(Integer, nullable=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    full_name = Column(String, nullable=False)
+    tenant_id = Column("user_tenant_id", Integer, nullable=True)
+    email = Column("user_email", String, unique=True, index=True, nullable=False)
+    full_name = Column("user_full_name", String, nullable=False)
     # DB default is 'tenant_user'; existing rows use 'admin'/'ops'. Role
     # vocabulary normalization + CHECK constraints are a deferred phase, so
     # the ORM default stays 'ops' to preserve current behavior for now.
-    role = Column(String, default="ops")
-    status = Column(String, default="active")
+    role = Column("user_role", String, default="ops")
+    status = Column("user_status", String, default="active")
     password = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login_at = Column(DateTime, nullable=True)  # set on each successful /auth/login

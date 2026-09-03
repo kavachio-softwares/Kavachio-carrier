@@ -299,7 +299,7 @@ class UpdateMapperBody(BaseModel):
 def _get_tenant_id(session, mga: str) -> Optional[int]:
     """Resolve an mga code (tenant_name) to its tenant_id, or None."""
     row = session.execute(
-        text("SELECT tenant_id FROM tenant WHERE tenant_name=:m LIMIT 1"),
+        text("SELECT tenant_id FROM tenant WHERE tenant_code=:m LIMIT 1"),
         {"m": mga}).fetchone()
     return row[0] if row else None
 
@@ -308,7 +308,7 @@ def _tenant_name(session, tenant_id: Optional[int]) -> Optional[str]:
     if not tenant_id:
         return None
     row = session.execute(
-        text("SELECT tenant_name FROM tenant WHERE tenant_id=:t LIMIT 1"),
+        text("SELECT tenant_code FROM tenant WHERE tenant_id=:t LIMIT 1"),
         {"t": tenant_id}).fetchone()
     return row[0] if row else None
 
@@ -412,8 +412,7 @@ def _upload_to_dict(u, has_blob: bool = False, mga: Optional[str] = None) -> dic
     }
 
 _SCALAR_TABLES = {
-    "policy", "program", "contract", "tenant",
-    "parametric_coverage_detail",
+    "policy", "policyholder", "program", "contract", "tenant",
     # `extras` isn't a canonical table — it's a {entity: {key: value}} dict
     # produced by mapper.apply_spec_multi when `_xf:*` entries are in the
     # spec. Treat it as scalar so merging across sheets preserves the dict

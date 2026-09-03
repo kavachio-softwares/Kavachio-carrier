@@ -1,33 +1,38 @@
-"""Write a merged canonical record into the relational warehouse.
+"""Write a merged canonical record into the relational warehouse (v4 model).
 
-Input  (one entry from mapper merge):
+Input  (one entry from mapper merge — keys are canonical v4 table names):
     {
-      "tenant":     {...},           # optional
-      "program":    {...},
-      "policy":     {...},
-      "coverage":   [{...}, ...] | {...}
+      "tenant":        {...},           # optional
+      "program":       {...},
+      "policyholder":  {...},           # the insured, its own entity
+      "policy":        {...},
+      "coverage":      [{...}, ...] | {...}
       "premium_transaction": [...]
-      "insured_location": [...]
-      "building":   [...]
-      "party_address":  [...]        # ambient agent/broker info from POL Data
-      "party_contact":  [...]
-      "party_license":  [...]
-      "claim":      [...]
+      "risk_location": [...]
+      "tax_line":      [...]            # hang off premium_transaction
+      "commission_line": [...]
+      "claim":         [...]
+      "claim_transaction": [...]        # hang off the claim
+      "claim_fee_line": [...]
+      "claim_reserve": [...]
+      "ingested_party": [...]           # party names read off the bordereau
+      "party_license": [...]
       ...
     }
 
 Strategy
 --------
-1. Insert / fetch a `tenant` row (PK → tenant_id).
+1. Insert / fetch a `tenant` row keyed on tenant_code (PK → tenant_id).
 2. Upsert `program` keyed on (tenant_id, program_name).
-3. Upsert `policy` keyed on policy_number. Set program_id from step 2.
-4. For each child table whose schema has a `policy_id` column, insert one row
-   per array entry with policy_id wired to the policy we just inserted.
-5. party_address / party_contact / party_license: if no party_id is supplied,
-   we synthesise one "ambient" party per policy so the child rows have a real
-   FK to attach to. (Better-than-NULL: lets you query "all addresses for this
-   policy's contributing parties".)
-6. The function returns the policy_id (or None if no policy was created),
+3. Upsert `policyholder` keyed on policyholder_natural_key (per tenant).
+4. Upsert `policy` keyed on policy_number; wire policy_program_id,
+   policy_contract_id (resolved BY EFFECTIVE DATE) and policy_policyholder_id.
+5. For each child table, insert one row per array entry with the child's own
+   FK column (`<table>_policy_id`, `<table>_premium_transaction_id`,
+   `<table>_claim_id`) wired to the parent just created.
+6. Party names read off the file land in `ingested_party` — never in the
+   curated `party` directory.
+7. The function returns the policy_id (or None if no policy was created),
    which the caller links to an upload via the upload_policy table.
 """
 from __future__ import annotations
@@ -39,26 +44,38 @@ from typing import Any, Iterable
 
 log = logging.getLogger("bdx.ingester")
 
-from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, delete, func, insert, select, text
+from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, delete, func, insert, or_, select, text
 from sqlalchemy.orm import Session
 
-from canonical import CANONICAL_TABLES, column_names, pk_column
+from canonical import CANONICAL_TABLES, column_names, pk_column, tenant_col
 
-# Tables that, when present in a record, hang off the policy via policy_id.
-POLICY_CHILDREN = (
-    "coverage", "premium_transaction", "premium_invoice",
-    "insured_location", "policy_attributes",
-    "claim", "parametric_coverage_detail", "party_role_in_policy",
-)
+# Tables that, when present in a record, hang off the policy via their own
+# `<table>_policy_id` FK column.
+POLICY_CHILDREN = ("coverage", "premium_transaction", "risk_location", "claim")
 
-# Tables that hang off premium_transaction.transaction_id (NOT policy_id).
-TRANSACTION_CHILDREN = ("policy_fee", "tax_or_surcharge", "commission")
+# Tables that hang off premium_transaction via `<table>_premium_transaction_id`.
+TRANSACTION_CHILDREN = ("tax_line", "commission_line")
 
-# Tables that hang off a party via party_id.
-PARTY_CHILDREN = ("party_address", "party_contact", "party_license", "party_relationship")
+# Tables that hang off a claim via `<table>_claim_id`.
+CLAIM_CHILDREN = ("claim_transaction", "claim_fee_line", "claim_reserve")
 
-# Tables that hang off insured_location via location_id.
-LOCATION_CHILDREN = ("building",)
+# Tables that hang off a party via their own party FK.
+PARTY_CHILDREN = ("party_license",)
+
+# FK column a child table uses to point at its parent.
+_CHILD_FK = {
+    "coverage": "coverage_policy_id",
+    "premium_transaction": "premium_transaction_policy_id",
+    "risk_location": "risk_location_policy_id",
+    "claim": "claim_policy_id",
+    "tax_line": "tax_line_premium_transaction_id",
+    "commission_line": "commission_line_premium_transaction_id",
+    "claim_transaction": "claim_transaction_claim_id",
+    "claim_fee_line": "claim_fee_line_claim_id",
+    "claim_reserve": "reserve_claim_id",
+    "party_license": "license_party_id",
+    "coverage_participation": "coverage_participation_coverage_id",
+}
 
 
 def _as_list(v: Any) -> list[dict]:
@@ -136,6 +153,10 @@ def _coerce(value: Any, sa_type) -> Any:
                 # Fast path: YYYYMMDD compact
                 if len(s) == 8 and s.isdigit():
                     return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+                # YYYYMM accounting period → first of month (v4 stores the
+                # accounting period as a DATE column)
+                if len(s) == 6 and s.isdigit() and 1 <= int(s[4:6]) <= 12:
+                    return date(int(s[:4]), int(s[4:6]), 1)
                 # Fast path: ISO YYYY-MM-DD (and ISO datetimes)
                 return datetime.fromisoformat(s).date()
             except (ValueError, TypeError):
@@ -200,7 +221,44 @@ def _coerce(value: Any, sa_type) -> Any:
     return value
 
 
-# BDX shortcode → canonical enum value for transaction_type.
+# Values that LOOK like a policy number but are the absence of one wearing a
+# costume — what a person types into a cell they can't fill. Compared casefolded
+# after a strip, so "N/A", "n/a" and " - " all match. Kept as a module constant
+# (not inlined) so it is greppable and testable; see the guard in ingest_record.
+_POLICY_NUMBER_PLACEHOLDERS = {
+    "0", "-", "--", "---", ".", "n/a", "na", "n.a.", "none", "null",
+    "unknown", "tbd", "tba", "#n/a", "nan",
+}
+
+# Ingest defaults for values the BDX does not carry.
+#
+# These MUST match Appendix 2 §2.7 of the Palms BDX Ingestion BRD v1.2. The same
+# rows pass through Palms' PRS sub-ledger pipeline, which applies its own
+# COALESCE with these exact values — a different default on either side produces
+# a reconciliation break that nothing errors on, because both systems succeed and
+# simply disagree about the number. Change these only in concert with Palms,
+# never as part of a refactor. Named (not inlined) so the coupling is greppable,
+# and asserted in the tests so a drift fails the build rather than the books.
+# Sourced from bdx_defaults so the OUTPUT render (direct_lane.eval_rule) and this
+# WAREHOUSE write cannot drift apart — a divergence there is silent on both sides.
+from bdx_defaults import (                    # noqa: E402  (grouped with its constants)
+    DEFAULT_AMOUNT as _DEFAULT_AMOUNT,
+    DEFAULT_CURRENCY as _DEFAULT_CURRENCY,
+    DEFAULT_FX_RATE as _DEFAULT_FX_RATE,
+    DEFAULT_INSURED_NAME as _DEFAULT_INSURED_NAME,
+    DEFAULT_TRANSACTION_TYPE as _DEFAULT_TRANSACTION_TYPE,
+)
+
+# §2.8: COALESCE(prs_transaction_short_types, 'UNK') — "Null transaction codes
+# are not permitted in output. 'UNK' is the required default."
+#
+# 'unknown' rather than Palms' 'UNK' because we already translate their shortcode
+# vocabulary at ingest (NB→new, EN→endorsement) and the enum is lowercase
+# snake_case throughout. The OUTPUT file carries 'UNK' instead
+# (bdx_defaults.OUTPUT_DEFAULT_TRANSACTION_TYPE); the value itself is defined in
+# bdx_defaults and imported above.
+
+# BDX shortcode → canonical enum value for the transaction type.
 _TXN_TYPE_MAP = {
     # New business
     "NB": "new", "N": "new", "NEW": "new", "NEW BUSINESS": "new",
@@ -213,7 +271,7 @@ _TXN_TYPE_MAP = {
     "ENDORSEMENT - AMENDMENT": "endorsement",
     "ENDORSEMENT - CORRECTION": "endorsement",
     "ENDORSEMENT - ADDITION": "endorsement",
-    
+
     "MTA": "endorsement",  # Mid-Term Adjustment
     # Cancellation
     "CN": "cancellation", "C": "cancellation", "CANCEL": "cancellation",
@@ -234,8 +292,7 @@ _TXN_TYPE_MAP = {
 # Map BDX shortcodes to canonical enum values. The keys are (table, column);
 # match on UPPERCASED stripped input value.
 _ENUM_NORMALISE: dict[tuple[str, str], dict[str, str]] = {
-    ("policy", "transaction_type"): _TXN_TYPE_MAP,
-    ("premium_transaction", "transaction_type"): _TXN_TYPE_MAP,
+    ("premium_transaction", "premium_transaction_type"): _TXN_TYPE_MAP,
 }
 
 
@@ -284,7 +341,7 @@ def _insert_row(session: Session, table_name: str, payload: dict) -> int | None:
 
 def _memo(session: Session, bucket: str, key, factory):
     """Per-session (≈ per-upload) memoization for INVARIANT find-or-create
-    lookups (tenant / contract / carrier / admin party). A 10k-row upload shares
+    lookups (tenant / contract / policyholder). A 10k-row upload shares
     one Session, so without this each of these is re-resolved with a DB
     round-trip on EVERY row; here they're resolved once and reused. Stored on
     session.info; only used for rows that don't change within an upload."""
@@ -295,81 +352,119 @@ def _memo(session: Session, bucket: str, key, factory):
 
 
 def _ensure_tenant(session: Session, mga_name: str) -> int:
-    """Find-or-create a tenant row keyed by tenant_name (the MGA identifier).
-
-    Supplies sensible defaults for NOT NULL columns that the canonical Postgres
-    schema enforces (data_residency_region, internal_codes, is_active).
-    """
+    """Find-or-create a tenant row keyed by tenant_code (the MGA identifier)."""
     def _resolve():
         t = CANONICAL_TABLES["tenant"]
-        row = session.execute(select(t.c.tenant_id).where(t.c.tenant_name == mga_name)).fetchone()
+        row = session.execute(select(t.c.tenant_id).where(t.c.tenant_code == mga_name)).fetchone()
         if row:
             return row[0]
-        defaults = {
-            "tenant_name": mga_name,
-            "tenant_type": "mga",
-            "data_residency_region": "us-east",
-            "internal_codes": {},
-            "is_active": True,
-        }
-        # Only pass columns the table actually has.
-        payload = {k: v for k, v in defaults.items() if k in t.c}
-        return _insert_row(session, "tenant", payload)
+        return _insert_row(session, "tenant", _filter_to_schema("tenant", {
+            "tenant_code": mga_name,
+            "tenant_legal_name": mga_name,
+            "tenant_type": "carrier",
+            "tenant_is_active": True,
+        }))
     return _memo(session, "tenant", mga_name, _resolve)
 
 
-def _ensure_party_with_natural_id(
-    session: Session, tenant_id: int, natural_id: str,
+def _ensure_party_with_reference(
+    session: Session, tenant_id: int, reference: str,
     party_type: str = "agency", legal_name: str | None = None,
 ) -> int | None:
-    """Find-or-create a party row keyed by tenant_id + party_natural_id."""
+    """Find-or-create a curated party row keyed by tenant + party_reference."""
     if "party" not in CANONICAL_TABLES:
         return None
     pt = CANONICAL_TABLES["party"]
     row = session.execute(
-        select(pt.c.party_id, pt.c.legal_name)
-        .where(pt.c.tenant_id == tenant_id)
-        .where(pt.c.party_natural_id == natural_id)
+        select(pt.c.party_id, pt.c.party_legal_name)
+        .where(pt.c.party_tenant_id == tenant_id)
+        .where(pt.c.party_reference == reference)
     ).fetchone()
     if row:
         party_id, current = row[0], row[1]
-        # Re-ingest: refresh the name when a real one is now supplied (e.g. the
-        # mapping was corrected so an insured/carrier name is finally mapped).
+        # Re-ingest: refresh the name when a real one is now supplied.
         if legal_name and str(legal_name).strip() and legal_name != current:
             session.execute(
                 pt.update().where(pt.c.party_id == party_id)
-                .values(legal_name=legal_name)
+                .values(party_legal_name=legal_name)
             )
         return party_id
     return _insert_row(session, "party", _filter_to_schema("party", {
-        "tenant_id": tenant_id,
-        "party_natural_id": natural_id,
+        "party_tenant_id": tenant_id,
+        "party_reference": reference,
         "party_type": party_type,
-        "legal_name": legal_name or natural_id,
-        "is_organization": True,
-        "is_active": True,
+        "party_legal_name": legal_name or reference,
+        "party_is_active": True,
     }))
 
 
 def _ensure_carrier_party(session: Session, tenant_id: int,
                           legal_name: str | None = None) -> int | None:
-    """Find-or-create the carrier party. When a real carrier name is supplied
-    (e.g. mapped from an 'Issuing Company' column) the party is keyed by that
-    name so distinct carriers get distinct rows; otherwise a single generic
-    per-tenant carrier is used (legacy behaviour)."""
-    name = (legal_name or "").strip()
+    """Find-or-create the party row that IS this carrier.
+
+    A tenant no longer picks which carrier it writes for — it IS the carrier
+    (see app_routes.my_carrier_party). Screens that must still store a
+    carrier_party_id (Bordereau Setup, pipelines, output templates) resolve it
+    here. Keyed on the stable reference `carrier::<tenant_id>`, so a tenant has
+    exactly one of these forever and a rename never spawns a second.
+    """
+    def _resolve():
+        return _ensure_party_with_reference(
+            session, tenant_id, f"carrier::{tenant_id}",
+            party_type="carrier",
+            legal_name=(legal_name or "").strip() or f"Tenant {tenant_id} Carrier",
+        )
+    return _memo(session, "carrier", tenant_id, _resolve)
+
+
+def _ensure_policyholder(session: Session, tenant_id: int, payload: dict,
+                         polno: str | None) -> int | None:
+    """Find-or-create the insured as its own entity (v4: policyholder).
+
+    Keyed on policyholder_natural_key. When the file supplies a legal name and
+    a tax id / registration number, the key is derived from those (so the same
+    company insured three times is ONE row); otherwise it falls back to the
+    policy number, which keeps distinct unknown insureds distinct.
+    Policyholders are tenant-scoped: the same company insured by two carriers
+    is two rows.
+    """
+    if "policyholder" not in CANONICAL_TABLES:
+        return None
+    name = payload.get("policyholder_legal_name")
+    name = name.strip() if isinstance(name, str) else None
+    tax = (payload.get("policyholder_tax_id")
+           or payload.get("policyholder_registration_number"))
+    tax = str(tax).strip() if tax not in (None, "") else None
+    if name and tax:
+        natural = f"{tenant_id}::{name.casefold()}::{tax.casefold()}"
+    elif name:
+        natural = f"{tenant_id}::{name.casefold()}"
+    else:
+        natural = f"{tenant_id}::policy::{polno or 'unknown'}"
 
     def _resolve():
-        if name:
-            natural = f"carrier::{tenant_id}::{name.lower()}"
-            return _ensure_party_with_natural_id(
-                session, tenant_id, natural, party_type="carrier", legal_name=name,
-            )
-        return _ensure_party_with_natural_id(
-            session, tenant_id, f"carrier::{tenant_id}",
-            party_type="carrier", legal_name=f"Tenant {tenant_id} Carrier",
-        )
-    return _memo(session, "carrier", (tenant_id, name.lower()), _resolve)
+        t = CANONICAL_TABLES["policyholder"]
+        row = session.execute(
+            select(t.c.policyholder_id, t.c.policyholder_legal_name)
+            .where(t.c.policyholder_tenant_id == tenant_id)
+            .where(t.c.policyholder_natural_key == natural)
+        ).fetchone()
+        if row:
+            ph_id, current = row[0], row[1]
+            # §2.7 refresh: a corrected mapping can supply the real name later.
+            if name and name != current:
+                session.execute(
+                    t.update().where(t.c.policyholder_id == ph_id)
+                    .values(policyholder_legal_name=name)
+                )
+            return ph_id
+        return _insert_row(session, "policyholder", _filter_to_schema("policyholder", {
+            **payload,
+            "policyholder_tenant_id": tenant_id,
+            "policyholder_natural_key": natural,
+            "policyholder_legal_name": name or _DEFAULT_INSURED_NAME,
+        }))
+    return _memo(session, "policyholder", natural, _resolve)
 
 
 def _ensure_contract(session: Session, tenant_id: int, program_id: int) -> int | None:
@@ -381,21 +476,106 @@ def _ensure_contract(session: Session, tenant_id: int, program_id: int) -> int |
         t = CANONICAL_TABLES["contract"]
         umr = f"auto::{tenant_id}::{program_id}"
         row = session.execute(
-            select(t.c.contract_id).where(t.c.umr == umr)
+            select(t.c.contract_id).where(t.c.contract_primary_umr == umr)
         ).fetchone()
         if row:
             return row[0]
         return _insert_row(session, "contract", _filter_to_schema("contract", {
             "tenant_id": tenant_id,
-            "program_id": program_id,
-            "umr": umr,
+            "contract_program_id": program_id,
+            "contract_primary_umr": umr,
             "contract_name": f"Auto contract for program {program_id}",
             "contract_type": "binding_authority",
-            "inception_dt": date(1970, 1, 1),
-            "expiry_dt": date(2999, 12, 31),
-            "is_active": True,
+            "contract_inception_date": date(1970, 1, 1),
+            "contract_expiry_date": date(2999, 12, 31),
+            "contract_status": "active",
         }))
     return _memo(session, "contract", (tenant_id, program_id), _resolve)
+
+
+def _resolve_contract(session: Session, tenant_id: int, program_id: int,
+                      pol_eff_dt) -> int | None:
+    """Resolve the contract a policy belongs to BY ITS EFFECTIVE DATE.
+
+    Palms BDX Ingestion BRD v1.2, Appendix 2 §2.10:
+
+        policy.pol_eff_dt >= contracts.inception_date
+        AND policy.pol_eff_dt <  contracts.expiry_date
+
+    A policy belongs to the contract in force on the day it STARTS: inception
+    counts, expiry does not. The `<` is load-bearing and must not become `<=`.
+    Contracts run back to back, so on a renewal day a `<=` matches BOTH the
+    expiring contract and the incoming one, and the premium is counted twice.
+
+    WHY THE PLACEHOLDERS ARE EXCLUDED
+    _ensure_contract mints one auto:: contract per (tenant, program) spanning
+    1970-01-01 to 2999-12-31. That window matches EVERY date, so without the
+    umr filter below the placeholder always wins the join and the effective
+    date is never consulted.
+
+    OVERLAPS: if two real contracts both cover the date the LATEST inception
+    wins, so the result is deterministic rather than dependent on row order.
+
+    NO MATCH: falls back to the placeholder, exactly as before, and logs.
+    """
+    if "contract" not in CANONICAL_TABLES:
+        return None
+    if not pol_eff_dt:
+        # Unreachable via ingest_record — §2.2's guard drops a record with no
+        # effective date before _upsert_policy runs. Kept so a future caller
+        # cannot silently get a date-blind join.
+        return _ensure_contract(session, tenant_id, program_id)
+
+    t = CANONICAL_TABLES["contract"]
+
+    def _resolve():
+        stmt = (
+            select(t.c.contract_id)
+            .where(t.c[tenant_col("contract")] == tenant_id)
+            .where(t.c.contract_program_id == program_id)
+            .where(t.c.contract_inception_date <= pol_eff_dt)   # >= inception
+            .where(t.c.contract_expiry_date > pol_eff_dt)       # <  expiry (§2.10)
+            .order_by(t.c.contract_inception_date.desc())
+            .limit(1)
+        )
+        # The auto:: placeholders span all of time; they must never win here.
+        stmt = stmt.where(or_(t.c.contract_primary_umr.is_(None),
+                              ~t.c.contract_primary_umr.like("auto::%")))
+        if "contract_status" in t.c:
+            stmt = stmt.where(or_(t.c.contract_status.is_(None),
+                                  t.c.contract_status.notin_(("terminated", "expired"))))
+        if "is_current_version" in t.c:
+            stmt = stmt.where(t.c.is_current_version.isnot(False))
+        row = session.execute(stmt).fetchone()
+        if row:
+            return row[0]
+        log.warning("no contract covers policy effective %s on program %s "
+                    "(tenant %s) — using the placeholder contract; this row is "
+                    "not bound to a real contract window", pol_eff_dt,
+                    program_id, tenant_id)
+        return _ensure_contract(session, tenant_id, program_id)
+
+    # The date MUST be part of the memo key. _memo is per-session (≈ per-upload)
+    # and keyed only on (tenant, program) the first row's contract would be
+    # handed to every later row whatever its date — defeating the whole point.
+    return _memo(session, "contract_by_date",
+                 (tenant_id, program_id, pol_eff_dt), _resolve)
+
+
+def _contract_broker_party_id(session: Session, contract_id: int | None) -> int | None:
+    """policy_contract_broker_party_id is DERIVED, never supplied: it is set
+    from the policy's contract and held there by a composite FK, so a policy
+    can never name a different broker than its contract."""
+    if not contract_id or "contract" not in CANONICAL_TABLES:
+        return None
+
+    def _resolve():
+        t = CANONICAL_TABLES["contract"]
+        row = session.execute(
+            select(t.c.contract_broker_party_id).where(t.c.contract_id == contract_id)
+        ).fetchone()
+        return row[0] if row else None
+    return _memo(session, "contract_broker", contract_id, _resolve)
 
 
 def _ensure_canonical_upload(
@@ -405,54 +585,29 @@ def _ensure_canonical_upload(
 ) -> int | None:
     """Create an upload row on the canonical side; one per /bdx/upload call.
 
-    Captures lineage: which mapping profile interpreted the file, how the load
-    relates to prior loads (incremental/cumulative/restatement), and — for
-    restatements — the canonical upload it supersedes.
+    v4: the period is a date range (upload_period_start / upload_period_end),
+    the row count is upload_rows_total and approval is an upload_status value.
     """
     if "upload" not in CANONICAL_TABLES:
         return None
-    import hashlib, time
+    import calendar, hashlib, time
     file_hash = hashlib.sha256(f"{filename}::{time.time()}".encode()).hexdigest()
-    carrier_id = _ensure_carrier_party(session, tenant_id)
+    period_start = period_end = None
+    if file_year and file_month:
+        period_start = date(int(file_year), int(file_month), 1)
+        period_end = date(int(file_year), int(file_month),
+                          calendar.monthrange(int(file_year), int(file_month))[1])
     return _insert_row(session, "upload", _filter_to_schema("upload", {
         "tenant_id": tenant_id,
-        "carrier_party_id": carrier_id,
-        "bdx_type": "premium_program",
-        "file_year": file_year,
-        "file_month": file_month,
-        "filename": filename,
-        "file_hash": file_hash,
-        "load_type": load_type,
-        "mapping_profile_id": mapping_profile_id,
-        "invalidates_upload_id": invalidates_upload_id,
-        "num_rows": num_rows,
-        "is_approved": True,
+        "upload_bordereau_type": "premium",
+        "upload_filename": filename,
+        "upload_file_hash": file_hash,
+        "upload_period_start": period_start,
+        "upload_period_end": period_end,
+        "upload_load_type_detected": load_type,
+        "upload_rows_total": num_rows,
+        "upload_status": "approved",
     }))
-
-
-def _ensure_admin_party(session: Session, tenant_id: int) -> int | None:
-    """Find-or-create the per-tenant 'program admin' party used as a placeholder
-    for FK columns like program.program_admin_party_id (NOT NULL on Postgres)."""
-    if "party" not in CANONICAL_TABLES:
-        return None
-
-    def _resolve():
-        pt = CANONICAL_TABLES["party"]
-        natural = f"tenant_admin::{tenant_id}"
-        row = session.execute(
-            select(pt.c.party_id).where(pt.c.party_natural_id == natural)
-        ).fetchone()
-        if row:
-            return row[0]
-        return _insert_row(session, "party", _filter_to_schema("party", {
-            "tenant_id": tenant_id,
-            "party_natural_id": natural,
-            "party_type": "mga",
-            "legal_name": f"Tenant {tenant_id} Admin",
-            "is_organization": True,
-            "is_active": True,
-        }))
-    return _memo(session, "admin", tenant_id, _resolve)
 
 
 def _upsert_program(session: Session, tenant_id: int, payload: dict) -> int | None:
@@ -464,19 +619,15 @@ def _upsert_program(session: Session, tenant_id: int, payload: dict) -> int | No
     t = CANONICAL_TABLES["program"]
     row = session.execute(
         select(t.c.program_id)
-        .where(t.c.tenant_id == tenant_id)
+        .where(t.c.program_tenant_id == tenant_id)
         .where(t.c.program_name == name)
     ).fetchone()
     if row:
         return row[0]
-    admin_party_id = _ensure_admin_party(session, tenant_id)
-    carrier_party_id = _ensure_carrier_party(session, tenant_id)
     values = _filter_to_schema("program", {
         **payload,
-        "tenant_id": tenant_id,
-        "program_admin_party_id": admin_party_id,
-        "lead_carrier_party_id": carrier_party_id,
-        "is_active": True,
+        "program_tenant_id": tenant_id,
+        "program_status": payload.get("program_status") or "active",
     })
     return _insert_row(session, "program", values)
 
@@ -562,7 +713,8 @@ def _scd2_version_inplace(session: Session, table: str, pk_col: str, pk_value,
 
 
 def _upsert_policy(session: Session, tenant_id: int, program_id: int | None,
-                   payload: dict) -> tuple[int | None, bool]:
+                   payload: dict, policyholder_payload: dict | None = None,
+                   ) -> tuple[int | None, bool]:
     """Returns (policy_id, is_new). `is_new` is True when this call CREATED the
     policy (no prior row existed) — the caller can then skip the re-ingest
     child-cleanup, which is a no-op for a brand-new policy but costs ~a dozen
@@ -572,53 +724,41 @@ def _upsert_policy(session: Session, tenant_id: int, program_id: int | None,
     polno = payload.get("policy_number")
     t = CANONICAL_TABLES["policy"]
 
-    # Synthesise the FK-required placeholders the canonical schema demands.
-    # (Carrier/insured party helpers also REFRESH their names on re-ingest.)
-    contract_id = _ensure_contract(session, tenant_id, program_id) if program_id else None
-    # Carrier party: named from the mapped carrier/issuing-company column when
-    # present, else the generic per-tenant carrier.
-    carrier_party_id = _ensure_carrier_party(
-        session, tenant_id, legal_name=payload.get("carrier_legal_name"))
-    insured_party_id = _ensure_party_with_natural_id(
-        session, tenant_id, f"insured::{polno}",
-        party_type="insured",
-        legal_name=payload.get("insured_legal_name") or polno,
-    )
-    nor = (payload.get("new_or_renewal") or "").strip().upper()
-    txn_type = _TXN_TYPE_MAP.get(nor, "new")
+    # §2.10: bind the policy to the contract in force on its EFFECTIVE DATE,
+    # not to a catch-all placeholder. Falls back to the placeholder (previous
+    # behaviour) when no real contract covers the date.
+    contract_id = _resolve_contract(
+        session, tenant_id, program_id, payload.get("policy_effective_date")
+    ) if program_id else None
+    # v4: the insured is its own entity, keyed on policyholder_natural_key.
+    policyholder_id = _ensure_policyholder(
+        session, tenant_id, policyholder_payload or {}, polno)
 
     base = _filter_to_schema("policy", {
         **payload,
         "tenant_id": tenant_id,
-        "program_id": program_id,
-        "contract_id": contract_id,
-        "insured_party_id": insured_party_id,
-        "risk_bearing_carrier_party_id": carrier_party_id,
-        "writing_company_party_id": carrier_party_id,
-        "transaction_type": txn_type,
+        "policy_program_id": program_id,
+        "policy_contract_id": contract_id,
+        "policy_policyholder_id": policyholder_id,
+        # Derived, never supplied: the broker comes from the contract.
+        "policy_contract_broker_party_id": _contract_broker_party_id(session, contract_id),
     })
 
     if polno:
         stmt = (
             select(t.c.policy_id)
-            .where(t.c.tenant_id == tenant_id)
+            .where(t.c[tenant_col("policy")] == tenant_id)
             .where(t.c.policy_number == polno)
         )
         # A 'Modify here' edit can leave a retired (is_current_version=FALSE)
-        # version alongside the active one for the same (tenant_id, policy_number).
-        # Re-ingest must update the ACTIVE version, never a superseded one. NULL
-        # (legacy, never-versioned rows) counts as active, so this is a no-op for
-        # un-versioned data.
+        # version alongside the active one for the same (tenant, policy_number).
+        # Re-ingest must update the ACTIVE version, never a superseded one.
         if "is_current_version" in t.c:
             stmt = stmt.where(t.c.is_current_version.isnot(False)).order_by(t.c.policy_id.desc())
         row = session.execute(stmt).fetchone()
         if row:
             policy_id = row[0]
-            # Re-ingest (Option A — sheet wins, prior edit kept as history): if the
-            # sheet changed anything, retire the current active policy version and
-            # insert a new active version with the SAME policy_id carrying the sheet
-            # values. Unchanged → leave as-is (no churn). Only columns the payload
-            # carries are set, so placeholder defaults never clobber real values.
+            # Re-ingest (Option A — sheet wins, prior edit kept as history).
             if base:
                 cur = (session.execute(
                     select(t).where(t.c.policy_id == policy_id)
@@ -632,10 +772,19 @@ def _upsert_policy(session: Session, tenant_id: int, program_id: int | None,
 
     # New policy: apply last-resort defaults for the NOT NULL date columns.
     values = dict(base)
-    if "policy_effective_dt" in t.c and not values.get("policy_effective_dt"):
-        values["policy_effective_dt"] = date(1970, 1, 1)
-    if "policy_expiration_dt" in t.c and not values.get("policy_expiration_dt"):
-        values["policy_expiration_dt"] = date(2999, 12, 31)
+    if "policy_effective_date" in t.c and not values.get("policy_effective_date"):
+        # UNREACHABLE via ingest_record, which now drops a record with no
+        # effective date before it gets here. Kept as a backstop because a
+        # future caller could reach _upsert_policy directly — but it logs at
+        # ERROR, because a 1970 date silently misattributes the contract, the
+        # commission band and the accounting period.
+        log.error("policy %s reached _upsert_policy with no effective date — "
+                  "the ingest_record guard was bypassed; storing the 1970 "
+                  "sentinel, which WILL misattribute contract and commission",
+                  polno)
+        values["policy_effective_date"] = date(1970, 1, 1)
+    if "policy_expiration_date" in t.c and not values.get("policy_expiration_date"):
+        values["policy_expiration_date"] = date(2999, 12, 31)
     return _insert_row(session, "policy", values), True
 
 
@@ -643,45 +792,57 @@ def _child_defaults(table_name: str, parent_ctx: dict) -> dict:
     """Per-table defaults to satisfy canonical Postgres NOT NULL constraints
     that BDX rows commonly don't carry."""
     pol = parent_ctx.get("policy_payload") or {}
-    eff = pol.get("policy_effective_dt") or date(1970, 1, 1)
-    if isinstance(eff, str):
-        try:
-            eff = datetime.fromisoformat(eff).date()
-        except (ValueError, TypeError):
-            eff = date(1970, 1, 1)
 
-    if table_name == "coverage":
-        return {"coverage_type": "GL"}
     if table_name == "premium_transaction":
         from datetime import date as _date
-        nor = (pol.get("new_or_renewal") or "").strip().upper()
-        # booking_dt is part of the PK — must be non-null.
-        # Fall back to today when the source record has no effective date.
+        # Children only build after the parent policy exists, and ingest_record
+        # drops a record with no effective date before creating one — so the
+        # sentinel below is a backstop for an unparseable date string, not for
+        # a missing one. Both cases log, for the same reason as _upsert_policy:
+        # a 1970 date reaches the booking and accounting dates and looks valid.
+        eff = pol.get("policy_effective_date")
+        if not eff:
+            log.error("_child_defaults: no policy_effective_date on the parent "
+                      "policy — falling back to the 1970 sentinel")
+            eff = date(1970, 1, 1)
+        if isinstance(eff, str):
+            try:
+                eff = datetime.fromisoformat(eff).date()
+            except (ValueError, TypeError):
+                log.error("_child_defaults: unparseable policy_effective_date %r "
+                          "— falling back to the 1970 sentinel", eff)
+                eff = date(1970, 1, 1)
         booking = eff if eff is not None else _date.today()
-        period = (
-            booking.strftime("%Y-%m") if hasattr(booking, "strftime") else "1970-01"
-        )
         return {
-            "transaction_type": _TXN_TYPE_MAP.get(nor, "new"),
-            "transaction_effective_dt": eff,
-            "booking_dt": booking,
-            "accounting_period": period,
-            "original_currency": pol.get("currency_iso") or "USD",
+            "premium_transaction_type": _DEFAULT_TRANSACTION_TYPE,
+            "premium_transaction_effective_date": eff,
+            "premium_transaction_booking_date": booking,
+            "premium_transaction_accounting_date": booking,
+            "premium_transaction_original_currency":
+                pol.get("policy_sum_insured_currency") or _DEFAULT_CURRENCY,
+            # §2.7: COALESCE(exchg_rate, 1.0). No conversion happens at ingest,
+            # so the rate is par by default. A BARE 1.0 is indistinguishable
+            # from a genuine same-currency rate, though, and BRD §4.4 requires
+            # the rate's SOURCE and AS-OF DATE on every converted record. Hence
+            # the convention:
+            #
+            #     premium_transaction_fx_rate_date IS NULL
+            #         ==  the rate was DEFAULTED, never sourced
+            #
+            # A looked-up rate always carries its as-of date (§4.4 demands it),
+            # so the two can never be confused, and every defaulted row is
+            # findable with one predicate.
+            "premium_transaction_exchange_rate": _DEFAULT_FX_RATE,
+            "premium_transaction_fx_rate_date": None,
         }
-    if table_name == "party_address":
-        return {"address_type": "mailing"}
     if table_name == "party_license":
         return {"license_state": "XX", "license_type": "producer"}
-    ccy = pol.get("currency_iso") or "USD"
-    if table_name == "policy_fee":
-        return {"fee_type": "admin", "fee_amount": 0, "currency_iso": ccy}
-    if table_name == "tax_or_surcharge":
-        return {"tax_type": "premium_tax", "tax_amount": 0, "currency_iso": ccy}
-    if table_name == "commission":
+    if table_name == "tax_line":
+        return {"tax_line_type": "premium_tax", "tax_line_amount": _DEFAULT_AMOUNT}
+    if table_name == "commission_line":
         return {
-            "commission_type": "producing_broker",
-            "commission_amount": 0,
-            "currency_iso": ccy,
+            "commission_line_type": "producing_broker",
+            "commission_line_amount": _DEFAULT_AMOUNT,
         }
     return {}
 
@@ -691,74 +852,91 @@ def _insert_children(
     parent_ctx: dict | None = None, **fks: int | None,
 ) -> list[int]:
     """Insert a list of dicts as rows of `table_name`, stamped with the given FKs
-    and any per-table required defaults."""
+    and any per-table required defaults. FK kwargs may use either the child's
+    own column name or a generic name resolved via _CHILD_FK."""
     ids: list[int] = []
     cols = column_names(table_name)
     defaults = _child_defaults(table_name, parent_ctx or {})
+
     for raw in items:
         merged = {**defaults, **raw}
         for fk, val in fks.items():
-            if val is not None and fk in cols:
-                merged[fk] = val
+            if val is None:
+                continue
+            col = fk if fk in cols else _CHILD_FK.get(table_name) if fk == "parent_id" else fk
+            if col in cols:
+                merged[col] = val
         values = _filter_to_schema(table_name, merged)
         if not values:
             continue
         # Skip rows that can't satisfy the table's own required-field check.
-        if table_name == "party_contact":
-            if not values.get("contact_method") or not values.get("contact_value"):
-                continue
         if table_name == "party_license" and not values.get("license_number"):
             continue
-        if table_name == "party_address" and not values.get("address_line1"):
+        if table_name == "ingested_party" and not values.get("ingested_party_legal_name"):
             continue
-        if table_name == "policy_attributes":
-            # NOT NULL columns: attribute_key, scope. The LLM may suggest a
-            # mapping that only fills attribute_value (or scope/value_type)
-            # without the key — that row would violate the PG constraint, so
-            # skip silently rather than 500 the whole ingest.
-            if not values.get("attribute_key") or not values.get("scope"):
-                continue
-        if table_name == "premium_transaction" and not values.get("booking_dt"):
-            # booking_dt is part of the PK — cannot be NULL. The merged record
-            # may have explicitly set it to None (mapper found no matching column).
-            # Fall back to transaction_effective_dt, or today as last resort.
+        if table_name == "premium_transaction" and not values.get("premium_transaction_booking_date"):
+            # The booking date must be non-null. The merged record may have
+            # explicitly set it to None (mapper found no matching column).
+            # Fall back to the effective date, or today as last resort.
             from datetime import date as _date
-            values["booking_dt"] = values.get("transaction_effective_dt") or _date.today()
-            # Re-derive accounting_period now that we have a valid date.
-            bdt = values["booking_dt"]
-            if hasattr(bdt, "strftime"):
-                values["accounting_period"] = bdt.strftime("%Y-%m")
-        if (table_name == "premium_invoice"
-                and values.get("invoice_ref") is not None
-                and values.get("tenant_id") is not None):
-            # invoice_ref is UNIQUE per tenant (premium_invoice_ref_uq). The same
-            # invoice legitimately recurs — one invoice can cover several
-            # transactions, and re-ingests replay the same refs — so find-or-create
-            # rather than blind-insert, which would raise UniqueViolation.
-            inv_t = CANONICAL_TABLES["premium_invoice"]
-            inv_pk = pk_column("premium_invoice")
-            existing = session.execute(
-                select(inv_t.c[inv_pk]).where(
-                    inv_t.c.tenant_id == values["tenant_id"],
-                    inv_t.c.invoice_ref == values["invoice_ref"],
-                )
-            ).scalar()
-            if existing is not None:
-                ids.append(existing)
-                continue
+            values["premium_transaction_booking_date"] = (
+                values.get("premium_transaction_effective_date") or _date.today())
+            # Re-derive the accounting date now that we have a valid date.
+            values.setdefault("premium_transaction_accounting_date",
+                              values["premium_transaction_booking_date"])
         pk = _insert_row(session, table_name, values)
         if pk:
             ids.append(pk)
     return ids
 
 
-def _ensure_ambient_party(session: Session, tenant_id: int, label: str) -> int | None:
-    """Find-or-create a synthetic party so party_address/contact/license have a FK.
+def _ingest_parties(session: Session, tenant_id: int, upload_id: int | None,
+                    items: list[dict]) -> list[int]:
+    """v4: party names read off a bordereau land in ingested_party — never in
+    the curated party directory. When a name matches a curated party of the
+    tenant, the row is linked via ingested_party_matched_party_id."""
+    if "ingested_party" not in CANONICAL_TABLES or not items:
+        return []
+    pt = CANONICAL_TABLES.get("party")
 
-    Idempotent on re-upload: keyed by (tenant_id, party_natural_id) it reuses the
-    existing ambient party instead of blind-inserting a duplicate (which violated
-    the uq_party_tenant_natural unique constraint on the second ingest)."""
-    return _ensure_party_with_natural_id(
+    def _match(name: str | None) -> int | None:
+        if not name or pt is None:
+            return None
+        key = name.strip().casefold()
+        if not key:
+            return None
+
+        def _resolve():
+            row = session.execute(
+                select(pt.c.party_id)
+                .where(pt.c.party_tenant_id == tenant_id)
+                .where(func.lower(pt.c.party_legal_name) == key)
+            ).fetchone()
+            return row[0] if row else None
+        return _memo(session, "ingested_party_match", key, _resolve)
+
+    enriched = []
+    for raw in items:
+        if not isinstance(raw, dict) or not raw:
+            continue
+        matched = _match(raw.get("ingested_party_legal_name"))
+        enriched.append({
+            **raw,
+            "ingested_party_matched_party_id": matched,
+            "ingested_party_match_confidence": "exact" if matched else None,
+        })
+    return _insert_children(
+        session, "ingested_party", enriched,
+        ingested_party_tenant_id=tenant_id, ingested_party_upload_id=upload_id,
+    )
+
+
+def _ensure_ambient_party(session: Session, tenant_id: int, label: str) -> int | None:
+    """Find-or-create a synthetic party so party_license rows have a FK.
+
+    Idempotent on re-upload: keyed by (tenant, party_reference) it reuses the
+    existing ambient party instead of blind-inserting a duplicate."""
+    return _ensure_party_with_reference(
         session, tenant_id, label, party_type="agency", legal_name=label)
 
 
@@ -767,61 +945,74 @@ def _clear_policy_children(session: Session, policy_id: int, policy_number: str 
     RETIRE the policy's existing canonical child rows (mark them inactive SCD-2
     history) instead of deleting them, so a re-upload preserves prior edits; the
     caller then inserts the fresh sheet rows as the new ACTIVE versions. Tables
-    without SCD columns (ops-shadowed) are still deleted so they don't accumulate.
+    without SCD columns are still deleted so they don't accumulate.
     """
-    # 1a. transaction-children first (keyed by this policy's active transaction_ids)
+    # 1a. transaction-children first (keyed by this policy's active transaction ids)
     pt = CANONICAL_TABLES.get("premium_transaction")
-    if pt is not None and "policy_id" in pt.c:
-        tstmt = select(pt.c.transaction_id).where(pt.c.policy_id == policy_id)
+    if pt is not None and "premium_transaction_policy_id" in pt.c:
+        tstmt = select(pt.c.premium_transaction_id).where(
+            pt.c.premium_transaction_policy_id == policy_id)
         if "is_current_version" in pt.c:
             tstmt = tstmt.where(pt.c.is_current_version.isnot(False))
         txn_ids = [r[0] for r in session.execute(tstmt).fetchall()]
         if txn_ids:
             for child in TRANSACTION_CHILDREN:
                 ct = CANONICAL_TABLES.get(child)
-                if ct is not None and "transaction_id" in ct.c:
-                    _supersede(session, ct, ct.c.transaction_id.in_(txn_ids))
+                fk = _CHILD_FK.get(child)
+                if ct is not None and fk in ct.c:
+                    _supersede(session, ct, ct.c[fk].in_(txn_ids))
 
-    # 1b. location-children (e.g. building) keyed by this policy's location_ids
-    loc_table = CANONICAL_TABLES.get("insured_location")
-    if loc_table is not None and "policy_id" in loc_table.c:
-        lstmt = select(loc_table.c.location_id).where(loc_table.c.policy_id == policy_id)
-        if "is_current_version" in loc_table.c:
-            lstmt = lstmt.where(loc_table.c.is_current_version.isnot(False))
-        loc_ids = [r[0] for r in session.execute(lstmt).fetchall()]
-        if loc_ids:
-            for child in LOCATION_CHILDREN:
+    # 1b. claim-children keyed by this policy's claim ids
+    clt = CANONICAL_TABLES.get("claim")
+    if clt is not None and "claim_policy_id" in clt.c:
+        cstmt = select(clt.c.claim_id).where(clt.c.claim_policy_id == policy_id)
+        if "is_current_version" in clt.c:
+            cstmt = cstmt.where(clt.c.is_current_version.isnot(False))
+        claim_ids = [r[0] for r in session.execute(cstmt).fetchall()]
+        if claim_ids:
+            for child in CLAIM_CHILDREN:
                 ct = CANONICAL_TABLES.get(child)
-                if ct is not None and "location_id" in ct.c:
-                    _supersede(session, ct, ct.c.location_id.in_(loc_ids))
+                fk = _CHILD_FK.get(child)
+                if ct is not None and fk in ct.c:
+                    _supersede(session, ct, ct.c[fk].in_(claim_ids))
+
+    # 1c. coverage-children (participations) keyed by this policy's coverage ids
+    cov = CANONICAL_TABLES.get("coverage")
+    if cov is not None and "coverage_policy_id" in cov.c:
+        vstmt = select(cov.c.coverage_id).where(cov.c.coverage_policy_id == policy_id)
+        if "is_current_version" in cov.c:
+            vstmt = vstmt.where(cov.c.is_current_version.isnot(False))
+        cov_ids = [r[0] for r in session.execute(vstmt).fetchall()]
+        if cov_ids:
+            cp = CANONICAL_TABLES.get("coverage_participation")
+            if cp is not None and "coverage_participation_coverage_id" in cp.c:
+                _supersede(session, cp,
+                           cp.c.coverage_participation_coverage_id.in_(cov_ids))
 
     # policy-children (incl. premium_transaction itself)
     for table_name in POLICY_CHILDREN:
         t = CANONICAL_TABLES.get(table_name)
-        if t is None or "policy_id" not in t.c:
+        fk = _CHILD_FK.get(table_name)
+        if t is None or fk not in t.c:
             continue
-        _supersede(session, t, t.c.policy_id == policy_id)
-
-    # buildings also keyed by policy_id (defensive)
-    bld = CANONICAL_TABLES.get("building")
-    if bld is not None and "policy_id" in bld.c:
-        _supersede(session, bld, bld.c.policy_id == policy_id)
+        _supersede(session, t, t.c[fk] == policy_id)
 
     # ambient party CHILDREN — retire (versioned) / delete (non-versioned). The
     # ambient party row itself is kept and reused (find-or-create) so retired
     # children aren't orphaned.
     if policy_number and "party" in CANONICAL_TABLES:
         party_t = CANONICAL_TABLES["party"]
-        natural = f"ambient::{policy_number}"
+        reference = f"ambient::{policy_number}"
         row = session.execute(
-            select(party_t.c.party_id).where(party_t.c.party_natural_id == natural)
+            select(party_t.c.party_id).where(party_t.c.party_reference == reference)
         ).fetchone()
         if row:
             ambient_id = row[0]
             for child in PARTY_CHILDREN:
                 ct = CANONICAL_TABLES.get(child)
-                if ct is not None and "party_id" in ct.c:
-                    _supersede(session, ct, ct.c.party_id == ambient_id)
+                fk = _CHILD_FK.get(child)
+                if ct is not None and fk in ct.c:
+                    _supersede(session, ct, ct.c[fk] == ambient_id)
 
 
 def ingest_record(session: Session, mga: str, record: dict,
@@ -829,37 +1020,61 @@ def ingest_record(session: Session, mga: str, record: dict,
     """Ingest one merged record. Returns the policy_id created (or None).
 
     Idempotent: if the policy already exists, its child canonical rows are
-    wiped and re-inserted with the freshly merged data.
+    retired and re-inserted with the freshly merged data.
 
     `canonical_upload_id` (when supplied) is stamped on premium_transaction
-    rows to satisfy the canonical schema's NOT NULL upload_id constraint.
+    rows (ingestion lineage) and on ingested_party rows.
     """
     tenant_id = _ensure_tenant(session, mga)
     program_id = _upsert_program(session, tenant_id, record.get("program") or {})
     pol_payload = record.get("policy") or {}
-    # Bridge: a mapper that targets the generic `legal_name` (party.legal_name)
-    # for an insured-name column lands the value under record["party"]. When the
-    # policy payload has no explicit insured name, treat that as the insured's
-    # legal name so it reaches the insured party (and the output template).
-    # `party` may arrive as a dict (single row) or a list (after _merge_records
-    # treats it as a collection) — handle both, and tolerate junk shapes.
-    if not pol_payload.get("insured_legal_name"):
-        party_blob = record.get("party")
-        if isinstance(party_blob, list):
-            party_blob = next((p for p in party_blob
-                               if isinstance(p, dict) and p.get("legal_name")), None)
-        if isinstance(party_blob, dict) and party_blob.get("legal_name"):
-            pol_payload = {**pol_payload, "insured_legal_name": party_blob["legal_name"]}
-    polno = pol_payload.get("policy_number")
-    if not polno:
-        # `policy.policy_number` is NOT NULL in canonical Postgres. If the
-        # mapping spec didn't produce one for this record (often the case
-        # for non-POL sheets that lack a PolicyNumber column), skip the
-        # whole record rather than 500-ing the ingest.
-        log.warning("ingest_record: skipping record with no policy_number "
-                    "(other keys=%s)", list(record.keys()))
+    ph_payload = record.get("policyholder") or {}
+    if isinstance(ph_payload, list):
+        ph_payload = next((p for p in ph_payload if isinstance(p, dict) and p), {})
+    # Bridge: a mapper that targets the party legal-name field for an
+    # insured-name column lands the value under record["ingested_party"] or
+    # record["party"]. When the policyholder payload has no name, treat that
+    # as the insured's legal name so it reaches the policyholder entity.
+    if not ph_payload.get("policyholder_legal_name"):
+        for bridge_key, name_col in (("ingested_party", "ingested_party_legal_name"),
+                                     ("party", "party_legal_name")):
+            blob = record.get(bridge_key)
+            if isinstance(blob, list):
+                blob = next((p for p in blob
+                             if isinstance(p, dict) and p.get(name_col)), None)
+            if isinstance(blob, dict) and blob.get(name_col):
+                ph_payload = {**ph_payload,
+                              "policyholder_legal_name": blob[name_col]}
+                break
+    polno = (pol_payload.get("policy_number") or "")
+    polno = polno.strip() if isinstance(polno, str) else polno
+    if not polno or (isinstance(polno, str)
+                     and polno.casefold() in _POLICY_NUMBER_PLACEHOLDERS):
+        # `policy.policy_number` is required. If the mapping spec didn't
+        # produce one for this record (often the case for non-POL sheets that
+        # lack a PolicyNumber column), skip the whole record rather than
+        # 500-ing the ingest.
+        #
+        # A PLACEHOLDER is rejected the same way. "0" / "-" is what a person
+        # types into a cell they can't fill: a truthy string that sails past a
+        # plain falsy check, then becomes a policy AND a policyholder natural
+        # key — so every row carrying the same placeholder collides onto one
+        # bogus policyholder.
+        log.warning("ingest_record: skipping record with invalid policy_number "
+                    "%r (other keys=%s)", polno, list(record.keys()))
         return None
-    policy_id, policy_is_new = _upsert_policy(session, tenant_id, program_id, pol_payload)
+    if not pol_payload.get("policy_effective_date"):
+        # The policy effective date is the join key for contract resolution, the
+        # commission rate band, and the accounting period. Substituting one does
+        # not produce a single wrong field — it resolves all three confidently to
+        # the wrong answer, silently. So a missing date is a HARD FILTER, not a
+        # fallback (Palms BDX BRD v1.2, Appendix 2 §2.2), the same treatment a
+        # missing policy number already gets above.
+        log.warning("ingest_record: skipping policy %s with no "
+                    "policy_effective_date", polno)
+        return None
+    policy_id, policy_is_new = _upsert_policy(
+        session, tenant_id, program_id, pol_payload, ph_payload)
     # Re-ingest cleanup retires a policy's existing child rows before re-inserting.
     # A brand-new policy has none, so skip it — that saves ~a dozen DB round-trips
     # per row, which dominates the cost of a fresh (10k-row) upload.
@@ -868,56 +1083,68 @@ def ingest_record(session: Session, mga: str, record: dict,
 
     ctx = {"policy_payload": pol_payload}
 
+    # Party names read off the file → ingested_party (with curated-party match).
+    _ingest_parties(session, tenant_id, canonical_upload_id,
+                    _as_list(record.get("ingested_party")))
+
     # Children that hang off the policy.
-    location_ids: list[int] = []
+    coverage_ids: list[int] = []
     txn_ids: list[int] = []
+    claim_ids: list[int] = []
     for table in POLICY_CHILDREN:
         items = _as_list(record.get(table))
         if not items:
             continue
         extra_fks: dict[str, int | None] = {
-            "policy_id": policy_id,
+            _CHILD_FK[table]: policy_id,
             "tenant_id": tenant_id,
         }
         if table == "premium_transaction":
-            extra_fks["upload_id"] = canonical_upload_id
+            extra_fks["premium_transaction_upload_id"] = canonical_upload_id
         ids = _insert_children(session, table, items, parent_ctx=ctx, **extra_fks)
-        if table == "insured_location":
-            location_ids = ids
+        if table == "coverage":
+            coverage_ids = ids
         elif table == "premium_transaction":
             txn_ids = ids
+        elif table == "claim":
+            claim_ids = ids
 
     # Children that hang off premium_transaction. If the BDX provides taxes/
-    # commissions/fees without an explicit premium_transaction in the record,
-    # we still need a transaction to attach them to — synthesise one.
+    # commissions without an explicit premium_transaction in the record, we
+    # still need a transaction to attach them to — synthesise one.
     needs_txn_parent = any(record.get(t) for t in TRANSACTION_CHILDREN)
     if needs_txn_parent and not txn_ids:
         ids = _insert_children(
             session, "premium_transaction", [{}], parent_ctx=ctx,
-            policy_id=policy_id, tenant_id=tenant_id, upload_id=canonical_upload_id,
+            premium_transaction_policy_id=policy_id, tenant_id=tenant_id,
+            premium_transaction_upload_id=canonical_upload_id,
         )
         txn_ids = ids
     parent_txn_id = txn_ids[0] if txn_ids else None
-    admin_party_id = None  # lazily resolved if commission rows exist
     for table in TRANSACTION_CHILDREN:
         items = _as_list(record.get(table))
         if not items or parent_txn_id is None:
             continue
-        extra: dict[str, int | None] = {
-            "transaction_id": parent_txn_id, "tenant_id": tenant_id,
-        }
-        if table == "commission":
-            if admin_party_id is None:
-                admin_party_id = _ensure_admin_party(session, tenant_id)
-            extra["recipient_party_id"] = admin_party_id
-        _insert_children(session, table, items, parent_ctx=ctx, **extra)
+        _insert_children(session, table, items, parent_ctx=ctx,
+                         tenant_id=tenant_id,
+                         **{_CHILD_FK[table]: parent_txn_id})
 
-    # Buildings: one per location row (best-effort 1:1 by order)
-    buildings = _as_list(record.get("building"))
-    for i, bld in enumerate(buildings):
-        loc_id = location_ids[i] if i < len(location_ids) else (location_ids[0] if location_ids else None)
-        _insert_children(session, "building", [bld], parent_ctx=ctx,
-                         location_id=loc_id, tenant_id=tenant_id)
+    # Children that hang off the claim (fee lines, movements, reserves).
+    parent_claim_id = claim_ids[0] if claim_ids else None
+    for table in CLAIM_CHILDREN:
+        items = _as_list(record.get(table))
+        if not items or parent_claim_id is None:
+            continue
+        _insert_children(session, table, items, parent_ctx=ctx,
+                         tenant_id=tenant_id,
+                         **{_CHILD_FK[table]: parent_claim_id})
+
+    # Participations hang off the first coverage of the record.
+    cp_items = _as_list(record.get("coverage_participation"))
+    if cp_items and coverage_ids:
+        _insert_children(session, "coverage_participation", cp_items,
+                         parent_ctx=ctx, tenant_id=tenant_id,
+                         coverage_participation_coverage_id=coverage_ids[0])
 
     # Party-side tables: create an ambient party once if any of these are present.
     needs_party = any(record.get(t) for t in PARTY_CHILDREN)
@@ -926,8 +1153,8 @@ def ingest_record(session: Session, mga: str, record: dict,
         party_id = _ensure_ambient_party(session, tenant_id, label)
         for table in PARTY_CHILDREN:
             _insert_children(session, table, _as_list(record.get(table)),
-                             parent_ctx=ctx,
-                             party_id=party_id, tenant_id=tenant_id)
+                             parent_ctx=ctx, tenant_id=tenant_id,
+                             **{_CHILD_FK[table]: party_id})
 
     # User-defined extra fields. The mapper has already grouped them by
     # target entity. Write each group onto that entity's `extras` JSONB
@@ -938,13 +1165,11 @@ def ingest_record(session: Session, mga: str, record: dict,
         _write_entity_extras(
             session, extras_by_entity,
             policy_id=policy_id,
-            # `claim` ids come from the children loop above — collect them.
             entity_ids={
                 "policy": policy_id,
-                # children that just got inserted have their ids in `ids`
-                # but ingest_record doesn't keep them around per-table.
-                # Fetch the latest rows for this policy_id for the entities
-                # that actually had data on this record.
+                "coverage": coverage_ids[0] if coverage_ids else None,
+                "premium_transaction": parent_txn_id,
+                "claim": parent_claim_id,
             },
         )
 
@@ -978,9 +1203,10 @@ def _write_entity_extras(
             row_id = policy_id
         else:
             row_id = entity_ids.get(entity)
-            if row_id is None and policy_id is not None and "policy_id" in t.c:
+            fk = _CHILD_FK.get(entity)
+            if row_id is None and policy_id is not None and fk and fk in t.c:
                 row = session.execute(
-                    select(t.c[pk_name]).where(t.c.policy_id == policy_id)
+                    select(t.c[pk_name]).where(t.c[fk] == policy_id)
                     .order_by(t.c[pk_name].desc()).limit(1)
                 ).fetchone()
                 row_id = row[0] if row else None

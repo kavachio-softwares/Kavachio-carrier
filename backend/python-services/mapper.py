@@ -9,10 +9,11 @@ Key changes versus v1:
      sheet that carries them instead of just one. apply_spec consumes this shape.
   3. **Role-prefixed party fields.** Canonical fields ending in `_INSURED` /
      `_AGENCY` / `_CARRIER` are recognized so the LLM can map both the insured's
-     address AND the agency's address to party_address without collision.
+     address AND the agency's address land on role-specific tables
+     (policyholder_* / ingested_party_*) without collision.
   4. **policy_attributes catch-all.** Unmappable but clearly-attribute-shaped
      columns (UserDefined1, NJ Transaction Number, CustomerNumber, etc.) are
-     auto-routed to policy_attributes with attribute_key = source column name.
+     auto-routed to the entity's extras JSONB via the `_xf:` prefix.
   5. **Composite-source hints.** The prompt now tells the model that fields like
      legal_name can be composed from multiple source columns
      (first_name + ' ' + last_name) and to declare composition explicitly.
@@ -46,22 +47,8 @@ CANONICAL_FIELDS = set(MAPPABLE_FIELDS)
 JOIN_KEY_FIELDS = {
     "policy_number",
     "program_name",
-    "tenant_name",
-    "external_policy_number",
-}
-
-# Fields that benefit from role-prefixed variants. The data model should declare
-# {field}_insured, {field}_agency, {field}_carrier variants. If the model
-# doesn't have them yet, only the base form will be used.
-ROLE_PREFIXED_BASES = {
-    "party_address_address_line1",
-    "party_address_address_line2",
-    "party_address_city",
-    "party_address_state_code",
-    "party_address_zip_code",
-    "party_address_country",
-    "legal_name",
-    "license_number",
+    "tenant_legal_name",
+    "policy_umr",
 }
 
 logging.basicConfig(
@@ -99,9 +86,14 @@ def sample_fingerprint(samples: list[str]) -> str:
 
 def cache_lookup(session, sheet: str, column: str,
                  fp: str) -> tuple[str, float] | None:
-    """Tiered lookup. Returns (canonical_field, confidence_0_to_1) or None."""
+    """Tiered lookup. Returns (canonical_field, confidence_0_to_1) or None.
+
+    Cached rows written before the v4 model migration may still carry a v2
+    canonical field name; those resolve through LEGACY_FIELD_MAP (fields the
+    v4 model removed return None and the cache tier is skipped)."""
     # Import here so this module stays import-light for tests.
     from db import ColumnMappingCache
+    from data_model import resolve_field
     sheet_n = _norm(sheet)
     column_n = _norm(column)
 
@@ -115,7 +107,9 @@ def cache_lookup(session, sheet: str, column: str,
                          ColumnMappingCache.last_seen_at.desc())
                .first())
         if row:
-            return row.canonical_field, _CACHE_CONFIDENCE_EXACT
+            cf = resolve_field(row.canonical_field)
+            if cf:
+                return cf, _CACHE_CONFIDENCE_EXACT
 
         # Tier 2 — same column header & samples, sheet differs.
         row = (session.query(ColumnMappingCache)
@@ -125,7 +119,9 @@ def cache_lookup(session, sheet: str, column: str,
                          ColumnMappingCache.last_seen_at.desc())
                .first())
         if row:
-            return row.canonical_field, _CACHE_CONFIDENCE_COL_FP
+            cf = resolve_field(row.canonical_field)
+            if cf:
+                return cf, _CACHE_CONFIDENCE_COL_FP
 
     # Tier 3 — column name only. Majority vote: pick the canonical that's
     # been recorded most often for this header across the whole org.
@@ -137,7 +133,9 @@ def cache_lookup(session, sheet: str, column: str,
              .order_by(func.sum(ColumnMappingCache.hit_count).desc())
              .first())
     if voted:
-        return voted[0], _CACHE_CONFIDENCE_COL_ONLY
+        cf = resolve_field(voted[0])
+        if cf:
+            return cf, _CACHE_CONFIDENCE_COL_ONLY
     return None
 
 
@@ -624,9 +622,9 @@ def _heuristic_pin(header: str, samples: list[str]) -> str | None:
     # System discriminator columns are intentionally skipped.
     if h.endswith(":: recordtype") or h.endswith(":: recordid"):
         return None
-    # AccountingYRMO format is yyyymm
+    # AccountingYRMO format is yyyymm → the transaction's accounting date
     if "accountingyrmo" in h and kind == "yyyymm":
-        return "premium_transaction_accounting_period"
+        return "premium_transaction_accounting_date"
     # Shared rich rules (column name only, restricted to mappable fields).
     col = header.split(SHEET_SEP)[-1]
     try:
@@ -658,21 +656,22 @@ def _build_candidates_prompt(
     the per-canonical prompt — so the spec we derive from these candidates
     is as accurate as the previous two-call pipeline."""
     role_hint = (
-        "\nROLE-PREFIXED FIELDS: When the same logical field is filled by\n"
-        "different real-world parties, the data model exposes role-prefixed\n"
-        "variants:\n"
-        "  - Agency*/Broker* headers → *_agency variant (agency_legal_name,\n"
-        "    agency_address_line1, …).\n"
-        "  - Insured* headers → *_insured variant (insured_legal_name, …).\n"
-        "  - Company* headers referring to the writing carrier → *_carrier\n"
-        "    if available, else the base field.\n"
+        "\nROLE-SPECIFIC FIELDS: every column in the model names its own\n"
+        "subject, so pick the field whose prefix matches WHO the column is\n"
+        "about:\n"
+        "  - Insured*/Policyholder* headers → policyholder_* fields\n"
+        "    (policyholder_legal_name, policyholder_address_line1, …).\n"
+        "  - Agency*/Broker*/Carrier*/Company* headers naming an organisation\n"
+        "    read off the file → ingested_party_* fields\n"
+        "    (ingested_party_legal_name, ingested_party_type, …).\n"
+        "  - Location/premises columns → risk_location_* fields.\n"
         "Never silently drop agency/broker columns.\n"
     )
     composite_hint = (
-        "\nCOMPOSITE FIELDS: legal_name is often split across FirstName +\n"
-        "LastName columns. List the canonical (legal_name / legal_name_insured\n"
-        "/ legal_name_agency) as a HIGH-confidence candidate on BOTH source\n"
-        "columns; the apply layer combines them.\n"
+        "\nCOMPOSITE FIELDS: policyholder_legal_name is often split across\n"
+        "FirstName + LastName columns. List the canonical field as a\n"
+        "HIGH-confidence candidate on BOTH source columns; the apply layer\n"
+        "combines them.\n"
     )
     attributes_hint = (
         "\nNEVER invent canonical field keys. If no field in the provided\n"
@@ -682,8 +681,8 @@ def _build_candidates_prompt(
         "anything else not in the canonical list.\n"
     )
     join_hint = (
-        "\nJOIN KEYS (policy_number, program_name, tenant_name,\n"
-        "external_policy_number): if the same column meaning appears in\n"
+        "\nJOIN KEYS (policy_number, program_name, tenant_legal_name,\n"
+        "policy_umr): if the same column meaning appears in\n"
         "multiple sheets (POL/UNT/PRM), pick the same canonical key as the\n"
         "top candidate in each sheet — do NOT suffix.\n"
     )
@@ -718,7 +717,7 @@ def _build_candidates_prompt(
         "\nReturn EXACTLY this shape, nothing else:\n"
         '  { "Sheet :: Column": [\n'
         '      {"c":"policy_number","s":0.95},\n'
-        '      {"c":"external_policy_number","s":0.42},\n'
+        '      {"c":"policy_umr","s":0.42},\n'
         "      …\n"
         "    ],\n"
         "    … (one entry per source column) }\n\n"
@@ -732,23 +731,20 @@ _FALLBACK_BATCH = 30        # only used if the single call truncates
 
 
 def _is_acceptable_canonical(cf: str) -> bool:
-    """Whitelist: canonical keys that actually exist in the data model,
-    plus role-prefixed variants. The attribute_value_* / unit_attribute_*
-    catch-all family is INTENTIONALLY rejected — if the LLM can't find a
-    real model field, the column stays unmapped for the user to handle.
+    """Whitelist: canonical keys that actually exist in the data model. The
+    attribute_value_* / extra_* catch-all family is INTENTIONALLY rejected —
+    if the LLM can't find a real model field, the column stays unmapped for
+    the user to handle.
 
-    Also intentionally rejected: bare `policy_attributes` columns
-    (`attribute_value`, `attribute_key`, `scope`, `value_type`). They only
-    make sense as a triple — picking one of them in isolation creates a row
-    that violates the NOT NULL constraints on the other two.
+    Legacy role-suffixed keys (`legal_name_insured`, …) from cached or stored
+    mappings resolve through the v2→v4 LEGACY_FIELD_MAP after the suffix is
+    stripped, so an old spec degrades to its base field instead of vanishing.
     """
-    BARE_ATTR_KEYS = {"attribute_value", "attribute_key", "scope", "value_type"}
-    if cf in BARE_ATTR_KEYS:
-        return False
     if cf in CANONICAL_FIELDS:
         return True
+    from data_model import resolve_field
     base = re.sub(r"_(insured|agency|carrier)$", "", cf)
-    return base in CANONICAL_FIELDS
+    return resolve_field(base) in CANONICAL_FIELDS
 
 
 def _lenient_json_loads(text: str) -> dict | None:
@@ -1385,7 +1381,7 @@ def _apply_local(df: pd.DataFrame, spec: dict[str, Any]) -> list[dict]:
         # can write each group to its entity's `extras` JSONB column.
         # Final shape on the record:
         #   record["extras"] = {
-        #       "policy": {"tria_premium": 12500.00, …},
+        #       "policy": {"tria_premium": 12500.00, …},   # user extra field
         #       "claim":  {"tpa_ref": "RC-2026", …},
         #   }
         if xf_spec:
@@ -1428,7 +1424,7 @@ def _looks_like_template_row(record: dict[str, dict]) -> bool:
 
     A real bordereau row MUST have at least one of:
       - policy.policy_number containing a digit
-      - policy.policy_effective_dt containing a digit
+      - policy.policy_effective_date containing a digit
       - claim.claim_number containing a digit
       - any numeric (int/float) value anywhere in the record
     Anything else is treated as a footer/template/junk row.
@@ -1439,7 +1435,7 @@ def _looks_like_template_row(record: dict[str, dict]) -> bool:
     def has_digit(v: Any) -> bool:
         return isinstance(v, str) and any(ch.isdigit() for ch in v)
 
-    if has_digit(pol.get("policy_number")) or has_digit(pol.get("policy_effective_dt")):
+    if has_digit(pol.get("policy_number")) or has_digit(pol.get("policy_effective_date")):
         return False
     if has_digit(clm.get("claim_number")):
         return False
