@@ -27,6 +27,9 @@ import {
 import {
   resolveOutputTemplate, type ResolveResult, type ScopedContract,
 } from "../api/outputTemplate";
+// The dashed upload box lives in ui/FileDrop so this screen and the Add
+// Contract dialog ask for a document in exactly the same way.
+import { DROP_TONES, DropBadge, type DropTone } from "../components/ui/FileDrop";
 
 // ---- types -----------------------------------------------------------------
 type Party = { id: number; legal_name: string; is_active?: boolean };
@@ -1280,7 +1283,7 @@ export default function DirectSetup() {
         )}
       </Modal>
       <PageHeader title="Bordereau Setup"
-        subtitle="Do this once for each carrier and program: upload the output template, the contract and a sample bordereau. Kavachio learns how your data maps to the output — after that, your team just uploads each new bordereau and gets a validated file back." />
+        subtitle="Done once per carrier and programme. Kavachio learns how your data maps to the output, and from then on your team just uploads each new bordereau and gets a validated file back." />
       <PageBody>
         {err && <Banner kind="error"><AlertTriangle size={15} /> {err}</Banner>}
 
@@ -1356,6 +1359,10 @@ export default function DirectSetup() {
         )}
 
         <Card title="1 · Scope & Uploads">
+          <div className="mb-3 flex items-baseline gap-2">
+            <h3 className="text-[13px] font-semibold">Scope</h3>
+            <span className="text-xs text-ink-muted">Who this setup is for.</span>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl">
             {/* The carrier is who you are, not a choice. Shown so the scope
                 is unambiguous, but there is nothing here to pick. */}
@@ -1377,7 +1384,7 @@ export default function DirectSetup() {
                 setCreatingProgram(false);
                 setProgramId(e.target.value ? Number(e.target.value) : "");
               }}>
-                <option value="">Select Program…</option>
+                <option value="" disabled>Select Program</option>
                 {programs.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 <option value="__new__">➕ Add New Program…</option>
               </Select>
@@ -1479,18 +1486,34 @@ export default function DirectSetup() {
             </div>
           )}
           {carrierId !== "" && programId !== "" && (
-            <p className="text-xs text-ink-muted mt-2">
-              Setup Name: <span className="font-medium text-ink">{setupName}</span>
-            </p>
+            <div className="mt-3 inline-flex max-w-2xl items-center gap-2 rounded-md
+              border border-border bg-surface-2 px-3 py-1.5">
+              <span className="text-[10.5px] uppercase tracking-wide text-ink-soft">
+                Setup name
+              </span>
+              <span className="truncate text-[12.5px] font-medium">{setupName}</span>
+            </div>
           )}
 
-          {/* Data uploads — the templates and the sample they're mapped from.
-              Three across on a wide screen (full width, no cell left hanging),
-              two on a tablet, stacked on a phone. Three only from xl: the sidebar
-              eats ~200px, so 3-up below that leaves the hints too cramped to read. */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 mt-4 items-start">
+          {/* THE DOCUMENTS, in one grid — required first, optional after.
+              They used to sit in two grids of three and two, which made the
+              bottom pair half again as wide as the top three: five boxes doing
+              the same job, drawn at two different sizes, with the widest given
+              to the ones you may skip. One grid keeps every box the same size
+              and lets the reading order carry the meaning instead.
+
+              Three across only from xl: the sidebar eats ~200px, so 3-up below
+              that leaves the hints too cramped to read. */}
+          <div className="mt-5 border-t border-border pt-4">
+            <div className="mb-3 flex items-baseline gap-2">
+              <h3 className="text-[13px] font-semibold">Documents</h3>
+              <span className="text-xs text-ink-muted">
+                The three required ones teach Kavachio the mapping; the rest are extras.
+              </span>
+            </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 items-start">
             <div className="space-y-2">
-              <FilePick label="Input Template" icon={<FileUp size={15} />} file={inputFile} tone="sky" required
+              <FilePick label="Input Template" icon={<FileUp size={15} />} file={inputFile} tone="required" required
                 onPick={f => pickFileWithSheets("input", f)} hint="A representative input sample"
                 disabled={scopeIncomplete} />
               <SheetPicker kind="input" options={inputSheetOpts}
@@ -1498,7 +1521,11 @@ export default function DirectSetup() {
                 hint="Only the checked sheets are mapped to the output." />
             </div>
             <div className="space-y-2">
-              <FilePick label="Output Template" icon={<FileOut size={15} />} file={outFile} tone="sky"
+              {/* Tone follows `required`, which is itself conditional: once the
+                  scope resolves to a template there is nothing you must upload
+                  here, and a box painted as mandatory would say otherwise. */}
+              <FilePick label="Output Template" icon={<FileOut size={15} />} file={outFile}
+                tone={resolved?.template ? "optional" : "required"}
                 required={!resolved?.template}
                 onPick={f => pickFileWithSheets("output", f)}
                 hint={SHOW_BDX_TEMPLATE_BUILDER
@@ -1538,33 +1565,10 @@ export default function DirectSetup() {
               )}
             </div>
 
-            {/* Supplementary data — optional, uploaded ONCE here like the templates.
-                Stored with the setup and captured alongside the BDX on every run;
-                never asked for again at run time. */}
-            <div className="space-y-2">
-              <FilePick label="Supplementary Data (Optional)" icon={<FileUp size={15} />} tone="sky"
-                file={suppFile} onPick={setSuppFile}
-                hint="Extra data captured alongside the BDX on every run — uploaded once here"
-                disabled={scopeIncomplete} />
-              {suppCurrentName && !suppFile && (
-                <div className="text-xs text-ink-muted flex items-center gap-2">
-                  Stored: <b className="truncate min-w-0 flex-1">{suppCurrentName}</b>
-                  <button className="text-red-400 hover:text-red-600 shrink-0" onClick={removeSupplement}>Remove</button>
-                </div>
-              )}
-              {up?.format_id && suppFile && (
-                <Button onClick={saveSupplementNow} disabled={savingSupp}>
-                  <Save size={14} /> Save Supplement
-                </Button>
-              )}
-            </div>
-          </div>
-
-          {/* Contract documents — its own group: the contract, plus anything the
-              contract defers out to. Two across, full width; stacked on a phone. */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4 items-start">
-            {/* Contracts — REQUIRED. One contract applies to every sheet; with more
-                than one, map each schedule sheet to its contract below. */}
+            {/* Contracts — REQUIRED, so it sits with the other two you must
+                provide rather than below them. One contract applies to every
+                sheet; with more than one, map each schedule sheet to its
+                contract below. */}
             <div className="space-y-2">
               <ContractPick
                 files={contractFiles}
@@ -1598,6 +1602,27 @@ export default function DirectSetup() {
               />
             </div>
 
+            {/* Supplementary data — optional, uploaded ONCE here like the templates.
+                Stored with the setup and captured alongside the BDX on every run;
+                never asked for again at run time. */}
+            <div className="space-y-2">
+              <FilePick label="Supplementary Data" icon={<FileUp size={15} />} tone="optional"
+                file={suppFile} onPick={setSuppFile}
+                hint="Extra data captured alongside the BDX on every run — uploaded once here"
+                disabled={scopeIncomplete} />
+              {suppCurrentName && !suppFile && (
+                <div className="text-xs text-ink-muted flex items-center gap-2">
+                  Stored: <b className="truncate min-w-0 flex-1">{suppCurrentName}</b>
+                  <button className="text-red-400 hover:text-red-600 shrink-0" onClick={removeSupplement}>Remove</button>
+                </div>
+              )}
+              {up?.format_id && suppFile && (
+                <Button onClick={saveSupplementNow} disabled={savingSupp}>
+                  <Save size={14} /> Save Supplement
+                </Button>
+              )}
+            </div>
+
             {/* Reference document(s) — optional (Path A). External docs the contract
                 defers to ("per the Purchasing Guidelines on file"); their text is fed
                 into extraction so deferred clauses (e.g. Authorized / Excluded Classes
@@ -1611,6 +1636,7 @@ export default function DirectSetup() {
                 disabled={scopeIncomplete}
               />
             </div>
+          </div>
           </div>
 
           {!up?.format_id && !building && staged.length > 1 && outputSheetOpts && outputSheetSel.size > 0 && (
@@ -1644,11 +1670,12 @@ export default function DirectSetup() {
             </div>
           )}
 
-          <div className="mt-4 flex items-center gap-3">
-            {/* Deliberately NOT gated on having an output template: without one
-                the click OFFERS the two ways to create it (see buildSetup), which
-                is the whole point. Gating it here would leave a user staring at a
-                dead button with no way to find out what is missing. */}
+          {/* The action, and — when it is off — WHY, in words on the page.
+              A greyed button whose only explanation is a tooltip asks the user
+              to discover that hovering it is worth doing; most people conclude
+              the screen is broken instead. The same sentence still rides along
+              as `title` for anyone who does hover. */}
+          <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border pt-4">
             <Button onClick={buildSetup}
               disabled={building || !inputFile || staged.length === 0}
               title={!building && (!inputFile || staged.length === 0)
@@ -1661,6 +1688,21 @@ export default function DirectSetup() {
                 disabled:shadow-none">
               {"Set Up Bordereau Pipeline"}
             </Button>
+            {!building && (!inputFile || staged.length === 0) && (
+              <span className="inline-flex items-center gap-1.5 text-[12.5px] text-warn">
+                <AlertTriangle size={14} className="shrink-0" />
+                Still needed: {missingForBuild().join(", ")}
+              </span>
+            )}
+            {/* Deliberately NOT gated on having an output template: without one
+                the click OFFERS the two ways to create it (see buildSetup), which
+                is the whole point. Gating it here would leave a user staring at a
+                dead button with no way to find out what is missing. */}
+            {!building && inputFile && staged.length > 0 && !outFile && !resolved?.template && (
+              <span className="text-[12.5px] text-ink-muted">
+                No output template yet — you'll be offered the two ways to create one.
+              </span>
+            )}
           </div>
 
           {pipelines.length > 0 && (
@@ -2009,30 +2051,6 @@ function sheetBucket(sh: DsSheet): "data" | "reference" | "summary" {
 // names, so a built-up `border-${tone}-200` would be purged and render colourless.
 // Only the resting/hover state is toned — dragging (navy) and filled (emerald)
 // stay common across every zone, so those signals mean one thing everywhere.
-const DROP_TONES = {
-  sky: {
-    idle: "border-sky-200 bg-sky-50/60 hover:border-sky-400 hover:bg-sky-50",
-    icon: "text-sky-600", cta: "text-sky-700",
-  },
-  indigo: {
-    idle: "border-indigo-200 bg-indigo-50/60 hover:border-indigo-400 hover:bg-indigo-50",
-    icon: "text-indigo-600", cta: "text-indigo-700",
-  },
-  amber: {
-    idle: "border-amber-200 bg-amber-50/60 hover:border-amber-400 hover:bg-amber-50",
-    icon: "text-amber-600", cta: "text-amber-700",
-  },
-  rose: {
-    idle: "border-rose-200 bg-rose-50/60 hover:border-rose-400 hover:bg-rose-50",
-    icon: "text-rose-600", cta: "text-rose-700",
-  },
-  teal: {
-    idle: "border-teal-200 bg-teal-50/60 hover:border-teal-400 hover:bg-teal-50",
-    icon: "text-teal-600", cta: "text-teal-700",
-  },
-} as const;
-type DropTone = keyof typeof DROP_TONES;
-
 function FilePick({ label, icon, file, onPick, accept, hint, tone, required, disabled,
                    altAction }: {
   label: string; icon: React.ReactNode; file: File | null;
@@ -2072,9 +2090,9 @@ function FilePick({ label, icon, file, onPick, accept, hint, tone, required, dis
       <input ref={ref} type="file" accept={accept ?? ".xlsx,.xls,.csv,.xml,.json"} className="hidden" disabled={disabled}
         onClick={e => e.stopPropagation()}
         onChange={e => onPick(e.target.files?.[0] ?? null)} />
-      <div className="flex items-center justify-center gap-1.5 text-sm font-medium mb-1">
+      <div className="flex flex-wrap items-center justify-center gap-1.5 text-sm font-medium mb-1.5">
         <span className={file ? "text-emerald-600" : t.icon}>{icon}</span> {label}
-        {required && <span className="text-red-500">*</span>}
+        <DropBadge required={required} />
       </div>
       {file ? (
         <div className="flex items-center justify-center gap-1.5 text-[11px] text-emerald-700">
@@ -2139,13 +2157,13 @@ function ReferencePick({ files, onAdd, onRemoveAt, disabled }: {
       }}
       className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
-          : `cursor-pointer ${drag ? "border-navy bg-navy/5" : files.length ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.rose.idle}`}`}>
+          : `cursor-pointer ${drag ? "border-navy bg-navy/5" : files.length ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.optional.idle}`}`}>
       <input ref={ref} type="file" multiple accept=".pdf,.docx,.doc,.txt,.xlsx,.xls,.csv" className="hidden" disabled={disabled}
         onClick={e => e.stopPropagation()}
         onChange={e => { const fs = Array.from(e.target.files || []); if (ref.current) ref.current.value = ""; if (fs.length) onAdd(fs); }} />
-      <div className="flex items-center justify-center gap-1.5 text-sm font-medium mb-1">
-        <span className={files.length ? "text-emerald-600" : DROP_TONES.rose.icon}><FileText size={15} /></span>
-        Reference Document(s) <span className="font-normal"> (Optional)</span>
+      <div className="flex flex-wrap items-center justify-center gap-1.5 text-sm font-medium mb-1.5">
+        <span className={files.length ? "text-emerald-600" : DROP_TONES.optional.icon}><FileText size={15} /></span>
+        Reference Document(s) <DropBadge />
       </div>
       {files.length > 0 ? (
         <div className="space-y-1">
@@ -2157,7 +2175,7 @@ function ReferencePick({ files, onAdd, onRemoveAt, disabled }: {
                 onClick={e => { e.stopPropagation(); onRemoveAt(i); }}>✕</button>
             </div>
           ))}
-          <div className={`text-[11px] font-medium inline-flex items-center gap-1 pt-0.5 ${DROP_TONES.rose.cta}`}>
+          <div className={`text-[11px] font-medium inline-flex items-center gap-1 pt-0.5 ${DROP_TONES.optional.cta}`}>
             <UploadCloud size={12} /> Add More
           </div>
         </div>
@@ -2165,7 +2183,7 @@ function ReferencePick({ files, onAdd, onRemoveAt, disabled }: {
         <div className="text-[11px] text-ink-muted">Select a carrier and program first</div>
       ) : (
         <div className="text-[11px] text-ink-muted">
-          <span className={`inline-flex items-center gap-1 font-medium ${DROP_TONES.rose.cta}`}>
+          <span className={`inline-flex items-center gap-1 font-medium ${DROP_TONES.optional.cta}`}>
             <UploadCloud size={12} /> Click to Upload</span> or Drag &amp; Drop
           <div className="mt-0.5 opacity-80">Guidelines the contract defers to (e.g. Purchasing Guidelines)</div>
         </div>
@@ -2212,13 +2230,13 @@ function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
       }}
       className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
-          : `cursor-pointer ${drag ? "border-navy bg-navy/5" : have ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.rose.idle}`}`}>
+          : `cursor-pointer ${drag ? "border-navy bg-navy/5" : have ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.required.idle}`}`}>
       <input ref={ref} type="file" multiple accept=".pdf,.docx" className="hidden" disabled={disabled}
         onClick={e => e.stopPropagation()}
         onChange={e => { const fs = Array.from(e.target.files || []); if (ref.current) ref.current.value = ""; if (fs.length) onAdd(fs); }} />
-      <div className="flex items-center justify-center gap-1.5 text-sm font-medium mb-1">
-        <span className={have ? "text-emerald-600" : DROP_TONES.rose.icon}><FileText size={15} /></span>
-        Contracts <span className="text-red-500">*</span>
+      <div className="flex flex-wrap items-center justify-center gap-1.5 text-sm font-medium mb-1.5">
+        <span className={have ? "text-emerald-600" : DROP_TONES.required.icon}><FileText size={15} /></span>
+        Contracts <DropBadge required />
       </div>
       {have > 0 ? (
         <div className="space-y-1">
@@ -2248,7 +2266,7 @@ function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
                 onClick={e => { e.stopPropagation(); onRemoveAt(i); }}>✕</button>
             </div>
           ))}
-          <div className={`text-[11px] font-medium inline-flex items-center gap-1 pt-0.5 ${DROP_TONES.rose.cta}`}>
+          <div className={`text-[11px] font-medium inline-flex items-center gap-1 pt-0.5 ${DROP_TONES.required.cta}`}>
             <UploadCloud size={12} /> Add More
           </div>
         </div>
@@ -2276,7 +2294,7 @@ function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
         <div className="text-[11px] text-ink-muted">Select a carrier and program first</div>
       ) : (
         <div className="text-[11px] text-ink-muted">
-          <span className={`inline-flex items-center gap-1 font-medium ${DROP_TONES.rose.cta}`}>
+          <span className={`inline-flex items-center gap-1 font-medium ${DROP_TONES.required.cta}`}>
             <UploadCloud size={12} /> Click to Upload</span> or Drag &amp; Drop
           <div className="mt-0.5 opacity-80">One applies to every sheet; add several to map each schedule sheet</div>
         </div>

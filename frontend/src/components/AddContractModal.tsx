@@ -32,6 +32,7 @@ import { errText, scheduleOf } from "../utils/directSetup";
 import {
   resolveOutputTemplate, type ResolveResult,
 } from "../api/outputTemplate";
+import { FileDrop, MultiFileDrop } from "./ui/FileDrop";
 import Modal from "./ui/Modal";
 import { Button } from "./ui/Button";
 import { Field, Select } from "./ui/Field";
@@ -218,12 +219,28 @@ export default function AddContractModal({
               <TemplateState resolving={resolving} resolved={resolved} />
             )}
 
-            <ContractFilePick file={file} onPick={f => { setFile(f); setHalt(null); }}
-              disabled={busy || programId === ""} />
-
-            <RefsPick files={refFiles} disabled={busy || programId === ""}
-              onAdd={fs => setRefFiles(prev => [...prev, ...fs])}
-              onRemoveAt={i => setRefFiles(prev => prev.filter((_, j) => j !== i))} />
+            {/* The same dashed box Bordereau Setup uses — one component, so a
+                document is asked for the same way wherever you are. */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 items-start">
+              <FileDrop
+                label="Contract" required tone="required"
+                icon={<FileText size={15} />}
+                accept=".pdf,.docx"
+                file={file}
+                onPick={f => { setFile(f); setHalt(null); }}
+                hint="The signed contract, as a PDF or Word file"
+                disabled={busy || programId === ""}
+                disabledNote={programId === "" ? "Choose a programme first" : "Reading…"} />
+              <MultiFileDrop
+                label="Reference Document(s)" tone="optional"
+                icon={<FileText size={15} />}
+                accept=".pdf,.docx,.doc,.txt,.xlsx,.xls,.csv"
+                files={refFiles}
+                onChange={setRefFiles}
+                hint="Guidelines the contract defers to (e.g. Purchasing Guidelines)"
+                disabled={busy || programId === ""}
+                disabledNote={programId === "" ? "Choose a programme first" : "Reading…"} />
+            </div>
 
             {/* What this upload REPLACES, said before it happens. A contract
                 whose name carries a schedule takes only that schedule's slot;
@@ -370,68 +387,6 @@ function TemplateState({ resolving, resolved }: {
             : "The programme's output template"}
         {" — so the clauses become validation rules in the same pass."}
       </p>
-    </div>
-  );
-}
-
-/** The contract itself. One file: this screen adds one contract at a time,
- *  which is what "Add contract" on a broker's page means. */
-function ContractFilePick({ file, onPick, disabled }: {
-  file: File | null; onPick: (f: File | null) => void; disabled?: boolean;
-}) {
-  // Deliberately not wrapped in <Field>: that renders a <label>, and a label
-  // around a file input makes every word beside it reopen the file chooser.
-  return (
-    <div>
-      <span className="label">Contract</span>
-      <div className="flex items-center gap-2">
-        <input type="file" accept=".pdf,.docx" disabled={disabled}
-          className="input !py-1.5 flex-1 file:mr-3 file:rounded file:border-0
-            file:bg-surface-2 file:px-2.5 file:py-1 file:text-[12px]"
-          onChange={e => onPick(e.target.files?.[0] ?? null)} />
-        {file && (
-          <span className="inline-flex items-center gap-1 text-[11.5px] text-emerald-700 shrink-0">
-            <FileText size={12} /> ready
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** External documents the contract defers to, offered up front so the pause
- *  below never has to happen. */
-function RefsPick({ files, onAdd, onRemoveAt, disabled }: {
-  files: File[]; onAdd: (fs: File[]) => void; onRemoveAt: (i: number) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div>
-      <span className="label">Reference documents (optional)</span>
-      <div className="space-y-1.5">
-        <input type="file" multiple accept=".pdf,.docx,.doc,.txt,.xlsx,.xls,.csv"
-          disabled={disabled}
-          className="input !py-1.5 file:mr-3 file:rounded file:border-0
-            file:bg-surface-2 file:px-2.5 file:py-1 file:text-[12px]"
-          onChange={e => {
-            const fs = Array.from(e.target.files || []);
-            e.target.value = "";
-            if (fs.length) onAdd(fs);
-          }} />
-        {files.map((f, i) => (
-          <div key={i} className="flex items-center gap-2 text-[11.5px] text-ink-muted">
-            <FileText size={12} className="shrink-0" />
-            <span className="truncate min-w-0 flex-1">{f.name}</span>
-            <button className="hover:text-danger shrink-0" disabled={disabled}
-              onClick={() => onRemoveAt(i)}>✕</button>
-          </div>
-        ))}
-        <p className="text-[11px] text-ink-soft">
-          Guidelines the contract defers to (“per the Purchasing Guidelines on
-          file”). Given here, those clauses become real rules instead of being
-          skipped.
-        </p>
-      </div>
     </div>
   );
 }

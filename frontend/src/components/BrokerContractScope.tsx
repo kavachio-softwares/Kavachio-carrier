@@ -29,6 +29,7 @@
  * so the screen can say what is waiting, and attached to nothing.
  */
 import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, FileText } from "lucide-react";
 import { Field, Select } from "./ui/Field";
 import {
   getProgrammeBrokers, getScopedContracts,
@@ -156,7 +157,7 @@ export function BrokerSelect({ scope, disabled }: {
             programme-wide setup on the carrier's own contracts. A placeholder
             cannot say that and stay a placeholder, so ProgrammeWideNote says it
             under the dropdown instead. */}
-        <option value="">Select Broker…</option>
+        <option value="" disabled>Select Broker…</option>
         {scope.brokers.map(b => (
           <option key={b.id} value={b.id}>
             {b.legal_name} — {brokerNote(b)}
@@ -264,9 +265,11 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
   const chosen = scope.contracts.some(c => c.id === selectedId);
 
   return (
-    <div className="rounded-md border border-border bg-surface-2 px-3 py-2">
+    <div className="rounded-lg border border-border bg-white px-3 py-2.5">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[10.5px] uppercase tracking-wide text-ink-soft">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase
+          tracking-wide text-ink-muted">
+          <FileText size={12} className="text-ink-soft" />
           {many
             ? "Choose the contract this setup runs on"
             : "Contract bound to this selection"}
@@ -280,7 +283,7 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
         )}
       </div>
 
-      <ul className="mt-1 space-y-0.5">
+      <ul className="mt-1.5 space-y-1">
         {scope.contracts.map(c => {
           const on = c.id === selectedId;
           return (
@@ -289,14 +292,17 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
                   already selected and so asks nothing. It is there because the
                   Contracts field below can drop a contract from the build, and
                   a state you can leave needs a way back into. */}
-              <label className="flex items-center gap-2 min-w-0 cursor-pointer py-0.5 text-[12.5px]">
+              <label className={`flex min-w-0 cursor-pointer items-center gap-2.5 rounded-md
+                border px-2.5 py-2 text-[12.5px] transition
+                ${on ? "border-navy/40 bg-navy/[0.05]"
+                     : "border-transparent hover:border-border hover:bg-surface-2"}`}>
                 <input type="radio" name="bdx-setup-contract" checked={on}
                   className="shrink-0 accent-navy"
                   onChange={() => onSelect(c.id)} />
-                <span className={`truncate ${on ? "" : "text-ink-muted"}`}>
+                <span className={`min-w-0 flex-1 truncate ${on ? "font-medium" : "text-ink-muted"}`}>
                   {c.filename || `Contract ${c.id}`}
                 </span>
-                <span className="text-[11px] text-ink-soft shrink-0">
+                <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10.5px] text-ink-muted">
                   {c.broker_name ? c.broker_name : "carrier held"}
                 </span>
               </label>
@@ -310,10 +316,14 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
           contract, and the Build button would refuse it with a message that
           does not mention the list the user is looking at. */}
       {!chosen ? (
-        <p className="text-[11px] text-amber-700 mt-1">
-          {many
-            ? "None selected — pick the contract this bordereau is written under, or upload one on the Contracts field below."
-            : "Left out — pick it to put it back, or upload a replacement on the Contracts field below."}
+        <p className="mt-2 flex items-start gap-1.5 rounded-md bg-warn/10 px-2.5 py-1.5
+          text-[11.5px] leading-relaxed text-warn">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+          <span>
+            {many
+              ? "None selected — pick the contract this bordereau is written under, or upload one on the Contracts field below."
+              : "Left out — pick it to put it back, or upload a replacement on the Contracts field below."}
+          </span>
         </p>
       ) : many ? (
         <p className="text-[11px] text-ink-soft mt-1">

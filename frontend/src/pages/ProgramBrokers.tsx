@@ -13,9 +13,11 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, FileText, Plus, Layers, Upload } from "lucide-react";
+import { ArrowLeft, FileText, Plus, Layers, Upload, Users2 } from "lucide-react";
 import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
+import { OrgAvatar } from "../components/ui/OrgAvatar";
 import {
   getHierarchy, getBrokers, addProgrammeBroker, removeProgrammeBroker,
   type HierarchyProgramme, type BrokerSummary,
@@ -159,20 +161,27 @@ export default function ProgramBrokers() {
       />
       <PageBody>
         {msg && (
-          <div className="mb-4 rounded border border-success/40 bg-success/10 px-3 py-2 text-sm text-success">
+          <div className="rounded-md border border-success/30 bg-success/10 px-3.5 py-2.5 text-sm text-success">
             {msg}
           </div>
         )}
         {err && (
-          <div className="mb-4 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">
+          <div className="rounded-md border border-warn/30 bg-warn/10 px-3.5 py-2.5 text-sm text-warn">
             {err}
           </div>
         )}
 
-        <Card title="Put a broker on this programme" className="mb-5">
+        {/* Adding a broker is a one-line action, not the subject of the page —
+            the brokers already on the programme are. It used to be a full card
+            at the top, which gave the least-used control the most weight and
+            pushed the actual content below the fold. */}
+        <Card className="!p-3.5">
           <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 pr-1 text-[12.5px] font-medium text-ink-muted">
+              <Plus size={14} /> Put a broker on this programme
+            </span>
             <select
-              className="min-w-[240px] flex-1 rounded border border-border px-2.5 py-1.5 text-sm"
+              className="input !w-auto min-w-[240px] flex-1 !py-1.5"
               value={adding} onChange={e => setAdding(e.target.value)}
               disabled={addable.length === 0}
             >
@@ -189,14 +198,11 @@ export default function ProgramBrokers() {
                 </option>
               ))}
             </select>
-            <button
-              className="inline-flex items-center gap-1 rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:opacity-50"
-              onClick={add} disabled={!adding || busy}
-            >
-              <Plus size={14} /> Add
-            </button>
+            <Button className="!py-1.5" onClick={add} disabled={!adding || busy}>
+              Add
+            </Button>
           </div>
-          <p className="mt-2.5 text-xs text-ink-muted">
+          <p className="mt-2 text-xs text-ink-muted">
             {all.length === 0
               ? <>You hold no brokers yet. A broker is created by inviting its
                   first admin, from <b className="font-medium">Brokers</b> —
@@ -209,10 +215,16 @@ export default function ProgramBrokers() {
 
         {prog.brokers.length === 0 ? (
           <Card>
-            <p className="text-sm text-ink-muted">
-              No brokers on this programme yet, so it cannot hold a contract.
-              Put at least one on it above.
-            </p>
+            <div className="py-12 text-center">
+              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2">
+                <Users2 size={20} className="text-ink-soft" />
+              </div>
+              <p className="text-sm font-medium">No brokers on this programme yet</p>
+              <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">
+                So it cannot hold a contract. Put at least one on it using the
+                bar above.
+              </p>
+            </div>
           </Card>
         ) : (
           <div className="space-y-4">
@@ -221,15 +233,28 @@ export default function ProgramBrokers() {
               const off = b.link_status !== "active";
               const sx = setupFor(setups, b.id);
               return (
-                <Card key={b.id}>
-                  <div className="mb-3 flex flex-wrap items-center gap-2.5">
-                    <Link to={`/brokers/${b.id}`}
-                      className={`font-medium hover:underline ${off ? "text-ink-soft line-through" : "text-navy"}`}>
-                      {b.legal_name}
-                    </Link>
+                <Card key={b.id} className={off ? "opacity-75" : undefined}>
+                  {/* The broker IS the heading of its own card, so it is given
+                      the weight of one — mark, name, state — with the
+                      destructive action kept small and to the side rather than
+                      sitting at the same size as the name it would remove. */}
+                  <div className="mb-3 flex flex-wrap items-center gap-3 border-b border-border pb-3">
+                    <OrgAvatar name={b.legal_name} muted={off} />
+                    <div className="min-w-0">
+                      <Link to={`/brokers/${b.id}`}
+                        className={`text-[15px] font-semibold hover:underline ${
+                          off ? "text-ink-soft line-through" : "text-ink hover:text-navy"}`}>
+                        {b.legal_name}
+                      </Link>
+                      <div className="mt-0.5 text-xs text-ink-muted">
+                        {b.contracts.length === 0
+                          ? "No contract on this programme"
+                          : `${b.contracts.length} contract${b.contracts.length === 1 ? "" : "s"} on this programme`}
+                      </div>
+                    </div>
                     <OnboardingBadge status={meta?.onboarding_status} />
                     {off && (
-                      <span className="rounded bg-surface-2 px-2 py-0.5 text-xs text-ink-muted"
+                      <span className="pill pill-grey"
                         title="Taken off this programme — their contracts stay readable">
                         Taken off
                       </span>
@@ -237,7 +262,8 @@ export default function ProgramBrokers() {
                     <span className="flex-1" />
                     {!off && (
                       <button
-                        className="text-sm text-ink-muted hover:text-danger hover:underline disabled:opacity-50"
+                        className="rounded-md px-2 py-1 text-[12.5px] text-ink-soft transition
+                          hover:bg-danger/10 hover:text-danger disabled:opacity-50"
                         onClick={() => remove(b.id, b.legal_name)} disabled={busy}
                         title="Take this broker off the programme"
                       >
@@ -321,35 +347,37 @@ export default function ProgramBrokers() {
                   {b.contracts.length === 0 ? (
                     // No contract yet: this IS the next thing to do for this
                     // broker, so it is the one prominent action on the card.
-                    <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md
+                      border border-dashed border-border bg-surface-2/40 px-3 py-3">
                       <p className="text-sm text-ink-muted">
                         No contracts with this broker on this programme yet.
                       </p>
                       {!off && (
                         <Link
                           to={`/direct/setup?program_id=${prog.id}&broker_party_id=${b.id}`}
-                          className="inline-flex items-center gap-1 rounded bg-navy px-2.5 py-1 text-sm font-medium text-white hover:bg-navy-dark"
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-navy px-3 py-1.5
+                            text-[12.5px] font-medium text-white transition hover:bg-navy-dark"
                         >
                           <Upload size={13} /> Upload contract
                         </Link>
                       )}
                     </div>
                   ) : (
-                    <ul className="space-y-1.5">
+                    <ul className="divide-y divide-border overflow-hidden rounded-md border border-border">
                       {b.contracts.map(c => (
                         <li key={c.id}>
                           <button
-                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-surface-2"
+                            className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-sm transition hover:bg-surface-2"
                             onClick={() => nav(`/programs/${prog.id}/contracts/${c.id}`)}
                           >
-                            <FileText size={14} className="shrink-0 text-ink-muted" />
+                            <FileText size={14} className="shrink-0 text-ink-soft" />
                             <span className="min-w-0 flex-1 truncate">
                               {c.filename ?? `Contract #${c.id}`}
                             </span>
-                            <span className={`rounded px-2 py-0.5 text-xs ${
-                              c.approval_status === "approved" ? "bg-success/10 text-success"
-                              : c.approval_status === "pending_approval" ? "bg-warn/10 text-warn"
-                              : "bg-danger/10 text-danger"}`}>
+                            <span className={`pill shrink-0 ${
+                              c.approval_status === "approved" ? "pill-green"
+                              : c.approval_status === "pending_approval" ? "pill-amber"
+                              : "pill-red"}`}>
                               {c.approval_status === "approved" ? "Live"
                                 : c.approval_status === "pending_approval" ? "Waiting on you"
                                 : "Rejected"}
@@ -358,7 +386,7 @@ export default function ProgramBrokers() {
                         </li>
                       ))}
                       {!off && (
-                        <li className="pt-1">
+                        <li className="bg-surface-2/40">
                           {/* To the broker's own page, not straight into the
                               wizard: a second contract is usually a decision
                               about what they already hold, so it starts from
@@ -366,7 +394,8 @@ export default function ProgramBrokers() {
                               this one. The upload lives there. */}
                           <Link
                             to={`/brokers/${b.id}`}
-                            className="inline-flex items-center gap-1 px-2 text-sm text-ink-muted hover:text-navy hover:underline"
+                            className="flex items-center gap-1.5 px-3 py-2 text-[12.5px] font-medium
+                              text-ink-muted transition hover:text-navy"
                           >
                             <Plus size={13} /> Add another contract
                           </Link>
@@ -380,10 +409,12 @@ export default function ProgramBrokers() {
           </div>
         )}
 
-        <p className="mt-4 flex items-center gap-1.5 text-sm text-ink-muted">
-          <Layers size={13} />
-          A broker can be on several of your programmes. This screen shows only
-          what they do on <b className="font-medium">{prog.name}</b>.
+        <p className="flex items-start gap-1.5 text-xs text-ink-muted">
+          <Layers size={13} className="mt-0.5 shrink-0" />
+          <span>
+            A broker can be on several of your programmes. This screen shows only
+            what they do on <b className="font-medium">{prog.name}</b>.
+          </span>
         </p>
       </PageBody>
     </>
