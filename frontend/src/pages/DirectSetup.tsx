@@ -16,7 +16,9 @@ import { InfoTip } from "../components/ui/InfoTip";
 import { LoadingOverlay } from "../components/Busy";
 import { MissingColumnsList, UnmappedClausesList } from "../components/MissingColumnsNote";
 import { errText, MissingColumnsResp, scheduleOf } from "../utils/directSetup";
-import { uploadContract, type ExternalReference } from "../api/contracts";
+import {
+  uploadContract, generateContractRules, type ExternalReference,
+} from "../api/contracts";
 import CreateOutputTemplate from "../components/CreateOutputTemplate";
 import { SHOW_BDX_TEMPLATE_BUILDER } from "../featureFlags";
 import OutputTemplateState from "../components/OutputTemplateState";
@@ -856,6 +858,17 @@ export default function DirectSetup() {
       // and leave a duplicate contract row behind, so take the id and move on.
       if (entry.kind === "existing") {
         setStep(`Using the contract already on file (${entry.name})…`);
+        // …but a contract added before this programme had an output template
+        // stopped at its CLAUSES: rules name a template's columns, and there
+        // were none to name. Taking its id and moving on is what produced a
+        // finished setup reporting zero contract rules. Write them now, from
+        // the clauses it already has — no re-read, and a no-op when the
+        // contract was already done for this template.
+        setStep(`Writing rules for ${entry.name} against this output template…`);
+        await generateContractRules({
+          programId: Number(programId), contractId: entry.id,
+          outputTemplateId: tid,
+        });
         cids.push(entry.id);
         continue;
       }

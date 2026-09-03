@@ -2947,6 +2947,444 @@ class ValidationRuleGenerator:
         self.program_id            = program_id
 
     # =====================================================
+    # PUBLIC: Pipeline 2 on its own (clauses in → rules out)
+    # =====================================================
+
+    def run_pipeline_2(self, clauses_extracted, template_fields, contract_id,
+                       tenant_id=None, reference_documents=None):
+        """Classify, synthesize, verify — everything from Call 2 onwards.
+
+        Split out of `generate_validation_rules_json` so it can be run on its
+        own, over clauses that are ALREADY in the database. That is the case a
+        contract lands in when it is added before the programme has an Output
+        Template: rules are written against a template's columns, so the run
+        stops after the clauses and every rule-bearing one is parked awaiting a
+        template. This is how that work gets finished when the template arrives
+        — the source document is not retained, so re-reading it is not merely
+        wasteful, it is impossible.
+
+        `clauses_extracted` is mutated in place (each clause gains its
+        rule_generation_status and classification), exactly as before.
+
+        Returns a dict: no_template, classifications, synth_outputs,
+        output_schema, validation_rules, review_queue, control_register.
+        """
+        # -------------------------------------------------
+        # CALL 2 — rule_bearing + rule INTENT (field-agnostic)
+        # Merges Stage A classification with intent extraction in one call. The
+        # result is classification-shaped (is_rule_bearing, rule_types, …) and
+        # also carries an `intents` list that Call 3 maps to output fields.
+        # -------------------------------------------------
+
+        with plog.stage("Call 2 intents"):
+            classifications = extract_rule_intents(clauses_extracted)
+
+        # Update each clause's rule_generation_status from the verdict
+        for clause, classification in zip(clauses_extracted, classifications):
+            clause["rule_generation_status"] = resolve_status(classification)
+            clause["classification"] = classification
+
+        # -------------------------------------------------
+        # NO OUTPUT TEMPLATE — the run ends here, with the clauses.
+        # -------------------------------------------------
+        # Every rule is written against an output template's COLUMNS: Call 3
+        # binds each intent to one of them, and the verify gate refuses any rule
+        # referencing a column the template does not have (rule_ir.validate_ir).
+        # With no template there are no columns, so Call 3 would ask the model to
+        # bind every intent to an empty list and the gate would then refuse all
+        # of its answers — the most expensive call in the pipeline, bought to
+        # produce nothing.
+        #
+        # So a contract read without one stops at what it CAN produce: its
+        # clauses, and the verdict on which of them carry a rule. Those verdicts
+        # go to the review bucket naming the reason, so the work is visible and
+        # can be finished the moment a template exists — rather than the contract
+        # looking as though it had nothing to say.
+        if not template_fields:
+            review_queue, control_register = [], []
+            for clause, classification in zip(clauses_extracted, classifications):
+                entry = {
+                    "clause_id":   clause.get("clause_id"),
+                    "clause_text": clause.get("text"),
+                    "source_page": clause.get("page_number") or clause.get("page"),
+                }
+                if classification.get("is_rule_bearing"):
+                    review_queue.append({
+                        **entry,
+                        "reason": "no output template yet — this clause carries a "
+                                  "rule, but a rule can only be written against an "
+                                  "output template's columns",
+                    })
+                else:
+                    control_register.append({
+                        **entry,
+                        "reason": classification.get("reasoning")
+                                  or "non-rule-bearing clause (obligation / governance)",
+                    })
+            print(f"\n[Pipeline 2] No output template — stopping after clauses: "
+                  f"{len(clauses_extracted)} clause(s), "
+                  f"{len(review_queue)} awaiting a template, "
+                  f"{len(control_register)} to control register. No rules written.")
+            # The caller owns the Pipeline-1 half of the answer (metadata,
+            # commercial terms, what the contract defers to), so it builds the
+            # final output; this returns only what Pipeline 2 decided.
+            return {
+                "no_template":      True,
+                "classifications":  classifications,
+                "synth_outputs":    [],
+                "output_schema":    None,
+                "validation_rules": [],
+                "review_queue":     review_queue,
+                "control_register": control_register,
+            }
+
+        # # Persist Stage A classification side-car JSON (mirrors Stage B files).
+        # save_stage_a_output(
+        #     clauses_extracted,
+        #     classifications,
+        #     output_dir,
+        #     contract_id=contract_id,
+        #     file_base=file_base
+        # )
+
+        # -------------------------------------------------
+        # PIPELINE 2.4 — Stage B (IR) extraction
+        # -------------------------------------------------
+
+        # No hardcoded confidence cutoff: confidence is advisory (the verify gate
+        # is the real gate), and is_rule_bearing routing happens inside Stage B —
+        # non-rule-bearing clauses go to the control register, nothing is dropped.
+        # Pass ALL clauses; the synthesizer partitions rule-bearing vs not.
+        rule_bearing = sum(
+            1 for c in classifications if c.get("is_rule_bearing")
+        )
+        print(
+            f"[Pipeline 2] Stage B IR extraction on "
+            f"{rule_bearing} rule-bearing clause(s) "
+            f"(of {len(clauses_extracted)} total)."
+        )
+
+        if template_fields:
+            print(
+                f"[Pipeline 2] Using template-aware IR extraction "
+                f"({len(template_fields)} output template fields)"
+            )
+
+        # Output Template = the canonical field namespace every rule is written
+        # against (field_names for the existence gate, field_to_sheet for the
+        # compiler, grouped list for the prompt).
+        output_schema = build_output_schema(template_fields)
+
+        # CALL 3 — map each rule intent (from Call 2) to ONE template + Output
+        # Template fields. This focused mapping step recovers checkable rules
+        # (territory, policy-period, products-aggregate) that the old combined
+        # "extract + map" call under-mapped. Output → IR candidates per clause.
+        #
+        # The generic rule library rides along in this SAME call. Both halves ask
+        # the mapper the identical question — bind this intent to a column of this
+        # Output Template — against the identical field list, so a second call was
+        # buying nothing but a second bill. Library intents are appended AFTER the
+        # contract ones (and are already tenant-before-global) so ordering is
+        # preserved on both sides.
+        #
+        # The RESULT is split apart again immediately below. Merging the CALL is
+        # safe; merging the pipeline POSITION is not — the library's dedup has to
+        # run after every derived-rule injector further down, so the library half
+        # is held back and finished at its original point. See
+        # finish_generic_entries.
+        # NOTE: the `tenant_id` PARAMETER, not self.tenant_id — they are distinct
+        # (the parameter shadows the attribute and is what the library bind has
+        # always used), so reading the attribute here would silently change scope.
+        lib_clauses, lib_intents, lib_rules = build_generic_intents(
+            tenant_id, template_fields)
+        if lib_clauses:
+            print(f"\n[Generic] {len(lib_clauses)} library rule(s) merged into the "
+                  f"Call-3 mapping call (tenant_id={tenant_id}).")
+
+        # ── COST: memoize the library half of the Call-3 bind ────────────────
+        # Binding a library rule asks "which column of THIS output template means
+        # 'Insured ZIP Code'?" — a question about the LIBRARY and the TEMPLATE, with
+        # no input from the contract being uploaded. Every contract uploaded against
+        # the same template re-bought the identical answer, and it is the most
+        # expensive answer in the pipeline to buy: on a measured run the library was
+        # 50 of the 80 Call-3 items, and Call 3 was ~59% of the bill.
+        #
+        # Safe because the key covers everything that can change the answer (see
+        # _generic_bind_key) and every call runs at temperature 0 with a fixed seed,
+        # so the cached answer IS what a re-ask returns. A hit skips ONLY the library
+        # intents — map_intents_to_ir partitions contract from library intents, so
+        # the contract half's batches are identical whether this hits or misses.
+        _lib_key = _generic_bind_key(lib_rules, template_fields)
+        _lib_cached = ai_cache.get("generic_bind", _lib_key) if _lib_key else None
+
+        if _lib_cached is not None:
+            print(f"[Generic] reusing cached bind for {len(lib_clauses)} library "
+                  f"rule(s) — their Call-3 mapping is skipped entirely.")
+            plog.log("CALL3", "SKIPPED",
+                     f"library bind for {len(lib_clauses)} rule(s) served from cache",
+                     "answer depends only on (library rows, template fields) — "
+                     "no contract input, so it is reused rather than re-bought")
+            with plog.stage("Call 3 mapping"):
+                synth_outputs = map_intents_to_ir(
+                    clauses_extracted,
+                    classifications,
+                    template_fields=template_fields,
+                )
+            generic_mapped = _lib_cached
+        else:
+            with plog.stage("Call 3 mapping"):
+                synth_outputs = map_intents_to_ir(
+                    clauses_extracted + lib_clauses,
+                    classifications   + lib_intents,
+                    template_fields=template_fields,
+                )
+
+            # Split the answer back apart. is_generic_entry keys on the sign of
+            # clause_id (library rules carry the negated library row id), so this is
+            # exact rather than a name match. After these two lines synth_outputs holds
+            # precisely what it held before the merge, and every injector below runs
+            # unchanged and never sees a library rule.
+            generic_mapped = [e for e in synth_outputs if is_generic_entry(e)]
+            synth_outputs  = [e for e in synth_outputs if not is_generic_entry(e)]
+
+            # Store the library half only, and never an EMPTY one: a cache entry that
+            # binds nothing would suppress every library rule on every future upload
+            # against this template. A run that mapped nothing (failed or truncated
+            # batch) is deliberately left uncached so the next upload retries it.
+            if _lib_key and generic_mapped:
+                ai_cache.put("generic_bind", _lib_key, generic_mapped,
+                             tenant_id=tenant_id)
+
+        # #7b — MERGE CONTRADICTORY SIBLING ENUMS (deterministic, generic).
+        # Sibling program tables ("<identifying label>: <name A>" / "<name B>" /
+        # "<name C>") each yield an UNSCOPED value_in_set on the same column
+        # allowing only their own name. Rules are conjunctive, so three
+        # disjoint singletons on one field flag EVERY row — the only consistent
+        # reading is their union (any of the named cohorts). The prompts steer
+        # the model away from emitting these, but compliance is probabilistic;
+        # this repair is the guarantee. See merge_sibling_enum_rules.
+        nme = merge_sibling_enum_rules(synth_outputs)
+        if nme:
+            print(f"[Call 3] merged {nme} contradictory sibling enum rule(s) "
+                  f"into union value set(s)")
+
+        # #8 — Re-anchor a "backdating" period rule to PolicyInception → Transaction
+        # (processing) date (deterministic, generic; the mapper's field choice for
+        # backdating is inconsistent). See fix_backdating_period_fields.
+        nbd = fix_backdating_period_fields(synth_outputs, template_fields)
+        if nbd:
+            print(f"[Call 3] re-anchored {nbd} backdating period rule(s) to "
+                  f"policy-inception → transaction-date")
+
+        # #9 — Repair a headline-rate commission/fee formula (e.g. Commission
+        # Amount = Gross × 0.25) to use the BDX's PER-ROW rate column instead of
+        # the hardcoded contract rate, when such a column exists. Deterministic,
+        # generic. See fix_hardcoded_rate_formulas.
+        nhr = fix_hardcoded_rate_formulas(synth_outputs, template_fields)
+        if nhr:
+            print(f"[Call 3] repaired {nhr} hardcoded-rate formula(s) to use the "
+                  f"per-row rate column")
+
+        # #9b — A commission-family rate SCHEDULE stated as a bare % ("Commissions
+        # Schedule: 25.05%") is a FIXED value the reported rate must EQUAL, not a
+        # ceiling/floor. When the mapper mis-typed it as max_limit/min_limit (so it
+        # silently flags nothing), collapse it to range_check(min==max). Generic,
+        # guarded. See fix_fixed_rate_schedule_bounds.
+        nrs = fix_fixed_rate_schedule_bounds(synth_outputs, template_fields)
+        if nrs:
+            print(f"[Call 3] collapsed {nrs} commission-schedule rate rule(s) to a "
+                  f"fixed-value (equals) check")
+
+        # #8b — Companion rule on the program-period date COLUMN. When a clause's
+        # program effective/expiration date became a date_bound on a POLICY date
+        # field, also require the reported Program Effective/Expiration Date column
+        # to EQUAL that contract date. Deterministic, generic. See
+        # derive_program_period_companion_rules.
+        prog_companions = derive_program_period_companion_rules(
+            synth_outputs, template_fields)
+        if prog_companions:
+            print(f"[Call 3] +{len(prog_companions)} program-date companion rule(s): "
+                  f"{[e['candidates'][0]['params']['field'] for e in prog_companions]}")
+            synth_outputs.extend(prog_companions)
+
+        # #6 — DERIVED formula rules (deterministic, not from a single clause):
+        # e.g. Commission Amount = Gross Premium × Commission Rate. Added only when
+        # the template has the matching column trio AND the contract already
+        # governs that rate, so the reported amount is checked, not just the rate.
+        # Deterministic territory backstop FIRST (reads the pristine mapped
+        # candidates to decide whether the mapper already emitted an exclusion).
+        terr = derive_territory_exclusion_entries(
+            synth_outputs, clauses_extracted, template_fields)
+        if terr:
+            print(f"[Call 3] +{len(terr)} deterministic territory exclusion rule(s) "
+                  f"(mapper produced none): {[e['clause']['text'][:60] for e in terr]}")
+            synth_outputs.extend(terr)
+
+        derived = derive_formula_entries(synth_outputs, template_fields)
+        if derived:
+            print(f"[Call 3] +{len(derived)} derived formula rule(s): "
+                  f"{[e['clause']['text'] for e in derived]}")
+            synth_outputs.extend(derived)
+
+        # #6b-AI — when the template carries NO explicit per-column formula row,
+        # ask the model in ONE call which columns are arithmetically COMPUTED and
+        # attach the inferred formula to each, so the SAME annotation-formula
+        # machinery below turns them into cross-field rules. Generic (the model
+        # decides — works for columns never seen before), additive (only fills a
+        # `formula` that isn't already set from a real annotation row), and safe
+        # (wrapped; a failure just yields nothing). See infer_formula_annotations.
+        try:
+            with plog.stage("Formula inference"):
+                _ai_formulas = infer_formula_annotations(template_fields)
+        except Exception as _exc:
+            print(f"[Call 3] AI formula inference skipped ({_exc})")
+            _ai_formulas = {}
+        if _ai_formulas:
+            _added = 0
+            for _f in (template_fields or []):
+                if not _f.get("formula") and _f.get("name") in _ai_formulas:
+                    _f["formula"] = _ai_formulas[_f["name"]]
+                    _added += 1
+            if _added:
+                print(f"[Call 3] AI inferred {_added} column formula(s) "
+                      f"(template has no formula-annotation row)")
+
+        # #6b — DERIVED formula rules from a per-column FORMULA annotation carried
+        # on the output template (the exact arithmetic the template author wrote,
+        # e.g. "Payable due AmWins Re = Palms Gross Written Premium $ − Gross
+        # Commission …") OR the AI-inferred formula attached just above. Parsed
+        # generically; each operand resolved to a real column. Runs AFTER
+        # derive_formula_entries so it skips any result field that already got a
+        # formula. See derive_annotation_formula_entries.
+        ann_formulas = derive_annotation_formula_entries(synth_outputs, template_fields)
+        if ann_formulas:
+            print(f"[Call 3] +{len(ann_formulas)} annotation-formula rule(s): "
+                  f"{[e['candidates'][0]['params'].get('result_field') or e['candidates'][0]['params'].get('field') for e in ann_formulas]}")
+            synth_outputs.extend(ann_formulas)
+
+        # #6c — STRUCTURAL fallback for templates with NO formula annotation: an
+        # "<entity> <concept> Amount $" column with a sibling per-row rate column
+        # and an entity-matched base → amount = base × rate. Deduped against the
+        # mapper and the two derivers above. See derive_rate_amount_formulas.
+        rate_formulas = derive_rate_amount_formulas(synth_outputs, template_fields)
+        if rate_formulas:
+            print(f"[Call 3] +{len(rate_formulas)} structural rate×base formula(s): "
+                  f"{[e['candidates'][0]['params']['result_field'] for e in rate_formulas]}")
+            synth_outputs.extend(rate_formulas)
+
+        # #6d — VALUE-driven backstop for templates whose headers defeat every
+        # name-matching gate above (terse ALL-CAPS bordereaux: "COMMISSION AMT",
+        # "COMPANY CEDE", "NET CEDED"). Emits only relationships that reproduce the
+        # reported amount on every sampled row, product AND complement. Runs last,
+        # so it only ever fills columns nothing else defined.
+        # See derive_verified_rate_formulas.
+        try:
+            verified = derive_verified_rate_formulas(synth_outputs, template_fields)
+        except Exception as _exc:
+            print(f"[Call 3] verified rate formula derivation skipped ({_exc})")
+            verified = []
+        if verified:
+            print(f"[Call 3] +{len(verified)} sample-verified formula(s): "
+                  f"{[e['candidates'][0]['rule_name'] for e in verified]}")
+            synth_outputs.extend(verified)
+
+        # #7 — Closed-set rules from the column HEADER (e.g. "Facultative
+        # Re(Y/N)" → value must be Y/N; "Policy Type (Primary/Excess)" → value
+        # must be Primary/Excess). Deterministic, header-driven, no LLM. Runs
+        # AFTER the mapper + formula derivation so it can skip any flag column a
+        # contract clause already governs (no duplicate rule).
+        bool_flags = derive_header_enum_entries(synth_outputs, template_fields)
+        if bool_flags:
+            print(f"[Call 3] +{len(bool_flags)} derived header-enum rule(s): "
+                  f"{[e['candidates'][0]['params']['field'] for e in bool_flags]}")
+            synth_outputs.extend(bool_flags)
+
+        # #8 — The referral-INDICATOR column must be populated on every policy
+        # (non-blank data-quality check). Deterministic, role-token located, no LLM.
+        # Runs after the header-enum deriver so it never doubles an existing rule.
+        ref_ind = derive_referral_indicator_presence_rule(synth_outputs, template_fields)
+        if ref_ind:
+            print(f"[Call 3] +{len(ref_ind)} referral-indicator presence rule(s): "
+                  f"{[e['candidates'][0]['params']['field'] for e in ref_ind]}")
+            synth_outputs.extend(ref_ind)
+
+        # GENERIC RULE LIBRARY — Kavachio's standard BDX checks from the
+        # `generic_rule_specification` table. Not contract-derived: they apply to
+        # every program, so they skip Call 1/2 and were bound to this program's
+        # columns by the SAME Call-3 mapper — in the same call, up at CALL 3; only
+        # the deterministic guards and the dedup happen here.
+        #
+        # This still runs LAST of the injectors, which is the whole reason the two
+        # halves are separate: the dedup below must see every derived-rule entry
+        # already in synth_outputs, and drop_derived_duplicates must find the
+        # derived twin so _carry_dispatch_params can move its country dispatch onto
+        # the surviving library rule. Only the AI call moved earlier; this did not.
+        generic_entries = finish_generic_entries(
+            generic_mapped, lib_rules, synth_outputs, template_fields)
+        if generic_entries:
+            print(f"[Call 3] +{sum(len(e['candidates']) for e in generic_entries)} "
+                  f"generic library rule(s)")
+            # A library rule and an auto-derived data-quality rule on the SAME
+            # column say the same thing twice ("[Derived rule] Insured Zip Code
+            # must be a valid postal code…" vs "[Generic rule] Insured ZIP Code
+            # Must Be Valid"). The library rule wins — drop the derived twin so
+            # the reviewer sees one rule per column, from the editable catalogue,
+            # carrying over the country dispatch the derived rule worked out.
+            drop_derived_duplicates(synth_outputs, generic_entries)
+            # …and hold the library to the same bar the deriver holds itself to: a
+            # reference-vocabulary check with no country to resolve against is
+            # unanswerable, so it is dropped rather than shipped. See
+            # drop_uncountried_reference_rules.
+            drop_uncountried_reference_rules(generic_entries)
+            synth_outputs.extend(generic_entries)
+
+        # -------------------------------------------------
+        # PIPELINE 2.5 — Verify gate + routing (deterministic)
+        # -------------------------------------------------
+
+        contract_ctx = {
+            "tenant_id":   self.tenant_id,
+            "contract_id": contract_id,
+            "program_id":  self.program_id
+        }
+
+        # Reference-doc GROUP → MEMBERS map (data-driven, from the uploaded
+        # reference documents' tables). Lets a value-set rule whose values are
+        # category/group names (e.g. authorized/excluded "Occupancy Group"s) be
+        # expanded to also carry every specific member the reference lists under
+        # that group, so a BDX row reporting a specific class matches.
+        group_members = build_reference_group_members(reference_documents)
+        if group_members:
+            print(f"[Pipeline 2.5] reference group→members map: "
+                  f"{len(group_members)} group(s) "
+                  f"{[v[0] for v in group_members.values()]}")
+
+        # Each IR is verified (validate → vocab-normalize → field-existence →
+        # compile → guard/dry-run) and routed to exactly one destination.
+        with plog.stage("Verify + compile (no AI)"):
+            validation_rules, review_queue, control_register = normalize_ir_outputs(
+                synth_outputs,
+                contract_ctx,
+                output_schema,
+                group_members=group_members,
+            )
+        print(
+            f"[Pipeline 2.5] {len(validation_rules)} proposed rule(s), "
+            f"{len(review_queue)} to review, "
+            f"{len(control_register)} to control register."
+        )
+
+        return {
+            "no_template":      False,
+            "classifications":  classifications,
+            "synth_outputs":    synth_outputs,
+            "output_schema":    output_schema,
+            "validation_rules": validation_rules,
+            "review_queue":     review_queue,
+            "control_register": control_register,
+        }
+
+    # =====================================================
     # PUBLIC: full pipeline
     # =====================================================
 
@@ -3324,61 +3762,25 @@ class ValidationRuleGenerator:
         # print(f"[Pipeline 1] saved extraction output → {pipeline1_path}")
 
         # -------------------------------------------------
-        # CALL 2 — rule_bearing + rule INTENT (field-agnostic)
-        # Merges Stage A classification with intent extraction in one call. The
-        # result is classification-shaped (is_rule_bearing, rule_types, …) and
-        # also carries an `intents` list that Call 3 maps to output fields.
+        # PIPELINE 2 — Call 2, Call 3, the derivers, and the verify gate.
+        # Lifted into run_pipeline_2 so the same steps can be run over clauses
+        # that are already in the database, for a contract whose Output Template
+        # only turned up later. Nothing about the sequence changed.
         # -------------------------------------------------
+        _p2 = self.run_pipeline_2(
+            clauses_extracted, template_fields, contract_id,
+            tenant_id=tenant_id, reference_documents=reference_documents,
+        )
+        classifications  = _p2["classifications"]
+        validation_rules = _p2["validation_rules"]
+        review_queue     = _p2["review_queue"]
+        control_register = _p2["control_register"]
+        # Kept under the legacy name for the final-output builder below.
+        dropped          = review_queue
 
-        with plog.stage("Call 2 intents"):
-            classifications = extract_rule_intents(clauses_extracted)
-
-        # Update each clause's rule_generation_status from the verdict
-        for clause, classification in zip(clauses_extracted, classifications):
-            clause["rule_generation_status"] = resolve_status(classification)
-            clause["classification"] = classification
-
-        # -------------------------------------------------
-        # NO OUTPUT TEMPLATE — the run ends here, with the clauses.
-        # -------------------------------------------------
-        # Every rule is written against an output template's COLUMNS: Call 3
-        # binds each intent to one of them, and the verify gate refuses any rule
-        # referencing a column the template does not have (rule_ir.validate_ir).
-        # With no template there are no columns, so Call 3 would ask the model to
-        # bind every intent to an empty list and the gate would then refuse all
-        # of its answers — the most expensive call in the pipeline, bought to
-        # produce nothing.
-        #
-        # So a contract read without one stops at what it CAN produce: its
-        # clauses, and the verdict on which of them carry a rule. Those verdicts
-        # go to the review bucket naming the reason, so the work is visible and
-        # can be finished the moment a template exists — rather than the contract
-        # looking as though it had nothing to say.
-        if not template_fields:
-            review_queue, control_register = [], []
-            for clause, classification in zip(clauses_extracted, classifications):
-                entry = {
-                    "clause_id":   clause.get("clause_id"),
-                    "clause_text": clause.get("text"),
-                    "source_page": clause.get("page_number") or clause.get("page"),
-                }
-                if classification.get("is_rule_bearing"):
-                    review_queue.append({
-                        **entry,
-                        "reason": "no output template yet — this clause carries a "
-                                  "rule, but a rule can only be written against an "
-                                  "output template's columns",
-                    })
-                else:
-                    control_register.append({
-                        **entry,
-                        "reason": classification.get("reasoning")
-                                  or "non-rule-bearing clause (obligation / governance)",
-                    })
-            print(f"\n[Pipeline 2] No output template — stopping after clauses: "
-                  f"{len(clauses_extracted)} clause(s), "
-                  f"{len(review_queue)} awaiting a template, "
-                  f"{len(control_register)} to control register. No rules written.")
+        # No template: the run ends at the clauses. Pipeline 1's half of the
+        # answer is here, so the final output is built here too.
+        if _p2["no_template"]:
             return self._build_final_output(
                 source_file=source_file,
                 contract_id=contract_id,
@@ -3395,344 +3797,6 @@ class ValidationRuleGenerator:
                 template_fields=None,
             )
 
-        # # Persist Stage A classification side-car JSON (mirrors Stage B files).
-        # save_stage_a_output(
-        #     clauses_extracted,
-        #     classifications,
-        #     output_dir,
-        #     contract_id=contract_id,
-        #     file_base=file_base
-        # )
-
-        # -------------------------------------------------
-        # PIPELINE 2.4 — Stage B (IR) extraction
-        # -------------------------------------------------
-
-        # No hardcoded confidence cutoff: confidence is advisory (the verify gate
-        # is the real gate), and is_rule_bearing routing happens inside Stage B —
-        # non-rule-bearing clauses go to the control register, nothing is dropped.
-        # Pass ALL clauses; the synthesizer partitions rule-bearing vs not.
-        rule_bearing = sum(
-            1 for c in classifications if c.get("is_rule_bearing")
-        )
-        print(
-            f"[Pipeline 2] Stage B IR extraction on "
-            f"{rule_bearing} rule-bearing clause(s) "
-            f"(of {len(clauses_extracted)} total)."
-        )
-
-        if template_fields:
-            print(
-                f"[Pipeline 2] Using template-aware IR extraction "
-                f"({len(template_fields)} output template fields)"
-            )
-
-        # Output Template = the canonical field namespace every rule is written
-        # against (field_names for the existence gate, field_to_sheet for the
-        # compiler, grouped list for the prompt).
-        output_schema = build_output_schema(template_fields)
-
-        # CALL 3 — map each rule intent (from Call 2) to ONE template + Output
-        # Template fields. This focused mapping step recovers checkable rules
-        # (territory, policy-period, products-aggregate) that the old combined
-        # "extract + map" call under-mapped. Output → IR candidates per clause.
-        #
-        # The generic rule library rides along in this SAME call. Both halves ask
-        # the mapper the identical question — bind this intent to a column of this
-        # Output Template — against the identical field list, so a second call was
-        # buying nothing but a second bill. Library intents are appended AFTER the
-        # contract ones (and are already tenant-before-global) so ordering is
-        # preserved on both sides.
-        #
-        # The RESULT is split apart again immediately below. Merging the CALL is
-        # safe; merging the pipeline POSITION is not — the library's dedup has to
-        # run after every derived-rule injector further down, so the library half
-        # is held back and finished at its original point. See
-        # finish_generic_entries.
-        # NOTE: the `tenant_id` PARAMETER, not self.tenant_id — they are distinct
-        # (the parameter shadows the attribute and is what the library bind has
-        # always used), so reading the attribute here would silently change scope.
-        lib_clauses, lib_intents, lib_rules = build_generic_intents(
-            tenant_id, template_fields)
-        if lib_clauses:
-            print(f"\n[Generic] {len(lib_clauses)} library rule(s) merged into the "
-                  f"Call-3 mapping call (tenant_id={tenant_id}).")
-
-        # ── COST: memoize the library half of the Call-3 bind ────────────────
-        # Binding a library rule asks "which column of THIS output template means
-        # 'Insured ZIP Code'?" — a question about the LIBRARY and the TEMPLATE, with
-        # no input from the contract being uploaded. Every contract uploaded against
-        # the same template re-bought the identical answer, and it is the most
-        # expensive answer in the pipeline to buy: on a measured run the library was
-        # 50 of the 80 Call-3 items, and Call 3 was ~59% of the bill.
-        #
-        # Safe because the key covers everything that can change the answer (see
-        # _generic_bind_key) and every call runs at temperature 0 with a fixed seed,
-        # so the cached answer IS what a re-ask returns. A hit skips ONLY the library
-        # intents — map_intents_to_ir partitions contract from library intents, so
-        # the contract half's batches are identical whether this hits or misses.
-        _lib_key = _generic_bind_key(lib_rules, template_fields)
-        _lib_cached = ai_cache.get("generic_bind", _lib_key) if _lib_key else None
-
-        if _lib_cached is not None:
-            print(f"[Generic] reusing cached bind for {len(lib_clauses)} library "
-                  f"rule(s) — their Call-3 mapping is skipped entirely.")
-            plog.log("CALL3", "SKIPPED",
-                     f"library bind for {len(lib_clauses)} rule(s) served from cache",
-                     "answer depends only on (library rows, template fields) — "
-                     "no contract input, so it is reused rather than re-bought")
-            with plog.stage("Call 3 mapping"):
-                synth_outputs = map_intents_to_ir(
-                    clauses_extracted,
-                    classifications,
-                    template_fields=template_fields,
-                )
-            generic_mapped = _lib_cached
-        else:
-            with plog.stage("Call 3 mapping"):
-                synth_outputs = map_intents_to_ir(
-                    clauses_extracted + lib_clauses,
-                    classifications   + lib_intents,
-                    template_fields=template_fields,
-                )
-
-            # Split the answer back apart. is_generic_entry keys on the sign of
-            # clause_id (library rules carry the negated library row id), so this is
-            # exact rather than a name match. After these two lines synth_outputs holds
-            # precisely what it held before the merge, and every injector below runs
-            # unchanged and never sees a library rule.
-            generic_mapped = [e for e in synth_outputs if is_generic_entry(e)]
-            synth_outputs  = [e for e in synth_outputs if not is_generic_entry(e)]
-
-            # Store the library half only, and never an EMPTY one: a cache entry that
-            # binds nothing would suppress every library rule on every future upload
-            # against this template. A run that mapped nothing (failed or truncated
-            # batch) is deliberately left uncached so the next upload retries it.
-            if _lib_key and generic_mapped:
-                ai_cache.put("generic_bind", _lib_key, generic_mapped,
-                             tenant_id=tenant_id)
-
-        # #7b — MERGE CONTRADICTORY SIBLING ENUMS (deterministic, generic).
-        # Sibling program tables ("<identifying label>: <name A>" / "<name B>" /
-        # "<name C>") each yield an UNSCOPED value_in_set on the same column
-        # allowing only their own name. Rules are conjunctive, so three
-        # disjoint singletons on one field flag EVERY row — the only consistent
-        # reading is their union (any of the named cohorts). The prompts steer
-        # the model away from emitting these, but compliance is probabilistic;
-        # this repair is the guarantee. See merge_sibling_enum_rules.
-        nme = merge_sibling_enum_rules(synth_outputs)
-        if nme:
-            print(f"[Call 3] merged {nme} contradictory sibling enum rule(s) "
-                  f"into union value set(s)")
-
-        # #8 — Re-anchor a "backdating" period rule to PolicyInception → Transaction
-        # (processing) date (deterministic, generic; the mapper's field choice for
-        # backdating is inconsistent). See fix_backdating_period_fields.
-        nbd = fix_backdating_period_fields(synth_outputs, template_fields)
-        if nbd:
-            print(f"[Call 3] re-anchored {nbd} backdating period rule(s) to "
-                  f"policy-inception → transaction-date")
-
-        # #9 — Repair a headline-rate commission/fee formula (e.g. Commission
-        # Amount = Gross × 0.25) to use the BDX's PER-ROW rate column instead of
-        # the hardcoded contract rate, when such a column exists. Deterministic,
-        # generic. See fix_hardcoded_rate_formulas.
-        nhr = fix_hardcoded_rate_formulas(synth_outputs, template_fields)
-        if nhr:
-            print(f"[Call 3] repaired {nhr} hardcoded-rate formula(s) to use the "
-                  f"per-row rate column")
-
-        # #9b — A commission-family rate SCHEDULE stated as a bare % ("Commissions
-        # Schedule: 25.05%") is a FIXED value the reported rate must EQUAL, not a
-        # ceiling/floor. When the mapper mis-typed it as max_limit/min_limit (so it
-        # silently flags nothing), collapse it to range_check(min==max). Generic,
-        # guarded. See fix_fixed_rate_schedule_bounds.
-        nrs = fix_fixed_rate_schedule_bounds(synth_outputs, template_fields)
-        if nrs:
-            print(f"[Call 3] collapsed {nrs} commission-schedule rate rule(s) to a "
-                  f"fixed-value (equals) check")
-
-        # #8b — Companion rule on the program-period date COLUMN. When a clause's
-        # program effective/expiration date became a date_bound on a POLICY date
-        # field, also require the reported Program Effective/Expiration Date column
-        # to EQUAL that contract date. Deterministic, generic. See
-        # derive_program_period_companion_rules.
-        prog_companions = derive_program_period_companion_rules(
-            synth_outputs, template_fields)
-        if prog_companions:
-            print(f"[Call 3] +{len(prog_companions)} program-date companion rule(s): "
-                  f"{[e['candidates'][0]['params']['field'] for e in prog_companions]}")
-            synth_outputs.extend(prog_companions)
-
-        # #6 — DERIVED formula rules (deterministic, not from a single clause):
-        # e.g. Commission Amount = Gross Premium × Commission Rate. Added only when
-        # the template has the matching column trio AND the contract already
-        # governs that rate, so the reported amount is checked, not just the rate.
-        # Deterministic territory backstop FIRST (reads the pristine mapped
-        # candidates to decide whether the mapper already emitted an exclusion).
-        terr = derive_territory_exclusion_entries(
-            synth_outputs, clauses_extracted, template_fields)
-        if terr:
-            print(f"[Call 3] +{len(terr)} deterministic territory exclusion rule(s) "
-                  f"(mapper produced none): {[e['clause']['text'][:60] for e in terr]}")
-            synth_outputs.extend(terr)
-
-        derived = derive_formula_entries(synth_outputs, template_fields)
-        if derived:
-            print(f"[Call 3] +{len(derived)} derived formula rule(s): "
-                  f"{[e['clause']['text'] for e in derived]}")
-            synth_outputs.extend(derived)
-
-        # #6b-AI — when the template carries NO explicit per-column formula row,
-        # ask the model in ONE call which columns are arithmetically COMPUTED and
-        # attach the inferred formula to each, so the SAME annotation-formula
-        # machinery below turns them into cross-field rules. Generic (the model
-        # decides — works for columns never seen before), additive (only fills a
-        # `formula` that isn't already set from a real annotation row), and safe
-        # (wrapped; a failure just yields nothing). See infer_formula_annotations.
-        try:
-            with plog.stage("Formula inference"):
-                _ai_formulas = infer_formula_annotations(template_fields)
-        except Exception as _exc:
-            print(f"[Call 3] AI formula inference skipped ({_exc})")
-            _ai_formulas = {}
-        if _ai_formulas:
-            _added = 0
-            for _f in (template_fields or []):
-                if not _f.get("formula") and _f.get("name") in _ai_formulas:
-                    _f["formula"] = _ai_formulas[_f["name"]]
-                    _added += 1
-            if _added:
-                print(f"[Call 3] AI inferred {_added} column formula(s) "
-                      f"(template has no formula-annotation row)")
-
-        # #6b — DERIVED formula rules from a per-column FORMULA annotation carried
-        # on the output template (the exact arithmetic the template author wrote,
-        # e.g. "Payable due AmWins Re = Palms Gross Written Premium $ − Gross
-        # Commission …") OR the AI-inferred formula attached just above. Parsed
-        # generically; each operand resolved to a real column. Runs AFTER
-        # derive_formula_entries so it skips any result field that already got a
-        # formula. See derive_annotation_formula_entries.
-        ann_formulas = derive_annotation_formula_entries(synth_outputs, template_fields)
-        if ann_formulas:
-            print(f"[Call 3] +{len(ann_formulas)} annotation-formula rule(s): "
-                  f"{[e['candidates'][0]['params'].get('result_field') or e['candidates'][0]['params'].get('field') for e in ann_formulas]}")
-            synth_outputs.extend(ann_formulas)
-
-        # #6c — STRUCTURAL fallback for templates with NO formula annotation: an
-        # "<entity> <concept> Amount $" column with a sibling per-row rate column
-        # and an entity-matched base → amount = base × rate. Deduped against the
-        # mapper and the two derivers above. See derive_rate_amount_formulas.
-        rate_formulas = derive_rate_amount_formulas(synth_outputs, template_fields)
-        if rate_formulas:
-            print(f"[Call 3] +{len(rate_formulas)} structural rate×base formula(s): "
-                  f"{[e['candidates'][0]['params']['result_field'] for e in rate_formulas]}")
-            synth_outputs.extend(rate_formulas)
-
-        # #6d — VALUE-driven backstop for templates whose headers defeat every
-        # name-matching gate above (terse ALL-CAPS bordereaux: "COMMISSION AMT",
-        # "COMPANY CEDE", "NET CEDED"). Emits only relationships that reproduce the
-        # reported amount on every sampled row, product AND complement. Runs last,
-        # so it only ever fills columns nothing else defined.
-        # See derive_verified_rate_formulas.
-        try:
-            verified = derive_verified_rate_formulas(synth_outputs, template_fields)
-        except Exception as _exc:
-            print(f"[Call 3] verified rate formula derivation skipped ({_exc})")
-            verified = []
-        if verified:
-            print(f"[Call 3] +{len(verified)} sample-verified formula(s): "
-                  f"{[e['candidates'][0]['rule_name'] for e in verified]}")
-            synth_outputs.extend(verified)
-
-        # #7 — Closed-set rules from the column HEADER (e.g. "Facultative
-        # Re(Y/N)" → value must be Y/N; "Policy Type (Primary/Excess)" → value
-        # must be Primary/Excess). Deterministic, header-driven, no LLM. Runs
-        # AFTER the mapper + formula derivation so it can skip any flag column a
-        # contract clause already governs (no duplicate rule).
-        bool_flags = derive_header_enum_entries(synth_outputs, template_fields)
-        if bool_flags:
-            print(f"[Call 3] +{len(bool_flags)} derived header-enum rule(s): "
-                  f"{[e['candidates'][0]['params']['field'] for e in bool_flags]}")
-            synth_outputs.extend(bool_flags)
-
-        # #8 — The referral-INDICATOR column must be populated on every policy
-        # (non-blank data-quality check). Deterministic, role-token located, no LLM.
-        # Runs after the header-enum deriver so it never doubles an existing rule.
-        ref_ind = derive_referral_indicator_presence_rule(synth_outputs, template_fields)
-        if ref_ind:
-            print(f"[Call 3] +{len(ref_ind)} referral-indicator presence rule(s): "
-                  f"{[e['candidates'][0]['params']['field'] for e in ref_ind]}")
-            synth_outputs.extend(ref_ind)
-
-        # GENERIC RULE LIBRARY — Kavachio's standard BDX checks from the
-        # `generic_rule_specification` table. Not contract-derived: they apply to
-        # every program, so they skip Call 1/2 and were bound to this program's
-        # columns by the SAME Call-3 mapper — in the same call, up at CALL 3; only
-        # the deterministic guards and the dedup happen here.
-        #
-        # This still runs LAST of the injectors, which is the whole reason the two
-        # halves are separate: the dedup below must see every derived-rule entry
-        # already in synth_outputs, and drop_derived_duplicates must find the
-        # derived twin so _carry_dispatch_params can move its country dispatch onto
-        # the surviving library rule. Only the AI call moved earlier; this did not.
-        generic_entries = finish_generic_entries(
-            generic_mapped, lib_rules, synth_outputs, template_fields)
-        if generic_entries:
-            print(f"[Call 3] +{sum(len(e['candidates']) for e in generic_entries)} "
-                  f"generic library rule(s)")
-            # A library rule and an auto-derived data-quality rule on the SAME
-            # column say the same thing twice ("[Derived rule] Insured Zip Code
-            # must be a valid postal code…" vs "[Generic rule] Insured ZIP Code
-            # Must Be Valid"). The library rule wins — drop the derived twin so
-            # the reviewer sees one rule per column, from the editable catalogue,
-            # carrying over the country dispatch the derived rule worked out.
-            drop_derived_duplicates(synth_outputs, generic_entries)
-            # …and hold the library to the same bar the deriver holds itself to: a
-            # reference-vocabulary check with no country to resolve against is
-            # unanswerable, so it is dropped rather than shipped. See
-            # drop_uncountried_reference_rules.
-            drop_uncountried_reference_rules(generic_entries)
-            synth_outputs.extend(generic_entries)
-
-        # -------------------------------------------------
-        # PIPELINE 2.5 — Verify gate + routing (deterministic)
-        # -------------------------------------------------
-
-        contract_ctx = {
-            "tenant_id":   self.tenant_id,
-            "contract_id": contract_id,
-            "program_id":  self.program_id
-        }
-
-        # Reference-doc GROUP → MEMBERS map (data-driven, from the uploaded
-        # reference documents' tables). Lets a value-set rule whose values are
-        # category/group names (e.g. authorized/excluded "Occupancy Group"s) be
-        # expanded to also carry every specific member the reference lists under
-        # that group, so a BDX row reporting a specific class matches.
-        group_members = build_reference_group_members(reference_documents)
-        if group_members:
-            print(f"[Pipeline 2.5] reference group→members map: "
-                  f"{len(group_members)} group(s) "
-                  f"{[v[0] for v in group_members.values()]}")
-
-        # Each IR is verified (validate → vocab-normalize → field-existence →
-        # compile → guard/dry-run) and routed to exactly one destination.
-        with plog.stage("Verify + compile (no AI)"):
-            validation_rules, review_queue, control_register = normalize_ir_outputs(
-                synth_outputs,
-                contract_ctx,
-                output_schema,
-                group_members=group_members,
-            )
-        # Kept under the legacy name for the final-output builder below.
-        dropped = review_queue
-
-        print(
-            f"[Pipeline 2.5] {len(validation_rules)} proposed rule(s), "
-            f"{len(review_queue)} to review, "
-            f"{len(control_register)} to control register."
-        )
 
         # # -------------------------------------------------
         # # PIPELINE 2.5 — Persist normalization output to JSON

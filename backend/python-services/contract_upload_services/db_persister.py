@@ -171,6 +171,7 @@ def persist_resolved_rules(
     output_template_id,
     validation_rules,
     actor="user",
+    created_by=None,
 ):
     """Persist rules built by a human review-queue resolution for ONE existing
     clause (see manual_rule_resolution.generate_rules_for_clause_field).
@@ -180,8 +181,15 @@ def persist_resolved_rules(
     rule count, and drop the clause's 'review' routing rows so it leaves the
     queue. Idempotent-friendly: callers pass freshly generated rules.
 
+    `created_by` overrides the provenance stamped on each row and on the
+    clause. It defaults to the manual-resolution form because that is who this
+    was written for; the whole-contract path (rules generated for a template
+    that only arrived later) passes its own, so a bulk regeneration is not
+    recorded as somebody's hand-made fix.
+
     Returns: list of {rule_id, rule_name, output_field} for the inserted rows.
     """
+    created_by = created_by or f"manual_resolution:{actor}"
     created = []
     with canonical_engine.begin() as conn:
         for r in validation_rules:
@@ -227,7 +235,7 @@ def persist_resolved_rules(
                     # Human-assigned the field, and it passed the verify gate →
                     # go live immediately (consistent with the IR generator default).
                     "rule_status":      r.get("rule_status") or "active",
-                    "created_by":       f"manual_resolution:{actor}",
+                    "created_by":       created_by,
                 },
             ).scalar()
 
@@ -240,7 +248,11 @@ def persist_resolved_rules(
                 "output_field": ct.get("output_field"),
             })
 
-        if created:
+        # `db_clause_id` is None for a rule that came from no clause of this
+        # contract — a generic library rule, which the whole-contract path sends
+        # through here with a NULL source. There is no clause to take out of the
+        # review queue, and both statements below would match nothing anyway.
+        if created and db_clause_id is not None:
             # The clause now has runnable rules → leave the review queue.
             conn.execute(
                 text("""
@@ -252,7 +264,7 @@ def persist_resolved_rules(
                            updated_by = :actor
                      WHERE clause_id = :cid
                 """),
-                {"n": len(created), "actor": f"manual_resolution:{actor}",
+                {"n": len(created), "actor": created_by,
                  "cid": db_clause_id},
             )
             conn.execute(

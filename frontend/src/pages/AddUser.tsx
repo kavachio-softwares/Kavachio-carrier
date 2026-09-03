@@ -125,7 +125,7 @@ export default function AddUser() {
 
           {/* Role & access */}
           <div className="card pad">
-            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>The broker</h3>
+            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>Broker Organisation</h3>
             {/* The broker organisation itself. Created with this invitation —
                 this person becomes its first admin. */}
             <div className="field">
