@@ -6,7 +6,7 @@ on:
     branches: [qa]
     paths:
       - 'backend/python-services/**'
-      - '.github/workflows/deploy.yml'
+      - '.github/workflows/deploy.yaml'
 
 permissions:
   id-token: write      # OIDC login to Azure (no stored secret)
