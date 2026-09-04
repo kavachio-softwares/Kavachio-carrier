@@ -15,7 +15,7 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: qa
+    environment: dev
     steps:
       - uses: actions/checkout@v4
 
