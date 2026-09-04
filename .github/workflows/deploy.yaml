@@ -36,9 +36,9 @@ jobs:
 
       # Roll the new image onto the Container App. Env vars & secrets are configured
       # once on the Container App (see deploy/README or the runbook) — not here.
-      # - name: Deploy to Azure Container Apps
-      #   run: |
-      #     az containerapp update \
-      #       -n ${{ secrets.CONTAINERAPP_NAME }} \
-      #       -g ${{ secrets.RG }} \
-      #       --image ${{ secrets.ACR_LOGIN_SERVER }}/kavachio-carrier:${{ github.sha }}
+      - name: Deploy to Azure Container Apps
+        run: |
+          az containerapp update \
+            -n ${{ secrets.CONTAINERAPP_NAME }} \
+            -g ${{ secrets.RG }} \
+            --image ${{ secrets.ACR_LOGIN_SERVER }}/kavachio-carrier:${{ github.sha }}
