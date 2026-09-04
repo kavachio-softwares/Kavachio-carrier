@@ -7,7 +7,7 @@ on:
     paths:
       - 'backend/python-services/**'
       - '.github/workflows/deploy.yaml'
-
+ 
 permissions:
   id-token: write      # OIDC login to Azure (no stored secret)
   contents: read
