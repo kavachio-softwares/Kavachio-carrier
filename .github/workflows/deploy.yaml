@@ -1,0 +1,44 @@
+name: build-and-deploy Carrier
+
+# Deploy on every commit to development -> Azure Container Apps (dev).
+on:
+  push:
+    branches: [qa]
+    paths:
+      - 'backend/python-services/**'
+      - '.github/workflows/deploy.yml'
+
+permissions:
+  id-token: write      # OIDC login to Azure (no stored secret)
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: qa
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Build + push in ACR itself — no Docker or `az acr login` needed on the runner.
+      - name: Build image in ACR
+        run: |
+          az acr build \
+            -r ${{ vars.ACR_NAME }} \
+            -t kavachio-carrier:${{ github.sha }} \
+            backend/python-services
+
+      # Roll the new image onto the Container App. Env vars & secrets are configured
+      # once on the Container App (see deploy/README or the runbook) — not here.
+      # - name: Deploy to Azure Container Apps
+      #   run: |
+      #     az containerapp update \
+      #       -n ${{ vars.CONTAINERAPP_NAME }} \
+      #       -g ${{ vars.RG }} \
+      #       --image ${{ vars.ACR_LOGIN_SERVER }}/kavachio-api:${{ github.sha }}
