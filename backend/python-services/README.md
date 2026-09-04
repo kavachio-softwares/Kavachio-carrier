@@ -4,7 +4,7 @@ Python/FastAPI service that onboards an MGA's Bordereaux (BDX) Excel format,
 auto-maps its columns to a canonical premium data model using **embeddings +
 Gemini LLM**, persists the resulting mapping as a **glom spec**, and ingests
 subsequent BDX files into a Data Warehouse (DWH) by replaying that spec.
-
+ 
 ---
 
 ## How it works
