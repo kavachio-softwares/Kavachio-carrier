@@ -3712,6 +3712,13 @@ def verify_and_build_ir_rule(ir, clause, contract_ctx, output_schema, con=None,
 
     # 5) guard + dry-run (+ light smoke) against the sample schema, when available.
     #    Skipped for unmapped rules (their column isn't in the template schema).
+    #
+    # `sample_impact` records how many of the template's sample rows the rule would
+    # flag. The smoke test below already counts this to catch a rule that flags
+    # EVERYTHING; keeping the numbers lets a caller show a reviewer what a rule
+    # they just asked for would actually do, instead of discarding the measurement
+    # the moment it comes in under the reject threshold.
+    sample_impact = None
     if not unmapped and sql is not None and con is not None:
         try:
             from duckdb_validation import guard_sql, dry_run
@@ -3733,7 +3740,13 @@ def verify_and_build_ir_rule(ir, clause, contract_ctx, output_schema, con=None,
                 "value_in_set", "value_not_in_set", "max_limit", "min_limit",
                 "range_check", "period_duration", "date_relation", "date_bound",
             }
-            if _DATA_GROUNDING and ir.get("template") in _FP_TEMPLATES:
+            # MEASURE always; REJECT only under _DATA_GROUNDING. The flag is off
+            # by default because rejecting on three sample rows threw out good
+            # rules (see the note at _DATA_GROUNDING) — but that is an argument
+            # against acting on the count automatically, not against taking it.
+            # Reported to a reviewer instead of enforced, the same number is the
+            # only feedback they get on whether the column they picked was right.
+            if ir.get("template") in _FP_TEMPLATES:
                 try:
                     from contract_upload_services.rule_ir import field_refs as _fr
                     refs = _fr(ir)
@@ -3748,7 +3761,9 @@ def verify_and_build_ir_rule(ir, clause, contract_ctx, output_schema, con=None,
                             flagged = con.execute(
                                 f"SELECT COUNT(*) FROM ({cleaned}) AS _q"
                             ).fetchone()[0]
-                            if flagged >= total:
+                            sample_impact = {"flagged": int(flagged),
+                                             "total": int(total)}
+                            if _DATA_GROUNDING and flagged >= total:
                                 return {"route": "review",
                                         "reason": f"flags all {total} sample rows — "
                                                   f"likely wrong operator or values "
@@ -3834,8 +3849,10 @@ def verify_and_build_ir_rule(ir, clause, contract_ctx, output_schema, con=None,
                                   "executable": not unmapped,
                                   "unmapped_reason": unmapped_reason,
                                   "referral": is_referral,
-                                  "justification": justification},
+                                  "justification": justification,
+                                  "sample_impact": sample_impact},
         "compiled_sql":          sql,
+        "sample_impact":         sample_impact,
         "is_executable":         not unmapped,
         "is_referral":           is_referral,
         # Provenance: 'generic_library' for a rule seeded from

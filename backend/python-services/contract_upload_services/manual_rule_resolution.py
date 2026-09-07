@@ -96,6 +96,19 @@ def generate_rules_for_clause_field(clause, chosen_field, template_fields,
     classifications = extract_rule_intents([clause_for_gen])
     clf = classifications[0] if classifications else {}
 
+    # The AI call itself failed (quota, network, a rejected request) — that is not
+    # a verdict about the clause, so say so in plain words and stop. Running Stage B
+    # on an errored classification only buys a second, equally empty answer, and the
+    # internal label ("Call 2 failed") would otherwise reach the reviewer's screen.
+    if clf.get("_error"):
+        return [], [{
+            "clause_id": clause.get("clause_id"),
+            "clause_text": clause.get("text"),
+            "source_page": clause.get("page_number"),
+            "reason": "The AI service could not be reached for this clause. "
+                      "Nothing was changed — try Generate Rule again in a moment.",
+        }], []
+
     # Stage B (Call 3): map the clause's intents to IR with the FULL field list
     # (so the mapper can bind scope/group_by columns) but DIRECTED onto the field(s)
     # the user chose. When several were chosen the rule spans them (scope/condition).

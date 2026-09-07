@@ -246,6 +246,12 @@ def persist_resolved_rules(
                 "rule_id":      new_rule_id,
                 "rule_name":    r.get("rule_name"),
                 "output_field": ct.get("output_field"),
+                # How many of the template's sample rows this rule would flag, when
+                # the verifier was able to measure it. A reviewer who has just bound
+                # a clause to a column of their own choosing needs this: a rule that
+                # flags most of the sample data is the signal that the column was
+                # the wrong one, and nothing else on the screen would say so.
+                "sample_impact": r.get("sample_impact"),
             })
 
         # `db_clause_id` is None for a rule that came from no clause of this

@@ -342,8 +342,42 @@ _CTX_CACHE_TTL = os.getenv("KAVACHIO_CONTEXT_CACHE_TTL", "600s")
 # pure overhead anyway. 4096 is the conservative figure across 2.5/3.x Flash.
 _CTX_CACHE_MIN_TOKENS = int(os.getenv("KAVACHIO_CONTEXT_CACHE_MIN", "4096"))
 
-_ctx_caches: dict = {}        # (model, sha256(prefix)) -> cache name
+# (model, sha256(prefix)) -> (cache name or None, expiry epoch seconds). The
+# expiry matters: the entry lives as long as this PROCESS, but the CachedContent
+# behind it dies on the server after _CTX_CACHE_TTL. A long-running API server
+# would otherwise keep quoting a name Gemini has already collected, and every call
+# that quoted it came back 403 "CachedContent not found" — surfacing to the user as
+# "Call 2 failed" on a screen that had worked minutes earlier.
+_ctx_caches: dict = {}
 _ctx_lock = threading.Lock()
+
+
+def _ctx_ttl_seconds() -> float:
+    """_CTX_CACHE_TTL as a number of seconds. Gemini's TTL is written "600s"."""
+    raw = str(_CTX_CACHE_TTL).strip()
+    try:
+        return float(raw[:-1]) if raw.endswith("s") else float(raw)
+    except ValueError:
+        return 600.0
+
+
+def forget_context_cache(name: str):
+    """Drop a cache name we can no longer use, so the next call creates a fresh one
+    instead of quoting a dead resource. Used when Gemini rejects the name."""
+    if not name:
+        return
+    with _ctx_lock:
+        for k, v in list(_ctx_caches.items()):
+            if isinstance(v, tuple) and v[0] == name:
+                _ctx_caches.pop(k, None)
+
+
+def _is_stale_cache_error(exc) -> bool:
+    """True when a request failed because its cached_content no longer exists.
+    Gemini answers a collected cache with 403 PERMISSION_DENIED, not 404."""
+    msg = str(exc).lower()
+    return "cachedcontent" in msg and (
+        "not found" in msg or "permission denied" in msg or "invalid" in msg)
 
 
 def context_cache_for(prefix: str, model: str):
@@ -357,11 +391,17 @@ def context_cache_for(prefix: str, model: str):
         return None
     if estimate_tokens(prefix, model) < _CTX_CACHE_MIN_TOKENS:
         return None
-    import hashlib
+    import hashlib, time
     key = (model, hashlib.sha256(prefix.encode("utf-8")).hexdigest())
     with _ctx_lock:
-        if key in _ctx_caches:
-            return _ctx_caches[key]
+        entry = _ctx_caches.get(key)
+        if entry is not None:
+            name, expires_at = entry
+            # Re-create a few seconds BEFORE the server-side TTL runs out, so a call
+            # that starts just under the wire cannot land just over it.
+            if time.time() < expires_at:
+                return name
+            _ctx_caches.pop(key, None)
     try:
         cache = client.caches.create(
             model=model,
@@ -375,8 +415,11 @@ def context_cache_for(prefix: str, model: str):
         print(f"[ctx-cache] not created ({type(exc).__name__}: {str(exc)[:120]}) "
               f"— sending full prompt")
         name = None
+    # A failure is remembered too (don't retry the create on every call) but only
+    # for the same window, so a transient quota error doesn't disable caching for
+    # the life of the process.
     with _ctx_lock:
-        _ctx_caches[key] = name       # cache the failure too; don't retry per call
+        _ctx_caches[key] = (name, time.time() + max(_ctx_ttl_seconds() - 30, 30))
     if name:
         print(f"[ctx-cache] created {name} "
               f"(~{estimate_tokens(prefix, model):,} tok, ttl {_CTX_CACHE_TTL})")
@@ -387,7 +430,7 @@ def release_context_caches():
     """Delete every cache this process created. Storage is billed per hour, so an
     upload should not leave one behind. Safe to call more than once."""
     with _ctx_lock:
-        names = [n for n in _ctx_caches.values() if n]
+        names = [v[0] for v in _ctx_caches.values() if v and v[0]]
         _ctx_caches.clear()
     for n in names:
         try:
@@ -502,10 +545,25 @@ def call_gemini(prompt, label="LLM", temperature=None, seed=None,
     except OversizeError:
         raise
     except Exception as exc:
+        # A cache that expired between the lookup and the send (or that some other
+        # process deleted) makes the request fail on the NAME, not on the prompt.
+        # Forget it and re-send the whole prompt: caching is a billing optimisation,
+        # so losing it must never cost the answer.
+        if _cache_name is not None and _is_stale_cache_error(exc):
+            print(f"[{label}] context cache {_cache_name} is gone ({exc}); "
+                  f"re-sending the full prompt.")
+            forget_context_cache(_cache_name)
+            _cache_name = None
+            config.pop("cached_content", None)
+            kwargs["contents"] = prompt
+            kwargs["config"] = config or None
+            if not config:
+                kwargs.pop("config", None)
+            response = _generate_with_retry(kwargs, label, est_input)
         # If the SDK/model rejects the structured-output config (older SDK or a
         # model without response_schema support), retry once without it so the
         # call degrades to prompt-enforced JSON instead of hard-failing.
-        if response_schema is not None:
+        elif response_schema is not None:
             print(f"[{label}] response_schema rejected ({exc}); "
                   f"retrying without structured output.")
             config.pop("response_mime_type", None)

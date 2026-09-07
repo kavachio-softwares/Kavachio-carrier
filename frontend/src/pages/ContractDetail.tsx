@@ -37,6 +37,21 @@ type ContractDetailPayload = {
   clause_routing?: ClauseRouting[];
 };
 
+type CreatedRule = {
+  rule_id: number;
+  rule_name?: string | null;
+  output_field?: string | null;
+  // How many of the template's sample rows this rule would flag, when the
+  // verifier could measure it. null when there was no sample data to run against.
+  sample_impact?: { flagged: number; total: number } | null;
+};
+
+type ResolveResult = {
+  ok: boolean;
+  reason?: string;
+  created_rules?: CreatedRule[];
+};
+
 type ClauseRouting = {
   clause_id: number | null;
   bucket: string;          // "review" (needs a field) | "control" (governance)
@@ -71,6 +86,13 @@ export default function ContractDetail() {
   const [error, setError] = useState<string | null>(null);
   const [showTerms, setShowTerms] = useState(false);
   const [generatingRule, setGeneratingRule] = useState(false);
+  // Outcome of the last resolution, held at CARD level. A successful resolve
+  // takes the clause out of the queue, so its row — and any message inside it —
+  // unmounts before anyone can read it. The reviewer would see the row vanish
+  // and nothing else: not which rule was written, not that it flags most of the
+  // sample data. This banner outlives the row.
+  const [resolved, setResolved] =
+    useState<null | { clause_id: number | null; rules: CreatedRule[] }>(null);
 
   const load = useCallback((opts?: { silent?: boolean }) => {
     if (!programId || !contractId) return;
@@ -241,20 +263,37 @@ export default function ContractDetail() {
               )}
             </Card>
 
-            {/* Review queue: rule-bearing clauses with no output field assigned */}
-            {reviewClauses.length > 0 && (
+            {/* Review queue: rule-bearing clauses with no output field assigned.
+                Stays on screen while `resolved` is set even once the queue empties,
+                so the confirmation for the LAST clause resolved is still readable. */}
+            {(reviewClauses.length > 0 || resolved) && (
               <Card title="Clauses Awaiting a Field"
                 action={
-                  <span className="pill pill-amber text-[11px]">
-                    {reviewClauses.length} In Review
-                  </span>
+                  reviewClauses.length > 0 ? (
+                    <span className="pill pill-amber text-[11px]">
+                      {reviewClauses.length} In Review
+                    </span>
+                  ) : (
+                    <span className="pill pill-green text-[11px]">Queue clear</span>
+                  )
                 }>
+                {resolved && <ResolvedBanner
+                  rules={resolved.rules}
+                  onDismiss={() => setResolved(null)} />}
+
+                {reviewClauses.length === 0 ? (
+                  <p className="text-sm text-ink-muted py-1">
+                    Every rule-bearing clause on this contract is now bound to an
+                    output column.
+                  </p>
+                ) : (
+                <>
                 <p className="text-xs text-ink-muted mb-3">
                   {data.output_template
                     ? <>These clauses are rule-bearing but couldn't be auto-mapped to an
-                        output template field, even after an automatic retry. Pick the
-                        field each one applies to and add a reference note describing the
-                        rule logic to enforce — then generate its validation rule.</>
+                        output template field. Pick the field each one applies to and add
+                        a reference note describing the rule logic to enforce — then
+                        generate its validation rule.</>
                     : <>These clauses carry a rule, but this contract was read with no
                         output template, so there were no columns to bind them to. They
                         are held here until a Bordereau Setup gives this programme a
@@ -269,18 +308,26 @@ export default function ContractDetail() {
                       onResolve={async (outputFields, note) => {
                         setGeneratingRule(true);
                         try {
-                          const r = await api.post(
+                          const r = await api.post<ResolveResult>(
                             `/programs/${programId}/contracts/${contractId}` +
                             `/clause-routing/${rc.clause_id}/resolve`,
                             { output_fields: outputFields, note: note || undefined },
                           );
-                          if (r.data?.ok) await load({ silent: true });
-                          return r.data as { ok: boolean; reason?: string; created_rules?: any[] };
+                          if (r.data?.ok) {
+                            setResolved({
+                              clause_id: rc.clause_id,
+                              rules: r.data.created_rules ?? [],
+                            });
+                            await load({ silent: true });
+                          }
+                          return r.data;
                         } finally { setGeneratingRule(false); }
                       }}
                     />
                   ))}
                 </div>
+                </>
+                )}
               </Card>
             )}
 
@@ -314,6 +361,68 @@ export default function ContractDetail() {
         )}
       </PageBody>
     </>
+  );
+}
+
+/** What the last resolution produced, kept on screen after its clause row leaves
+ *  the queue. Names each rule and the column it bound to, and — where the verifier
+ *  could measure it — how much of the template's sample data the rule flags. A rule
+ *  that fires on most sample rows is the readable sign that the chosen column was
+ *  the wrong one, which is otherwise invisible until a bordereau is run. */
+function ResolvedBanner({
+  rules, onDismiss,
+}: {
+  rules: CreatedRule[];
+  onDismiss: () => void;
+}) {
+  // "Most" is deliberately a majority rather than a tuned number: sample rows are
+  // compliant example data, so a correct rule should flag few of them. Half is the
+  // point past which "the rule is wrong" beats "the data has exceptions".
+  const noisy = rules.filter(r =>
+    r.sample_impact && r.sample_impact.total > 0 &&
+    r.sample_impact.flagged * 2 > r.sample_impact.total);
+
+  return (
+    <div className={`mb-3 rounded-lg border p-3 ${
+      noisy.length ? "border-amber-300 bg-amber-50" : "border-green-300 bg-green-50"}`}>
+      <div className="flex items-start gap-2">
+        {noisy.length
+          ? <AlertTriangle size={14} className="text-amber-600 shrink-0 mt-0.5" />
+          : <CheckCircle2 size={14} className="text-green-600 shrink-0 mt-0.5" />}
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">
+            {rules.length === 0
+              ? "Clause resolved."
+              : `Generated ${rules.length} rule${rules.length !== 1 ? "s" : ""}.`}
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {rules.map(r => (
+              <li key={r.rule_id} className="text-[11px] text-ink-muted">
+                <span className="font-medium text-ink">{r.rule_name}</span>
+                {r.output_field && <> <ArrowRight size={9} className="inline" />{" "}
+                  <span className="font-mono">{r.output_field}</span></>}
+                {r.sample_impact && r.sample_impact.total > 0 && (
+                  <> · flags {r.sample_impact.flagged} of {r.sample_impact.total}{" "}
+                    sample row{r.sample_impact.total !== 1 ? "s" : ""}</>
+                )}
+              </li>
+            ))}
+          </ul>
+          {noisy.length > 0 && (
+            <p className="mt-1.5 text-[11px] text-amber-800">
+              This flags most of the template's sample data. Sample rows are
+              compliant examples, so that usually means the rule landed on the
+              wrong column — check it in the Rule Library before a bordereau runs
+              against it.
+            </p>
+          )}
+        </div>
+        <button type="button" onClick={onDismiss}
+          className="text-ink-muted hover:text-ink shrink-0" aria-label="Dismiss">
+          <X size={13} />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -377,8 +486,14 @@ function ReviewQueueRow({
           <span className="italic leading-relaxed line-clamp-3">"{item.clause_text}"</span>
         </div>
       )}
+      {/* The reason is a RECORD of what happened when the contract was read, not a
+          statement about now — a contract read before its programme had an output
+          template keeps saying so long after a template exists. Dating the line
+          stops it contradicting the paragraph above, which describes today. */}
       {item.reason && (
-        <p className="mt-1.5 text-[11px] text-amber-700">Why unmapped: {item.reason}</p>
+        <p className="mt-1.5 text-[11px] text-amber-700">
+          Why it wasn't auto-mapped when the contract was read: {item.reason}
+        </p>
       )}
 
       {/* Step 1 — choose the field(s) */}
