@@ -32,15 +32,20 @@ import { createBroker } from "../api/hierarchy";
 const PARTY_TYPES: [string, string][] = [
   ["broker", "Broker"], ["mga", "MGA"], ["mgu", "MGU"], ["tpa", "TPA"],
 ];
+import { api } from "../api/client";
+
+// The four kinds of organisation that can produce business. A broker is the
+// usual one; the others occupy the same slot on the same terms.
+
 
 export default function AddUser() {
   const mga = currentMga();
   const nav = useNavigate();
 
+
   const [full_name, setName] = useState("");
   const [email, setEmail] = useState("");
-  // Broker admin is the only seat a carrier invites (see the docblock).
-  const role = "broker_admin";
+  const [role, setRole] = useState("carrier_admin");
 
   // Broker side — the organisation this person will be the first admin of.
   const [brokerName, setBrokerName] = useState("");
@@ -52,23 +57,29 @@ export default function AddUser() {
 
   // Nothing to send until the form describes somebody. A broker admin also
   // needs the broker named, or there is no organisation for them to be admin of.
-  const canSend = full_name.trim().length > 0 && email.trim().length > 0
-    && brokerName.trim().length > 0 && !created;
+  const canSend = full_name.trim().length > 0 && email.trim().length > 0 && !created
+    && (role !== "broker_admin" || brokerName.trim().length > 0);
 
   async function send() {
     if (!canSend) { setErr("Fill in the name and email first."); return; }
     setErr(null); setBusy(true);
     try {
-      // One call: creates the broker organisation AND invites this person as
-      // its first admin. A taken email or a name you already use is refused
-      // before anything is created, so you never end up with half of it.
-      const b = await createBroker({
-        legal_name: brokerName.trim(),
-        party_type: brokerType,
-        admin_name: full_name.trim(),
-        admin_email: email.trim(),
-      });
-      setCreated({ name: full_name.trim(), email: email.trim(), org: b.legal_name });
+      let org = mga ?? "your organization";
+      if (role === "broker_admin") {
+        // One call: creates the broker organisation AND invites this person as
+        // its first admin. A taken email or a name you already use is refused
+        // before anything is created, so you never end up with half of it.
+        const b = await createBroker({
+          legal_name: brokerName.trim(),
+          party_type: brokerType,
+          admin_name: full_name.trim(),
+          admin_email: email.trim(),
+        });
+        org = b.legal_name;
+      } else {
+        await api.post("/users", { full_name, email, role }, { params: { mga } });
+      }
+      setCreated({ name: full_name.trim(), email: email.trim(), org });
     } catch (e: any) {
       setErr(e?.response?.data?.detail ?? "Could not send invite.");
     } finally { setBusy(false); }
@@ -86,7 +97,7 @@ export default function AddUser() {
             <button className="btn" onClick={() => nav("/brokers")}>← Brokers</button>
             <button className="btn pri" onClick={send} disabled={busy || !canSend}
               title={canSend ? undefined : created ? "Invite already sent"
-                : !brokerName.trim() ? "Name the broker first"
+                : role === "broker_admin" && !brokerName.trim() ? "Name the broker first"
                 : "Enter a name and email first"}>
               {busy ? "Sending…" : "Send invite"}
             </button>
@@ -129,22 +140,46 @@ export default function AddUser() {
             {/* The broker organisation itself. Created with this invitation —
                 this person becomes its first admin. */}
             <div className="field">
-              <label>Broker Organisation name</label>
-              <input value={brokerName} placeholder="e.g. Marlowe Broking Ltd"
-                onChange={e => setBrokerName(e.target.value)} />
-              <div className="hint">The organisation they will run.</div>
+              <label>Role</label>
+              <select value={role} onChange={e => setRole(e.target.value)}>
+                <option value="carrier_admin">Carrier Admin — someone on your own team</option>
+                <option value="broker_admin">Broker Admin — someone at a broker who sends you files</option>
+              </select>
+              <div className="hint">
+                Operators are not here on purpose: they belong to the broker, and
+                the broker&rsquo;s own admin adds them.
+              </div>
             </div>
 
-            <div className="hint" style={{ marginBottom: 12 }}>
-              Operators are not here on purpose: they belong to the broker, and
-              the broker&rsquo;s own admin adds them.
-            </div>
+            {/* The broker organisation itself. Created with this invitation —
+                this person becomes its first admin. */}
+            {role === "broker_admin" && (
+              <div className="row2">
+                <div className="field">
+                  <label>Broker name</label>
+                  <input value={brokerName} placeholder="e.g. Marlowe Broking Ltd"
+                    onChange={e => setBrokerName(e.target.value)} />
+                  <div className="hint">The organisation they will run.</div>
+                </div>
+                <div className="field">
+                  <label>Type</label>
+                  <select value={brokerType} onChange={e => setBrokerType(e.target.value)}>
+                    {PARTY_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                </div>
+              </div>
+            )}
 
             <div className="note" style={{ marginBottom: 0 }}>
-              They sign in as a <b>broker</b>, add contracts and send you files.
-              From then on they add their own staff, including operators, and you
-              cannot change that list. They can only work on programmes you put
-              them on — do that from <b>Programmes</b>.
+              {role === "broker_admin" ? (
+                <>They sign in as a <b>broker</b>, add contracts and send you files.
+                  From then on they add their own staff, including operators, and you
+                  cannot change that list. They can only work on programmes you put
+                  them on — do that from <b>Programmes</b>.</>
+              ) : (
+                <>They join your organization and can do everything you can,
+                  including approving contracts. Only invite people you trust with that.</>
+              )}
             </div>
           </div>
         </div>
@@ -152,11 +187,15 @@ export default function AddUser() {
 
       {created && (
         <InviteSentModal
-          title="Broker invited"
-          message={`${created.name} can set a password and sign in for ${created.org}.`}
+          title={role === "broker_admin" ? "Broker invited" : "User invited"}
+          message={role === "broker_admin"
+            ? `${created.name} can set a password and sign in for ${created.org}.`
+            : `${created.name} has been added to your organization.`}
           email={created.email}
-          note="Put them on a programme from Programmes — until then they cannot produce."
-          onDone={() => nav("/brokers")}
+          note={role === "broker_admin"
+            ? "Put them on a programme from Programmes — until then they cannot produce."
+            : "They'll set a password and sign in."}
+          onDone={() => nav("/users")}
         />
       )}
     </div>

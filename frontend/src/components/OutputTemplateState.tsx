@@ -11,7 +11,6 @@
 import { AlertTriangle, CheckCircle2, FileSpreadsheet, Plus } from "lucide-react";
 import Button from "./ui/Button";
 import type { ResolveResult } from "../api/outputTemplate";
-import { SHOW_BDX_TEMPLATE_BUILDER } from "../featureFlags";
 
 const SOURCE_LABEL: Record<string, string> = {
   uploaded: "built from an uploaded sample workbook",
@@ -35,11 +34,6 @@ export function isBroaderThanScope(r: ResolveResult | null): boolean {
   if (r.scope.broker_party_id && r.match_level === "programme") return true;
   return false;
 }
-
-// The build-a-template flow can be switched off for a demo. This box is one of
-// its doors, so it reads the flag itself rather than making every caller pass
-// the same answer down.
-const CAN_BUILD = SHOW_BDX_TEMPLATE_BUILDER;
 
 export default function OutputTemplateState({
   resolving, resolved, disabled, uploading, onCreate, onOpen, compact, hideMissing,
@@ -83,10 +77,9 @@ export default function OutputTemplateState({
           Nothing has been agreed for this
           {resolved?.scope.contract_id ? " contract" :
            resolved?.scope.broker_party_id ? " broker" : " programme"} yet.
-          Upload the layout you have been asked for
-          {CAN_BUILD ? ", or create one." : "."}
+          Upload the layout you have been asked for, or create one.
         </div>
-        {!compact && CAN_BUILD && (
+        {!compact && (
           <Button className="mt-2" variant="secondary" onClick={onCreate}>
             <Plus size={14} /> Create Output BDX Template
           </Button>
@@ -145,11 +138,9 @@ export default function OutputTemplateState({
               Review fields
             </Button>
           )}
-          {CAN_BUILD && (
-            <Button variant="secondary" onClick={onCreate}>
-              <Plus size={14} /> {broader ? "Create one for this scope" : "Replace it"}
-            </Button>
-          )}
+          <Button variant="secondary" onClick={onCreate}>
+            <Plus size={14} /> {broader ? "Create one for this scope" : "Replace it"}
+          </Button>
         </div>
       )}
     </Box>

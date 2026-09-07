@@ -89,6 +89,7 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // is why the ways in sit under Configure and not in the monthly run.
       { to: "/intake", label: "How Files Arrive", icon: Server },
       { to: "/intake/arrivals", label: "Files Received", icon: Inbox },
+      { to: "/parties", label: "All Carriers", icon: Users2 },
     ],
   },
   {
@@ -149,6 +150,7 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // opened from the setup screen makes the sidebar lie about where they are.
   // The whole /outputs area belongs to that setup: /parties is no longer in the
   // sidebar, so pointing at it would highlight nothing at all.
+  if (pathname.startsWith("/outputs/templates")) return "/direct/setups";
   if (under("/outputs")) return "/direct/setups";
 
   if (under("/parties")) return "/parties";

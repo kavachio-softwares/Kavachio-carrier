@@ -21,7 +21,6 @@ import {
   uploadContract, generateContractRules, type ExternalReference,
 } from "../api/contracts";
 import CreateOutputTemplate from "../components/CreateOutputTemplate";
-import { SHOW_BDX_TEMPLATE_BUILDER } from "../featureFlags";
 import OutputTemplateState from "../components/OutputTemplateState";
 import MappingReview, { type MappingReviewData } from "../components/MappingReview";
 import {
@@ -1542,41 +1541,27 @@ export default function DirectSetup() {
                 tone={resolved?.template ? "optional" : "required"}
                 required={!resolved?.template}
                 onPick={f => pickFileWithSheets("output", f)}
-                hint={SHOW_BDX_TEMPLATE_BUILDER
-                  ? "Upload the layout you have been asked for, or build one here"
-                  : "Upload the layout you have been asked for"}
-                // No altAction when the builder is off, which puts the card back
-                // to opening the file dialog wherever you click it.
-                altAction={SHOW_BDX_TEMPLATE_BUILDER ? {
+                hint="Upload the layout you have been asked for, or build one here"
+                altAction={{
                   label: "Create BDX Template",
                   onClick: openCreateTemplate,
                   hint: "Built from a reporting standard or the contract, and "
                       + "checked against your bordereau",
-                } : undefined}
+                }}
                 disabled={scopeIncomplete} />
               <SheetPicker kind="output" options={outputSheetOpts}
                 selected={outputSheetSel} onToggle={n => toggleSheet("output", n)}
                 hint="The generated output will contain only the checked sheets." />
               {/* The "not configured" case is NOT reported here any more: the
                   box above now carries both ways to fix it, and saying it twice
-                  read as a fault rather than as a choice.
-
-                  The whole box is off while the builder is: it names the
-                  template a scope already has, says which way it was built and
-                  links into the field editor, all of which belong to the flow
-                  being kept off screen. Note that it also carries two real
-                  warnings — a template inherited from a broader scope, and a
-                  setup built against a different template — so those go quiet
-                  too until the flag comes back on. */}
-              {SHOW_BDX_TEMPLATE_BUILDER && (
-                <OutputTemplateState
-                  resolving={resolving} resolved={resolved}
-                  disabled={scopeIncomplete}
-                  uploading={!!outFile}
-                  hideMissing
-                  onCreate={openCreateTemplate}
-                  onOpen={id => navigate(`/outputs/templates/${id}`)} />
-              )}
+                  read as a fault rather than as a choice. */}
+              <OutputTemplateState
+                resolving={resolving} resolved={resolved}
+                disabled={scopeIncomplete}
+                uploading={!!outFile}
+                hideMissing
+                onCreate={openCreateTemplate}
+                onOpen={id => navigate(`/outputs/templates/${id}`)} />
             </div>
 
             {/* Contracts — REQUIRED, so it sits with the other two you must
@@ -1949,9 +1934,7 @@ export default function DirectSetup() {
           </div>
         </Modal>
 
-        {/* Not mounted at all while the builder is off, so nothing of it can
-            be reached by a stray state change during a demo. */}
-        {SHOW_BDX_TEMPLATE_BUILDER && <CreateOutputTemplate
+        <CreateOutputTemplate
           open={showCreateTemplate}
           onClose={() => setShowCreateTemplate(false)}
           mga={mga}
@@ -1987,7 +1970,7 @@ export default function DirectSetup() {
             // template — the card below links out and the user comes back to
             // the same screen with the same files attached.
             setJustCreated({ id: t.id, name: t.name });
-          }} />}
+          }} />
 
         {/* Save / Activate / Delete for the setup just built (or loaded) in this
             scope. Editing the mapping itself still happens on the setup's own
