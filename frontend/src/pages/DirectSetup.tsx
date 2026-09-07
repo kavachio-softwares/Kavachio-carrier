@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect, useRef } from "react";
+import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, FileSpreadsheet, ShieldCheck, FileUp, FileText,
@@ -36,10 +37,10 @@ import { DROP_TONES, DropBadge, type DropTone } from "../components/ui/FileDrop"
 // ---- types -----------------------------------------------------------------
 type Party = { id: number; legal_name: string; is_active?: boolean };
 type Program = { id: number; name: string; status?: string };
-const BDX_FREQUENCIES: [string, string][] = [
-  ["monthly", "Monthly"], ["quarterly", "Quarterly"],
-  ["semi-annual", "Semi-Annual"], ["annual", "Annual"],
-];
+// One list for the whole app — see constants/frequency.ts. The values here used
+// to be "semi-annual" and "annual", which the calendar engine could not build a
+// schedule from: picking either produced a programme with no deadlines and no
+// explanation on screen.
 type Rule = { kind: "copy" | "const" | "source_sheet"; source?: string; value?: string };
 type RouteT = { output_sheet: string; sources: { input_sheet: string }[]; filter: null | { column: string; equals?: string } };
 type Routing = { version: number; mode: string; confidence: string; routes: RouteT[] };
@@ -1462,7 +1463,7 @@ export default function DirectSetup() {
                   <Select value={programForm.bdx_frequency}
                     onChange={e => setProgramField("bdx_frequency", e.target.value)}>
                     <option value="">—</option>
-                    {BDX_FREQUENCIES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    {PROGRAMME_FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
                   </Select>
                 </Field>
                 {/* <Field label="Business segment">

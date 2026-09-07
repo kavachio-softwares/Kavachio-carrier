@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
 import { useNavigate } from "react-router-dom";
 import {
   CheckCircle2, Sparkles, ArrowRight, Building2, Users2, Layers,
@@ -27,7 +28,7 @@ const CURRENCIES = [
 type Programme = { id: number; name: string; bdx_frequency?: string | null };
 
 const TENANT_TYPES = ["carrier"];
-const BDX_FREQUENCIES = ["monthly", "quarterly", "annually"];
+// One list for the whole app — see constants/frequency.ts for why.
 
 export default function Welcome() {
   const nav = useNavigate();
@@ -303,8 +304,8 @@ export default function Welcome() {
                 <Field label="Bordereau frequency">
                   <Select value={newProgramme.bdx_frequency}
                     onChange={e => setNewProgramme({ ...newProgramme, bdx_frequency: e.target.value })}>
-                    {BDX_FREQUENCIES.map(f =>
-                      <option key={f} value={f}>{f[0].toUpperCase() + f.slice(1)}</option>)}
+                    {PROGRAMME_FREQUENCIES.map(f =>
+                      <option key={f.value} value={f.value}>{f.label}</option>)}
                   </Select>
                 </Field>
               </div>

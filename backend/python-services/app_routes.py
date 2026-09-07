@@ -1446,7 +1446,10 @@ class ScheduleBody(BaseModel):
     # No `grace_days`: there is no grace period. An older client still sending it
     # is ignored rather than rejected (pydantic drops unknown fields), which is
     # the right outcome — the field no longer has any effect to honour.
-    frequency_override: Optional[str] = None       # 'weekly'|'monthly'|'quarterly'
+    # weekly | monthly | quarterly | half_yearly | yearly. Legacy spellings the
+    # programme forms have been storing ('semi-annual', 'annual', 'annually')
+    # are normalised by submission_calendar._FREQ_ALIASES rather than rejected.
+    frequency_override: Optional[str] = None
     anchor_date_override: Optional[date] = None
     due_day_of_month: Optional[int] = None         # monthly/quarterly deadline
     due_offset_days: Optional[int] = None          # weekly deadline
@@ -1582,10 +1585,13 @@ def calendar_list(mga: Optional[str] = None, program_id: Optional[int] = None,
 
     Also runs a lazy overdue sweep so the bell reminder appears for anyone using the
     app even without an external daily cron (idempotent — fires each reminder once)."""
-    from submission_calendar_service import calendar_rows, sweep_overdue
+    from submission_calendar_service import (
+        calendar_rows, sweep_overdue, heal_calendars,
+    )
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         try:
+            heal_calendars(s, tenant_id=tid)
             sweep_overdue(s, tenant_id=tid)
             s.commit()
         except Exception as _e:   # never let the reminder path break the view
@@ -1595,6 +1601,137 @@ def calendar_list(mga: Optional[str] = None, program_id: Optional[int] = None,
         for r in rows:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
         return {"rows": rows, "counts": counts}
+
+
+@router.get("/calendar/board")
+def calendar_board_view(mga: Optional[str] = None, month: Optional[str] = None,
+                        principal: Principal = Depends(current_principal)):
+    """The carrier's Bordereau Calendar for one due-month (requirement 17.2).
+
+    What each broker owes, what turned up, what was sent onward, and which
+    version each period is on — plus how often every programme reports, which is
+    the answer all of it is derived from.
+    """
+    from submission_calendar_service import (
+        calendar_board, sweep_overdue, heal_calendars,
+    )
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        try:
+            # Calendars built under older rules — no broker on their rows, or
+            # deadlines still running past a contract that has ended — are brought
+            # up to date on view, the same way the sweep below runs.
+            heal_calendars(s, tenant_id=tid)
+            sweep_overdue(s, tenant_id=tid)
+            s.commit()
+        except Exception:      # never let the reminder path break the view
+            s.rollback()
+        return calendar_board(s, tid, month=month)
+
+
+@router.get("/calendar/{expected_id}/versions")
+def calendar_versions(expected_id: int,
+                      principal: Principal = Depends(current_principal)):
+    """Every file ever submitted for one period, oldest first.
+
+    The original is kept after a correction replaces it, so "what did we
+    actually send in August?" stays answerable.
+    """
+    from submission_calendar_service import submission_versions
+    with SessionLocal() as s:
+        e = s.get(ExpectedSubmission, expected_id)
+        if e is None:
+            raise HTTPException(404, "period not found")
+        assert_tenant_owns(principal, e.tenant_id)
+        return {"expected_id": expected_id, "period": e.period,
+                "versions": submission_versions(s, expected_id)}
+
+
+class ReleaseBody(BaseModel):
+    released_on: Optional[date] = None
+    released_to: Optional[str] = None      # reinsurer / syndicate / regulator / finance
+    release_ref: Optional[str] = None      # their reference, if they give one
+    version_no: Optional[int] = None       # defaults to the newest version
+    note: Optional[str] = None
+
+
+@router.post("/calendar/{expected_id}/release")
+def calendar_release(expected_id: int, body: ReleaseBody,
+                     principal: Principal = Depends(current_principal)):
+    """Record that a period's file was SENT ONWARD to its recipient.
+
+    Producing a file and sending it are separate acts, so they are recorded
+    separately: this is the one that answers "did they get July, and when?".
+    409 when the period has nothing submitted yet — there is nothing to send.
+    """
+    from submission_calendar_service import record_release
+    with SessionLocal() as s:
+        e = s.get(ExpectedSubmission, expected_id)
+        if e is None:
+            raise HTTPException(404, "period not found")
+        assert_tenant_owns(principal, e.tenant_id)
+        actor = _actor(principal)
+        out = record_release(
+            s, expected_id, released_on=body.released_on,
+            released_to=body.released_to, released_by=actor,
+            release_ref=body.release_ref, version_no=body.version_no,
+            note=body.note)
+        if out is None:
+            raise HTTPException(
+                409, "nothing has been submitted for this period yet, "
+                     "so there is nothing to send on")
+        s.commit()
+        _log(_tenant_name(s, e.tenant_id), actor, "submission_released",
+             target=f"program:{e.program_id}", details=out)
+        return out
+
+
+class ChaseBody(BaseModel):
+    # Which rows to chase. Empty/absent means "everything overdue for this
+    # tenant" — the screen's "Chase what is late" button.
+    expected_ids: Optional[list[int]] = None
+    # Anything the operator wants on the record alongside the chase — "we need
+    # this before month end". Kept with the event, because a chase nobody can
+    # read back is only half a record.
+    note: Optional[str] = None
+
+
+@router.post("/calendar/chase")
+def calendar_chase(body: ChaseBody, mga: Optional[str] = None,
+                   principal: Principal = Depends(current_principal)):
+    """Record that somebody was chased for a late file.
+
+    Stamps the rows and writes an activity event so the screen can say "chased
+    2 days ago". It does NOT email the broker — nothing here is wired to send
+    mail outward — but it makes the chase a recorded act rather than a private
+    one.
+    """
+    from submission_calendar_service import record_chase
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        ids = body.expected_ids
+        # None means "everything overdue" — the deliberate bulk path. An EMPTY
+        # LIST means "these rows", of which there are none, and must chase
+        # nothing. Testing truthiness collapsed the two: a caller that sent []
+        # (which is what `[] ?? null` produces in JS) would have chased every
+        # overdue row in the tenant instead of none of them.
+        if ids is None:
+            today = datetime.utcnow().date()
+            ids = [e.id for e in s.query(ExpectedSubmission).filter(
+                ExpectedSubmission.tenant_id == tid,
+                ExpectedSubmission.received_at.is_(None),
+                ExpectedSubmission.broker_party_id.isnot(None),
+                ExpectedSubmission.due_date < today).all()]
+        else:
+            # Never let an id from another tenant through.
+            owned = {e.id for e in s.query(ExpectedSubmission).filter(
+                ExpectedSubmission.tenant_id == tid,
+                ExpectedSubmission.id.in_(ids)).all()}
+            ids = [i for i in ids if i in owned]
+        result = record_chase(s, ids, actor=_actor(principal),
+                              note=(body.note or "").strip() or None)
+        s.commit()
+        return result
 
 
 @router.post("/calendar/sweep")

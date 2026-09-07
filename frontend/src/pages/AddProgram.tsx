@@ -9,6 +9,7 @@
  * The carrier is not asked for. You are signed in as it.
  */
 import { useEffect, useState } from "react";
+import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
@@ -25,7 +26,7 @@ import { getSegments, addSegment, type Segment } from "../api/segments";
 // Sentinel for the dropdown's "add" option. Not a segment name, and no
 // real name can collide with it.
 const ADD_SEGMENT = "__add_segment__";
-const FREQUENCIES = ["Monthly", "Quarterly"];
+// One list for the whole app — see constants/frequency.ts for why.
 
 export default function AddProgram() {
   const mga = currentMga();
@@ -39,7 +40,7 @@ export default function AddProgram() {
   const [creatingSegment, setCreatingSegment] = useState(false);
   const [segErr, setSegErr] = useState("");
   const [productLine, setProductLine] = useState("");
-  const [frequency, setFrequency] = useState(FREQUENCIES[0]);
+  const [frequency, setFrequency] = useState<string>(PROGRAMME_FREQUENCIES[0].value);
   const [status, setStatus] = useState("active");
 
   // The carrier's segments. Selecting the first keeps the form immediately
@@ -209,7 +210,8 @@ export default function AddProgram() {
                   <label className="mb-1 block text-xs font-medium text-ink-muted">BDX frequency</label>
                   <select className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
                     value={frequency} onChange={e => setFrequency(e.target.value)}>
-                    {FREQUENCIES.map(f => <option key={f} value={f}>{f}</option>)}
+                    {PROGRAMME_FREQUENCIES.map(f =>
+                      <option key={f.value} value={f.value}>{f.label}</option>)}
                   </select>
                   <p className="mt-1 text-xs text-ink-muted">How often you expect a file.</p>
                 </div>

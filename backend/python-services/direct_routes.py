@@ -2005,7 +2005,16 @@ async def _render_landing(
                     fmt = s.get(DirectFormat, lr.format_id) if lr.format_id else None
                     if fmt is not None and fmt.program_id is not None:
                         from submission_calendar_service import mark_received
-                        if mark_received(s, fmt.program_id, export_id=export_id) is not None:
+                        # WHICH period, and WHOSE. The uploaded file's name is
+                        # the only statement of the period we have here, and it
+                        # is a better one than "whatever is oldest and open" —
+                        # a July file sent in September satisfies July. When the
+                        # name says nothing, mark_received falls back to the
+                        # oldest open period and records that it guessed.
+                        if mark_received(
+                                s, fmt.program_id, export_id=export_id,
+                                broker_party_id=out.broker_party_id,
+                                source_filename=lr.source_filename) is not None:
                             s.commit()
                 except Exception as _e:  # noqa: BLE001
                     log.warning("submission-calendar mark_received failed: %s", _e)

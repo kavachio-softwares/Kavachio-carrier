@@ -17,18 +17,38 @@ resolved inputs and persists the results.
 """
 from __future__ import annotations
 
+import re
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-FREQUENCIES = {"weekly", "monthly", "quarterly"}
+FREQUENCIES = {"weekly", "monthly", "quarterly", "half_yearly", "yearly"}
 
 # Accept the handful of spellings a contract / user might use.
+#
+# The stored tokens are the five above; everything else here is an INBOUND
+# spelling. The half-yearly and yearly aliases matter more than the others,
+# because programmes were being created with "semi-annual" / "annual" /
+# "annually" long before this module could build a calendar from them — those
+# rows exist in the database today and have to keep resolving without a data
+# migration.
 _FREQ_ALIASES = {
     "week": "weekly", "weekly": "weekly",
     "month": "monthly", "monthly": "monthly",
     "quarter": "quarterly", "quarterly": "quarterly",
+    # half-yearly, and the many ways a contract writes it
+    "half_yearly": "half_yearly", "half-yearly": "half_yearly",
+    "half yearly": "half_yearly", "halfyearly": "half_yearly",
+    "half_year": "half_yearly", "half-year": "half_yearly",
+    "semi_annual": "half_yearly", "semi-annual": "half_yearly",
+    "semi annual": "half_yearly", "semiannual": "half_yearly",
+    "semi-annually": "half_yearly", "semiannually": "half_yearly",
+    "biannual": "half_yearly", "bi-annual": "half_yearly",
+    "six_monthly": "half_yearly", "six-monthly": "half_yearly",
+    # yearly
+    "yearly": "yearly", "year": "yearly",
+    "annual": "yearly", "annually": "yearly",
 }
 
 # Defaults for the tuning knobs — sensible out of the box, overridable per program.
@@ -36,12 +56,30 @@ DEFAULT_DUE_DAY_OF_MONTH = 10  # monthly/quarterly: due on this day of the next 
 DEFAULT_DUE_OFFSET_DAYS = 10   # weekly only: due this many days after the period ends
 DEFAULT_SOON_WINDOW_DAYS = 5   # how early the "due soon" warning starts
 
+# How far ahead a calendar is built, per frequency. A flat twelve months was
+# right while every schedule was monthly or quarterly; on a YEARLY programme it
+# produces one or two rows and the screen looks broken. The number of PERIODS a
+# reader can see ahead is what should stay roughly constant, not the number of
+# months, so the horizon scales with the period length.
+_HORIZON_MONTHS = {
+    "weekly": 12, "monthly": 12, "quarterly": 12,
+    "half_yearly": 24, "yearly": 36,
+}
+DEFAULT_HORIZON_MONTHS = 12
+
+
+def horizon_months_for(frequency: Optional[str]) -> int:
+    """Months of calendar to build ahead of today for this frequency."""
+    return _HORIZON_MONTHS.get(_norm_freq(frequency) or "", DEFAULT_HORIZON_MONTHS)
+
 # HOW A DUE DATE IS SET, and why it depends on the frequency.
 #
-# Monthly and quarterly periods always end on the LAST DAY OF A CALENDAR MONTH
-# (see _period_bounds), so the natural way to state their deadline is the one
-# brokers actually use: "the bordereau is due on the 10th". That is
-# `due_day_of_month` — day N of the month FOLLOWING the period.
+# Monthly, quarterly, half-yearly and yearly periods all end on the LAST DAY OF
+# A CALENDAR MONTH (see _period_bounds), so the natural way to state their
+# deadline is the one brokers actually use: "the bordereau is due on the 10th".
+# That is `due_day_of_month` — day N of the month FOLLOWING the period. A yearly
+# programme ending 31 Dec is therefore due on 10 Jan, which is how a treaty
+# actually reads.
 #
 # It replaced a "days after the period ends" offset, which was the same thing
 # said confusingly AND drifted: 31 Jan + 30 days is 2 March, skipping February
@@ -142,6 +180,18 @@ def _period_bounds(frequency: str, anchor: date, i: int) -> tuple[str, date, dat
         ly, lm = _add_months(y, m, 2)          # last month of this quarter
         end = date(ly, lm, monthrange(ly, lm)[1])
         return f"{y:04d}-Q{q}", start, end
+    if frequency == "half_yearly":
+        # First month of the anchor's calendar half (Jan or Jul), then step i halves.
+        first_month_of_anchor_h = 1 if anchor.month <= 6 else 7
+        y, m = _add_months(anchor.year, first_month_of_anchor_h, i * 6)
+        h = 1 if m <= 6 else 2
+        start = date(y, m, 1)
+        ly, lm = _add_months(y, m, 5)          # last month of this half
+        end = date(ly, lm, monthrange(ly, lm)[1])
+        return f"{y:04d}-H{h}", start, end
+    if frequency == "yearly":
+        y = anchor.year + i
+        return f"{y:04d}", date(y, 1, 1), date(y, 12, 31)
     if frequency == "weekly":
         start = anchor + timedelta(days=7 * i)
         end = start + timedelta(days=6)
@@ -150,17 +200,56 @@ def _period_bounds(frequency: str, anchor: date, i: int) -> tuple[str, date, dat
     raise ValueError(f"unknown frequency: {frequency!r}")
 
 
+def period_index_for(frequency: str, anchor: date, d: date) -> int:
+    """Which period number (0-based, from the anchor) contains `d`.
+
+    Negative when `d` falls before the calendar starts. Computed arithmetically
+    rather than by walking periods, so answering "which period is this file
+    for?" costs the same whether the anchor is last month or ten years ago.
+    """
+    if frequency == "weekly":
+        return (d - anchor).days // 7
+    if frequency == "monthly":
+        return (d.year * 12 + d.month - 1) - (anchor.year * 12 + anchor.month - 1)
+    if frequency == "quarterly":
+        return (d.year * 4 + (d.month - 1) // 3) - (anchor.year * 4 + (anchor.month - 1) // 3)
+    if frequency == "half_yearly":
+        return (d.year * 2 + (d.month - 1) // 6) - (anchor.year * 2 + (anchor.month - 1) // 6)
+    if frequency == "yearly":
+        return d.year - anchor.year
+    raise ValueError(f"unknown frequency: {frequency!r}")
+
+
+def period_for_date(resolved: Optional[ResolvedSchedule], d: date) -> Optional[str]:
+    """The label of the period that `d` falls inside — e.g. 2026-07, 2026-Q3,
+    2026-H2, 2026, 2026-W28.
+
+    This is what makes a LATE file belong to its own period rather than to the
+    period it turned up in. A July bordereau that arrives in September is still
+    July's: pass the date the file COVERS (not the date it arrived) and this
+    names the row it satisfies.
+
+    None when there is no schedule, or when `d` is before the calendar starts.
+    """
+    if resolved is None:
+        return None
+    i = period_index_for(resolved.frequency, resolved.anchor, d)
+    if i < 0:
+        return None
+    return _period_bounds(resolved.frequency, resolved.anchor, i)[0]
+
+
 def due_date_for(resolved: ResolvedSchedule, period_end: date) -> date:
     """When the bordereau for a period ending `period_end` has to be in.
 
-    Monthly/quarterly with a day-of-month set: day N of the month AFTER the
+    Any calendar-aligned frequency with a day-of-month set: day N of the month AFTER the
     period. February is the case that matters — a schedule set to the 31st is
     due on the 28th (or 29th) there, because clamping to the month's real last
     day is the only reading of "the 31st" that is always a date. It never spills
     into March, which is exactly the drift the old offset had.
 
-    Everything else (weekly, or a schedule saved before day-of-month existed)
-    falls back to the offset.
+    Everything else (weekly, whose periods end on arbitrary dates, or a schedule
+    saved before day-of-month existed) falls back to the offset.
     """
     if resolved.frequency == "weekly" or resolved.due_day_of_month is None:
         return period_end + timedelta(days=resolved.due_offset_days)
@@ -180,11 +269,13 @@ def generate_expected(
     Returns [] when `resolved` is None (nothing to build yet) or when the window
     is empty.
 
-    NOTE a period CAN begin before the anchor. Monthly and quarterly periods snap
-    to whole calendar months/quarters (see _period_bounds), so an anchor of
-    15 Oct produces 2025-10 running 1–31 Oct, and an anchor of 20 Nov produces
-    2025-Q4 running 1 Oct–31 Dec. Only weekly periods start on the anchor itself.
-    The anchor selects which period is FIRST; it does not clip that period.
+    NOTE a period CAN begin before the anchor. Every frequency except weekly
+    snaps to whole calendar units (see _period_bounds), so an anchor of 15 Oct
+    produces 2025-10 running 1–31 Oct, an anchor of 20 Nov produces 2025-Q4
+    running 1 Oct–31 Dec, and an anchor of 3 Sep produces 2025-H2 running
+    1 Jul–31 Dec and 2025 running 1 Jan–31 Dec. Only weekly periods start on the
+    anchor itself. The anchor selects which period is FIRST; it does not clip
+    that period.
     """
     if resolved is None or start > end:
         return []
@@ -205,6 +296,86 @@ def generate_expected(
         if i > 10_000:   # safety valve against a bad frequency/anchor
             break
     return rows
+
+
+_MONTH_NAMES = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+# Ordered most-specific first: "2026-Q3" must not be read as the bare year 2026.
+# Each pattern yields a date INSIDE the period the text names — never the period
+# label itself, because the label depends on the programme's frequency and this
+# function does not know it. period_for_date() does that translation.
+_PERIOD_PATTERNS: list[tuple[str, str]] = [
+    (r"(?<!\d)(20\d{2})[-_ ]?q([1-4])(?!\d)", "yq"),      # 2026-Q3, 2026Q3
+    (r"(?<!\d)q([1-4])[-_ ]?(20\d{2})(?!\d)", "qy"),      # Q3-2026, Q3 2026
+    (r"(?<!\d)(20\d{2})[-_ ]?h([12])(?!\d)", "yh"),       # 2026-H2
+    (r"(?<!\d)h([12])[-_ ]?(20\d{2})(?!\d)", "hy"),       # H2-2026
+    (r"(?<!\d)(20\d{2})[-_](0[1-9]|1[0-2])(?!\d)", "ym"), # 2026-07, 2026_07
+    (r"(?<!\d)(0[1-9]|1[0-2])[-_](20\d{2})(?!\d)", "my"), # 07-2026
+    (r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(?!\d)", "ym"),     # 202607
+    (r"([a-z]{3,9})[-_ ]?(20\d{2})(?!\d)", "ny"),          # July2026, Jul-2026
+    (r"(?<!\d)(20\d{2})[-_ ]?([a-z]{3,9})", "yn"),         # 2026-July
+    (r"(?<!\d)(20\d{2})(?!\d)", "y"),                     # bare 2026 — last resort
+]
+
+# A quarter or half marker that did NOT validate — "Q5", "H3". Its presence
+# means the name was TRYING to state a period and got it wrong, so the bare-year
+# fallback must not quietly read "Q5-2026" as the year 2026 and mark January
+# delivered. Better to admit we cannot tell.
+_SPOILED_MARKER = re.compile(r"(?<![a-z])[qh]\s*\d")
+
+
+def parse_period_hint(text: Optional[str]) -> Optional[date]:
+    """Read a reporting period out of free text — usually a filename.
+
+    Returns a date that falls INSIDE the period the text names, which
+    period_for_date() then turns into the right label for the programme's own
+    frequency. So "SpectrumBDX_2026-07.xlsx" gives 1 Jul 2026, which is 2026-07
+    on a monthly programme and 2026-Q3 on a quarterly one — the same file, read
+    correctly by both.
+
+    Deliberately conservative: it recognises the shapes brokers actually name
+    files with and returns None for anything else, so an unreadable name falls
+    back to the caller's own rule instead of guessing a period wrong. A wrong
+    period is worse than no period — it marks the wrong month delivered.
+    """
+    if not text:
+        return None
+    low = str(text).lower()
+    for pattern, kind in _PERIOD_PATTERNS:
+        m = re.search(pattern, low)
+        if not m:
+            continue
+        try:
+            if kind == "yq":
+                return date(int(m.group(1)), (int(m.group(2)) - 1) * 3 + 1, 1)
+            if kind == "qy":
+                return date(int(m.group(2)), (int(m.group(1)) - 1) * 3 + 1, 1)
+            if kind == "yh":
+                return date(int(m.group(1)), 1 if m.group(2) == "1" else 7, 1)
+            if kind == "hy":
+                return date(int(m.group(2)), 1 if m.group(1) == "1" else 7, 1)
+            if kind == "ym":
+                return date(int(m.group(1)), int(m.group(2)), 1)
+            if kind == "my":
+                return date(int(m.group(2)), int(m.group(1)), 1)
+            if kind in ("ny", "yn"):
+                name, year = (m.group(1), m.group(2)) if kind == "ny" else (m.group(2), m.group(1))
+                month = _MONTH_NAMES.get(name)
+                if month is None:
+                    continue        # a word that is not a month — keep looking
+                return date(int(year), month, 1)
+            if kind == "y":
+                if _SPOILED_MARKER.search(low):
+                    return None
+                return date(int(m.group(1)), 1, 1)
+        except ValueError:
+            continue
+    return None
 
 
 def derive_status(

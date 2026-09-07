@@ -39,6 +39,7 @@ import RuleLibrary from "./pages/RuleLibrary";
 import RuleForm from "./pages/RuleForm";
 import RecentRuns from "./pages/RecentRuns";
 import Calendar from "./pages/Calendar";
+import BordereauCalendar from "./pages/BordereauCalendar";
 // Feature 10 — file intake channels.
 import FilesArrive from "./pages/FilesArrive";
 import FilesReceived from "./pages/FilesReceived";
@@ -158,6 +159,10 @@ export default function App() {
         <Route path="/rule-library/:id/edit" element={<RuleForm />} />
         <Route path="/runs" element={<RecentRuns />} />
         <Route path="/calendar" element={<Calendar />} />
+        {/* The carrier's view of the same data: every broker's obligation for a
+            due month, rather than one programme's deadlines. /calendar stays as
+            the place a single programme's schedule is SET. */}
+        <Route path="/bordereau-calendar" element={<BordereauCalendar />} />
         {/* How a broker's file reaches you, and everything that has landed. */}
         <Route path="/intake" element={<FilesArrive />} />
         <Route path="/intake/arrivals" element={<FilesReceived />} />

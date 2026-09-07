@@ -17,6 +17,7 @@
  * you read and a list you act on.
  */
 import { useEffect, useState } from "react";
+import { frequencyLabel } from "../constants/frequency";
 import { Link, useNavigate } from "react-router-dom";
 import { Layers, ChevronRight, FileText, Users2, Plus } from "lucide-react";
 import { PageBody, PageHeader } from "../components/Layout";
@@ -139,7 +140,7 @@ export default function Programs() {
                           ? <span className="pill pill-grey">{p.business_segment}</span>
                           : <span className="text-ink-soft">—</span>}
                       </td>
-                      <td className="capitalize text-ink-muted">{p.bdx_frequency || "—"}</td>
+                      <td className="text-ink-muted">{frequencyLabel(p.bdx_frequency)}</td>
                       {/* Zero brokers is the state worth calling out, not hiding:
                           nothing can be done with the programme until it has one,
                           so the cell says what to DO rather than showing a 0 the

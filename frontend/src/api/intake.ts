@@ -103,11 +103,27 @@ export type Arrival = {
   sender_notified_at: string | null;
   sender_notified_via: string | null;
   bdx_upload_id: number | null;
+  /** The reference a partner quotes back at us. */
+  public_ref?: string | null;
+  // ── 12.3 — what a PERSON decided ─────────────────────────────────────────
+  /** null means nobody has looked at this yet — which is what makes it a queue. */
+  resolution: "released" | "discarded" | null;
+  resolved_at: string | null;
+  resolved_by_user_id: number | null;
+  resolution_note: string | null;
+  /** Set once retention has deleted the stored bytes. The row outlives them. */
+  bytes_purged_at: string | null;
+  /** False when there is no stored copy, it has been purged, or the file failed
+   *  the security scan — an infected file is never handed to anybody. */
+  can_download: boolean;
+  is_infected: boolean;
 };
 
 export type ArrivalsResponse = {
   rows: Arrival[];
-  counts: { total: number; accepted: number; held: number; turned_away: number };
+  counts: { total: number; accepted: number; held: number; turned_away: number;
+            /** Held AND unresolved — the only number anybody has to act on. */
+            waiting: number };
 };
 
 export type PollResult = {
@@ -180,6 +196,44 @@ export async function listArrivals(limit = 100): Promise<ArrivalsResponse> {
   const { data } = await api.get("/intake/arrivals",
     { params: { mga: currentMga(), limit } });
   return data;
+}
+
+// ── the review queue (12.3) ─────────────────────────────────────────────────
+// A refused file is kept so somebody can look at it. These are the three things
+// they can do about it — until they existed, the screen's buttons were built
+// disabled because a decision had nowhere to be recorded.
+
+export type ReviewResult = {
+  arrival_id: number; outcome: Outcome;
+  resolution: "released" | "discarded"; resolved_at: string | null;
+};
+
+/** "This is fine, load it." Held files only — a turned-away file is one we
+ *  could not read, and releasing it would hand processing something broken. */
+export async function releaseArrival(arrivalId: number, note?: string): Promise<ReviewResult> {
+  const { data } = await api.post(`/intake/arrivals/${arrivalId}/release`,
+    { note: note || null }, { params: { mga: currentMga() } });
+  return data;
+}
+
+/** "Ignore this." The row and the reason stay; only the decision is added. */
+export async function discardArrival(arrivalId: number, note?: string): Promise<ReviewResult> {
+  const { data } = await api.post(`/intake/arrivals/${arrivalId}/discard`,
+    { note: note || null }, { params: { mga: currentMga() } });
+  return data;
+}
+
+/** Open the stored copy. Saved through the browser rather than fetched into
+ *  memory: these are whole bordereaux, and the download is logged server-side
+ *  either way. */
+export async function downloadArrival(arrivalId: number, filename: string): Promise<void> {
+  const res = await api.get(`/intake/arrivals/${arrivalId}/download`,
+    { params: { mga: currentMga() }, responseType: "blob" });
+  const url = URL.createObjectURL(res.data as Blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename || "arrival";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 }
 
 /** Collect this folder now instead of waiting for the timer. */

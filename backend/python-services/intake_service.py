@@ -2,7 +2,7 @@
 
 The whole point of this module is one function, `land_file`. Whichever door a
 file used — SFTP folder, email attachment, machine POST, someone dragging it
-onto a screen — it lands here, gets the same six checks and produces one
+onto a screen — it lands here, gets the same checks and produces one
 `file_arrival` row. The door only changes how it got here; it never changes what
 happens next.
 
@@ -35,6 +35,8 @@ from typing import Optional
 
 from sqlalchemy import func
 
+import intake_required_fields as required_fields
+import intake_safety as safety
 from intake_models import FileArrival, IntakeRoute
 
 log = logging.getLogger("kavachio.intake")
@@ -66,22 +68,30 @@ _MAGIC = {
     b"%PDF": "pdf",                 # named so the refusal can say what it IS
 }
 
-# The six checks, in the order they run. Cheapest and most certain first, so a
-# file that was never going to work is refused in the first second rather than
-# an hour into processing.
+# The checks, in the order they run. Cheapest and most certain first, so a file
+# that was never going to work is refused in the first second rather than an
+# hour into processing.
 #
-# NOTE on outcomes: the database CHECK allows only 'accepted' and 'turned_away'.
-# The design describes a third state — "Held, someone decides" — for a suspected
-# duplicate, an empty file, or a file with no live contract yet. Those are NOT
-# refusals: the file is fine, a person just has to make a call. With no value to
-# store, they currently land as `turned_away` with a reason that begins "Held —".
-# Giving them their own state is a one-line migration relaxing that CHECK.
+# ORDER IS SAFETY, NOT JUST SPEED (12.1). Everything above `can_open` is settled
+# WITHOUT parsing the file. That matters because opening a spreadsheet is the
+# one step that executes a stranger's choices — openpyxl, pandas and the XML
+# parser all run on bytes we did not write. Until this order existed, that step
+# ran FIRST, before every check meant to protect it.
+#
+# NOTE on outcomes: 'held' is not a refusal. The file is fine, a person just has
+# to make a call — a suspected duplicate, an empty file, a changed layout, no
+# live contract yet. Migration 10_2 made it a real value; before that these
+# landed as `turned_away` with a reason beginning "Held —".
 CHECKS = (
+    ("size",             "turned_away", "Is it small enough to read?"),
     ("is_spreadsheet",   "turned_away", "Is it a spreadsheet at all?"),
-    ("can_open",         "turned_away", "Can we open it?"),
+    ("safe_to_open",     "turned_away", "Is it safe to open?"),
     ("known_sender",     "turned_away", "Do we know who sent it?"),
     ("not_duplicate",    "held",        "Is it the same file we already have?"),
+    ("malware",          "turned_away", "Does it pass the security scan?"),
+    ("can_open",         "turned_away", "Can we open it?"),
     ("has_rows",         "held",        "Does it have any rows in it?"),
+    ("required_columns", "held",        "Does it have the columns we need?"),
     ("live_contract",    "held",        "Is there a live contract to check it against?"),
 )
 
@@ -156,22 +166,40 @@ def display_address(route: IntakeRoute) -> str:
 
 
 def route_dirs(route: IntakeRoute) -> tuple[Path, Path, Path]:
-    """(incoming, processed, rejected) for one route.
-
-    Three folders, not one. `processed` is what stops a file being read twice —
-    the design's "moved into /processed so it cannot be read twice". `rejected`
-    exists because a refused file is kept, not deleted: "Nothing here is lost."
-    """
+    """(incoming, processed, rejected) for one route — the three that existed
+    first. `held` and `quarantine` are siblings, resolved by name below, so this
+    signature and every caller of it stay as they were."""
     base = sftp_root() / route.address
     return base / "incoming", base / "processed", base / "rejected"
 
 
+# The five folders a route has, and why each one is separate (12.3):
+#
+#   incoming    what the broker drops in.
+#   processed   accepted, already loaded, must never be read twice.
+#   rejected    genuinely bad — a PDF, a corrupt workbook, an unknown sender.
+#               The broker has to fix something and send it again.
+#   held        NOT bad. A file waiting on a person: a suspected duplicate, a
+#               layout that changed, no live contract yet. Mixing these into
+#               `rejected` buried the only pile anybody has to act on inside the
+#               pile nobody does.
+#   quarantine  failed the security scan. Nobody is invited to browse this one.
+ROUTE_FOLDERS = ("incoming", "processed", "rejected", "held", "quarantine")
+
+
+def route_dir(route: IntakeRoute, which: str) -> Path:
+    """One named folder for a route. `which` is one of ROUTE_FOLDERS."""
+    return sftp_root() / route.address / which
+
+
 def ensure_route_dirs(route: IntakeRoute) -> Path:
-    """Create a route's three folders. Safe to call repeatedly."""
-    incoming, processed, rejected = route_dirs(route)
-    for d in (incoming, processed, rejected):
-        d.mkdir(parents=True, exist_ok=True)
-    return incoming.parent
+    """Create a route's folders. Safe to call repeatedly, and called on every
+    collection so a route created before `held`/`quarantine` existed grows them
+    the first time it is polled rather than needing a backfill."""
+    base = sftp_root() / route.address
+    for name in ROUTE_FOLDERS:
+        (base / name).mkdir(parents=True, exist_ok=True)
+    return base
 
 
 def is_quiet(path: Path, now: Optional[datetime] = None) -> bool:
@@ -241,7 +269,10 @@ def count_rows(filename: str, file_bytes: bytes) -> Optional[int]:
                 return 1 if payload else 0
             return 0
         if ext == ".xml":
-            root = ET.fromstring(file_bytes)
+            # Hardened parse: entity declarations and external references are
+            # refused outright, so a "billion laughs" file cannot exhaust
+            # memory and no document can ask us to read a file off the server.
+            root = safety.safe_xml_root(file_bytes)
             return len(list(root))
     except Exception as exc:
         log.info("count_rows failed for %s: %s", filename, exc)
@@ -249,7 +280,7 @@ def count_rows(filename: str, file_bytes: bytes) -> Optional[int]:
     return None
 
 
-# ── the six checks ──────────────────────────────────────────────────────────
+# ── the checks ──────────────────────────────────────────────────────────
 
 def _check_is_spreadsheet(filename: str, file_bytes: bytes) -> Optional[str]:
     ext = Path(filename).suffix.lower()
@@ -359,7 +390,8 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
               claimed_sender: Optional[str] = None,
               idempotency_key: Optional[str] = None,
               public_ref: Optional[str] = None,
-              blob_ref: Optional[str] = None) -> FileArrival:
+              blob_ref: Optional[str] = None,
+              max_bytes: Optional[int] = None) -> FileArrival:
     """Record one arriving file and decide whether it may go on.
 
     Always returns a FileArrival — including for a file we refuse. That is the
@@ -380,28 +412,49 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
     is wired. Doing it here would change how existing uploads behave.
     """
     sha = hashlib.sha256(file_bytes).hexdigest()
-    # Counted once and kept. Two of the six checks need it, and Files Received
-    # wants to show it — a bordereau is measured in rows, not kilobytes.
-    row_count = count_rows(filename, file_bytes)
+
+    # The row count is LAZY (12.1). Counting rows means opening the file, and
+    # opening the file is the thing the first six checks exist to gate. A file
+    # refused for its size, its type, a zip that expands to gigabytes, an
+    # unknown sender or a virus signature is never opened at all, and its
+    # row_count stays NULL — which is the honest record of what happened.
+    _counted: list = []
+
+    def rows() -> Optional[int]:
+        if not _counted:
+            # Bounded: a clean file can still be pathological, and the caller —
+            # an API request, a poller loop — must not be stuck behind it.
+            _counted.append(safety.with_timeout(
+                lambda: count_rows(filename, file_bytes)))
+        return _counted[0]
 
     reason: Optional[str] = None
     for check in (
+        # ── settled without opening the file ────────────────────────────────
+        lambda: safety.check_size(file_bytes, max_bytes),
         lambda: _check_is_spreadsheet(filename, file_bytes),
-        lambda: _check_can_open(row_count),
+        lambda: safety.check_safe_to_open(filename, file_bytes),
         lambda: _check_known_sender(route),
+        # Before the scan on purpose: a file we have already accepted has
+        # already been scanned, and there is no sense paying for it twice.
         lambda: _check_not_duplicate(session, tenant_id, sha, route),
-        lambda: _check_has_rows(row_count),
+        lambda: safety.scan_for_malware(filename, file_bytes),
+        # ── from here on the file gets opened ───────────────────────────────
+        lambda: _check_can_open(rows()),
+        lambda: _check_has_rows(rows()),
+        lambda: required_fields.check(session, route, filename, file_bytes),
         lambda: _check_live_contract(session, route),
     ):
         reason = check()
         if reason:
             break
 
-    # Three of the six checks mean "hold this for a person to decide" rather
-    # than "refuse it": a suspected duplicate, an empty file, and no live
-    # contract yet. They say so by prefixing their reason with "Held". Until
-    # migration 10_2 the outcome column had no value for that, so those landed
-    # as refusals; now they land as what they are. A held file HAS arrived.
+    row_count = _counted[0] if _counted else None
+
+    # Four checks mean "hold this for a person to decide" rather than "refuse
+    # it": a suspected duplicate, an empty file, a layout missing columns, and
+    # no live contract yet. They say so by prefixing their reason with "Held".
+    # A held file HAS arrived — it is only waiting on somebody.
     if not reason:
         outcome = "accepted"
     elif reason.startswith("Held"):
@@ -427,6 +480,31 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
     )
     session.add(arrival)
     session.flush()
+
+    # THE CALENDAR'S "turned up" MOMENT (requirement 17.2). An accepted file on a
+    # route pinned to a programme satisfies that programme's period for this
+    # broker — which is the whole point of the calendar knowing when something
+    # was due. Only ACCEPTED files count: a turned-away file did not arrive, and
+    # a held one has not been decided yet, so neither may tick a deadline off.
+    #
+    # The period is read from the file NAME, so July's bordereau arriving in
+    # September lands on July. When the name says nothing, mark_received falls
+    # back to the oldest open period and records that it guessed.
+    #
+    # Best-effort on purpose: the calendar is a side-feature, and nothing here
+    # may stop a file being recorded as arrived.
+    if outcome == "accepted" and route is not None and route.program_id is not None:
+        try:
+            from submission_calendar_service import mark_received
+            mark_received(session, route.program_id,
+                          received_on=arrival.received_at.date(),
+                          broker_party_id=route.broker_party_id,
+                          source_filename=filename)
+            session.flush()
+        except Exception:   # noqa: BLE001
+            log.warning("submission-calendar mark_received failed for arrival %s",
+                        arrival.public_ref, exc_info=True)
+
     return arrival
 
 

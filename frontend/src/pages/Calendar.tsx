@@ -17,6 +17,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { CalendarDays } from "lucide-react";
 import { listCarriers, listPrograms, type CarrierLite, type ProgramLite } from "../api/calendar";
+import { AUTH_EVENT, getTenantBrand } from "../auth";
 import ProgramCalendar from "../components/ProgramCalendar";
 import NotificationBell from "../components/NotificationBell";
 
@@ -32,6 +33,19 @@ export default function Calendar() {
   const [selProgram, setSelProgram] = useState<number | "">(
     () => (sp.get("program") ? Number(sp.get("program")) : ""));
   const [err, setErr] = useState<string | null>(null);
+  // THIS TENANT'S OWN NAME — "Acceltree" — which is what the sidebar shows.
+  //
+  // It is the honest last resort for naming a carrier, because in this model the
+  // tenant IS the carrier. Seeded from the cached brand (hydrated out of
+  // localStorage, so it is normally there on the first paint) and refreshed on
+  // AUTH_EVENT, which setTenantBrand fires once /tenants lands on a fresh login.
+  const [ownName, setOwnName] = useState<string | null>(
+    () => getTenantBrand()?.legal_name ?? null);
+  useEffect(() => {
+    const onAuth = () => setOwnName(getTenantBrand()?.legal_name ?? null);
+    window.addEventListener(AUTH_EVENT, onAuth);
+    return () => window.removeEventListener(AUTH_EVENT, onAuth);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -54,35 +68,60 @@ export default function Calendar() {
     if (pid == null || Number.isNaN(pid)) return;
     const p = programs.find(x => x.id === pid);
     if (!p) { setSelProgram(""); return; }   // not this tenant's, or deleted
-    setSelCarrier(p.party_id ?? -1);
+    setSelCarrier(carrierKey(p));
     setSelProgram(pid);
+    // Re-runs when the carrier directory lands too: carrierKey depends on it,
+    // and programs usually arrive first, so keying on the earlier answer alone
+    // could leave the program hidden behind a group it no longer belongs to.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [programs]);
+  }, [programs, carriers]);
 
   const carrierName = useMemo(() => {
     const byId = new Map(carriers.map(c => [c.id, c.legal_name]));
-    // Falls back to the program's own free-text lead_carrier when the party is
-    // missing from the directory (deactivated, or a different tenant scope).
+    // Four steps, most specific first:
+    //   1. the party's real name, when /parties returns it;
+    //   2. the program's own free-text lead_carrier;
+    //   3. THIS TENANT'S name — see below for why this is the common case;
+    //   4. "Unassigned carrier", only when even that is unknown.
+    //
+    // Step 3 does the work in practice. Carrier parties are created by Kavachio
+    // platform admins, not through the tenant app, so they carry
+    // is_app_managed = false — and /parties returns app-managed parties only.
+    // Step 1 therefore misses EVERY carrier, and a program that names its
+    // carrier correctly still had no name to show. Falling back to the tenant is
+    // not a guess: a carrier tenant's programs belong to that carrier.
     return (p: ProgramLite) =>
       (p.party_id != null ? byId.get(p.party_id) : null)
-      || p.lead_carrier || "Unassigned carrier";
+      || p.lead_carrier || ownName || "Unassigned carrier";
+  }, [carriers, ownName]);
+
+  // WHICH GROUP a program's carrier belongs to. Deliberately NOT `party_id`.
+  //
+  // A party we cannot NAME must not be its own group. Keying on the raw id put
+  // programs with no party under -1 and programs with an unresolvable party
+  // under that party's id — two groups whose labels both fall through to the
+  // same fallback text, so the picker showed the same carrier name twice with
+  // the programs split arbitrarily between them. Collapsing every unnameable
+  // party into -1 gives one entry per name the user can actually read.
+  const carrierKey = useMemo(() => {
+    const byId = new Map(carriers.map(c => [c.id, c.legal_name]));
+    return (p: ProgramLite) =>
+      (p.party_id != null && byId.has(p.party_id)) ? p.party_id : -1;
   }, [carriers]);
 
   // Only carriers that actually hold a program — an empty carrier in this list
   // would be a dead end, since there would be nothing to pick at step two.
-  // Programs with no party_id are grouped under a single synthetic id (-1) so
-  // they stay reachable instead of dropping out of the picker entirely.
   const carrierOptions = useMemo(() => {
     const seen = new Map<number, string>();
-    for (const p of programs) seen.set(p.party_id ?? -1, carrierName(p));
+    for (const p of programs) seen.set(carrierKey(p), carrierName(p));
     return [...seen].map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [programs, carrierName]);
+  }, [programs, carrierKey, carrierName]);
 
   const carrierPrograms = useMemo(
     () => selCarrier === "" ? []
-      : programs.filter(p => (p.party_id ?? -1) === selCarrier),
-    [programs, selCarrier]);
+      : programs.filter(p => carrierKey(p) === selCarrier),
+    [programs, carrierKey, selCarrier]);
 
   // Changing carrier must clear the program — otherwise the calendar below keeps
   // rendering a program that is no longer in the visible list.

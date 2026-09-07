@@ -31,6 +31,7 @@ import {
   type CalendarResponse, type CalendarStatus, type ScheduleState,
 } from "../api/calendar";
 import { Pagination } from "./Pagination";
+import { FREQUENCIES, FREQUENCY_LABEL } from "../constants/frequency";
 
 const PAGE_SIZE = 12;
 
@@ -50,14 +51,22 @@ const STATUS_META: Record<CalendarStatus, { label: string; cls: string }> = {
   received_late: { label: "Sent late",         cls: "b-mut" },
 };
 
+// All five, from the one shared list — this editor is where an existing weekly
+// schedule can still be seen and changed, so unlike the programme forms it does
+// not hide it. Half-yearly and yearly used to be missing here entirely, which
+// is why a programme created as "Annual" had no way to get a calendar.
 const FREQ_OPTIONS: [string, string][] = [
-  ["", "— use contract —"], ["monthly", "Monthly"],
-  ["quarterly", "Quarterly"], ["weekly", "Weekly"],
+  ["", "— use contract —"],
+  ...FREQUENCIES.map(f => [f.value, f.label] as [string, string]),
 ];
 
 // The same options, keyed for display — so the read-only view names a frequency
-// the way the picker does without a second list to keep in step.
-const FREQ_LABEL: Record<string, string> = Object.fromEntries(FREQ_OPTIONS);
+// the way the picker does without a second list to keep in step. Legacy stored
+// spellings ("annual", "semi-annual") resolve through frequencyLabel().
+const FREQ_LABEL: Record<string, string> = {
+  ...Object.fromEntries(FREQ_OPTIONS),
+  ...FREQUENCY_LABEL,
+};
 
 const REASON_TEXT: Record<string, string> = {
   not_set: "No deadlines yet — tell us how often this bordereau is due, and when it starts.",
@@ -230,9 +239,18 @@ export default function ProgramCalendar({
 
   // The frequency actually in force — the override if there is one, otherwise
   // the contract's. It decides which deadline control makes sense: a day of the
-  // month for monthly/quarterly, days-after-the-period for weekly.
-  const effectiveFreq =
-    (form.frequency_override || sched?.contract_frequency || "").toLowerCase();
+  // month for every calendar-aligned frequency, days-after-the-period for weekly.
+  //
+  // NORMALISED, not raw. A contract can carry a legacy spelling like
+  // "semi-annual" or "annual"; the server resolves those to the stored tokens
+  // and hands the result back as `effective_frequency`, so preferring it here
+  // keeps this component from having to know the aliases. It falls back to the
+  // raw values while an unsaved override is still being typed.
+  const effectiveFreq = (
+    form.frequency_override
+    || sched?.effective_frequency
+    || sched?.contract_frequency
+    || "").toLowerCase();
   const isWeekly = effectiveFreq === "weekly";
 
   async function save() {
@@ -380,7 +398,9 @@ export default function ProgramCalendar({
   // "This quarter" for a quarterly one — calling a quarter "this month" would
   // be wrong in exactly the place the reader is trusting the label.
   const currentLabel = effectiveFreq === "quarterly" ? "This quarter"
-    : effectiveFreq === "weekly" ? "This week" : "This month";
+    : effectiveFreq === "weekly" ? "This week"
+    : effectiveFreq === "half_yearly" ? "This half-year"
+    : effectiveFreq === "yearly" ? "This year" : "This month";
 
   // The next thing actually owed: earliest unsent period by due date. Rows
   // arrive newest-deadline-last, so a scan is enough — no sort needed. "Due
@@ -864,6 +884,23 @@ export default function ProgramCalendar({
                           </td>
                           <td style={{ padding: "9px 12px", color: "var(--p-muted)" }}>
                             {fmtDate(r.received_at)}
+                            {/* A period can be filed more than once. Saying so
+                                HERE matters: the date beside it is the first
+                                submission, and without this the row would read
+                                as if that were the only one. Silent on a period
+                                filed once, which is almost all of them. */}
+                            {r.version_count > 1 && (
+                              <div className="sub" style={{ marginTop: 3 }}>
+                                {r.version_label}
+                                {r.latest_received_at
+                                  && ` · latest ${fmtDate(r.latest_received_at)}`}
+                              </div>
+                            )}
+                            {r.released_at && (
+                              <div className="sub" style={{ marginTop: 3 }}>
+                                Sent onward {fmtDate(r.released_at)}
+                              </div>
+                            )}
                           </td>
                         </tr>
                       );

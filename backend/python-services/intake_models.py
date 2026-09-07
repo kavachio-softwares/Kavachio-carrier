@@ -94,7 +94,7 @@ class FileArrival(Base):
     row_count = Column(Integer, nullable=True)
     file_hash_sha256 = Column(Text, nullable=True, index=True)
     received_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    outcome = Column(Text, nullable=False)          # accepted | turned_away
+    outcome = Column(Text, nullable=False)   # accepted | held | turned_away
     turned_away_reason = Column(Text, nullable=True)
     sender_notified_at = Column(DateTime(timezone=True), nullable=True)
     sender_notified_via = Column(Text, nullable=True)
@@ -106,6 +106,20 @@ class FileArrival(Base):
     # original receipt back instead of loading the same month twice.
     idempotency_key = Column(Text, nullable=True)
     blob_ref = Column(Text, nullable=True)
+    # ── Feature 12.3 — what a PERSON decided ────────────────────────────────
+    # Everything above this line is what arrived and what the machine made of
+    # it. These four are the other half: a held file is one the checks could not
+    # settle, and until somebody could record a decision there was no way for it
+    # ever to stop being held. NULL resolution means nobody has looked yet,
+    # which is exactly what every pre-12.3 row means.
+    resolution = Column(Text, nullable=True)              # released | discarded
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id = Column(BigInteger, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    # Stamped when the stored bytes are deleted by retention. The row outlives
+    # the file: "it arrived on the 5th and was refused because X" stays
+    # answerable long after the file itself is gone.
+    bytes_purged_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
 

@@ -13,10 +13,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func
 
+import intake_review as review
 import intake_service as svc
 from app_routes import (
     _actor, _iso_utc, _log, _tenant_name, assert_tenant_owns, resolve_tenant_id,
@@ -424,14 +425,116 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
                 "sender_notified_at": _iso_utc(a.sender_notified_at),
                 "sender_notified_via": a.sender_notified_via,
                 "bdx_upload_id": a.bdx_upload_id,
+                "public_ref": a.public_ref,
+                # ── 12.3 — what a person decided, and whether the file is
+                # still there to look at. The screen needs both: a resolved row
+                # must stop asking to be worked, and a download button that
+                # cannot work should not be offered.
+                "resolution": a.resolution,
+                "resolved_at": _iso_utc(a.resolved_at),
+                "resolved_by_user_id": a.resolved_by_user_id,
+                "resolution_note": a.resolution_note,
+                "bytes_purged_at": _iso_utc(a.bytes_purged_at),
+                "can_download": bool(
+                    a.blob_ref and a.bytes_purged_at is None
+                    and not review.is_infected(a)),
+                "is_infected": review.is_infected(a),
             })
         counts = {
             "total": len(out),
             "accepted": sum(1 for a in out if a["outcome"] == "accepted"),
             "held": sum(1 for a in out if a["outcome"] == "held"),
             "turned_away": sum(1 for a in out if a["outcome"] == "turned_away"),
+            # The only number anybody has to act on: held, and nobody has
+            # looked at it yet. This is what the queue is.
+            "waiting": sum(1 for a in out
+                           if a["outcome"] == "held" and not a["resolution"]),
         }
         return {"rows": out, "counts": counts}
+
+
+# ── the review queue (feature 12.3) ─────────────────────────────────────────
+# A refused file is kept so somebody can look at it. Until these three
+# endpoints existed there was nothing to look WITH: the screen's buttons were
+# built disabled because a decision had nowhere to be recorded.
+
+
+class ReviewDecision(BaseModel):
+    note: Optional[str] = None
+
+
+def _arrival_for_review(s, arrival_id: int, principal: Principal) -> FileArrival:
+    arrival = s.get(FileArrival, arrival_id)
+    if arrival is None:
+        raise HTTPException(404, "no such arrival")
+    assert_tenant_owns(principal, arrival.tenant_id)
+    return arrival
+
+
+@router.post("/arrivals/{arrival_id}/release")
+def release_arrival(arrival_id: int, body: ReviewDecision = ReviewDecision(),
+                    principal: Principal = Depends(require_role("carrier_admin"))):
+    """"This is fine, load it." Held files only — see intake_review.release."""
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        try:
+            review.release(s, arrival, user_id=principal.user_id, note=body.note)
+        except review.ReviewError as exc:
+            raise HTTPException(400, str(exc))
+        s.commit()
+        return {"arrival_id": arrival.id, "outcome": arrival.outcome,
+                "resolution": arrival.resolution,
+                "resolved_at": _iso_utc(arrival.resolved_at)}
+
+
+@router.post("/arrivals/{arrival_id}/discard")
+def discard_arrival(arrival_id: int, body: ReviewDecision = ReviewDecision(),
+                    principal: Principal = Depends(require_role("carrier_admin"))):
+    """"Ignore this." The row stays; only the decision is added."""
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        try:
+            review.discard(s, arrival, user_id=principal.user_id, note=body.note)
+        except review.ReviewError as exc:
+            raise HTTPException(400, str(exc))
+        s.commit()
+        return {"arrival_id": arrival.id, "outcome": arrival.outcome,
+                "resolution": arrival.resolution,
+                "resolved_at": _iso_utc(arrival.resolved_at)}
+
+
+@router.get("/arrivals/{arrival_id}/download")
+def download_arrival(arrival_id: int, request: Request,
+                     principal: Principal = Depends(require_role("carrier_admin"))):
+    """The stored copy, so a reviewer can open what they are judging.
+
+    Never for a file that failed the security scan, and every read is logged —
+    these are files that failed inspection, and one day somebody will ask who
+    looked at one.
+    """
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        try:
+            data = review.fetch_bytes(
+                arrival, user_id=principal.user_id,
+                ip=request.client.host if request.client else None)
+        except review.ReviewError as exc:
+            raise HTTPException(400, str(exc))
+        safe_name = (arrival.filename or "file").replace('"', "")
+        return Response(
+            content=data, media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'})
+
+
+@router.post("/retention/run")
+def run_retention(principal: Principal = Depends(require_role("carrier_admin"))):
+    """Run the retention sweep now rather than waiting for the nightly task.
+
+    Exists for the same reason /routes/{id}/poll does: a rule that only ever
+    runs at 3am cannot be demonstrated, and "did it work?" should have an answer
+    on screen rather than in a log file next week.
+    """
+    return review.run_retention()
 
 
 @router.post("/routes/{route_id}/poll")

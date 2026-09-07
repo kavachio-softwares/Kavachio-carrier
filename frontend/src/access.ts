@@ -96,6 +96,7 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
     only: ["carrier_admin", "kavachio_admin", "broker_admin", "operator"] },
   { pattern: "/runs", requires: "carrier_admin" },
   { pattern: "/calendar", requires: "carrier_admin" },
+  { pattern: "/bordereau-calendar", requires: "carrier_admin" },
   // How files reach this carrier, and everything that has landed. Carrier-only:
   // the routes name the carrier's brokers and their folder addresses.
   { pattern: "/intake", requires: "carrier_admin" },

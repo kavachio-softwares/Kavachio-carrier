@@ -45,6 +45,7 @@ from sqlalchemy import text
 
 import email_intake_service as mail
 import intake_service as svc
+import storage
 from db import SessionLocal
 from intake_models import FileArrival, IntakeRoute
 
@@ -316,12 +317,6 @@ def _handle_message(session, raw: bytes, summary: dict):
 
     took = False
     for attachment in parsed.attachments:
-        if attachment.size > _max_bytes():
-            log.warning("skipping %s from %s — %d bytes is over the limit",
-                        attachment.filename, parsed.from_addr, attachment.size)
-            summary["too_large"] += 1
-            continue
-
         # A crash between landing an attachment and retiring the message would
         # re-read it. The duplicate check would catch that, but it would tell a
         # broker their good file was a duplicate of itself — so make the retry
@@ -335,9 +330,39 @@ def _handle_message(session, raw: bytes, summary: dict):
             took = True          # it IS ours, we just have it already
             continue
 
+        # 12.2 — an attachment over the mail limit used to be dropped here
+        # with nothing but a log line: no arrival row, no reason, no reply. The
+        # broker sent a file and heard nothing, and we had no record it ever
+        # came. It now goes through the same landing as everything else and is
+        # refused BY the size check, which writes the row and the reason, and
+        # notify_sender tells them. Mail has a tighter cap than the other two
+        # doors (servers cap attachments anyway), so it passes its own.
+        # 12.3 — keep our OWN copy before deciding anything.
+        #
+        # SFTP moves the file into a folder we own; the API stores the bytes
+        # before it lands them. Email did neither: the row was written and the
+        # only copy of the file stayed in the mailbox. Move that message, rotate
+        # the mailbox, or let somebody tidy old mail, and the file is gone —
+        # so "a refused file is kept exactly as it arrived" was simply not true
+        # for one door in three.
+        #
+        # Stored BEFORE the checks run, deliberately. A file refused for its
+        # size or a virus signature is the one you most need to still have.
+        blob_ref = None
+        try:
+            blob_ref, _ = storage.store_or_keep(
+                "intake", tenant_id, attachment.filename, attachment.content)
+        except Exception as exc:
+            # Losing the copy must not lose the RECORD. Better an arrival row
+            # with no blob than a file that vanishes with nothing to show it
+            # ever came.
+            log.error("could not store %s from %s: %s",
+                      attachment.filename, parsed.from_addr, exc)
+
         arrival = svc.land_file(
             session, tenant_id=tenant_id, filename=attachment.filename,
             file_bytes=attachment.content, route=route,
+            max_bytes=_max_bytes(), blob_ref=blob_ref,
             # The From: header is a CLAIM, not proof — anyone can write anything
             # in it. Recorded as sent so "who tried?" has an answer even when it
             # matched nobody.
@@ -377,6 +402,10 @@ def collect_mailbox(session, account: str = "") -> dict:
     cfg = mail.mailbox_config(account)
     summary: dict = {"mailbox": cfg.user, "folder": cfg.folder,
                      "messages": 0, "accepted": 0, "held": 0, "turned_away": 0,
+                     # `too_large` stays in the shape for the screen that reads
+                     # it, but is now always 0: since 12.2 an oversized
+                     # attachment is a recorded refusal, counted under
+                     # turned_away with a reason the sender is told.
                      "no_attachment": 0, "too_large": 0, "already_seen": 0,
                      "unattributable": 0, "files": []}
 

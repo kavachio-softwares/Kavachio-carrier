@@ -30,7 +30,9 @@ from pathlib import Path
 
 from sqlalchemy import text
 
+import intake_safety as svc_safety
 import intake_service as svc
+import storage
 from db import SessionLocal
 from intake_models import IntakeRoute
 
@@ -80,10 +82,13 @@ def collect_route(session, route: IntakeRoute) -> dict:
     nothing to find it by. Doing it in this order can at worst re-read a file
     after a crash, and the duplicate check catches that.
     """
-    incoming, processed, rejected = svc.route_dirs(route)
+    # Creates any folder this route is missing, so a route made before `held`
+    # and `quarantine` existed grows them on its next poll (12.3).
+    svc.ensure_route_dirs(route)
+    incoming = svc.route_dir(route, "incoming")
     summary = {"route_id": route.id, "address": route.address,
-               "looked_in": str(incoming), "accepted": 0, "turned_away": 0,
-               "skipped_still_writing": 0, "files": []}
+               "looked_in": str(incoming), "accepted": 0, "held": 0,
+               "turned_away": 0, "skipped_still_writing": 0, "files": []}
 
     if not incoming.is_dir():
         summary["error"] = "folder does not exist yet"
@@ -136,16 +141,50 @@ def collect_route(session, route: IntakeRoute) -> dict:
                 log.warning("could not read %s: %s", path, exc)
                 continue
 
+            # 12.3 — our own copy, before any decision is made.
+            #
+            # The file is also MOVED into rejected/held/quarantine below, and
+            # for an operator browsing the folder that is the copy they want.
+            # This one is for the review screen: it is what the download button
+            # reads, and what retention can expire on a schedule. Without it
+            # SFTP arrivals were the only ones a reviewer could not open.
+            blob_ref = None
+            try:
+                blob_ref, _ = storage.store_or_keep(
+                    "intake", route.tenant_id, path.name, file_bytes)
+            except Exception as exc:
+                log.error("could not store %s: %s", path.name, exc)
+
             arrival = svc.land_file(
                 session, tenant_id=route.tenant_id, filename=path.name,
-                file_bytes=file_bytes, route=route,
+                file_bytes=file_bytes, route=route, blob_ref=blob_ref,
                 # On SFTP the folder is the claim — there is no From: header to
                 # take a sender's word for.
                 claimed_sender=f"sftp:{route.address}",
             )
             session.commit()
 
-            destination = processed if arrival.outcome == "accepted" else rejected
+            # Where a file goes says what it IS, and the four destinations are
+            # four different situations (12.3):
+            #
+            #   quarantine  failed the security scan. `rejected` is where
+            #               somebody goes to look at what was refused, and
+            #               handing them an infected workbook to open is the one
+            #               outcome worse than not catching it.
+            #   processed   accepted and loaded.
+            #   held        waiting on a person — a suspected duplicate, a
+            #               changed layout, no contract yet. NOT a refusal, and
+            #               burying these in `rejected` meant the only pile
+            #               anybody has to work sat inside the pile nobody does.
+            #   rejected    genuinely bad; the broker has to fix and resend.
+            if svc_safety.is_malware_reason(arrival.turned_away_reason):
+                destination = svc.route_dir(route, "quarantine")
+            elif arrival.outcome == "accepted":
+                destination = svc.route_dir(route, "processed")
+            elif arrival.outcome == "held":
+                destination = svc.route_dir(route, "held")
+            else:
+                destination = svc.route_dir(route, "rejected")
             destination.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.move(str(path), str(destination / _stamped(path.name)))
@@ -155,7 +194,8 @@ def collect_route(session, route: IntakeRoute) -> dict:
                 # time rather than loading it twice.
                 log.error("landed %s but could not move it: %s", path.name, exc)
 
-            summary["accepted" if arrival.outcome == "accepted" else "turned_away"] += 1
+            summary.setdefault(arrival.outcome, 0)
+            summary[arrival.outcome] += 1
             summary["files"].append({
                 "filename": path.name,
                 "outcome": arrival.outcome,
@@ -173,7 +213,7 @@ def collect_route(session, route: IntakeRoute) -> dict:
 
 def collect_all() -> dict:
     """Every enabled SFTP route, across every tenant. Safe to run repeatedly."""
-    totals = {"routes": 0, "accepted": 0, "turned_away": 0}
+    totals = {"routes": 0, "accepted": 0, "held": 0, "turned_away": 0}
     with SessionLocal() as s:
         routes = (s.query(IntakeRoute)
                   .filter(IntakeRoute.channel == "sftp",
@@ -184,6 +224,7 @@ def collect_all() -> dict:
                 result = collect_route(s, route)
                 totals["routes"] += 1
                 totals["accepted"] += result.get("accepted", 0)
+                totals["held"] += result.get("held", 0)
                 totals["turned_away"] += result.get("turned_away", 0)
             except Exception as exc:
                 # One broken folder must not stop the others being collected.

@@ -1215,6 +1215,14 @@ class ExpectedSubmission(Base):
     id = Column(Integer, primary_key=True)
     tenant_id = Column(Integer, index=True, nullable=True)
     program_id = Column(Integer, index=True, nullable=False)
+    # WHICH BROKER owes this one. A programme is reported by several brokers and
+    # each owes its own file, so "Corvin Risk is nine days late" is a statement
+    # about one row, not about the programme. NULL means the obligation is not
+    # attributed to a broker — either the programme has no broker on it yet, or
+    # the row predates this column. A NULL row is adopted by the first broker
+    # put on the programme rather than left orphaned, so its arrival history
+    # survives (see materialize_schedule).
+    broker_party_id = Column(Integer, index=True, nullable=True)
     schedule_id = Column(Integer, index=True, nullable=True)   # FK -> submission_schedule.id
     period = Column(String, nullable=False)                    # '2026-01' | '2026-Q1' | '2026-W03'
     period_start = Column(Date, nullable=False)
@@ -1224,8 +1232,31 @@ class ExpectedSubmission(Base):
     # ('late' is retired — it only ever meant "overdue past the grace period",
     #  and there is no grace period any more. Stored rows are migrated below.)
     status = Column(String, default="scheduled", index=True)
+    # The FIRST arrival for this period, and the only one that decides on_time
+    # vs received_late. A correction sent three weeks later must not repaint a
+    # missed deadline green, so these two stay pinned to version 1 and the later
+    # versions are counted separately below.
     received_at = Column(Date, nullable=True)
     received_export_id = Column(Integer, nullable=True)        # FK -> output_exports.id
+    # --- versions and release (see SubmissionVersion) -----------------------
+    # How many files have been submitted for this period. 1 = the original only;
+    # 2+ means it was corrected and resent. Denormalised from submission_version
+    # so the calendar can render a version badge without a per-row query.
+    version_count = Column(Integer, default=0)
+    # The most recent arrival, whichever version it was. `received_at` answers
+    # "did they meet the deadline"; this answers "what are we looking at now".
+    latest_received_at = Column(Date, nullable=True)
+    # SENT ONWARD. Producing a file and releasing it to its recipient are two
+    # different acts — a bordereau can be generated on the 3rd and only sent to
+    # the reinsurer on the 6th — so the calendar records them separately and can
+    # answer "did Munich Re actually get July, and when?".
+    released_at = Column(Date, nullable=True)
+    released_count = Column(Integer, default=0)
+    # CHASING. Recorded so the screen can say "chased 2 days ago" instead of
+    # offering a button whose effect nobody can see, and so a second chase is a
+    # deliberate act rather than an accident.
+    chased_at = Column(Date, nullable=True)
+    chase_count = Column(Integer, default=0)
     # The overdue bell fired for this row. Separate from `status` (which is
     # recomputed on read) so the reminder fires exactly once and survives a
     # re-materialize — status is a bad idempotency guard.
@@ -1248,7 +1279,68 @@ class ExpectedSubmission(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     __table_args__ = (
-        UniqueConstraint("program_id", "period", name="uq_expected_submission_program_period"),
+        # One obligation per (programme, broker, period). The broker is part of
+        # the key because three brokers on one programme each owe July, and
+        # NULL is the fourth, unattributed case.
+        UniqueConstraint("program_id", "broker_party_id", "period",
+                         name="uq_expected_submission_period"),
+    )
+
+
+class SubmissionVersion(Base):
+    """One file submitted for one expected period — and, if it went on, the
+    record of it being sent.
+
+    THE POINT OF THIS TABLE. A period can be filed more than once: the original
+    goes in on the due date, then something is found wrong and the period is
+    sent again. Overwriting the first submission would quietly rewrite history —
+    anyone looking back would see numbers that never actually went out — so each
+    submission is kept as its own immutable row and the period carries a chain
+    of them.
+
+    `version_no` counts from 1 within a period. Version 1 is the `original`;
+    every later one is a `corrected`. That distinction is the whole reason the
+    kind is stored rather than derived at read time: a period that was filed
+    once and a period that was filed three times are different facts about a
+    broker, and the second must stay visible after the fact.
+
+    A LATE file still belongs to its own period, not to the period it arrived
+    in — which is what `expected_id` fixes. The arrival date lives here; the
+    period it satisfies is decided by the calendar, not by the calendar month
+    the file happened to turn up in.
+    """
+    __tablename__ = "submission_version"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, index=True, nullable=True)
+    expected_id = Column(Integer, index=True, nullable=False)  # FK -> expected_submission.id
+    program_id = Column(Integer, index=True, nullable=True)
+    broker_party_id = Column(Integer, index=True, nullable=True)
+    period = Column(String, nullable=True)          # denormalised for readable history
+    version_no = Column(Integer, nullable=False, default=1)
+    # original | corrected. Derived from version_no when the row is written, and
+    # then kept — see the class docstring.
+    kind = Column(String, default="original")
+    # --- the file arriving --------------------------------------------------
+    received_at = Column(Date, nullable=True)
+    received_export_id = Column(Integer, nullable=True)   # FK -> output_exports.id
+    source_filename = Column(String, nullable=True)
+    # Where the period came from: 'explicit' (the caller said so), 'filename'
+    # (read off the file name), or 'oldest_open' (the fallback guess). Recorded
+    # because "we assumed this was July" and "the file said July" are different
+    # levels of confidence and an operator checking a wrong month needs to know
+    # which one this was.
+    period_source = Column(String, nullable=True)
+    # --- the file going onward ---------------------------------------------
+    released_at = Column(Date, nullable=True)
+    released_to = Column(String, nullable=True)     # reinsurer / syndicate / regulator / finance
+    released_by = Column(String, nullable=True)     # actor email
+    release_ref = Column(String, nullable=True)     # their reference, if they give one
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("expected_id", "version_no",
+                         name="uq_submission_version_no"),
     )
 
 
@@ -1263,6 +1355,60 @@ def _ensure_column(conn, inspector, table: str, column: str, ddl_type: str) -> N
     if column in existing:
         return
     conn.exec_driver_sql(f'ALTER TABLE {table} ADD COLUMN {column} {ddl_type}')
+
+
+def _sqlite_relax_expected_submission_key(conn) -> bool:
+    """Drop a legacy UNIQUE(program_id, period) on expected_submission, SQLite-style.
+
+    The obligation key gained the broker, so that old uniqueness now BLOCKS the
+    fan-out: two brokers cannot both owe 2026-07 under it. Postgres can simply
+    drop the constraint; SQLite cannot drop one declared inside CREATE TABLE, so
+    the only way out is the standard rebuild — make the new table, copy the rows
+    across, swap the names.
+
+    Detection looks at unique CONSTRAINTS as well as indexes: SQLAlchemy's SQLite
+    dialect reports a table-level UNIQUE as a constraint and hides its
+    `sqlite_autoindex_*` from get_indexes() entirely, so checking indexes alone
+    finds nothing and the rebuild silently never runs.
+
+    Returns True when the table was rebuilt, so the caller knows to reflect it
+    again — every cached column list for this table is stale afterwards.
+    """
+    try:
+        insp = inspect(conn)
+        if not insp.has_table("expected_submission"):
+            return False
+        target = {"program_id", "period"}
+        legacy = [uc for uc in insp.get_unique_constraints("expected_submission")
+                  if set(uc.get("column_names") or []) == target]
+        legacy += [ix for ix in insp.get_indexes("expected_submission")
+                   if ix.get("unique") and set(ix.get("column_names") or []) == target]
+        if not legacy:
+            return False
+        cols = [c["name"] for c in insp.get_columns("expected_submission")]
+        col_list = ", ".join(cols)
+        conn.exec_driver_sql("ALTER TABLE expected_submission "
+                             "RENAME TO expected_submission__old")
+        ExpectedSubmission.__table__.create(bind=conn)
+        # Only the columns the OLD table had — the new ones are left at their
+        # defaults and filled in by the backfill that runs after this.
+        conn.exec_driver_sql(
+            f"INSERT INTO expected_submission ({col_list}) "
+            f"SELECT {col_list} FROM expected_submission__old")
+        conn.exec_driver_sql("DROP TABLE expected_submission__old")
+        return True
+    except Exception:
+        # A failed rebuild must not take the whole boot down. Put the original
+        # table back and carry on: the calendar is then limited to one broker
+        # per period on this database, which is exactly how it behaved before —
+        # degraded, not broken.
+        try:
+            conn.exec_driver_sql("DROP TABLE IF EXISTS expected_submission")
+            conn.exec_driver_sql("ALTER TABLE expected_submission__old "
+                                 "RENAME TO expected_submission")
+        except Exception:
+            pass
+        return False
 
 
 def init_db():
@@ -1284,6 +1430,22 @@ def init_db():
     json_type = "JSONB" if dialect == "postgresql" else "JSON"
     with engine.begin() as conn:
         inspector = inspect(conn)
+        # FIRST, before any column is added: the calendar's obligation key gained
+        # the broker, and the old UNIQUE(program_id, period) would block the
+        # fan-out. On SQLite that means rebuilding the table, so it has to happen
+        # while the column list is still the one on disk.
+        try:
+            if dialect == "postgresql":
+                conn.exec_driver_sql(
+                    "ALTER TABLE expected_submission "
+                    "DROP CONSTRAINT IF EXISTS uq_expected_submission_program_period")
+            else:
+                conn.exec_driver_sql(
+                    "DROP INDEX IF EXISTS uq_expected_submission_program_period")
+        except Exception:
+            pass
+        if dialect == "sqlite" and _sqlite_relax_expected_submission_key(conn):
+            inspector = inspect(conn)     # rebuilt — every cached shape is stale
         _ensure_column(conn, inspector, "mappers", "spec_by_sheet", json_type)
         _ensure_column(conn, inspector, "mappers", "candidates", json_type)
         _ensure_column(conn, inspector, "mappers", "samples", json_type)
@@ -1368,6 +1530,59 @@ def init_db():
                        "BOOLEAN DEFAULT FALSE")
         _ensure_column(conn, inspector, "expected_submission", "due_today_emailed",
                        "BOOLEAN DEFAULT FALSE")
+        # Requirement 17.2 — "due, released and corrected versions".
+        #
+        # broker_party_id turns one obligation per programme into one per
+        # (programme x broker), which is what the calendar screen actually
+        # shows. NULL on every pre-existing row; materialize_schedule adopts
+        # those into the programme's first broker rather than orphaning them,
+        # so no arrival history is lost.
+        _ensure_column(conn, inspector, "expected_submission", "broker_party_id",
+                       "INTEGER")
+        # Roll-ups denormalised from submission_version so the calendar renders
+        # a version badge and a "sent onward" date without a query per row.
+        _ensure_column(conn, inspector, "expected_submission", "version_count",
+                       "INTEGER DEFAULT 0")
+        _ensure_column(conn, inspector, "expected_submission", "latest_received_at",
+                       "DATE")
+        _ensure_column(conn, inspector, "expected_submission", "released_at", "DATE")
+        _ensure_column(conn, inspector, "expected_submission", "released_count",
+                       "INTEGER DEFAULT 0")
+        _ensure_column(conn, inspector, "expected_submission", "chased_at", "DATE")
+        _ensure_column(conn, inspector, "expected_submission", "chase_count",
+                       "INTEGER DEFAULT 0")
+        # Backfill the roll-ups for rows that arrived before versions existed:
+        # a period already marked received has exactly one submission behind it.
+        try:
+            conn.exec_driver_sql(
+                "UPDATE expected_submission "
+                "SET version_count = 1, latest_received_at = received_at "
+                "WHERE received_at IS NOT NULL "
+                "AND (version_count IS NULL OR version_count = 0)")
+            conn.exec_driver_sql(
+                "UPDATE expected_submission SET version_count = 0 "
+                "WHERE received_at IS NULL AND version_count IS NULL")
+            conn.exec_driver_sql(
+                "UPDATE expected_submission SET released_count = 0 "
+                "WHERE released_count IS NULL")
+        except Exception:
+            pass    # table not there yet; create_all built it with no rows
+        # The version rows those backfilled counts describe. Written here rather
+        # than left implied, so "show me every file sent for July" returns the
+        # original too and not just the corrections that came after it.
+        try:
+            conn.exec_driver_sql(
+                "INSERT INTO submission_version "
+                "(tenant_id, expected_id, program_id, broker_party_id, period, "
+                " version_no, kind, received_at, received_export_id, period_source) "
+                "SELECT e.tenant_id, e.id, e.program_id, e.broker_party_id, e.period, "
+                "       1, 'original', e.received_at, e.received_export_id, 'backfill' "
+                "FROM expected_submission e "
+                "WHERE e.received_at IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM submission_version v "
+                "                WHERE v.expected_id = e.id)")
+        except Exception:
+            pass    # submission_version not created yet, or already backfilled
         # 'late' is retired: with no grace period it and 'overdue' mean the same
         # thing. Fold the stored rows over, so the dashboard counts (which read
         # the column rather than recomputing) do not lose them. Idempotent — the

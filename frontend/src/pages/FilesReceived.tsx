@@ -16,7 +16,10 @@
 // Styled with `.proto` (proto.css) to match the wireframe, like FilesArrive.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { isHeld, listArrivals, type Arrival, type Channel } from "../api/intake";
+import {
+  discardArrival, downloadArrival, isHeld, listArrivals, releaseArrival,
+  type Arrival, type Channel,
+} from "../api/intake";
 import { fmtStamp } from "../utils/date";
 
 // Each door gets a name and a tone, as in the carrier-centric design: email is
@@ -37,38 +40,55 @@ const CAME_IN_BY: Record<Channel, { label: string; tone: "ok" | "info" | "mut" }
 // turned up made it look as though uploads were not counted here at all.
 const WAY_IN_ORDER: Channel[] = ["upload", "email", "sftp", "api"];
 
-// The six checks in the order land_file() runs them. That order is the whole
-// point: it stops at the FIRST failure, so a file that fails check three has
-// passed one and two and checks four to six never ran at all.
+// The checks in the order land_file() runs them. That order is the whole point:
+// it stops at the FIRST failure, so a file that fails check three has passed one
+// and two and the rest never ran at all.
+//
+// Everything above "Can we open it?" is settled WITHOUT opening the file — that
+// is deliberate (12.1), because opening a spreadsheet is the one step that runs
+// a stranger's choices through our parsers.
 const CHECKS: [string, string][] = [
+  ["Is it small enough to read?",
+   "A file far larger than a bordereau is a mistake, not a month of business."],
   ["Is it a spreadsheet at all?",
    "A PDF or a photo of a spreadsheet cannot be read."],
-  ["Can we open it?",
-   "Half-uploaded and password-protected files look fine until you try."],
+  ["Is it safe to open?",
+   "A small file that unpacks to gigabytes is not a spreadsheet."],
   ["Do we know who sent it?",
    "Every file has to belong to a broker on one of your programmes."],
   ["Is it the same file we already have?",
    "Brokers often send twice. Loading it twice would double your premium."],
+  ["Does it pass the security scan?",
+   "Files from outside are scanned before anything opens them."],
+  ["Can we open it?",
+   "Half-uploaded and password-protected files look fine until you try."],
   ["Does it have any rows in it?",
    "An empty file usually means an export that silently failed."],
+  ["Does it have the columns we need?",
+   "The right file with the wrong layout produces a page of blanks."],
   ["Is there a live contract to check it against?",
    "There is nothing to check a file against until the contract is agreed."],
 ];
 
 // Which check produced this reason. The backend writes the sentence, not the
 // index, so this reads it back — matched against the phrases in
-// intake_service.py rather than the whole string, so wording can be tuned
-// without silently breaking the drawer. -1 when nothing matches, and then the
-// drawer shows the reason on its own instead of guessing.
+// intake_service.py / intake_safety.py / intake_required_fields.py rather than
+// the whole string, so wording can be tuned without silently breaking the
+// drawer. -1 when nothing matches, and then the drawer shows the reason on its
+// own instead of guessing.
 function failedCheck(reason: string | null): number {
   if (!reason) return -1;
   const r = reason.toLowerCase();
-  if (/not a spreadsheet|not an excel workbook|we can read /.test(r)) return 0;
-  if (/could not open it/.test(r)) return 1;
-  if (/recognise the sender|not linked to a broker|been switched off/.test(r)) return 2;
-  if (/same file we already loaded/.test(r)) return 3;
-  if (/no rows in it/.test(r)) return 4;
-  if (/no live contract/.test(r)) return 5;
+  if (/we can accept files up to|nothing arrived at all/.test(r)) return 0;
+  if (/not a spreadsheet|not an excel workbook|we can read /.test(r)) return 1;
+  if (/expands to|internal parts|contains macros/.test(r)) return 2;
+  if (/recognise the sender|not linked to a broker|been switched off/.test(r)) return 3;
+  if (/same file we already loaded/.test(r)) return 4;
+  if (/security scan/.test(r)) return 5;
+  if (/could not open it/.test(r)) return 6;
+  if (/no rows in it/.test(r)) return 7;
+  if (/columns this programme reports on|missing \d+ column/.test(r)) return 8;
+  if (/no live contract/.test(r)) return 9;
   return -1;
 }
 
@@ -101,12 +121,17 @@ function rowsOf(n: number | null): string {
  *  a held file needs a decision, a refused one needs an explanation. */
 function actionLabel(a: Arrival): string {
   const st = state(a);
+  if (a.resolution) return "Open →";       // already decided; nothing to do
   return st === "held" ? "Decide →" : st === "away" ? "Why →" : "Open →";
 }
 
 /** The line under the filename: what happened, in the fewest words that are
  *  still true. The full sentence is in the drawer. */
 function subline(a: Arrival): string {
+  // A decision is the most recent true thing about the file, so it wins over
+  // the reason that made somebody decide.
+  if (a.resolution === "released") return "released by hand — waiting to be run";
+  if (a.resolution === "discarded") return "discarded";
   if (a.outcome === "accepted") return a.bdx_upload_id ? "" : "waiting to be run";
   return (a.turned_away_reason ?? "").replace(/^Held — /, "");
 }
@@ -153,6 +178,17 @@ export default function FilesReceived() {
       ok: all.filter(a => state(a) === "ok").length,
       held: all.filter(a => state(a) === "held").length,
       away: all.filter(a => state(a) === "away").length,
+      // 12.3 — the queue is HELD AND UNRESOLVED. A held file somebody has
+      // already decided is finished, and counting it keeps a tile amber for
+      // work that is done.
+      waiting: all.filter(a => state(a) === "held" && !a.resolution).length,
+      // The oldest thing still waiting. A queue nobody opens is the same as no
+      // queue, and one number that says "eleven days" is what makes somebody
+      // open it.
+      oldestWaitDays: Math.max(0, ...all
+        .filter(a => state(a) === "held" && !a.resolution && a.received_at)
+        .map(a => Math.floor(
+          (Date.now() - new Date(a.received_at as string).getTime()) / 86400000))),
     };
   }, [all]);
 
@@ -214,11 +250,14 @@ export default function FilesReceived() {
           {/* Held and turned away are genuinely different situations — one is
               waiting on a person, the other is finished — so they keep separate
               tiles and separate colours. */}
-          <div className={`tile${counts.held > 0 ? " warnl" : ""}`}>
-            <div className="k">Held</div>
-            <div className="v" style={counts.held > 0 ? { color: "var(--p-warn)" } : undefined}>
-              {rows ? counts.held : "—"}</div>
-            <div className="foot">a person has to decide</div>
+          <div className={`tile${counts.waiting > 0 ? " warnl" : ""}`}>
+            <div className="k">Waiting on you</div>
+            <div className="v" style={counts.waiting > 0 ? { color: "var(--p-warn)" } : undefined}>
+              {rows ? counts.waiting : "—"}</div>
+            <div className="foot">
+              {counts.waiting > 0 && counts.oldestWaitDays > 0
+                ? `oldest has waited ${counts.oldestWaitDays} day${counts.oldestWaitDays === 1 ? "" : "s"}`
+                : "a person has to decide"}</div>
           </div>
           <div className={`tile${counts.away > 0 ? " alert" : ""}`}>
             <div className="k">Turned away</div>
@@ -341,12 +380,12 @@ export default function FilesReceived() {
           }}>
             <b>Nothing here is lost.</b> A file that was turned away is kept exactly as it
             arrived, and a held file has landed — it is only waiting on somebody. Click any row
-            to see which of the six checks decided it.
+            to see which check decided it.
           </div>
         </div>
       </section>
 
-      <ArrivalDrawer arrival={open} onClose={() => setOpen(null)} />
+      <ArrivalDrawer arrival={open} onClose={() => setOpen(null)} onResolved={load} />
     </div>
   );
 }
@@ -354,11 +393,39 @@ export default function FilesReceived() {
 // ── the row drawer ──────────────────────────────────────────────────────────
 // The decision sits directly beneath the evidence for it, which is the whole
 // reason this is a drawer and not a tooltip.
-function ArrivalDrawer({ arrival, onClose }: {
-  arrival: Arrival | null; onClose: () => void;
+function ArrivalDrawer({ arrival, onClose, onResolved }: {
+  arrival: Arrival | null; onClose: () => void; onResolved: () => void;
 }) {
   const st = arrival ? state(arrival) : "ok";
   const failed = arrival && st !== "ok" ? failedCheck(arrival.turned_away_reason) : -1;
+
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+
+  // A fresh drawer must not inherit the last file's half-typed note or its
+  // error — they belong to the row that is gone.
+  useEffect(() => { setNote(""); setErr(null); setBusy(false); }, [arrival?.arrival_id]);
+
+  // The one place a decision is made. Both actions are the same shape: send it,
+  // reload the list so the row shows resolved, and close — the file has been
+  // dealt with, and leaving the drawer open invites clicking again.
+  async function decide(what: "release" | "discard") {
+    if (!arrival) return;
+    setBusy(true); setErr(null);
+    try {
+      if (what === "release") await releaseArrival(arrival.arrival_id, note);
+      else await discardArrival(arrival.arrival_id, note);
+      onResolved();
+      onClose();
+    } catch (e) {
+      const detail = (e as { response?: { data?: { detail?: string } } })
+        ?.response?.data?.detail;
+      setErr(detail || "That did not work. Nothing has changed.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <>
@@ -451,22 +518,69 @@ function ArrivalDrawer({ arrival, onClose }: {
                 {arrival.turned_away_reason ?? "No reason was recorded."}
               </div>)}
 
-            {st === "held" && (
+            {st === "held" && !arrival.resolution && (
               <div className="note" style={{ marginTop: 12 }}>
                 <b>Held is not refused.</b> The file arrived and is kept exactly as it came in.
-                Letting it through, or discarding it, is a decision somebody has to make —
-                and the button for that is not built yet.
+                Letting it through, or discarding it, is a decision somebody has to make.
               </div>)}
+
+            {/* 12.3 — once somebody has decided, the decision IS the record.
+                Shown above the buttons so a resolved file cannot be re-worked
+                by accident, and so "who let this through?" is answered on the
+                same screen that asked the question. */}
+            {arrival.resolution && (
+              <div className="note" style={{ marginTop: 12 }}>
+                <b>{arrival.resolution === "released" ? "Released" : "Discarded"}</b>
+                {arrival.resolved_at ? ` on ${fmtStamp(arrival.resolved_at)}` : ""}
+                {arrival.resolved_by_user_id ? ` by user ${arrival.resolved_by_user_id}` : ""}.
+                {arrival.resolution_note ? ` “${arrival.resolution_note}”` : ""}
+              </div>)}
+
+            {arrival.is_infected && (
+              <div className="note crit" style={{ marginTop: 12 }}>
+                <b>This file failed the security scan.</b> It is not kept where anybody
+                can open it, and it cannot be downloaded or released. Discarding it is
+                the only thing to do here.
+              </div>)}
+
+            {arrival.bytes_purged_at && (
+              <div className="note" style={{ marginTop: 12 }}>
+                The file itself was deleted on {fmtStamp(arrival.bytes_purged_at)} under the
+                retention rule. This record of it stays.
+              </div>)}
+
+            {/* Why somebody decided is the half of the record that is worth
+                having three months later. Optional, and asked for at the moment
+                of deciding rather than in a separate screen nobody opens. */}
+            {st !== "ok" && !arrival.resolution && (
+              <label className="kv" style={{ marginTop: 12, display: "block" }}>
+                <span className="k">Note (optional)</span>
+                <input className="inp" value={note} disabled={busy}
+                  placeholder="Why are you letting this through, or dropping it?"
+                  onChange={e => setNote(e.target.value)} style={{ width: "100%" }} />
+              </label>)}
+
+            {err && <div className="note crit" style={{ marginTop: 12 }}>{err}</div>}
           </div>
 
           <div className="drawer-f">
-            {st === "held" && <>
-              {/* Shown, and honestly disabled: the release/discard endpoint does
-                  not exist yet, and a button that silently does nothing is
-                  worse than one that says why. */}
-              <button className="btn pri" disabled title="Not built yet">Load it anyway</button>
-              <button className="btn" disabled title="Not built yet">Discard</button>
-            </>}
+            {arrival.can_download && (
+              <button className="btn" disabled={busy}
+                onClick={() => downloadArrival(arrival.arrival_id, arrival.filename)}
+                title="Every download is recorded">Download</button>)}
+
+            {/* Release is for HELD files only. A turned-away file is one we
+                could not read — releasing a PDF would hand processing something
+                broken, and the fix is a file we can open, not an override. */}
+            {st === "held" && !arrival.resolution && (
+              <button className="btn pri" disabled={busy}
+                onClick={() => decide("release")}>
+                {busy ? "Working…" : "Load it anyway"}</button>)}
+
+            {st !== "ok" && !arrival.resolution && (
+              <button className="btn" disabled={busy}
+                onClick={() => decide("discard")}>Discard</button>)}
+
             <button className="btn" onClick={onClose}
               style={{ marginLeft: "auto" }}>Close</button>
           </div>

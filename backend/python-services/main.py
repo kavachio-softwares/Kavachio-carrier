@@ -153,6 +153,12 @@ sftp_poller.start(app)
 import email_poller  # noqa: E402
 email_poller.start(app)
 
+# Feature 12.3 — the nightly retention sweep. Refused and held files are kept
+# so somebody can review them, not for ever; this is what forgets the bytes
+# and keeps the record.
+import intake_review  # noqa: E402
+intake_review.start(app)
+
 
 # --- DB audit middleware ---------------------------------------------------
 # Records every mutating request (POST/PUT/PATCH/DELETE) as an activity_events

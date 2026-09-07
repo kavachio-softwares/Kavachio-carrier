@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, Server, Inbox,
+  FileCheck, Server, Inbox, CalendarDays,
 } from "lucide-react";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
@@ -58,6 +58,11 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // is commented out.
       // { to: "/program-management", label: "Program Management", icon: ClipboardList },
       { to: "/direct", label: "Process Bordereau", icon: Zap },
+      // The carrier's calendar IS listed: it is a whole-book view — every
+      // broker's obligation for a due month — so unlike My Calendar it does not
+      // belong inside one setup. It sits next to Process Bordereau because
+      // "what is owed to me" and "run one" are the same job on two days.
+      { to: "/bordereau-calendar", label: "Bordereau Calendar", icon: CalendarDays },
       // My Calendar is deliberately NOT listed. Deadlines belong to a specific
       // carrier + program, so the calendar now lives inside that setup's own
       // screen where both are already fixed. The /calendar route still exists
@@ -82,13 +87,8 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       { to: "/direct/setups", label: "Bordereau Setup", icon: Layers },
       // Set up once when a broker is onboarded, then rarely touched — which
       // is why the ways in sit under Configure and not in the monthly run.
-      //
-      // TEMPORARILY HIDDEN from the menu. The routes, the access rules and the
-      // links between the two screens all still work — /intake and
-      // /intake/arrivals are reachable by URL and from each other. Put these
-      // two lines back to show them again.
-      // { to: "/intake", label: "How Files Arrive", icon: Server },
-      // { to: "/intake/arrivals", label: "Files Received", icon: Inbox },
+      { to: "/intake", label: "How Files Arrive", icon: Server },
+      { to: "/intake/arrivals", label: "Files Received", icon: Inbox },
     ],
   },
   {
