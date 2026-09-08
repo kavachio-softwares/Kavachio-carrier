@@ -1468,6 +1468,19 @@ def dwh_list(
 
 # --- Export: user-defined output BDX templates -----------------------------
 
+def _current_contract_for_template(session, template_id):
+    """The contract on this template that is IN FORCE TODAY.
+
+    Replaces `Contract.status == "active"` + `ORDER BY id DESC`. Currency is no
+    longer stored — every approved version stays `active` and the calendar
+    decides which one is current, so this is resolve_as_of(today) scoped to a
+    template. Returns the Contract row (or None) so callers can read .filename.
+    """
+    from contract_upload_services.contract_asof import current_for_template
+    cid = current_for_template(session, template_id)
+    return session.get(Contract, cid) if cid else None
+
+
 def _active_contract_id_for_template(session, template_id: int,
                                      on_date=None) -> Optional[int]:
     """Resolve the active contract linked to an output template via the new
@@ -1484,14 +1497,8 @@ def _active_contract_id_for_template(session, template_id: int,
     """
     # Only the id is wanted — select that column, not the whole contract row
     # (which carries the extracted-clauses and field-mapping JSON).
-    cid = (
-        session.query(Contract.id)
-        .filter(Contract.output_template_id == template_id,
-                Contract.status == "active")
-        .order_by(Contract.id.desc())
-        .limit(1)
-        .scalar()
-    )
+    from contract_upload_services.contract_asof import current_for_template
+    cid = current_for_template(session, template_id)
     if cid is None or on_date is None:
         return cid
     try:
@@ -1683,15 +1690,7 @@ def export_template_contract_mapping(template_id: int,
     """
     with SessionLocal() as s:
         # Find the active contract whose output_template_id == template_id
-        active_contract = (
-            s.query(Contract)
-            .filter(
-                Contract.output_template_id == template_id,
-                Contract.status == "active",
-            )
-            .order_by(Contract.id.desc())
-            .first()
-        )
+        active_contract = _current_contract_for_template(s, template_id)
         if not active_contract:
             return {"contract": None, "field_rules": {}}
         assert_tenant_owns(principal, active_contract.tenant_id)
@@ -1775,13 +1774,7 @@ def export_template_build_rules(template_id: int,
             raise HTTPException(404, "template not found")
         assert_tenant_owns(principal, t.tenant_id)
         structure = t.structure or {}
-        active = (
-            s.query(Contract)
-            .filter(Contract.output_template_id == template_id,
-                    Contract.status == "active")
-            .order_by(Contract.id.desc())
-            .first()
-        )
+        active = _current_contract_for_template(s, template_id)
         if not active:
             return {"contract": None, "rules_ok": 0, "unprocessable": [],
                     "message": "No active contract linked to this template."}
@@ -3167,13 +3160,7 @@ def _resolve_export_target(s, template_id, upload_id, policy_ids, principal=None
         assert_tenant_owns(principal, t.tenant_id)
 
     # Active contract linked to this output template (new hierarchy).
-    active_contract = (
-        s.query(Contract)
-        .filter(Contract.output_template_id == template_id,
-                Contract.status == "active")
-        .order_by(Contract.id.desc())
-        .first()
-    )
+    active_contract = _current_contract_for_template(s, template_id)
     active_contract_id = active_contract.id if active_contract else None
     active_contract_info = (
         {"id": active_contract.id, "filename": active_contract.filename}
@@ -3443,15 +3430,7 @@ def export_generate(
 
         # Find the active contract for this Output Template (new hierarchy).
         # The ops DB Contract row carries output_template_id and status.
-        active_contract = (
-            s.query(Contract)
-            .filter(
-                Contract.output_template_id == template_id,
-                Contract.status == "active",
-            )
-            .order_by(Contract.id.desc())
-            .first()
-        )
+        active_contract = _current_contract_for_template(s, template_id)
         active_contract_id = active_contract.id if active_contract else None
         active_contract_info = (
             {"id": active_contract.id, "filename": active_contract.filename}

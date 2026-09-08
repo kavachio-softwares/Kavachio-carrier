@@ -333,6 +333,26 @@ class ExtraFieldBody(BaseModel):
     shared: Optional[bool] = False
 
 
+
+def _mark_dupes(session, contract_id) -> None:
+    """Label the versions this upload permanently shadows.
+
+    Called once the contract's schedule_key and broker_party_id are committed —
+    see contract_asof.mark_duplicates_for for why it cannot run any earlier.
+    Fail-open and deliberately quiet: a label is bookkeeping, and no upload
+    should fail because bookkeeping did.
+    """
+    if not contract_id:
+        return
+    try:
+        from contract_upload_services import contract_asof as _asof
+        marked = _asof.mark_duplicates_for(session, int(contract_id))
+        if marked:
+            session.commit()
+    except Exception as exc:      # noqa: BLE001 — never break an upload
+        print(f"[AsOf] duplicate labelling skipped ({exc})")
+
+
 @router.get("/extra-fields")
 def extra_fields_list(mga: str, p: Principal = Depends(current_principal)):
     """Return every extra-field definition visible to this tenant:
@@ -2151,6 +2171,12 @@ async def program_contract_upload(
                     if _c is not None:
                         _c.broker_party_id = broker_party_id
                         _s.commit()
+                    # The lineage is only NOW complete. stamp_effective_dates
+                    # ran inside the persister, before the broker existed on the
+                    # row, so its duplicate check searched (programme, NULL,
+                    # NULL) and matched nothing. Re-run it against the settled
+                    # lineage.
+                    _mark_dupes(_s, _cid)
 
         except Exception as persist_exc:
             persist_warning = f"persistence failed: {persist_exc}"
@@ -2219,8 +2245,17 @@ async def program_contract_upload(
                 if broker_party_id is not None:
                     sib_q = sib_q.filter(Contract.broker_party_id == broker_party_id)
                 sibs = sib_q.all()
-                for sib in sibs:
-                    sib.status = "superseded"
+                # Currency is no longer a stored flag. Every approved version
+                # stays `active` — meaning "approved and usable" — and WHICH one
+                # applies is decided by the transaction date (contract_asof).
+                # The predecessor is still closed in BUSINESS time by
+                # stamp_effective_dates, so the chain and §7 are unaffected;
+                # only the label stops being rewritten.
+                #
+                # Demoting it here was also actively misleading: a superseded
+                # version still governs every file dated inside its own window,
+                # so "superseded" never meant "unusable" — it meant "not the
+                # newest", which is now just a date comparison.
                 new_c = s.get(Contract, cid)
                 if new_c:
                     new_c.status = "active"
@@ -2256,6 +2291,11 @@ async def program_contract_upload(
                     if prog:
                         prog.status = "active"
                 s.commit()
+                # Same reason as the Add Contract path: schedule_key and
+                # broker_party_id were just written, so this is the first moment
+                # the duplicate check can see the real lineage.
+                if cid:
+                    _mark_dupes(s, cid)
                 if prog:
                     program_obj = _program_dict(prog)
 
@@ -2575,12 +2615,10 @@ async def program_setup(
                     if c:
                         c.output_template_id = resolved_template_id
                         c.status = "active"
-                        for sib in s.query(Contract).filter(
-                            Contract.program_id == program_id,
-                            Contract.id != cid,
-                            Contract.status.notin_(["failed", "drafted", "extracting"]),
-                        ).all():
-                            sib.status = "superseded"
+                        # Siblings are NOT demoted. status_ops means "approved
+                        # and usable", not "newest" — which version applies to a
+                        # given file is a date comparison made at read time
+                        # (contract_asof.resolve_as_of), not a stored flag. §7.
                         # A program is "active" once it has an active contract.
                         prog = s.get(Program, program_id)
                         if prog:
@@ -2677,14 +2715,9 @@ async def program_setup(
             with SessionLocal() as s:
                 cid = (persist_result or {}).get("contract_id")
                 if cid:
-                    # One active contract per Program — supersede all others
-                    siblings = s.query(Contract).filter(
-                        Contract.program_id == program_id,
-                        Contract.id != cid,
-                        Contract.status.notin_(["failed", "drafted", "extracting"]),
-                    ).all()
-                    for sib in siblings:
-                        sib.status = "superseded"
+                    # Siblings are NOT demoted — see the note on the reuse path
+                    # above. Every approved version stays 'active'; which one
+                    # governs a file is decided by that file's date (§7).
                     new_c = s.get(Contract, cid)
                     if new_c:
                         new_c.status = "active"
@@ -4108,18 +4141,11 @@ def program_contract_activate(program_id: int, contract_id: int,
         if target.status in ("failed", "drafted", "extracting"):
             raise HTTPException(400, f"cannot activate a contract with status '{target.status}'")
 
-        # One active contract per (program, schedule) — supersede same-schedule
-        # siblings. Legacy (schedule_key IS NULL) supersedes all, as before.
-        sib_q = s.query(Contract).filter(
-            Contract.program_id == program_id,
-            Contract.id != contract_id,
-        )
-        if target.schedule_key is not None:
-            sib_q = sib_q.filter(Contract.schedule_key == target.schedule_key)
-
-        for sib in sib_q.all():
-            if sib.status not in ("failed", "drafted", "extracting"):
-                sib.status = "superseded"
+        # Approving one version no longer demotes its siblings. "Active" is an
+        # approval state, not a currency flag: a 2025 version still governs
+        # every 2025-dated file after the 2026 version is approved, so demoting
+        # it here said something false about it. Currency is resolved from the
+        # file's own date at read time (contract_asof.resolve_as_of), §7.
         target.status = "active"
         # A program is "active" once it has an active contract.
         prog = s.get(Program, program_id)

@@ -365,11 +365,17 @@ def _check_live_contract(session, route: Optional[IntakeRoute]) -> Optional[str]
     if route is None or route.broker_party_id is None:
         return None            # already refused by the sender check
     from db import Contract, ProgramBroker
+    # Eligibility, not currency: the question is "does this broker hold an
+    # APPROVED contract on the programme", not "which version is newest". Since
+    # currency stopped being stored, `status == 'active'` would no longer narrow
+    # anything here — and narrowing by date would be wrong, because a file may
+    # legitimately arrive for a period whose contract has since expired.
+    from contract_upload_services.contract_asof import NON_GOVERNING_STATUSES
     q = (session.query(Contract.id)
          .join(ProgramBroker, ProgramBroker.program_id == Contract.program_id)
          .filter(ProgramBroker.broker_party_id == route.broker_party_id,
                  ProgramBroker.status == "active",
-                 Contract.status == "active"))
+                 func.coalesce(Contract.status, "").notin_(NON_GOVERNING_STATUSES)))
     # When the route names its programme (10.2), check THAT programme's
     # contract rather than "any contract this broker holds anywhere" — which is
     # all the old mesh note could manage without a program_id column.

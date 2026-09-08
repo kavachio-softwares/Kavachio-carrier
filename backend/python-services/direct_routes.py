@@ -2428,13 +2428,17 @@ def _unbound_setup_contract_id(program_id: Optional[int],
         return None
     try:
         with SessionLocal() as s:
-            row = (s.query(Contract.id)
-                   .filter(Contract.program_id == program_id,
-                           Contract.output_template_id == output_template_id,
-                           Contract.status == "active")
-                   .order_by(Contract.id.desc())
-                   .first())
-            return row[0] if row else None
+            # Currency is no longer stored: every approved version stays
+            # `active` and the calendar says which is current, so this asks for
+            # the version in force TODAY rather than the newest id.
+            from contract_upload_services.contract_asof import current_for_template
+            cid = current_for_template(s, output_template_id)
+            if cid is None:
+                return None
+            # The template lookup is programme-agnostic; keep the original
+            # programme guard so a setup can never adopt another one's contract.
+            owner = s.query(Contract.program_id).filter(Contract.id == cid).scalar()
+            return cid if owner == program_id else None
     except Exception as e:  # noqa: BLE001 — a failed lookup must not break the page
         log.warning("unbound-setup contract lookup failed: %s", e)
         return None

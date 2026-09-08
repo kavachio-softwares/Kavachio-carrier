@@ -49,6 +49,19 @@ def asof_enabled() -> bool:
     )
 
 
+# What to do when two approved versions both cover a transaction date — which
+# only happens on data that migration 20_2 would have rejected.
+#   "latest"    (default) use the one that started most recently, then the one
+#               uploaded most recently. Files keep processing.
+#   "exception" refuse to choose; the row goes to exceptions and the operator
+#               sees that the contract data itself is wrong.
+# Default is "latest" because a stalled bordereau helps nobody, and the warning
+# is logged either way.
+def _on_overlap() -> str:
+    v = os.getenv("CONTRACT_ASOF_ON_OVERLAP", "").strip().lower()
+    return v if v in ("latest", "exception") else "latest"
+
+
 class Lineage(NamedTuple):
     """The three columns that identify one logical contract across its versions.
 
@@ -161,25 +174,65 @@ def resolve_as_of(conn, lineage: Lineage, on_date: date) -> Optional[int]:
     returns None rather than a best guess, and the distinction between "no
     version" and "the current version" stays visible to the caller.
 
-    No ORDER BY and no LIMIT: constraint contract_no_overlap (migration 20_2)
-    guarantees at most one version matches. If this ever raises MultipleResults,
-    that constraint is missing or was installed over pre-existing overlaps —
-    which is a data problem to fix, not a query to loosen.
+    TWO CANDIDATES (an overlap). Migration 20_2 makes this impossible, but it
+    is not applied everywhere, so the case has to be handled rather than
+    assumed away. Precedence, in order:
+
+      1. UNAPPROVED VERSIONS ARE DROPPED FIRST. A drafted contract carries real
+         effective dates the moment it is extracted, so on dates alone a draft
+         nobody approved can out-rank the signed contract. Approval is not a
+         tiebreak, it is a precondition — hence it is applied before, not
+         within, the ordering. If nothing approved covers the date this returns
+         None, which is the safe answer: better no contract than an unapproved
+         one.
+      2. Latest contract_effective_from wins — a mid-term endorsement starting
+         2025-07-01 governs over the annual contract that started 2025-01-01.
+      3. Then highest contract_id — the later upload. Needed because a genuine
+         duplicate has an IDENTICAL window, so rule 2 does not separate them.
+
+    ORDER BY makes the answer deterministic. Without it the database returns
+    rows in physical order, so the SAME file re-run after an unrelated UPDATE
+    could resolve to a different contract and produce different exceptions.
+
+    Set CONTRACT_ASOF_ON_OVERLAP=exception to refuse to choose instead: the row
+    goes to exceptions and the bad data becomes visible rather than papered
+    over. Either way the overlap is logged.
     """
     if on_date is None or not _columns_present(conn):
         return None
-    return conn.execute(
+    rows = conn.execute(
         text(f"""
-            SELECT contract_id
+            SELECT contract_id, status_ops
             FROM   contract
             WHERE  {_LINEAGE_WHERE}
               AND  contract_effective_from IS NOT NULL
               AND  contract_effective_from <= :d
               AND  (contract_effective_to IS NULL OR contract_effective_to > :d)
+            ORDER BY contract_effective_from DESC, contract_id DESC
         """),
         {"pid": lineage.program_id, "sk": lineage.schedule_key,
          "bk": lineage.broker_party_id, "d": on_date},
-    ).scalar()
+    ).all()
+    if not rows:
+        return None
+
+    approved = [r for r in rows if is_approved(r[1])]
+    if not approved:
+        if len(rows):
+            print(f"[AsOf] {on_date}: only unapproved version(s) "
+                  f"{[r[0] for r in rows]} cover this date — refusing to use "
+                  f"them; row goes to exceptions.")
+        return None
+
+    if len(approved) > 1:
+        print(f"[AsOf] WARNING overlapping contract versions {[r[0] for r in approved]} "
+              f"all cover {on_date} for program={lineage.program_id} "
+              f"schedule={lineage.schedule_key} broker={lineage.broker_party_id}. "
+              f"Close the earlier version's contract_effective_to and apply "
+              f"migration 20_2.")
+        if _on_overlap() == "exception":
+            return None
+    return approved[0][0]
 
 
 def resolve_sibling_as_of(conn, contract_id: int, on_date: date) -> Optional[int]:
@@ -269,7 +322,114 @@ def stamp_effective_dates(conn, contract_id: int, lineage: Lineage,
         {"cid": contract_id, "eff_from": effective_from,
          "eff_to": effective_to, "label": version_label},
     )
+
+    mark_shadowed_superseded(conn, contract_id, lineage, effective_from, effective_to)
     return True
+
+
+def mark_duplicates_for(conn, contract_id: int) -> list[int]:
+    """Re-read this contract's OWN lineage and dates, then mark what it shadows.
+
+    WHY THIS EXISTS SEPARATELY FROM stamp_effective_dates. The upload flow sets
+    a contract's lineage columns in two goes: db_persister inserts the row at
+    (tenant, programme) scope, and app_routes stamps `schedule_key` and
+    `broker_party_id` onto it AFTERWARDS. stamp_effective_dates runs inside the
+    persister, so the lineage it can see at that moment is (programme, NULL,
+    NULL) — which matches nothing once the real versions carry a schedule and a
+    broker. The marking silently found no candidates every time.
+
+    Resolution never hit this because it runs at bordereau time, long after the
+    columns are filled in. Only the write path, which happens mid-flight, could
+    see the row half-built.
+
+    So this is called once the lineage is settled and committed. Idempotent:
+    rows already `superseded` are filtered out, so calling it twice is harmless.
+    """
+    if not _columns_present(conn):
+        return []
+    row = conn.execute(
+        text("SELECT contract_program_id, schedule_key, contract_broker_party_id, "
+             "       contract_effective_from, contract_effective_to "
+             "FROM contract WHERE contract_id = :cid"),
+        {"cid": contract_id},
+    ).first()
+    if not row or row[3] is None:
+        return []
+    return mark_shadowed_superseded(
+        conn, contract_id, Lineage(row[0], row[1], row[2]), row[3], row[4])
+
+
+def _mark_superseded_enabled() -> bool:
+    return os.getenv("CONTRACT_ASOF_MARK_SUPERSEDED", "1").strip().lower() not in (
+        "0", "false", "off", "no",
+    )
+
+
+def mark_shadowed_superseded(conn, contract_id: int, lineage: Lineage,
+                             effective_from: date,
+                             effective_to: Optional[date]) -> list[int]:
+    """Label the versions this one permanently shadows as `superseded`.
+
+    ONLY the versions that can never win a date again. The test is not "does the
+    new window cover the old one" — that is wrong in a way worth spelling out,
+    because it is the intuitive answer:
+
+        annual      2025-01-01 -> 2026-01-01     (uploaded second)
+        endorsement 2025-07-01 -> 2026-01-01     (uploaded first)
+
+    The annual's window fully contains the endorsement's, so "covered" would mark
+    the endorsement superseded. But resolution picks the LATEST effective_from,
+    so the endorsement still wins every date from July onward. Marking it would
+    label a version that is actively governing half the year.
+
+    A version is permanently shadowed only when it can never out-rank the new one
+    under that same ordering — which means starting on the SAME day (so it never
+    wins on a later start) and ending no later (so it never wins past the new
+    one's end). That is the duplicate: two rows making the identical claim, where
+    the tiebreak on contract_id decides and always decides the same way.
+
+    This is a LABEL, not an exclusion: `superseded` is deliberately absent from
+    NON_GOVERNING_STATUSES, so a marked row still resolves. Nothing about which
+    contract processes a file changes here — the newer row already won on the
+    tiebreak. What changes is that the database now records WHICH row is out of
+    use, instead of leaving two identical `active` rows and no way to tell which
+    was intended.
+
+    Returns the ids marked. Set CONTRACT_ASOF_MARK_SUPERSEDED=0 to disable.
+    """
+    if not _mark_superseded_enabled() or effective_from is None:
+        return []
+    rows = conn.execute(
+        text(f"""
+            SELECT contract_id, status_ops FROM contract
+            WHERE  {_LINEAGE_WHERE}
+              AND  contract_id <> :cid
+              AND  contract_effective_from = :eff_from
+              AND  COALESCE(contract_effective_to, '2999-12-31')
+                   <= COALESCE(:eff_to, '2999-12-31')
+        """),
+        {"pid": lineage.program_id, "sk": lineage.schedule_key,
+         "bk": lineage.broker_party_id, "cid": contract_id,
+         "eff_from": effective_from, "eff_to": effective_to},
+    ).all()
+
+    # Only rows that were governing. Re-labelling a draft or a rejected contract
+    # would overwrite the more specific thing its status already says.
+    marked = [r[0] for r in rows
+              if is_approved(r[1]) and (r[1] or "").strip().lower() != "superseded"]
+    if not marked:
+        return []
+
+    conn.execute(
+        text("UPDATE contract SET status_ops = 'superseded' "
+             "WHERE contract_id IN :ids").bindparams(
+                 __import__("sqlalchemy").bindparam("ids", expanding=True)),
+        {"ids": marked},
+    )
+    print(f"[AsOf] contract {contract_id} ({effective_from} -> {effective_to}) "
+          f"repeats the period of {marked} — marked superseded. They keep "
+          f"resolving; the label records which row is out of use.")
+    return marked
 
 
 def find_overlaps(conn) -> list[dict[str, Any]]:
@@ -403,3 +563,82 @@ def filter_exceptions_by_window(exceptions, row_dates, windows):
         else:
             dropped += 1
     return kept, dropped
+
+
+# ==========================================================================
+# Currency without a flag — "which version is current?" answered by date
+# ==========================================================================
+#
+# `status_ops` used to carry two unrelated ideas: whether a contract was
+# APPROVED, and whether it was the NEWEST. The second is redundant — it is just
+# resolve_as_of(today) — and storing it created a cache with no invalidation
+# discipline (programme 1 drifted to four rows claiming to be current at once).
+#
+# So currency stops being stored. Every version stays `active`, meaning
+# "approved and usable", and which one applies is a date lookup — for a
+# bordereau, on its own transaction dates; for a screen asking "what governs
+# this programme now?", on today's.
+
+# Statuses that mean the contract was never approved for use. These are the
+# only ones excluded from resolution: `superseded` is deliberately NOT here,
+# because a superseded version still governs the periods it covered — that is
+# the whole of §7.
+NON_GOVERNING_STATUSES = ("drafted", "rejected", "failed", "cancelled", "extracting")
+
+
+def is_approved(status: Optional[str]) -> bool:
+    """Approval, not currency. A contract still being extracted, or rejected by
+    the carrier, must never govern a file; one merely replaced by a newer
+    version still governs its own period."""
+    return (status or "").strip().lower() not in NON_GOVERNING_STATUSES
+
+
+def current_for_template(conn, template_id: int) -> Optional[int]:
+    """The contract linked to `template_id` that is in force TODAY.
+
+    Replaces the `status_ops = 'active' ORDER BY contract_id DESC` idiom used by
+    the template screens. Two differences that matter:
+
+      * it asks the calendar, so a contract whose term expired months ago stops
+        being reported as the current one (contract 94 claimed `active` seven
+        months after expiry);
+      * it orders by effective date, not by id, so a BACKDATED upload — a higher
+        id with an earlier window — cannot displace the version actually in
+        force.
+
+    Falls back to the newest approved contract when nothing is in force (undated
+    legacy rows, or a lapsed programme) so a screen that used to show a contract
+    still shows one rather than going blank.
+    """
+    if not template_id or not _columns_present(conn):
+        return _newest_for_template(conn, template_id)
+    cid = conn.execute(
+        text(f"""
+            SELECT contract_id FROM contract
+            WHERE  output_template_id = :t
+              AND  COALESCE(status_ops,'') NOT IN {NON_GOVERNING_STATUSES}
+              AND  contract_effective_from IS NOT NULL
+              AND  contract_effective_from <= CURRENT_DATE
+              AND  (contract_effective_to IS NULL OR contract_effective_to > CURRENT_DATE)
+            ORDER  BY contract_effective_from DESC, contract_id DESC
+            LIMIT  1
+        """),
+        {"t": template_id},
+    ).scalar()
+    return cid if cid is not None else _newest_for_template(conn, template_id)
+
+
+def _newest_for_template(conn, template_id: int) -> Optional[int]:
+    """Last resort: the newest APPROVED contract on the template, regardless of
+    dates. Keeps screens populated for undated legacy contracts."""
+    if not template_id:
+        return None
+    return conn.execute(
+        text(f"""
+            SELECT contract_id FROM contract
+            WHERE  output_template_id = :t
+              AND  COALESCE(status_ops,'') NOT IN {NON_GOVERNING_STATUSES}
+            ORDER  BY contract_id DESC LIMIT 1
+        """),
+        {"t": template_id},
+    ).scalar()

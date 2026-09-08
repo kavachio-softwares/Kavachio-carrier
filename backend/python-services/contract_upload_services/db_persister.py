@@ -717,11 +717,21 @@ def persist_pipeline_output(
             # The fingerprint is what lets an identical re-upload be reused
             # WITHOUT re-running the LLM (see
             # contract_versioning.find_reusable_contract).
+            #
+            # valid_until still closes in SYSTEM time — that is the audit answer
+            # to "what did we believe, and when", and it stays.
+            #
+            # is_current_version is NOT cleared any more. It was a cached
+            # resolve_as_of(today) whose invalidation scope (programme only) did
+            # not match how contracts are actually scoped (programme + schedule
+            # + broker), so it drifted — programme 1 ended up with four rows all
+            # claiming to be current. Currency is now derived from
+            # contract_effective_from/to instead, which cannot drift because it
+            # is not a copy of anything.
             conn.execute(
                 text("""
                     UPDATE contract
-                    SET    is_current_version = FALSE,
-                           valid_until = now()
+                    SET    valid_until = now()
                     WHERE  contract_program_id = :pid
                       AND  is_current_version IS TRUE
                 """),
