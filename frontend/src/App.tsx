@@ -129,6 +129,7 @@ export default function App() {
         <Route path="/programs" element={<Programs />} />
         {/* The carrier hierarchy: brokers are reached from the carrier, not
             from a tenant — the same broker produces for several carriers. */}
+        <Route path="/brokers" element={<Brokers />} />
         <Route path="/brokers/:brokerId" element={<BrokerDetail />} />
         {/* Carrier-scoped oversight dashboard. Without ?carrier= it renders its
             own carrier picker, so the route needs no param of its own. */}
