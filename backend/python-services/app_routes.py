@@ -2218,7 +2218,8 @@ async def program_contract_upload(
                 # programme, exactly as before.
                 if broker_party_id is not None:
                     sib_q = sib_q.filter(Contract.broker_party_id == broker_party_id)
-                for sib in sib_q.all():
+                sibs = sib_q.all()
+                for sib in sibs:
                     sib.status = "superseded"
                 new_c = s.get(Contract, cid)
                 if new_c:
@@ -2227,6 +2228,23 @@ async def program_contract_upload(
                         new_c.blob_ref = contract_blob_ref
                     if schedule_key is not None:
                         new_c.schedule_key = schedule_key
+                    else:
+                        # INHERIT the schedule of the contract being replaced.
+                        # The Add Contract modal (a contract added on its own,
+                        # from the broker's page) sends no schedule_key, so
+                        # without this the replacement lands with NULL while the
+                        # contract it supersedes carries e.g. 'Schedule A'.
+                        # Status-wise that still reads as a supersession, but
+                        # schedule_key is part of the lineage key, so the two
+                        # rows become DIFFERENT contracts rather than versions of
+                        # one — and Feature 7's as-of lookup can then never find
+                        # the older version for a prior-period file.
+                        # Only when the replaced set agrees on a single schedule:
+                        # spanning several, there is nothing unambiguous to
+                        # inherit and NULL (the old behaviour) is honest.
+                        _sched = {sib.schedule_key for sib in sibs if sib.schedule_key}
+                        if len(_sched) == 1:
+                            new_c.schedule_key = _sched.pop()
                     # The persister writes the contract at (tenant, programme)
                     # scope — it has no notion of the broker level. Filing it
                     # under the broker is what makes it reachable from their

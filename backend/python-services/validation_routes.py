@@ -298,7 +298,39 @@ def _persist(s, body, tenant_id, contract_id, result) -> Optional[int]:
 #         "proceedToCanonical": result.get("proceedToCanonical", True),
 #     }
 
-def _resolve_contract_for_validation(s, template_id: int, tenant_id) -> Optional[int]:
+def _as_of_or(s, contract_id: Optional[int], on_date) -> Optional[int]:
+    """Feature 7 §7.2 — swap a "latest wins" contract for the version that was
+    IN FORCE on `on_date`.
+
+    Wrapped around the existing resolvers rather than folded into them: their
+    job is "which contract governs this template", which is unchanged and still
+    correct. This adds the one thing §7 needs on top — "and which VERSION of it
+    governs this date" — without touching a line of the logic that finds the
+    contract in the first place.
+
+    Returns `contract_id` untouched whenever as-of resolution cannot improve on
+    it (flag off, no date, migration 20_1 not applied, or no sibling version
+    covering the date), so every caller's pre-Feature-7 behaviour is preserved
+    exactly.
+    """
+    if contract_id is None or on_date is None:
+        return contract_id
+    try:
+        from contract_upload_services import contract_asof as _asof
+        return _asof.resolve_sibling_as_of(s, contract_id, on_date) or contract_id
+    except Exception:  # noqa: BLE001 — fail-open: never break validation over this
+        return contract_id
+
+
+def _resolve_contract_for_validation(s, template_id: int, tenant_id,
+                                     on_date=None) -> Optional[int]:
+    """Find the contract whose rules govern an output template — then, when a
+    transaction date is supplied, the VERSION of it in force on that date
+    (Feature 7 §7.1). `on_date=None` keeps the historical behaviour exactly."""
+    return _as_of_or(s, _resolve_contract_latest(s, template_id, tenant_id), on_date)
+
+
+def _resolve_contract_latest(s, template_id: int, tenant_id) -> Optional[int]:
     """Find the contract whose rules govern an output template, so the output
     stage runs the CONTRACT rules (not just global ones) even when the chosen
     template isn't directly linked to a contract — which otherwise means no
@@ -501,9 +533,14 @@ class FieldEditBody(BaseModel):
     apply: bool = False
 
 
-def _resolve_contract_id(s, body, policy_id) -> Optional[int]:
+def _resolve_contract_id(s, body, policy_id, on_date=None) -> Optional[int]:
     """Find the contract whose rules govern this edit (so re-validation uses the
-    SAME rule set the original output validation did)."""
+    SAME rule set the original output validation did).
+
+    Feature 7: with `on_date` supplied, the result is narrowed to the version in
+    force on that date. Note the ordering — an explicit body.contractId still
+    wins outright, because an operator naming a contract version has said which
+    one they mean and must not be second-guessed by a date lookup."""
     if body.contractId is not None:
         return body.contractId
     if body.exceptionId is not None:
@@ -515,18 +552,22 @@ def _resolve_contract_id(s, body, policy_id) -> Optional[int]:
         ).scalar()
         if cid is not None:
             return cid
-    # Fall back to the contract that owns this output template.
+    # Fall back to the contract that owns this output template. This is the
+    # "latest wins" lookup Feature 7 exists to correct, so it is the one that
+    # gets the as-of wrap; the exceptionId path above does NOT, because the
+    # contract that produced an exception is already the right version to
+    # re-validate against, by construction.
     cid = s.execute(
         text("SELECT contract_id FROM contract WHERE output_template_id = :t "
              "ORDER BY contract_id DESC LIMIT 1"),
         {"t": body.templateId},
     ).scalar()
     if cid is not None:
-        return cid
+        return _as_of_or(s, cid, on_date)
     # Last resort: the policy's own contract_id (often NULL).
-    return s.execute(
+    return _as_of_or(s, s.execute(
         text("SELECT policy_contract_id FROM policy WHERE policy_id = :p"), {"p": policy_id}
-    ).scalar()
+    ).scalar(), on_date)
 
 
 def _scope_for_policy(s, policy_id: int):

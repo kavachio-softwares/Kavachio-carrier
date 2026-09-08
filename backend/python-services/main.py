@@ -1452,12 +1452,23 @@ def dwh_list(
 
 # --- Export: user-defined output BDX templates -----------------------------
 
-def _active_contract_id_for_template(session, template_id: int) -> Optional[int]:
+def _active_contract_id_for_template(session, template_id: int,
+                                     on_date=None) -> Optional[int]:
     """Resolve the active contract linked to an output template via the new
-    hierarchy (Contract.output_template_id == template_id, status='active')."""
+    hierarchy (Contract.output_template_id == template_id, status='active').
+
+    Feature 7 §7.1: with `on_date` supplied, the result is narrowed from "the
+    version that is current" to "the version that was IN FORCE on that date" —
+    for a prior-period file those are different rows, and the status='active'
+    filter below selects precisely the wrong one. The narrowing happens after
+    this query rather than inside it for exactly that reason: a superseded
+    version cannot be found by a filter on 'active'.
+
+    `on_date=None` (every existing caller) keeps the behaviour unchanged.
+    """
     # Only the id is wanted — select that column, not the whole contract row
     # (which carries the extracted-clauses and field-mapping JSON).
-    return (
+    cid = (
         session.query(Contract.id)
         .filter(Contract.output_template_id == template_id,
                 Contract.status == "active")
@@ -1465,6 +1476,13 @@ def _active_contract_id_for_template(session, template_id: int) -> Optional[int]
         .limit(1)
         .scalar()
     )
+    if cid is None or on_date is None:
+        return cid
+    try:
+        from contract_upload_services import contract_asof as _asof
+        return _asof.resolve_sibling_as_of(session, cid, on_date) or cid
+    except Exception:  # noqa: BLE001 — fail-open
+        return cid
 
 
 def _contract_id_for_template(session, t: ExportTemplate) -> Optional[int]:

@@ -1077,6 +1077,141 @@ def _pipeline_contracts(s, pipeline_id: int) -> list[PipelineContract]:
             .all())
 
 
+def _asof_governing_date(landing_data: dict, *cfg_sources):
+    """The date that decides which contract version governs this run.
+
+    Returns (date | None, note). Reads the configured — or auto-detected —
+    governing column out of the landing record and reduces its values to one
+    date per the configured strategy. See contract_asof_config for why the
+    column is configuration rather than a constant: for a premium bordereau it
+    is policy inception, for claims it is date of loss, and choosing wrong
+    produces plausible-looking wrong money rather than an error.
+    """
+    from contract_upload_services import contract_asof_config as _cfg
+    sheets = (landing_data or {}).get("sheets") or {}
+    columns, values = [], []
+    for sh in sheets.values():
+        if isinstance(sh, dict):
+            columns.extend(sh.get("columns") or [])
+    field = _cfg.governing_date_field(columns, *cfg_sources)
+    if not field:
+        return None, _cfg.describe(None, None)
+    for sh in sheets.values():
+        for row in (sh.get("rows") or []) if isinstance(sh, dict) else []:
+            if isinstance(row, dict) and field in row:
+                values.append(row[field])
+    strategy = _cfg.setting("date_strategy", _cfg.DATE_STRATEGY, *cfg_sources)
+    governing = _cfg.pick_date(values, strategy)
+    return governing, _cfg.describe(field, governing, strategy)
+
+
+# Per-row scoping helpers live in contract_upload_services.contract_asof —
+# they are pure functions over dicts, and keeping them out of this module lets
+# them be tested without importing the route layer (and with it the LLM client,
+# the rule library and a live database).
+from contract_upload_services.contract_asof import (          # noqa: E402
+    AsofCfg as _AsofCfg,
+    contract_windows as _asof_contract_windows,
+    row_dates_from_blocks as _asof_row_dates,
+    filter_exceptions_by_window as _asof_filter_exceptions,
+)
+
+
+def _apply_asof_contracts(s, landing_data, pipe, fmt, sheet_contracts, eff_contract_id):
+    """Feature 7 §7.2 — re-point this run's contracts at the versions IN FORCE
+    on the file's transaction dates, instead of whichever version is pinned.
+
+    The pin (pipeline_contract / direct_format.contract_id) says WHICH contract
+    governs this setup. That stays correct and untouched. This asks the second
+    question §7 adds — which VERSION of it applied on these dates — and swaps
+    only the version, keeping the pin's choice of contract lineage.
+
+    Returns (sheet_contracts, eff_contract_id, note). Every failure path returns
+    the inputs unchanged, so a run can never break because as-of resolution was
+    unavailable or misconfigured.
+    """
+    from contract_upload_services import contract_asof as _asof
+    from contract_upload_services import contract_asof_config as _cfg
+
+    if not _cfg.enabled(pipe, fmt):
+        return sheet_contracts, eff_contract_id, None
+
+    governing, note = _asof_governing_date(landing_data, pipe, fmt)
+    if governing is None:
+        return sheet_contracts, eff_contract_id, note
+
+    on_unresolved = _cfg.setting("on_unresolved", _cfg.ON_UNRESOLVED, pipe, fmt)
+
+    def _swap(cid):
+        """Pinned version → the sibling in force on `governing`."""
+        if not cid:
+            return cid, None
+        found = _asof.resolve_sibling_as_of(s, int(cid), governing)
+        if found and int(found) != int(cid):
+            return int(found), f"contract {cid} → {found}"
+        if found is None and on_unresolved == "skip":
+            # No version covers this date. 'skip' drops the contract so the run
+            # is not silently validated by rules that never applied; 'pin' (the
+            # default) keeps it, preserving pre-Feature-7 behaviour.
+            return None, f"contract {cid} → none (no version covers {governing})"
+        return cid, None
+
+    swaps = []
+    new_sheets = {}
+    for k, v in (sheet_contracts or {}).items():
+        nv, msg = _swap(v)
+        new_sheets[k] = nv
+        if msg:
+            swaps.append(f"sheet '{k}': {msg}")
+    new_eff, msg = _swap(eff_contract_id)
+    if msg:
+        swaps.append(f"fallback: {msg}")
+
+    # ── Per-row scoping (§7.1 "resolve EACH transaction") ────────────────
+    # `governing` above is ONE date for the whole run, so a file straddling a
+    # renewal resolves entirely to one version and the rows on the other side
+    # are judged by rules that never applied to them. Collect every version the
+    # file's dates actually touch; each one's rules then run, and
+    # _asof_filter_exceptions discards the ones that fired outside their own
+    # window. Off (`row_scoped: false`) keeps the single-version behaviour.
+    extra_ids = []
+    if _cfg.setting("row_scoped", "true", pipe, fmt) not in ("false", "0", "no"):
+        anchor = new_eff or eff_contract_id
+        lineage = _asof.lineage_of(s, int(anchor)) if anchor else None
+        if lineage is not None:
+            seen = {int(c) for c in list((new_sheets or {}).values()) + [new_eff] if c}
+            for row_date in sorted({d for d in _row_dates_of(landing_data, pipe, fmt)}):
+                cid = _asof.resolve_as_of(s, lineage, row_date)
+                if cid and int(cid) not in seen:
+                    seen.add(int(cid))
+                    extra_ids.append(int(cid))
+            if extra_ids:
+                swaps.append(f"row-scoped: also governing {extra_ids}")
+
+    note = note + ("; " + "; ".join(swaps) if swaps else "; no version change")
+    return new_sheets, new_eff, note, extra_ids
+
+
+def _row_dates_of(landing_data, *cfg_sources):
+    """Every distinct governing date in the landing record — the set of dates
+    the file's rows actually carry, so only the versions genuinely touched are
+    pulled in (a file inside one window stays a single-contract run)."""
+    from contract_upload_services import contract_asof_config as _cfg
+    sheets = (landing_data or {}).get("sheets") or {}
+    dates = set()
+    for sh in sheets.values():
+        if not isinstance(sh, dict):
+            continue
+        field = _cfg.governing_date_field(sh.get("columns") or [], *cfg_sources)
+        if not field:
+            continue
+        for row in sh.get("rows") or []:
+            d = _cfg.coerce_date(row.get(field)) if isinstance(row, dict) else None
+            if d is not None:
+                dates.add(d)
+    return dates
+
+
 def _pipeline_ready(s, p: Pipeline) -> tuple[bool, str]:
     """A pipeline can be activated once it has an input template, an output
     template, and at least one contract. Permissive: individual output sheets
@@ -1715,13 +1850,34 @@ async def _render_landing(
         output_format = _norm_fmt(getattr(tpl, "output_format", None))
         tenant_id = rec.tenant_id
         eff_contract_id = contract_id or fallback_contract_id
+
+        # ── Feature 7 §7.2 — Prior Period Files ──────────────────────────
+        # The pin above answers "which contract governs this setup". For a late
+        # or corrected file that is not the whole question: the version pinned
+        # today may not be the version that applied when the transactions
+        # happened. Swap each pinned contract for the sibling IN FORCE on the
+        # file's own dates, keeping the pin's choice of contract lineage.
+        #
+        # Fail-open: on any error the run keeps the contracts the pin gave it,
+        # so this can never be the reason a bordereau fails to process.
+        asof_note, asof_extra_ids = None, []
+        try:
+            sheet_contracts, eff_contract_id, asof_note, asof_extra_ids = (
+                _apply_asof_contracts(
+                    s, rec.data, pipe, fmt, sheet_contracts, eff_contract_id))
+            if asof_note:
+                log.info(f"[AsOf] {asof_note}")
+        except Exception as _asof_exc:  # noqa: BLE001 — fail-open by design
+            log.info(f"[AsOf] skipped ({_asof_exc}) — run keeps its pinned contracts")
+
         # Per-schedule contracts: each output sheet can have its OWN contract.
         # Governing set = the per-sheet contracts ∪ the fallback contract. Every
         # governing contract's rules are validated (each only fires on the sheets
         # its compiled SQL references), and their constants are merged.
         governing_ids = []
         for cid in ([int(v) for v in sheet_contracts.values() if v]
-                    + ([eff_contract_id] if eff_contract_id else [])):
+                    + ([eff_contract_id] if eff_contract_id else [])
+                    + list(asof_extra_ids or [])):
             if cid not in governing_ids:
                 governing_ids.append(cid)
         base_consts = {}
@@ -1734,6 +1890,13 @@ async def _render_landing(
         # that sheet; an unmapped sheet falls back to the format's contract ONLY
         # when that contract isn't itself pinned elsewhere (otherwise the sheet
         # has no governing contract and isn't contract-validated).
+        asof_windows = {}
+        asof_cfg = [_AsofCfg(x) for x in (pipe, fmt) if x is not None]
+        try:
+            if asof_extra_ids:
+                asof_windows = _asof_contract_windows(s, governing_ids)
+        except Exception:      # noqa: BLE001 — fail-open: no filter, no harm
+            asof_windows = {}
         _fname = {c.id: c.filename for c in
                   (s.query(Contract).filter(Contract.id.in_(governing_ids)).all()
                    if governing_ids else [])}
@@ -1832,6 +1995,26 @@ async def _render_landing(
             dv = run_validation(blocks, rules, template_id=eff_output_template_id,
                                 schema_cols=schema_cols, column_types=column_types)
             exceptions = dv.get("exceptions", [])
+
+            # ── Feature 7 §7.1, per row ──────────────────────────────────
+            # Every version the file spans has just had its rules run over
+            # EVERY row, so a row is currently judged by versions that never
+            # governed it. Keep only the exceptions whose contract was in force
+            # on that row's own date. Filtering after the run rather than
+            # scoping each rule's SQL means the compiler and the engine are
+            # untouched — the multi-contract machinery that already serves
+            # per-schedule contracts does the work.
+            if asof_windows:
+                try:
+                    _rd = _asof_row_dates(blocks, *asof_cfg)
+                    exceptions, _dropped = _asof_filter_exceptions(
+                        exceptions, _rd, asof_windows)
+                    if _dropped:
+                        log.info(f"[AsOf] row-scoped: dropped {_dropped} exception(s) "
+                                 f"raised by a version that did not govern the row")
+                except Exception as _fx:  # noqa: BLE001 — fail-open: keep them all
+                    log.info(f"[AsOf] row scoping skipped ({_fx})")
+
             # Label each row-level exception with the offending policy's number so
             # the review UI shows a real policy id instead of "Dataset-level".
             from duckdb_validation import label_exceptions_with_policy

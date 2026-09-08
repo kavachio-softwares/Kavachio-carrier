@@ -670,6 +670,62 @@ def persist_pipeline_output(
             }
         ).scalar_one()
 
+        # ── 2b) Business-effective term (Feature 7 — Prior Period Files) ──
+        # The SCD UPDATE above closed the prior version with `valid_until =
+        # now()` — SYSTEM time, "we stopped believing this today". §7.1 asks a
+        # different question: which version APPLIED on a transaction's date. So
+        # this stamps the business-effective range and closes the predecessor at
+        # the new version's effective_from, which is what makes a backdated
+        # endorsement resolve correctly for dates already in the past.
+        #
+        # A separate UPDATE rather than extra columns on the INSERT above: the
+        # INSERT stays byte-identical, so a deployment that has not applied
+        # migration 20_1 keeps working exactly as before instead of failing on
+        # an unknown column.
+        #
+        # Fail-open, and deliberately broad: effective dating is additive and
+        # nothing reads it until CONTRACT_ASOF_ENABLED is on, so it must never
+        # be the reason a contract upload fails.
+        #
+        # Wrapped in a SAVEPOINT, and that is load-bearing rather than tidy: in
+        # PostgreSQL a failed statement aborts the whole transaction, so a
+        # try/except alone would swallow the Python exception while leaving the
+        # transaction dead — every statement after this point would then fail
+        # with InFailedSqlTransaction, and the contract upload would break on
+        # the one path this block was written to survive. The savepoint rolls
+        # back only what happened inside it and hands the caller a working
+        # transaction back.
+        _sp = None
+        try:
+            from contract_upload_services import contract_asof as _asof
+            _sp = conn.begin_nested()
+            _eff_from = _parse_date(
+                # Honoured if extraction ever surfaces an endorsement date; an
+                # amendment's effective date is NOT its contract's inception,
+                # and using inception for one would silently backdate the new
+                # version over the whole original term.
+                _meta_scalar(program_metadata.get("amendment_effective_date"))
+                or _meta_scalar(program_metadata.get("endorsement_effective_date")),
+                inception,
+            )
+            _lineage = _asof.lineage_of(conn, contract_id)
+            if _lineage is not None:
+                _asof.stamp_effective_dates(
+                    conn, contract_id, _lineage, _eff_from, expiry,
+                    version_label=_meta_scalar(
+                        program_metadata.get("amendment_number")) or "Original",
+                )
+            if _sp is not None:
+                _sp.commit()
+        except Exception as _asof_exc:  # noqa: BLE001 — fail-open by design
+            if _sp is not None:
+                try:
+                    _sp.rollback()
+                except Exception:
+                    pass
+            print(f"[AsOf] effective dating skipped ({_asof_exc}) — "
+                  f"contract {contract_id} persisted without a business term")
+
         # ── 3) UPDATE program metadata columns ───────────────────────────
         territory = _meta_scalar(program_metadata.get("territory"))
 
