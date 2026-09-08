@@ -779,6 +779,65 @@ def test_a_new_preview_replaces_the_last_one(world):
                       headers=world["headers"]).status_code == 404
 
 
+def _sent(world, title: str):
+    """One round, raised and sent — sent immediately because an unsent draft is
+    discarded by the next preview (see the two tests further down)."""
+    env = _create(world, title=title)
+    client.post(f"/esign/envelopes/{env['id']}/send",
+                headers=world["headers"], json={})
+    return env
+
+
+def test_the_list_comes_back_one_page_at_a_time(world):
+    """Assembling a row means reading its recipients, fields and events, so a
+    carrier with a long archive must not be made to pay for all of it to look at
+    the last five rounds.
+
+    Scoped by a tag in the title because the carrier in this fixture is shared
+    with every other test in the file — the point being made is about the shape
+    of a page, not about how many rounds happen to exist."""
+    import uuid
+    tag = f"Paging {uuid.uuid4().hex[:8]}"
+    a = _sent(world, f"{tag} A")
+    b = _sent(world, f"{tag} B")
+    c = _sent(world, f"{tag} C")
+
+    first = client.get(f"/esign/envelopes?q={tag}&limit=2&offset=0",
+                       headers=world["headers"]).json()
+    assert first["total"] == 3, first["total"]
+    assert first["limit"] == 2 and first["offset"] == 0
+    assert len(first["envelopes"]) == 2, "a page is a page, not the whole list"
+    assert [e["id"] for e in first["envelopes"]] == [c["id"], b["id"]], "newest first"
+
+    second = client.get(f"/esign/envelopes?q={tag}&limit=2&offset=2",
+                        headers=world["headers"]).json()
+    assert [e["id"] for e in second["envelopes"]] == [a["id"]]
+    assert second["total"] == 3, "the total is of everything, not of the page"
+
+    # The two pages together are the whole list, with nothing seen twice and
+    # nothing missed — the property OFFSET paging loses on an unstable sort, and
+    # why the ordering breaks ties on id.
+    seen = [e["id"] for e in first["envelopes"] + second["envelopes"]]
+    assert sorted(seen) == sorted([a["id"], b["id"], c["id"]])
+    assert len(set(seen)) == 3
+
+
+def test_the_search_box_asks_the_server_not_the_page(world):
+    """It has to match across the whole archive: a browser filtering the page it
+    happens to be holding would report an older round as not existing."""
+    import uuid
+    tag = uuid.uuid4().hex[:8]
+    wanted = _sent(world, f"Marine Binder {tag}")
+    other = _sent(world, f"Motor Fleet {tag}")
+
+    r = client.get(f"/esign/envelopes?q=marine+binder+{tag}&limit=10",
+                   headers=world["headers"]).json()
+    ids = [e["id"] for e in r["envelopes"]]
+    assert wanted["id"] in ids, "the match is case-insensitive"
+    assert other["id"] not in ids, ids
+    assert r["total"] == 1, "the total has to count the MATCHES, or the pager lies"
+
+
 def test_the_history_of_one_contract_can_be_asked_for_on_its_own(world):
     """The record links into this screen filtered to itself.
 

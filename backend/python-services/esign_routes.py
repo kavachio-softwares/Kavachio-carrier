@@ -1116,8 +1116,10 @@ def contract_round(contract_id: int, p: Principal = Depends(current_principal)):
 def list_envelopes(p: Principal = Depends(require_role("carrier_admin")),
                    status: Optional[str] = Query(None),
                    contract_id: Optional[int] = Query(None),
+                   q: Optional[str] = Query(None),
                    include_drafts: bool = Query(False),
-                   limit: int = Query(50, ge=1, le=200)):
+                   limit: int = Query(50, ge=1, le=200),
+                   offset: int = Query(0, ge=0)):
     """Everything this carrier has SENT for signature, and where each one got to.
 
     Drafts are left out. This screen says it lists contracts that are out for
@@ -1129,22 +1131,36 @@ def list_envelopes(p: Principal = Depends(require_role("carrier_admin")),
     genuinely wants to see them.
 
     `contract_id` narrows it to one contract's rounds, which is how the contract
-    record links into this screen. It has to be filtered HERE and not in the
-    browser: `limit` caps the list, so a tenant past 50 rounds would otherwise
-    see an older contract's history silently come back empty.
+    record links into this screen. `q` matches the title. Both are filtered HERE
+    and not in the browser, because the response is ONE PAGE: a browser-side
+    filter would search the page it happens to be holding and report an older
+    contract's history as though it did not exist.
+
+    Paged with `limit`/`offset`, returning `total` alongside — assembling an
+    envelope means reading its recipients, fields and events, so a carrier with
+    a few hundred rounds behind them pays for the whole archive on every visit
+    otherwise. Ordering breaks ties on id: two rounds raised in the same second
+    with only `created_at` to sort by can swap places between two pages, which
+    is how a row shows up twice and another never shows up at all.
     """
     with SessionLocal() as s:
-        q = (s.query(EsignEnvelope)
-             .filter(EsignEnvelope.tenant_id == p.tenant_id)
-             .order_by(desc(EsignEnvelope.created_at)))
+        rows_q = (s.query(EsignEnvelope)
+                  .filter(EsignEnvelope.tenant_id == p.tenant_id))
         if contract_id is not None:
-            q = q.filter(EsignEnvelope.contract_id == contract_id)
+            rows_q = rows_q.filter(EsignEnvelope.contract_id == contract_id)
         if status:
-            q = q.filter(EsignEnvelope.status == status)
+            rows_q = rows_q.filter(EsignEnvelope.status == status)
         elif not include_drafts:
-            q = q.filter(EsignEnvelope.status != "draft")
-        rows = q.limit(limit).all()
-        return {"envelopes": [_envelope_json(s, e, links=True) for e in rows]}
+            rows_q = rows_q.filter(EsignEnvelope.status != "draft")
+        if (q or "").strip():
+            rows_q = rows_q.filter(EsignEnvelope.title.ilike(f"%{q.strip()}%"))
+
+        total = rows_q.count()
+        rows = (rows_q
+                .order_by(desc(EsignEnvelope.created_at), desc(EsignEnvelope.id))
+                .limit(limit).offset(offset).all())
+        return {"envelopes": [_envelope_json(s, e, links=True) for e in rows],
+                "total": total, "limit": limit, "offset": offset}
 
 
 def _load_envelope(s, envelope_id: int, p: Principal) -> EsignEnvelope:

@@ -107,20 +107,32 @@ export type Envelope = {
  * two open on one contract.
  */
 
+/** One PAGE of rounds, newest first, plus how many there are in all. */
+export type EnvelopePage = {
+  envelopes: Envelope[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
 /** Rounds this carrier has out, newest first.
  *
- *  `contractId` narrows it to one contract — filtered on the SERVER, because
- *  the list is capped and a browser-side filter would quietly lose the history
- *  of anything older than the cap. */
+ *  Every filter is applied on the SERVER, and so is the paging. The response
+ *  is one page: filtering it in the browser would search the page that
+ *  happened to be loaded and report the rest of the archive as missing. */
 export async function listEnvelopes(
-  opts: { status?: string; contractId?: number } = {},
-): Promise<Envelope[]> {
+  opts: { status?: string; contractId?: number; q?: string;
+          limit?: number; offset?: number } = {},
+): Promise<EnvelopePage> {
   const params: Record<string, string | number> = {};
   if (opts.status) params.status = opts.status;
   if (opts.contractId) params.contract_id = opts.contractId;
-  const { data } = await api.get<{ envelopes: Envelope[] }>("/esign/envelopes",
+  if (opts.q?.trim()) params.q = opts.q.trim();
+  if (opts.limit) params.limit = opts.limit;
+  if (opts.offset) params.offset = opts.offset;
+  const { data } = await api.get<EnvelopePage>("/esign/envelopes",
     { params: Object.keys(params).length ? params : undefined });
-  return data.envelopes;
+  return data;
 }
 
 export async function getEnvelope(id: number): Promise<Envelope> {
