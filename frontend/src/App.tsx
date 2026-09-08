@@ -29,6 +29,13 @@ import ContractNew from "./pages/ContractNew";
 import ContractUpload from "./pages/ContractUpload";
 import BrokerContractNew from "./pages/BrokerContractNew";
 import Approvals from "./pages/Approvals";
+// Create-a-Contract, step 4 from the carrier's side: what is out for
+// signature and where each one got to. Steps 1-3 are the wizard at
+// /contracts/new.
+import ContractSignatures from "./pages/ContractSignatures";
+// The signing screen itself. PUBLIC — reached from an emailed link by
+// people who have no account here, so it sits outside RequireAuth.
+import SignContract from "./pages/SignContract";
 import Mapping from "./pages/Mapping";
 import DirectRun from "./pages/DirectRun";
 import DirectSetup from "./pages/DirectSetup";
@@ -110,6 +117,11 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/reset" element={<ResetPassword />} />
+      {/* Signing a contract from an emailed link. No Layout, no session,
+          no guard: the token in the URL is the whole credential and it
+          stands for exactly one signer on exactly one contract. The
+          insurer's signer and the broker's both land here. */}
+      <Route path="/sign" element={<SignContract />} />
       {/* /welcome is the tenant-admin first-run wizard — it has no Layout shell,
           so it carries the guards itself. */}
       <Route path="/welcome" element={<RequireAuth><RequireAccess><Welcome /></RequireAccess></RequireAuth>} />
@@ -156,6 +168,10 @@ export default function App() {
         <Route path="/contracts/:contractId/signature" element={<ContractSignature />} />
         <Route path="/approvals" element={<Approvals />} />   {/* the gate */}
         <Route path="/programs/:programId/contracts/:contractId" element={<ContractDetail />} />
+        {/* Watching the signing rounds. A round is STARTED from the
+            contract itself, once both sides have agreed the terms — see
+            esign_routes' in-app door — not from a screen of its own. */}
+        <Route path="/contracts/signatures" element={<ContractSignatures />} />
         <Route path="/direct" element={<DirectRun />} />
         <Route path="/direct/setup" element={<DirectSetup />} />
         <Route path="/direct/setups" element={<BordereauSetups />} />

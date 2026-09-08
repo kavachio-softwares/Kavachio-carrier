@@ -22,6 +22,7 @@ from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, Float, Index, Integer, String, JSON, DateTime, Date,
     ForeignKey, Text, LargeBinary, Boolean, Numeric, inspect, UniqueConstraint,
+    func, text,
 )
 from sqlalchemy.orm import declarative_base, deferred, sessionmaker, relationship
 
@@ -787,6 +788,232 @@ class ContractApproval(Base):
     # Added by migration 15; NULL on every row that proposed nothing.
     proposed_changes = Column("approval_proposed_changes", JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+# ============================================================================
+# Create-a-Contract, step 4 — Signatures.
+#
+# Four tables, one signing round. See migrations/13_contract_esign.sql for the
+# reasoning; the short version is the rule that makes the whole thing work:
+#
+#   a box on the page belongs to ONE signer and says so itself, in
+#   `party_key` — 'tenant:<tenant_id>' for the insurer, 'broker:<broker_party_id>'
+#   for the broker. The recipient behind the emailed link carries the same
+#   string. Field ownership is that equality, checked on the server, never
+#   inferred from what the browser posts.
+# ============================================================================
+
+def party_key_for_tenant(tenant_id) -> str:
+    """The insurer's identity as the fields spell it."""
+    return f"tenant:{int(tenant_id)}"
+
+
+def party_key_for_broker(broker_party_id) -> str:
+    """The broker's identity as the fields spell it."""
+    return f"broker:{int(broker_party_id)}"
+
+
+class EsignEnvelope(Base):
+    """One document, out for signature once.
+
+    Two PDFs are kept on purpose. `source_pdf` is the wording as it was written
+    and is never overwritten; `current_pdf` is that same document with every
+    signature applied so far, and it is what the NEXT signer opens — which is
+    how the broker sees the insurer's signature already on the page rather than
+    a blank block and a promise.
+    """
+    __tablename__ = "contract_esign_envelope"
+    # Indexes are declared here with the SAME NAMES the migration uses, not via
+    # `index=True`. init_db() still runs create_all() when RLS is off, so on any
+    # given database either this or migrations/13_contract_esign.sql made the
+    # table — and an auto-named `ix_contract_esign_envelope_envelope_tenant_id`
+    # is not the migration's `ix_esign_envelope_tenant`, so both would be created
+    # and every write would maintain two identical indexes. Matching the names
+    # makes CREATE INDEX IF NOT EXISTS see what is already there.
+    __table_args__ = (
+        Index("ix_esign_envelope_tenant", "envelope_tenant_id"),
+        Index("ix_esign_envelope_contract", "envelope_contract_id"),
+    )
+    id = Column("envelope_id", Integer, primary_key=True)
+    tenant_id = Column("envelope_tenant_id", Integer, nullable=False)
+    # NULL while the contract row does not exist yet: the wizard can send a
+    # generated draft before it is filed.
+    contract_id = Column("envelope_contract_id", Integer, nullable=True)
+    program_id = Column("envelope_program_id", Integer, nullable=True)
+    broker_party_id = Column("envelope_broker_party_id", Integer, nullable=True)
+    title = Column("envelope_title", String, nullable=False)
+    # draft | sent | in_progress | completed | declined | voided
+    status = Column("envelope_status", String, nullable=False, default="draft",
+                    server_default="draft")
+    source_pdf = _payload(Column("envelope_source_pdf", LargeBinary, nullable=True))
+    source_pdf_ref = Column("envelope_source_pdf_ref", String, nullable=True)
+    current_pdf = _payload(Column("envelope_current_pdf", LargeBinary, nullable=True))
+    current_pdf_ref = Column("envelope_current_pdf_ref", String, nullable=True)
+    page_count = Column("envelope_page_count", Integer, nullable=False, default=0,
+                        server_default=text("0"))
+    # Bumped on every stamp so a page image can never be served stale.
+    pdf_version = Column("envelope_pdf_version", Integer, nullable=False, default=1,
+                         server_default=text("1"))
+    created_by_user_id = Column("envelope_created_by_id", Integer, nullable=True)
+    created_at = Column("envelope_created_at", DateTime(timezone=True), nullable=False,
+                        default=datetime.utcnow, server_default=func.now())
+    sent_at = Column("envelope_sent_at", DateTime(timezone=True), nullable=True)
+    completed_at = Column("envelope_completed_at", DateTime(timezone=True), nullable=True)
+
+    recipients = relationship(
+        "EsignRecipient", back_populates="envelope", cascade="all, delete-orphan",
+        order_by="EsignRecipient.order_no")
+    fields = relationship(
+        "EsignField", back_populates="envelope", cascade="all, delete-orphan")
+
+
+class EsignRecipient(Base):
+    """One organisation's signer on one envelope, and the link that reaches them.
+
+    `party_key` is the identity the boxes are matched against. `tenant_id` and
+    `broker_party_id` mirror it in FK-able form, and exactly one is set — the
+    same rule chk_app_user_scope enforces on app_user, for the same reason: an
+    organisation is a carrier or a broker, never both at once.
+    """
+    __tablename__ = "contract_esign_recipient"
+    __table_args__ = (
+        # One organisation signs once per envelope: a duplicated signer row would
+        # silently give one side two sets of boxes.
+        Index("uq_esign_recipient_party", "recipient_envelope_id",
+              "recipient_party_key", unique=True),
+        Index("ix_esign_recipient_envelope", "recipient_envelope_id",
+              "recipient_order"),
+    )
+    id = Column("recipient_id", Integer, primary_key=True)
+    envelope_id = Column("recipient_envelope_id", Integer,
+                         ForeignKey("contract_esign_envelope.envelope_id"),
+                         nullable=False)
+    side = Column("recipient_side", String, nullable=False)          # insurer | broker
+    party_key = Column("recipient_party_key", String, nullable=False)
+    tenant_id = Column("recipient_tenant_id", Integer, nullable=True)
+    broker_party_id = Column("recipient_broker_party_id", Integer, nullable=True)
+    user_id = Column("recipient_user_id", Integer, nullable=True)
+    name = Column("recipient_name", String, nullable=False)
+    email = Column("recipient_email", String, nullable=False)
+    title = Column("recipient_title", String, nullable=True)
+    org = Column("recipient_org", String, nullable=True)
+    # 1 signs first. The next person is emailed only once this one is done.
+    order_no = Column("recipient_order", Integer, nullable=False, default=1,
+                      server_default=text("1"))
+    # pending | sent | viewed | signed | declined
+    status = Column("recipient_status", String, nullable=False, default="pending",
+                    server_default="pending")
+    # unique WITHOUT index=True: that pair makes SQLAlchemy build a unique INDEX
+    # named ix_…, where the migration declares `recipient_token TEXT UNIQUE` and
+    # gets the constraint …_recipient_token_key. Same guarantee, different
+    # object — and two of them on one column if both sides ran.
+    token = Column("recipient_token", String, unique=True, nullable=True)
+    token_expires = Column("recipient_token_expires", DateTime(timezone=True), nullable=True)
+    sent_at = Column("recipient_sent_at", DateTime(timezone=True), nullable=True)
+    viewed_at = Column("recipient_viewed_at", DateTime(timezone=True), nullable=True)
+    signed_at = Column("recipient_signed_at", DateTime(timezone=True), nullable=True)
+    decline_reason = Column("recipient_decline_reason", Text, nullable=True)
+    signature_name = Column("recipient_signature_name", String, nullable=True)
+    # The drawn signature as a data URL. Big, and only needed while stamping,
+    # so it never rides along on a list query.
+    signature_image = _payload(Column("recipient_signature_image", Text, nullable=True))
+    signed_ip = Column("recipient_signed_ip", String, nullable=True)
+    signed_agent = Column("recipient_signed_agent", String, nullable=True)
+    # --- the one-time code that unlocks the link (migration 17) ------------
+    # Holding the URL is not enough on its own: a URL leaks through history,
+    # chat, screen shares and forwarded mail in ways a mailbox does not. Stored
+    # as a bcrypt hash, never in plain text — a readable signing code is a
+    # readable signing code to anyone with a database backup.
+    otp_hash = Column("recipient_otp_hash", String, nullable=True)
+    otp_expires = Column("recipient_otp_expires", DateTime(timezone=True), nullable=True)
+    # Six digits is a small space, so these two are the real protection, not the
+    # hash: five wrong guesses locks the link for fifteen minutes.
+    otp_attempts = Column("recipient_otp_attempts", Integer, nullable=False,
+                          default=0, server_default=text("0"))
+    otp_locked_until = Column("recipient_otp_locked_until", DateTime(timezone=True),
+                              nullable=True)
+    otp_verified_at = Column("recipient_otp_verified_at", DateTime(timezone=True),
+                             nullable=True)
+    # So a resend button cannot be turned into a way to mail somebody hundreds
+    # of messages.
+    otp_sent_count = Column("recipient_otp_sent_count", Integer, nullable=False,
+                            default=0, server_default=text("0"))
+    otp_last_sent_at = Column("recipient_otp_last_sent_at", DateTime(timezone=True),
+                              nullable=True)
+    created_at = Column("recipient_created_at", DateTime(timezone=True), nullable=False,
+                        default=datetime.utcnow, server_default=func.now())
+
+    envelope = relationship("EsignEnvelope", back_populates="recipients")
+
+
+class EsignField(Base):
+    """A box on the page, owned by exactly one signer.
+
+    Position is a FRACTION of the page (0..1, origin top-left), not points: the
+    signing screen renders each page at whatever width the browser gives it, and
+    fractions land the box in the same place at every zoom and every DPI.
+    """
+    __tablename__ = "contract_esign_field"
+    __table_args__ = (
+        Index("ix_esign_field_envelope", "field_envelope_id", "field_page"),
+        Index("ix_esign_field_party", "field_envelope_id", "field_party_key"),
+    )
+    id = Column("field_id", Integer, primary_key=True)
+    envelope_id = Column("field_envelope_id", Integer,
+                         ForeignKey("contract_esign_envelope.envelope_id"),
+                         nullable=False)
+    # WHO OWNS THIS BOX — the entire access rule, in one column.
+    party_key = Column("field_party_key", String, nullable=False)
+    recipient_id = Column("field_recipient_id", Integer,
+                          ForeignKey("contract_esign_recipient.recipient_id"),
+                          nullable=True)
+    # signature | initial | name | title | date | text
+    type = Column("field_type", String, nullable=False)
+    page = Column("field_page", Integer, nullable=False)
+    x = Column("field_x", Float, nullable=False)
+    y = Column("field_y", Float, nullable=False)
+    w = Column("field_w", Float, nullable=False)
+    h = Column("field_h", Float, nullable=False)
+    required = Column("field_required", Boolean, nullable=False, default=True,
+                      server_default=text("TRUE"))
+    label = Column("field_label", String, nullable=True)
+    # The token in the document that put the box here, e.g.
+    # '{{signature:tenant:12}}'. Kept so a re-generated document can be re-tagged
+    # and the placement reproduced instead of re-drawn by hand.
+    anchor = Column("field_anchor", String, nullable=True)
+    value = Column("field_value", Text, nullable=True)
+    filled_at = Column("field_filled_at", DateTime(timezone=True), nullable=True)
+    created_at = Column("field_created_at", DateTime(timezone=True), nullable=False,
+                        default=datetime.utcnow, server_default=func.now())
+
+    envelope = relationship("EsignEnvelope", back_populates="fields")
+
+
+class EsignEvent(Base):
+    """What happened, in order.
+
+    The envelope row holds where it got to; this holds how it got there. It is
+    printed as the certificate page on the completed PDF, so nothing that
+    matters may be left out of it.
+    """
+    __tablename__ = "contract_esign_event"
+    __table_args__ = (
+        Index("ix_esign_event_envelope", "event_envelope_id", "event_at"),
+    )
+    id = Column("event_id", Integer, primary_key=True)
+    envelope_id = Column("event_envelope_id", Integer,
+                         ForeignKey("contract_esign_envelope.envelope_id"),
+                         nullable=False)
+    recipient_id = Column("event_recipient_id", Integer, nullable=True)
+    # created | sent | delivered | viewed | signed | declined | completed
+    # | reminded | voided
+    type = Column("event_type", String, nullable=False)
+    actor = Column("event_actor", String, nullable=True)
+    ip = Column("event_ip", String, nullable=True)
+    agent = Column("event_agent", String, nullable=True)
+    detail = Column("event_detail", JSON, nullable=True)
+    at = Column("event_at", DateTime(timezone=True), nullable=False,
+                default=datetime.utcnow, server_default=func.now())
 
 
 class SheetBinding(Base):

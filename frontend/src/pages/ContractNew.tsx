@@ -238,6 +238,13 @@ export default function ContractNew() {
     setBusy("renewal");
     try {
       const prior = await getContract(Number(id));
+      // A treaty renews as a treaty. Guarded against the free text that older
+      // rows carry in this column, which matches no spec and would blank the
+      // form. Unrecognised leaves the picker where the carrier put it.
+      if (prior.contract_type
+          && (specs ?? []).some(t => t.key === prior.contract_type)) {
+        setTypeKey(prior.contract_type);
+      }
       setProgramId(prior.programme ? String(prior.programme.id) : "");
       setBrokerId(prior.counterparty ? String(prior.counterparty.id) : "");
       setValues(v => ({
@@ -264,12 +271,21 @@ export default function ContractNew() {
   const spec = useMemo(
     () => (specs ?? []).find(t => t.key === typeKey) ?? null, [specs, typeKey]);
 
+  // WHO the other side may be is the type's business, not this screen's. A
+  // broker has to be on the programme before it can hold a contract there; a
+  // reinsurer has no such gate, so making it wait for a programme would be a
+  // condition the server does not impose.
+  const gatedOnProgramme = spec?.counterparty_must_be_on_programme ?? true;
+  const counterpartyLabel = spec?.counterparty_label ?? "Counterparty";
+
   useEffect(() => {
-    if (!programId) { setCounterparties(null); return; }
+    if (!spec) { setCounterparties(null); return; }
+    if (gatedOnProgramme && !programId) { setCounterparties(null); return; }
     setCounterparties(null);
-    getCounterparties("broker", Number(programId))
+    getCounterparties(spec.counterparty_party_type,
+                      gatedOnProgramme ? Number(programId) : undefined)
       .then(setCounterparties).catch(() => setCounterparties([]));
-  }, [programId]);
+  }, [spec, gatedOnProgramme, programId]);
 
   const programme = programmes.find(p => String(p.id) === programId);
   const counterparty = (counterparties ?? []).find(c => String(c.id) === brokerId);
@@ -331,12 +347,10 @@ export default function ContractNew() {
    *  the checks and the PDF can never be computed from different inputs. */
   const wordingInput = useCallback((secs?: WordingSection[] | null) => ({
     contract_type: typeKey,
-    values: {
-      name: values.name, inception_dt: values.inception_dt,
-      expiry_dt: values.expiry_dt, class_of_business: values.class_of_business,
-      schedule_key: values.schedule_key,
-      notice_period_days: values.notice_period_days,
-    },
+    // Everything typed, not a chosen six. The schedule prints year of
+    // account, risk code and section when they are set, so a subset here meant
+    // a treaty's own identifying terms never reached the page.
+    values: { ...values },
     agreed_limits: limits,
     sections: secs ?? undefined,
     carrier_name: carrierName,
@@ -425,6 +439,20 @@ export default function ContractNew() {
     setFurthest(f => Math.max(f, to));
   }
 
+  /** The identity fields, shaped for the API: blank is null, and the spec's
+   *  own `kind` decides whether a value goes as a number. Built from the spec
+   *  so a field added to contract_types.py needs no change here. */
+  function typedValues(): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const f of basicFields) {
+      const raw = (values[f.name] ?? "").trim();
+      out[f.name] = raw === ""
+        ? null
+        : (f.kind === "int" || f.kind === "decimal") ? Number(raw) : raw;
+    }
+    return out;
+  }
+
   async function create(mode: "draft" | "review" | "live") {
     if (!spec) return;
     setBusy("create");
@@ -435,13 +463,10 @@ export default function ContractNew() {
         program_id: Number(programId),
         contract_type: typeKey,
         counterparty_party_id: Number(brokerId),
-        name: values.name,
-        schedule_key: values.schedule_key || null,
-        class_of_business: values.class_of_business || null,
-        inception_dt: values.inception_dt,
-        expiry_dt: values.expiry_dt,
-        notice_period_days: values.notice_period_days
-          ? Number(values.notice_period_days) : null,
+        // Every field the chosen TYPE asks for. Naming a handful by hand left
+        // year_of_account out of the request entirely — mandatory on a treaty,
+        // so an insurer ↔ reinsurer contract could not be saved at all.
+        ...typedValues(),
         agreed_limits: limits,
         renews_contract_id: kind === "renew" && renewsId ? Number(renewsId) : null,
         signers,
@@ -775,6 +800,42 @@ export default function ContractNew() {
                 )
               ) : (
               <>
+              {/* WHICH KIND of contract. Asked before the basics because it
+                  decides what the rest of the card asks for: a binder needs
+                  the class of business the broker may write under, a treaty
+                  needs the year of account it attaches to and the notice
+                  needed to get out of it. Both lists come from the server's
+                  spec, so this picker only chooses a key — the inputs below
+                  rearrange themselves. */}
+              <div className="fh">
+                Who is it with?
+                <em>this decides what the contract has to state</em>
+              </div>
+              {/* Two across, not the three the class assumes: there are two
+                  types, and a trailing empty column reads as a missing option. */}
+              <div
+                className="startpick"
+                style={{ marginBottom: 18,
+                         gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
+              >
+                {(specs ?? []).map(t => (
+                  <div
+                    key={t.key}
+                    className={`sp ${typeKey === t.key ? "on" : ""}`}
+                    onClick={() => {
+                      if (t.key === typeKey) return;
+                      setTypeKey(t.key);
+                      // The organisation already chosen is the wrong KIND for
+                      // the new type, and the server refuses it on save. Better
+                      // to clear it here than to explain it three steps later.
+                      setBrokerId("");
+                    }}
+                  >
+                    <b>{t.label}</b><span>{t.blurb}</span>
+                  </div>
+                ))}
+              </div>
+
               <div className="fh">
                 The basics <em>who the contract is with, and how long it runs</em>
               </div>
@@ -799,15 +860,17 @@ export default function ContractNew() {
 
                 </div>
                 <div className="field">
-                  <label>Broker</label>
+                  <label>{counterpartyLabel}</label>
                   <select
-                    value={brokerId} disabled={!programId}
+                    value={brokerId} disabled={gatedOnProgramme && !programId}
                     onChange={e => setBrokerId(e.target.value)}
                     style={touched && !brokerId
                       ? { borderColor: "var(--p-crit)" } : undefined}
                   >
                     <option value="">
-                      {programId ? "Select a broker…" : "Choose a programme first"}
+                      {gatedOnProgramme && !programId
+                        ? "Choose a programme first"
+                        : `Select a ${counterpartyLabel.toLowerCase()}…`}
                     </option>
                     {(counterparties ?? []).map(c => (
                       <option key={c.id} value={String(c.id)}>{c.name}</option>

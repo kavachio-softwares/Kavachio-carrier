@@ -78,6 +78,21 @@ for _t_name in EXTRA_FIELD_ENTITY_TABLES:
 
 
 # ---------------------------------------------------------------------------
+# Operational tenant settings column.
+#
+# The v4 model dropped `internal_codes` from the tenant entity (LEGACY_FIELD_MAP
+# maps it to None), but it stays on the physical table as an OPERATIONAL store:
+# db.Tenant declares it, /tenant reads and writes it, and extras.py keeps the
+# user-defined extra-field definitions under its `extras` sub-key. Without it
+# here, any canonical-side `t.c.internal_codes` raises AttributeError — which is
+# what 500'd GET /extra-fields. Appended the same way `extras` is above.
+# ---------------------------------------------------------------------------
+_TENANT = CANONICAL_TABLES.get("tenant")
+if _TENANT is not None and "internal_codes" not in _TENANT.c:
+    _TENANT.append_column(Column("internal_codes", JSON, nullable=True))
+
+
+# ---------------------------------------------------------------------------
 # Operational tenancy column.
 #
 # The v4 model scopes child tables through their parents (policy → contract →

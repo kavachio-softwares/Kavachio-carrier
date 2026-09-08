@@ -104,9 +104,15 @@ def mail_account(account: str = "") -> MailAccount:
 
 
 def send_email(to: str, subject: str, html: str, text: str | None = None,
-               account: str = "") -> None:
+               account: str = "",
+               attachments: "list[tuple[str, bytes, str]] | None" = None) -> None:
     """Send an HTML email as `account` (default sender when omitted).
     Raises on failure — the caller decides how to handle it.
+
+    `attachments` is a list of (filename, data, mime_type) — e.g. the completed
+    contract sent to both parties when the last signature lands. A signed
+    contract has to ARRIVE, not sit behind a login: the people who need it next
+    are lawyers, auditors and reinsurers with no account on this platform.
 
     Honours the MAIL_ALLOWED_RECIPIENTS test guard: when that is set, a
     recipient not on the list is skipped (logged, not raised) so callers that
@@ -136,6 +142,13 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
     msg["To"] = to
     msg.set_content(text or "Open this message in an HTML-capable email client.")
     msg.add_alternative(html, subtype="html")
+    for name, data, mime in (attachments or []):
+        # A bad mime string would raise inside the email package and lose the
+        # whole message, so anything unexpected falls back to opaque bytes —
+        # every client can still save the file.
+        maintype, _, subtype = (mime or "application/octet-stream").partition("/")
+        msg.add_attachment(data, maintype=maintype or "application",
+                           subtype=subtype or "octet-stream", filename=name)
 
     log.info("[Email] sending '%s' to %s as %s via %s:%s",
              subject, to, acct.sender, acct.host, acct.port)

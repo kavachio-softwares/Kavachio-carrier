@@ -47,6 +47,10 @@ from carrier_routes import router as carrier_router
 from contract_routes import router as contract_router
 # The carrier's own business-segment list, assigned when a programme is made.
 from segment_routes import router as segment_router
+# Create-a-Contract step 4 — Signatures. Two routers on purpose: the carrier's
+# side is Bearer-authenticated and tenant-scoped, the signing side has NO auth
+# at all because the emailed token is the credential (esign_routes.py).
+from esign_routes import router as esign_router, public_router as esign_public_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -114,6 +118,12 @@ app.include_router(intake_api_router)
 # routes on app_router or the approve/reject pair on hierarchy_router.
 app.include_router(contract_router)
 app.include_router(segment_router)
+# The signing round: set one up and watch it (/esign/…), and sign one from an
+# emailed link (/esign/sign/…). The public router is registered FIRST so its
+# fixed /esign/sign prefix is matched before any future /esign/{id} pattern
+# could swallow it.
+app.include_router(esign_public_router)
+app.include_router(esign_router)
 
 
 def _mark_deprecated_aliases() -> None:

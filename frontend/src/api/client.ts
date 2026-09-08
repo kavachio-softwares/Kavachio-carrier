@@ -262,8 +262,15 @@ api.interceptors.response.use(
     const cfg = err.config;
     const status = err.response?.status;
     const isAuthCall = typeof cfg?.url === "string" && cfg.url.includes("/auth/");
+    // The public signing routes answer 401 with "type the code from your
+    // email" — it is the one-time-code gate, not an expired app session. The
+    // person holding that link may have no account here at all, so refreshing
+    // a token they never had and then bouncing them to /login would throw a
+    // signer off a contract mid-signature. Their page handles the 401 itself.
+    const isPublicSigning = typeof cfg?.url === "string"
+      && cfg.url.includes("/esign/sign/");
 
-    if (status === 401 && cfg && !cfg._retry && !isAuthCall) {
+    if (status === 401 && cfg && !cfg._retry && !isAuthCall && !isPublicSigning) {
       cfg._retry = true;
       refreshing = refreshing ?? refreshAccessToken();
       const newToken = await refreshing;

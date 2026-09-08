@@ -85,6 +85,14 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // bordereau setup runs against.
       { to: "/contracts", label: "Contracts", icon: FileCheck },
       { to: "/approvals", label: "Approvals", icon: ClipboardCheck },
+      // Signatures is NOT a sidebar entry. Watching a round is watching a
+      // contract, so it is reached from Contracts ("Signature history") and
+      // from the contract's own record, filtered to that contract. A top-level
+      // tab put it beside Contracts as though it were a separate thing to
+      // manage, and gave a second front door to a flow whose only correct
+      // beginning is the contract itself — the same reason there has never
+      // been a "start a round" entry. The screen still lives at
+      // /contracts/signatures; only the way in changed.
       // Brokers, not carriers. Kavachio creates carriers (Platform → Carriers)
       // and this tenant IS one — what a carrier manages is the brokers that
       // produce into its programmes. The old "All Carriers" entry pointed at

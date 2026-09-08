@@ -13,6 +13,7 @@ import {
   getBrokerContracts, getBrokerCarriers,
   type BrokerContract, type BrokerCarrier, type Lifecycle,
 } from "../api/broker";
+import { inAppSigningUrl } from "../api/esign";
 import { fmtDate } from "../utils/date";
 import { ListFilterBar } from "../components/ListFilterBar";
 
@@ -111,8 +112,12 @@ export default function BrokerContracts() {
                 {" "}({STATE[m.lifecycle].label.toLowerCase()})
               </span>
             ))}
-            . Open one to read the terms and either agree them or ask for
-            changes — nothing moves until you do.
+            {mine.some(m => m.lifecycle === "agreed" || m.lifecycle === "signed")
+              ? " The carrier has signed the ones marked terms agreed — they "
+                + "are waiting on your signature, and the contract goes in "
+                + "force the moment you give it."
+              : " Open one to read the terms and either agree them or ask for "
+                + "changes — nothing moves until you do."}
           </div>
         )}
 
@@ -203,6 +208,15 @@ export default function BrokerContracts() {
                       <td className={canSetUp ? "" : "muted"}>
                         {canSetUp
                           ? <Link to="/broker/bordereau">Process bordereau →</Link>
+                          // Waiting on this broker's signature. Offered here
+                          // rather than only on the contract's own page,
+                          // because this is the screen they are on — and by
+                          // the time a contract reaches this state the carrier
+                          // has signed and the only thing left is them.
+                          : (c.whose_turn === "broker"
+                             && (c.lifecycle === "agreed" || c.lifecycle === "signed"))
+                            ? <a className="linkish" href={inAppSigningUrl(c.id)}
+                                 target="_blank" rel="noreferrer">Sign it →</a>
                           : c.approval_status !== "approved"
                             ? "Locked"
                             // Approved but not in force. Since a contract goes

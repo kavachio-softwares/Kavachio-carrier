@@ -15,14 +15,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, Eye, FileText,
-  MessagesSquare, Paperclip, PenLine, Plus, RefreshCw, Send, Trash2, Upload,
-  XCircle,
+  AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink,
+  Eye, FileText, History, MessagesSquare, Paperclip, PenLine, Plus, RefreshCw,
+  Send, Trash2, Upload, XCircle,
 } from "lucide-react";
 import { currentMga, getTenantBrand } from "../auth";
 import { WordingEditor } from "../components/WordingEditor";
 import { fmtDate, fmtStamp } from "../utils/date";
 import { getApprovalHistory, type ApprovalEvent } from "../api/hierarchy";
+import {
+  getContractRound, inAppSigningUrl, type ContractRound,
+} from "../api/esign";
 import {
   acceptTerms, activateContract, deactivateDocument, downloadDocument,
   openDocument,
@@ -123,6 +126,11 @@ export default function ContractRecord() {
   const [viewing, setViewing] = useState<
     { id: number; name: string; url: string; type: string } | null>(null);
 
+  // Where the electronic signing round has got to. Read from the server so the
+  // button and the endpoint behind it cannot disagree about whether pressing it
+  // will work — see api/esign.getContractRound.
+  const [round, setRound] = useState<ContractRound | null>(null);
+
   // Negotiation
   const [showSign, setShowSign] = useState(false);
   const [signedDocId, setSignedDocId] = useState("");
@@ -184,6 +192,10 @@ export default function ContractRecord() {
       .then(setRec)
       .catch(e => setErr(e?.response?.data?.detail || "Could not load this contract."));
     getApprovalHistory(id).then(setHistory).catch(() => setHistory([]));
+    // Its own call and its own failure: a round that cannot be read must never
+    // stop the contract being shown. Absent, the buttons fall back to the
+    // signature screen, which is where they pointed before there were rounds.
+    getContractRound(id).then(setRound).catch(() => setRound(null));
   }, [id]);
   useEffect(load, [load]);
 
@@ -297,10 +309,42 @@ export default function ContractRecord() {
   // counterparty is a different contract, not an edit.
   const editable = (spec?.fields ?? []).filter(f => f.name !== "counterparty_party_id");
 
+  /** Every term a change request may name, in one list.
+   *
+   *  TWO VOCABULARIES, and the negotiation needs both. The contract's identity
+   *  fields — name, term, class of business — are one; the AGREED LIMITS are
+   *  the other, and they are where the money is: commission, brokerage, the
+   *  per-risk limit. A broker pushes back on the commission rate far more often
+   *  than on the contract's name, and while only the identity fields were
+   *  offered the negotiation could argue about everything except the terms.
+   *
+   *  The server has always accepted both (contract_routes.request_changes
+   *  checks `field_names | AGREED_LIMITS`) — it was only this list that was
+   *  half of it. */
+  const termChoices = [
+    ...editable.map(f => ({ name: f.name, label: f.label, limit: false })),
+    ...limitSpec.map(l => ({ name: l.name, label: l.question, limit: true })),
+  ];
+
+  /** Whether a named term is an agreed limit rather than a contract field.
+   *  They are written to different places, so this decides how a request is
+   *  applied as well as where its current value is read from. */
+  function isLimit(field: string): boolean {
+    return limitSpec.some(l => l.name === field);
+  }
+
   /** What a term says right now, as text. Sent with a change request so the
    *  carrier can tell a request that is still about the live value from one
-   *  that an edit overtook in the meantime. */
+   *  that an edit overtook in the meantime.
+   *
+   *  A limit is not a column on the contract — it lives in `agreed_limits`
+   *  under its own key — so reading it off the record directly returned
+   *  nothing, and every request against one looked like it was about a blank. */
   function currentValue(field: string): string {
+    if (isLimit(field)) {
+      const v = rec?.agreed_limits?.[field]?.value;
+      return v == null ? "" : String(v);
+    }
     const v = (rec as unknown as Record<string, unknown>)[field];
     return v == null ? "" : String(v);
   }
@@ -375,7 +419,31 @@ export default function ContractRecord() {
 
     /** The human label for a term, for showing a change request back. */
   function labelOf(field: string): string {
-    return editable.find(f => f.name === field)?.label ?? field;
+    return termChoices.find(f => f.name === field)?.label ?? field;
+  }
+
+  /** Whether the change request says anything the carrier can act on yet.
+   *
+   *  Prose, OR a named term carrying a value. The note used to be the only way
+   *  in, so a broker who had filled the row exactly — the term, what it says
+   *  now, what they want, why — was left staring at a dead button with nothing
+   *  on screen telling them what was missing. A named term is not a wall; it is
+   *  the most precise form the request can take. The server keeps the same
+   *  rule, so this cannot drift into offering a button the API refuses. */
+  const requestSaysSomething =
+    !!reqNote.trim()
+    || reqChanges.some(ch => !!ch.field && !!(ch.proposed ?? "").trim());
+
+  /** Whether every term the broker named already says what they asked for.
+   *
+   *  Pressing Apply again would be a no-op, and a primary button that does
+   *  nothing is how somebody concludes the screen is broken. What is left to
+   *  do at that point is send the revised terms back, so the row says so. */
+  function changeRequestApplied(): boolean {
+    const named = (rec?.open_change_request?.proposed_changes ?? [])
+      .filter(ch => !!ch.proposed);
+    return named.length > 0
+      && named.every(ch => currentValue(ch.field) === ch.proposed);
   }
 
   function beginEdit() {
@@ -524,6 +592,13 @@ export default function ContractRecord() {
                       .join(" and ")}`}
               </span>
               <span className="right">
+                {/* Who signed and when is on this card; WHAT HAPPENED — sent,
+                    opened, reminded, withdrawn — is the round's own trail, and
+                    this is the only way into it now that Signatures is not a
+                    sidebar tab. Filtered to this contract. */}
+                <Link className="btn sm" to={`/contracts/signatures?contract=${id}`}>
+                  <History size={12} /> Signature history
+                </Link>
                 <Link className="btn sm" to={`/contracts/${id}/signature`}>
                   <ArrowRight size={12} /> Signature page
                 </Link>
@@ -631,10 +706,23 @@ export default function ContractRecord() {
                 asked {fmtStamp(rec.open_change_request.acted_at)}
               </span>
             </div>
+            {/* A request can now be made entirely of named terms, with no
+                prose at all — so an empty paragraph here is a real case and
+                not a missing value. Say which it is rather than rendering a
+                blank box that reads as a bug. */}
             <div style={{ padding: "16px 20px" }}>
-              <p style={{ margin: 0, fontSize: 13 }}>
-                {rec.open_change_request.note}
-              </p>
+              {rec.open_change_request.note?.trim() ? (
+                <p style={{ margin: 0, fontSize: 13 }}>
+                  {rec.open_change_request.note}
+                </p>
+              ) : (
+                <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                  {rec.open_change_request.proposed_changes.length > 0
+                    ? "They named the terms rather than writing it out — what "
+                      + "they want is below."
+                    : "No reason was given."}
+                </p>
+              )}
             </div>
             {rec.open_change_request.proposed_changes.length > 0 && (
               <>
@@ -645,24 +733,41 @@ export default function ContractRecord() {
                     </thead>
                     <tbody>
                       {rec.open_change_request.proposed_changes.map((ch, i) => {
-                        // A request made against a value that has since changed
-                        // is worth flagging: the carrier may have already
-                        // answered it, or answered something else.
+                        // THREE states here, not two. A value that moved
+                        // because the carrier applied this very request has
+                        // been ANSWERED — flagging it as "changed since" reads
+                        // as a warning about the one outcome that is entirely
+                        // correct, and it is the state the row is in for the
+                        // whole of the rest of the negotiation. A value that
+                        // moved some OTHER way is the one worth flagging: the
+                        // carrier may have already answered this, or answered
+                        // something else, and either way the request is now
+                        // about a value that no longer exists.
                         const live = currentValue(ch.field);
-                        const stale = (ch.current ?? "") !== live;
+                        const applied = !!ch.proposed && live === ch.proposed;
+                        const stale = !applied && (ch.current ?? "") !== live;
                         return (
                           <tr key={i}>
                             <td><b>{labelOf(ch.field)}</b></td>
                             <td className="mono">
                               {live || "—"}
+                              {/* A div, not a span: `.sub` in a td is styled
+                                  as a second line under the value, and inline
+                                  it rendered glued to the end of it. */}
+                              {applied && (
+                                <div className="sub"
+                                     style={{ color: "var(--p-ok-ink)" }}>
+                                  applied — this is what they asked for
+                                </div>
+                              )}
                               {stale && (
-                                <span
+                                <div
                                   className="sub"
                                   style={{ color: "var(--p-warn-ink)" }}
                                   title={`They asked when it said "${ch.current || "—"}"`}
                                 >
-                                  changed since
-                                </span>
+                                  changed since they asked
+                                </div>
                               )}
                             </td>
                             <td className="mono">{ch.proposed || "—"}</td>
@@ -677,32 +782,62 @@ export default function ContractRecord() {
                   <div style={{ padding: "14px 20px", borderTop: "1px solid var(--p-border)" }}>
                     <div className="rowacts" style={{ marginTop: 0 }}>
                       <button
-                        className="btn pri" type="button" disabled={!!busy}
+                        className="btn pri" type="button"
+                        disabled={!!busy || changeRequestApplied()}
                         onClick={() => run("apply", async () => {
                           // Apply exactly what was asked for, then leave it — the
                           // carrier still has to look and re-send. Applying and
                           // sending in one click would put terms out that nobody
                           // read.
+                          //
+                          // The two vocabularies go to different places. A
+                          // contract field is a column; an agreed limit lives
+                          // in `agreed_limits` under its own key, and writing
+                          // one as a top-level field would be sending a term
+                          // the API has never heard of.
                           const body: Record<string, unknown> = {};
+                          const limits: AgreedLimits = { ...(rec.agreed_limits ?? {}) };
+                          let movedALimit = false;
                           for (const ch of rec.open_change_request!.proposed_changes) {
-                            if (ch.proposed != null && ch.proposed !== "") {
-                              const f = editable.find(x => x.name === ch.field);
-                              body[ch.field] =
-                                f?.kind === "int" ? Number.parseInt(ch.proposed, 10)
-                                : f?.kind === "decimal" ? Number.parseFloat(ch.proposed)
-                                : ch.proposed;
+                            if (ch.proposed == null || ch.proposed === "") continue;
+                            if (isLimit(ch.field)) {
+                              // Spread what is there so a limit's severity —
+                              // whether a breach stops a file or flags it —
+                              // survives a change to its value. That was
+                              // agreed separately and is not what the broker
+                              // asked about.
+                              limits[ch.field] = {
+                                ...(limits[ch.field] ?? {}), value: ch.proposed };
+                              movedALimit = true;
+                              continue;
                             }
+                            const f = editable.find(x => x.name === ch.field);
+                            body[ch.field] =
+                              f?.kind === "int" ? Number.parseInt(ch.proposed, 10)
+                              : f?.kind === "decimal" ? Number.parseFloat(ch.proposed)
+                              : ch.proposed;
                           }
+                          if (movedALimit) body.agreed_limits = limits;
                           if (Object.keys(body).length === 0) return;
                           await updateContract(id, body as never);
                           setNote("Applied what the broker asked for. Look it over, "
-                                + "then send the revised terms back.");
+                                + "then send the revised terms back."
+                                + (movedALimit
+                                   ? " A limit moved, so the wording quoting it "
+                                     + "and the check behind it moved with it — "
+                                     + "and any signature already on this "
+                                     + "contract has been withdrawn, because it "
+                                     + "was given on the terms as they were."
+                                   : ""));
                         })}
                       >
                         {busy === "apply" ? "Applying…" : "Apply these values"}
                       </button>
                       <span className="sub">
-                        Fills the terms in. You still review and re-send.
+                        {changeRequestApplied()
+                          ? "Already applied — the terms now say what they "
+                            + "asked for. Send the revised terms back."
+                          : "Fills the terms in. You still review and re-send."}
                       </span>
                     </div>
                   </div>
@@ -784,7 +919,7 @@ export default function ContractRecord() {
                   <CheckCircle2 size={13} /> Agree these terms
                 </button>
               )}
-              {a.submit_signed && (
+              {a.submit_signed && !round?.can_sign && (
                 <button
                   className="btn pri" type="button" disabled={!!busy}
                   onClick={() => setShowSign(v => !v)}
@@ -798,12 +933,22 @@ export default function ContractRecord() {
                   <MessagesSquare size={13} /> Request changes
                 </button>
               )}
-              {/* Signing is the road to being live, so it is offered where
-                  the other lifecycle actions are and not only on its own
-                  screen. The screen is where it is DONE — this sends you
-                  there, because signing deserves seeing what you are signing
-                  first. */}
-              {(a.sign || a.record_signature) && !a.submit_signed && (
+              {/* Signing is the road to being live, so it is offered where the
+                  other lifecycle actions are and not only on its own screen.
+
+                  When a round can be opened this goes STRAIGHT to the document
+                  in a new tab — signing deserves seeing what you are signing,
+                  and the document is the thing being signed, so a stop on an
+                  intermediate screen adds a click and shows less. Everything
+                  else still goes to the signature screen, which is where
+                  signatories are named and a paper signature is recorded. */}
+              {round?.can_sign ? (
+                <a className="btn pri" href={inAppSigningUrl(id)}
+                   target="_blank" rel="noreferrer">
+                  <PenLine size={13} /> Sign the contract
+                  <ExternalLink size={12} style={{ marginLeft: 6 }} />
+                </a>
+              ) : (a.sign || a.record_signature) && !a.submit_signed && (
                 <Link className="btn pri" to={`/contracts/${id}/signature`}>
                   <PenLine size={13} />{" "}
                   {a.sign ? "Sign the contract" : "Record their signature"}
@@ -906,10 +1051,11 @@ export default function ContractRecord() {
               <div className="note" style={{ marginTop: 14 }}>
                 <b>Ask for changes</b>
                 <p style={{ margin: "6px 0 0" }}>
-                  Say what needs to change — the carrier can only answer what it
-                  can read. Naming the terms is optional, but it lets them see
-                  what you want beside what the contract currently says instead
-                  of working it out from prose.
+                  Say what needs to change — in words, by naming the terms, or
+                  both. Naming a term is the clearer of the two: it lets the
+                  carrier see what you want beside what the contract currently
+                  says, and apply it in one move instead of working it out from
+                  prose and retyping.
                 </p>
                 <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
                   <textarea
@@ -929,9 +1075,23 @@ export default function ContractRecord() {
                           j === i ? { ...x, field: e.target.value,
                                       current: currentValue(e.target.value) } : x))}
                       >
-                        {editable.map(f => (
-                          <option key={f.name} value={f.name}>{f.label}</option>
-                        ))}
+                        {/* Starts on NOTHING. It used to start on the first
+                            field in the list — the contract's name — so a
+                            broker who typed what they wanted and never opened
+                            the dropdown proposed renaming the contract to a
+                            sentence. A picker with a default is a picker that
+                            answers for you. */}
+                        <option value="">— choose a term —</option>
+                        <optgroup label="The terms you agreed">
+                          {termChoices.filter(f => f.limit).map(f => (
+                            <option key={f.name} value={f.name}>{f.label}</option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="The contract itself">
+                          {termChoices.filter(f => !f.limit).map(f => (
+                            <option key={f.name} value={f.name}>{f.label}</option>
+                          ))}
+                        </optgroup>
                       </select>
                     </div>
                     <div className="field" style={{ marginBottom: 0 }}>
@@ -969,18 +1129,16 @@ export default function ContractRecord() {
                 <div className="rowacts">
                   <button
                     className="btn sm" type="button"
-                    disabled={editable.length === 0}
+                    disabled={termChoices.length === 0}
                     onClick={() => setReqChanges(list => [...list, {
-                      field: editable[0]?.name ?? "",
-                      current: currentValue(editable[0]?.name ?? ""),
-                      proposed: "", comment: "",
+                      field: "", current: "", proposed: "", comment: "",
                     }])}
                   >
                     <Plus size={12} /> Name a term
                   </button>
                   <button
                     className="btn pri" type="button"
-                    disabled={!reqNote.trim() || !!busy}
+                    disabled={!requestSaysSomething || !!busy}
                     onClick={() => run("request", async () => {
                       await requestChanges(id, reqNote.trim(),
                         reqChanges.filter(ch => ch.field));
@@ -993,6 +1151,14 @@ export default function ContractRecord() {
                   </button>
                   <button className="btn" type="button"
                           onClick={() => setShowRequest(false)}>Cancel</button>
+                  {/* A disabled button that does not say why is indis-
+                      tinguishable from a broken one. */}
+                  {!requestSaysSomething && (
+                    <span className="sub">
+                      Nothing to send yet — write what needs to change, or name
+                      a term and what you want it to say.
+                    </span>
+                  )}
                 </div>
               </div>
             )}

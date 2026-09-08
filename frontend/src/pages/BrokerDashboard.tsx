@@ -9,6 +9,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { getBrokerDashboard, type BrokerDashboard as Dash } from "../api/broker";
+import { inAppSigningUrl } from "../api/esign";
 import { fmtDate } from "../utils/date";
 
 export default function BrokerDashboard() {
@@ -121,9 +122,25 @@ export default function BrokerDashboard() {
                           <td>{w.carrier}</td>
                           <td className="muted">{w.what}</td>
                           <td>
-                            <Link className="btn sm pri" to={`/contracts/${w.id}`}>
-                              Open →
-                            </Link>
+                            {/* A contract waiting on the broker's SIGNATURE
+                                gets the signing page itself, not the record.
+                                By the time it reaches this queue the carrier
+                                has already signed — that is what put it here —
+                                so the next thing to happen is the broker
+                                signing, and one click short of it is one click
+                                too many. Everything else still opens the
+                                contract, because reading it IS the job. */}
+                            {(w.lifecycle === "agreed" || w.lifecycle === "signed") ? (
+                              <a className="btn sm pri"
+                                 href={inAppSigningUrl(w.id)}
+                                 target="_blank" rel="noreferrer">
+                                Sign it →
+                              </a>
+                            ) : (
+                              <Link className="btn sm pri" to={`/contracts/${w.id}`}>
+                                Open →
+                              </Link>
+                            )}
                           </td>
                         </tr>
                       ))}

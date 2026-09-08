@@ -475,9 +475,13 @@ export const sendForReview = (id: number, note?: string) =>
   api.post<ContractRecord>(`/contracts/${id}/send-for-review`,
                            { note: note ?? null }).then(r => r.data);
 
-/** Broker: push back. The note is required — the carrier can only answer what
- *  it can read. Naming fields is optional but is what lets the carrier see the
- *  request beside the current terms and apply it in one move. */
+/** Broker: push back.
+ *
+ *  Something has to be said — the carrier can only answer what it can read —
+ *  but either form counts: prose, or a named term carrying the value wanted.
+ *  A named term is the more useful of the two, since it lets the carrier see
+ *  the request beside the current terms and apply it in one move. The server
+ *  enforces the same rule; saying nothing at all is what it refuses. */
 export const requestChanges = (
   id: number, note: string, changes: ProposedChange[] = [],
 ) => api.post<ContractRecord>(`/contracts/${id}/request-changes`,

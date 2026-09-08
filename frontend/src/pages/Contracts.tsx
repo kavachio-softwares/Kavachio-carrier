@@ -9,10 +9,14 @@
  * Two ways a contract gets here and they are different jobs: uploading one that
  * EXISTS reads its terms out of the wording; raising one states terms being
  * agreed now, with the document to follow. Both end at the same record.
+ *
+ * Signature history hangs off this screen rather than off the sidebar: what is
+ * out for signature is a fact about the contracts listed here, and reading it
+ * anywhere else means first remembering which contract you meant.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { FilePlus2, Upload } from "lucide-react";
+import { FilePlus2, History, Upload } from "lucide-react";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import {
   listContracts, type ContractRecord, type Lifecycle,
@@ -97,6 +101,13 @@ export default function Contracts() {
             <p>Every contract you hold, across all your programmes and brokers.</p>
           </div>
           <div className="actions">
+            {/* Where the Signatures sidebar tab went. Watching a signing round
+                is watching a contract, so the way in is from the contracts you
+                hold rather than a tab of its own — and the same link, carrying
+                a contract id, is what the record's Signatures card opens. */}
+            <Link to="/contracts/signatures" className="btn">
+              <History size={14} /> Signature history
+            </Link>
             <Link to="/contracts/upload" className="btn">
               <Upload size={14} /> Upload existing
             </Link>

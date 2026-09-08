@@ -37,3 +37,10 @@ backend/python-services/sftp-root/
 # conflicts on every pull if it is tracked.
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
+
+# Signing certificates. The .p12 holds a PRIVATE KEY — a committed signing key
+# is a key anyone with repo access can seal contracts with. Regenerate a local
+# one any time with backend/python-services/scripts/make_dev_signing_cert.py.
+certs/
+*.p12
+*.pfx

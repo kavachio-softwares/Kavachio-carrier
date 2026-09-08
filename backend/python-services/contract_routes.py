@@ -414,8 +414,11 @@ def _allowed_actions(c: Contract, missing: list[str],
         "request_changes": is_broker and state in ("in_review", "agreed"),
         "accept_terms": is_broker and state == "in_review" and not blocked,
         # Sign and return it. The broker's last act — after this the contract is
-        # the carrier's to place and put in force.
-        "submit_signed": is_broker and state == "agreed",
+        # the carrier's to place and put in force. Not until the carrier has
+        # signed, though: the broker signs a document that already carries the
+        # other signature, which is the same order the signing round keeps.
+        "submit_signed": (is_broker and state == "agreed"
+                          and "carrier" not in unsigned),
 
         # Signing is what puts a contract in force, so this is only ever the
         # tidy-up path for a contract both sides signed while something else
@@ -430,8 +433,14 @@ def _allowed_actions(c: Contract, missing: list[str],
         # signs for itself.
         # `has_wording` matters: there is nothing to sign without one, and the
         # API says so. A button that 400s is worse than no button.
+        #
+        # And the carrier goes first — see _whose_turn. A broker offered a sign
+        # button before the carrier has signed would be signing a document the
+        # carrier has not, and the signing round would refuse it as out of turn
+        # anyway.
         "sign": (state in ("draft", "agreed", "signed")
                  and my_side in unsigned
+                 and (not is_broker or "carrier" not in unsigned)
                  and has_wording and bool(p)),
         # The carrier entering a signature made on paper or through a provider.
         # The only way a reinsurance contract is ever signed on both sides,
@@ -453,19 +462,27 @@ def _whose_turn(c: Contract, unsigned: list[str] | None = None) -> Optional[str]
     assuming the other is looking at it.
 
     ONCE THE TERMS ARE SETTLED THE STATE ALONE CANNOT ANSWER THIS. `agreed`
-    means "waiting on a signature", and after the broker gives theirs it is
-    still `agreed` — but the move is now the carrier's. Reading the state
-    alone would leave the contract sitting in the broker's queue on the
-    strength of a signature they had already given, which is precisely the
-    thing this field exists to prevent. So once signing has started, the turn
-    belongs to whoever has not signed.
+    means "waiting on a signature", and after one side gives theirs it is
+    still `agreed` — but the move is now the other's. Reading the state alone
+    would leave the contract sitting in somebody's queue on the strength of a
+    signature they had already given, which is precisely the thing this field
+    exists to prevent. So once signing has started, the turn belongs to
+    whoever has not signed.
+
+    THE CARRIER SIGNS FIRST. It wrote the terms and it holds the document, so
+    the round starts on its side: the carrier signs, and only then is the
+    broker asked. That order is not a preference — the broker is asked to sign
+    a document that already carries the carrier's signature, and asking both
+    at once is how two people sign two different versions of the same
+    contract. It is why the carrier is named before the broker here, and the
+    signing round enforces the same order for itself (esign_routes._turn_check).
     """
     state = _effective_lifecycle(c)
     if unsigned is not None and state in ("agreed", "signed"):
-        if "counterparty" in unsigned:
-            return "broker"
         if "carrier" in unsigned:
             return "carrier"
+        if "counterparty" in unsigned:
+            return "broker"
         return "carrier"        # both signed, waiting to be put in force
     if state in ct.WITH_BROKER:
         return "broker"
@@ -1306,7 +1323,10 @@ class ProposedChange(BaseModel):
 
 
 class ChangeRequest(BaseModel):
-    note: str
+    # Optional at the schema level so a request made entirely of named terms
+    # does not 422 before the handler can decide whether it says enough. What
+    # counts as "enough" is one rule, and it lives in the handler.
+    note: Optional[str] = None
     changes: list[ProposedChange] = []
 
 
@@ -1315,22 +1335,28 @@ def request_changes(contract_id: int, body: ChangeRequest,
                     p: Principal = Depends(current_principal)):
     """Push back on the terms. The broker's half of the negotiation.
 
-    A note is required. "Rejected" with no reason is a wall rather than a
+    SOMETHING has to be said. "Rejected" with no reason is a wall rather than a
     negotiation, and the carrier cannot answer what it cannot read.
 
-    Named fields are optional but are what make this useful: they let the
-    carrier see the request beside the current terms and apply it in one move,
-    instead of reading prose and retyping.
+    But prose is not the only way to say it. A named term — this field, this
+    value, this reason — says what is wanted more precisely than a sentence
+    does, and it is what lets the carrier apply the request in one move instead
+    of reading prose and retyping. Requiring a note ON TOP of one made a broker
+    who had filled the row exactly stare at a button that would not go, so
+    either form is accepted and only saying nothing at all is refused.
     """
     if not p.is_broker:
         raise HTTPException(
             403, "the broker answers a review — the carrier revises and "
                  "re-sends instead")
-    if not (body.note or "").strip():
+    named = [ch for ch in body.changes
+             if (ch.field or "").strip() and (ch.proposed or "").strip()]
+    if not (body.note or "").strip() and not named:
         raise HTTPException(400, {
-            "message": "Say what needs to change. The carrier can only answer "
-                       "what it can read.",
-            "errors": {"note": "required"}})
+            "message": "Say what needs to change — either in words, or by "
+                       "naming a term and what you want it to say. The carrier "
+                       "can only answer what it can read.",
+            "errors": {"note": "required unless you name a term"}})
 
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
@@ -1679,6 +1705,23 @@ def _unsigned_sides(sigs) -> list[str]:
             if side not in _signed_sides(sigs)]
 
 
+def _live_signing_round(s, contract_id: int):
+    """The electronic signing round open on this contract, if there is one.
+
+    Voided and declined rounds do not count — those ended without a signed
+    contract, and what happens next is a fresh round or a typed signature,
+    not either of them being reopened. Kept here rather than in esign_routes
+    so the two places that ask (this module's guard and the round itself)
+    cannot drift on what "open" means.
+    """
+    from db import EsignEnvelope
+    return (s.query(EsignEnvelope)
+            .filter(EsignEnvelope.contract_id == contract_id,
+                    EsignEnvelope.status.in_(("sent", "in_progress", "completed")))
+            .order_by(EsignEnvelope.created_at.desc())
+            .first())
+
+
 class SignatureIn(BaseModel):
     """One signature. `side` is only accepted from a carrier recording the
     other party's — everybody else signs for their own side and cannot say
@@ -1776,6 +1819,32 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
             raise HTTPException(
                 409, f"{name} has already signed for the "
                      f"{'carrier' if side == 'carrier' else 'counterparty'}.")
+
+        # The carrier signs first — see _whose_turn. A broker signing ahead of
+        # it would put their name under a document the carrier has not signed,
+        # and the two sides would end up holding different things. `recorded`
+        # is exempt: that is the carrier entering a signature made on paper,
+        # where the order was somebody else's to keep.
+        if (side == "counterparty" and not body.recorded
+                and "carrier" in _unsigned_sides(existing)):
+            raise HTTPException(
+                409, "the carrier has not signed this yet. It comes to you for "
+                     "signature once they have, and you are emailed the moment "
+                     "it does.")
+
+        # A signing round already open on this contract owns the signature.
+        # Typing a name here as well would record the same fact twice, by two
+        # different routes, one of them not on the document — and the round
+        # would go on waiting for a signature the contract already claims to
+        # have. Recording a paper signature stays allowed: that is a fact from
+        # outside, and it is what a round cannot capture.
+        if not body.recorded:
+            live = _live_signing_round(s, c.id)
+            if live is not None:
+                raise HTTPException(
+                    409, "this contract is out for electronic signature — sign "
+                         "it there, so your signature lands on the document "
+                         "itself. Open it from the Sign button.")
 
         doc_id = None
         if body.document_id is not None:
@@ -2230,58 +2299,9 @@ def download_contract_pdf(contract_id: int,
     for. Composed fresh each time rather than stored, because a stored copy is
     a second version of the contract that stops following its terms.
     """
-    import contract_wording as cw
-    from db import Tenant
-
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
-        sections = ((c.wording_sections or {}).get("sections")
-                    if isinstance(c.wording_sections, dict)
-                    else c.wording_sections) or []
-        limits = ct.clean_agreed_limits(c.commercial_terms or {})
-        if not sections and not limits:
-            raise HTTPException(
-                404,
-                "there is nothing to compose yet — this contract has no terms "
-                "and no wording written in Kavachio. If its wording was "
-                "uploaded, download the document itself.")
-
-        counterparty = (s.get(Party, c.broker_party_id)
-                        if c.broker_party_id else None)
-        carrier = s.get(Tenant, c.tenant_id) if c.tenant_id else None
-        carrier_name = (getattr(carrier, "legal_name", None)
-                        or getattr(carrier, "tenant_name", None))
-        programme = s.get(Program, c.program_id) if c.program_id else None
-        try:
-            type_label = ct.spec(c.contract_type)["label"] if c.contract_type else None
-        except ct.ContractTypeError:
-            type_label = None
-
-        values = {
-            "name": c.name, "inception_dt": c.inception_dt,
-            "expiry_dt": c.expiry_dt, "class_of_business": c.class_of_business,
-            "schedule_key": c.schedule_key, "risk_code": c.risk_code,
-            "section_number": c.section_number,
-            "year_of_account": c.year_of_account,
-            "notice_period_days": c.notice_period_days,
-        }
-        programme_name = getattr(programme, "name", None)
-        tokens = cw.token_values(
-            values=values, limits=limits, carrier_name=carrier_name,
-            counterparty_name=getattr(counterparty, "legal_name", None),
-            programme_name=programme_name)
-
-        data = cw.compose_pdf(
-            name=c.name or "Contract", carrier_name=carrier_name,
-            counterparty_name=getattr(counterparty, "legal_name", None),
-            sections=sections, tokens=tokens,
-            schedule=cw.schedule_rows(values=values, limits=limits,
-                                      type_label=type_label,
-                                      programme_name=programme_name),
-            signers=(c.wording_sections or {}).get("signers")
-                    if isinstance(c.wording_sections, dict) else None,
-            signature_layout=(c.wording_sections or {}).get("signature_layout")
-                             if isinstance(c.wording_sections, dict) else None)
+        data = compose_contract_pdf(s, c)
 
         # The state is in the filename because this file outlives the screen it
         # came from: a draft that reaches somebody's inbox should say so.
@@ -2291,6 +2311,74 @@ def download_contract_pdf(contract_id: int,
         return Response(content=data, media_type="application/pdf",
                         headers={"Content-Disposition":
                                  _content_disposition(fname)})
+
+
+def compose_contract_pdf(s, c: Contract, *,
+                         anchors: dict[str, str] | None = None) -> bytes:
+    """This contract's terms and wording as one PDF.
+
+    Split out of the download endpoint because the SIGNING round needs the same
+    file: an authored contract has no document row to send — its wording is
+    held as sections and composed on demand — so if the two composed it
+    separately the copy people signed could differ from the copy they read.
+    One function, one document.
+
+    `anchors` is the only difference between the two callers. Passed, each
+    signature block is tagged with the party it belongs to and the round reads
+    its boxes back out of the file; omitted, this is exactly the draft anybody
+    can download. See contract_wording.compose_pdf.
+    """
+    import contract_wording as cw
+    from db import Tenant
+
+    sections = ((c.wording_sections or {}).get("sections")
+                if isinstance(c.wording_sections, dict)
+                else c.wording_sections) or []
+    limits = ct.clean_agreed_limits(c.commercial_terms or {})
+    if not sections and not limits:
+        raise HTTPException(
+            404,
+            "there is nothing to compose yet — this contract has no terms "
+            "and no wording written in Kavachio. If its wording was "
+            "uploaded, download the document itself.")
+
+    counterparty = (s.get(Party, c.broker_party_id)
+                    if c.broker_party_id else None)
+    carrier = s.get(Tenant, c.tenant_id) if c.tenant_id else None
+    carrier_name = (getattr(carrier, "legal_name", None)
+                    or getattr(carrier, "tenant_name", None))
+    programme = s.get(Program, c.program_id) if c.program_id else None
+    try:
+        type_label = ct.spec(c.contract_type)["label"] if c.contract_type else None
+    except ct.ContractTypeError:
+        type_label = None
+
+    values = {
+        "name": c.name, "inception_dt": c.inception_dt,
+        "expiry_dt": c.expiry_dt, "class_of_business": c.class_of_business,
+        "schedule_key": c.schedule_key, "risk_code": c.risk_code,
+        "section_number": c.section_number,
+        "year_of_account": c.year_of_account,
+        "notice_period_days": c.notice_period_days,
+    }
+    programme_name = getattr(programme, "name", None)
+    tokens = cw.token_values(
+        values=values, limits=limits, carrier_name=carrier_name,
+        counterparty_name=getattr(counterparty, "legal_name", None),
+        programme_name=programme_name)
+
+    return cw.compose_pdf(
+        name=c.name or "Contract", carrier_name=carrier_name,
+        counterparty_name=getattr(counterparty, "legal_name", None),
+        sections=sections, tokens=tokens,
+        schedule=cw.schedule_rows(values=values, limits=limits,
+                                  type_label=type_label,
+                                  programme_name=programme_name),
+        signers=(c.wording_sections or {}).get("signers")
+                if isinstance(c.wording_sections, dict) else None,
+        signature_layout=(c.wording_sections or {}).get("signature_layout")
+                         if isinstance(c.wording_sections, dict) else None,
+        anchors=anchors)
 
 
 # =============================================================================

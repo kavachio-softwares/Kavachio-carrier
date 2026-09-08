@@ -415,7 +415,8 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
                 signature_layout: dict | None = None,
                 subtitle: str | None = None,
                 schedule: list[tuple[str, list]] | None = None,
-                signers: list[dict] | None = None) -> bytes:
+                signers: list[dict] | None = None,
+                anchors: dict[str, str] | None = None) -> bytes:
     """The WHOLE contract as a PDF: schedule, wording, signature page.
 
     WHY A PDF, AND WHY NOTHING IS STORED. The wording is not a document in this
@@ -437,6 +438,16 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
     wording — the numbers in a table, and what they mean in sentences — and a
     file carrying only one of the two is not the contract. So the terms come
     first, grouped as they were agreed, and the clauses follow.
+
+    `anchors` is what makes the composed file SIGNABLE electronically. Given
+    {"carrier": "tenant:12", "counterparty": "broker:42"}, each signature block
+    gets invisible tags naming the party it belongs to, and the signing round
+    reads its boxes back out of the document rather than being told where they
+    are — so the document stays the authority on its own layout, and a wording
+    that is re-composed produces the identical boxes instead of being re-drawn
+    by hand. Omitted, nothing is tagged and the file is exactly what it was:
+    this is only wanted for the copy going out for signature, never for the
+    draft somebody downloads to read.
     """
     from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
     from reportlab.lib.pagesizes import A4
@@ -557,6 +568,26 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         "terms set out above.", body_st))
     flow.append(Spacer(1, 16 * mm))
 
+    def anchor(kind: str, side: str) -> str:
+        """An invisible tag that puts a signing box of `kind` right here.
+
+        Drawn in white rather than hidden, because this is a ReportLab flowable
+        and there is no text render mode to reach from paragraph markup. The
+        practical difference is only that selecting the text of the page would
+        reveal it — it does not print, and it is not visible on screen. The
+        token has to survive in the file either way: the signing round finds
+        its boxes by searching for these, and redacting them would mean a
+        re-composed wording could never be re-tagged.
+
+        Empty when the caller asked for no anchors, which is every use of this
+        function except the copy going out for signature.
+        """
+        key = (anchors or {}).get(side)
+        if not key:
+            return ""
+        return ('<font color="#ffffff" size="5">'
+                + "{{" + kind + ":" + key + "}}" + "</font>")
+
     def block_text(party_label: str, org: str | None, side: str) -> str:
         # Whoever was named for this side gets their own block, so the person
         # signing does not have to work out which of two identical lines is
@@ -566,14 +597,28 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
                  and (sg.get("name") or "").strip()]
         head = (f"<b>{esc(party_label)}</b><br/>{esc(org or '')}")
         rule = "____________________________"
+        # Above the rule, so a signature stamped from the anchor sits ON the
+        # line rather than under it.
+        sig = (anchor("signature", side) + "<br/>") if anchors else ""
         if not named:
-            return f"{rule}<br/>{head}<br/><br/>Name:<br/>Title:<br/>Date:"
+            return (f"{sig}{rule}<br/>{head}<br/><br/>"
+                    f"Name: {anchor('name', side)}<br/>"
+                    f"Title: {anchor('title', side)}<br/>"
+                    f"Date: {anchor('date', side)}")
         # A rule per signer. Two names under one line is one signature block
         # with two names in it, which is not what a second signatory is.
+        #
+        # Only the FIRST block is anchored. Every box carries the party it
+        # belongs to and nothing finer, so a second one for the same side would
+        # be a second place that same signature lands — which is not what a
+        # second signatory is either. The rest stay as they print today, to be
+        # signed by hand.
         return head + "".join(
-            f"<br/><br/>{rule}<br/>Name: {esc(sg['name'])}<br/>"
-            f"Title: {esc(sg.get('role') or '')}<br/>Date:"
-            for sg in named)
+            f"<br/><br/>{sig if i == 0 else ''}{rule}<br/>"
+            f"Name: {esc(sg['name'])}<br/>"
+            f"Title: {esc(sg.get('role') or '')}<br/>"
+            f"Date: {anchor('date', side) if i == 0 else ''}"
+            for i, sg in enumerate(named))
 
     carrier_block = Paragraph(
         block_text("For the Carrier", carrier_name, "carrier"), sig_st)

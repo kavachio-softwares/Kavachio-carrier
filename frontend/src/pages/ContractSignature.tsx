@@ -6,12 +6,20 @@
  * Nothing else does: creation cannot produce a live contract and "put it in
  * force" refuses while a side is missing.
  *
- * WHAT IS NOT. Sending. No provider is connected, no envelope goes anywhere
- * and no email is sent — the "Send for signature" button stays disabled, and
- * signing happens here instead. That is a real difference and worth stating:
- * a provider asserts identity, and this page asserts only that a person who
- * was logged in, was the right party, and could see this contract typed their
- * name against it. The smaller claim is the true one.
+ * HOW IT IS SIGNED NOW. On the document, not on this page. Once both sides
+ * have agreed the terms, "Sign the contract" opens the contract itself in a
+ * new tab with a signature box waiting on its execution page — and what comes
+ * out the other end is a PDF carrying both signatures, sealed so any later
+ * change to it shows up as a broken signature. Nothing is emailed to start it:
+ * the carrier is already logged in, and that is a better answer to "who is
+ * this?" than a link sent to an inbox. The broker is emailed the moment the
+ * carrier has signed, and can sign from their own dashboard instead.
+ *
+ * WHAT THIS PAGE STILL DOES. Names the signatories, shows what has been
+ * signed, and holds the one path the round cannot cover: RECORDING a signature
+ * made outside Kavachio. A reinsurer has no seat here, so a contract with one
+ * on the other side can never be signed in the app at all — recording it is
+ * the only honest way to hold it, and it stays.
  *
  * THE TWO METHODS, kept apart everywhere they are shown:
  *   typed     the signatory was here. Attributable to their user.
@@ -30,7 +38,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
-  AlertTriangle, ArrowLeft, Check, Clock, PenLine, Send,
+  AlertTriangle, ArrowLeft, Check, Clock, ExternalLink, PenLine,
 } from "lucide-react";
 import { fmtDate } from "../utils/date";
 import {
@@ -38,6 +46,9 @@ import {
   type ContractRecord as Rec,
 } from "../api/contractRecord";
 import { isBrokerSeat } from "../auth";
+import {
+  getContractRound, inAppSigningUrl, type ContractRound,
+} from "../api/esign";
 
 /** Which side of the contract a signatory signs for. */
 type Side = "carrier" | "counterparty";
@@ -66,6 +77,10 @@ export default function ContractSignature() {
   const [saving, setSaving] = useState(false);
 
   const [saved, setSaved] = useState("");
+  // Where the electronic round has got to. The SERVER answers this — whether
+  // one is running, whose move it is — so the button and the endpoint behind
+  // it cannot disagree about whether pressing it will work.
+  const [round, setRound] = useState<ContractRound | null>(null);
   const [signName, setSignName] = useState("");
   const [signTitle, setSignTitle] = useState("");
   const [signing, setSigning] = useState(false);
@@ -148,7 +163,22 @@ export default function ContractSignature() {
         }
       })
       .catch(e => setErr(e?.response?.data?.detail || "Could not load this contract."));
+    // Its own call, and its own failure: a round that cannot be read must not
+    // stop the contract being shown. Absent, the page simply offers nothing to
+    // sign, which is the honest fallback.
+    getContractRound(id).then(setRound).catch(() => setRound(null));
   }, [id]);
+
+  /** Sign on the document itself, in a new tab.
+   *
+   *  A new tab rather than this one because signing is a job of its own — the
+   *  signer reads a whole contract and comes back — and because losing this
+   *  page's state to a navigation would be losing the signatory list they may
+   *  have just typed. The URL names only the contract; the signing page asks
+   *  the server for its own token, so nothing forwardable ends up in it. */
+  function signOnTheDocument() {
+    window.open(inAppSigningUrl(id), "_blank", "noopener");
+  }
 
   function add() {
     if (!name.trim() || !email.trim()) return;
@@ -165,6 +195,16 @@ export default function ContractSignature() {
     carrier: signatories.filter(s => s.side === "carrier"),
     counterparty: signatories.filter(s => s.side === "counterparty"),
   }), [signatories]);
+
+  /** Whether a name typed HERE is still how this contract gets signed.
+   *
+   *  Once a round is open on the document it owns the signature, and the
+   *  server refuses a typed one — so leaving the box up would be offering a
+   *  button that 409s. Recording a signature made on paper is untouched by
+   *  this: that is a fact from outside Kavachio, and a round cannot capture
+   *  it. It is also the only way an insurer ↔ reinsurer contract is ever
+   *  signed on both sides. */
+  const maySignHere = !!rec?.actions.sign && !round?.started;
 
 
   if (!rec) {
@@ -410,13 +450,21 @@ export default function ContractSignature() {
                     .join(" and ")}`}
             </span>
             <span className="right">
-              <button
-                className="btn pri" type="button" disabled
-                title="No signing provider is connected yet — signing happens
-                       on this page instead"
-              >
-                <Send size={14} /> Send for signature
-              </button>
+              {round?.can_sign ? (
+                <button className="btn pri" type="button"
+                        onClick={signOnTheDocument}
+                        title="Opens the contract in a new tab with your
+                               signature box on it">
+                  <PenLine size={14} /> Sign the contract
+                  <ExternalLink size={12} style={{ marginLeft: 6 }} />
+                </button>
+              ) : round?.started ? (
+                <button className="btn" type="button"
+                        onClick={signOnTheDocument}
+                        title="Open the document this round is running on">
+                  <ExternalLink size={13} /> Open the document
+                </button>
+              ) : null}
             </span>
           </div>
 
@@ -432,18 +480,43 @@ export default function ContractSignature() {
                 <b>Both sides have signed, but it is not in force yet.</b>{" "}
                 Something else is in the way — see the contract\u2019s page.
               </div>
+            ) : round?.can_sign ? (
+              <div className="note" style={{ marginBottom: 14 }}>
+                <b>It is your turn to sign.</b>{" "}
+                Sign the contract opens the document in a new tab with your
+                signature box waiting on its execution page. You are already
+                logged in, so there is no email and no code to wait for.{" "}
+                {round.started
+                  ? "The other side has been asked and this round is already running."
+                  : "Nothing goes to the other side until you have signed — "
+                    + "they are emailed the document carrying your signature, "
+                    + "and it also appears on their dashboard."}
+              </div>
+            ) : round?.started && !round.can_sign ? (
+              <div className="note warn" style={{ marginBottom: 14 }}>
+                <b>Out for signature{round.waiting_on_name
+                    ? ` — waiting on ${round.waiting_on_name}`
+                    : ""}.</b>{" "}
+                {round.i_have_signed
+                  ? "You have signed. Everybody gets the signed copy by email "
+                    + "once the other side has."
+                  : round.why ?? "It is not your move."}
+              </div>
             ) : (
               <div className="note" style={{ marginBottom: 14 }}>
                 <b>A contract goes in force when both sides have signed it.</b>{" "}
                 There is no other way to make one live, and the second signature
-                normally does it on its own.
+                normally does it on its own.{" "}
+                {round && !round.started && round.why
+                  ? `It cannot be signed yet — ${round.why}.`
+                  : ""}
               </div>
             )}
 
             <div className="grid g-2">
               {(["carrier", "counterparty"] as Side[]).map(sd => {
                 const done = rec.signatures.filter(g => g.side === sd);
-                const mine = sd === (rec.actions.sign ? myS : null);
+                const mine = sd === (maySignHere ? myS : null);
                 return (
                   <div key={sd}>
                     <div className="sub" style={{ marginBottom: 8 }}>
@@ -494,10 +567,10 @@ export default function ContractSignature() {
               })}
             </div>
 
-            {(rec.actions.sign || rec.actions.record_signature) && (
+            {(maySignHere || rec.actions.record_signature) && (
               <>
                 <div className="divider" />
-                {rec.actions.sign ? (
+                {maySignHere ? (
                   <div className="hint" style={{ marginBottom: 10 }}>
                     <b>Signing is an act, not a note.</b> Type your name to sign
                     for {myS === "carrier" ? "the carrier"
@@ -532,11 +605,11 @@ export default function ContractSignature() {
                     <button
                       className="btn pri" type="button"
                       disabled={!signName.trim() || !!signing}
-                      onClick={() => doSign(!rec.actions.sign)}
+                      onClick={() => doSign(!maySignHere)}
                     >
                       <PenLine size={14} />{" "}
                       {signing ? "Signing\u2026"
-                        : rec.actions.sign ? "Sign the contract"
+                        : maySignHere ? "Sign the contract"
                         : "Record their signature"}
                     </button>
                   </div>
@@ -545,7 +618,7 @@ export default function ContractSignature() {
                 {/* Both are offered when the carrier can do either, so
                     recording somebody else\u2019s is a deliberate second click
                     and never the default. */}
-                {rec.actions.sign && rec.actions.record_signature && (
+                {maySignHere && rec.actions.record_signature && (
                   <div className="hint" style={{ marginTop: 10 }}>
                     Signed on paper by{" "}
                     {rec.counterparty?.name ?? "the counterparty"}?{" "}

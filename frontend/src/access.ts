@@ -96,6 +96,15 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // The gate. Only the carrier decides.
   { pattern: "/approvals", requires: "carrier_admin" },
   { pattern: "/brokers", requires: "carrier_admin" },
+  // Create-a-Contract steps 3 and 4. Carrier-only: a broker never sends a
+  // contract for signature, they are sent one. Their half of the flow is
+  // /sign, which is public and unlisted here because it has no session at
+  // all — an unlisted path still needs a signed-in user, and a broker
+  // signing from an email has no account to sign in with.
+  // No longer a sidebar entry — reached from Contracts and from a contract's
+  // own record — so this rule is what guards it now that nothing hides the
+  // link from the wrong role.
+  { pattern: "/contracts/signatures", requires: "carrier_admin" },
   { pattern: "/brokers/:brokerId", requires: "carrier_admin" },
   { pattern: "/outputs", requires: "carrier_admin" },
   { pattern: "/outputs/new-template", requires: "carrier_admin" },
