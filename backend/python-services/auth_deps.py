@@ -115,6 +115,32 @@ def current_principal(authorization: str = Header(default="")) -> Principal:
     )
 
 
+def resolve_broker_party_id(s, p: Principal) -> int | None:
+    """Which broker organisation this person works for.
+
+    READ FROM THE DATABASE, NOT THE TOKEN. `mint_access_token` puts only
+    user/tenant/role in the claims, so `Principal.broker_party_id` is None for
+    every real request — it is populated only by tests that construct a
+    Principal directly. Any check written against the attribute therefore
+    compares a real id to None and fails closed, which looks exactly like a
+    permission decision and is not one.
+
+    That is not hypothetical: it is why a broker could open their contract list
+    and then get "contract not found" on every row in it. The list resolved the
+    party this way; the record read the claim.
+
+    Returns None only when the user genuinely has no broker bound, so callers
+    can decide between 403 and 404 for themselves.
+    """
+    if not p.is_broker:
+        return None
+    if p.broker_party_id:
+        return int(p.broker_party_id)
+    from db import AppUser                      # local: db imports auth in turn
+    u = s.query(AppUser).filter(AppUser.id == p.user_id).first()
+    return int(u.broker_party_id) if u and u.broker_party_id else None
+
+
 def require_role(*allowed: str):
     """RBAC guard factory. kavachio_admin is always allowed (superset).
 

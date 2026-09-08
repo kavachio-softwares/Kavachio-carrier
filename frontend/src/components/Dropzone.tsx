@@ -6,10 +6,21 @@
  * does the same job. Two implementations would drift — one would get the
  * re-pick fix below and the other would not.
  */
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
-export function Dropzone({ file, onPick, disabled, lockedReason }: {
-  file: File | null; onPick: (f: File | null) => void; disabled?: boolean; lockedReason?: string;
+export function Dropzone({
+  file, onPick, disabled, lockedReason,
+  // What this drop target takes, and what it says it takes. Defaulted to the
+  // bordereau formats so every existing caller is untouched — the contract
+  // flow drops a WORDING here, which is a PDF, and would otherwise have needed
+  // a second copy of this component. The header above says why that would be
+  // the wrong move.
+  accept = ".xlsx,.xls,.csv,.xml,.json",
+  hint = ".xlsx, .xls, .csv",
+  label,
+}: {
+  file: File | null; onPick: (f: File | null) => void; disabled?: boolean;
+  lockedReason?: string; accept?: string; hint?: string; label?: React.ReactNode;
 }) {
   const [drag, setDrag] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
@@ -33,7 +44,7 @@ export function Dropzone({ file, onPick, disabled, lockedReason }: {
         cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1,
         ...(drag ? { borderColor: "var(--p-primary)", background: "var(--p-primary-soft)" } : {}),
       }}>
-      <input ref={ref} type="file" accept=".xlsx,.xls,.csv,.xml,.json" style={{ display: "none" }} disabled={disabled}
+      <input ref={ref} type="file" accept={accept} style={{ display: "none" }} disabled={disabled}
         onClick={e => e.stopPropagation()}
         onChange={e => onPick(e.target.files?.[0] ?? null)} />
       <svg className="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -49,8 +60,8 @@ export function Dropzone({ file, onPick, disabled, lockedReason }: {
         </div>
       ) : (
         <div>
-          <b>Click to Upload</b> or Drag &amp; Drop
-          <div style={{ fontSize: 12, marginTop: 4 }}>.xlsx, .xls, .csv</div>
+          {label ?? <><b>Click to Upload</b> or Drag &amp; Drop</>}
+          <div style={{ fontSize: 12, marginTop: 4 }}>{hint}</div>
         </div>
       )}
     </div>

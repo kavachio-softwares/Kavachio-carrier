@@ -31,7 +31,8 @@ class ContractExtractionService:
 
     def process_contract(self, file_path, output_dir=None, template_fields=None,
                          halt_on_external_references=False, resume_token=None,
-                         reference_documents=None, tenant_id=None):
+                         reference_documents=None, tenant_id=None,
+                         endorsements=None):
         """Extract contract data and generate validation rules.
 
         Args:
@@ -52,6 +53,12 @@ class ContractExtractionService:
             resume_token: When set, resume a previously halted run from its cached
                 extraction — skips both the document parse and the extraction LLM
                 call (used by "Continue Anyway").
+            endorsements: Documents that AMEND this contract and are in force
+                alongside it, as [{"name", "text", "effective_from"}]. Deliberately
+                NOT folded into reference_documents: a reference resolves a clause
+                that deferred its content, an endorsement changes a clause that
+                was already complete, and treating the second as the first leaves
+                both values live and generates two contradictory rules.
         """
         print(f"\nProcessing Contract: {file_path}")
         # One header per contract so concurrent uploads stay separable in the file.
@@ -95,6 +102,7 @@ class ContractExtractionService:
                 resume_token=resume_token,
                 reference_documents=reference_documents,
                 tenant_id=tenant_id,
+                endorsements=endorsements,
             )
         )
 

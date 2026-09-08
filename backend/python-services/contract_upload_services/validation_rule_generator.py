@@ -3398,10 +3398,19 @@ class ValidationRuleGenerator:
         resume_token=None,
         reference_documents=None,
         tenant_id=None,
+        endorsements=None,
     ):
         """
         Run Pipeline 1 + Pipeline 2 on the parsed PDF data and return a
         single hybrid output dict. Safe to JSON-serialize.
+
+        `endorsements` are documents that AMEND this contract and are in force
+        alongside it. They are kept separate from `reference_documents` all the
+        way down to the prompt because they do the opposite thing: a reference
+        RESOLVES a clause that deferred its content, an endorsement CHANGES a
+        clause that was already complete. Feeding an endorsement in as a
+        reference produces two live clauses for one term, and therefore two
+        contradictory rules.
 
         When `output_dir` is set, raw Stage B synthesis outputs are also
         written to two side-car JSON files:
@@ -3518,8 +3527,15 @@ class ValidationRuleGenerator:
                     f"document(s): {[rd.get('name') for rd in reference_documents]}"
                 )
 
+            if endorsements:
+                print(
+                    f"[Pipeline 1] with {len(endorsements)} active "
+                    f"endorsement(s): {[e.get('name') for e in endorsements]}"
+                )
+
             ext_prompt = build_extraction_prompt(
                 whole_doc, reference_documents=reference_documents,
+                endorsements=endorsements,
             )
 
             def _extract_by_section(reason):
@@ -3541,7 +3557,8 @@ class ValidationRuleGenerator:
                     try:
                         raw = call_gemini(
                             build_extraction_prompt(
-                                sec, reference_documents=reference_documents),
+                                sec, reference_documents=reference_documents,
+                                endorsements=endorsements),
                             label=f"Pipeline1-Section-p{sec.get('page_start')}",
                             max_output_tokens=65536, thinking_budget=16384,
                             temperature=0, seed=DETERMINISTIC_SEED,

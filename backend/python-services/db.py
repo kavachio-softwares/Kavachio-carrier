@@ -555,6 +555,177 @@ class Contract(Base):
     premium_cap_amount = Column("contract_premium_cap_amount", Numeric, nullable=True)
     premium_cap_currency = Column(String, nullable=True)
 
+    # --- the contract as a RECORD ------------------------------------------
+    # Every column below already exists in the canonical schema and was simply
+    # never mapped, so the app could only ever show a filename where it meant
+    # to show a contract. Mapping them is a read/write-side addition with NO
+    # migration. What they mean, and which are mandatory, is decided per
+    # contract type in contract_types.py — never here.
+    name = Column("contract_name", String, nullable=True)
+    # insurer_broker | insurer_reinsurer. Free text in the DB (there is no CHECK
+    # on the column) but constrained by contract_types.spec() on the way in, so
+    # the legacy free-text values already in the table still load.
+    contract_type = Column("contract_type", String, nullable=True)
+    # The market's identifier for a delegated authority. NOTE the bare `umr`
+    # column on this table is legacy and unused (all NULL) — the ingester and
+    # the persister both write contract_primary_umr, so that is the one mapped.
+    umr = Column("contract_primary_umr", String, nullable=True)
+    risk_code = Column("contract_risk_code", String, nullable=True)
+    section_number = Column("contract_section_number", String, nullable=True)
+    class_of_business = Column("contract_class_of_business", String, nullable=True)
+    year_of_account = Column("contract_year_of_account", String, nullable=True)
+    earnings_pattern = Column("contract_earnings_pattern", String, nullable=True)
+    executed_date = Column("contract_executed_date", Date, nullable=True)
+    notice_period_days = Column("contract_notice_period_days", Integer, nullable=True)
+
+    # --- lifecycle ---------------------------------------------------------
+    # THREE status axes, because they answer three different questions:
+    #   approval_status  what the CARRIER decided (the gate).
+    #   status_ops       what the extraction PIPELINE did with the file.
+    #   lifecycle        where the CONTRACT itself is — see contract_types.
+    # Collapsing them would lose two of the three: a contract can be approved,
+    # extracted and still not in force because its term has not started.
+    lifecycle = Column("contract_status", String, nullable=True)
+    lifecycle_effective_date = Column("contract_status_effective_date", Date, nullable=True)
+    terminated_date = Column("contract_terminated_date", Date, nullable=True)
+    termination_reason = Column("contract_termination_reason", Text, nullable=True)
+    # The contract this one renews. A renewal is a NEW row pointing back, not an
+    # edit to the old term — last year's contract has to keep meaning what it
+    # meant when it was produced against.
+    renews_contract_id = Column("contract_renews_contract_id", Integer,
+                                ForeignKey("contract.contract_id"), nullable=True)
+
+    # --- the authored contract -------------------------------------------
+    # What the two sides agreed to pay each other (commission, shares, fees,
+    # settlement) as one dict — see contract_types.COMMERCIAL_TERMS for the
+    # vocabulary and for why this is JSON and not eleven columns. Used twice:
+    # shown on the record, and quoted verbatim inside the generated wording.
+    commercial_terms = Column(JSON, nullable=True)
+    # The wording's sections as the carrier left them — generated ones edited
+    # or not, plus any written by hand — and the signature-page layout. The
+    # composed .docx is built FROM this, so the document can always be
+    # regenerated and the sections are never trapped inside a binary.
+    wording_sections = Column(JSON, nullable=True)
+
+
+class ContractDocument(Base):
+    """The documents a contract is made of — and which of them rules come from.
+
+    Until now a contract WAS its file: one blob on the contract row. That cannot
+    express the three things this flow needs.
+
+      contract     the wording itself. Optional, because a contract can now be
+                   raised from its terms before anyone has the executed PDF.
+      reference    a document the wording DEFERS to ("per the Purchasing
+                   Guidelines on file"). The clauses that point at it produce no
+                   usable rule until it is supplied, which is why it is
+                   mandatory once the extraction names one.
+      endorsement  a change agreed after the fact. It does NOT replace the
+                   wording — both stay active, and rule generation reads the
+                   pair, with the endorsement's clauses taking precedence over
+                   the ones they amend.
+
+    `is_active` is what rule generation filters on, so superseding an
+    endorsement is a flag flip rather than a delete: the rules it produced stay
+    explainable afterwards.
+
+    This maps the EXISTING canonical `contract_document` table rather than a new
+    one of its own. The table was already in the v4 schema — defined, empty, and
+    reached by nothing in the app — and it is the right shape for this: a
+    document, its type, its version, who uploaded it, and whether it is the
+    executed copy. Five columns it lacks (the ones this flow turns on) are added
+    by migration 14; everything else was already there and is used as it stands.
+    """
+    __tablename__ = "contract_document"
+    id = Column("contract_document_id", Integer, primary_key=True)
+    tenant_id = Column(Integer, nullable=True, index=True)
+    contract_id = Column("contract_document_contract_id", Integer,
+                         ForeignKey("contract.contract_id"),
+                         nullable=False, index=True)
+    # contract | reference | endorsement. The canonical column is named for the
+    # document's TYPE, which is exactly what this is.
+    kind = Column("contract_document_type", String, nullable=False,
+                  default="contract")
+    filename = Column("contract_document_filename", String, nullable=True)
+    version = Column("contract_document_version", String, nullable=True)
+    # Whether this is the signed copy rather than a draft. Kavachio does not run
+    # the signing, so this records a fact from elsewhere.
+    is_executed_copy = Column("contract_document_is_executed_copy", Boolean,
+                              nullable=True)
+    blob_ref = Column("contract_document_blob_reference", String, nullable=True)
+    fingerprint = Column("contract_document_file_hash", String, nullable=True)
+    uploaded_by_user_id = Column("contract_document_uploaded_by_id", Integer,
+                                 nullable=True)
+    amendment_id = Column("contract_document_amendment_id", Integer, nullable=True)
+    upload_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    modified_at = Column(DateTime, default=datetime.utcnow,
+                         onupdate=datetime.utcnow)
+
+    # --- added by migration 14 ---------------------------------------------
+    # The document the wording asked for BY NAME, when this row answers such a
+    # request. Lets the "still missing" list be computed by matching what the
+    # extraction named against what has actually been supplied.
+    satisfies_reference = Column("contract_document_satisfies_reference",
+                                 String, nullable=True)
+    # Endorsements carry a date they take effect from; the wording does not.
+    effective_from = Column("contract_document_effective_from", Date, nullable=True)
+    # What rule generation filters on. Superseding is a flag flip, never a
+    # delete — see the class docstring.
+    is_active = Column("contract_document_is_active", Boolean, default=True)
+    # Parsed text + whatever the extractor made of it, cached so re-running rule
+    # generation does not re-parse every attachment.
+    extracted = Column("contract_document_extracted", JSON, nullable=True)
+    # The DB-blob fallback for when blob storage is off, matching the
+    # (blob_ref, blob) pair every other file-bearing table here uses. The
+    # canonical table only ever had the Azure pointer.
+    blob = _payload(Column("contract_document_blob", LargeBinary, nullable=True))
+
+
+class ContractSignature(Base):
+    """That a contract was signed, by which side, when, and on what authority.
+
+    A CONTRACT GOES LIVE BECAUSE IT WAS SIGNED. Both sides sign — one row each,
+    at least — and the second signature is what puts it in force. That is why
+    this is a table and not a key in the wording blob: it is dated, attributed,
+    and it is the thing the contract's being in force now rests on. A key in a
+    JSON bag can be overwritten by an unrelated save; a row cannot.
+
+    KAVACHIO DOES NOT WITNESS A SIGNING. It records that one happened, and
+    `method` is what keeps the two claims apart:
+
+      typed     the signatory was in Kavachio, was the right party, and typed
+                their name against this contract. `by_user_id` IS the signatory.
+      recorded  somebody signed on paper or through a provider elsewhere and
+                the carrier recorded the fact here. `by_user_id` is whoever
+                recorded it — never the signatory, who was never in this
+                system. It is the only honest way to hold a reinsurance
+                contract, whose counterparty has no seat here at all.
+
+    A SIGNATURE IS ON A VERSION. Editing a draft's terms or its wording deletes
+    the signatures on it. A signature that outlived the words it was under
+    would be worse than no signature at all.
+    """
+    __tablename__ = "contract_signature"
+    id = Column("contract_signature_id", Integer, primary_key=True)
+    tenant_id = Column("contract_signature_tenant_id", Integer, nullable=True)
+    contract_id = Column("contract_signature_contract_id", Integer,
+                         ForeignKey("contract.contract_id"),
+                         nullable=False, index=True)
+    # Which ORGANISATION this signature is for, not who typed it.
+    side = Column("contract_signature_side", String, nullable=False)
+    signer_name = Column("contract_signature_signer_name", String, nullable=False)
+    signer_title = Column("contract_signature_signer_title", String, nullable=True)
+    signer_email = Column("contract_signature_signer_email", String, nullable=True)
+    method = Column("contract_signature_method", String, default="typed")
+    by_user_id = Column("contract_signature_by_user_id", Integer, nullable=True)
+    signed_at = Column("contract_signature_signed_at", DateTime, nullable=True)
+    # The executed copy this was read off, where there is one.
+    document_id = Column("contract_signature_document_id", Integer, nullable=True)
+    note = Column("contract_signature_note", String, nullable=True)
+    created_at = Column("contract_signature_created_at", DateTime,
+                        default=datetime.utcnow)
+
 
 class ProgramBroker(Base):
     """Which brokers may produce into which programme — the many-to-many that
@@ -593,7 +764,13 @@ class ContractApproval(Base):
     tenant_id = Column(Integer, nullable=False, index=True)  # ops tenancy column
     contract_id = Column("approval_contract_id", Integer,
                          ForeignKey("contract.contract_id"), nullable=False, index=True)
-    # submitted | approved | rejected | withdrawn
+    # The decision vocabulary:
+    #   submitted | approved | rejected | withdrawn   the broker→carrier gate
+    #   sent_for_review | changes_requested | terms_agreed
+    #                                               the carrier→broker negotiation
+    # One table for both because they are the same kind of fact — somebody did
+    # something to this contract, and "how did it get here?" has to stay
+    # answerable across both directions of travel.
     action = Column("approval_action", String, nullable=False)
     acted_by_user_id = Column("approval_acted_by_id", Integer, nullable=False)
     acted_at = Column("approval_acted_at", DateTime(timezone=True), default=datetime.utcnow)
@@ -601,6 +778,14 @@ class ContractApproval(Base):
     # What the carrier was looking at when it decided. A contract file can be
     # replaced; the decision stays attached to the version it judged.
     contract_file_hash = Column("approval_file_hash", String, nullable=True)
+    # A counter-proposal, when this row is one:
+    #   [{field, current, proposed, comment}, …]
+    # A note alone says "the premium cap is too low" and leaves the carrier to
+    # work out which field, what number, and to type it. This says it in terms
+    # the other side can see beside the current value and apply in one move —
+    # and keeps "what did they actually ask for?" answerable later.
+    # Added by migration 15; NULL on every row that proposed nothing.
+    proposed_changes = Column("approval_proposed_changes", JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -1504,6 +1689,28 @@ def init_db():
         # Contract → Output Template hierarchy
         _ensure_column(conn, inspector, "contract", "output_template_id", "INTEGER")
         _ensure_column(conn, inspector, "contract", "template_field_mappings", json_type)
+        # The documents a contract is made of. `contract_document` already
+        # existed in the canonical schema, so create_all() will NOT touch it —
+        # the five columns the contract flow needs have to be ALTERed in. See
+        # migrations/14_contract_documents.sql for what each one is for.
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_satisfies_reference", "VARCHAR")
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_effective_from", "DATE")
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_is_active", "BOOLEAN DEFAULT TRUE")
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_extracted", json_type)
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_blob", blob_type)
+        # The broker's counter-proposal on a contract under negotiation. See
+        # migrations/15_contract_negotiation.sql for why a note is not enough.
+        _ensure_column(conn, inspector, "contract_approval",
+                       "approval_proposed_changes", json_type)
+        # The authored contract: its commercial terms and its wording sections.
+        # See migrations/16_contract_authoring.sql.
+        _ensure_column(conn, inspector, "contract", "commercial_terms", json_type)
+        _ensure_column(conn, inspector, "contract", "wording_sections", json_type)
         # Direct-lane setup scoping (carrier + program)
         _ensure_column(conn, inspector, "direct_format", "carrier_party_id", "INTEGER")
         _ensure_column(conn, inspector, "direct_format", "program_id", "INTEGER")

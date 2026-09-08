@@ -44,6 +44,7 @@ from intake_routes import router as intake_router
 # Feature 10.2 — the machine-to-machine way in (/v1). API-key auth, not JWT.
 from intake_api_routes import router as intake_api_router
 from carrier_routes import router as carrier_router
+from contract_routes import router as contract_router
 # The carrier's own business-segment list, assigned when a programme is made.
 from segment_routes import router as segment_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
@@ -107,6 +108,11 @@ app.include_router(broker_router)
 app.include_router(output_template_router)
 app.include_router(intake_router)
 app.include_router(intake_api_router)
+# The contract as a RECORD: raise it from its terms, attach its wording,
+# references and endorsements, get it approved, renew or terminate it. Its
+# paths sit at /contracts/… and do not overlap the programme-scoped upload
+# routes on app_router or the approve/reject pair on hierarchy_router.
+app.include_router(contract_router)
 app.include_router(segment_router)
 
 

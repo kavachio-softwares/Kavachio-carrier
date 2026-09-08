@@ -5,6 +5,7 @@
  * same shape, and the types below are that shape stated once.
  */
 import { api } from "./client";
+import { currentMga } from "../auth";
 
 export type ApprovalStatus = "approved" | "pending_approval" | "rejected";
 
@@ -83,6 +84,13 @@ export type BrokerDetail = {
 export type PendingApproval = {
   contract_id: number;
   filename: string | null;
+  /** What is actually being decided on. A filename is not a contract — the
+   *  queue has to say which contract, with whom and of what kind before anyone
+   *  can decide without opening it. */
+  name: string;
+  contract_type: string | null;
+  umr: string | null;
+  class_of_business: string | null;
   programme: { id: number; name: string } | null;
   broker: { id: number; legal_name: string } | null;
   submitted_at: string | null;
@@ -91,11 +99,20 @@ export type PendingApproval = {
   expiry_dt: string | null;
 };
 
+/** One act on a contract. Covers BOTH directions of travel: the broker→carrier
+ *  approval gate, and the carrier→broker negotiation. Together they are the
+ *  contract's thread — how it got to where it is. */
 export type ApprovalEvent = {
-  action: "submitted" | "approved" | "rejected" | "withdrawn";
+  action: "submitted" | "approved" | "rejected" | "withdrawn"
+        | "sent_for_review" | "changes_requested" | "terms_agreed";
   note: string | null;
   acted_at: string | null;
   acted_by: { id: number; full_name: string; email: string } | null;
+  /** The terms named by a change request. Empty for every other action. */
+  proposed_changes: Array<{
+    field: string; current?: string | null;
+    proposed?: string | null; comment?: string | null;
+  }>;
 };
 
 export const getHierarchy = () =>
@@ -144,3 +161,39 @@ export const createBroker = (body: {
 }) => api.post<BrokerSummary & {
   admin_invited: boolean; admin_email: string | null; program_id: number | null;
 }>("/brokers", body).then(r => r.data);
+
+
+// ── creating the things a contract needs to exist ──────────────────────────
+// A contract sits on a programme and is held with a counterparty. When either
+// is missing, the Raise Contract flow creates it in place rather than sending
+// the user away to another screen and losing what they had typed.
+//
+// These call the SAME endpoints the dedicated screens do — nothing new on the
+// server, and no second way for a programme or a broker to come into
+// existence. Note both `/programs` and `/parties` still take the legacy `mga`
+// query param; the tenant is resolved from the token regardless.
+
+/** Create a programme. Only the name is required — everything else about a
+ *  programme can be filled in later on its own screen. */
+export const createProgramme = (body: {
+  name: string;
+  business_segment?: string | null;
+  product_line?: string | null;
+  bdx_frequency?: string | null;
+  status?: string | null;
+}) => api.post<{ id: number; name: string }>("/programs", body,
+                                             { params: { mga: currentMga() } })
+        .then(r => r.data);
+
+/** Create a reinsurer in the carrier's directory.
+ *
+ *  Deliberately not `createBroker`: that endpoint refuses anything outside
+ *  PRODUCER_PARTY_TYPES, because it also invites an admin and puts the party on
+ *  a programme — neither of which applies to a reinsurer, which has no seat in
+ *  Kavachio and produces nothing into a programme. */
+export const createReinsurer = (legalName: string) =>
+  api.post<{ id: number; legal_name: string }>(
+    "/parties",
+    { party_type: "reinsurer", legal_name: legalName, scope: "tenant" },
+    { params: { mga: currentMga() } },
+  ).then(r => r.data);

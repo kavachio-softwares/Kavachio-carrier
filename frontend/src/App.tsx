@@ -22,6 +22,13 @@ import ProgramManagement from "./pages/ProgramManagement";
 import AddProgram from "./pages/AddProgram";
 import ProgramBrokers from "./pages/ProgramBrokers";
 import ContractDetail from "./pages/ContractDetail";
+import ContractRecord from "./pages/ContractRecord";
+import ContractSignature from "./pages/ContractSignature";
+import Contracts from "./pages/Contracts";
+import ContractNew from "./pages/ContractNew";
+import ContractUpload from "./pages/ContractUpload";
+import BrokerContractNew from "./pages/BrokerContractNew";
+import Approvals from "./pages/Approvals";
 import Mapping from "./pages/Mapping";
 import DirectRun from "./pages/DirectRun";
 import DirectSetup from "./pages/DirectSetup";
@@ -115,6 +122,8 @@ export default function App() {
         <Route path="/broker" element={<BrokerDashboard />} />
         <Route path="/operator" element={<OperatorHome />} />   {/* the broker's day-to-day seat */}
         <Route path="/broker/contracts" element={<BrokerContracts />} />
+        {/* Step A of the flow: the broker brings a contract and waits. */}
+        <Route path="/broker/contracts/new" element={<BrokerContractNew />} />
         {/* The broker's monthly run. Both broker seats reach it: an admin
             submits, and an operator is the seat added to do exactly this. */}
         <Route path="/broker/bordereau" element={<BrokerBordereau />} />
@@ -136,6 +145,16 @@ export default function App() {
         <Route path="/program-management" element={<ProgramManagement />} />
         <Route path="/programs/new" element={<AddProgram />} />
         <Route path="/programs/:programId/brokers" element={<ProgramBrokers />} />   {/* the mesh, managed */}
+        {/* The contract as a RECORD — terms, documents, lifecycle. The
+            programme-scoped route below is what it PRODUCED: clauses and rules. */}
+        <Route path="/contracts" element={<Contracts />} />
+        <Route path="/contracts/new" element={<ContractNew />} />
+        {/* The other way in: a wording that already exists, read on upload. */}
+        <Route path="/contracts/upload" element={<ContractUpload />} />
+        <Route path="/contracts/:contractId" element={<ContractRecord />} />
+        {/* Screen only — no signing provider is connected. See the page. */}
+        <Route path="/contracts/:contractId/signature" element={<ContractSignature />} />
+        <Route path="/approvals" element={<Approvals />} />   {/* the gate */}
         <Route path="/programs/:programId/contracts/:contractId" element={<ContractDetail />} />
         <Route path="/direct" element={<DirectRun />} />
         <Route path="/direct/setup" element={<DirectSetup />} />

@@ -433,6 +433,8 @@ def persist_pipeline_output(
     upload_token=None,
     identity=None,
     prior_contract=None,
+    existing_contract_id=None,
+    record_defaults=None,
 ):
     """
     Persist `final_output` into the canonical Postgres tables.
@@ -456,6 +458,27 @@ def persist_pipeline_output(
     hit triggers reconcile-and-carry-forward over `validation_rules` BEFORE
     anything is inserted — see regen_reconcile.reconcile. Fail-open: any error
     in that path falls back to persisting the generated set unchanged.
+
+    `existing_contract_id` writes the extraction INTO a contract that already
+    exists instead of creating one. Two flows need it and neither can use the
+    insert path:
+
+      * a contract raised from its TERMS before anyone had the wording — the
+        record was created by a person, and the file arrives afterwards;
+      * a re-generation after an endorsement, where the contract keeps its
+        identity and only the rules it produces change.
+
+    Both would otherwise end up with two contract rows for one contract: the
+    one the user is looking at, and the one the rules were attached to. In this
+    mode the business fields a PERSON entered are never overwritten — extraction
+    only fills what is still empty (see the COALESCE below) — and the
+    programme-wide supersede is skipped, because regenerating one contract must
+    not retire the others.
+
+    `record_defaults` carries values decided by the route rather than by
+    extraction — currently the coded `contract_type` (see contract_types.py).
+    Without it the insert path falls back to the document type the model read
+    off the page, which is what the column held before contracts had a type.
     """
 
     program_metadata = final_output.get("program_metadata") or {}
@@ -607,68 +630,145 @@ def persist_pipeline_output(
         contract_name = source_file or f"contract_{program_id}"
         umr = f"UMR-{program_id}-{abs(hash(contract_name)) % 1_000_000:06d}"
 
-        # ── Type-2 SCD versioning ────────────────────────────────────────
-        # The contract table already carries the SCD columns. Close out the
-        # prior current version(s) for this program before inserting the new
-        # one, and stamp the new row as current with its content fingerprint.
-        # The fingerprint is what lets an identical re-upload be reused
-        # WITHOUT re-running the LLM (see contract_versioning.find_reusable_contract).
-        conn.execute(
-            text("""
-                UPDATE contract
-                SET    is_current_version = FALSE,
-                       valid_until = now()
-                WHERE  contract_program_id = :pid
-                  AND  is_current_version IS TRUE
-            """),
-            {"pid": program_id},
-        )
+        _defaults = record_defaults or {}
+        _extracted_payload = _jsonb(build_extracted_payload(
+            document_type,
+            _meta_scalar(program_metadata.get("program_name")),
+            program_metadata,
+            upload_token,
+            reference_documents,
+            identity=identity,
+            regen_report=regen_report,
+        ))
 
-        # program/contract are now unified with the ops columns; the contract
-        # screen reads the ops `filename` / `status_ops` / `extracted` columns,
-        # so populate them too — not just the canonical contract_name.
-        contract_id = conn.execute(
-            text("""
-                INSERT INTO contract
-                    (tenant_id, contract_program_id, contract_primary_umr,
-                     contract_name, contract_type,
-                     contract_inception_date, contract_expiry_date,
-                     filename, status_ops, extracted,
-                     output_template_id, is_app_managed,
-                     row_hash, row_key,
-                     is_current_version, valid_from)
-                VALUES
-                    (:tenant_id, :program_id, :umr, :contract_name, :contract_type,
-                     :inception_dt, :expiry_dt, :filename, :status_ops,
-                     CAST(:extracted AS JSONB), :output_template_id, TRUE,
-                     :content_fingerprint, :entity_fingerprint,
-                     TRUE, now())
-                RETURNING contract_id
-            """),
-            {
-                "tenant_id":          tenant_id,
-                "program_id":         program_id,
-                "umr":                umr,
-                "contract_name":      contract_name,
-                "contract_type":      document_type,
-                "inception_dt":       inception,
-                "expiry_dt":          expiry,
-                "filename":           source_file or contract_name,
-                "status_ops":         "active",
-                "extracted":          _jsonb(build_extracted_payload(
-                    document_type,
-                    _meta_scalar(program_metadata.get("program_name")),
-                    program_metadata,
-                    upload_token,
-                    reference_documents,
-                    identity=identity,
-                    regen_report=regen_report,
-                )),
-                "output_template_id":  output_template_id,
-                "content_fingerprint": content_fingerprint,
-                "entity_fingerprint":  entity_fingerprint,
-            }
-        ).scalar_one()
+        if existing_contract_id:
+            # ── Write INTO a contract that already exists ────────────────
+            # The row was created by a person (from the terms, before the
+            # wording arrived) or is being re-generated after an endorsement.
+            # Either way its identity is settled, so no new row and no
+            # programme-wide supersede — the other contracts on this programme
+            # are not affected by one contract being re-read.
+            #
+            # COALESCE, not assignment, on the business fields: a date or a UMR
+            # a person typed is a FACT, and the extraction's reading of the same
+            # field is a guess. The guess only fills a blank.
+            conn.execute(
+                text("""
+                    UPDATE contract
+                    SET    filename           = :filename,
+                           status_ops         = :status_ops,
+                           extracted          = CAST(:extracted AS JSONB),
+                           output_template_id = COALESCE(:output_template_id,
+                                                         output_template_id),
+                           row_hash           = :content_fingerprint,
+                           row_key            = :entity_fingerprint,
+                           is_current_version = TRUE,
+                           contract_inception_date =
+                               COALESCE(contract_inception_date, :inception_dt),
+                           contract_expiry_date =
+                               COALESCE(contract_expiry_date, :expiry_dt),
+                           contract_primary_umr =
+                               COALESCE(contract_primary_umr, :umr),
+                           contract_name      = COALESCE(contract_name, :contract_name),
+                           modified_at        = now()
+                    WHERE  contract_id = :cid
+                """),
+                {
+                    "cid":                 existing_contract_id,
+                    "filename":            source_file or contract_name,
+                    "status_ops":          "active",
+                    "extracted":           _extracted_payload,
+                    "output_template_id":  output_template_id,
+                    "content_fingerprint": content_fingerprint,
+                    "entity_fingerprint":  entity_fingerprint,
+                    "inception_dt":        inception,
+                    "expiry_dt":           expiry,
+                    "umr":                 umr,
+                    "contract_name":       contract_name,
+                },
+            )
+            contract_id = existing_contract_id
+
+            # Everything below re-inserts this contract's rules, clauses, terms
+            # and routings, so the previous generation has to go first — without
+            # this, re-reading a contract after an endorsement leaves BOTH
+            # generations attached and every check runs twice.
+            #
+            # Deleted child-first: rule_sql hangs off validation_rule and
+            # contract_clause_routing off clauses_extracted, so the dependents
+            # go before the rows they point at.
+            #
+            # This is why regeneration is an explicit action rather than
+            # something an upload does quietly: it discards the rules currently
+            # in force for this contract and replaces them with a fresh reading.
+            for _sql in (
+                "DELETE FROM rule_sql WHERE contract_id = :cid",
+                "DELETE FROM contract_clause_routing WHERE contract_id = :cid",
+                "DELETE FROM validation_rule WHERE contract_id = :cid",
+                "DELETE FROM clauses_extracted WHERE contract_id = :cid",
+                "DELETE FROM contract_term WHERE term_contract_id = :cid",
+            ):
+                conn.execute(text(_sql), {"cid": existing_contract_id})
+        else:
+            # ── Type-2 SCD versioning ────────────────────────────────────
+            # The contract table already carries the SCD columns. Close out the
+            # prior current version(s) for this program before inserting the new
+            # one, and stamp the new row as current with its content fingerprint.
+            # The fingerprint is what lets an identical re-upload be reused
+            # WITHOUT re-running the LLM (see
+            # contract_versioning.find_reusable_contract).
+            conn.execute(
+                text("""
+                    UPDATE contract
+                    SET    is_current_version = FALSE,
+                           valid_until = now()
+                    WHERE  contract_program_id = :pid
+                      AND  is_current_version IS TRUE
+                """),
+                {"pid": program_id},
+            )
+
+            # program/contract are now unified with the ops columns; the contract
+            # screen reads the ops `filename` / `status_ops` / `extracted` columns,
+            # so populate them too — not just the canonical contract_name.
+            contract_id = conn.execute(
+                text("""
+                    INSERT INTO contract
+                        (tenant_id, contract_program_id, contract_primary_umr,
+                         contract_name, contract_type,
+                         contract_inception_date, contract_expiry_date,
+                         filename, status_ops, extracted,
+                         output_template_id, is_app_managed,
+                         row_hash, row_key,
+                         is_current_version, valid_from)
+                    VALUES
+                        (:tenant_id, :program_id, :umr, :contract_name, :contract_type,
+                         :inception_dt, :expiry_dt, :filename, :status_ops,
+                         CAST(:extracted AS JSONB), :output_template_id, TRUE,
+                         :content_fingerprint, :entity_fingerprint,
+                         TRUE, now())
+                    RETURNING contract_id
+                """),
+                {
+                    "tenant_id":          tenant_id,
+                    "program_id":         program_id,
+                    "umr":                umr,
+                    "contract_name":      contract_name,
+                    # The CODED type when the route knows it (insurer_broker /
+                    # insurer_reinsurer — see contract_types.py). Falling back to
+                    # the document type the model read off the page keeps every
+                    # caller that predates coded types working unchanged.
+                    "contract_type":      _defaults.get("contract_type") or document_type,
+                    "inception_dt":       inception,
+                    "expiry_dt":          expiry,
+                    "filename":           source_file or contract_name,
+                    "status_ops":         "active",
+                    "extracted":          _extracted_payload,
+                    "output_template_id":  output_template_id,
+                    "content_fingerprint": content_fingerprint,
+                    "entity_fingerprint":  entity_fingerprint,
+                }
+            ).scalar_one()
 
         # ── 2b) Business-effective term (Feature 7 — Prior Period Files) ──
         # The SCD UPDATE above closed the prior version with `valid_until =

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, Server, Inbox, CalendarDays,
+  FileCheck, Server, Inbox, CalendarDays, ClipboardCheck,
 } from "lucide-react";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
@@ -79,6 +79,12 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     // bordereau setup. Reading the section top to bottom IS the flow.
     items: [
       { to: "/programs", label: "Programmes", icon: Layers },
+      // Contracts sit between the programme and the setup built on them, which
+      // is where they sit in the work: a programme exists, brokers go on it,
+      // contracts are raised against those pairs, and each contract is what a
+      // bordereau setup runs against.
+      { to: "/contracts", label: "Contracts", icon: FileCheck },
+      { to: "/approvals", label: "Approvals", icon: ClipboardCheck },
       // Brokers, not carriers. Kavachio creates carriers (Platform → Carriers)
       // and this tenant IS one — what a carrier manages is the brokers that
       // produce into its programmes. The old "All Carriers" entry pointed at

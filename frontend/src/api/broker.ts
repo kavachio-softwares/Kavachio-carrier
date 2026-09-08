@@ -20,6 +20,18 @@ export type ApprovalStatus = "draft" | "pending_approval" | "approved" | "reject
 export type BrokerContract = {
   id: number;
   filename: string | null;
+  /** What it is called. An AUTHORED contract has no file, so a list keyed on
+   *  filename shows it as "Contract 462". */
+  name: string;
+  contract_type: string | null;
+  /** Where it is in its life. NOT the same question as `approval_status`,
+   *  which only says whether this broker may set it up: a contract sitting in
+   *  `in_review` is one the BROKER has to act on, and without this it renders
+   *  as an ordinary approved row. */
+  lifecycle: Lifecycle;
+  /** Who it is waiting on — the question this list is actually scanned for. */
+  whose_turn: "carrier" | "broker" | null;
+  has_wording: boolean;
   programme: { id: number | null; name: string };
   carrier: { id: number | null; name: string };
   inception_dt: string | null;
@@ -31,16 +43,34 @@ export type BrokerContract = {
   created_at: string | null;
 };
 
+/** Mirrors the carrier-side type; `expired` is derived from the term. */
+export type Lifecycle =
+  | "draft" | "pending" | "in_review" | "changes_requested" | "agreed"
+  | "signed" | "active" | "expired" | "terminated" | "superseded";
+
 export type BrokerDashboard = {
   broker: { id: number; name: string };
   carriers: { id: number; name: string }[];
   counts: {
-    waiting_on_carrier: number; live_contracts: number;
+    waiting_on_carrier: number;
+    /** The queue only this broker can move — terms to read, or a signature to
+     *  give. Its absence is why a carrier could send terms over and the broker
+     *  never be told. */
+    waiting_on_me: number;
+    /** In force, which since signing became mandatory is not the same as
+     *  approved. */
+    live_contracts: number;
     programmes: number; carriers: number;
   };
   waiting: {
     id: number; filename: string | null;
     programme: string; carrier: string; submitted_at: string | null;
+  }[];
+  waiting_on_me: {
+    id: number; name: string; lifecycle: Lifecycle;
+    programme: string; carrier: string;
+    /** What the broker has to do, in words, not a state name. */
+    what: string;
   }[];
 };
 

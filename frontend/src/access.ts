@@ -55,6 +55,7 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // landing screen, and no access to the admin views above.
   { pattern: "/operator", requires: "operator", only: ["operator"] },
   { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
+  { pattern: "/broker/contracts/new", requires: "broker_admin", only: ["broker_admin"] },
   // Both broker seats, unlike the rest of this block. Running the bordereau IS
   // the operator's job — the seat exists for it — and an admin does it too, so
   // this is the one broker screen that is not the admin's alone.
@@ -77,6 +78,23 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   { pattern: "/programs/new", requires: "carrier_admin" },
   { pattern: "/programs/:programId/brokers", requires: "carrier_admin" },
   { pattern: "/programs/:programId/contracts/:contractId", requires: "carrier_admin" },
+  // The contract RECORD screens. The carrier-wide list and the create form are
+  // the carrier's — a broker reaches its own contracts through My Contracts.
+  { pattern: "/contracts", requires: "carrier_admin" },
+  { pattern: "/contracts/new", requires: "carrier_admin" },
+  { pattern: "/contracts/upload", requires: "carrier_admin" },
+  // The record itself is open to both sides, because both have business with
+  // it: the carrier decides on it, and the broker has to attach the documents
+  // it defers to and correct it after a rejection. The API scopes what each
+  // one can see and do — a broker gets a 404 on anyone else's contract.
+  { pattern: "/contracts/:contractId", requires: "operator",
+    only: ["broker_admin", "operator", "carrier_admin", "kavachio_admin"] },
+  // Signing is between the two organisations, so both sides reach it. The
+  // screen writes nothing, but it names the people who would sign.
+  { pattern: "/contracts/:contractId/signature", requires: "operator",
+    only: ["broker_admin", "operator", "carrier_admin", "kavachio_admin"] },
+  // The gate. Only the carrier decides.
+  { pattern: "/approvals", requires: "carrier_admin" },
   { pattern: "/brokers", requires: "carrier_admin" },
   { pattern: "/brokers/:brokerId", requires: "carrier_admin" },
   { pattern: "/outputs", requires: "carrier_admin" },

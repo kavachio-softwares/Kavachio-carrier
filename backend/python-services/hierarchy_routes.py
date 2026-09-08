@@ -39,7 +39,7 @@ from db import (
     SessionLocal, Party, Program, Contract, AppUser,
     ProgramBroker, ContractApproval,
 )
-from auth_deps import current_principal, require_role, Principal
+from auth_deps import current_principal, require_role, Principal, resolve_broker_party_id
 from app_routes import (
     resolve_tenant_id, assert_tenant_owns, _iso_utc, PRODUCER_PARTY_TYPES,
 )
@@ -470,6 +470,13 @@ def approvals_queue(principal: Principal = Depends(current_principal)):
 
     Only ever contracts a BROKER uploaded — a carrier's own upload is live on
     arrival and never appears here.
+
+    A broker's DRAFT is excluded even though the row already reads
+    pending_approval. That status is set by the DB trigger the moment a broker
+    creates the contract — which is what keeps a half-finished draft from being
+    mistaken for approved by anything downstream — but the broker has not asked
+    for a decision yet, and a queue full of other people's unfinished work is
+    not a queue anyone can clear.
     """
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal)
@@ -478,7 +485,8 @@ def approvals_queue(principal: Principal = Depends(current_principal)):
             .outerjoin(Program, Program.id == Contract.program_id)
             .outerjoin(Party, Party.id == Contract.broker_party_id)
             .filter(Contract.tenant_id == tid,
-                    Contract.approval_status == "pending_approval")
+                    Contract.approval_status == "pending_approval",
+                    func.coalesce(Contract.lifecycle, "") != "draft")
             .order_by(Contract.submitted_at.asc().nullslast())
             .all()
         )
@@ -488,6 +496,11 @@ def approvals_queue(principal: Principal = Depends(current_principal)):
             out.append({
                 "contract_id": c.id,
                 "filename": c.filename,
+                # What the carrier is actually deciding on. A filename is not a
+                # contract — the queue has to say which contract, with whom, of
+                # what kind, before anyone can approve it without opening it.
+                "name": c.name or c.filename or f"Contract {c.id}",
+                "contract_type": c.contract_type,
                 "programme": {"id": prog.id, "name": prog.name} if prog else None,
                 "broker": {"id": broker.id, "legal_name": broker.legal_name} if broker else None,
                 "submitted_at": _iso_utc(c.submitted_at),
@@ -495,6 +508,8 @@ def approvals_queue(principal: Principal = Depends(current_principal)):
                                  "email": submitter.email} if submitter else None,
                 "inception_dt": str(c.inception_dt) if c.inception_dt else None,
                 "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None,
+                "umr": c.umr,
+                "class_of_business": c.class_of_business,
             })
         return out
 
@@ -525,6 +540,29 @@ def _decide(contract_id: int, principal: Principal, action: str, note: Optional[
         c.approval_status = "approved" if action == "approved" else "rejected"
         c.approved_by_user_id = principal.user_id
         c.approved_at = now
+
+        # The decision moves the contract, not just its gate.
+        #
+        # APPROVING NO LONGER MAKES IT LIVE. A contract goes in force because
+        # both sides signed it, and this used to set `active` directly — which
+        # meant a broker-uploaded contract could go live with no signature on
+        # it at all, straight past the gate every other path respects. So
+        # approval now clears the gate and nothing more: if the signatures are
+        # already in (a wording executed outside Kavachio and recorded here)
+        # the contract goes live on the spot, and otherwise it drops back to a
+        # state where the two sides can sign it.
+        #
+        # Rejecting sends it back to DRAFT rather than leaving it in limbo: the
+        # broker's next act is to correct it and re-submit, and a contract they
+        # cannot edit is one they cannot fix. The rejection itself stays on the
+        # record in contract_approval, so "sent back, and why" survives the edit.
+        if action == "approved":
+            import contract_routes as _cr
+            unsigned = _cr._unsigned_sides(_cr._signatures(s, c.id))
+            c.lifecycle = "active" if not unsigned else "draft"
+        else:
+            c.lifecycle = "draft"
+        c.lifecycle_effective_date = now.date()
 
         s.add(ContractApproval(
             tenant_id=tid,
@@ -559,12 +597,27 @@ def contract_reject(contract_id: int, body: ApprovalDecision = ApprovalDecision(
 @router.get("/contracts/{contract_id}/approvals")
 def contract_approval_history(contract_id: int,
                               principal: Principal = Depends(current_principal)):
-    """How this contract got to where it is — every decision, oldest first."""
+    """How this contract got to where it is — every decision, oldest first.
+
+    THE BROKER READS THIS TOO. It is not an audit log for the carrier: it is
+    the negotiation thread, carrying every change request and the terms it
+    named. Scoping it to the owning tenant meant the one party who has to
+    ANSWER a change request could not see it — they saw an empty trail on a
+    contract they had themselves pushed back on.
+    """
     with SessionLocal() as s:
         c = s.get(Contract, contract_id)
         if not c:
             raise HTTPException(404, "contract not found")
-        assert_tenant_owns(principal, c.tenant_id)
+        if principal.is_broker:
+            # Their own contracts only. A shared programme carries other
+            # brokers' contracts and none of them are this broker's business.
+            # Resolved from the database — the token carries no broker party.
+            bid = resolve_broker_party_id(s, principal)
+            if bid is None or c.broker_party_id != bid:
+                raise HTTPException(404, "contract not found")
+        else:
+            assert_tenant_owns(principal, c.tenant_id)
 
         rows = (
             s.query(ContractApproval, AppUser)
@@ -575,7 +628,11 @@ def contract_approval_history(contract_id: int,
         )
         return [
             {"action": a.action, "note": a.note, "acted_at": _iso_utc(a.acted_at),
-             "acted_by": {"id": u.id, "full_name": u.full_name, "email": u.email} if u else None}
+             "acted_by": {"id": u.id, "full_name": u.full_name, "email": u.email} if u else None,
+             # The counter-proposal, when this row is one. Carried here because
+             # this endpoint IS the negotiation thread: a change request without
+             # the terms it named is half the story.
+             "proposed_changes": a.proposed_changes or []}
             for a, u in rows
         ]
 

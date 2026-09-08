@@ -104,7 +104,7 @@
 .proto-side.collapsed .side-ver{display:none}
 
 /* ---------------- Screen shell ---------------- */
-.proto{background:var(--p-canvas);color:var(--p-ink);min-height:100vh;font-size:14px;line-height:1.45}
+.proto{background:var(--p-canvas);color:var(--p-ink);font-size:14px;line-height:1.45}
 .proto .view{padding:28px 34px 72px;max-width:1220px;animation:proto-rise .22s cubic-bezier(.2,.7,.3,1)}
 /* full-bleed variant: fill the available width (no 1220px cap) */
 .proto .view.full{max-width:none}
@@ -384,6 +384,16 @@
 .proto .tag-pill{font-family:var(--p-mono);font-size:11px;background:var(--p-surface-3);border:1px solid var(--p-border);border-radius:5px;padding:2px 7px;color:var(--p-muted)}
 .proto .divider{height:1px;background:var(--p-border);margin:18px 0}
 .proto .muted{color:var(--p-muted)}
+/* Standalone small print.
+   `.sub` was only ever defined INSIDE a `td` or a `.card-h`, and `.hint` only
+   inside a `.field`, so using either on its own rendered at full 14px body
+   size — which is what made the contract screens look off next to the rest of
+   the app. These give them the same values outside those contexts. The
+   existing, more specific rules still win where they apply, and every use in
+   the app before this was already inside one of them, so nothing that looked
+   right changes. */
+.proto .sub{color:var(--p-faint);font-size:12px;line-height:1.5}
+.proto .hint{font-size:11.5px;color:var(--p-faint);margin-top:5px;line-height:1.5}
 
 /* dropzone */
 .proto .drop{border:1.5px dashed var(--p-border-2);border-radius:var(--p-r);background:var(--p-surface-2);padding:24px;text-align:center;color:var(--p-muted);transition:.15s}
@@ -736,3 +746,129 @@
 @media (prefers-reduced-motion:reduce){
   .proto .drawer,.proto .scrim,.proto .chan-hd .caret,.proto .chip,.proto tr.arow{transition:none}
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WRITING A CONTRACT — ported verbatim from the carrier design
+   (docs/kavachio_carrier_centric_design.html), which authors these rules
+   already scoped under .proto.
+
+   Three groups:
+     .trail / .step-c   the step trail across the top of the four-step flow
+     .fh .startpick .lim  step 1: a question, its answer, and what happens when
+                          a file breaks it — one row carrying all three
+     .doc .wording .term  step 2: the section rail, the editable wording, and
+                          the LIVE VALUE chips. A chip is tied to a term from
+                          step 1; hand-typed text is not. That difference is
+                          the whole reason the editor exists.
+   ═════════════════════════════════════════════════════════════════════════ */
+.proto .trail{display:inline-flex;align-items:center;gap:1px;flex-wrap:wrap;
+  padding:5px;margin-bottom:20px;max-width:100%;
+  background:var(--p-surface);border:1px solid var(--p-border);
+  border-radius:var(--p-r);box-shadow:var(--p-sh-sm)}
+.proto .trail .sep{display:inline-flex;align-items:center;padding:0 3px;color:var(--p-border-2);font-size:15px;font-weight:400}
+.proto .trail .step-c{display:inline-flex;align-items:center;gap:10px;
+  padding:7px 13px;border:0;background:transparent;border-radius:var(--p-r-sm);
+  box-shadow:none;font-weight:600;color:var(--p-ink);transition:background .12s}
+.proto .trail .step-c .n{width:20px;height:20px;border-radius:50%;flex:0 0 auto;
+  background:var(--p-surface-3);color:var(--p-muted);font-size:10.5px;
+  display:grid;place-items:center;font-weight:700}
+.proto .trail .step-c .lvbox{display:flex;flex-direction:column;line-height:1.2;text-align:left;min-width:0}
+.proto .trail .step-c .lv{font-size:8.5px;letter-spacing:1.1px;text-transform:uppercase;font-weight:700;color:var(--p-faint)}
+.proto .trail .step-c .nm{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.proto .trail .step-c.done{cursor:pointer}
+.proto .trail .step-c.done:hover{background:var(--p-surface-2)}
+.proto .trail .step-c.done:hover .n{background:var(--p-border-2);color:var(--p-ink)}
+.proto .trail .step-c.on{background:var(--p-primary-soft);color:var(--p-primary)}
+.proto .trail .step-c.on .n{background:var(--p-primary);color:#fff}
+.proto .trail .step-c.on .lv{color:var(--p-primary);opacity:.7}
+.proto .trail .step-c.off{color:var(--p-faint)}
+.proto .trail .step-c.off:not(:has(.nm)) .lv{font-size:12.5px;letter-spacing:0;text-transform:none;color:var(--p-faint);font-weight:600}
+.proto .trail .step-c.off .nm{color:var(--p-muted);font-weight:600}
+.proto .trail .step-c .nm{max-width:150px}
+.proto .doc{display:grid;grid-template-columns:214px minmax(0,1fr);gap:0;border:1px solid var(--p-border);
+      border-radius:var(--p-r);overflow:hidden;background:var(--p-surface)}
+.proto .doc-rail{background:var(--p-surface-2);border-right:1px solid var(--p-border);padding:8px}
+.proto .doc-sec{display:flex;align-items:flex-start;gap:9px;padding:9px 10px;border-radius:var(--p-r-sm);
+      cursor:pointer;margin-bottom:2px;transition:background .12s}
+.proto .doc-sec:hover{background:var(--p-surface-3)}
+.proto .doc-sec.on{background:var(--p-primary-soft)}
+.proto .doc-sec .no{font-family:var(--p-mono);font-size:10.5px;color:var(--p-faint);flex:0 0 auto;margin-top:1px;width:22px}
+.proto .doc-sec .txt{flex:1;min-width:0}
+.proto .doc-sec .rm{flex:0 0 auto;opacity:0;width:19px;height:19px;border-radius:4px;display:grid;
+      place-items:center;color:var(--p-faint);font-size:15px;line-height:1;margin-top:-1px;transition:.12s}
+.proto .doc-sec:hover .rm{opacity:1}
+.proto .doc-sec .rm:hover{background:var(--p-crit-soft);color:var(--p-crit)}
+.proto .doc-sec .keep{flex:0 0 auto;opacity:.45;font-size:11px;margin-top:1px}
+.proto .doc-sec.on .no{color:var(--p-primary)}
+.proto .doc-sec .nm{display:block;font-size:12.5px;font-weight:600;line-height:1.35}
+.proto .doc-sec.on .nm{color:var(--p-primary-h)}
+.proto .doc-sec .st{display:block;font-size:10.5px;color:var(--p-faint);margin-top:2px}
+.proto .doc-body{padding:20px 24px;min-width:0}
+.proto .doc-body h4{margin:0 0 3px;font-family:var(--p-disp);font-size:16px;font-weight:600}
+.proto .wording{border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:16px 18px;
+      font-size:13.5px;line-height:1.85;background:var(--p-surface);min-height:120px}
+.proto .wording:focus{outline:2px solid var(--p-primary);outline-offset:1px}
+.proto .wording p{margin:0 0 11px}
+.proto .wording p:last-child{margin:0}
+.proto .term{background:var(--p-primary-soft);color:var(--p-primary-h);border-radius:4px;padding:1px 5px;
+      font-weight:600;white-space:nowrap;border-bottom:1.5px solid var(--p-primary)}
+.proto .termbar{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 0}
+.proto .termbar button{border:1px dashed var(--p-border-2);background:var(--p-surface-2);color:var(--p-muted);
+      font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer;transition:.12s}
+.proto .termbar button:hover{border-color:var(--p-primary);color:var(--p-primary);background:var(--p-primary-soft);border-style:solid}
+.proto .segpick{display:flex;background:var(--p-surface-3);border-radius:9px;padding:3px;gap:3px;margin-bottom:18px}
+.proto .segpick button{flex:1;border:0;background:transparent;color:var(--p-muted);font-size:12.5px;font-weight:600;padding:8px 12px;border-radius:7px;transition:.12s}
+.proto .segpick button:hover{color:var(--p-ink)}
+.proto .segpick button.on{background:var(--p-surface);color:var(--p-primary);box-shadow:var(--p-sh-sm)}
+.proto .fh{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:13.5px;font-weight:700;color:var(--p-ink);margin:0 0 13px;letter-spacing:-.005em}
+.proto .fh em{font-style:normal;font-size:11.5px;font-weight:500;color:var(--p-faint);line-height:1.45}
+.proto .startpick{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.proto .startpick .sp{border:1px solid var(--p-border);border-radius:var(--p-r-sm);padding:11px 13px;cursor:pointer;background:var(--p-surface);transition:.12s}
+.proto .startpick .sp:hover{border-color:var(--p-border-2);background:var(--p-surface-2)}
+.proto .startpick .sp.on{border-color:var(--p-primary);background:var(--p-primary-soft);box-shadow:inset 0 0 0 1px var(--p-primary)}
+.proto .startpick .sp b{display:block;font-size:12.5px;font-weight:600;color:var(--p-ink)}
+.proto .startpick .sp span{display:block;font-size:11.5px;color:var(--p-faint);margin-top:4px;line-height:1.5}
+.proto .startpick .sp.on span{color:var(--p-muted)}
+.proto .lim{display:grid;grid-template-columns:minmax(0,1fr) 196px 214px;gap:16px;align-items:center;padding:12px 0;border-bottom:1px solid var(--p-border)}
+.proto .lim:last-of-type{border-bottom:0;padding-bottom:2px}
+.proto .lim .lq{min-width:0}
+.proto .lim .lq b{display:block;font-size:13px;font-weight:600;color:var(--p-ink)}
+.proto .lim .lq span{display:block;font-size:11.5px;color:var(--p-faint);margin-top:2px;line-height:1.45}
+.proto .lim input,.proto .lim select{width:100%;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:9px 11px;font-size:13px;font-family:inherit;background:var(--p-surface);color:var(--p-ink);transition:.12s}
+.proto .lim input:focus,.proto .lim select:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .lim select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238B93A2' stroke-width='2'><path d='M6 9l6 6 6-6'/></svg>");background-repeat:no-repeat;background-position:right 10px center;padding-right:30px}
+.proto .lim .unit{display:flex;align-items:center;gap:8px}
+.proto .lim .unit em{font-style:normal;font-size:11.5px;font-weight:600;color:var(--p-faint);flex:0 0 auto;min-width:30px}
+.proto .lim .segpick{margin:0;padding:2px}
+.proto .lim .segpick button{padding:7px 8px;font-size:11.5px}
+.proto .lim-h .lq b{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--p-faint)}
+.proto .startpick.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.proto .rj-quote{margin:16px 0 0;padding:13px 15px;border-left:3px solid var(--p-border-2);background:var(--p-surface-2);border-radius:0 var(--p-r-sm) var(--p-r-sm) 0;font-size:13px;color:var(--p-ink);line-height:1.6}
+.proto .rj-quote .rj-who{margin-top:9px;font-size:11.5px;color:var(--p-faint);font-weight:600}
+
+/* A chip whose term was cleared in step 1. Shown as a visible gap rather than
+   silently dropped: a sentence with a hole in it is a problem somebody can see
+   and fix, and one that quietly lost its number is not. */
+.proto .term.term-missing{background:var(--p-warn-soft);color:var(--p-warn-ink);
+  border-bottom-color:var(--p-warn);font-style:italic}
+/* The per-row "what this becomes", opened from a limit in step 1 so cause and
+   effect sit together at the moment the number is typed. */
+.proto .lim-becomes{grid-column:1/-1;margin:10px 0 2px;padding:11px 13px;
+  background:var(--p-surface-2);border:1px solid var(--p-border);
+  border-radius:var(--p-r-sm);font-size:12.5px;line-height:1.6}
+.proto .lim-becomes .arrow{color:var(--p-faint);margin:0 7px}
+
+/* Reading a contract on screen. The wording is generated, so the app can show
+   the real thing rather than only offering a file — this is the page it reads
+   on: a measure narrow enough to read, the type a contract is set in, and the
+   clause numbers hanging in the margin the way they do on paper. */
+.proto .contract-doc{background:var(--p-surface);border:1px solid var(--p-border);
+  border-radius:var(--p-r-sm);padding:34px 40px;max-width:820px;margin:0 auto}
+.proto .contract-doc h4{font-family:var(--p-disp);font-size:15px;font-weight:600;
+  margin:26px 0 10px;letter-spacing:-.01em}
+.proto .contract-doc h4:first-child{margin-top:0}
+.proto .contract-doc p{margin:0 0 9px;font-size:13.5px;line-height:1.8;
+  padding-left:44px;text-indent:-44px;color:var(--p-ink)}
+.proto .contract-doc .cl{display:inline-block;width:44px;text-indent:0;
+  color:var(--p-faint);font-variant-numeric:tabular-nums}

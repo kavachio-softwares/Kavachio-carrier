@@ -555,7 +555,72 @@ def _reference_documents_block(reference_documents):
     return "\n".join(parts)
 
 
-def build_extraction_prompt(section, reference_documents=None):
+def _endorsements_block(endorsements):
+    """Render active endorsements into a prompt block.
+
+    An endorsement is NOT a reference document, and rendering it as one would
+    produce the wrong rules. A reference document RESOLVES a clause that
+    deferred its content elsewhere — the wording said "per the Guidelines" and
+    the guidelines supply the missing values. An endorsement CHANGES a clause
+    that was already complete: the wording said $5m and the endorsement says
+    $7m, and only one of those may survive into a rule.
+
+    So both documents stay active and both are read, but the endorsement's
+    version of any term it touches is the one that becomes a rule. The clause it
+    replaced is not deleted from the extraction — it is marked superseded, so
+    "why is the limit 7 and not 5" stays answerable from the record.
+
+    `endorsements` is a list of {"name", "text", "effective_from"}. Returns ""
+    when there are none, which is the common case.
+    """
+    if not endorsements:
+        return ""
+
+    names = [(e.get("name") or "(unnamed endorsement)") for e in endorsements]
+
+    parts = [
+        "\n---BEGIN ENDORSEMENTS---",
+        "The document(s) below AMEND the contract section above. They are in",
+        "force together with it — this is not a replacement wording, and the",
+        "section above has NOT been superseded as a whole.",
+        "",
+        "Apply them as follows, clause by clause:",
+        "  1. Where an endorsement CHANGES a term that the contract already",
+        "     states (a limit, a rate, a date, a list, a deductible), extract",
+        "     the ENDORSED value as the live clause. Set that clause's",
+        "     \"amended_by_endorsement\" to the endorsement's document name and",
+        "     \"superseded_text\" to the original wording it replaced, VERBATIM.",
+        "  2. Where an endorsement ADDS a term the contract did not have,",
+        "     extract it as a new clause and set \"amended_by_endorsement\" to",
+        "     the endorsement's name.",
+        "  3. Where an endorsement REMOVES a term, extract the original clause",
+        "     with \"removed_by_endorsement\" set to the endorsement's name so it",
+        "     produces no rule but stays on the record.",
+        "  4. Every clause the endorsements do NOT touch is extracted from the",
+        "     contract exactly as it stands. Most clauses are in this case.",
+        "",
+        "NEVER emit both the original and the endorsed version of the same term",
+        "as two live clauses — that produces two contradictory rules and the",
+        "check fails whichever value the data holds.",
+        "",
+        "Where two endorsements touch the SAME term, the one with the later",
+        "effective date wins.",
+        "",
+        f"ACTIVE ENDORSEMENTS: {json.dumps(names)}",
+    ]
+    for e in endorsements:
+        name = e.get("name") or "(unnamed endorsement)"
+        eff = e.get("effective_from")
+        head = f'\n=== ENDORSEMENT: "{name}"'
+        if eff:
+            head += f' (effective {eff})'
+        parts.append(f'{head} ===\n{e.get("text") or ""}')
+    parts.append("---END ENDORSEMENTS---\n")
+
+    return "\n".join(parts)
+
+
+def build_extraction_prompt(section, reference_documents=None, endorsements=None):
     """
     Build the Pipeline 1.3 extraction prompt for one section.
     `section` is one element from split_into_sections().
@@ -563,6 +628,11 @@ def build_extraction_prompt(section, reference_documents=None):
     `reference_documents` (optional) is a list of {"name", "text"} for external
     documents the contract refers to; when present they are appended so the LLM
     can resolve deferred clauses against their real content.
+
+    `endorsements` (optional) is a list of {"name", "text", "effective_from"}
+    for documents that AMEND this contract. They are rendered separately from
+    reference documents because they do the opposite thing — see
+    _endorsements_block.
     """
 
     section_type = section.get("section_type", "body")
@@ -571,6 +641,7 @@ def build_extraction_prompt(section, reference_documents=None):
     text         = section.get("text", "")
 
     references_block = _reference_documents_block(reference_documents)
+    endorsements_block = _endorsements_block(endorsements)
 
     return f"""{_EXTRACTION_SYSTEM}
 
@@ -581,7 +652,7 @@ Pages: {page_start} to {page_end}
 ---BEGIN SECTION TEXT---
 {text}
 ---END SECTION TEXT---
-{references_block}
+{references_block}{endorsements_block}
 Extract per schema."""
 
 

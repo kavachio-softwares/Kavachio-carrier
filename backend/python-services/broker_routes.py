@@ -18,6 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import String, and_, func, or_
 
+import contract_routes
+import contract_types as ct
 from auth_deps import Principal, current_principal
 from db import (
     SessionLocal, AppUser, Contract, Party, Program, ProgramBroker, Tenant,
@@ -157,6 +159,15 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
     Two kinds live in one list: contracts the CARRIER added, which work
     straight away, and contracts the BROKER added, which wait for approval.
     Only a live one can be set up, so the UI needs both facts per row.
+
+    IT ALSO CARRIES THE LIFECYCLE, and that is not a detail. `approval_status`
+    answers "may this broker set it up"; it says nothing about whether the
+    carrier has sent terms over for the broker to read, argued back at, or is
+    waiting on their signature. Without the lifecycle a contract sitting in
+    `in_review` — the whole point of which is that the BROKER has to act —
+    renders as an ordinary approved row, and the negotiation is invisible to
+    the one person it is waiting on. `whose_turn` is included for the same
+    reason: it is the question the list is actually being scanned for.
     """
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
@@ -178,9 +189,24 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
         out = []
         for c in rows:
             cid = carrier_of.get(c.program_id)
+            state = contract_routes._effective_lifecycle(c)
             out.append({
                 "id": c.id,
                 "filename": c.filename,
+                # An AUTHORED contract has no file, so a list keyed on filename
+                # shows it as "Contract 462". The name is what it is called.
+                "name": c.name or c.filename or f"Contract {c.id}",
+                "contract_type": c.contract_type,
+                "lifecycle": state,
+                # Who the contract is waiting on. The SAME function the
+                # carrier's record uses, not a second copy of the rule — the
+                # two sides disagreeing about whose move it is would be worse
+                # than neither of them saying.
+                "whose_turn": contract_routes._whose_turn(
+                    c, contract_routes._unsigned_sides(
+                        contract_routes._signatures(s, c.id))),
+                "has_wording": bool((c.wording_sections or {}).get("sections"))
+                               or bool(c.blob_ref or c.blob),
                 "programme": {"id": c.program_id,
                               "name": progs[c.program_id].name if c.program_id in progs else "—"},
                 "carrier": {"id": cid, "name": carriers.get(cid, "—")},
@@ -198,8 +224,12 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
 def broker_dashboard(p: Principal = Depends(current_principal)):
     """The broker's landing screen: what they hold, and what is holding them up.
 
-    "Waiting on the carrier" is the only queue a broker has — it is the one
-    thing they cannot move themselves.
+    TWO QUEUES, not one, and they point in opposite directions. "Waiting on the
+    carrier" is what the broker cannot move; "waiting on you" is what nobody
+    else can. The second one was missing entirely, so a carrier sending terms
+    over for review reached a broker who was never told — the negotiation sat
+    in a state whose whole purpose is that the broker acts on it, on a
+    dashboard that only counted the other side's queue.
     """
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
@@ -212,21 +242,47 @@ def broker_dashboard(p: Principal = Depends(current_principal)):
         progs = ({pr.id: pr.name for pr in s.query(Program).filter(Program.id.in_(prog_ids)).all()}
                  if prog_ids else {})
 
-        pending, live = [], 0
+        pending, on_me, live = [], [], 0
         if prog_ids:
             rows = (s.query(Contract)
                       .filter(Contract.program_id.in_(prog_ids),
                               Contract.broker_party_id == bid).all())
             for c in rows:
+                carrier_name = carriers.get(
+                    next((l.tenant_id for l in links
+                          if l.program_id == c.program_id), None), "—")
+                state = contract_routes._effective_lifecycle(c)
+
+                # The broker's OWN queue. `agreed` is in it too: terms both
+                # sides settled are waiting on the broker's signature, and a
+                # contract nobody signs never goes live.
+                turn = contract_routes._whose_turn(
+                    c, contract_routes._unsigned_sides(
+                        contract_routes._signatures(s, c.id)))
+                if turn == "broker":
+                    on_me.append({
+                        "id": c.id,
+                        "name": c.name or c.filename or f"Contract {c.id}",
+                        "lifecycle": state,
+                        "programme": progs.get(c.program_id, "—"),
+                        "carrier": carrier_name,
+                        "what": ("read the terms and agree them or ask for "
+                                 "changes" if state == "in_review"
+                                 else "sign it"),
+                    })
+
                 if c.approval_status == "pending_approval":
                     pending.append({
                         "id": c.id, "filename": c.filename,
                         "programme": progs.get(c.program_id, "—"),
-                        "carrier": carriers.get(
-                            next((l.tenant_id for l in links if l.program_id == c.program_id), None), "—"),
+                        "carrier": carrier_name,
                         "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
                     })
-                elif c.approval_status == "approved":
+                # LIVE means in force, not merely approved. Since a contract
+                # goes in force only when both sides have signed it, an
+                # approved-but-unsigned one is not something to produce
+                # against, and counting it as live would say it is.
+                if state == "active":
                     live += 1
 
         return {
@@ -234,11 +290,14 @@ def broker_dashboard(p: Principal = Depends(current_principal)):
             "carriers": [{"id": i, "name": carriers.get(i, "—")} for i in carrier_ids],
             "counts": {
                 "waiting_on_carrier": len(pending),
+                "waiting_on_me": len(on_me),
                 "live_contracts": live,
                 "programmes": len(links),
                 "carriers": len(carrier_ids),
             },
             "waiting": sorted(pending, key=lambda r: r["submitted_at"] or ""),
+            # The queue only this broker can move.
+            "waiting_on_me": on_me,
         }
 
 

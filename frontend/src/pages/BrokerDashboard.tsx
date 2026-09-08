@@ -7,7 +7,7 @@
  * carrier approval is the one step they cannot move themselves.
  */
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { getBrokerDashboard, type BrokerDashboard as Dash } from "../api/broker";
 import { fmtDate } from "../utils/date";
 
@@ -63,6 +63,13 @@ export default function BrokerDashboard() {
         ) : (
           <>
             <div className="tiles" style={{ marginBottom: 18 }}>
+              {/* Your queue first. It is the one nobody else can move, and it
+                  was the one this dashboard never showed. */}
+              <div className={`tile${c.waiting_on_me > 0 ? " alert" : ""}`}>
+                <div className="k">Waiting on you</div>
+                <div className="v">{c.waiting_on_me}</div>
+                <div className="foot">terms to read, or a signature to give</div>
+              </div>
               <div className={`tile${c.waiting_on_carrier > 0 ? " alert" : ""}`}>
                 <div className="k">Waiting on the carrier</div>
                 <div className="v">{c.waiting_on_carrier}</div>
@@ -71,7 +78,7 @@ export default function BrokerDashboard() {
               <div className="tile">
                 <div className="k">Live contracts</div>
                 <div className="v">{c.live_contracts}</div>
-                <div className="foot">ready to set up</div>
+                <div className="foot">in force — ready to set up</div>
               </div>
               <div className="tile">
                 <div className="k">Programmes you're on</div>
@@ -84,6 +91,47 @@ export default function BrokerDashboard() {
                 <div className="foot">{carrierNames || "—"}</div>
               </div>
             </div>
+
+            {/* Above the carrier's queue, because this is the one the broker
+                can actually act on. A negotiation that does not announce
+                itself is one nobody answers. */}
+            {d.waiting_on_me.length > 0 && (
+              <div className="card" style={{ marginBottom: 18 }}>
+                <div className="card-h">
+                  <h3>Waiting on you</h3>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    nothing moves on these until you answer
+                  </span>
+                </div>
+                <div className="tbl-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Contract</th><th>Programme</th><th>Carrier</th>
+                        <th>What to do</th><th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {d.waiting_on_me.map(w => (
+                        <tr key={w.id}>
+                          <td>
+                            <Link to={`/contracts/${w.id}`}><b>{w.name}</b></Link>
+                          </td>
+                          <td>{w.programme}</td>
+                          <td>{w.carrier}</td>
+                          <td className="muted">{w.what}</td>
+                          <td>
+                            <Link className="btn sm pri" to={`/contracts/${w.id}`}>
+                              Open →
+                            </Link>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             <div className="card">
               <div className="card-h">
