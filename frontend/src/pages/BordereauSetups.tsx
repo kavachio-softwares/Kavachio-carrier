@@ -127,7 +127,7 @@ export default function BordereauSetups() {
       <PageHeader title="Bordereau Setups"
         subtitle="Every setup created across your carriers and programs — open one to review its mapping."
         action={<Button onClick={() => nav("/direct/setup")}>
-          <FileSpreadsheet size={15} /> Program Setup
+          <FileSpreadsheet size={15} /> Bordereau Setup
         </Button>} />
       <PageBody>
         <Card>
@@ -172,7 +172,7 @@ export default function BordereauSetups() {
               No setups yet — build one to map a carrier + program's bordereau.
               <div className="mt-3">
                 <Button onClick={() => nav("/direct/setup")}>
-                  <FileSpreadsheet size={15} /> Program Setup
+                  <FileSpreadsheet size={15} /> Bordereau Setup
                 </Button>
               </div>
             </div>

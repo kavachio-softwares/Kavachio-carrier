@@ -5,19 +5,31 @@
  * is this carrier's to see. Everything on this page is scoped to the
  * relationship the signed-in carrier actually has.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Loader2, FileText, Layers, UserCog, Plus } from "lucide-react";
-import { getBroker, type BrokerDetail as Detail } from "../api/hierarchy";
-import { fmtStamp } from "../utils/date";
+import {
+  ArrowLeft, Loader2, FileText, Layers, Search, UserCog, Plus,
+} from "lucide-react";
+import {
+  getBroker, listBrokerContracts,
+  type BrokerContractRow, type BrokerDetail as Detail,
+} from "../api/hierarchy";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { useServerList } from "../hooks/useServerList";
+import { fmtDate, fmtStamp } from "../utils/date";
 import Card from "../components/ui/Card";
+import { Sk } from "../components/ui/Skeleton";
 import { Button } from "../components/ui/Button";
+import { Select, TextInput } from "../components/ui/Field";
 import { PageBody, PageHeader } from "../components/Layout";
 import { OnboardingBadge } from "../components/OnboardingBadge";
 import AddContractModal from "../components/AddContractModal";
 
+const PAGE_SIZE = 10;
+
 export default function BrokerDetail() {
   const { brokerId } = useParams();
+  const bid = Number(brokerId);
   const [b, setB] = useState<Detail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -32,6 +44,36 @@ export default function BrokerDetail() {
       .catch(() => setErr("That broker is not on any of your programmes."));
   }, [brokerId]);
   useEffect(load, [load]);
+
+  // Contract rows carry a programme id, not its name. Built once here rather
+  // than scanned out of b.programmes per row — and it is the same list the
+  // programme filter offers, so the two can never fall out of step.
+  const programmeName = useMemo(
+    () => new Map((b?.programmes ?? []).map(p => [p.id, p.name])),
+    [b],
+  );
+
+  // The contract table is filtered and paged by the SERVER. A broker of any
+  // size has hundreds and the table shows ten, so the alternative was shipping
+  // the lot on every page load to hide most of it in the browser.
+  const [q, setQ] = useState("");
+  const [programme, setProgramme] = useState("");
+  // Debounced because the search runs in SQL — an undebounced box is one
+  // request per keystroke.
+  const dq = useDebouncedValue(q, 300);
+  const filterKey = [bid, programme, dq.trim()].join("|");
+  const {
+    page, setPage, items: contracts, total, pageCount, loading: loadingContracts,
+    reload: reloadContracts,
+  } = useServerList<BrokerContractRow>(
+    (pg, size) => listBrokerContracts(bid, {
+      q: dq.trim() || undefined,
+      program_id: programme ? Number(programme) : undefined,
+      limit: size, offset: (pg - 1) * size,
+    }).then(r => ({ items: r.contracts, total: r.total })),
+    filterKey, PAGE_SIZE,
+  );
+  const filtersActive = !!(q || programme);
 
   if (err) return (
     <>
@@ -91,7 +133,7 @@ export default function BrokerDetail() {
             )}
           </Card>
 
-          <Card title="Their people" className="md:col-span-2">
+          <Card title="Their team" className="md:col-span-2">
             {/* The onboarding badge sits here rather than by the title because
                 this is where it comes from — it is derived from the very list
                 underneath it, so the two can never appear to disagree. */}
@@ -154,66 +196,144 @@ export default function BrokerDetail() {
               Bordereau Setup for this broker can use it without reading it again.
             </div>
           )}
-          {b.contracts.length === 0 ? (
-            <p className="text-sm text-ink-muted">
-              No contracts with this broker yet. Add one and it is read straight
-              away — the same reading Bordereau Setup does, so a setup can use it
-              without going over the document a second time.
-            </p>
+          {/* Shown even when the page is empty: with the filters hidden, a
+              search that matched nothing looked identical to a broker with no
+              contracts, and there was nothing on screen to clear. */}
+          <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface-2/40 px-3 py-2.5">
+            <div className="relative">
+              <Search size={14}
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-muted" />
+              <TextInput className="!pl-8 !w-64" value={q} aria-label="Search contracts"
+                placeholder="Name, UMR or filename"
+                onChange={e => setQ(e.target.value)} />
+            </div>
+            <Select className="!w-52" value={programme} aria-label="Filter by programme"
+              onChange={e => setProgramme(e.target.value)}>
+              <option value="">All programmes</option>
+              {b.programmes.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </Select>
+            {filtersActive && (
+              <button type="button" className="linkish text-xs"
+                onClick={() => { setQ(""); setProgramme(""); }}>
+                Clear filters
+              </button>
+            )}
+            {/* The count sits with the filters rather than only by the pager:
+                on a single page there is no pager, and "how many did that
+                leave?" is the first thing a filter raises. */}
+            <span className="ml-auto flex items-center gap-2 text-xs text-ink-muted">
+              {loadingContracts && <Loader2 size={13} className="animate-spin" />}
+              {total} {total === 1 ? "contract" : "contracts"}
+              {filtersActive && total > 0 ? " match" : ""}
+            </span>
+          </div>
+          {total === 0 && loadingContracts ? (
+            // Nothing yet AND still asking. Without this the "no contracts"
+            // line shows for as long as the first request takes, on a broker
+            // that has plenty. Rows rather than a spinner, so the card keeps
+            // the height it is about to have and nothing below it jumps.
+            <div className="space-y-2 py-1">
+              {[0, 1, 2, 3].map(i => <Sk key={i} className="h-10" />)}
+            </div>
+          ) : total === 0 ? (
+            <div className="rounded-md border border-dashed border-border px-4 py-10 text-center">
+              <FileText size={20} className="mx-auto mb-2 text-ink-muted opacity-60" />
+              <p className="mx-auto max-w-md text-sm text-ink-muted">
+                {filtersActive
+                  ? "No contract matches that. Clear the filters to see them all."
+                  : `No contracts with this broker yet. Add one and it is read
+                     straight away — the same reading Bordereau Setup does, so a
+                     setup can use it without going over the document a second
+                     time.`}
+              </p>
+            </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-ink-muted border-b border-border">
-                  <th className="pb-2 font-medium">Contract</th>
-                  <th className="pb-2 font-medium">Term</th>
-                  <th className="pb-2 font-medium">Added</th>
-                </tr>
-              </thead>
-              <tbody>
-                {b.contracts.map(c => {
-                  // "Where it stands" was the carrier's approval decision on
-                  // this contract. There is no decision to show now the gate is
-                  // gone, and the ops status answers a different question, so
-                  // the column went with it.
-                  return (
-                    <tr key={c.id} className="border-b border-border last:border-0">
-                      <td className="py-3">
-                        {/* Opens what the contract PRODUCED — its clauses and the
-                            rules written from them. That page is the whole point
-                            of adding one here, so the name is the way in. */}
-                        {/* A contract WRITTEN here has no file and no clauses
-                            read out of one — its home is its own record, where
-                            its terms, its wording and its checks are. An
-                            UPLOADED one opens what reading it produced, which
-                            is the whole point of having added it here. */}
-                        {c.is_app_managed ? (
-                          <Link to={`/contracts/${c.id}`}
-                            className="inline-flex items-center gap-2 text-navy hover:underline">
-                            <FileText size={14} className="text-ink-muted" />
-                            {c.name ?? `Contract ${c.id}`}
-                          </Link>
-                        ) : c.program_id != null ? (
-                          <Link to={`/programs/${c.program_id}/contracts/${c.id}`}
-                            className="inline-flex items-center gap-2 text-navy hover:underline">
-                            <FileText size={14} className="text-ink-muted" />
-                            {c.filename ?? c.name ?? `Contract ${c.id}`}
-                          </Link>
-                        ) : (
-                          <span className="inline-flex items-center gap-2">
-                            <FileText size={14} className="text-ink-muted" />
-                            {c.filename ?? c.name ?? `Contract ${c.id}`}
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 text-ink-muted">
-                        {c.inception_dt && c.expiry_dt ? `${c.inception_dt} → ${c.expiry_dt}` : "—"}
-                      </td>
-                      <td className="py-3 text-ink-muted">{fmtStamp(c.created_at)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            // Dimmed, not replaced, while the next page is on its way: swapping
+            // the table for a spinner collapses the card and throws the pager
+            // under the cursor that just clicked it.
+            <div className={`overflow-x-auto transition-opacity ${loadingContracts ? "opacity-50" : ""}`}
+              aria-busy={loadingContracts}>
+              {/* No table classes of its own: the app-wide table rules in
+                  index.css give every list the same header band, padding, hover
+                  and centred columns. The local ones this table used to carry
+                  were fighting them. */}
+              <table>
+                <thead>
+                  <tr>
+                    <th>Contract</th>
+                    <th>Programme</th>
+                    <th>Term</th>
+                    <th>Added</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {contracts.map(c => {
+                    // "Where it stands" was the carrier's approval decision on
+                    // this contract. There is no decision to show now the gate is
+                    // gone, and the ops status answers a different question, so
+                    // the column went with it.
+                    return (
+                      <tr key={c.id}>
+                        <td>
+                          {/* Opens what the contract PRODUCED — its clauses and the
+                              rules written from them. That page is the whole point
+                              of adding one here, so the name is the way in. */}
+                          {/* A contract WRITTEN here has no file and no clauses
+                              read out of one — its home is its own record, where
+                              its terms, its wording and its checks are. An
+                              UPLOADED one opens what reading it produced, which
+                              is the whole point of having added it here. */}
+                          {c.is_app_managed ? (
+                            <Link to={`/contracts/${c.id}`}
+                              className="inline-flex items-center gap-2 text-navy hover:underline">
+                              <FileText size={14} className="text-ink-muted" />
+                              {c.name ?? `Contract ${c.id}`}
+                            </Link>
+                          ) : c.program_id != null ? (
+                            <Link to={`/programs/${c.program_id}/contracts/${c.id}`}
+                              className="inline-flex items-center gap-2 text-navy hover:underline">
+                              <FileText size={14} className="text-ink-muted" />
+                              {c.filename ?? c.name ?? `Contract ${c.id}`}
+                            </Link>
+                          ) : (
+                            <span className="inline-flex items-center gap-2">
+                              <FileText size={14} className="text-ink-muted" />
+                              {c.filename ?? c.name ?? `Contract ${c.id}`}
+                            </span>
+                          )}
+                        </td>
+                        <td className="text-ink-muted">
+                          {(c.program_id != null && programmeName.get(c.program_id)) || "—"}
+                        </td>
+                        <td className="text-ink-muted whitespace-nowrap">
+                          {c.inception_dt && c.expiry_dt
+                            ? `${fmtDate(c.inception_dt)} → ${fmtDate(c.expiry_dt)}`
+                            : "—"}
+                        </td>
+                        <td className="text-ink-muted whitespace-nowrap">{fmtStamp(c.created_at)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {/* Only worth drawing when there is a second page to reach. */}
+          {pageCount > 1 && (
+            <div className="mt-4 flex items-center justify-between border-t border-border pt-3 text-xs text-ink-muted">
+              <span>
+                {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total} contracts
+              </span>
+              <div className="flex items-center gap-2">
+                <Button variant="secondary" className="!px-2.5 !py-1 !text-xs"
+                  disabled={page <= 1} onClick={() => setPage(page - 1)}>← Prev</Button>
+                <span>Page {page} of {pageCount}</span>
+                <Button variant="secondary" className="!px-2.5 !py-1 !text-xs"
+                  disabled={page >= pageCount} onClick={() => setPage(page + 1)}>Next →</Button>
+              </div>
+            </div>
           )}
         </Card>
 
@@ -224,9 +344,12 @@ export default function BrokerDetail() {
           programmes={b.programmes}
           onAdded={(contractId, programId) => {
             setAdded({ id: contractId, programId });
-            // Re-read the broker so the new contract appears in the table with
-            // the term and approval state the server actually recorded.
-            load();
+            // Only the table changed — the programmes and people above it did
+            // not — so re-read the page of contracts, from the first page,
+            // where a newly added one sorts. If a filter is on it may not be
+            // on that page at all, which is what the banner's link is for.
+            setPage(1);
+            reloadContracts();
           }} />
       </PageBody>
     </>

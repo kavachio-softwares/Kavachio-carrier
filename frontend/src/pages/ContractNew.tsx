@@ -4,8 +4,8 @@
  * c-sign).
  *
  *   1 Terms            what you are making, who it is with, and the limits you
- *                      agreed — each limit carrying what happens when a file
- *                      breaks it
+ *                      agreed — each limit carrying how serious a breach of it
+ *                      is
  *   2 Wording          the sections, written from those terms, editable
  *   3 Read it through  the finished document, the checks it will run, and
  *                      anything worth a second look
@@ -42,7 +42,7 @@ import {
   getContractTypes, getCounterparties, listContracts, previewEndorsement,
   previewWording, skipReview,
   type AgreedLimits, type AgreedLimitSpec, type ContractTypeSpec,
-  type SignatureBlockSpec, type SignatureLayout,
+  type SignatureBlockSpec, type SignatureLayout, type SeveritySpec,
   type ContractRecord as ContractRecordT, type Counterparty,
   type ContractField, type EndorsementPreview, type FieldErrors,
   type LimitGroup,
@@ -104,6 +104,13 @@ export default function ContractNew() {
   // nobody touches comes out exactly as every contract did before the block
   // was configurable.
   const [sigSpec, setSigSpec] = useState<SignatureBlockSpec | null>(null);
+  // How hard a check may bite, in the server's words. Never typed here — see
+  // SeveritySpec: the picker, the summary badge and the contract document all
+  // read the same vocabulary, so renaming a severity is one change on the
+  // server rather than seven strings across two screens.
+  const [sevSpec, setSevSpec] = useState<SeveritySpec[]>([]);
+  const sevLabel = (k?: string | null) =>
+    sevSpec.find(x => x.key === k)?.label ?? k ?? "—";
   const [sigLayout, setSigLayout] = useState<SignatureLayout | null>(null);
   const [typeKey, setTypeKey] = useState("");
 
@@ -169,6 +176,7 @@ export default function ContractNew() {
         setLimitGroups(d.limit_groups);
         setTermSpec(d.term);
         setSigSpec(d.signature_block);
+        setSevSpec(d.severities);
         setSigLayout(l => l ?? d.signature_block.default);
         setTypeKey(k => k || d.default);
       })
@@ -718,26 +726,31 @@ export default function ContractNew() {
           )}
         </div>
         <div>
-          {/* The severity question only exists once there is a limit to break.
-              Asking "if a file breaks it" of an empty row is asking about
-              nothing. */}
+          {/* The severity question only exists once there is a limit to
+              break. Asking how serious a breach of nothing would be is asking
+              about nothing. */}
           {!has ? (
             <span className="sub">—</span>
           ) : l.checkable ? (
-            <div className="segpick">
-              <button
-                type="button" className={sev === "critical" ? "on" : ""}
-                onClick={() => setLimit(l.name, { severity: "critical" })}
-              >
-                Stop the row
-              </button>
-              <button
-                type="button" className={sev === "warning" ? "on" : ""}
-                onClick={() => setLimit(l.name, { severity: "warning" })}
-              >
-                Just flag it
-              </button>
-            </div>
+            <>
+              <div className="segpick">
+                {sevSpec.map(sv => (
+                  <button
+                    key={sv.key} type="button" title={sv.hint}
+                    className={sev === sv.key ? "on" : ""}
+                    onClick={() => setLimit(l.name, { severity: sv.key })}
+                  >
+                    {sv.label}
+                  </button>
+                ))}
+              </div>
+              {/* The name alone does not say what happens. "Critical" is the
+                  word the rest of the app uses, and this is what it means for
+                  the file the broker sends. */}
+              <div className="sub" style={{ marginTop: 4 }}>
+                {sevSpec.find(x => x.key === sev)?.action ?? ""}
+              </div>
+            </>
           ) : (
             <span className="sub">
               Goes in the wording. Nothing in a file to check it against.
@@ -754,7 +767,7 @@ export default function ContractNew() {
             <span className="arrow">→</span>
             <span className={`badge ${becomes.severity === "critical" ? "b-crit" : "b-warn"}`}>
               <span className="d" />
-              {becomes.severity === "critical" ? "Stop the row" : "Flag it"}
+              {sevLabel(becomes.severity)}
             </span>
           </div>
         )}
@@ -1103,7 +1116,7 @@ export default function ContractNew() {
                       <div className="lim lim-h">
                         <div className="lq"><b>What you agreed</b></div>
                         <div className="sub">The limit</div>
-                        <div className="sub">If a file breaks it</div>
+                        <div className="sub">Severity Classification</div>
                       </div>
                       {rows.map(limitRow)}
                     </div>
@@ -1567,7 +1580,7 @@ export default function ContractNew() {
                         <td>
                           <span className={`badge ${c.severity === "critical" ? "b-crit" : "b-warn"}`}>
                             <span className="d" />
-                            {c.severity === "critical" ? "Stop the row" : "Flag it"}
+                            {sevLabel(c.severity)}
                           </span>
                         </td>
                       </tr>

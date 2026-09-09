@@ -43,7 +43,7 @@ import {
   type ContractDocumentKind, type ContractField, type ContractRecord as Rec,
   type AgreedLimits, type AgreedLimitSpec, type ContractTypeSpec, type FieldErrors,
   type Lifecycle, type LimitGroup,
-  type SignatureBlockSpec, type SignatureLayout,
+  type SignatureBlockSpec, type SignatureLayout, type SeveritySpec,
   type ProposedChange, type WordingSection,
 } from "../api/contractRecord";
 
@@ -175,6 +175,11 @@ export default function ContractRecord() {
   // contract like any other, and a carrier who got it wrong should not have to
   // raise the contract again to fix it.
   const [sigSpec, setSigSpec] = useState<SignatureBlockSpec | null>(null);
+  // The severity words, from the server — see SeveritySpec. Typing them here
+  // is what let this screen and the create form drift apart.
+  const [sevSpec, setSevSpec] = useState<SeveritySpec[]>([]);
+  const sevLabel = (k?: string | null) =>
+    sevSpec.find(x => x.key === k)?.label ?? k ?? "—";
   const [draftSig, setDraftSig] = useState<SignatureLayout | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -213,6 +218,7 @@ export default function ContractRecord() {
         setLimitGroups(d.limit_groups);
         setTermSpec(d.term);
         setSigSpec(d.signature_block);
+        setSevSpec(d.severities);
       })
       .catch(() => setSpecs([]));
   }, []);
@@ -1532,7 +1538,7 @@ export default function ContractRecord() {
                       <div className="lim lim-h">
                         <div className="lq"><b>What you agreed</b></div>
                         <div className="sub">The limit</div>
-                        <div className="sub">If a file breaks it</div>
+                        <div className="sub">Severity Classification</div>
                       </div>
                       {rows.map(l => {
                         const e = draftLimits[l.name];
@@ -1574,24 +1580,24 @@ export default function ContractRecord() {
                               {!e ? (
                                 <span className="sub">—</span>
                               ) : l.checkable ? (
-                                <div className="segpick">
-                                  <button
-                                    type="button"
-                                    className={sev === "critical" ? "on" : ""}
-                                    onClick={() => setDraftLimit(
-                                      l.name, { severity: "critical" })}
-                                  >
-                                    Stop the row
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={sev === "warning" ? "on" : ""}
-                                    onClick={() => setDraftLimit(
-                                      l.name, { severity: "warning" })}
-                                  >
-                                    Just flag it
-                                  </button>
-                                </div>
+                                <>
+                                  <div className="segpick">
+                                    {sevSpec.map(sv => (
+                                      <button
+                                        key={sv.key} type="button"
+                                        title={sv.hint}
+                                        className={sev === sv.key ? "on" : ""}
+                                        onClick={() => setDraftLimit(
+                                          l.name, { severity: sv.key })}
+                                      >
+                                        {sv.label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                  <div className="sub" style={{ marginTop: 4 }}>
+                                    {sevSpec.find(x => x.key === sev)?.action ?? ""}
+                                  </div>
+                                </>
                               ) : (
                                 <span className="sub">
                                   Goes in the wording. Nothing in a file to
@@ -1844,7 +1850,7 @@ export default function ContractRecord() {
             <div className="tbl-wrap">
               <table>
                 <thead>
-                  <tr><th>Term</th><th>Agreed</th><th>If a file breaks it</th></tr>
+                  <tr><th>Term</th><th>Agreed</th><th>Severity Classification</th></tr>
                 </thead>
                 <tbody>
                   {limitGroups.map(g => {
@@ -1879,8 +1885,7 @@ export default function ContractRecord() {
                                   <span className={`badge ${
                                     e.severity === "critical" ? "b-crit" : "b-warn"}`}>
                                     <span className="d" />
-                                    {e.severity === "critical"
-                                      ? "Stop the row" : "Flag it"}
+                                    {sevLabel(e.severity)}
                                   </span>
                                 )}
                               </td>

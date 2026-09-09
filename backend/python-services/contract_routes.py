@@ -686,7 +686,10 @@ def contract_types(_p: Principal = Depends(current_principal)):
             # form offers exactly what the wording builder can draw and the
             # validator will accept, because all three read this one list.
             "signature_block": esign_pdf.signature_block_spec(),
-            "severities": list(ct.SEVERITIES)}
+            # How hard a check bites, with the words for it. Objects rather
+            # than bare keys so the form, the summary badge and the sample
+            # contract all name a severity the same way — see SEVERITY_VOCAB.
+            "severities": [dict(sv) for sv in ct.SEVERITY_VOCAB]}
 
 
 @router.get("/counterparties")

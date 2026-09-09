@@ -31,9 +31,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, String
+from sqlalchemy import func, or_, String
 
 from db import (
     SessionLocal, Party, Program, Contract, AppUser,
@@ -377,7 +377,7 @@ def broker_create(body: NewBrokerBody,
 
 @router.get("/brokers/{broker_party_id}")
 def broker_detail(broker_party_id: int, principal: Principal = Depends(current_principal)):
-    """One broker: its programmes with this carrier, its contracts, its people.
+    """One broker: its programmes with this carrier, and its people.
 
     Deliberately scoped to THIS carrier. The same broker may produce far more
     business for someone else; none of that is this carrier's to see.
@@ -394,13 +394,6 @@ def broker_detail(broker_party_id: int, principal: Principal = Depends(current_p
             .order_by(Program.name)
             .all()
         )
-        contracts = (
-            s.query(Contract)
-            .filter(Contract.broker_party_id == broker_party_id,
-                    Contract.tenant_id == tid)
-            .order_by(Contract.created_at.desc())
-            .all()
-        )
         users = (
             s.query(AppUser)
             .filter(AppUser.broker_party_id == broker_party_id)
@@ -414,23 +407,10 @@ def broker_detail(broker_party_id: int, principal: Principal = Depends(current_p
                  "assigned_at": _iso_utc(link.created_at)}
                 for link, p in programmes
             ],
-            "contracts": [
-                # `name` as well as `filename`: a contract WRITTEN in Kavachio
-                # has no file, so this list showed it as "Contract 1459" beside
-                # uploads that showed their own names. It has a name — the one
-                # the carrier typed — and it is what everything else calls it.
-                {"id": c.id, "name": c.name, "filename": c.filename,
-                 "program_id": c.program_id,
-                 # Whether it is app-managed decides where its name should lead:
-                 # a written contract's home is its own record, not the page
-                 # that reads clauses out of an uploaded document.
-                 "is_app_managed": bool(c.is_app_managed),
-                 "status": c.status,
-                 "inception_dt": str(c.inception_dt) if c.inception_dt else None,
-                 "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None,
-                 "created_at": _iso_utc(c.created_at)}
-                for c in contracts
-            ],
+            # Contracts are NOT here: a broker of any size has hundreds and
+            # the screen shows ten. See broker_contracts below, which filters
+            # and pages them in SQL.
+            #
             # Their people, but never their password/reset columns.
             "users": [
                 {"id": u.id, "full_name": u.full_name, "email": u.email,
@@ -440,6 +420,67 @@ def broker_detail(broker_party_id: int, principal: Principal = Depends(current_p
             ],
         }
 
+
+def _broker_contract_dict(c: Contract) -> dict:
+    return {
+        # `name` as well as `filename`: a contract WRITTEN in Kavachio has no
+        # file, so this list showed it as "Contract 1459" beside uploads that
+        # showed their own names. It has a name — the one the carrier typed —
+        # and it is what everything else calls it.
+        "id": c.id, "name": c.name, "filename": c.filename,
+        "program_id": c.program_id,
+        # Whether it is app-managed decides where its name should lead: a
+        # written contract's home is its own record, not the page that reads
+        # clauses out of an uploaded document.
+        "is_app_managed": bool(c.is_app_managed),
+        "status": c.status,
+        "inception_dt": str(c.inception_dt) if c.inception_dt else None,
+        "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None,
+        "created_at": _iso_utc(c.created_at),
+    }
+
+
+@router.get("/brokers/{broker_party_id}/contracts")
+def broker_contracts(broker_party_id: int,
+                     q: Optional[str] = Query(None, description="match on name, UMR or filename"),
+                     program_id: Optional[int] = Query(None),
+                     limit: int = Query(10, ge=1, le=100),
+                     offset: int = Query(0, ge=0),
+                     principal: Principal = Depends(current_principal)):
+    """One page of what this broker holds with this carrier.
+
+    Split out of broker_detail so the filters and the LIMIT run in SQL. The
+    page above it — programmes, people, the header — does not change as the
+    table is searched or paged, so it is fetched once and left alone.
+
+    `total` is the count AFTER filtering, which is what the pager counts
+    pages from; an unfiltered total would offer pages that come back empty.
+    """
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal)
+        # Same scope check as the detail page: a carrier can only ever see a
+        # broker that is on one of its own programmes.
+        _assert_broker(s, broker_party_id, tid)
+
+        query = s.query(Contract).filter(
+            Contract.broker_party_id == broker_party_id,
+            Contract.tenant_id == tid)
+        if program_id:
+            query = query.filter(Contract.program_id == program_id)
+        if q and q.strip():
+            like = f"%{q.strip()}%"
+            query = query.filter(or_(Contract.name.ilike(like),
+                                     Contract.umr.ilike(like),
+                                     Contract.filename.ilike(like)))
+
+        total = query.count()
+        # id as the tiebreak: two contracts added in the same second would
+        # otherwise be free to swap places between pages, which shows one of
+        # them twice and hides the other.
+        rows = (query.order_by(Contract.created_at.desc(), Contract.id.desc())
+                .limit(limit).offset(offset).all())
+        return {"contracts": [_broker_contract_dict(c) for c in rows],
+                "total": total}
 
 # =============================================================================
 #  THE NEGOTIATION THREAD

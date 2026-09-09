@@ -330,7 +330,10 @@ export type AgreedLimitSpec = {
   choices: string[] | null;
   group: "underwriting" | "commercial";
   checkable: boolean;
-  default_severity: "critical" | "warning" | null;
+  /** A key from `severities` — see SeveritySpec. Deliberately not a union of
+   *  literals: the list of severities is served, and spelling it out here made
+   *  the client the second place that decided what one could be. */
+  default_severity: string | null;
   /** Offered before "show every term". Served rather than decided here: the
    *  form used to hold its own list, so a limit added to the vocabulary existed
    *  everywhere except the screen somebody would have typed it on. */
@@ -340,7 +343,8 @@ export type AgreedLimitSpec = {
 /** What the carrier agreed, as the flow holds it. */
 export type AgreedLimits = Record<string, {
   value: string | number;
-  severity?: "critical" | "warning" | null;
+  /** A key from `severities` — see SeveritySpec. */
+  severity?: string | null;
 }>;
 
 /** A section of the wording. `body` holds TOKENS ({{commission_max_pct}});
@@ -444,6 +448,17 @@ export type SignatureLayout = {
   blocks: Record<string, { page: number; x: number; y: number }>;
 };
 
+/** How hard a check bites, and the words for it — served, never typed here.
+ *
+ *  `key` is what is stored; `label` is the name a person picks ("Critical");
+ *  `action` says what actually happens to a row that breaks it ("Stops the
+ *  row"). Renaming a severity is a change to SEVERITY_VOCAB on the server and
+ *  nothing else — the form, the summary badge and the sample contract all read
+ *  the same two words. */
+export type SeveritySpec = {
+  key: string; label: string; action: string; hint: string;
+};
+
 export const getContractTypes = () =>
   api.get<{
     types: ContractTypeSpec[]; default: string; lifecycle: Lifecycle[];
@@ -452,7 +467,7 @@ export const getContractTypes = () =>
      *  about a duration is stored — see utils/term.ts. */
     term: TermSpec;
     signature_block: SignatureBlockSpec;
-    severities: string[];
+    severities: SeveritySpec[];
   }>("/contract-types").then(r => r.data);
 
 /** Steps 2 and 3, computed without writing anything. Called as the terms

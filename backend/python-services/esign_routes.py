@@ -749,7 +749,7 @@ def _build_document(s, body: EnvelopeIn, env: EsignEnvelope, insurer: SignerIn,
         cur = contract.premium_cap_currency or terms.currency
         terms.limits.append(Limit(
             "Most premium for the whole term",
-            f"{cur} {contract.premium_cap_amount:,.0f}", "Just flag it"))
+            f"{cur} {contract.premium_cap_amount:,.0f}", "warning"))
     return build_sample_contract(terms)
 
 

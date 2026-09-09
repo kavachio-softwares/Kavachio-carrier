@@ -56,6 +56,21 @@ export type ProgrammeBroker = BrokerSummary & {
   assigned_at: string | null;
 };
 
+/** One row of a broker's contract table. No longer part of BrokerDetail: the
+ *  table asks for a page of these at a time (listBrokerContracts). */
+export type BrokerContractRow = {
+  id: number;
+  /** What the carrier called it. A contract WRITTEN here has no file, so this
+   *  is the only name it has — and it is the one every other screen shows. */
+  name: string | null;
+  filename: string | null; program_id: number | null;
+  /** Written here rather than uploaded, which decides where its name leads:
+   *  its own record, not the page that reads clauses out of a document. */
+  is_app_managed: boolean;
+  status: string | null;
+  inception_dt: string | null; expiry_dt: string | null; created_at: string | null;
+};
+
 export type BrokerDetail = {
   id: number;
   legal_name: string;
@@ -66,19 +81,6 @@ export type BrokerDetail = {
   onboarding_status: string | null;
   created_at: string | null;
   programmes: { id: number; name: string; status: string; assigned_at: string | null }[];
-  contracts: {
-    id: number;
-    /** What the carrier called it. A contract WRITTEN here has no file, so
-     *  this is the only name it has — and it is the one every other screen
-     *  shows. */
-    name: string | null;
-    filename: string | null; program_id: number | null;
-    /** Written here rather than uploaded, which decides where its name leads:
-     *  its own record, not the page that reads clauses out of a document. */
-    is_app_managed: boolean;
-    status: string | null;
-    inception_dt: string | null; expiry_dt: string | null; created_at: string | null;
-  }[];
   users: {
     id: number; full_name: string; email: string;
     role: string; status: string; accepted_at: string | null;
@@ -115,6 +117,13 @@ export const getBrokers = () =>
 
 export const getBroker = (brokerId: number) =>
   api.get<BrokerDetail>(`/brokers/${brokerId}`).then(r => r.data);
+
+/** One page of a broker's contracts, filtered and counted by the server. */
+export const listBrokerContracts = (brokerId: number, params: {
+  q?: string; program_id?: number; limit: number; offset: number;
+}) =>
+  api.get<{ contracts: BrokerContractRow[]; total: number }>(
+    `/brokers/${brokerId}/contracts`, { params }).then(r => r.data);
 
 export const getProgrammeBrokers = (programId: number) =>
   api.get<ProgrammeBroker[]>(`/programs/${programId}/brokers`).then(r => r.data);

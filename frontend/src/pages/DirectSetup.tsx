@@ -1377,14 +1377,9 @@ export default function DirectSetup() {
             <h3 className="text-[13px] font-semibold">Scope</h3>
             <span className="text-xs text-ink-muted">Who this setup is for.</span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl">
-            {/* The carrier is who you are, not a choice. Shown so the scope
-                is unambiguous, but there is nothing here to pick. */}
-            <Field label="Carrier">
-              <div className="input flex items-center bg-surface-2 text-ink-muted">
-                {carrierName || mga}
-              </div>
-            </Field>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* The carrier is who you are, not a choice, so it is not asked for
+                or shown here — it is already in the setup's name. */}
             <Field label="Program">
               <Select value={creatingProgram ? "__new__" : programId} onChange={e => {
                 if (e.target.value === "__new__") {
@@ -1403,12 +1398,11 @@ export default function DirectSetup() {
                 <option value="__new__">➕ Add New Program…</option>
               </Select>
             </Field>
-
             {/* The broker. The contract follows from it rather than being asked
                 for again — see BrokerContractScope for why. */}
             <BrokerSelect scope={scope} disabled={scopeIncomplete} />
           </div>
-          <div className="max-w-2xl mt-3">
+          <div className="mt-3">
             {/* Which contract on file this setup runs on — ONE of them. The
                 radio and the "on file" chip on the Contracts field below are
                 the SAME state (reusedContracts, held at a single entry), so

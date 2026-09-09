@@ -291,7 +291,7 @@ export default function KavachioAdminDashboard() {
       col: C.ink, up: (d.runs.delta_pct ?? 0) >= 0,
       info: `Bordereaux processed in the selected date range (${rangeMeta.label.toLowerCase()}). `
         + "The change compares this range with the immediately preceding one of the same length." },
-    { k: "Remaining Program Setup", v: d.mapping_queue.open,
+    { k: "Remaining Bordereau Setup", v: d.mapping_queue.open,
       foot: `Awaiting Review · ${d.mapping_queue.in_progress} in Progress`, col: C.warn,
       info: "Data-mapping tasks still needing Kavachio staff to map a new file layout to the data model. "
         + "“Awaiting Review” haven’t been picked up; “In Progress” are being worked on." },

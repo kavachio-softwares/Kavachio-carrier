@@ -48,10 +48,20 @@ BRAND = (0.027, 0.447, 0.510)          # the platform teal, #077282
 @dataclass
 class Limit:
     """One agreed limit — a line of the schedule, and later a check that runs on
-    every file the broker sends."""
+    every file the broker sends.
+
+    `severity` is a key from contract_types.SEVERITY_VOCAB, never a phrase: the
+    document prints whatever that vocabulary calls it, so the schedule and the
+    form can never describe the same limit in two different words.
+    """
     what: str
     value: str
-    on_breach: str = "Stop the row"
+    severity: str = "critical"
+
+    @property
+    def on_breach(self) -> str:
+        import contract_types as ct
+        return ct.SEVERITY_ACTION.get(self.severity, self.severity)
 
 
 @dataclass
@@ -80,8 +90,8 @@ class ContractTerms:
         Limit("Most commission the carrier will pay", "15% of premium on each risk"),
         Limit("Smallest premium the carrier will take", "USD 500 per policy"),
         Limit("Biggest risk the carrier will cover", "USD 5,000,000 any one risk"),
-        Limit("Most premium for the whole term", "USD 12,000,000", "Just flag it"),
-        Limit("How late a bordereau may be", "15 days after month end", "Just flag it"),
+        Limit("Most premium for the whole term", "USD 12,000,000", "warning"),
+        Limit("How late a bordereau may be", "15 days after month end", "warning"),
     ])
     initials_every_page: bool = False
 

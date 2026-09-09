@@ -417,8 +417,9 @@ def validate(contract_type: str, values: dict[str, Any],
 #     the question   in the words somebody says out loud ("Most commission you
 #                    will pay"), not the column name (commission_pct)
 #     the answer     what was agreed
-#     the teeth      what happens when a file breaks it — "Stop the row" or
-#                    "Just flag it"
+#     the teeth      how hard it bites when a file breaks it — Critical, which
+#                    stops the row, or Warning, which only flags it. See
+#                    SEVERITY_VOCAB for the words.
 #
 # That third column is the point of the whole flow. Uploading a PDF gets you
 # clauses a model had to interpret and a severity somebody guessed at later;
@@ -674,7 +675,26 @@ LIMIT_GROUPS = [
      "what the two of you are paying each other"),
 ]
 
-SEVERITIES = ("critical", "warning")
+# ── how hard a check bites ──────────────────────────────────────────────────
+# The vocabulary, once. `key` is what is stored on the row and on
+# validation_rule.severity; `label` is what a person sees; `action` says what
+# actually happens to a bordereau row that breaks it.
+#
+# The labels used to be typed into the form, the summary badge and the sample
+# contract separately — three copies of the same two words, free to drift, and
+# renaming one meant finding the other six by hand. They are served from here
+# now (see /contract-types), so a rename is this tuple and nothing else.
+SEVERITY_VOCAB: tuple[dict[str, str], ...] = (
+    {"key": "critical", "label": "Critical", "action": "Stops the row",
+     "hint": "a must-fix breach — the row is not acceptable as submitted"},
+    {"key": "warning", "label": "Warning", "action": "Flags the row",
+     "hint": "worth knowing about, but it does not block the file"},
+)
+
+SEVERITIES = tuple(s["key"] for s in SEVERITY_VOCAB)
+
+SEVERITY_LABEL = {s["key"]: s["label"] for s in SEVERITY_VOCAB}
+SEVERITY_ACTION = {s["key"]: s["action"] for s in SEVERITY_VOCAB}
 
 
 def clean_agreed_limits(raw: dict | None) -> dict:
