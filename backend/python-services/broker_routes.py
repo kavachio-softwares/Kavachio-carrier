@@ -157,13 +157,12 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
     """Every contract this broker holds, across every programme it is on.
 
     Two kinds live in one list: contracts the CARRIER added, which work
-    straight away, and contracts the BROKER added, which wait for approval.
-    Only a live one can be set up, so the UI needs both facts per row.
+    straight away. Only a live one can be set up, so the UI needs that per row.
 
-    IT ALSO CARRIES THE LIFECYCLE, and that is not a detail. `approval_status`
-    answers "may this broker set it up"; it says nothing about whether the
-    carrier has sent terms over for the broker to read, argued back at, or is
-    waiting on their signature. Without the lifecycle a contract sitting in
+    IT ALSO CARRIES THE LIFECYCLE, and that is not a detail. Whether a contract
+    may be set up says nothing about whether the carrier has sent terms over for
+    the broker to read, argued back at, or is waiting on their signature.
+    Without the lifecycle a contract sitting in
     `in_review` — the whole point of which is that the BROKER has to act —
     renders as an ordinary approved row, and the negotiation is invisible to
     the one person it is waiting on. `whose_turn` is included for the same
@@ -212,7 +211,6 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
                 "carrier": {"id": cid, "name": carriers.get(cid, "—")},
                 "inception_dt": c.inception_dt.isoformat() if c.inception_dt else None,
                 "expiry_dt": c.expiry_dt.isoformat() if c.expiry_dt else None,
-                "approval_status": c.approval_status,
                 "source": _contract_source(s, c, bid),
                 "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
                 "created_at": c.created_at.isoformat() if getattr(c, "created_at", None) else None,
@@ -242,7 +240,9 @@ def broker_dashboard(p: Principal = Depends(current_principal)):
         progs = ({pr.id: pr.name for pr in s.query(Program).filter(Program.id.in_(prog_ids)).all()}
                  if prog_ids else {})
 
-        pending, on_me, live = [], [], 0
+        # `pending` — contracts a broker had brought and the carrier had still
+        # to approve — is gone with the upload flow that created them.
+        on_me, live = [], 0
         if prog_ids:
             rows = (s.query(Contract)
                       .filter(Contract.program_id.in_(prog_ids),
@@ -271,13 +271,6 @@ def broker_dashboard(p: Principal = Depends(current_principal)):
                                  else "sign it"),
                     })
 
-                if c.approval_status == "pending_approval":
-                    pending.append({
-                        "id": c.id, "filename": c.filename,
-                        "programme": progs.get(c.program_id, "—"),
-                        "carrier": carrier_name,
-                        "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
-                    })
                 # LIVE means in force, not merely approved. Since a contract
                 # goes in force only when both sides have signed it, an
                 # approved-but-unsigned one is not something to produce
@@ -289,13 +282,11 @@ def broker_dashboard(p: Principal = Depends(current_principal)):
             "broker": {"id": bid, "name": me.legal_name if me else "—"},
             "carriers": [{"id": i, "name": carriers.get(i, "—")} for i in carrier_ids],
             "counts": {
-                "waiting_on_carrier": len(pending),
                 "waiting_on_me": len(on_me),
                 "live_contracts": live,
                 "programmes": len(links),
                 "carriers": len(carrier_ids),
             },
-            "waiting": sorted(pending, key=lambda r: r["submitted_at"] or ""),
             # The queue only this broker can move.
             "waiting_on_me": on_me,
         }

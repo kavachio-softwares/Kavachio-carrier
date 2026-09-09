@@ -1,5 +1,5 @@
 /**
- * Shared exception-triage UI — used by UploadExceptions page and Outputs modal.
+ * Shared exception-triage UI — used by the UploadExceptions page.
  *
  * Groups flat StoredException[] by rule type so 13 identical errors collapse
  * to one card.  When a mapper spec is provided, each exception row also shows

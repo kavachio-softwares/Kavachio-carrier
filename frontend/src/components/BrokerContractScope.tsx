@@ -173,15 +173,11 @@ export function BrokerSelect({ scope, disabled }: {
  *
  *  `contract_count` includes contracts still waiting on the carrier, so a
  *  broker could be offered as having "1 contract" on a screen that says in the
- *  next breath that the programme has nothing approved. The approved count is
- *  the one that decides whether they can be worked with, and a broker with none
+ *  next breath that the programme has nothing on it. A broker with no contract
  *  says so rather than looking ready. */
 function brokerNote(b: ProgrammeBroker): string {
   const live = b.approved_contract_count ?? b.contract_count;
   if (live > 0) return `${live} live contract${live === 1 ? "" : "s"}`;
-  if (b.pending_approvals > 0) {
-    return `${b.pending_approvals} contract${b.pending_approvals === 1 ? "" : "s"} awaiting your approval`;
-  }
   return "no contract yet";
 }
 

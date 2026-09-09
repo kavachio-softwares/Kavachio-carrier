@@ -262,7 +262,7 @@ export default function OutputTemplate() {
                 ))}
               </Select>
             </label>
-            <Link to="/outputs"><Button variant="ghost">Cancel</Button></Link>
+            <Link to="/direct/setups"><Button variant="ghost">Cancel</Button></Link>
             {!hasAnyCandidates && (
               <Button variant="secondary" onClick={refreshCandidates} disabled={busy || refreshing}>
                 <RefreshCw size={14} /> Re-Run AI Mapping

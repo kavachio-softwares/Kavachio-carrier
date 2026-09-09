@@ -2,10 +2,11 @@
  * My Contracts — every contract this broker holds, across every programme a
  * carrier has put them on.
  *
- * Two kinds sit in one list. A contract the CARRIER added works straight away.
- * A contract the BROKER added waits until the carrier approves it, and only a
- * live one can be set up. That approval is the only permission a broker ever
- * needs — after it, the setup and everything downstream is theirs to do.
+ * Every one of them is the carrier's: a broker is a party to a contract, not
+ * the author of one. This list used to carry a second column for the carrier's
+ * approval of contracts the BROKER had uploaded — that upload and the gate that
+ * policed it were removed together, so what is left is the single question this
+ * page was always really scanned for: whose move is it.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
@@ -17,13 +18,9 @@ import { inAppSigningUrl } from "../api/esign";
 import { fmtDate } from "../utils/date";
 import { ListFilterBar } from "../components/ListFilterBar";
 
-/** Where the contract is in its life, said from the BROKER's side.
- *
- *  This is a different question from `approval_status`, which only answers
- *  whether this broker may set the contract up. A contract in `in_review` is
- *  one the carrier has sent over for the broker to read — the negotiation is
- *  waiting on THEM — and describing it as "approved" hides exactly the thing
- *  they need to see. */
+/** Where the contract is in its life, said from the BROKER's side. A contract
+ *  in `in_review` is one the carrier has sent over for them to read — the
+ *  negotiation is waiting on THEM, which is the thing they need to see. */
 const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   draft: { label: "Not in force yet", cls: "b-mut",
            note: "no signatures on it yet — it comes into force when both "
@@ -42,20 +39,6 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   superseded: { label: "Superseded", cls: "b-mut", note: "replaced by a renewal" },
 };
 
-/** What the row means to the broker, which is not the raw column value. */
-function approval(c: BrokerContract): { cls: string; label: string; note: string } {
-  if (c.approval_status === "approved")
-    return c.source === "carrier"
-      ? { cls: "b-ok", label: "No approval needed",
-          note: "the carrier raised this one themselves" }
-      : { cls: "b-ok", label: "Approved", note: "the carrier approved it" };
-  if (c.approval_status === "pending_approval")
-    return { cls: "b-warn", label: "Pending carrier", note: "you cannot set it up yet" };
-  if (c.approval_status === "rejected")
-    return { cls: "b-crit", label: "Rejected", note: "sent back with a reason" };
-  return { cls: "b-mut", label: "Draft", note: "not sent yet" };
-}
-
 export default function BrokerContracts() {
   const [rows, setRows] = useState<BrokerContract[] | null>(null);
   const [carriers, setCarriers] = useState<BrokerCarrier[]>([]);
@@ -73,8 +56,8 @@ export default function BrokerContracts() {
   useEffect(load, [load]);
 
   const shown = (rows ?? []).filter(r =>
-    !status
-    || (status === "mine" ? r.whose_turn === "broker" : r.approval_status === status));
+    !status || (status === "mine" ? r.whose_turn === "broker"
+                                  : r.lifecycle === status));
   const filtersActive = carrier !== "" || status !== "";
 
   // The only queue a broker cannot move by waiting. Surfaced above the table
@@ -92,11 +75,6 @@ export default function BrokerContracts() {
               Every contract you hold, across all the programmes you have been
               put on. You do not add the programme — the carrier does.
             </p>
-          </div>
-          <div className="actions">
-            <Link to="/broker/contracts/new" className="btn pri">
-              ＋ Upload Contract
-            </Link>
           </div>
         </div>
 
@@ -125,12 +103,9 @@ export default function BrokerContracts() {
         )}
 
         <div className="note" style={{ marginBottom: 16 }}>
-          <b>Two columns, two questions.</b> <b>State</b> is where the contract
-          is in its life and whose move it is — terms sent for you to read,
-          changes you asked for, yours to sign. <b>Approval</b> is only about
-          contracts <i>you</i> added, which wait for the carrier to accept them.
-          A contract can be approved and still not live: one goes in force when
-          both sides have signed it.
+          <b>State is whose move it is</b> — terms sent for you to read, changes
+          you asked for, yours to sign. A contract is not live until both sides
+          have signed it, so one can be fully agreed and still not in force.
         </div>
 
         <div className="card">
@@ -148,9 +123,10 @@ export default function BrokerContracts() {
                 options: [
                   { value: "", label: "All statuses" },
                   { value: "mine", label: "Waiting on me" },
-                  { value: "approved", label: "Live / Approved" },
-                  { value: "pending_approval", label: "Pending carrier" },
-                  { value: "rejected", label: "Rejected" },
+                  { value: "in_review", label: "Terms to read" },
+                  { value: "agreed", label: "Terms agreed" },
+                  { value: "active", label: "In force" },
+                  { value: "expired", label: "Expired" },
                 ],
               },
             ]}
@@ -163,19 +139,17 @@ export default function BrokerContracts() {
               <thead>
                 <tr>
                   <th>Contract</th><th>Carrier</th><th>Programme</th>
-                  <th>Term</th><th>State</th><th>Approval</th><th>Bordereau</th>
+                  <th>Term</th><th>State</th><th>Bordereau</th>
                 </tr>
               </thead>
               <tbody>
                 {shown.map(c => {
-                  const a = approval(c);
                   const st = STATE[c.lifecycle] ?? STATE.draft;
                   // A live contract is one you can actually produce against,
                   // so the column offers the thing to DO rather than a status
                   // word — "Not set up yet" named a screen the broker has no
                   // access to and could do nothing about.
-                  const canSetUp = c.approval_status === "approved"
-                    && c.lifecycle === "active";
+                  const canSetUp = c.lifecycle === "active";
                   return (
                     <tr key={c.id}>
                       <td>
@@ -196,17 +170,10 @@ export default function BrokerContracts() {
                           ? `${c.inception_dt} → ${c.expiry_dt}` : "—"}
                       </td>
                       <td>
-                        {/* The state, not the approval. These answer different
-                            questions and the broker is usually here for this
-                            one: whose move is it. */}
                         <span className={`badge ${st.cls}`}>
                           <span className="d" />{st.label}
                         </span>
                         <div className="sub">{st.note}</div>
-                      </td>
-                      <td>
-                        <span className={`badge ${a.cls}`}><span className="d" />{a.label}</span>
-                        <div className="sub">{a.note}</div>
                       </td>
                       <td className={canSetUp ? "" : "muted"}>
                         {canSetUp
@@ -220,12 +187,10 @@ export default function BrokerContracts() {
                              && (c.lifecycle === "agreed" || c.lifecycle === "signed"))
                             ? <a className="linkish" href={inAppSigningUrl(c.id)}
                                  target="_blank" rel="noreferrer">Sign it →</a>
-                          : c.approval_status !== "approved"
-                            ? "Locked"
-                            // Approved but not in force. Since a contract goes
-                            // live only when both sides have signed it, saying
-                            // "locked" would hide a thing the broker can act on.
-                            : "Not live yet"}
+                          // Not in force. Since a contract goes live only when
+                          // both sides have signed it, "locked" would hide a
+                          // thing the broker can act on.
+                          : "Not live yet"}
                       </td>
                     </tr>
                   );

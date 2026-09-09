@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, Server, Inbox, CalendarDays, ClipboardCheck,
+  FileCheck, Server, Inbox, CalendarDays,
 } from "lucide-react";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
@@ -79,12 +79,16 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     // bordereau setup. Reading the section top to bottom IS the flow.
     items: [
       { to: "/programs", label: "Programmes", icon: Layers },
-      // Contracts sit between the programme and the setup built on them, which
-      // is where they sit in the work: a programme exists, brokers go on it,
-      // contracts are raised against those pairs, and each contract is what a
-      // bordereau setup runs against.
+      // Brokers, not carriers. Kavachio creates carriers (Platform → Carriers)
+      // and this tenant IS one — what a carrier manages is the brokers that
+      // produce into its programmes. Brokers come straight after Programmes
+      // because putting brokers on a programme is the next thing that happens.
+      { to: "/brokers", label: "Brokers", icon: Users2 },
+      // Contracts sit between the programme/broker pair and the setup built on
+      // them, which is where they sit in the work: a programme exists, brokers
+      // go on it, contracts are raised against those pairs, and each contract
+      // is what a bordereau setup runs against.
       { to: "/contracts", label: "Contracts", icon: FileCheck },
-      { to: "/approvals", label: "Approvals", icon: ClipboardCheck },
       // Signatures is NOT a sidebar entry. Watching a round is watching a
       // contract, so it is reached from Contracts ("Signature history") and
       // from the contract's own record, filtered to that contract. A top-level
@@ -93,17 +97,19 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // beginning is the contract itself — the same reason there has never
       // been a "start a round" entry. The screen still lives at
       // /contracts/signatures; only the way in changed.
-      // Brokers, not carriers. Kavachio creates carriers (Platform → Carriers)
-      // and this tenant IS one — what a carrier manages is the brokers that
-      // produce into its programmes. The old "All Carriers" entry pointed at
-      // /parties, a leftover from when a tenant was an MGA that held carriers.
-      { to: "/brokers", label: "Brokers", icon: Users2 },
       { to: "/direct/setups", label: "Bordereau Setup", icon: Layers },
-      // Set up once when a broker is onboarded, then rarely touched — which
-      // is why the ways in sit under Configure and not in the monthly run.
+    ],
+  },
+  {
+    // How a broker's files reach us, and what has reached us so far — a
+    // different job from building the book above, so it gets its own section
+    // rather than a tail on Configure. Set up once when a broker is onboarded,
+    // then rarely touched, which is why it is not in the monthly run either.
+    title: "Files",
+    requires: "carrier_admin",
+    items: [
       { to: "/intake", label: "How Files Arrive", icon: Server },
       { to: "/intake/arrivals", label: "Files Received", icon: Inbox },
-      { to: "/parties", label: "All Carriers", icon: Users2 },
     ],
   },
   {
@@ -111,6 +117,9 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     requires: "carrier_admin",
     items: [
       { to: "/tenant", label: "Organization", icon: Building2 },
+      // The old party directory. It is a directory to look things up in, not
+      // part of building the book, so it sits with the other admin screens.
+      { to: "/parties", label: "All Carriers", icon: Users2 },
       { to: "/users", label: "Users & Roles", icon: UserCog },
       { to: "/rule-library", label: "Rule Library", icon: ListChecks },
     ],
@@ -150,9 +159,6 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // The column-mapping workflow (/uploads/mapper/*) belongs to Data Mapping Queue.
   if (pathname.startsWith("/uploads/mapper")) return "/admin/mapping-tasks";
 
-  // Programs / Outputs are the orphaned party → program → template → output
-  // stepper — no sidebar entry of their own, so they roll up under Trading
-  // Partners (programs/contracts are scoped to a carrier).
   // Programmes now own their own sub-screens (create, and a programme's
   // brokers), so they highlight Programmes rather than the old party directory.
   if (under("/programs")) return "/programs";
@@ -162,9 +168,8 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // An output template is part of a Bordereau Setup, and that is where the user
   // came from — highlighting anything else while they review a template they
   // opened from the setup screen makes the sidebar lie about where they are.
-  // The whole /outputs area belongs to that setup: /parties is no longer in the
-  // sidebar, so pointing at it would highlight nothing at all.
-  if (pathname.startsWith("/outputs/templates")) return "/direct/setups";
+  // A template is the only thing left under /outputs: the old Output Delivery
+  // screen and its party → program → template → output stepper are gone.
   if (under("/outputs")) return "/direct/setups";
 
   if (under("/parties")) return "/parties";

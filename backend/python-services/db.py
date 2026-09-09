@@ -540,17 +540,15 @@ class Contract(Base):
     broker_party_id = Column("contract_broker_party_id", Integer,
                              ForeignKey("party.party_id"), nullable=True, index=True)
     # The ONE approval in the platform. A contract a BROKER uploads waits for
-    # its carrier; a contract the CARRIER uploads is live immediately. Set by
-    # the DB trigger trg_set_contract_approval from who submitted it — never
-    # trust a client to say "approved".
-    # approved | pending_approval | rejected
-    approval_status = Column("contract_approval_status", String, default="approved")
+    # THE APPROVAL GATE IS GONE, and so is the broker-side upload it policed.
+    # `contract_approval_status`, `contract_approved_by_id` and
+    # `contract_approved_at` are left in the database — the schema is shared, and
+    # dropping a column is not this application's to do — but nothing reads or
+    # writes them any more, so they are not mapped here. An unmapped column
+    # cannot be revived by accident; a mapped one can.
     submitted_by_user_id = Column("contract_submitted_by_id", Integer,
                                   ForeignKey("app_user.user_id"), nullable=True)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
-    approved_by_user_id = Column("contract_approved_by_id", Integer,
-                                 ForeignKey("app_user.user_id"), nullable=True)
-    approved_at = Column(DateTime(timezone=True), nullable=True)
     # The agreed most-premium-they-may-write for the term. A LIMIT from the
     # wording — deliberately not an estimate, which is a forecast.
     premium_cap_amount = Column("contract_premium_cap_amount", Numeric, nullable=True)
@@ -580,12 +578,11 @@ class Contract(Base):
     notice_period_days = Column("contract_notice_period_days", Integer, nullable=True)
 
     # --- lifecycle ---------------------------------------------------------
-    # THREE status axes, because they answer three different questions:
-    #   approval_status  what the CARRIER decided (the gate).
+    # TWO status axes, because they answer two different questions:
     #   status_ops       what the extraction PIPELINE did with the file.
     #   lifecycle        where the CONTRACT itself is — see contract_types.
-    # Collapsing them would lose two of the three: a contract can be approved,
-    # extracted and still not in force because its term has not started.
+    # Collapsing them would lose one: a contract can be extracted and still not
+    # in force because its term has not started.
     lifecycle = Column("contract_status", String, nullable=True)
     lifecycle_effective_date = Column("contract_status_effective_date", Date, nullable=True)
     terminated_date = Column("contract_terminated_date", Date, nullable=True)

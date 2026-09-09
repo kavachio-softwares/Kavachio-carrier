@@ -5,9 +5,9 @@ actually implements:
 
     1. the carrier owns the lifecycle — programmes, brokers, contracts, setup
     2. the broker signs in and sees only what the carrier assigned it
-    3. the broker uploads a contract
-    4. the carrier reviews the extraction and approves or rejects it
-    5. once approved, the broker completes bordereau setup and supplies files
+    3. the carrier raises the contract and sends its terms to the broker
+    4. the broker reads the terms and either agrees them or asks for changes
+    5. both sides sign, and the contract goes in force
     6. the broker submits bordereaux and reads its own validation results
     7. the broker fixes what validation flagged
 
@@ -149,7 +149,7 @@ def programme_broker_remove(scope: CarrierScope = Depends(broker_scope),
 # ── 3. contracts (a contract is programme × broker) ─────────────────────────
 
 @router.get(_B + "/contracts")
-def broker_contracts_list(approved_only: bool = Query(default=False),
+def broker_contracts_list(
                           scope: CarrierScope = Depends(broker_scope)):
     """Contracts this broker holds on this programme.
 
@@ -162,13 +162,12 @@ def broker_contracts_list(approved_only: bool = Query(default=False),
     empty. The filtering is left to program_contracts_list rather than repeated
     here, so the two can never disagree about that rule.
 
-    `approved_only` drops anything still waiting on the carrier — only a live
-    contract can have an output template built on it.
+    It once took an `approved_only` flag, back when a contract could be waiting
+    on the carrier's approval. Nothing waits any more — that gate is gone.
     """
     return _app.program_contracts_list(
         program_id=scope.program_id,
         broker_party_id=scope.broker_party_id,
-        approved_only=approved_only,
         principal=scope.acting,
     )
 
@@ -185,11 +184,12 @@ async def broker_contract_upload(
     upload_token: Optional[str] = Form(default=None),
     scope: CarrierScope = Depends(broker_scope),
 ):
-    """Step 3 of the flow — the broker uploads a contract for this programme.
+    """Upload a contract for this programme, filed under this broker.
 
-    A contract a BROKER uploads waits for its carrier; one the CARRIER uploads
-    is live immediately. That decision is made from who submitted it (the DB
-    trigger trg_set_contract_approval), never from anything the client says.
+    This was "the broker uploads a contract and waits for the carrier to
+    approve it". There is no approval gate any more, and no broker-side upload
+    screen: a contract is the carrier's, and the broker in the address says who
+    it is WITH, not who brought it.
     """
     return await _app.program_contract_upload(
         program_id=scope.program_id, file=file,
@@ -210,36 +210,14 @@ def contract_detail(scope: CarrierScope = Depends(contract_scope)):
                                         principal=scope.acting)
 
 
-# ── 4. carrier review: approve / reject ─────────────────────────────────────
-
-@router.post(_T + "/approve")
-def contract_approve(body: _hier.ApprovalDecision = _hier.ApprovalDecision(),
-                     scope: CarrierScope = Depends(contract_scope),
-                     _guard: Principal = Depends(require_role("carrier_admin"))):
-    return _hier.contract_approve(contract_id=scope.contract_id, body=body,
-                                  principal=scope.acting)
-
-
-@router.post(_T + "/reject")
-def contract_reject(body: _hier.ApprovalDecision = _hier.ApprovalDecision(),
-                    scope: CarrierScope = Depends(contract_scope),
-                    _guard: Principal = Depends(require_role("carrier_admin"))):
-    return _hier.contract_reject(contract_id=scope.contract_id, body=body,
-                                 principal=scope.acting)
-
+# ── 4. the contract's thread ───────────────────────────────────────────────
 
 @router.get(_T + "/approvals")
 def contract_approval_history(scope: CarrierScope = Depends(contract_scope)):
-    """Every decision ever made on this contract — the contract row holds the
-    CURRENT state, this holds how it got there."""
+    """How this contract got to where it is — the negotiation thread: terms sent
+    out, changes asked for, terms agreed."""
     return _hier.contract_approval_history(contract_id=scope.contract_id,
                                            principal=scope.acting)
-
-
-@router.get(_C + "/approvals")
-def carrier_approvals_queue(scope: CarrierScope = Depends(carrier_scope)):
-    """What is waiting on THIS carrier — step 4's inbox."""
-    return _hier.approvals_queue(principal=scope.acting)
 
 
 # ── 5-7. bordereau: setup, submission, validation ───────────────────────────
@@ -359,29 +337,17 @@ def _carrier_party_id(s, carrier_id: int) -> int:
 def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
     """Can a bordereau be run against this contract yet, and against what.
 
-    Two things have to be true, and they fail for completely different reasons,
-    so they are reported separately rather than as one "not ready":
+    What has to be true is that a SETUP exists — the (programme × broker) setup
+    the carrier builds, which says how to read the spreadsheet. That is not
+    something the broker can fix themselves, which is exactly why the answer is
+    a reason and not an upload box that fails on submit.
 
-      the contract is live      a contract the carrier has not approved governs
-                                nothing, so there are no rules to validate on
-      a setup exists            the carrier has built the (programme × broker)
-                                setup that says how to read the spreadsheet
-
-    Neither is something the broker can fix themselves, which is exactly why
-    the answer is a reason and not an upload box that fails on submit.
+    It also used to require the contract to have cleared the carrier's approval
+    gate. There is no gate any more, so the only remaining question is the
+    setup.
     """
-    from db import Contract, DirectFormat, ExportTemplate, Pipeline
+    from db import DirectFormat, ExportTemplate, Pipeline
     with SessionLocal() as s:
-        c = s.get(Contract, scope.contract_id)
-        if c is not None and (c.approval_status or "approved") != "approved":
-            return {
-                "ready": False,
-                "reason": ("This contract is not live yet — the carrier has "
-                           "still to approve it. Until they do, there are no "
-                           "rules to check your file against."),
-                "setup": None,
-            }
-
         cpid = _carrier_party_id(s, scope.carrier_id)
 
         # Mirrors direct_run's resolution order exactly, so what this endpoint

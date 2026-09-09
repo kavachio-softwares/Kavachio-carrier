@@ -82,8 +82,6 @@ export type OpenChangeRequest = {
  */
 export type ContractActions = {
   edit: boolean;
-  submit: boolean;
-  approve: boolean;
   /** Carrier: put the terms out to the broker, or re-send after revising. */
   send_for_review: boolean;
   /** Carrier: settle the terms without sending them out, and go straight to
@@ -161,7 +159,6 @@ export type ContractRecord = {
   /** What the column holds, which differs from the above once a term lapses. */
   lifecycle_stored: string | null;
   lifecycle_effective_date: string | null;
-  approval_status: "approved" | "pending_approval" | "rejected";
   status_ops: string | null;
   terminated_date: string | null;
   termination_reason: string | null;
@@ -515,7 +512,6 @@ export type ContractFilters = {
   counterparty_id?: number;
   contract_type?: string;
   lifecycle?: string;
-  approval_status?: string;
   q?: string;
 };
 
@@ -549,10 +545,6 @@ export const updateContract = (
   // text of a contract.
 ) => api.patch<ContractRecord & { wording_retied?: string[] }>(
   `/contracts/${id}`, body).then(r => r.data);
-
-export const submitContract = (id: number, note?: string) =>
-  api.post<ContractRecord>(`/contracts/${id}/submit`, { note: note ?? null })
-     .then(r => r.data);
 
 export const activateContract = (id: number) =>
   api.post<ContractRecord>(`/contracts/${id}/activate`).then(r => r.data);

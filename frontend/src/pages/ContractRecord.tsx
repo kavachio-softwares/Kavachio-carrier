@@ -37,7 +37,7 @@ import {
   openDocument,
   bindChecks,
   generateRules, getContract, getContractTypes, renewContract, requestChanges,
-  sendForReview, skipReview, submitContract, submitSigned, terminateContract,
+  sendForReview, skipReview, submitSigned, terminateContract,
   downloadContractPdf, previewWording,
   updateContract, uploadDocument, fieldErrors,
   type ContractDocumentKind, type ContractField, type ContractRecord as Rec,
@@ -345,13 +345,10 @@ export default function ContractRecord() {
   }
 
   const st = STATE[rec.lifecycle] ?? STATE.draft;
-  // Whose draft this is changes what "draft" means. A broker's is waiting to be
-  // submitted; a carrier's is simply not live yet, because a carrier submits to
-  // nobody.
-  const draftNote = rec.approval_status === "pending_approval"
-    ? "Not submitted yet. Its terms can still be corrected."
-    : "Not live yet — nothing is checked against it. Its terms can still be "
-      + "changed, and you can make it live when you are ready.";
+  // A draft belongs to the carrier — there is no other kind now — so it means
+  // one thing: written down, not live, still editable.
+  const draftNote = "Not live yet — nothing is checked against it. Its terms "
+    + "can still be changed, and you can make it live when you are ready.";
   const a = rec.actions;
   const docs = rec.documents ?? [];
   const active = docs.filter(d => d.is_active);
@@ -1033,11 +1030,11 @@ export default function ContractRecord() {
             </span>
           </div>
           <div style={{ padding: "16px 20px" }}>
-            <div className="hint" style={{ marginTop: 0 }}>
-              Approval: {rec.approval_status.replace("_", " ")}
-              {rec.approved_at && <> · decided {fmtStamp(rec.approved_at)}</>}
-              {rec.submitted_at && <> · submitted {fmtStamp(rec.submitted_at)}</>}
-            </div>
+            {rec.submitted_at && (
+              <div className="hint" style={{ marginTop: 0 }}>
+                Raised {fmtStamp(rec.submitted_at)}
+              </div>
+            )}
             {rec.lifecycle === "terminated" && rec.termination_reason && (
               <div className="hint" style={{ color: "var(--p-crit-ink)" }}>
                 Terminated {fmtDate(rec.terminated_date)} — {rec.termination_reason}
@@ -1070,14 +1067,6 @@ export default function ContractRecord() {
             )}
 
             <div className="rowacts" style={{ marginTop: 14 }}>
-              {a.submit && (
-                <button
-                  className="btn pri" type="button" disabled={!!busy}
-                  onClick={() => run("submit", () => submitContract(id))}
-                >
-                  <Send size={13} /> Submit for approval
-                </button>
-              )}
               {a.send_for_review && (
                 <button
                   className="btn pri" type="button" disabled={!!busy}

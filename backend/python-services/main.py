@@ -113,9 +113,9 @@ app.include_router(output_template_router)
 app.include_router(intake_router)
 app.include_router(intake_api_router)
 # The contract as a RECORD: raise it from its terms, attach its wording,
-# references and endorsements, get it approved, renew or terminate it. Its
+# references and endorsements, negotiate, sign, renew or terminate it. Its
 # paths sit at /contracts/… and do not overlap the programme-scoped upload
-# routes on app_router or the approve/reject pair on hierarchy_router.
+# routes on app_router.
 app.include_router(contract_router)
 app.include_router(segment_router)
 # The signing round: set one up and watch it (/esign/…), and sign one from an
@@ -136,7 +136,7 @@ def _mark_deprecated_aliases() -> None:
     model, the rule library, platform admin) is deliberately left alone.
     """
     superseded = (
-        "/programs", "/contracts", "/approvals", "/brokers", "/hierarchy",
+        "/programs", "/contracts", "/brokers", "/hierarchy",
     )
     note = ("Deprecated — use the carrier-centric equivalent under "
             "/carriers/{carrier_id}/programs/{program_id}/brokers/"

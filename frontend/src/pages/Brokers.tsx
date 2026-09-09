@@ -129,13 +129,6 @@ export default function Brokers() {
                             {b.legal_name}
                           </Link>
                           <OnboardingBadge status={b.onboarding_status} />
-                          {b.pending_approvals > 0 && (
-                            // Still worth surfacing — a contract they submitted
-                            // is not live until it is approved.
-                            <span className="pill pill-amber">
-                              {b.pending_approvals} awaiting approval
-                            </span>
-                          )}
                         </div>
 
                         <div className="mt-2 flex flex-wrap items-center gap-1.5">

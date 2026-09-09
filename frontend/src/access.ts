@@ -55,7 +55,6 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // landing screen, and no access to the admin views above.
   { pattern: "/operator", requires: "operator", only: ["operator"] },
   { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
-  { pattern: "/broker/contracts/new", requires: "broker_admin", only: ["broker_admin"] },
   // Both broker seats, unlike the rest of this block. Running the bordereau IS
   // the operator's job — the seat exists for it — and an admin does it too, so
   // this is the one broker screen that is not the admin's alone.
@@ -93,8 +92,6 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // screen writes nothing, but it names the people who would sign.
   { pattern: "/contracts/:contractId/signature", requires: "operator",
     only: ["broker_admin", "operator", "carrier_admin", "kavachio_admin"] },
-  // The gate. Only the carrier decides.
-  { pattern: "/approvals", requires: "carrier_admin" },
   { pattern: "/brokers", requires: "carrier_admin" },
   // Create-a-Contract steps 3 and 4. Carrier-only: a broker never sends a
   // contract for signature, they are sent one. Their half of the flow is
@@ -106,9 +103,6 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // link from the wrong role.
   { pattern: "/contracts/signatures", requires: "carrier_admin" },
   { pattern: "/brokers/:brokerId", requires: "carrier_admin" },
-  { pattern: "/outputs", requires: "carrier_admin" },
-  { pattern: "/outputs/new-template", requires: "carrier_admin" },
-  { pattern: "/outputs/generate", requires: "carrier_admin" },
   { pattern: "/outputs/templates/:id", requires: "carrier_admin" },
   // Exception triage. Open to BROKER seats too, not only the carrier: a broker
   // who ran a bordereau has to be able to see what failed on their own file and

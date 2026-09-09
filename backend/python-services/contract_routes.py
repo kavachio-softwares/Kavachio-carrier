@@ -13,25 +13,22 @@ it was. The two meet in one place: `POST /contracts/{id}/generate-rules` feeds
 the contract's ACTIVE documents through the existing pipeline and writes the
 result back onto this contract instead of minting a second one.
 
-Three status axes, deliberately not collapsed into one:
+Two status axes, deliberately not collapsed into one:
 
-    approval_status   what the CARRIER decided. The gate — a broker's contract
-                      cannot be used until it says approved. Untouched by this
-                      file except through the approve/reject routes that already
-                      existed in hierarchy_routes.
     lifecycle         where the CONTRACT is: draft → pending → active →
-                      expired / terminated / superseded. New here.
+                      expired / terminated / superseded.
     status_ops        what the extraction pipeline did with the file.
 
-They answer different questions and a contract routinely differs on all three —
-approved, extracted, and not yet in force because its term starts in January.
+They answer different questions and a contract routinely differs on both —
+extracted, and not yet in force because its term starts in January.
 
 WHO MAY DO WHAT
-    A carrier admin owns the book: they raise contracts that are live on
-    arrival, and they decide on the ones brokers bring.
-    A broker raises a contract as a DRAFT, submits it, and waits. The DB trigger
-    trg_set_contract_approval — not this file — is what marks a broker's
-    contract pending, so a client can never assert "approved".
+    A carrier admin owns the book and raises every contract in it.
+    A broker is a PARTY to a contract, not its author: they read the terms sent
+    to them, push back on them, agree them and sign — but they do not bring one.
+    There was once a third path, where a broker uploaded a contract and the
+    carrier approved it into the book; the upload and the approval gate that
+    policed it were removed together, since neither is worth anything alone.
 """
 from __future__ import annotations
 
@@ -378,13 +375,11 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         "lifecycle_stored": c.lifecycle,
         "lifecycle_effective_date": (str(c.lifecycle_effective_date)
                                      if c.lifecycle_effective_date else None),
-        "approval_status": c.approval_status,
         "status_ops": c.status,
         "terminated_date": str(c.terminated_date) if c.terminated_date else None,
         "termination_reason": c.termination_reason,
         "renews_contract_id": c.renews_contract_id,
         "submitted_at": _iso_utc(c.submitted_at),
-        "approved_at": _iso_utc(c.approved_at),
         "created_at": _iso_utc(c.created_at),
 
         # ── documents ──
@@ -554,8 +549,6 @@ def _allowed_actions(c: Contract, missing: list[str],
         # broker has asked for changes, which is the whole point of asking.
         "edit": (state in ("draft", "pending")
                  or (state == "changes_requested" and is_carrier)),
-        "submit": state == "draft" and not blocked and is_broker,
-        "approve": c.approval_status == "pending_approval" and state == "pending",
 
         # ── the negotiation ──
         # Carrier sends its terms out. Only for a contract it owns and only to a
@@ -597,8 +590,7 @@ def _allowed_actions(c: Contract, missing: list[str],
         # Signing is what puts a contract in force, so this is only ever the
         # tidy-up path for a contract both sides signed while something else
         # was in the way. It never stands in for a signature.
-        "activate": (state in ("signed",) and not unsigned
-                     and c.approval_status == "approved" and not blocked
+        "activate": (state in ("signed",) and not unsigned and not blocked
                      and is_carrier),
 
         # ── signing ──
@@ -740,7 +732,6 @@ def list_contracts(
     counterparty_id: Optional[int] = Query(None),
     contract_type: Optional[str] = Query(None),
     lifecycle: Optional[str] = Query(None),
-    approval_status: Optional[str] = Query(None),
     q: Optional[str] = Query(None, description="match on name, UMR or filename"),
     p: Principal = Depends(current_principal),
 ):
@@ -764,8 +755,6 @@ def list_contracts(
             query = query.filter(Contract.broker_party_id == counterparty_id)
         if contract_type:
             query = query.filter(Contract.contract_type == contract_type)
-        if approval_status:
-            query = query.filter(Contract.approval_status == approval_status)
         if q:
             like = f"%{q.strip()}%"
             query = query.filter(or_(Contract.name.ilike(like),
@@ -1051,57 +1040,48 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
                             if isinstance(sg, dict) and (sg.get("name") or "").strip()],
             }
 
+        # A BROKER NO LONGER RAISES CONTRACTS. The carrier owns the book, and
+        # this used to be the other half of that: a broker could bring one, and
+        # it sat behind an approval gate until the carrier let it in. Both went
+        # together — with nobody bringing a contract there is nothing to
+        # approve, and with no gate there is nothing to hold a broker's upload.
+        # Refused here rather than only in the UI, because the endpoint is the
+        # thing that decides.
         if p.is_broker:
-            # Setting the submitter is what makes the DB trigger
-            # trg_set_contract_approval mark this pending_approval — from the
-            # submitter's STORED role, so a client can never assert "approved".
-            #
-            # The status is ALSO set here, from the role in the signed token.
-            # Not redundancy for its own sake: the trigger reads app_user, and
-            # if that lookup ever failed to identify the seat as a broker's, the
-            # row would fall through to its 'approved' default — and a
-            # half-finished draft would read as live to everything downstream
-            # that filters on approved_only. The trigger still runs and still
-            # has the last word; this only makes the failure mode safe.
-            c.submitted_by_user_id = p.user_id
-            c.approval_status = "pending_approval"
+            raise HTTPException(
+                403, "a contract is raised by the carrier — a broker is a party "
+                     "to one, not the author of it")
+        # Two ways to finish, and neither is "live". A contract goes in
+        # force because both sides SIGNED it — see sign_contract — so
+        # creating one already active would be asserting a signing that
+        # never happened, in the one place nobody could later point at.
+        mode = body.create_as or ("review" if body.send_for_review else "draft")
+        if mode == "live":
+            raise HTTPException(400, {
+                "message": "a contract cannot be created in force. Both "
+                           "sides sign it, and the second signature is "
+                           "what puts it in force.",
+                "errors": {"create_as": "not allowed"}})
+        if mode not in ("draft", "review"):
+            raise HTTPException(400, {
+                "message": f"“{mode}” is not a way to create a contract. "
+                           f"Use draft or review.",
+                "errors": {"create_as": "unknown"}})
+        if mode == "review":
+            # These are PROPOSED terms. They go out to the broker and the
+            # contract is not in force until the broker has agreed them and
+            # the carrier has put it in force.
+            if spec["counterparty_party_type"] != "broker":
+                raise HTTPException(
+                    400, "only an insurer ↔ broker contract can go out for "
+                         "review — a reinsurer has no seat in Kavachio, so "
+                         "there is nobody on the other side to read it")
+            c.lifecycle = "in_review"
+        elif mode == "draft":
+            # Written down and nothing more: not live, nothing checked, and
+            # the terms still editable. What makes it not-live is the
+            # lifecycle, and nothing else.
             c.lifecycle = "draft"
-        else:
-            # The carrier owns the book — there is nobody left to approve it.
-            c.approved_by_user_id = p.user_id
-            # Two ways to finish, and neither is "live". A contract goes in
-            # force because both sides SIGNED it — see sign_contract — so
-            # creating one already active would be asserting a signing that
-            # never happened, in the one place nobody could later point at.
-            mode = body.create_as or ("review" if body.send_for_review else "draft")
-            if mode == "live":
-                raise HTTPException(400, {
-                    "message": "a contract cannot be created in force. Both "
-                               "sides sign it, and the second signature is "
-                               "what puts it in force.",
-                    "errors": {"create_as": "not allowed"}})
-            if mode not in ("draft", "review"):
-                raise HTTPException(400, {
-                    "message": f"“{mode}” is not a way to create a contract. "
-                               f"Use draft or review.",
-                    "errors": {"create_as": "unknown"}})
-            if mode == "review":
-                # These are PROPOSED terms. They go out to the broker and the
-                # contract is not in force until the broker has agreed them and
-                # the carrier has put it in force.
-                if spec["counterparty_party_type"] != "broker":
-                    raise HTTPException(
-                        400, "only an insurer ↔ broker contract can go out for "
-                             "review — a reinsurer has no seat in Kavachio, so "
-                             "there is nobody on the other side to read it")
-                c.lifecycle = "in_review"
-            elif mode == "draft":
-                # Written down and nothing more: not live, nothing checked,
-                # and the terms still editable. The carrier's own draft needs
-                # no approval — approval_status stays approved, because the
-                # gate is about whose contract it is, not whether it is
-                # finished. What makes it not-live is the lifecycle.
-                c.lifecycle = "draft"
         c.lifecycle_effective_date = c.inception_dt or _today()
 
         s.add(c)
@@ -1440,55 +1420,6 @@ def _move(c: Contract, to: str) -> None:
 
 class Note(BaseModel):
     note: Optional[str] = None
-
-
-@router.post("/contracts/{contract_id}/submit")
-def submit_contract(contract_id: int, body: Note = Note(),
-                    p: Principal = Depends(current_principal)):
-    """Send a draft to the carrier for a decision.
-
-    Refused while the wording defers to a document nobody has supplied: those
-    clauses are known to produce no rule, so the carrier would be approving a
-    contract whose terms are partly unreadable.
-    """
-    with SessionLocal() as s:
-        c = _contract_access(s, p, contract_id)
-        docs = s.query(ContractDocument).filter(
-            ContractDocument.contract_id == c.id).all()
-        missing = _missing_references(c, docs)
-        if missing:
-            raise HTTPException(400, {
-                "message": "This contract defers to document(s) that have not "
-                           "been supplied, so some of its clauses cannot be "
-                           "checked. Attach them before submitting.",
-                "errors": {"documents": ", ".join(missing)},
-            })
-
-        try:
-            ct.validate(c.contract_type or "", {
-                f: getattr(c, ct.FIELDS[f]["attr"])
-                for f in ct.field_names(c.contract_type or "")
-                if f != "counterparty_party_id"
-            } | {"counterparty_party_id": c.broker_party_id})
-        except ct.ContractTypeError as e:
-            raise _bad_fields(e)
-
-        _move(c, "pending")
-        now = dt.datetime.now(dt.timezone.utc)
-        c.submitted_at = now
-        c.submitted_by_user_id = p.user_id
-        # The trigger only fires on INSERT, so a contract submitted after it was
-        # drafted has its gate set here — from the submitter's ROLE, never from
-        # anything the client said.
-        if p.is_broker:
-            c.approval_status = "pending_approval"
-
-        s.add(ContractApproval(
-            tenant_id=c.tenant_id, contract_id=c.id, action="submitted",
-            acted_by_user_id=p.user_id, acted_at=now, note=body.note))
-        s.commit()
-        s.refresh(c)
-        return _record(s, c, p=p)
 
 
 # =============================================================================
@@ -1838,7 +1769,7 @@ def submit_signed(contract_id: int, body: SignedSubmission = SignedSubmission(),
         # The carrier still has to sign. Going in force is the second
         # signature's job, whichever side gives it — see sign_contract.
         sigs = _signatures(s, c.id)
-        if not _unsigned_sides(sigs) and c.approval_status == "approved":
+        if not _unsigned_sides(sigs):
             docs_now = s.query(ContractDocument).filter(
                 ContractDocument.contract_id == c.id).all()
             if not _missing_references(c, docs_now):
@@ -2201,9 +2132,7 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
             docs = s.query(ContractDocument).filter(
                 ContractDocument.contract_id == c.id).all()
             missing = _missing_references(c, docs)
-            if c.approval_status != "approved":
-                blocked_by = ("it has not been approved yet")
-            elif missing:
+            if missing:
                 blocked_by = ("it defers to document(s) nobody has supplied: "
                               + ", ".join(missing))
             if blocked_by:
@@ -2294,10 +2223,6 @@ def activate_contract(contract_id: int, p: Principal = Depends(current_principal
                            f"because both sides signed it.",
                 "errors": {"signatures": ", ".join(unsigned)}})
 
-        if c.approval_status != "approved":
-            raise HTTPException(
-                409, "this contract has not been approved, so it cannot be put "
-                     "in force")
         docs = s.query(ContractDocument).filter(
             ContractDocument.contract_id == c.id).all()
         missing = _missing_references(c, docs)

@@ -80,7 +80,7 @@ export default function BrokerBordereau() {
     getBrokerContracts()
       .then(rows => {
         setContracts(rows);
-        const live = rows.filter(c => c.approval_status === "approved");
+        const live = rows.filter(c => c.lifecycle === "active");
         // One live contract is not a choice. Select it and let the broker get
         // on with the actual task.
         if (live.length === 1) setContractId(live[0].id);
@@ -88,11 +88,14 @@ export default function BrokerBordereau() {
       .catch(() => setContracts([]));
   }, []);
 
+  // In force, which is what decides whether a file can be produced against it.
+  // This used to read the carrier's approval instead — a weaker question, and
+  // one that no longer exists now the gate has gone.
   const live = useMemo(
-    () => (contracts ?? []).filter(c => c.approval_status === "approved"),
+    () => (contracts ?? []).filter(c => c.lifecycle === "active"),
     [contracts]);
   const waiting = useMemo(
-    () => (contracts ?? []).filter(c => c.approval_status === "pending_approval"),
+    () => (contracts ?? []).filter(c => c.lifecycle !== "active"),
     [contracts]);
   const contract = useMemo(
     () => live.find(c => c.id === contractId) ?? null, [live, contractId]);
@@ -186,9 +189,9 @@ export default function BrokerBordereau() {
 
         {contracts !== null && contracts.length > 0 && live.length === 0 && (
           <div className="note warn" style={{ marginBottom: 18, maxWidth: 640 }}>
-            <b>None of your contracts is live yet.</b> A contract governs nothing
-            until the carrier approves it, and it is that approval which creates
-            the rules your file is checked against. See{" "}
+            <b>None of your contracts is live yet.</b> A contract governs
+            nothing until it is in force, and it is the terms of a live contract
+            that create the rules your file is checked against. See{" "}
             <Link to="/broker/contracts">My Contracts</Link> for where each one
             has got to.
           </div>
@@ -224,10 +227,11 @@ export default function BrokerBordereau() {
           {waiting.length > 0 && (
             <div className="note" style={{ marginBottom: 16 }}>
               {waiting.length === 1
-                ? <><b>{waiting[0].filename ?? `Contract ${waiting[0].id}`}</b> is
-                    not listed — it is still waiting on the carrier's approval.</>
+                ? <><b>{waiting[0].name ?? waiting[0].filename
+                        ?? `Contract ${waiting[0].id}`}</b> is not listed — it is
+                    not in force yet.</>
                 : <><b>{waiting.length} of your contracts</b> are not listed —
-                    they are still waiting on the carrier's approval.</>}
+                    they are not in force yet.</>}
             </div>
           )}
 

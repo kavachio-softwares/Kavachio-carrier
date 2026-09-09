@@ -15,8 +15,6 @@ export type BrokerProgramme = {
   carrier_id: number; carrier_name: string; assigned_at: string | null;
 };
 
-export type ApprovalStatus = "draft" | "pending_approval" | "approved" | "rejected";
-
 export type BrokerContract = {
   id: number;
   filename: string | null;
@@ -24,10 +22,8 @@ export type BrokerContract = {
    *  filename shows it as "Contract 462". */
   name: string;
   contract_type: string | null;
-  /** Where it is in its life. NOT the same question as `approval_status`,
-   *  which only says whether this broker may set it up: a contract sitting in
-   *  `in_review` is one the BROKER has to act on, and without this it renders
-   *  as an ordinary approved row. */
+  /** Where it is in its life, and the question this list is really about: a
+   *  contract sitting in `in_review` is one the BROKER has to act on. */
   lifecycle: Lifecycle;
   /** Who it is waiting on — the question this list is actually scanned for. */
   whose_turn: "carrier" | "broker" | null;
@@ -36,8 +32,8 @@ export type BrokerContract = {
   carrier: { id: number | null; name: string };
   inception_dt: string | null;
   expiry_dt: string | null;
-  approval_status: ApprovalStatus;
-  /** Who put it there. A carrier upload is live on arrival; a broker upload waits. */
+  /** Who put it there. Only the carrier raises contracts now, so this is
+   *  "carrier" on anything new; older rows can still say "broker". */
   source: "carrier" | "broker";
   submitted_at: string | null;
   created_at: string | null;

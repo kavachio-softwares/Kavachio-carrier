@@ -60,7 +60,6 @@ def _contract(w):
     with SessionLocal() as s:
         c = Contract(tenant_id=w["t"], program_id=w["p"], broker_party_id=w["b"],
                      status="drafted", lifecycle="in_review",
-                     approval_status="approved",
                      commercial_terms={"commission_pct": {"value": "25"}},
                      wording_sections={"sections": [
                          {"title": "Cover", "body": "The Broker may bind."}]})

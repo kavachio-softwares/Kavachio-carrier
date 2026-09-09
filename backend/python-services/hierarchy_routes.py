@@ -139,34 +139,17 @@ def programme_brokers(program_id: int, principal: Principal = Depends(current_pr
                         Contract.broker_party_id == party.id)
                 .scalar() or 0
             )
-            pending = (
-                s.query(func.count(Contract.id))
-                .filter(Contract.program_id == program_id,
-                        Contract.broker_party_id == party.id,
-                        Contract.approval_status == "pending_approval")
-                .scalar() or 0
-            )
-            # Counted apart from `contract_count`, which includes contracts
-            # still waiting on the carrier. A screen that offers a broker
-            # because they "have 1 contract" and then says the programme has
-            # nothing approved is telling the user two different things; this is
-            # the number that decides whether they can actually be worked with.
-            approved = (
-                s.query(func.count(Contract.id))
-                .filter(Contract.program_id == program_id,
-                        Contract.broker_party_id == party.id,
-                        func.coalesce(Contract.approval_status, "approved")
-                        == "approved")
-                .scalar() or 0
-            )
+            # `approved` used to be counted apart from `contract_count`, which
+            # included contracts still waiting on the carrier's decision. There
+            # is no such wait any more — a contract exists or it does not — so
+            # the two questions have one answer.
             d = _broker_dict(party)
             d.update({
                 "link_id": link.id,
                 "status": link.status,
                 "assigned_at": _iso_utc(link.created_at),
                 "contract_count": contracts,
-                "approved_contract_count": approved,
-                "pending_approvals": pending,
+                "approved_contract_count": contracts,
             })
             out.append(d)
         return out
@@ -278,7 +261,7 @@ def broker_directory(principal: Principal = Depends(current_principal)):
         for link, prog, party in links:
             d = by_broker.setdefault(party.id, {**_broker_dict(party),
                                                 "programmes": [], "contract_count": 0,
-                                                "pending_approvals": 0, "user_count": 0})
+                                                "user_count": 0})
             d["programmes"].append({"id": prog.id, "name": prog.name, "status": link.status})
 
         # A broker the carrier created but has not yet put on any programme is
@@ -295,19 +278,12 @@ def broker_directory(principal: Principal = Depends(current_principal)):
         )
         for party in unassigned:
             by_broker[party.id] = {**_broker_dict(party), "programmes": [],
-                                   "contract_count": 0, "pending_approvals": 0,
-                                   "user_count": 0}
+                                   "contract_count": 0, "user_count": 0}
 
         for pid, d in by_broker.items():
             d["contract_count"] = (
                 s.query(func.count(Contract.id))
                 .filter(Contract.tenant_id == tid, Contract.broker_party_id == pid)
-                .scalar() or 0
-            )
-            d["pending_approvals"] = (
-                s.query(func.count(Contract.id))
-                .filter(Contract.tenant_id == tid, Contract.broker_party_id == pid,
-                        Contract.approval_status == "pending_approval")
                 .scalar() or 0
             )
             d["user_count"] = (
@@ -449,7 +425,7 @@ def broker_detail(broker_party_id: int, principal: Principal = Depends(current_p
                  # a written contract's home is its own record, not the page
                  # that reads clauses out of an uploaded document.
                  "is_app_managed": bool(c.is_app_managed),
-                 "status": c.status, "approval_status": c.approval_status,
+                 "status": c.status,
                  "inception_dt": str(c.inception_dt) if c.inception_dt else None,
                  "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None,
                  "created_at": _iso_utc(c.created_at)}
@@ -466,142 +442,18 @@ def broker_detail(broker_party_id: int, principal: Principal = Depends(current_p
 
 
 # =============================================================================
-#  THE ONE APPROVAL
+#  THE NEGOTIATION THREAD
 # =============================================================================
-
-class ApprovalDecision(BaseModel):
-    note: Optional[str] = None
-
-
-@router.get("/approvals")
-def approvals_queue(principal: Principal = Depends(current_principal)):
-    """Contracts waiting on this carrier.
-
-    Only ever contracts a BROKER uploaded — a carrier's own upload is live on
-    arrival and never appears here.
-
-    A broker's DRAFT is excluded even though the row already reads
-    pending_approval. That status is set by the DB trigger the moment a broker
-    creates the contract — which is what keeps a half-finished draft from being
-    mistaken for approved by anything downstream — but the broker has not asked
-    for a decision yet, and a queue full of other people's unfinished work is
-    not a queue anyone can clear.
-    """
-    with SessionLocal() as s:
-        tid = resolve_tenant_id(s, principal)
-        rows = (
-            s.query(Contract, Program, Party)
-            .outerjoin(Program, Program.id == Contract.program_id)
-            .outerjoin(Party, Party.id == Contract.broker_party_id)
-            .filter(Contract.tenant_id == tid,
-                    Contract.approval_status == "pending_approval",
-                    func.coalesce(Contract.lifecycle, "") != "draft")
-            .order_by(Contract.submitted_at.asc().nullslast())
-            .all()
-        )
-        out = []
-        for c, prog, broker in rows:
-            submitter = s.get(AppUser, c.submitted_by_user_id) if c.submitted_by_user_id else None
-            out.append({
-                "contract_id": c.id,
-                "filename": c.filename,
-                # What the carrier is actually deciding on. A filename is not a
-                # contract — the queue has to say which contract, with whom, of
-                # what kind, before anyone can approve it without opening it.
-                "name": c.name or c.filename or f"Contract {c.id}",
-                "contract_type": c.contract_type,
-                "programme": {"id": prog.id, "name": prog.name} if prog else None,
-                "broker": {"id": broker.id, "legal_name": broker.legal_name} if broker else None,
-                "submitted_at": _iso_utc(c.submitted_at),
-                "submitted_by": {"id": submitter.id, "full_name": submitter.full_name,
-                                 "email": submitter.email} if submitter else None,
-                "inception_dt": str(c.inception_dt) if c.inception_dt else None,
-                "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None,
-                "umr": c.umr,
-                "class_of_business": c.class_of_business,
-            })
-        return out
-
-
-def _decide(contract_id: int, principal: Principal, action: str, note: Optional[str]) -> dict:
-    """Approve or reject. One function because the two differ only in the word.
-
-    The decision is written in two places on purpose: the contract row carries
-    the CURRENT state (what every other screen reads), and contract_approval
-    keeps the story (submitted → rejected → re-submitted → approved). The DB
-    trigger enforce_approval_authority independently re-checks that the actor
-    is allowed, so a mistake here cannot become a data problem.
-    """
-    with SessionLocal() as s:
-        tid = resolve_tenant_id(s, principal)
-        c = s.get(Contract, contract_id)
-        if not c:
-            raise HTTPException(404, "contract not found")
-        assert_tenant_owns(principal, c.tenant_id)
-
-        if c.approval_status != "pending_approval":
-            raise HTTPException(
-                409,
-                f"this contract is already {c.approval_status}, so there is nothing to decide"
-            )
-
-        now = datetime.now(timezone.utc)
-        c.approval_status = "approved" if action == "approved" else "rejected"
-        c.approved_by_user_id = principal.user_id
-        c.approved_at = now
-
-        # The decision moves the contract, not just its gate.
-        #
-        # APPROVING NO LONGER MAKES IT LIVE. A contract goes in force because
-        # both sides signed it, and this used to set `active` directly — which
-        # meant a broker-uploaded contract could go live with no signature on
-        # it at all, straight past the gate every other path respects. So
-        # approval now clears the gate and nothing more: if the signatures are
-        # already in (a wording executed outside Kavachio and recorded here)
-        # the contract goes live on the spot, and otherwise it drops back to a
-        # state where the two sides can sign it.
-        #
-        # Rejecting sends it back to DRAFT rather than leaving it in limbo: the
-        # broker's next act is to correct it and re-submit, and a contract they
-        # cannot edit is one they cannot fix. The rejection itself stays on the
-        # record in contract_approval, so "sent back, and why" survives the edit.
-        if action == "approved":
-            import contract_routes as _cr
-            unsigned = _cr._unsigned_sides(_cr._signatures(s, c.id))
-            c.lifecycle = "active" if not unsigned else "draft"
-        else:
-            c.lifecycle = "draft"
-        c.lifecycle_effective_date = now.date()
-
-        s.add(ContractApproval(
-            tenant_id=tid,
-            contract_id=contract_id,
-            action=action,
-            acted_by_user_id=principal.user_id,
-            acted_at=now,
-            note=note,
-        ))
-        s.commit()
-        return {"ok": True, "contract_id": contract_id,
-                "approval_status": c.approval_status,
-                "decided_at": _iso_utc(now)}
-
-
-@router.post("/contracts/{contract_id}/approve")
-def contract_approve(contract_id: int, body: ApprovalDecision = ApprovalDecision(),
-                     principal: Principal = Depends(require_role("carrier_admin"))):
-    """Approve a broker's contract. Its checks start running from the next file."""
-    return _decide(contract_id, principal, "approved", body.note)
-
-
-@router.post("/contracts/{contract_id}/reject")
-def contract_reject(contract_id: int, body: ApprovalDecision = ApprovalDecision(),
-                    principal: Principal = Depends(require_role("carrier_admin"))):
-    """Send it back. A rejection without a reason is not a decision, it is a wall."""
-    if not (body.note or "").strip():
-        raise HTTPException(400, "a rejection needs a reason — the broker has to know what to fix")
-    return _decide(contract_id, principal, "rejected", body.note)
-
+#
+# The carrier's approve/reject gate used to live here: a broker brought a
+# contract and it could not be used until the carrier said so. That gate is
+# gone, along with the broker-side upload it existed to police — a contract is
+# now raised by the carrier alone, so there was nobody left to approve it and
+# nothing for the queue to hold.
+#
+# What remains is the part that was never about permission: the thread of what
+# the two sides said to each other — sent for review, changes requested, terms
+# agreed — which the contract record still reads.
 
 @router.get("/contracts/{contract_id}/approvals")
 def contract_approval_history(contract_id: int,
@@ -696,8 +548,7 @@ def hierarchy(principal: Principal = Depends(current_principal)):
                     "legal_name": party.legal_name,
                     "link_status": link.status,
                     "contracts": [
-                        {"id": c.id, "filename": c.filename,
-                         "approval_status": c.approval_status, "status": c.status}
+                        {"id": c.id, "filename": c.filename, "status": c.status}
                         for c in sorted(bc, key=lambda c: c.id)
                     ],
                 })

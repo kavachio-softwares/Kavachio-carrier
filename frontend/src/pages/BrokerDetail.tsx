@@ -16,15 +16,6 @@ import { PageBody, PageHeader } from "../components/Layout";
 import { OnboardingBadge } from "../components/OnboardingBadge";
 import AddContractModal from "../components/AddContractModal";
 
-// The carrier's DECISION, which is not the contract's state: a contract can be
-// approved and still be a draft nobody has signed. It said "Live", which is the
-// state — and the two disagreeing on adjacent screens is worse than either.
-const APPROVAL_LABEL: Record<string, { text: string; cls: string }> = {
-  approved:         { text: "Approved",    cls: "bg-success/10 text-success" },
-  pending_approval: { text: "Waiting on you", cls: "bg-warn/10 text-warn" },
-  rejected:         { text: "Sent back",   cls: "bg-danger/10 text-danger" },
-};
-
 export default function BrokerDetail() {
   const { brokerId } = useParams();
   const [b, setB] = useState<Detail | null>(null);
@@ -175,13 +166,15 @@ export default function BrokerDetail() {
                 <tr className="text-left text-ink-muted border-b border-border">
                   <th className="pb-2 font-medium">Contract</th>
                   <th className="pb-2 font-medium">Term</th>
-                  <th className="pb-2 font-medium">Where it stands</th>
                   <th className="pb-2 font-medium">Added</th>
                 </tr>
               </thead>
               <tbody>
                 {b.contracts.map(c => {
-                  const badge = APPROVAL_LABEL[c.approval_status] ?? { text: c.approval_status, cls: "bg-surface-2" };
+                  // "Where it stands" was the carrier's approval decision on
+                  // this contract. There is no decision to show now the gate is
+                  // gone, and the ops status answers a different question, so
+                  // the column went with it.
                   return (
                     <tr key={c.id} className="border-b border-border last:border-0">
                       <td className="py-3">
@@ -214,11 +207,6 @@ export default function BrokerDetail() {
                       </td>
                       <td className="py-3 text-ink-muted">
                         {c.inception_dt && c.expiry_dt ? `${c.inception_dt} → ${c.expiry_dt}` : "—"}
-                      </td>
-                      <td className="py-3">
-                        <span className={`rounded px-2 py-0.5 text-xs font-medium ${badge.cls}`}>
-                          {badge.text}
-                        </span>
                       </td>
                       <td className="py-3 text-ink-muted">{fmtStamp(c.created_at)}</td>
                     </tr>

@@ -64,7 +64,7 @@ thead th {
 tbody td { @apply px-3 py-2.5 border-b border-border align-top text-center; }
 /* A flex/grid child ignores text-align, so a cell holding a laid-out row (link +
    sub-line, chips, action buttons) would still pack left. proto.css has this for
-   `.proto` pages; mirror it here so the Tailwind-built pages (Uploads, Outputs)
+   `.proto` pages; mirror it here so the Tailwind-built pages (Uploads, exception triage)
    centre too. */
 tbody td > .flex,
 tbody td > div[class*="flex"] { justify-content: center; margin-left: auto; margin-right: auto; }

@@ -267,7 +267,7 @@ export default function ProgramBrokers() {
                         onClick={() => remove(b.id, b.legal_name)} disabled={busy}
                         title="Take this broker off the programme"
                       >
-                        Take off
+                        Remove
                       </button>
                     )}
                   </div>
@@ -373,16 +373,6 @@ export default function ProgramBrokers() {
                             <FileText size={14} className="shrink-0 text-ink-soft" />
                             <span className="min-w-0 flex-1 truncate">
                               {c.filename ?? `Contract #${c.id}`}
-                            </span>
-                            <span className={`pill shrink-0 ${
-                              c.approval_status === "approved" ? "pill-green"
-                              : c.approval_status === "pending_approval" ? "pill-amber"
-                              : "pill-red"}`}>
-                              {/* The carrier's decision, not the contract's
-                                  state — approved is not the same as in force. */}
-                              {c.approval_status === "approved" ? "Approved"
-                                : c.approval_status === "pending_approval" ? "Waiting on you"
-                                : "Rejected"}
                             </span>
                           </button>
                         </li>

@@ -1082,7 +1082,6 @@ def _authored_contract(world, lifecycle: str = "agreed") -> int:
             tenant_id=world["tenant"], program_id=world["program"],
             broker_party_id=world["broker"], status="drafted",
             schedule_key="Schedule A — 2027", lifecycle=lifecycle,
-            approval_status="approved",
             commercial_terms={"commission_max_pct": "11"},
             wording_sections={"sections": [
                 {"title": "Parties and cover",

@@ -2309,7 +2309,6 @@ async def program_contract_upload(
                         "output_template_id": c.output_template_id,
                         "schedule_key":       c.schedule_key,
                         "broker_party_id":    c.broker_party_id,
-                        "approval_status":    c.approval_status,
                         "created_at":         _iso_utc(c.created_at),
                     }
 
@@ -2777,7 +2776,6 @@ async def program_setup(
 @router.get("/programs/{program_id}/contracts")
 def program_contracts_list(program_id: int,
                            broker_party_id: Optional[int] = None,
-                           approved_only: bool = False,
                            principal: Principal = Depends(current_principal)):
     """Contracts on a programme.
 
@@ -2786,10 +2784,10 @@ def program_contracts_list(program_id: int,
     those were written before the broker level existed and still govern the
     programme, so hiding them would make an existing setup look empty.
 
-    `approved_only` drops anything still waiting on the carrier: only a live
-    contract can have an output template built on it.
-
-    Both default off, so an existing caller gets exactly what it always did.
+    It once took an `approved_only` flag, which dropped contracts still waiting
+    on the carrier's approval. Nothing waits any more — the approval gate and
+    the broker-side upload it policed were removed together — so every contract
+    on the programme is returned.
     """
     with SessionLocal() as s:
         prog = s.get(Program, program_id)
@@ -2800,9 +2798,6 @@ def program_contracts_list(program_id: int,
         if broker_party_id is not None:
             q = q.filter(or_(Contract.broker_party_id == broker_party_id,
                              Contract.broker_party_id.is_(None)))
-        if approved_only:
-            q = q.filter(func.coalesce(Contract.approval_status, "approved")
-                         == "approved")
         rows = q.order_by(Contract.id.desc()).all()
         # Clause count per contract = rows in clauses_extracted (defensive: the
         # table may be absent on minimal DBs).
@@ -2822,9 +2817,8 @@ def program_contracts_list(program_id: int,
         # where it is stored. Null for every contract written before this
         # existed, and for any upload that didn't send one.
         from contract_upload_services.db_persister import extracted_upload_token
-        # broker_party_id / approval_status / the term are read-side additions:
-        # the columns already existed on the row, they were simply never
-        # returned. Every existing key is unchanged.
+        # broker_party_id and the term are read-side additions: the columns
+        # already existed on the row, they were simply never returned.
         broker_names = {}
         broker_ids = {c.broker_party_id for c in rows if c.broker_party_id}
         if broker_ids:
@@ -2845,7 +2839,6 @@ def program_contracts_list(program_id: int,
                  "schedule_key": c.schedule_key,
                  "broker_party_id": c.broker_party_id,
                  "broker_name": broker_names.get(c.broker_party_id),
-                 "approval_status": c.approval_status or "approved",
                  "inception_dt": c.inception_dt.isoformat() if c.inception_dt else None,
                  "expiry_dt": c.expiry_dt.isoformat() if c.expiry_dt else None,
                  "created_at": _iso_utc(c.created_at)}

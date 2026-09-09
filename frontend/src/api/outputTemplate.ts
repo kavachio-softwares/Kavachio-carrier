@@ -415,10 +415,9 @@ export const compareWithSample = (id: number) =>
 export type ProgrammeBroker = {
   id: number; legal_name: string; status: string;
   contract_count: number;
-  /** Contracts the carrier has actually approved — the ones that can be worked
-   *  with. `contract_count` includes those still waiting. */
+  /** Kept as a separate field because callers read it, but it now equals
+   *  `contract_count` — there is no approval gate left to hold anything back. */
   approved_contract_count?: number;
-  pending_approvals: number;
 };
 
 export const getProgrammeBrokers = (programId: number) =>
@@ -430,7 +429,6 @@ export type ScopedContract = {
   // utils/contractLabel.
   id: number; name: string | null; filename: string | null; status: string;
   broker_party_id: number | null; broker_name: string | null;
-  approval_status: string;
   inception_dt: string | null; expiry_dt: string | null;
   output_template_id: number | null;
 };

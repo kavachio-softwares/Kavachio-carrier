@@ -27,8 +27,6 @@ import ContractSignature from "./pages/ContractSignature";
 import Contracts from "./pages/Contracts";
 import ContractNew from "./pages/ContractNew";
 import ContractUpload from "./pages/ContractUpload";
-import BrokerContractNew from "./pages/BrokerContractNew";
-import Approvals from "./pages/Approvals";
 // Create-a-Contract, step 4 from the carrier's side: what is out for
 // signature and where each one got to. Steps 1-3 are the wizard at
 // /contracts/new.
@@ -44,7 +42,6 @@ import BordereauSetupDetail from "./pages/BordereauSetupDetail";
 import BordereauSetupEdit from "./pages/BordereauSetupEdit";
 import AdminMappingTasks from "./pages/AdminMappingTasks";
 import KavachioAdminDashboard from "./pages/KavachioAdminDashboard";
-import Outputs from "./pages/Outputs";
 import OutputTemplate from "./pages/OutputTemplate";
 import UploadExceptions from "./pages/UploadExceptions";
 import RuleReview from "./pages/RuleReview";
@@ -134,8 +131,6 @@ export default function App() {
         <Route path="/broker" element={<BrokerDashboard />} />
         <Route path="/operator" element={<OperatorHome />} />   {/* the broker's day-to-day seat */}
         <Route path="/broker/contracts" element={<BrokerContracts />} />
-        {/* Step A of the flow: the broker brings a contract and waits. */}
-        <Route path="/broker/contracts/new" element={<BrokerContractNew />} />
         {/* The broker's monthly run. Both broker seats reach it: an admin
             submits, and an operator is the seat added to do exactly this. */}
         <Route path="/broker/bordereau" element={<BrokerBordereau />} />
@@ -166,7 +161,6 @@ export default function App() {
         <Route path="/contracts/:contractId" element={<ContractRecord />} />
         {/* Screen only — no signing provider is connected. See the page. */}
         <Route path="/contracts/:contractId/signature" element={<ContractSignature />} />
-        <Route path="/approvals" element={<Approvals />} />   {/* the gate */}
         <Route path="/programs/:programId/contracts/:contractId" element={<ContractDetail />} />
         {/* Watching the signing rounds. A round is STARTED from the
             contract itself, once both sides have agreed the terms — see
@@ -181,9 +175,6 @@ export default function App() {
         <Route path="/uploads/:uploadId/exceptions" element={<UploadExceptions />} />
         <Route path="/uploads/:uploadId/exceptions/rule/:ruleId" element={<RuleReview />} />
         <Route path="/uploads/mapper/:mapperId" element={<Mapping />} />
-        <Route path="/outputs" element={<Outputs />} />
-        <Route path="/outputs/new-template" element={<Outputs />} />
-        <Route path="/outputs/generate" element={<Outputs />} />
         <Route path="/outputs/templates/:id" element={<OutputTemplate />} />
         <Route path="/users" element={<Users />} />
         {/* Rule library — managed BDX rules. tenant_admin sees their own tenant's

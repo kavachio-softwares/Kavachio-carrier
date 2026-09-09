@@ -19,7 +19,7 @@
  *
  * VARIANTS. The app has two non-overlapping CSS vocabularies and this renders in
  * both: `proto` for screens under a `.proto` root (Exceptions, Rule Review, BDX
- * inline review) and `tw` for the Tailwind cards in the Outputs modal, which
+ * inline review) and `tw` for the Tailwind cards in the triage listing, which
  * have no `.proto` ancestor and would render unstyled under proto.css.
  */
 import { useState } from "react";

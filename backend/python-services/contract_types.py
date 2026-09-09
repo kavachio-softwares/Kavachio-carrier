@@ -207,10 +207,9 @@ def term_spec() -> dict[str, Any]:
 
 
 # ── lifecycle ───────────────────────────────────────────────────────────────
-# The BUSINESS state of a contract, kept apart from `approval_status` (the
-# carrier's decision) and `status_ops` (what the extraction pipeline did with
-# the file). Three axes, because they answer three different questions and a
-# single column that tried to carry all three would lose two of them.
+# The BUSINESS state of a contract, kept apart from `status_ops` (what the
+# extraction pipeline did with the file). Two axes, because they answer two
+# different questions and a single column carrying both would lose one.
 #
 #   draft              being prepared. Not visible to the counterparty.
 #   pending            the BROKER submitted it; waiting on the carrier.

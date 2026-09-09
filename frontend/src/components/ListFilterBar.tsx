@@ -22,7 +22,7 @@ export type DateRangeFilter = {
 // the bar itself stays the same either way.
 //
 // Used across every filterable list page in the app (Tenants, Users,
-// Parties, Programs, Uploads, Outputs, ...) so they share one look and one
+// Parties, Programs, Uploads, ...) so they share one look and one
 // "Clear filters" behavior instead of each page inventing its own.
 export function ListFilterBar({
   search, selects, dateRange, onClear, active,

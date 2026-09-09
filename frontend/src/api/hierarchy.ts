@@ -7,12 +7,9 @@
 import { api } from "./client";
 import { currentMga } from "../auth";
 
-export type ApprovalStatus = "approved" | "pending_approval" | "rejected";
-
 export type HierarchyContract = {
   id: number;
   filename: string | null;
-  approval_status: ApprovalStatus;
   status: string | null;
 };
 
@@ -50,7 +47,6 @@ export type BrokerSummary = {
   created_at: string | null;
   programmes: { id: number; name: string; status: string }[];
   contract_count: number;
-  pending_approvals: number;
   user_count: number;
 };
 
@@ -80,7 +76,7 @@ export type BrokerDetail = {
     /** Written here rather than uploaded, which decides where its name leads:
      *  its own record, not the page that reads clauses out of a document. */
     is_app_managed: boolean;
-    status: string | null; approval_status: ApprovalStatus;
+    status: string | null;
     inception_dt: string | null; expiry_dt: string | null; created_at: string | null;
   }[];
   users: {
@@ -89,27 +85,11 @@ export type BrokerDetail = {
   }[];
 };
 
-export type PendingApproval = {
-  contract_id: number;
-  filename: string | null;
-  /** What is actually being decided on. A filename is not a contract — the
-   *  queue has to say which contract, with whom and of what kind before anyone
-   *  can decide without opening it. */
-  name: string;
-  contract_type: string | null;
-  umr: string | null;
-  class_of_business: string | null;
-  programme: { id: number; name: string } | null;
-  broker: { id: number; legal_name: string } | null;
-  submitted_at: string | null;
-  submitted_by: { id: number; full_name: string; email: string } | null;
-  inception_dt: string | null;
-  expiry_dt: string | null;
-};
-
-/** One act on a contract. Covers BOTH directions of travel: the broker→carrier
- *  approval gate, and the carrier→broker negotiation. Together they are the
- *  contract's thread — how it got to where it is. */
+/** One act on a contract — the carrier→broker negotiation thread: how it got
+ *  to where it is. `approved` / `rejected` are kept in the union because rows
+ *  written before the carrier's approval gate was removed are still on the
+ *  record, and a thread that cannot name what happened is worse than one
+ *  carrying a word nothing writes any more. */
 export type ApprovalEvent = {
   action: "submitted" | "approved" | "rejected" | "withdrawn"
         | "sent_for_review" | "changes_requested" | "terms_agreed"
@@ -148,15 +128,6 @@ export const addProgrammeBroker = (programId: number, brokerPartyId: number) =>
 export const removeProgrammeBroker = (programId: number, brokerPartyId: number) =>
   api.delete(`/programs/${programId}/brokers/${brokerPartyId}`)
      .then(r => r.data as { ok: boolean; deactivated: boolean; contract_count: number; message?: string });
-
-export const getApprovals = () =>
-  api.get<PendingApproval[]>("/approvals").then(r => r.data);
-
-export const approveContract = (contractId: number, note?: string) =>
-  api.post(`/contracts/${contractId}/approve`, { note: note ?? null }).then(r => r.data);
-
-export const rejectContract = (contractId: number, note: string) =>
-  api.post(`/contracts/${contractId}/reject`, { note }).then(r => r.data);
 
 export const getApprovalHistory = (contractId: number) =>
   api.get<ApprovalEvent[]>(`/contracts/${contractId}/approvals`).then(r => r.data);

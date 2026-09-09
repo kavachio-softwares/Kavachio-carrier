@@ -1903,17 +1903,15 @@ def _complete_contract(s, env: EsignEnvelope, request: Request) -> None:
         docs = (s.query(ContractDocument)
                 .filter(ContractDocument.contract_id == c.id).all())
         missing = cr._missing_references(c, docs)
-        if (cr._effective_lifecycle(c) == "signed"
-                and c.approval_status == "approved" and not missing):
+        if cr._effective_lifecycle(c) == "signed" and not missing:
             cr._move(c, "active")
             _event(s, env.id, "in_force", actor="kavachio", request=request,
                    detail={"contract_id": c.id})
-        elif missing or c.approval_status != "approved":
+        elif missing:
             _event(s, env.id, "signed_not_in_force", actor="kavachio",
                    request=request,
                    detail={"contract_id": c.id,
-                           "missing_documents": missing or None,
-                           "approval_status": c.approval_status})
+                           "missing_documents": missing})
     except Exception as e:                                   # noqa: BLE001
         log.exception("[esign] envelope %s: could not move contract %s on "
                       "after signing: %s", env.id, env.contract_id, e)
@@ -1993,11 +1991,10 @@ def _advance(s, env: EsignEnvelope, request: Request) -> list[dict]:
     # a round that ended here would be a signed contract whose checks never
     # start running.
     #
-    # This used to stamp `approval_status = approved` and the ops status
-    # straight onto the row. Both were wrong once contract management landed:
-    # approval answers "may this broker's contract be used at all", which
-    # signing does not decide, and the real state lives in `lifecycle` with
-    # rules about which move is legal. So the move is made through
+    # This used to stamp an approval flag and the ops status straight onto the
+    # row. That was wrong once contract management landed: the real state lives
+    # in `lifecycle`, with rules about which move is legal. So the move is made
+    # through
     # contract_routes, by the rules that own it.
     _complete_contract(s, env, request)
 

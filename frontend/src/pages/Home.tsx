@@ -80,7 +80,6 @@ export default function Home() {
 
   const fmt = (v: number | null | undefined) => (v == null ? "—" : v);
   const runHasExc = (r: Run) => r.status === "has_exceptions" || r.exception_count > 0;
-  // Exception triage for a generated run — matches the Outputs page route.
   // In download mode UploadExceptions loads by `download` id; the uploadId in the
   // path is only used for link-building, so 0 is a safe placeholder when absent.
   const goTriage = (r: Run) =>
