@@ -3,14 +3,14 @@
  *
  * A broker holds no book of its own — it produces into carriers' programmes.
  * So this screen answers two questions and no others: what have I been given,
- * and what is holding me up. The second is the only queue a broker has, because
- * carrier approval is the one step they cannot move themselves.
+ * and what is waiting on me — terms to read, or a signature to give. There is
+ * no queue pointing the other way any more: the carrier's approval gate is
+ * gone, so nothing a broker adds sits waiting for an answer.
  */
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { getBrokerDashboard, type BrokerDashboard as Dash } from "../api/broker";
 import { inAppSigningUrl } from "../api/esign";
-import { fmtDate } from "../utils/date";
 
 export default function BrokerDashboard() {
   const nav = useNavigate();
@@ -71,11 +71,6 @@ export default function BrokerDashboard() {
                 <div className="v">{c.waiting_on_me}</div>
                 <div className="foot">terms to read, or a signature to give</div>
               </div>
-              <div className={`tile${c.waiting_on_carrier > 0 ? " alert" : ""}`}>
-                <div className="k">Waiting on the carrier</div>
-                <div className="v">{c.waiting_on_carrier}</div>
-                <div className="foot">the only thing they approve</div>
-              </div>
               <div className="tile">
                 <div className="k">Live contracts</div>
                 <div className="v">{c.live_contracts}</div>
@@ -93,10 +88,18 @@ export default function BrokerDashboard() {
               </div>
             </div>
 
-            {/* Above the carrier's queue, because this is the one the broker
-                can actually act on. A negotiation that does not announce
+            {/* The broker's only queue. A negotiation that does not announce
                 itself is one nobody answers. */}
-            {d.waiting_on_me.length > 0 && (
+            {d.waiting_on_me.length === 0 ? (
+              <div className="card pad">
+                <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                  Nothing is waiting on you. Your contracts are on{" "}
+                  <span className="linkish" onClick={() => nav("/broker/contracts")}>
+                    My Contracts
+                  </span>.
+                </p>
+              </div>
+            ) : (
               <div className="card" style={{ marginBottom: 18 }}>
                 <div className="card-h">
                   <h3>Waiting on you</h3>
@@ -149,47 +152,6 @@ export default function BrokerDashboard() {
                 </div>
               </div>
             )}
-
-            <div className="card">
-              <div className="card-h">
-                <h3>
-                  {c.carriers === 1 && d.carriers[0]
-                    ? `Waiting on ${d.carriers[0].name}`
-                    : "Waiting on the carrier"}
-                </h3>
-                <span className="muted" style={{ fontSize: 12 }}>
-                  contracts you added that the carrier has not answered yet
-                </span>
-              </div>
-              <div className="tbl-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Contract</th><th>Programme</th><th>Carrier</th>
-                      <th>Uploaded</th><th>What you cannot do until it is approved</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {d.waiting.map(w => (
-                      <tr key={w.id}>
-                        <td><b>{w.filename ?? `Contract ${w.id}`}</b></td>
-                        <td>{w.programme}</td>
-                        <td>{w.carrier}</td>
-                        <td className="muted">{fmtDate(w.submitted_at)}</td>
-                        <td className="muted">
-                          Build a BDX setup on it, and process any file against it
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {d.waiting.length === 0 && (
-                  <div className="empty">
-                    Nothing is waiting on the carrier — everything you have added is answered.
-                  </div>
-                )}
-              </div>
-            </div>
 
             <div className="note" style={{ marginTop: 16 }}>
               <b>You do not create carriers or programmes.</b> The carrier puts you

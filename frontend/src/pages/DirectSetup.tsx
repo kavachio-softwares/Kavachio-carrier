@@ -181,7 +181,7 @@ export default function DirectSetup() {
   // the bordereau to see what can be filled, the contract to see what must be
   // reported. When one is missing this names it instead of opening a dialog
   // that could only produce a worse answer.
-  const [createGate, setCreateGate] = useState<string[] | null>(null);
+  const [createGate, setCreateGate] = useState(false);
 
   // the three uploads
   const [outFile, setOutFile] = useState<File | null>(null);
@@ -701,19 +701,33 @@ export default function DirectSetup() {
     return missing;
   }
 
-  // What the template builder still needs. An input format already saved on
-  // the loaded setup counts as the input side; a contract already approved for
-  // the scope counts as the contract side — neither has to be re-uploaded.
+  // The two things the output template is worked out from, and whether each is
+  // here yet. An input format already saved on the loaded setup counts as the
+  // input side; a contract already on file for the scope counts as the contract
+  // side — neither has to be re-uploaded.
+  //
+  // A FUNCTION, read at render rather than captured when the dialog opens: the
+  // gate used to hold the list it was opened with, so a document added — or a
+  // programme changed — while it was up left it naming the wrong file.
+  function createNeeds() {
+    return [
+      { label: "Input template",
+        have: !!inputFile || !!up?.format_id,
+        why: "a sample of the bordereau you receive. It shows which columns "
+           + "actually get filled." },
+      { label: "Contract",
+        have: staged.length > 0,
+        why: "says what this binder must report. It decides which extra "
+           + "columns to add." },
+    ];
+  }
+
   function missingForCreate(): string[] {
-    const missing: string[] = [];
-    if (!inputFile && !up?.format_id) missing.push("the input template");
-    if (staged.length === 0) missing.push("the contract");
-    return missing;
+    return createNeeds().filter(n => !n.have).map(n => n.label.toLowerCase());
   }
 
   function openCreateTemplate() {
-    const missing = missingForCreate();
-    if (missing.length) { setCreateGate(missing); return; }
+    if (missingForCreate().length) { setCreateGate(true); return; }
     setErr(null);
     setShowCreateTemplate(true);
   }
@@ -1120,6 +1134,10 @@ export default function DirectSetup() {
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
+  // Read here, not when the gate opened — see createNeeds.
+  const gateNeeds = createNeeds();
+  const gateMissing = gateNeeds.filter(n => !n.have);
+
   return (
     <>
       {building && (
@@ -1310,36 +1328,37 @@ export default function DirectSetup() {
           <p className="text-sm text-ink">{multiTableModal}</p>
         </Modal>
 
-        {/* Both sides, before the columns can be decided. */}
-        <Modal open={createGate != null} size="lg"
+        {/* Both sides, before the columns can be decided. A ticked list rather
+            than a paragraph: the question in front of the person is "which one
+            am I missing?", and a tick answers it without being read. */}
+        <Modal open={createGate} size="md"
           title={<span className="flex items-center gap-2">
             <AlertTriangle size={17} className="text-amber-500" />
-            Upload {(createGate ?? []).join(" and ")} first
+            Add the missing document{gateMissing.length > 1 ? "s" : ""}
           </span>}
-          onClose={() => setCreateGate(null)}
-          footer={<Button onClick={() => setCreateGate(null)}>Got It</Button>}>
-          <div className="space-y-2 text-sm text-ink">
+          onClose={() => setCreateGate(false)}
+          footer={<Button onClick={() => setCreateGate(false)}>Got It</Button>}>
+          <div className="space-y-3 text-sm text-ink">
             <p>
-              The output BDX template is worked out from two things, and{" "}
-              {(createGate ?? []).length === 1
-                ? `${createGate?.[0]} is missing.`
-                : "neither is here yet."}
+              We need two files to build your output template.{" "}
+              {gateMissing.length > 1 ? "Both are missing." : "One is missing."}
             </p>
-            <ul className="list-disc pl-5 space-y-1 text-ink-muted">
-              <li>
-                <b>The input template</b> — a sample of the bordereau you
-                receive. A reporting standard publishes hundreds of columns per
-                territory and most of them will not apply to this binder; your
-                own file is what says which ones can actually be filled.
-              </li>
-              <li>
-                <b>The contract</b> — what this binder is obliged to report.
-                Its terms are read to work out the columns the standard does not
-                cover, and to keep the ones it does.
-              </li>
+            <ul className="space-y-2">
+              {gateNeeds.map(n => (
+                <li key={n.label} className="flex gap-2">
+                  <span className={`shrink-0 font-semibold ${
+                    n.have ? "text-emerald-600" : "text-amber-600"}`}>
+                    {n.have ? "✓" : "✗"}
+                  </span>
+                  <span>
+                    <b>{n.label}</b> — <span className="text-ink-muted">{n.why}</span>
+                  </span>
+                </li>
+              ))}
             </ul>
             <p className="text-ink-muted">
-              Add {(createGate ?? []).join(" and ")} above, then try again.
+              Upload the missing {gateMissing.length > 1 ? "documents" : "document"}{" "}
+              from above, then try again.
             </p>
           </div>
         </Modal>
@@ -1503,32 +1522,38 @@ export default function DirectSetup() {
             </div>
           )}
 
-          {/* THE DOCUMENTS, in one grid — required first, optional after.
-              They used to sit in two grids of three and two, which made the
-              bottom pair half again as wide as the top three: five boxes doing
-              the same job, drawn at two different sizes, with the widest given
-              to the ones you may skip. One grid keeps every box the same size
-              and lets the reading order carry the meaning instead.
+          {/* THE DOCUMENTS — the three you must provide, then the two you may.
+              ONE ROW PER GROUP, and nothing but the boxes in it.
 
-              Three across only from xl: the sidebar eats ~200px, so 3-up below
-              that leaves the hints too cramped to read. */}
+              The five used to share a single grid so that every box came out
+              the same width. They did — but a grid row is as tall as its
+              tallest cell, and the output column carries whatever the scope
+              RESOLVED to underneath it. That one card set the height of the
+              whole row: the other two boxes were left with a band of dead space
+              below them, and the optional pair began wherever that band ended,
+              beside a third column with nothing in it.
+
+              So what a box PRODUCES no longer lives inside the box's cell. The
+              sheet choices and the template that applies sit full width beneath
+              the trio, where they have room to be read — and the trio itself is
+              three boxes of exactly equal height, because the cells now hold
+              nothing that can push one of them down.
+
+              Widths: 1-up, then 2-up, then 3-up from xl (the sidebar eats
+              ~200px, so 3 across below that leaves the hints too cramped). At
+              the 2-up step the third box spans both columns rather than sitting
+              alone beside a gap. */}
           <div className="mt-5 border-t border-border pt-4">
-            <div className="mb-3 flex items-baseline gap-2">
+            <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1">
               <h3 className="text-[13px] font-semibold">Documents</h3>
               <span className="text-xs text-ink-muted">
                 The three required ones teach Kavachio the mapping; the rest are extras.
               </span>
             </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 items-start">
-            <div className="space-y-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
               <FilePick label="Input Template" icon={<FileUp size={15} />} file={inputFile} tone="required" required
                 onPick={f => pickFileWithSheets("input", f)} hint="A representative input sample"
                 disabled={scopeIncomplete} />
-              <SheetPicker kind="input" options={inputSheetOpts}
-                selected={inputSheetSel} onToggle={n => toggleSheet("input", n)}
-                hint="Only the checked sheets are mapped to the output." />
-            </div>
-            <div className="space-y-2">
               {/* Tone follows `required`, which is itself conditional: once the
                   scope resolves to a template there is nothing you must upload
                   here, and a box painted as mandatory would say otherwise. */}
@@ -1544,26 +1569,14 @@ export default function DirectSetup() {
                       + "checked against your bordereau",
                 }}
                 disabled={scopeIncomplete} />
-              <SheetPicker kind="output" options={outputSheetOpts}
-                selected={outputSheetSel} onToggle={n => toggleSheet("output", n)}
-                hint="The generated output will contain only the checked sheets." />
-              {/* The "not configured" case is NOT reported here any more: the
-                  box above now carries both ways to fix it, and saying it twice
-                  read as a fault rather than as a choice. */}
-              <OutputTemplateState
-                resolving={resolving} resolved={resolved}
-                disabled={scopeIncomplete}
-                uploading={!!outFile}
-                hideMissing
-                onCreate={openCreateTemplate}
-                onOpen={id => navigate(`/outputs/templates/${id}`)} />
-            </div>
 
             {/* Contracts — REQUIRED, so it sits with the other two you must
                 provide rather than below them. One contract applies to every
                 sheet; with more than one, map each schedule sheet to its
                 contract below. */}
-            <div className="space-y-2">
+            <div className="sm:col-span-2 xl:col-span-1 flex">
+              {/* `flex` wrapper + `w-full` so the box fills the cell it was
+                  given, spanned or not, and still stretches to the row. */}
               <ContractPick
                 files={contractFiles}
                 /* Already approved for this programme and broker — shown here
@@ -1594,8 +1607,71 @@ export default function DirectSetup() {
                 onRemoveAt={i => setContractFiles(cs => cs.filter((_, j) => j !== i))}
                 disabled={scopeIncomplete}
               />
+              </div>
             </div>
 
+          {/* WHAT THE THREE ABOVE PRODUCED — the sheets they offer and the
+              template the scope resolved to. Below the trio rather than inside
+              it, so nothing can push one of those boxes down.
+
+              THE SAME COLUMN TRACK AS THE TRIO, and each thing PLACED in the
+              column of the box it belongs to. A two-column band under a
+              three-column row put "Input Sheets to Map" one and a half boxes
+              wide, ending in the middle of the Output Template above it — near
+              enough to look like an attempt at alignment and far enough to look
+              like a mistake. The explicit col-start matters for a second
+              reason: with auto-placement, an output sheet list would slide into
+              column one whenever the input had none, and sit under the wrong
+              box entirely. */}
+          {(inputSheetOpts || outputSheetOpts
+            || (!scopeIncomplete && (resolving || outFile || resolved?.found))) && (
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3
+                            gap-4 items-start">
+              <div className="xl:col-start-1">
+                <SheetPicker kind="input" options={inputSheetOpts}
+                  selected={inputSheetSel} onToggle={n => toggleSheet("input", n)}
+                  hint="Only the checked sheets are mapped to the output." />
+              </div>
+              <div className="sm:col-start-2 xl:col-start-2">
+                <SheetPicker kind="output" options={outputSheetOpts}
+                  selected={outputSheetSel} onToggle={n => toggleSheet("output", n)}
+                  hint="The generated output will contain only the checked sheets." />
+              </div>
+              {/* THE FULL WIDTH, not the output column's two thirds. Starting
+                  it under Output Template would be the truer position — it is
+                  that box's answer — but it would leave a third of a row empty
+                  to its left, and an indent nothing else on the page shares
+                  reads as a layout fault rather than as a relationship. Its own
+                  first line names the template, and the actions now sit at the
+                  right edge, so the width is used rather than merely occupied.
+
+                  The "not configured" case is NOT reported here: the output box
+                  carries both ways to fix it, and saying it twice read as a
+                  fault rather than as a choice. */}
+              <div className="sm:col-span-2 xl:col-span-3">
+                <OutputTemplateState
+                  resolving={resolving} resolved={resolved}
+                  disabled={scopeIncomplete}
+                  uploading={!!outFile}
+                  hideMissing
+                  onCreate={openCreateTemplate}
+                  onOpen={id => navigate(`/outputs/templates/${id}`)} />
+              </div>
+            </div>
+          )}
+
+          {/* THE OPTIONAL PAIR, on a row of their own and said to be optional in
+              words. Two across at every width above a phone: a pair drawn as
+              halves reads as a pair, where the same two boxes squeezed into a
+              row of three left a column of nothing beside them. */}
+          <div className="mt-5 mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <h4 className="text-[12px] font-semibold">Extras</h4>
+            <span className="text-xs text-ink-muted">
+              Neither is needed to set the pipeline up — add them when the
+              contract calls for them.
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
             {/* Supplementary data — optional, uploaded ONCE here like the templates.
                 Stored with the setup and captured alongside the BDX on every run;
                 never asked for again at run time. */}
@@ -1622,14 +1698,12 @@ export default function DirectSetup() {
                 into extraction so deferred clauses (e.g. Authorized / Excluded Classes
                 of Business) resolve into real rules. If omitted and the contract
                 defers, the build pauses below and asks for them (Path B). */}
-            <div className="space-y-2">
-              <ReferencePick
-                files={refFiles}
-                onAdd={fs => setRefFiles(prev => [...prev, ...fs])}
-                onRemoveAt={i => setRefFiles(prev => prev.filter((_, j) => j !== i))}
-                disabled={scopeIncomplete}
-              />
-            </div>
+            <ReferencePick
+              files={refFiles}
+              onAdd={fs => setRefFiles(prev => [...prev, ...fs])}
+              onRemoveAt={i => setRefFiles(prev => prev.filter((_, j) => j !== i))}
+              disabled={scopeIncomplete}
+            />
           </div>
           </div>
 
@@ -2076,7 +2150,7 @@ function FilePick({ label, icon, file, onPick, accept, hint, tone, required, dis
         if (disabled) return;
         const f = e.dataTransfer.files?.[0]; if (f) onPick(f);
       }}
-      className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
+      className={`h-full flex flex-col justify-center rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
           : `${cardOpens ? "cursor-pointer" : ""} ${drag ? "border-navy bg-navy/5" : file ? "border-emerald-300 bg-emerald-50/40" : t.idle}`}`}>
       <input ref={ref} type="file" accept={accept ?? ".xlsx,.xls,.csv,.xml,.json"} className="hidden" disabled={disabled}
@@ -2147,7 +2221,7 @@ function ReferencePick({ files, onAdd, onRemoveAt, disabled }: {
         if (disabled) return;
         const fs = Array.from(e.dataTransfer.files || []); if (fs.length) onAdd(fs);
       }}
-      className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
+      className={`h-full flex flex-col justify-center rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
           : `cursor-pointer ${drag ? "border-navy bg-navy/5" : files.length ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.optional.idle}`}`}>
       <input ref={ref} type="file" multiple accept=".pdf,.docx,.doc,.txt,.xlsx,.xls,.csv" className="hidden" disabled={disabled}
@@ -2220,7 +2294,7 @@ function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
         if (disabled) return;
         const fs = Array.from(e.dataTransfer.files || []); if (fs.length) onAdd(fs);
       }}
-      className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
+      className={`h-full w-full flex flex-col justify-center rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
           : `cursor-pointer ${drag ? "border-navy bg-navy/5" : have ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.required.idle}`}`}>
       <input ref={ref} type="file" multiple accept=".pdf,.docx" className="hidden" disabled={disabled}

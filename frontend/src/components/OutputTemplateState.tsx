@@ -97,52 +97,59 @@ export default function OutputTemplateState({
     <Box tone={broader || mismatch ? "warn" : "ok"}
       icon={broader || mismatch ? <AlertTriangle size={14} />
         : <CheckCircle2 size={14} />}>
-      <div className="flex items-start gap-2">
-        <FileSpreadsheet size={14} className="mt-0.5 shrink-0 opacity-70" />
-        <div className="min-w-0">
-          <div className="font-medium truncate">{t.name}</div>
-          <div className="mt-0.5">
-            v{t.version} · {t.output_format.toUpperCase()} ·{" "}
-            {resolved.match_level
-              ? FOUND_VIA[resolved.match_level] ?? resolved.match_level
-              : "already saved"}
-            {t.standard_meta?.jurisdiction && (
-              <> · {t.standard_meta.standard} {t.standard_meta.jurisdiction}</>
+      {/* WHAT IT IS on the left, WHAT YOU CAN DO ABOUT IT on the right. The
+          card is as wide as the section it reports on, and three short lines
+          stacked above two buttons left a band of empty colour beside them —
+          which reads as something failing to load. Below sm they stack, where
+          the width to sit side by side is not there. */}
+      <div className="sm:flex sm:items-start sm:justify-between sm:gap-4">
+        <div className="flex items-start gap-2 min-w-0">
+          <FileSpreadsheet size={14} className="mt-0.5 shrink-0 opacity-70" />
+          <div className="min-w-0">
+            <div className="font-medium truncate">{t.name}</div>
+            <div className="mt-0.5">
+              v{t.version} · {t.output_format.toUpperCase()} ·{" "}
+              {resolved.match_level
+                ? FOUND_VIA[resolved.match_level] ?? resolved.match_level
+                : "already saved"}
+              {t.standard_meta?.jurisdiction && (
+                <> · {t.standard_meta.standard} {t.standard_meta.jurisdiction}</>
+              )}
+            </div>
+            <div className="text-[10.5px] opacity-80 mt-0.5">
+              {SOURCE_LABEL[t.source_kind] ?? t.source_kind} — nothing you upload
+              here is needed unless you want to replace it.
+            </div>
+            {broader && !mismatch && (
+              <div className="mt-1">
+                This is the <b>{resolved.match_level}</b>'s template, not one made
+                for the selection above. It is what a run would use — make a more
+                specific one if this contract reports differently.
+              </div>
+            )}
+            {mismatch && (
+              <div className="mt-1">
+                The setup that runs here — <b>{resolved.setup!.name}</b> — was
+                built against <b>{resolved.setup!.output_template_name}</b>, not
+                this one. A setup learns its mapping from a single output
+                template, so build the setup below against this scope to use it.
+              </div>
             )}
           </div>
-          <div className="text-[10.5px] opacity-80 mt-0.5">
-            {SOURCE_LABEL[t.source_kind] ?? t.source_kind} — nothing you upload
-            here is needed unless you want to replace it.
-          </div>
-          {broader && !mismatch && (
-            <div className="mt-1">
-              This is the <b>{resolved.match_level}</b>'s template, not one made
-              for the selection above. It is what a run would use — make a more
-              specific one if this contract reports differently.
-            </div>
-          )}
-          {mismatch && (
-            <div className="mt-1">
-              The setup that runs here — <b>{resolved.setup!.name}</b> — was
-              built against <b>{resolved.setup!.output_template_name}</b>, not
-              this one. A setup learns its mapping from a single output
-              template, so build the setup below against this scope to use it.
-            </div>
-          )}
         </div>
-      </div>
-      {!compact && (
-        <div className="flex gap-2 mt-2">
-          {onOpen && (
-            <Button variant="secondary" onClick={() => onOpen(t.id)}>
-              Review fields
+        {!compact && (
+          <div className="flex flex-wrap gap-2 mt-2 sm:mt-0 sm:shrink-0">
+            {onOpen && (
+              <Button variant="secondary" onClick={() => onOpen(t.id)}>
+                Review fields
+              </Button>
+            )}
+            <Button variant="secondary" onClick={onCreate}>
+              <Plus size={14} /> {broader ? "Create one for this scope" : "Replace it"}
             </Button>
-          )}
-          <Button variant="secondary" onClick={onCreate}>
-            <Plus size={14} /> {broader ? "Create one for this scope" : "Replace it"}
-          </Button>
-        </div>
-      )}
+          </div>
+        )}
+      </div>
     </Box>
   );
 }

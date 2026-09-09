@@ -48,7 +48,6 @@ export type BrokerDashboard = {
   broker: { id: number; name: string };
   carriers: { id: number; name: string }[];
   counts: {
-    waiting_on_carrier: number;
     /** The queue only this broker can move — terms to read, or a signature to
      *  give. Its absence is why a carrier could send terms over and the broker
      *  never be told. */
@@ -58,10 +57,9 @@ export type BrokerDashboard = {
     live_contracts: number;
     programmes: number; carriers: number;
   };
-  waiting: {
-    id: number; filename: string | null;
-    programme: string; carrier: string; submitted_at: string | null;
-  }[];
+  /** There is no "waiting on the carrier" queue any more: the carrier's
+   *  approval gate, and the broker-side upload that fed it, are both gone. A
+   *  broker no longer brings a contract for someone to answer. */
   waiting_on_me: {
     id: number; name: string; lifecycle: Lifecycle;
     programme: string; carrier: string;
