@@ -35,6 +35,7 @@ import {
   type OutputTemplate, type ProposedField, type ScopedContract,
   type SourceAnalysis, type Standard,
 } from "../api/outputTemplate";
+import { contractLabel } from "../utils/contractLabel";
 import { errText } from "../utils/directSetup";
 
 /** Which contract the field list is read from — saved, or staged in the form. */
@@ -97,7 +98,7 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
   const contractOptions = useMemo<ContractPick[]>(() => {
     const saved: ContractPick[] = (p.boundContracts ?? []).map(c => ({
       kind: "saved", id: c.id,
-      label: c.filename || `Contract ${c.id}`,
+      label: contractLabel(c),
     }));
     const staged: ContractPick[] = (p.contractFiles ?? []).map((f, i) => ({
       kind: "staged", index: i, label: f.name,

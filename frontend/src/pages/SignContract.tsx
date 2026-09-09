@@ -35,7 +35,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Check, ChevronDown, Download, KeyRound, Loader2, Lock, Mail, PenLine,
-  ShieldCheck, X,
+  ShieldCheck, Upload, X,
 } from "lucide-react";
 import {
   clearUnlockSession, declineSignature, isLocked, openForSigning,
@@ -86,6 +86,12 @@ export default function SignContract() {
   const [declining, setDeclining] = useState(false);
   const [reason, setReason] = useState("");
   const [sigImage, setSigImage] = useState<string | null>(null);
+  // Initials are a SECOND mark, not the signature reused. They are a different
+  // act on paper — a signature closes the document, initials acknowledge a page
+  // or a clause — and a document where both are the same scrawl is one where
+  // neither means anything in particular.
+  const [sigInitials, setSigInitials] = useState("");
+  const [initialsImage, setInitialsImage] = useState<string | null>(null);
   const [sigName, setSigName] = useState("");
   const [focus, setFocus] = useState<number | null>(null);
 
@@ -164,15 +170,24 @@ export default function SignContract() {
       ?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
-  /** Adopting a signature fills EVERY signature box at once — the same act
-   *  applied everywhere it is needed, which is what signing a document means.
-   *  Clicking them one at a time is a form, not a signature. */
-  function applySignature(name: string, image: string | null) {
+  /** Adopting fills EVERY box of yours at once — the same act applied
+   *  everywhere it is needed, which is what signing a document means. Clicking
+   *  them one at a time is a form, not a signature.
+   *
+   *  Two marks, though, not one used twice: the signature goes in the signature
+   *  boxes and the initials in the initials boxes. */
+  function applySignature(name: string, marks: {
+    initials: string; image: string | null; initialsImage: string | null;
+  }) {
     setSigName(name);
-    setSigImage(image);
+    setSigImage(marks.image);
+    setSigInitials(marks.initials);
+    setInitialsImage(marks.initialsImage);
     setDraft(d => {
       const next = { ...d };
-      for (const f of sigFields) next[f.id] = name;
+      for (const f of sigFields) {
+        next[f.id] = f.type === "initial" ? marks.initials : name;
+      }
       return next;
     });
     setAdopt(false);
@@ -192,6 +207,9 @@ export default function SignContract() {
       const r = await submitSignature(token, {
         signature_name: sigName.trim() || view.me.name,
         signature_image: sigImage,
+        // Separate on the wire too, or the server has no way to stamp anything
+        // but one image in both kinds of box.
+        initials_image: initialsImage,
         fields: mine.map(f => ({ field_id: f.id, value: (draft[f.id] ?? "").trim() })),
         agreed,
       });
@@ -328,6 +346,7 @@ export default function SignContract() {
               fields={view.fields.filter(f => f.page === pageNo)}
               draft={draft}
               sigImage={sigImage}
+              initialsImage={initialsImage}
               readOnly={readOnly}
               focus={focus}
               onFocus={setFocus}
@@ -446,11 +465,13 @@ export default function SignContract() {
 
 // ── one page of the document, with its boxes laid over it ──────────────────
 function PageView({
-  token, pageNo, version, ratio, fields, draft, sigImage, readOnly, focus,
+  token, pageNo, version, ratio, fields, draft, sigImage, initialsImage,
+  readOnly, focus,
   onFocus, onChange, onSignature,
 }: {
   token: string; pageNo: number; version: number; ratio: number;
-  fields: EsignField[]; draft: Draft; sigImage: string | null; readOnly: boolean;
+  fields: EsignField[]; draft: Draft;
+  sigImage: string | null; initialsImage: string | null; readOnly: boolean;
   focus: number | null;
   onFocus: (id: number | null) => void;
   onChange: (id: number, v: string) => void;
@@ -479,7 +500,8 @@ function PageView({
         {fields.map(f => (
           <FieldBox
             key={f.id} f={f} value={draft[f.id] ?? f.value ?? ""}
-            sigImage={sigImage} readOnly={readOnly} focused={focus === f.id}
+            sigImage={f.type === "initial" ? initialsImage : sigImage}
+            readOnly={readOnly} focused={focus === f.id}
             onFocus={onFocus} onChange={onChange} onSignature={onSignature}
           />
         ))}
@@ -548,7 +570,8 @@ function FieldBox({
       >
         {signed ? (
           sigImage
-            ? <img src={sigImage} alt="Your signature"
+            ? <img src={sigImage}
+                   alt={f.type === "initial" ? "Your initials" : "Your signature"}
                    className="max-h-full max-w-full object-contain object-left-bottom" />
             : <span className="truncate text-ink"
                     style={{ fontFamily: SIG_FONT, fontSize: "clamp(11px,1.5vw,22px)" }}>
@@ -557,7 +580,7 @@ function FieldBox({
         ) : (
           <span className="flex items-center gap-1 text-[10px] font-semibold uppercase
                            tracking-wide" style={{ color: TEAL }}>
-            <PenLine size={10} /> Sign
+            <PenLine size={10} /> {f.type === "initial" ? "Initial" : "Sign"}
           </span>
         )}
       </button>
@@ -610,23 +633,137 @@ function Signer({ order, name, org, status, you = false }: {
 }
 
 // ── adopting a signature ───────────────────────────────────────────────────
-/** Type it or draw it, then it goes on every signature box at once. Both are
- *  offered because both are what people expect: a drawn scrawl is what a
- *  signature looks like, a typed one is what a signature on a phone is. */
-function AdoptSignature({ initialName, onCancel, onAdopt }: {
-  initialName: string;
-  onCancel: () => void;
-  onAdopt: (name: string, image: string | null) => void;
-}) {
-  const [tab, setTab] = useState<"type" | "draw">("type");
-  const [name, setName] = useState(initialName);
-  const canvas = useRef<HTMLCanvasElement | null>(null);
+
+/** How wide an uploaded signature is kept. A signature box on the page is a
+ *  couple of inches; anything past this is detail nobody will ever see, paid
+ *  for in a fatter PDF on every page it is stamped on. */
+const UPLOAD_MAX_PX = 1000;
+/** Anything lighter than this is paper, not ink. Deliberately generous: a photo
+ *  of a page is never white, it is grey with a shadow across one side, and a
+ *  strict threshold leaves that shadow behind as a dirty rectangle. */
+const PAPER_LUMA = 205;
+/** What a phone camera will hand over. Bigger than this is a mistake — a
+ *  screenshot of a whole desktop, a RAW file — and the message says so rather
+ *  than letting the page appear to hang while it decodes 40 megapixels. */
+const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+
+/** Turn a photo or scan of a signature into something that can be stamped onto
+ *  a page without covering it up.
+ *
+ *  This is not decoration. A signature is stamped ON the document, over the
+ *  ruled line and next to printed text, so an image with its paper still
+ *  attached lands as a white postcard pasted across the page. Three things have
+ *  to happen and none of them can happen server-side without guessing:
+ *
+ *    · the paper is dropped   — anything lighter than PAPER_LUMA becomes
+ *                               transparent, so what is left is the ink;
+ *    · the ink is cropped to  — a phone photo is mostly desk, and left uncropped
+ *      what was actually      the signature shrinks to fit the desk inside the
+ *      written                box rather than filling it;
+ *    · it is scaled down      — a 4000px photo carries nothing a 1000px one does
+ *                               not, at ten times the bytes, in a file that is
+ *                               then embedded in every version of the PDF.
+ *
+ *  Rejects rather than guesses when there is no ink to find: a blank page or a
+ *  photo of a dark room produces either nothing or a solid block, and a solid
+ *  block stamped over a contract is worse than being told to try again.
+ */
+async function signatureFromImage(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("That is not an image. A photo or a scan — PNG or JPEG.");
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error("That image is too big. Anything up to 12 MB — a photo "
+                    + "straight from a phone is fine.");
+  }
+
+  const url = URL.createObjectURL(file);
+  let img: HTMLImageElement;
+  try {
+    img = await new Promise<HTMLImageElement>((ok, no) => {
+      const el = new Image();
+      el.onload = () => ok(el);
+      el.onerror = () => no(new Error("That image could not be opened. Try a "
+                                      + "PNG or a JPEG."));
+      el.src = url;
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+
+  const scale = Math.min(1, UPLOAD_MAX_PX / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("This browser could not read that image.");
+  ctx.drawImage(img, 0, 0, w, h);
+
+  let data: ImageData;
+  try {
+    data = ctx.getImageData(0, 0, w, h);
+  } catch {
+    // Only reachable if the canvas was somehow tainted. Nothing here is
+    // cross-origin, but a thrown SecurityError must read as an explanation.
+    throw new Error("That image could not be read. Try saving it as a PNG.");
+  }
+  const px = data.data;
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      // Already transparent — a PNG someone has cut out already. Leave it that
+      // way and keep it out of the crop, or the bounding box is the whole
+      // canvas and the crop does nothing.
+      if (px[i + 3] < 16) { px[i + 3] = 0; continue; }
+      const luma = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+      if (luma >= PAPER_LUMA) { px[i + 3] = 0; continue; }
+      // Ink. Fade the near-paper greys out proportionally instead of leaving a
+      // hard edge — that edge is what makes a cut-out look cut out.
+      px[i + 3] = Math.round(255 * Math.min(1, (PAPER_LUMA - luma) / 60));
+      if (x < x0) x0 = x;
+      if (y < y0) y0 = y;
+      if (x > x1) x1 = x;
+      if (y > y1) y1 = y;
+    }
+  }
+  if (x1 < 0) {
+    throw new Error("No signature could be found in that image — it came out "
+                    + "blank. A darker pen, or a photo with more light on it.");
+  }
+  ctx.putImageData(data, 0, 0);
+
+  // A couple of pixels of air, so the ink is not flush against the edge of its
+  // own box when the PDF scales it up.
+  const pad = 2;
+  x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad);
+  x1 = Math.min(w - 1, x1 + pad); y1 = Math.min(h - 1, y1 + pad);
+  const cw = x1 - x0 + 1, ch = y1 - y0 + 1;
+  const out = document.createElement("canvas");
+  out.width = cw; out.height = ch;
+  out.getContext("2d")?.drawImage(c, x0, y0, cw, ch, 0, 0, cw, ch);
+  return out.toDataURL("image/png");
+}
+
+/** The initials somebody would write: one letter per name, so "Mahesh H Sutar"
+ *  gives MHS. A starting point, not a rule — the field is editable, because
+ *  plenty of people initial with something else entirely. */
+function initialsFrom(name: string): string {
+  return name.trim().split(/\s+/).filter(Boolean)
+    .map(w => w[0]).join("").toUpperCase().slice(0, 5);
+}
+
+/** One drawable box. There are two on this dialog, and they are two different
+ *  marks — see the dialog's own comment. */
+function useSketch(active: boolean) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
   const drawing = useRef(false);
   const [hasInk, setHasInk] = useState(false);
 
   useEffect(() => {
-    const c = canvas.current;
-    if (!c || tab !== "draw") return;
+    const c = ref.current;
+    if (!c || !active) return;
     // Match the backing store to the CSS size × DPR, or the line is a blurry
     // rectangle on every retina screen.
     const dpr = window.devicePixelRatio || 1;
@@ -641,37 +778,109 @@ function AdoptSignature({ initialName, onCancel, onAdopt }: {
     ctx.lineJoin = "round";
     ctx.strokeStyle = "#0E1320";
     setHasInk(false);
-  }, [tab]);
+  }, [active]);
 
   function at(e: React.PointerEvent<HTMLCanvasElement>) {
     const r = e.currentTarget.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
-  function down(e: React.PointerEvent<HTMLCanvasElement>) {
-    const ctx = canvas.current?.getContext("2d"); if (!ctx) return;
-    e.currentTarget.setPointerCapture(e.pointerId);
-    drawing.current = true;
-    const p = at(e); ctx.beginPath(); ctx.moveTo(p.x, p.y);
-  }
-  function move(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (!drawing.current) return;
-    const ctx = canvas.current?.getContext("2d"); if (!ctx) return;
-    const p = at(e); ctx.lineTo(p.x, p.y); ctx.stroke(); setHasInk(true);
-  }
-  function up() { drawing.current = false; }
-  function clear() {
-    const c = canvas.current; const ctx = c?.getContext("2d");
-    if (c && ctx) { ctx.clearRect(0, 0, c.width, c.height); setHasInk(false); }
+  return {
+    ref, hasInk,
+    handlers: {
+      onPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+        const ctx = ref.current?.getContext("2d"); if (!ctx) return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drawing.current = true;
+        const p = at(e); ctx.beginPath(); ctx.moveTo(p.x, p.y);
+      },
+      onPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+        if (!drawing.current) return;
+        const ctx = ref.current?.getContext("2d"); if (!ctx) return;
+        const p = at(e); ctx.lineTo(p.x, p.y); ctx.stroke(); setHasInk(true);
+      },
+      onPointerUp() { drawing.current = false; },
+      onPointerLeave() { drawing.current = false; },
+    },
+    clear() {
+      const c = ref.current; const ctx = c?.getContext("2d");
+      if (c && ctx) { ctx.clearRect(0, 0, c.width, c.height); setHasInk(false); }
+    },
+    dataUrl(): string | null {
+      return hasInk && ref.current ? ref.current.toDataURL("image/png") : null;
+    },
+  };
+}
+
+/** Type it, draw it, or upload one, then it goes on every signature box at
+ *  once. All three are offered because all three are what people expect: a
+ *  drawn scrawl is what a signature looks like, a typed one is what a signature
+ *  on a phone is, and an uploaded one is what someone who signs a lot of
+ *  contracts already has sitting in a file.
+ *
+ *  TWO MARKS COME OUT OF IT, not one used twice. A signature and a set of
+ *  initials do different jobs on a contract — the signature closes the
+ *  document, the initials acknowledge a page, a clause, or an amendment — and
+ *  stamping the same scrawl in both places means neither says which was meant.
+ *  It also stops being defensible: initials that ARE the signature let anyone
+ *  holding one page of the document reproduce the mark on the last one. */
+function AdoptSignature({ initialName, onCancel, onAdopt }: {
+  initialName: string;
+  onCancel: () => void;
+  onAdopt: (name: string, marks: {
+    initials: string; image: string | null; initialsImage: string | null;
+  }) => void;
+}) {
+  const [tab, setTab] = useState<"type" | "draw" | "upload">("type");
+  const [name, setName] = useState(initialName);
+  // Follows the name until somebody types their own, then stops — plenty of
+  // people initial with something that is not their initials.
+  const [initials, setInitials] = useState(initialsFrom(initialName));
+  const [initialsEdited, setInitialsEdited] = useState(false);
+  const sig = useSketch(tab === "draw");
+  const ini = useSketch(tab === "draw");
+  // The uploaded signature, already cleaned. Held as the finished data URL
+  // rather than the File, so what is previewed is exactly what is adopted —
+  // and what the document will carry.
+  const file = useRef<HTMLInputElement | null>(null);
+  const [uploaded, setUploaded] = useState<string | null>(null);
+  const [uploadErr, setUploadErr] = useState<string | null>(null);
+  const [reading, setReading] = useState(false);
+
+  async function pick(f: File | null | undefined) {
+    if (!f) return;
+    setReading(true); setUploadErr(null);
+    try {
+      setUploaded(await signatureFromImage(f));
+    } catch (e) {
+      setUploaded(null);
+      setUploadErr(e instanceof Error ? e.message
+                                      : "That image could not be used.");
+    } finally {
+      setReading(false);
+      // Cleared so choosing the SAME file again after a failure still fires a
+      // change event. Without this, a signer who fixes the lighting and picks
+      // the same filename gets nothing at all.
+      if (file.current) file.current.value = "";
+    }
   }
 
   function adopt() {
     const trimmed = name.trim();
     if (!trimmed) return;
-    if (tab === "draw" && hasInk && canvas.current) {
-      onAdopt(trimmed, canvas.current.toDataURL("image/png"));
-    } else {
-      onAdopt(trimmed, null);
-    }
+    const mark = tab === "draw" ? sig.dataUrl()
+               : tab === "upload" ? uploaded
+               : null;   // typed: the name itself is the mark, stamped as text
+    onAdopt(trimmed, {
+      // Never empty: an initials box stamps this text when there is no drawing
+      // for it, and an empty box would fail the "still to fill in" check with
+      // nothing the signer could do about it.
+      initials: (initials.trim() || initialsFrom(trimmed) || trimmed[0]).toUpperCase(),
+      image: mark,
+      // Only ever a DRAWN one. Typed initials are stamped as text, and an
+      // uploaded signature is a signature — reusing it for the initials would
+      // put the two marks back together, which is the thing this separates.
+      initialsImage: tab === "draw" ? ini.dataUrl() : null,
+    });
   }
 
   return (
@@ -683,51 +892,168 @@ function AdoptSignature({ initialName, onCancel, onAdopt }: {
           <button onClick={onCancel} className="text-ink-soft hover:text-ink"><X size={18} /></button>
         </header>
         <div className="px-5 py-4">
-          <label className="mb-1.5 block text-[12.5px] font-medium text-ink">Full name</label>
-          <input value={name} onChange={e => setName(e.target.value)}
-                 className="w-full rounded-lg border border-border px-3 py-2.5 text-[13.5px] text-ink
-                            outline-none focus:border-[#077282] focus:ring-[3px] focus:ring-[#E1F1F3]" />
+          <div className="flex gap-3">
+            <div className="min-w-0 flex-1">
+              <label className="mb-1.5 block text-[12.5px] font-medium text-ink">Full name</label>
+              <input value={name}
+                     onChange={e => {
+                       setName(e.target.value);
+                       if (!initialsEdited) setInitials(initialsFrom(e.target.value));
+                     }}
+                     className="w-full rounded-lg border border-border px-3 py-2.5 text-[13.5px] text-ink
+                                outline-none focus:border-[#077282] focus:ring-[3px] focus:ring-[#E1F1F3]" />
+            </div>
+            <div className="w-[110px] shrink-0">
+              <label className="mb-1.5 block text-[12.5px] font-medium text-ink">Initials</label>
+              <input value={initials} maxLength={5}
+                     onChange={e => {
+                       setInitials(e.target.value.toUpperCase());
+                       setInitialsEdited(true);
+                     }}
+                     className="w-full rounded-lg border border-border px-3 py-2.5 text-[13.5px] text-ink
+                                outline-none focus:border-[#077282] focus:ring-[3px] focus:ring-[#E1F1F3]" />
+            </div>
+          </div>
 
           <div className="mt-4 inline-flex rounded-lg bg-surface-2 p-1 text-[12.5px] font-medium">
-            {(["type", "draw"] as const).map(t => (
+            {(["type", "draw", "upload"] as const).map(t => (
               <button key={t} onClick={() => setTab(t)}
                 className={`rounded-md px-3.5 py-1.5 transition ${
                   tab === t ? "bg-white text-ink shadow-sm" : "text-ink-muted"}`}>
-                {t === "type" ? "Type it" : "Draw it"}
+                {t === "type" ? "Type it" : t === "draw" ? "Draw it" : "Upload it"}
               </button>
             ))}
           </div>
 
           {tab === "type" ? (
-            <div className="mt-3 grid h-[120px] place-items-center rounded-lg border border-border bg-[#FAFBFC]">
-              <span className="px-4 text-center text-ink"
-                    style={{ fontFamily: SIG_FONT, fontSize: 34 }}>
-                {name || "Your name"}
-              </span>
+            <div className="mt-3 flex gap-3">
+              <div className="grid h-[120px] flex-1 place-items-center rounded-lg
+                              border border-border bg-[#FAFBFC]">
+                <span className="px-4 text-center text-ink"
+                      style={{ fontFamily: SIG_FONT, fontSize: 34 }}>
+                  {name || "Your name"}
+                </span>
+              </div>
+              <div className="grid h-[120px] w-[110px] shrink-0 place-items-center
+                              rounded-lg border border-border bg-[#FAFBFC]">
+                <span className="px-2 text-center text-ink"
+                      style={{ fontFamily: SIG_FONT, fontSize: 28 }}>
+                  {initials || initialsFrom(name) || "—"}
+                </span>
+              </div>
+            </div>
+          ) : tab === "draw" ? (
+            <div className="mt-3">
+              <div className="flex gap-3">
+                <div className="min-w-0 flex-1">
+                  <canvas ref={sig.ref} {...sig.handlers}
+                          className="h-[120px] w-full touch-none rounded-lg border border-border bg-[#FAFBFC]" />
+                  <div className="mt-1 flex items-center justify-between">
+                    <span className="text-[11.5px] text-ink-soft">Signature</span>
+                    <button onClick={sig.clear}
+                      className="text-[12px] font-medium text-ink-muted hover:text-ink">
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                <div className="w-[110px] shrink-0">
+                  <canvas ref={ini.ref} {...ini.handlers}
+                          className="h-[120px] w-full touch-none rounded-lg border border-border bg-[#FAFBFC]" />
+                  <div className="mt-1 flex items-center justify-between">
+                    <span className="text-[11.5px] text-ink-soft">Initials</span>
+                    <button onClick={ini.clear}
+                      className="text-[12px] font-medium text-ink-muted hover:text-ink">
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              </div>
+              {!ini.hasInk && (
+                <p className="mt-1.5 text-[12px] text-ink-soft">
+                  Leave the initials box empty and “{initials || initialsFrom(name)}”
+                  is written in the initials boxes instead. What is never done is
+                  putting your signature in them.
+                </p>
+              )}
             </div>
           ) : (
             <div className="mt-3">
-              <canvas ref={canvas} onPointerDown={down} onPointerMove={move}
-                      onPointerUp={up} onPointerLeave={up}
-                      className="h-[120px] w-full touch-none rounded-lg border border-border bg-[#FAFBFC]" />
-              <button onClick={clear}
-                className="mt-1.5 text-[12px] font-medium text-ink-muted hover:text-ink">
-                Clear and start again
-              </button>
+              {/* The preview is shown on a CHEQUERED ground, not on white. What
+                  is adopted has no background of its own — it goes over the
+                  ruled line on the page — and a preview on white would hide
+                  exactly the failure this needs to make visible: paper that did
+                  not come off. */}
+              <div
+                className="grid h-[120px] place-items-center rounded-lg border border-border"
+                style={uploaded ? {
+                  backgroundColor: "#FFFFFF",
+                  backgroundImage:
+                    "linear-gradient(45deg,#EEF1F4 25%,transparent 25%,transparent 75%,#EEF1F4 75%),"
+                    + "linear-gradient(45deg,#EEF1F4 25%,transparent 25%,transparent 75%,#EEF1F4 75%)",
+                  backgroundSize: "14px 14px",
+                  backgroundPosition: "0 0, 7px 7px",
+                } : { background: "#FAFBFC" }}
+              >
+                {reading ? (
+                  <span className="flex items-center gap-2 text-[12.5px] text-ink-muted">
+                    <Loader2 className="animate-spin" size={15} /> Reading it…
+                  </span>
+                ) : uploaded ? (
+                  <img src={uploaded} alt="Your signature"
+                       className="max-h-[104px] max-w-[92%] object-contain" />
+                ) : (
+                  <button onClick={() => file.current?.click()}
+                    className="flex flex-col items-center gap-1.5 px-4 text-center">
+                    <Upload size={18} className="text-ink-soft" />
+                    <span className="text-[12.5px] font-medium text-ink">
+                      Choose a photo or scan
+                    </span>
+                    <span className="text-[11.5px] text-ink-soft">
+                      PNG or JPEG. The paper is taken off for you.
+                    </span>
+                  </button>
+                )}
+              </div>
+              <input ref={file} type="file" accept="image/*" className="hidden"
+                     onChange={e => pick(e.target.files?.[0])} />
+              {uploaded && (
+                <button onClick={() => { setUploaded(null); setUploadErr(null); }}
+                  className="mt-1.5 text-[12px] font-medium text-ink-muted hover:text-ink">
+                  Choose a different image
+                </button>
+              )}
+              {uploadErr && (
+                <p className="mt-1.5 text-[12px] leading-relaxed text-[#8A2222]">
+                  {uploadErr}
+                </p>
+              )}
+              <p className="mt-1.5 text-[12px] leading-relaxed text-ink-soft">
+                This is your signature. The initials boxes get
+                “{initials || initialsFrom(name)}” — draw them instead on the
+                Draw it tab if you would rather they were in your own hand.
+              </p>
             </div>
           )}
 
           <p className="mt-4 text-[12px] leading-relaxed text-ink-soft">
-            This goes on every signature box that is yours on this document. It
+            The signature goes on every signature box that is yours on this
+            document, and the initials on every initials box — two marks, never
+            one used twice. It
             is applied on behalf of your organisation, not you personally, and
-            the time and device are recorded beside it.
+            the time and device are recorded beside it. Whichever way you make
+            it, the same name, time and address are recorded — an uploaded
+            signature carries no more weight than a typed one, and no less.
           </p>
         </div>
         <footer className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
           <button onClick={onCancel}
             className="rounded-md border border-border px-3.5 py-2 text-[13px] font-medium text-ink
                        hover:bg-surface-2">Cancel</button>
-          <button onClick={adopt} disabled={!name.trim()}
+          {/* Blocked on the upload tab until there IS one. Falling back to the
+              typed name there would hand back a signature the signer can see
+              they did not choose, on the one screen where that matters most. */}
+          <button onClick={adopt}
+            disabled={!name.trim() || reading || (tab === "upload" && !uploaded)}
             className="rounded-md px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-50"
             style={{ background: TEAL }}>
             Adopt and place it

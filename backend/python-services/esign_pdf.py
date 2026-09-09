@@ -31,6 +31,7 @@ import binascii
 import logging
 import re
 from dataclasses import dataclass
+from typing import Any
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
@@ -66,6 +67,213 @@ FIELD_LABEL: dict[str, str] = {
     "date":      "Date signed",
     "text":      "Text",
 }
+
+# ── what a signature BLOCK may contain ──────────────────────────────────────
+#
+# The block on a contract's signature page used to be four fixed lines written
+# into contract_wording: signature, name, title, date, for both sides, on every
+# contract ever raised. That is right for most of them and wrong for the rest —
+# a treaty signed by two people who both hold the title already printed above
+# the line does not need a title box, and a carrier who wants initials on the
+# block cannot have them. Changing it meant changing this file.
+#
+# So the block is now DESCRIBED here and CHOSEN per contract. This list is the
+# whole vocabulary: served to the form so the carrier ticks boxes, and read by
+# the wording builder so what is ticked is what is drawn. Neither side holds a
+# copy of it, which is the point — a field added here appears in the form and
+# on the page with no other change anywhere.
+#
+#   key        one of FIELD_TYPES, so the anchor it writes is one
+#              discover_fields already knows how to find
+#   label      what the signer is asked for (from FIELD_LABEL — said once)
+#   hint       why you would want it, for the person choosing
+#   on         whether it is ticked when nobody has chosen yet
+#   fixed      True for the one field a signature block cannot be without
+SIGNATURE_BLOCK_FIELDS: tuple[dict, ...] = (
+    {"key": "signature", "hint": "the signature itself, on the ruled line",
+     "on": True, "fixed": True},
+    {"key": "name", "hint": "printed underneath, so the scrawl can be read",
+     "on": True, "fixed": False},
+    {"key": "title", "hint": "the capacity they sign in",
+     "on": True, "fixed": False},
+    {"key": "date", "hint": "the day they signed — filled in for them",
+     "on": True, "fixed": False},
+    {"key": "initial", "hint": "initials as well as a signature",
+     "on": False, "fixed": False},
+)
+
+# How the two blocks sit on the page. Also chosen rather than coded: side by
+# side reads as one agreement between equals and fits on one page, stacked
+# gives a long signatory list room to breathe.
+SIGNATURE_ARRANGEMENTS: tuple[dict, ...] = (
+    {"key": "side_by_side", "label": "Side by side",
+     "hint": "the two blocks across the page — the usual arrangement"},
+    {"key": "stacked", "label": "One above the other",
+     "hint": "more room under each, for several signatories a side"},
+    # The third answer to "where do the blocks go": anywhere. A contract that
+    # has to be countersigned beside a particular clause, or that follows a
+    # house layout the other two cannot express, is placed by hand — the blocks
+    # are dragged onto the page and the document is drawn where they were left.
+    {"key": "placed", "label": "Placed by hand",
+     "hint": "drag each block onto the page where it should sit"},
+)
+
+# How big a placed block is, as a fraction of the page. SERVED, not restated in
+# the browser: the ghost box somebody drags has to be the size of the block that
+# gets drawn, or they are placing one thing and getting another. `height` is the
+# reserve the screen shows — the drawn height depends on how many lines the
+# side asked for, and is always less than this.
+PLACED_BLOCK: dict[str, float] = {"width": 0.40, "height": 0.13}
+
+# The two sides a block belongs to, in the words the wording prints. Named here
+# so the form, the validator and the builder agree on the spelling.
+SIGNATURE_SIDES = ("carrier", "counterparty")
+
+DEFAULT_SIGNATURE_FIELDS = tuple(
+    f["key"] for f in SIGNATURE_BLOCK_FIELDS if f["on"])
+DEFAULT_ARRANGEMENT = SIGNATURE_ARRANGEMENTS[0]["key"]
+_FIXED_FIELDS = tuple(f["key"] for f in SIGNATURE_BLOCK_FIELDS if f["fixed"])
+
+
+class SignatureLayoutError(ValueError):
+    """A block that could not be drawn as asked. Carries `errors` as
+    {side: message} so the form can mark the column rather than print one
+    sentence over both of them."""
+
+    def __init__(self, message: str, errors: dict[str, str] | None = None):
+        super().__init__(message)
+        self.message = message
+        self.errors = errors or {}
+
+
+def signature_block_spec() -> dict:
+    """The vocabulary, shaped for a form. Served, never restated client-side."""
+    return {
+        "fields": [{"key": f["key"], "label": FIELD_LABEL[f["key"]],
+                    "hint": f["hint"], "default_on": f["on"], "fixed": f["fixed"]}
+                   for f in SIGNATURE_BLOCK_FIELDS],
+        "arrangements": [dict(a) for a in SIGNATURE_ARRANGEMENTS],
+        "sides": list(SIGNATURE_SIDES),
+        "default": default_signature_layout(),
+        # The size of a hand-placed block, so the box dragged on the screen and
+        # the box drawn on the page are one number.
+        "placed_block": dict(PLACED_BLOCK),
+    }
+
+
+def default_signature_layout() -> dict:
+    """What a contract that has never been asked gets. The four lines every
+    contract raised before this was configurable already had, so an old row and
+    a new one with nothing chosen produce the identical page."""
+    return {"arrangement": DEFAULT_ARRANGEMENT,
+            "fields": {side: list(DEFAULT_SIGNATURE_FIELDS)
+                       for side in SIGNATURE_SIDES},
+            # Nowhere placed by hand. Present so every reader gets the same
+            # shape whether or not anybody ever dragged a block.
+            "blocks": {}}
+
+
+def normalise_signature_layout(raw: Any, *, strict: bool = False) -> dict:
+    """A stored layout in the one shape everything downstream may assume.
+
+    READ path (`strict=False`) never raises. Rows written before this existed
+    hold `{}` or `{"arrangement": "stacked"}` and must keep rendering exactly as
+    they did; anything unrecognisable falls back to the default rather than
+    leaving a contract with no way to sign it, which is the worse failure by a
+    long way.
+
+    WRITE path (`strict=True`) refuses instead, because the moment to tell
+    somebody their choice cannot be drawn is while they are making it.
+    """
+    src = raw if isinstance(raw, dict) else {}
+    errors: dict[str, str] = {}
+
+    arrangement = str(src.get("arrangement") or "").strip() or DEFAULT_ARRANGEMENT
+    known_arrangements = {a["key"] for a in SIGNATURE_ARRANGEMENTS}
+    if arrangement not in known_arrangements:
+        if strict:
+            errors["arrangement"] = (
+                f"“{arrangement}” is not a way to arrange the blocks — "
+                f"{' or '.join(sorted(known_arrangements))}.")
+        arrangement = DEFAULT_ARRANGEMENT
+
+    given = src.get("fields")
+    given = given if isinstance(given, dict) else {}
+    out: dict[str, list[str]] = {}
+    for side in SIGNATURE_SIDES:
+        wanted = given.get(side)
+        if not isinstance(wanted, list):
+            # Not "no fields" — not asked. A side left out of a layout that
+            # names the other one is the form sending half of itself, and
+            # silently giving that side an empty block would leave a contract
+            # nobody can sign.
+            out[side] = list(DEFAULT_SIGNATURE_FIELDS)
+            continue
+        # Deduplicated, and put back into the vocabulary's own order: the block
+        # reads signature, name, title, date whatever order the boxes were
+        # ticked in, and a form that let tick order change the page would make
+        # two identical-looking choices produce different documents.
+        chosen = {str(k).strip() for k in wanted if str(k).strip()}
+        unknown = sorted(chosen - {f["key"] for f in SIGNATURE_BLOCK_FIELDS})
+        if unknown and strict:
+            errors[side] = f"no such line on a signature block: {', '.join(unknown)}"
+        missing = [k for k in _FIXED_FIELDS if k not in chosen]
+        if missing:
+            if strict:
+                errors[side] = (
+                    "a signature block has to have somewhere to sign — "
+                    f"{', '.join(FIELD_LABEL[k].lower() for k in missing)} "
+                    "cannot be left off.")
+            chosen |= set(missing)
+        out[side] = [f["key"] for f in SIGNATURE_BLOCK_FIELDS if f["key"] in chosen]
+
+    # ── where a hand-placed block sits ──────────────────────────────────────
+    # Kept whatever the arrangement is, so switching to side-by-side to see how
+    # it looks and back again does not throw away a placement somebody made.
+    blocks: dict[str, dict] = {}
+    given_blocks = src.get("blocks")
+    given_blocks = given_blocks if isinstance(given_blocks, dict) else {}
+    for side in SIGNATURE_SIDES:
+        spot = given_blocks.get(side)
+        if not isinstance(spot, dict):
+            continue
+        try:
+            page = int(spot.get("page"))
+            x = float(spot.get("x"))
+            y = float(spot.get("y"))
+        except (TypeError, ValueError):
+            if strict:
+                errors[side] = ("that block was not placed on the page — drag "
+                                "it where it should sit")
+            continue
+        # A block whose top-left is off the page cannot be drawn anywhere
+        # sensible. Refused on the way in rather than silently pulled back to
+        # the margin, because "it moved when I saved it" is worse than "that is
+        # off the page".
+        if page < 1 or not (0.0 <= x <= 1.0) or not (0.0 <= y <= 1.0):
+            if strict:
+                errors[side] = "that block is off the page"
+            continue
+        blocks[side] = {"page": page, "x": round(x, 6), "y": round(y, 6)}
+
+    if arrangement == "placed":
+        missing_sides = [s for s in SIGNATURE_SIDES if s not in blocks]
+        if missing_sides:
+            if strict:
+                for s in missing_sides:
+                    errors.setdefault(
+                        s, "drag this block onto the page before saving, or "
+                           "choose one of the automatic arrangements")
+            else:
+                # READ path. A stored layout that asks to be placed by hand and
+                # says nowhere would leave the contract with no signature block
+                # at all, which is the one outcome worse than the wrong layout.
+                arrangement = DEFAULT_ARRANGEMENT
+
+    if strict and errors:
+        raise SignatureLayoutError(
+            "That signature block cannot be drawn as asked.", errors)
+    return {"arrangement": arrangement, "fields": out, "blocks": blocks}
 
 
 def anchor_token(field_type: str, party_key: str) -> str:
@@ -203,6 +411,120 @@ def discover_fields(pdf_bytes: bytes) -> list[DiscoveredField]:
                     ))
     found.sort(key=lambda f: (f.page, f.y, f.x))
     return found
+
+
+# ── drawing a signature block where somebody put it ────────────────────────
+# Points, not fractions: these are distances DOWN one block, not positions on a
+# page, so they do not scale with the paper. Named because the numbers appear
+# twice — once to draw, once to measure — and two copies of 26 is how a rule
+# ends up half a line above the space meant for the signature.
+_BLK_TITLE_PT = 9.5
+_BLK_LINE_PT = 8.5
+_BLK_SIG_GAP = 30.0        # room above the rule for a signature to land in
+_BLK_ROW = 11.5            # one printed line under the rule
+
+
+def placed_block_height(line_count: int) -> float:
+    """How much room a block with this many lines needs, in points.
+
+    Generous on purpose: it counts the organisation line whether or not there
+    is one, and leaves a few points under the last row. A block placed near the
+    foot of a page is lifted so it fits, and over-measuring lifts it a little
+    further than strictly necessary, where under-measuring would run the last
+    line off the paper.
+    """
+    return (_BLK_TITLE_PT + 2 + _BLK_LINE_PT + 2 + _BLK_SIG_GAP
+            + 6 + _BLK_ROW * max(0, line_count))
+
+
+def draw_signature_blocks(pdf_bytes: bytes, blocks: Sequence[dict]) -> bytes:
+    """Draw hand-placed signature blocks onto an already-composed document.
+
+    WHY NOT IN THE FLOWABLES. The two automatic arrangements are laid out by
+    ReportLab, which places things in reading order — that is what a flowable
+    layout is for and why it cannot put a block at a point somebody chose. So a
+    placed block is drawn afterwards, onto the finished page, in the same way a
+    signature is stamped onto it later: coordinates are fractions of the page,
+    top-left origin, exactly as everywhere else in this module.
+
+    Each block is `{"page", "x", "y", "title", "org", "lines", "anchors"}`,
+    where `lines` are the printed labels under the rule and `anchors` maps a
+    field type to the party key that owns it, so the signing round finds its
+    boxes here the same way it finds them anywhere else. Anchors are written at
+    render mode 3 — genuinely invisible, unlike the white text a flowable is
+    limited to.
+
+    A block whose page is past the end of a document that got shorter is drawn
+    on the LAST page rather than dropped: a contract with nowhere to sign is the
+    worse failure, and it is silent.
+    """
+    if not blocks:
+        return pdf_bytes
+    doc = _open(pdf_bytes)
+    try:
+        for b in blocks:
+            page_no = max(1, min(int(b.get("page") or 1), doc.page_count))
+            if page_no != b.get("page"):
+                log.warning("[contract] signature block for %s was placed on "
+                            "page %s of a %s-page document — drawn on the last "
+                            "page", b.get("title"), b.get("page"),
+                            doc.page_count)
+            page = doc[page_no - 1]
+            pw, ph = page.rect.width, page.rect.height
+            # Each is {"label", "value", "type"}: what is printed, what is
+            # already known (a named signer's own name), and which kind of box
+            # goes there when it is not.
+            lines: list[dict] = list(b.get("lines") or [])
+            width = float(b.get("width") or PLACED_BLOCK["width"]) * pw
+            height = placed_block_height(len(lines))
+
+            x0 = max(0.0, min(float(b.get("x") or 0.0) * pw, pw - width))
+            y0 = max(0.0, min(float(b.get("y") or 0.0) * ph, ph - height))
+
+            anchors: dict[str, str] = dict(b.get("anchors") or {})
+
+            def tag(kind: str, at: tuple[float, float]) -> None:
+                """The invisible token that puts a signing box right here."""
+                key = anchors.get(kind)
+                if not key:
+                    return
+                page.insert_text(fitz.Point(*at), anchor_token(kind, key),
+                                 fontsize=5, render_mode=3)
+
+            y = y0 + _BLK_TITLE_PT
+            page.insert_text(fitz.Point(x0, y), str(b.get("title") or ""),
+                             fontname="hebo", fontsize=_BLK_TITLE_PT - 0.5,
+                             color=(0.06, 0.09, 0.20))
+            if b.get("org"):
+                y += _BLK_LINE_PT + 2
+                page.insert_text(fitz.Point(x0, y), str(b["org"]),
+                                 fontname="helv", fontsize=_BLK_LINE_PT - 0.5,
+                                 color=(0.06, 0.09, 0.20))
+
+            # The signature lands ON the rule, so its anchor sits in the space
+            # above it — the same relationship the flowable layout draws.
+            tag("signature", (x0, y + 12))
+            y += _BLK_SIG_GAP
+            page.draw_line(fitz.Point(x0, y), fitz.Point(x0 + width, y),
+                           color=(0.45, 0.48, 0.55), width=0.7)
+
+            for row in lines:
+                y += _BLK_ROW
+                page.insert_text(fitz.Point(x0, y), row["label"],
+                                 fontname="helv", fontsize=_BLK_LINE_PT - 1,
+                                 color=(0.35, 0.38, 0.45))
+                after = x0 + fitz.get_text_length(
+                    row["label"], "helv", _BLK_LINE_PT - 1) + 3
+                if row.get("value"):
+                    page.insert_text(fitz.Point(after, y), row["value"],
+                                     fontname="helv", fontsize=_BLK_LINE_PT - 1,
+                                     color=(0.06, 0.09, 0.20))
+                elif row.get("type"):
+                    tag(row["type"], (after, y))
+        out = doc.tobytes(deflate=True, garbage=3)
+    finally:
+        doc.close()
+    return out
 
 
 def render_page_png(pdf_bytes: bytes, page_no: int, scale: float = 2.0) -> bytes:

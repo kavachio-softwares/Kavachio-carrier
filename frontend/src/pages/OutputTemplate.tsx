@@ -111,13 +111,29 @@ export default function OutputTemplate() {
   // Bumped when the grid above changes a column, so the field builder below
   // re-reads rather than showing the list as it was a moment ago.
   const [fieldsKey, setFieldsKey] = useState(0);
+  // UNSAVED COLUMN MAPPING, held here and nowhere else until Save.
+  //
+  // This page has two editors of the same value. The mapping rows below write
+  // `canonical_field` into this component's copy of the template and persist it
+  // with Save Draft; the field builder writes the same value as `source_field`
+  // through an endpoint of its own, from a copy IT loaded when it mounted.
+  // Neither knew about the other, so the second save to run wrote its own stale
+  // copy over the first — and `reloadTemplate` then replaced this state with
+  // the server's, wiping the edit off the screen as well. Both said "Saved."
+  //
+  // One flag fixes both halves: while there are unsaved mapping edits, nothing
+  // else may save over them and no reload may quietly discard them.
+  const [dirty, setDirty] = useState(false);
 
   // Re-read after the field builder saves, so the sheet preview above it shows
   // the rename / reorder / removal that was just made rather than the layout as
   // it was when the page opened.
   const reloadTemplate = useCallback(() => {
+    // Refusing the refresh is the lesser harm. A stale row above is visible and
+    // one reload away; an edit silently reverted is neither.
+    if (dirty) return;
     api.get<Template>(`/export/template/${id}`).then(r => setT(r.data));
-  }, [id]);
+  }, [id, dirty]);
 
   useEffect(() => {
     api.get<Template>(`/export/template/${id}`).then(r => setT(r.data));
@@ -129,6 +145,15 @@ export default function OutputTemplate() {
       .then(r => setContractMapping(r.data))
       .catch(() => setContractMapping({ contract: null, field_rules: {} }));
   }, [id]);
+
+  // The browser's own guard. Everything above stops another CONTROL discarding
+  // an unsaved mapping; this stops the tab doing it.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   // Canonical fields plus user-defined extras (all searchable, grouped).
   const allFields: ModelField[] = useMemo(() => {
@@ -145,7 +170,12 @@ export default function OutputTemplate() {
     return [...base, ...xs];
   }, [model, extras]);
 
+  // Both patches spread the existing structure rather than rebuilding it as
+  // `{ sheets }`. The structure carries more than its sheets — `source_check`
+  // among them — and rebuilding dropped every other key on the first column a
+  // user touched, so an edit to one mapping quietly deleted unrelated state.
   function patchColumn(sheetIdx: number, colIdx: number, patch: Partial<TplColumn>) {
+    setDirty(true);
     setT(prev => {
       if (!prev) return prev;
       const s = prev.structure.sheets.map((sh, i) => {
@@ -153,15 +183,16 @@ export default function OutputTemplate() {
         return { ...sh, columns: sh.columns.map((c, j) =>
           j === colIdx ? { ...c, ...patch } : c) };
       });
-      return { ...prev, structure: { sheets: s } };
+      return { ...prev, structure: { ...prev.structure, sheets: s } };
     });
   }
   function patchSheet(sheetIdx: number, patch: Partial<TplSheet>) {
+    setDirty(true);
     setT(prev => {
       if (!prev) return prev;
       const s = prev.structure.sheets.map((sh, i) =>
         i === sheetIdx ? { ...sh, ...patch } : sh);
-      return { ...prev, structure: { sheets: s } };
+      return { ...prev, structure: { ...prev.structure, sheets: s } };
     });
   }
   function setSheetRole(sheetIdx: number, role: "data" | "reference" | "summary") {
@@ -176,7 +207,11 @@ export default function OutputTemplate() {
         approved: approve || t.approved,
         output_format: t.output_format ?? "xlsx",
       });
-      setT(data); setMsg(approve ? "Approved & activated." : "Saved.");
+      setT(data); setDirty(false);
+      setMsg(approve ? "Approved & activated." : "Saved.");
+      // The field builder holds its own copy of what was just written. Re-read
+      // it, or its next save would put the pre-save mapping back.
+      setFieldsKey(k => k + 1);
     } catch (e: any) { setMsg(e?.message ?? "Save failed."); }
     finally { setBusy(false); }
   }
@@ -232,6 +267,11 @@ export default function OutputTemplate() {
               <Button variant="secondary" onClick={refreshCandidates} disabled={busy || refreshing}>
                 <RefreshCw size={14} /> Re-Run AI Mapping
               </Button>
+            )}
+            {dirty && (
+              <span className="pill pill-amber whitespace-nowrap">
+                <AlertTriangle size={11} /> Unsaved changes
+              </span>
             )}
             <Button onClick={() => save(false)} variant="secondary" disabled={busy}>
               Save Draft
@@ -296,6 +336,11 @@ export default function OutputTemplate() {
             other half of the same template — this decides WHAT the fields are,
             that decides where their values come from. */}
         <OutputTemplateFields templateId={Number(id)} refreshKey={fieldsKey}
+          blockedReason={dirty
+            ? "There are unsaved column-mapping changes above. Save Draft at the "
+              + "top of the page first — this list holds its own copy of the "
+              + "mapping, so saving it now would write the old values back."
+            : null}
           onSaved={reloadTemplate} />
 
         {contractMapping?.contract && (

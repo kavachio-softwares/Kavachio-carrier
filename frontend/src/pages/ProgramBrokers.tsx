@@ -378,7 +378,9 @@ export default function ProgramBrokers() {
                               c.approval_status === "approved" ? "pill-green"
                               : c.approval_status === "pending_approval" ? "pill-amber"
                               : "pill-red"}`}>
-                              {c.approval_status === "approved" ? "Live"
+                              {/* The carrier's decision, not the contract's
+                                  state — approved is not the same as in force. */}
+                              {c.approval_status === "approved" ? "Approved"
                                 : c.approval_status === "pending_approval" ? "Waiting on you"
                                 : "Rejected"}
                             </span>

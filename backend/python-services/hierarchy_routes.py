@@ -439,7 +439,16 @@ def broker_detail(broker_party_id: int, principal: Principal = Depends(current_p
                 for link, p in programmes
             ],
             "contracts": [
-                {"id": c.id, "filename": c.filename, "program_id": c.program_id,
+                # `name` as well as `filename`: a contract WRITTEN in Kavachio
+                # has no file, so this list showed it as "Contract 1459" beside
+                # uploads that showed their own names. It has a name — the one
+                # the carrier typed — and it is what everything else calls it.
+                {"id": c.id, "name": c.name, "filename": c.filename,
+                 "program_id": c.program_id,
+                 # Whether it is app-managed decides where its name should lead:
+                 # a written contract's home is its own record, not the page
+                 # that reads clauses out of an uploaded document.
+                 "is_app_managed": bool(c.is_app_managed),
                  "status": c.status, "approval_status": c.approval_status,
                  "inception_dt": str(c.inception_dt) if c.inception_dt else None,
                  "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None,

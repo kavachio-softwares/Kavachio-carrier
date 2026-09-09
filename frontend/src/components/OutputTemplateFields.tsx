@@ -36,12 +36,23 @@ import {
 } from "../api/outputTemplate";
 import { errText } from "../utils/directSetup";
 
-export default function OutputTemplateFields({ templateId, onSaved, refreshKey }: {
+export default function OutputTemplateFields({
+  templateId, onSaved, refreshKey, blockedReason = null,
+}: {
   templateId: number;
   onSaved?: () => void;
   /** Bumped by the sheet grid above when it changes a column, so this list
    *  re-reads instead of showing the template as it was a moment ago. */
   refreshKey?: number;
+  /** Why saving is not allowed right now, or null when it is.
+   *
+   *  This list and the column-mapping rows above it both write the same value —
+   *  `source_field` here is `canonical_field` there. This one works from a copy
+   *  it loaded when it mounted, so saving it while the page holds unsaved
+   *  mapping edits writes the pre-edit value back and loses them silently. The
+   *  page knows when that is true; it says so here rather than letting the save
+   *  happen and reporting success for work it undid. */
+  blockedReason?: string | null;
 }) {
   const [doc, setDoc] = useState<FieldsDoc | null>(null);
   const [fields, setFields] = useState<TemplateField[]>([]);
@@ -150,17 +161,27 @@ export default function OutputTemplateFields({ templateId, onSaved, refreshKey }
             onClick={() => setAdding(a => !a)}>
             <Plus size={14} /> Add Field
           </Button>
-          <Button variant="secondary" disabled={busy} onClick={() => save(false)}>
+          <Button variant="secondary" disabled={busy || !!blockedReason}
+            title={blockedReason ?? undefined}
+            onClick={() => save(false)}>
             Save
           </Button>
-          <Button disabled={busy || !report?.valid} onClick={() => save(true)}
-            title={report?.valid ? undefined
-              : "Fix the errors below before activating this template"}>
+          <Button disabled={busy || !!blockedReason || !report?.valid}
+            onClick={() => save(true)}
+            title={blockedReason
+              ?? (report?.valid ? undefined
+                  : "Fix the errors below before activating this template")}>
             Save &amp; Activate
           </Button>
         </div>
       </div>
 
+      {/* Said out loud, not just as a tooltip on a greyed-out button — a
+          disabled control with no reason beside it is the same dead end that
+          made the silent overwrite hard to spot in the first place. */}
+      {blockedReason && (
+        <Note tone="warn"><AlertTriangle size={14} /> {blockedReason}</Note>
+      )}
       {doc.locked_by_history && (
         <Note tone="info">
           A file has already been generated from version {doc.template.version}.

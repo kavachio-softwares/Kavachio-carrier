@@ -71,7 +71,15 @@ export type BrokerDetail = {
   created_at: string | null;
   programmes: { id: number; name: string; status: string; assigned_at: string | null }[];
   contracts: {
-    id: number; filename: string | null; program_id: number | null;
+    id: number;
+    /** What the carrier called it. A contract WRITTEN here has no file, so
+     *  this is the only name it has — and it is the one every other screen
+     *  shows. */
+    name: string | null;
+    filename: string | null; program_id: number | null;
+    /** Written here rather than uploaded, which decides where its name leads:
+     *  its own record, not the page that reads clauses out of a document. */
+    is_app_managed: boolean;
     status: string | null; approval_status: ApprovalStatus;
     inception_dt: string | null; expiry_dt: string | null; created_at: string | null;
   }[];
@@ -104,7 +112,11 @@ export type PendingApproval = {
  *  contract's thread — how it got to where it is. */
 export type ApprovalEvent = {
   action: "submitted" | "approved" | "rejected" | "withdrawn"
-        | "sent_for_review" | "changes_requested" | "terms_agreed";
+        | "sent_for_review" | "changes_requested" | "terms_agreed"
+        // The carrier settling the terms alone, without a review. Same
+        // destination as terms_agreed and a different fact, which is the whole
+        // reason it is written down under its own name.
+        | "review_skipped";
   note: string | null;
   acted_at: string | null;
   acted_by: { id: number; full_name: string; email: string } | null;

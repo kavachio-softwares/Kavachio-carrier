@@ -16,8 +16,11 @@ import { PageBody, PageHeader } from "../components/Layout";
 import { OnboardingBadge } from "../components/OnboardingBadge";
 import AddContractModal from "../components/AddContractModal";
 
+// The carrier's DECISION, which is not the contract's state: a contract can be
+// approved and still be a draft nobody has signed. It said "Live", which is the
+// state — and the two disagreeing on adjacent screens is worse than either.
 const APPROVAL_LABEL: Record<string, { text: string; cls: string }> = {
-  approved:         { text: "Live",        cls: "bg-success/10 text-success" },
+  approved:         { text: "Approved",    cls: "bg-success/10 text-success" },
   pending_approval: { text: "Waiting on you", cls: "bg-warn/10 text-warn" },
   rejected:         { text: "Sent back",   cls: "bg-danger/10 text-danger" },
 };
@@ -185,16 +188,27 @@ export default function BrokerDetail() {
                         {/* Opens what the contract PRODUCED — its clauses and the
                             rules written from them. That page is the whole point
                             of adding one here, so the name is the way in. */}
-                        {c.program_id != null ? (
+                        {/* A contract WRITTEN here has no file and no clauses
+                            read out of one — its home is its own record, where
+                            its terms, its wording and its checks are. An
+                            UPLOADED one opens what reading it produced, which
+                            is the whole point of having added it here. */}
+                        {c.is_app_managed ? (
+                          <Link to={`/contracts/${c.id}`}
+                            className="inline-flex items-center gap-2 text-navy hover:underline">
+                            <FileText size={14} className="text-ink-muted" />
+                            {c.name ?? `Contract ${c.id}`}
+                          </Link>
+                        ) : c.program_id != null ? (
                           <Link to={`/programs/${c.program_id}/contracts/${c.id}`}
                             className="inline-flex items-center gap-2 text-navy hover:underline">
                             <FileText size={14} className="text-ink-muted" />
-                            {c.filename ?? `Contract ${c.id}`}
+                            {c.filename ?? c.name ?? `Contract ${c.id}`}
                           </Link>
                         ) : (
                           <span className="inline-flex items-center gap-2">
                             <FileText size={14} className="text-ink-muted" />
-                            {c.filename ?? `Contract ${c.id}`}
+                            {c.filename ?? c.name ?? `Contract ${c.id}`}
                           </span>
                         )}
                       </td>

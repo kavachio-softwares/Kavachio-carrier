@@ -29,6 +29,8 @@ out; it is never believed about it.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 import re
@@ -859,8 +861,9 @@ def _assert_terms_settled(c: Contract) -> None:
     if state in SIGNABLE_STATES:
         return
     why = {
-        "draft": "it has not been sent to the broker yet. Send the terms for "
-                 "review first — a contract nobody has read is not one to sign.",
+        "draft": "the terms are not settled yet. Send them to the broker for "
+                 "review — or, if there is nothing to agree, settle them "
+                 "yourself with “skip review” and sign straight away.",
         "pending": "it is waiting on the carrier to approve it.",
         "in_review": "the broker is still reading the terms. They agree them "
                      "or ask for changes, and it comes back here to sign.",
@@ -1604,6 +1607,54 @@ class FieldValueIn(BaseModel):
     value: Optional[str] = None
 
 
+# What a signature image may be. PNG is what the browser produces from both the
+# drawing canvas and a cleaned-up upload; the other two are here because a
+# signer who has one on file may send it straight through some other client.
+_SIG_IMAGE_TYPES = ("png", "jpeg", "jpg", "webp", "gif")
+# Matched to esign_pdf's own ceiling on decoded bytes. Beyond it the PDF layer
+# drops the image and stamps the typed name instead — silently, which is the
+# right behaviour for a corrupt drawing and the wrong one for a signer who
+# deliberately chose a picture and would never find out it was not used.
+_SIG_IMAGE_MAX_BYTES = 4_000_000
+
+
+def _check_signature_image(value: str | None) -> None:
+    """Refuse a signature image that cannot become one, and say why.
+
+    The alternative is what used to happen: anything at all was stored on the
+    recipient row, and esign_pdf quietly fell back to the typed name for
+    whatever it could not decode. That is correct for a drawing that arrived
+    corrupt — the signing must not fail over a canvas glitch — and wrong for
+    somebody who UPLOADED a picture of their signature, who has every reason to
+    believe the document carries it and no way to discover it does not.
+
+    So the shape is checked here, at the boundary, where it can still be
+    explained. Past this point the old silent fallback stands.
+    """
+    if not value:
+        return
+    head, _, b64 = value.partition(",")
+    kind = head[len("data:image/"):].split(";")[0].lower() if \
+        head.startswith("data:image/") else ""
+    if not b64 or "base64" not in head or kind not in _SIG_IMAGE_TYPES:
+        raise HTTPException(
+            400, "That signature is not an image we can put on the document. "
+                 "Draw it, type it, or upload a PNG or JPEG.")
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(
+            400, "That signature image arrived damaged. Choose it again.")
+    if not raw:
+        raise HTTPException(
+            400, "That signature image is empty. Choose it again.")
+    if len(raw) > _SIG_IMAGE_MAX_BYTES:
+        raise HTTPException(
+            400, "That signature image is too big to go on the document — "
+                 "under 4 MB. A photo of the signature alone, rather than of "
+                 "the whole page, is usually well under it.")
+
+
 class SignIn(BaseModel):
     """What the signer submits.
 
@@ -1611,9 +1662,18 @@ class SignIn(BaseModel):
     the typed fallback. Field VALUES are sent per box so the same submission can
     carry a signature, a printed name, a title and a date — but which boxes may
     appear here is not the client's decision. See the ownership check below.
+
+    `initials_image` is a SECOND mark and is optional. Initials and a signature
+    do different jobs on a contract — the signature closes the document, the
+    initials acknowledge a page or a clause — so one image was never allowed to
+    stand for both: initialling with the signature itself means anyone holding
+    one page can reproduce the mark on the last one. Sent, it goes in the
+    initials boxes; not sent, those boxes carry their own text value, which the
+    browser fills with the signer's initials.
     """
     signature_name: Optional[str] = None
     signature_image: Optional[str] = None
+    initials_image: Optional[str] = None
     fields: list[FieldValueIn] = Field(default_factory=list)
     agreed: bool = False
 
@@ -1634,6 +1694,8 @@ def sign(token: str, body: SignIn, request: Request,
         if not body.agreed:
             raise HTTPException(
                 400, "Tick the box to confirm you agree to sign electronically.")
+        _check_signature_image(body.signature_image)
+        _check_signature_image(body.initials_image)
 
         fields = list(env.fields)
         mine = {f.id: f for f in _own_fields(fields, rec)}
@@ -1699,7 +1761,13 @@ def sign(token: str, body: SignIn, request: Request,
         stamps = [
             Stamp(page=f.page, x=f.x, y=f.y, w=f.w, h=f.h, type=f.type,
                   value=f.value or "",
-                  image=(body.signature_image if f.type in ("signature", "initial") else None),
+                  # Each mark in its own kind of box. `initials_image` may be
+                  # absent — then the initials box stamps its text value, which
+                  # is still a different mark from the signature. What never
+                  # happens is the signature image landing in an initials box.
+                  image=(body.initials_image if f.type == "initial"
+                         else body.signature_image if f.type == "signature"
+                         else None),
                   caption=(caption if f.type == "signature" else None))
             for f in sorted(mine.values(), key=lambda f: (f.page, f.y))
             if (f.value or "").strip()]

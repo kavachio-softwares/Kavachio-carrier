@@ -10,6 +10,7 @@ import { type Sheet } from "../components/OutputRows";
 import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
 import { useBrokerContractScope } from "../components/BrokerContractScope";
 import { resolveOutputTemplate, type ResolveResult } from "../api/outputTemplate";
+import { contractLabel } from "../utils/contractLabel";
 
 type Party = { id: number; legal_name: string; is_active?: boolean };
 type Program = { id: number; name: string; status?: string; party_id?: number | null };
@@ -327,8 +328,7 @@ export default function DirectRun() {
                       : scope.contracts.length === 0
                         ? "No approved contract for this selection"
                         : scope.contracts.length === 1
-                          ? (scope.contracts[0].filename
-                             || `Contract ${scope.contracts[0].id}`)
+                          ? contractLabel(scope.contracts[0])
                           : `${scope.contracts.length} contracts on this broker`} />
                 </div>
               </div>

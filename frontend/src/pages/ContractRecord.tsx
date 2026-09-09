@@ -17,11 +17,17 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink,
   Eye, FileText, History, MessagesSquare, Paperclip, PenLine, Plus, RefreshCw,
-  Send, Trash2, Upload, XCircle,
+  Send, ShieldCheck, Trash2, Upload, XCircle,
 } from "lucide-react";
 import { currentMga, getTenantBrand } from "../auth";
+import { SignaturePlacer } from "../components/SignaturePlacer";
 import { WordingEditor } from "../components/WordingEditor";
 import { fmtDate, fmtStamp } from "../utils/date";
+import { TermDurationField, useTermDuration } from "../components/TermDuration";
+import { EXPIRY_FIELD, INCEPTION_FIELD, type TermSpec } from "../utils/term";
+import {
+  chipEdits, readTermMove, restoreChips, type TermMove,
+} from "../utils/wordingEdits";
 import { getApprovalHistory, type ApprovalEvent } from "../api/hierarchy";
 import {
   getContractRound, inAppSigningUrl, type ContractRound,
@@ -29,13 +35,15 @@ import {
 import {
   acceptTerms, activateContract, deactivateDocument, downloadDocument,
   openDocument,
+  bindChecks,
   generateRules, getContract, getContractTypes, renewContract, requestChanges,
-  sendForReview, submitContract, submitSigned, terminateContract,
+  sendForReview, skipReview, submitContract, submitSigned, terminateContract,
   downloadContractPdf, previewWording,
   updateContract, uploadDocument, fieldErrors,
   type ContractDocumentKind, type ContractField, type ContractRecord as Rec,
   type AgreedLimits, type AgreedLimitSpec, type ContractTypeSpec, type FieldErrors,
   type Lifecycle, type LimitGroup,
+  type SignatureBlockSpec, type SignatureLayout,
   type ProposedChange, type WordingSection,
 } from "../api/contractRecord";
 
@@ -58,8 +66,9 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   signed: { label: "Signed", cls: "b-ok",
             note: "The broker signed and returned it. It is with the carrier "
                 + "to place and put in force." },
-  active: { label: "Live", cls: "b-ok",
-            note: "In force. Bordereaux can be produced against it." },
+  active: { label: "In force", cls: "b-ok",
+            note: "Signed by both sides and running. Bordereaux can be "
+                + "produced against it." },
   expired: { label: "Expired", cls: "b-mut",
              note: "Its term has run out. Renew it into a successor." },
   terminated: { label: "Terminated", cls: "b-crit",
@@ -139,6 +148,11 @@ export default function ContractRecord() {
   const [reqNote, setReqNote] = useState("");
   const [reqChanges, setReqChanges] = useState<ProposedChange[]>([]);
   const [reviewNote] = useState("");
+  // Skipping the review is asked for rather than done on the click: it spends
+  // the other side's chance to object, and the reason for spending it is worth
+  // more on the record than the click was.
+  const [showSkip, setShowSkip] = useState(false);
+  const [skipNote, setSkipNote] = useState("");
 
   // Termination / renewal
   const [showTerminate, setShowTerminate] = useState(false);
@@ -146,6 +160,7 @@ export default function ContractRecord() {
   const [showRenew, setShowRenew] = useState(false);
   const [renewFrom, setRenewFrom] = useState("");
   const [renewTo, setRenewTo] = useState("");
+  const [termSpec, setTermSpec] = useState<TermSpec | null>(null);
 
   // Editing the terms. The inputs are built from the SERVER's field spec, the
   // same one the create form uses and the same one the server validates
@@ -155,6 +170,12 @@ export default function ContractRecord() {
   // words and the same three groups the create flow asked for it in.
   const [limitSpec, setLimitSpec] = useState<AgreedLimitSpec[]>([]);
   const [limitGroups, setLimitGroups] = useState<LimitGroup[]>([]);
+  // The signature block: the vocabulary from the server, and this contract's
+  // own choice. Editable here as well as at step 4 — a block is a term of the
+  // contract like any other, and a carrier who got it wrong should not have to
+  // raise the contract again to fix it.
+  const [sigSpec, setSigSpec] = useState<SignatureBlockSpec | null>(null);
+  const [draftSig, setDraftSig] = useState<SignatureLayout | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Record<string, string>>({});
   // The agreed limits, editable while the contract is still a draft. A draft is
@@ -170,12 +191,19 @@ export default function ContractRecord() {
   // at a time, and the chips that tie its sentences to the terms above.
   const [wEditing, setWEditing] = useState(false);
   const [wSections, setWSections] = useState<WordingSection[]>([]);
-  const [wActive, setWActive] = useState(0);
+  // Which heading is open for renaming. A heading is not part of the clause
+  // text and must not be typed into by accident — it is the thing a reader
+  // navigates by — so it is a label until it is asked to be an input.
+  const [wRenaming, setWRenaming] = useState<string | null>(null);
   const [wTokens, setWTokens] = useState<Record<string, string>>({});
   // Bumped only when the sections are REPLACED wholesale (rebuilt from the
   // terms). The editor rebuilds its DOM on this, and rebuilding it on every
   // keystroke would throw the caret to the start of the clause.
   const [wVersion, setWVersion] = useState(0);
+  // Terms a chip was typed over, waiting to be saved WITH the wording — one
+  // request, because a clause saying 15% beside a term still reading 11% is
+  // exactly the state this exists to prevent, and two requests can leave it.
+  const [wMoves, setWMoves] = useState<AgreedLimits>({});
 
   useEffect(() => {
     getContractTypes()
@@ -183,6 +211,8 @@ export default function ContractRecord() {
         setSpecs(d.types);
         setLimitSpec(d.agreed_limits);
         setLimitGroups(d.limit_groups);
+        setTermSpec(d.term);
+        setSigSpec(d.signature_block);
       })
       .catch(() => setSpecs([]));
   }, []);
@@ -241,6 +271,29 @@ export default function ContractRecord() {
     });
   }
 
+  /** Terms → checks. See bindChecks: the server resolves which bordereau
+   *  template this contract reports into, so there is nothing to choose. */
+  async function doBind() {
+    await run("bind", async () => {
+      const r = await bindChecks(id);
+      const m = r.mapping;
+      // Each shortfall carries its OWN reason — "no column that measures it"
+      // and "three columns claim to be this and nothing says which" are
+      // different problems with different fixes, and one summary sentence over
+      // both of them tells the reader neither.
+      setNote(
+        (m.rules_written === 0
+          ? `Nothing could be checked against ${m.output_template.name}.`
+          : `${m.rules_written} check${m.rules_written === 1 ? "" : "s"} `
+            + `written against ${m.output_template.name}.`)
+        + (m.unmapped.length
+            ? " Not measured: "
+              + m.unmapped.map(u => `${u.question} — ${u.reason}`).join("; ")
+              + "."
+            : ""));
+    });
+  }
+
   async function doGenerate() {
     await run("rules", async () => {
       const r = await generateRules(id, rec?.output_template?.id ?? null);
@@ -255,6 +308,28 @@ export default function ContractRecord() {
       setNote(`Re-read from the active documents — ${bits.join(", ") || "done"}.`);
     });
   }
+
+  // ── hooks stop here ──────────────────────────────────────────────────────
+  // Every hook on this screen has to be ABOVE the guard below. React counts
+  // them, and the loading render (no contract yet) runs a shorter list than the
+  // loaded one — which is "Rendered more hooks than during the previous
+  // render", and it takes the whole page down rather than degrading.
+  //
+  // TWO terms live here and they must not share a picker: the one being edited,
+  // and the one a renewal would start. A single hook would carry the length
+  // chosen for the successor back onto the contract in force.
+  const editTerm = useTermDuration({
+    spec: termSpec,
+    inception: draft[INCEPTION_FIELD] ?? "",
+    expiry: draft[EXPIRY_FIELD] ?? "",
+    setInception: v => setDraft(d => ({ ...d, [INCEPTION_FIELD]: v })),
+    setExpiry: v => setDraft(d => ({ ...d, [EXPIRY_FIELD]: v })),
+  });
+  const renewTerm = useTermDuration({
+    spec: termSpec,
+    inception: renewFrom, expiry: renewTo,
+    setInception: setRenewFrom, setExpiry: setRenewTo,
+  });
 
   if (!rec) {
     return (
@@ -383,8 +458,9 @@ export default function ContractRecord() {
         wordingInput(rebuild ? null : rec?.wording_sections ?? null));
       setWSections(pv.sections);
       setWTokens(pv.tokens);
+      setWMoves({});
       setWVersion(v => v + 1);
-      setWActive(0);
+      setWRenaming(null);
       setWEditing(true);
       if (rebuild) {
         setNote("Rewritten from the terms. Nothing is saved until you save it.");
@@ -392,6 +468,71 @@ export default function ContractRecord() {
     } catch (e) {
       setErr(fieldErrors(e).message);
     }
+  }
+
+  /** A chip was typed over, so the term follows the words. See the same
+   *  function in ContractNew — one gesture, one meaning, both screens. */
+  function chipsEdited(before: string, after: string, at: number) {
+    const live: AgreedLimits = { ...(rec?.agreed_limits ?? {}), ...wMoves };
+    const moves: TermMove[] = [];
+    for (const edit of chipEdits(before, after)) {
+      const term = limitSpec.find(l => l.name === edit.token);
+      if (!term) continue;
+      const move = readTermMove(edit, { kind: term.kind, choices: term.choices });
+      if (!move) continue;
+      if (String(live[edit.token]?.value ?? "") === move.value) continue;
+      moves.push(move);
+    }
+    if (!moves.length) return;
+
+    const next: AgreedLimits = { ...live };
+    for (const m of moves) {
+      next[m.token] = { ...(next[m.token] ?? {}), value: m.value };
+    }
+    const body = restoreChips(before, after, moves);
+    const nextSections = wSections.map(
+      (x, j) => j === at ? { ...x, body } : x);
+
+    setWMoves(w => {
+      const out = { ...w };
+      for (const m of moves) out[m.token] = next[m.token];
+      return out;
+    });
+    setWSections(nextSections);
+    setWVersion(v => v + 1);
+    setNote(
+      moves.map(m => {
+        const term = limitSpec.find(l => l.name === m.token);
+        return `${term?.question ?? m.token} is now `
+             + `${m.value}${term?.unit ?? ""}`;
+      }).join(", ")
+      + " — the term moves with the sentence. Save the wording to keep it.");
+
+    // The chip has to come back carrying the new value, which means re-reading
+    // with the new terms rather than the ones on the record.
+    previewWording({ ...wordingInput(nextSections), agreed_limits: next })
+      .then(pv => setWTokens(pv.tokens))
+      .catch(() => {});
+  }
+
+  /** A chip edited in place on the record. Held with the other pending term
+   *  moves and saved WITH the wording — see chipsEdited. */
+  function chipValue(token: string, text: string) {
+    const live: AgreedLimits = { ...(rec?.agreed_limits ?? {}), ...wMoves };
+    const term = limitSpec.find(l => l.name === token);
+    if (!term) return;
+    const move = readTermMove({ token, text },
+                              { kind: term.kind, choices: term.choices });
+    if (!move) return;
+    if (String(live[token]?.value ?? "") === move.value) return;
+    const entry = { ...(live[token] ?? {}), value: move.value };
+    setWMoves(w => ({ ...w, [token]: entry }));
+    setNote(`${term.question} is now ${move.value}${term.unit ?? ""} — save the `
+          + "wording to keep it.");
+    previewWording({ ...wordingInput(wSections),
+                     agreed_limits: { ...live, [token]: entry } })
+      .then(pv => setWTokens(pv.tokens))
+      .catch(() => {});
   }
 
   async function saveWording() {
@@ -403,12 +544,41 @@ export default function ContractRecord() {
     setBusy("wording");
     setErr("");
     try {
-      await updateContract(id, {
+      const moved = Object.keys(wMoves);
+      const saved = await updateContract(id, {
         wording_sections: wSections.map(
           ({ key, title, body, origin }) => ({ key, title, body, origin })),
+        // Only when a chip was typed over. Absent means unchanged, so a plain
+        // wording edit never touches what was agreed.
+        ...(moved.length
+          ? { agreed_limits: { ...(rec?.agreed_limits ?? {}), ...wMoves } }
+          : {}),
       });
+      setWMoves({});
       setWEditing(false);
-      setNote("The wording was updated.");
+      // A figure typed where a chip used to be is tied back to its term on the
+      // way in, so the sentence keeps moving when the term does. Said out loud
+      // — it is the text of a contract.
+      const retied = saved.wording_retied ?? [];
+      if (moved.length) {
+        setNote(
+          "The wording was updated, and so were the terms it quotes: "
+          + moved.map(k => {
+              const term = limitSpec.find(l => l.name === k);
+              return `${term?.question ?? k} is now `
+                   + `${saved.agreed_limits?.[k]?.value ?? ""}`;
+            }).join(", ")
+          + ". The checks moved with them.");
+        setWEditing(false);
+        load();
+        return;
+      }
+      setNote(retied.length
+        ? `The wording was updated. ${retied.join(" and ")} `
+          + `${retied.length === 1 ? "was" : "were"} typed in as a figure, so `
+          + `${retied.length === 1 ? "it has" : "they have"} been tied back to `
+          + `the term — the clause now moves when the term does.`
+        : "The wording was updated.");
       load();
     } catch (e) {
       setErr(fieldErrors(e).message);
@@ -454,6 +624,9 @@ export default function ContractRecord() {
     }
     setDraft(seed);
     setDraftLimits(rec?.agreed_limits ?? {});
+    // The server normalises this on the way out, so there is always a layout to
+    // seed from — an older contract seeds with the four lines it already has.
+    setDraftSig(rec?.signature_layout ?? sigSpec?.default ?? null);
     setFieldErrs({});
     setEditing(true);
   }
@@ -486,6 +659,7 @@ export default function ContractRecord() {
         // Sent together so one save covers the whole contract — the identity
         // and the substance change in one step, or not at all.
         agreed_limits: draftLimits,
+        ...(draftSig ? { signature_layout: draftSig } : {}),
       });
       setEditing(false);
       setNote("Contract updated.");
@@ -511,7 +685,10 @@ export default function ContractRecord() {
                : f.kind === "int" || f.kind === "decimal" ? "number" : "text"}
           step={f.kind === "decimal" ? "0.01" : undefined}
           value={draft[f.name] ?? ""}
-          onChange={e => setDraft(d => ({ ...d, [f.name]: e.target.value }))}
+          onChange={e => (
+            f.name === INCEPTION_FIELD ? editTerm.onInception(e.target.value)
+            : f.name === EXPIRY_FIELD ? editTerm.onExpiry(e.target.value)
+            : setDraft(d => ({ ...d, [f.name]: e.target.value })))}
           style={bad ? { borderColor: "var(--p-crit)" } : undefined}
         />
         {bad && (
@@ -911,6 +1088,15 @@ export default function ContractRecord() {
                     ? "Send revised terms" : "Send to broker for review"}
                 </button>
               )}
+              {/* Second-tier on purpose. Sending it out is the ordinary road
+                  and stays the primary button; this is the exception, and it
+                  should look like one. */}
+              {a.skip_review && (
+                <button className="btn" type="button" disabled={!!busy}
+                        onClick={() => setShowSkip(v => !v)}>
+                  <PenLine size={13} /> Skip the review — sign it now
+                </button>
+              )}
               {a.accept_terms && (
                 <button
                   className="btn pri" type="button" disabled={!!busy}
@@ -969,6 +1155,27 @@ export default function ContractRecord() {
                   {busy === "rules" ? "Reading…" : "Re-read rules"}
                 </button>
               )}
+              {/* The written contract's equivalent of Re-read rules. There is
+                  no document to re-read — the terms ARE the source — so this
+                  translates them into checks instead. A term that moves takes
+                  its check with it on its own (see contract_routes._auto_bind);
+                  what this answers is the other direction, where the TEMPLATE
+                  changed and a term that had no column to measure it now has
+                  one. */}
+              {rec.checks.bindable && (
+                <button className="btn" type="button" disabled={!!busy}
+                        onClick={doBind}
+                        title={rec.checks.rules === 0
+                          ? "Write these terms into the checks that run on "
+                            + "every bordereau row"
+                          : "Write them again — for when a column has been "
+                            + "mapped that had nothing to measure a term "
+                            + "before"}>
+                  <ShieldCheck size={13} />
+                  {busy === "bind" ? "Binding…"
+                    : rec.checks.rules === 0 ? "Bind checks" : "Re-bind checks"}
+                </button>
+              )}
               {a.renew && (
                 <button className="btn" type="button"
                         onClick={() => setShowRenew(v => !v)}>
@@ -993,6 +1200,49 @@ export default function ContractRecord() {
                 <PenLine size={13} /> Signature
               </Link>
             </div>
+
+            {/* ── carrier: settle the terms alone ── */}
+            {showSkip && (
+              <div className="note warn" style={{ marginTop: 14 }}>
+                <b>Agree these terms without sending them out</b>
+                <p style={{ margin: "6px 0 0" }}>
+                  The contract goes straight to signing. The
+                  {" "}{rec.contract_type === "insurer_reinsurer"
+                        ? "reinsurer" : "broker"}{" "}
+                  is not asked to read the terms first and gets no chance to
+                  push back on them — so this is for a contract with nothing
+                  left to agree, or one whose counterparty has no seat in
+                  Kavachio to read it in.
+                </p>
+                <p style={{ margin: "6px 0 0" }}>
+                  It is written into the contract's history as
+                  {" "}<b>review skipped</b>, under your name, so a reader later
+                  can tell it apart from terms the other side agreed to.
+                </p>
+                <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
+                  <textarea rows={2} value={skipNote}
+                            onChange={e => setSkipNote(e.target.value)}
+                            placeholder="Why is no review needed? (optional)" />
+                </div>
+                <div className="rowacts">
+                  <button
+                    className="btn pri" type="button" disabled={!!busy}
+                    onClick={() => run("skip", async () => {
+                      await skipReview(id, skipNote.trim() || undefined);
+                      setShowSkip(false);
+                      setSkipNote("");
+                      setNote("Terms settled. It is ready to sign.");
+                    })}
+                  >
+                    {busy === "skip" ? "Settling…" : "Yes, go straight to signing"}
+                  </button>
+                  <button className="btn" type="button"
+                          onClick={() => setShowSkip(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* ── broker: sign and hand it back ── */}
             {showSign && (
@@ -1213,12 +1463,16 @@ export default function ContractRecord() {
                   <div className="field" style={{ marginBottom: 0 }}>
                     <label>Inception</label>
                     <input type="date" value={renewFrom}
-                           onChange={e => setRenewFrom(e.target.value)} />
+                           onChange={e => renewTerm.onInception(e.target.value)} />
                   </div>
+                  {/* A renewal is nearly always the same length as the term it
+                      succeeds, so this is where saying "12 months" saves the
+                      most typing. */}
+                  {renewTerm.ready && <TermDurationField term={renewTerm} />}
                   <div className="field" style={{ marginBottom: 0 }}>
                     <label>Expiry</label>
                     <input type="date" value={renewTo}
-                           onChange={e => setRenewTo(e.target.value)} />
+                           onChange={e => renewTerm.onExpiry(e.target.value)} />
                   </div>
                 </div>
                 <div className="rowacts">
@@ -1256,7 +1510,12 @@ export default function ContractRecord() {
           <div style={{ padding: "16px 20px" }}>
             {editing && spec ? (
               <>
-                <div className="grid g-3">{editable.map(editInput)}</div>
+                <div className="grid g-3">
+                  {editable.flatMap(f => f.name === EXPIRY_FIELD && editTerm.ready
+                    ? [<TermDurationField key="term-duration" term={editTerm} />,
+                       editInput(f)]
+                    : [editInput(f)])}
+                </div>
 
                 {/* The agreed limits, in the same three groups and the same
                     words the create flow asked for them in. Editing a draft's
@@ -1269,8 +1528,18 @@ export default function ContractRecord() {
                       && (showAllLimits || draftLimits[l.name] !== undefined));
                   if (!rows.length) return null;
                   return (
-                    <div key={g.key} style={{ marginTop: 18 }}>
-                      <div className="sub-h">{g.label}</div>
+                    // Panelled, exactly as the create flow asks for them. The
+                    // group name used to be a loose caption between two runs of
+                    // rows, which made the last row of one group read as the
+                    // first row of the next — and these two screens edit the
+                    // same terms, so they must not disagree about where a term
+                    // belongs.
+                    <div className="limgrp" key={g.key}>
+                      <div className="limgrp-h">
+                        <div className="sub-h">{g.label}</div>
+                        <div className="hint">{g.sub}</div>
+                      </div>
+                      <div className="limgrp-b">
                       <div className="lim lim-h">
                         <div className="lq"><b>What you agreed</b></div>
                         <div className="sub">The limit</div>
@@ -1344,9 +1613,111 @@ export default function ContractRecord() {
                           </div>
                         );
                       })}
+                      </div>
                     </div>
                   );
                 })}
+
+                {/* The signature block, offered from the server's own list so
+                    this screen and step 4 cannot drift apart about what a block
+                    may contain. */}
+                {sigSpec && draftSig && (
+                  <div className="limgrp">
+                    <div className="limgrp-h">
+                      <div className="sub-h">What each side signs</div>
+                      <div className="hint">
+                        the lines that appear under their signature on the
+                        contract's signature page
+                      </div>
+                    </div>
+                    <div className="limgrp-b" style={{ paddingTop: 12 }}>
+                      <div className="grid g-2">
+                        {sigSpec.sides.map(side => (
+                          <div key={side}>
+                            <div className="sub-h" style={{ marginTop: 0 }}>
+                              {side === "carrier"
+                                ? "You"
+                                : rec.counterparty?.name ?? "The counterparty"}
+                            </div>
+                            {sigSpec.fields.map(f => {
+                              const on = (draftSig.fields[side] ?? []).includes(f.key);
+                              return (
+                                <label key={f.key} className="kv"
+                                       style={{ alignItems: "flex-start",
+                                                cursor: f.fixed ? "default" : "pointer" }}>
+                                  <span className="k">
+                                    <input type="checkbox" checked={on}
+                                           disabled={f.fixed}
+                                           style={{ marginRight: 9 }}
+                                           onChange={() => setDraftSig(l => l && ({
+                                             ...l,
+                                             fields: {
+                                               ...l.fields,
+                                               [side]: on
+                                                 ? (l.fields[side] ?? []).filter(k => k !== f.key)
+                                                 : [...(l.fields[side] ?? []), f.key],
+                                             },
+                                           }))} />
+                                    <b style={{ color: "var(--p-ink)" }}>{f.label}</b>
+                                    <div className="sub" style={{ marginLeft: 24 }}>
+                                      {f.hint}{f.fixed && " · always on"}
+                                    </div>
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="field"
+                           style={{ marginTop: 12, marginBottom: 0, maxWidth: 320 }}>
+                        <label>How the two blocks sit on the page</label>
+                        <select value={draftSig.arrangement}
+                                onChange={e => setDraftSig(
+                                  l => l && { ...l, arrangement: e.target.value })}>
+                          {sigSpec.arrangements.map(a => (
+                            <option key={a.key} value={a.key}>{a.label}</option>
+                          ))}
+                        </select>
+                        <div className="hint">
+                          {sigSpec.arrangements
+                            .find(a => a.key === draftSig.arrangement)?.hint}
+                        </div>
+                      </div>
+
+                      {/* Placed by hand: the blocks are dragged onto the pages
+                          of this contract, and the document is drawn where they
+                          were left. Only offered here and not in the create
+                          wizard, because there is no document to drag onto
+                          until the contract exists. */}
+                      {draftSig.arrangement === "placed" && (
+                        <div style={{ marginTop: 14 }}>
+                          <SignaturePlacer
+                            contractId={id}
+                            layout={draftSig}
+                            block={sigSpec.placed_block}
+                            sides={sigSpec.sides.map(s => ({
+                              key: s,
+                              label: s === "carrier"
+                                ? "You"
+                                : rec.counterparty?.name ?? "The counterparty",
+                            }))}
+                            onPlace={(side, spot) => setDraftSig(l => l && ({
+                              ...l,
+                              blocks: { ...(l.blocks ?? {}), [side]: spot },
+                            }))}
+                          />
+                          <div className="hint" style={{ marginTop: 8 }}>
+                            The pages are this contract as it stands. Save the
+                            terms to keep where you put the blocks — and if the
+                            wording later grows or shrinks, a block left past
+                            the end is drawn on the last page rather than lost.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 <div className="rowacts">
                   <button className="btn sm" type="button"
@@ -1394,8 +1765,6 @@ export default function ContractRecord() {
                   <Row label="UMR">{rec.umr}</Row>
                   <Row label="Class of business">{rec.class_of_business}</Row>
                   <Row label="Year of account">{rec.year_of_account}</Row>
-                  <Row label="Risk code">{rec.risk_code}</Row>
-                  <Row label="Section">{rec.section_number}</Row>
                   <Row label="Premium cap">
                     {rec.premium_cap_amount != null
                       ? `${rec.premium_cap_currency ?? ""} ${rec.premium_cap_amount.toLocaleString()}`.trim()
@@ -1414,6 +1783,44 @@ export default function ContractRecord() {
                       ? `${rec.output_template.name} v${rec.output_template.version}`
                       : "none — no rules can be written without one"}
                   </Row>
+                  {/* What is MEASURED on a file, beside the template that
+                      measures it. Two facts that only mean anything together:
+                      a contract with a template and no checks is one nobody has
+                      bound, and it looks identical to a finished one until this
+                      says otherwise. */}
+                  <Row label="Checks in force">
+                    {rec.checks.rules === 0
+                      ? rec.checks.bindable
+                        ? `none — ${rec.checks.checkable} agreed term`
+                          + `${rec.checks.checkable === 1 ? "" : "s"} are not `
+                          + "checked on any row yet"
+                        : "none — nothing here is measured against a bordereau"
+                      : rec.checks.checkable === 0
+                        // An uploaded wording: its rules were read from its
+                        // clauses, and it has no agreed limits to count against.
+                        ? `${rec.checks.rules}, read from the wording`
+                        : `${rec.checks.rules} of ${rec.checks.checkable} `
+                          + "checkable terms"}
+                  </Row>
+                  {/* WHICH SHEET, AND WHY IT IS THAT ONE. A term says
+                      "commission is 17%" and never says which tab of which
+                      workbook that is measured on — the sheet comes from the
+                      programme's output template, which binding resolves on its
+                      own. That is right (two answers to "which template" is how
+                      a file gets checked against one nothing reports into) and
+                      it was also invisible: a carrier who writes nothing in the
+                      United States could be measured on a Lloyd's US layout and
+                      never be told. Shown, so the wrong template is noticed
+                      here rather than in an exception report. */}
+                  {rec.checks.sheets.length > 0 && (
+                    <Row label="Measured on">
+                      {rec.checks.sheets.join(", ")}
+                      <div className="hint" style={{ marginTop: 2 }}>
+                        From the programme's output template, not from this
+                        contract. Change it on the programme and re-bind.
+                      </div>
+                    </Row>
+                  )}
                   <Row label="Raised">{fmtStamp(rec.created_at)}</Row>
                 </div>
                 {a.edit && (
@@ -1556,91 +1963,113 @@ export default function ContractRecord() {
 
             {wEditing ? (
               <div style={{ padding: "20px" }}>
-                {/* The same rail the create flow uses. One section at a
-                    time: a contract is written clause by clause, and a page
-                    of stacked editable boxes makes it far too easy to type
-                    into the wrong one. */}
-                <div className="doc">
-                  <div className="doc-rail">
-                    {wSections.map((sec, i) => (
-                      <div
-                        key={sec.key} role="button" tabIndex={0}
-                        className={`doc-sec${i === wActive ? " on" : ""}`}
-                        onClick={() => setWActive(i)}
-                        onKeyDown={e => e.key === "Enter" && setWActive(i)}
-                      >
-                        <span className="no">{i + 1}</span>
-                        <span className="txt">
-                          <span className="nm">{sec.title}</span>
-                          <span className="st">{sec.origin}</span>
-                        </span>
-                        <span
-                          className="rm" role="button" tabIndex={0}
-                          title="Remove this clause"
-                          onClick={e => {
-                            e.stopPropagation();
-                            setWSections(ss => ss.filter(s2 => s2.key !== sec.key));
-                            setWActive(k => Math.max(0, k > i ? k - 1 : k));
-                            setWVersion(v => v + 1);
-                          }}
-                          onKeyDown={e => e.stopPropagation()}
-                        >×</span>
-                      </div>
-                    ))}
-                    <button
-                      className="btn sm" type="button"
-                      style={{ width: "100%", marginTop: 6 }}
-                      onClick={() => {
-                        const key = `own_${Date.now()}`;
-                        setWSections(ss => [...ss, {
-                          key, title: "New clause", origin: "your own words",
-                          body: "",
-                        }]);
-                        setWActive(wSections.length);
-                        setWVersion(v => v + 1);
-                      }}
-                    >
-                      <Plus size={12} /> Add a clause
-                    </button>
-                  </div>
+                {/* EDITED WHERE IT IS READ. The wording used to be edited in a
+                    rail-and-panel layout — pick a clause on the left, type it
+                    on the right — which is a good shape for a form and the
+                    wrong one for a document: the thing on the screen stopped
+                    looking like the contract at the moment somebody was
+                    changing its words, and a clause could only be judged
+                    against the one before it by clicking away from it.
 
-                  <div className="doc-body">
-                    {wSections[wActive] && (
-                      <>
-                        <div className="field" style={{ marginBottom: 12 }}>
-                          <label>Heading</label>
+                    So the document IS the editor. Same page, same type, same
+                    numbering; every clause editable in place. What is NOT
+                    editable in place is the headings — they are what a reader
+                    navigates by, and a stray keystroke in one is silent damage
+                    — so a heading is a label with Rename beside it and becomes
+                    an input only when asked.
+
+                    Deliberately no toolbar. There is nothing to format in a
+                    contract clause: the only things that can be done to one are
+                    write it, rename its heading, remove it, or add another, and
+                    all four are on this page with no menu in front of them. */}
+                <div className="contract-doc editing">
+                  {wSections.map((sec, i) => (
+                    <div key={sec.key} className="sec-e">
+                      <h4>
+                        <span className="n">{i + 1}.</span>
+                        {wRenaming === sec.key ? (
                           <input
-                            value={wSections[wActive].title}
+                            className="hd" autoFocus
+                            value={sec.title}
+                            aria-label="Clause heading"
                             onChange={e => {
-                              const t = e.target.value;
+                              const v = e.target.value;
                               setWSections(ss => ss.map(
-                                (s2, i) => i === wActive
-                                  ? { ...s2, title: t } : s2));
+                                (s2, j) => j === i ? { ...s2, title: v } : s2));
+                            }}
+                            onBlur={() => setWRenaming(null)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter" || e.key === "Escape") {
+                                e.preventDefault();
+                                setWRenaming(null);
+                              }
                             }}
                           />
-                        </div>
-                        <WordingEditor
-                          sectionKey={`${wVersion}:${wSections[wActive].key}`}
-                          body={wSections[wActive].body}
-                          tokens={wTokens}
-                          labels={Object.fromEntries(
-                            limitSpec.map(l => [l.name, l.question]))}
-                          onChange={body => setWSections(ss => ss.map(
-                            (s2, i) => i === wActive
-                              ? { ...s2, body,
-                                  origin: s2.origin.includes("edited")
-                                    ? s2.origin : `${s2.origin} · edited` }
-                              : s2))}
-                        />
-                      </>
-                    )}
-                    {!wSections.length && (
-                      <div className="empty">
-                        Every clause has been removed. Add one, or rewrite the
-                        wording from the terms.
-                      </div>
-                    )}
-                  </div>
+                        ) : (
+                          <>
+                            <span className="tx">{sec.title}</span>
+                            <span className="acts">
+                              <button type="button" className="linkish"
+                                      onClick={() => setWRenaming(sec.key)}>
+                                Rename
+                              </button>
+                              <button
+                                type="button" className="linkish rm"
+                                title="Remove this clause from the contract"
+                                onClick={() => {
+                                  setWSections(ss => ss.filter(s2 => s2.key !== sec.key));
+                                  setWVersion(v => v + 1);
+                                }}
+                              >
+                                Remove
+                              </button>
+                            </span>
+                          </>
+                        )}
+                      </h4>
+                      <WordingEditor
+                        onChipsEdited={(b, a2) => chipsEdited(b, a2, i)}
+                        onChipValue={chipValue}
+                        chipEditable={tk => limitSpec.some(l => l.name === tk)}
+                        sectionKey={`${wVersion}:${sec.key}`}
+                        body={sec.body}
+                        tokens={wTokens}
+                        labels={Object.fromEntries(
+                          limitSpec.map(l => [l.name, l.question]))}
+                        onChange={body => setWSections(ss => ss.map(
+                          (s2, j) => j === i
+                            ? { ...s2, body,
+                                origin: s2.origin.includes("edited")
+                                  ? s2.origin : `${s2.origin} · edited` }
+                            : s2))}
+                      />
+                    </div>
+                  ))}
+
+                  {!wSections.length && (
+                    <div className="empty">
+                      Every clause has been removed. Add one, or rewrite the
+                      wording from the terms.
+                    </div>
+                  )}
+
+                  {/* At the end, where a new clause goes. It opens with its
+                      heading already asking to be named, because a clause with
+                      no heading is one nobody can find again. */}
+                  <button
+                    className="btn sm add-sec" type="button"
+                    onClick={() => {
+                      const key = `own_${Date.now()}`;
+                      setWSections(ss => [...ss, {
+                        key, title: "New clause", origin: "your own words",
+                        body: "",
+                      }]);
+                      setWVersion(v => v + 1);
+                      setWRenaming(key);
+                    }}
+                  >
+                    <Plus size={12} /> Add a clause
+                  </button>
                 </div>
 
                 <div className="note" style={{ marginTop: 12 }}>
@@ -1660,6 +2089,27 @@ export default function ContractRecord() {
                   </div>
                 ) : (
                 <>
+                {/* A term that is checked on every row and stated nowhere in
+                    the document either side signs. Worked out by the server —
+                    it is a fact about the wording, not about this screen. */}
+                {(rec.wording_unquoted ?? []).length > 0 && (
+                  <div className="note warn" style={{ marginBottom: 12 }}>
+                    <b>
+                      The wording does not quote{" "}
+                      {(rec.wording_unquoted ?? [])
+                        .map(u => `“${u.question}”`).join(", ")}.
+                    </b>{" "}
+                    {(rec.wording_unquoted ?? []).length === 1
+                      ? "That term is"
+                      : "Those terms are"}{" "}
+                    agreed and checked on every row, but no clause states
+                    {(rec.wording_unquoted ?? []).length === 1 ? " it" : " them"}.
+                    If a clause has the figure typed into it, it will go on
+                    saying the old one — edit that clause and the value comes
+                    back as a chip, or rewrite the wording from the terms.
+                  </div>
+                )}
+
                 {/* Typeset as a document, not listed as fields. This IS the
                     contract, so it should read like one — and it is the same
                     text the PDF carries, set the same way, so the screen and
@@ -1668,21 +2118,20 @@ export default function ContractRecord() {
                   {(rec.wording_sections ?? []).map((sec, i) => (
                     <div key={sec.key}>
                       <h4>{i + 1}. &nbsp;{sec.title}</h4>
-                      {sec.body.split("\n").map((line, j) => {
-                        const resolved = line.replace(
-                          /\{\{([a-z_]+)\}\}/g, (_m, k) => {
-                            const fs = limitSpec.find(x => x.name === k);
-                            const v = rec.agreed_limits?.[k]?.value;
-                            if (v != null) return `${v}${fs?.unit ? ` ${fs.unit}` : ""}`;
-                            return fs?.question ?? k;
-                          });
+                      {/* `rendered` comes from the server, which is the only
+                          place that knows how a percentage, a money amount or a
+                          date is written. This used to resolve tokens here and
+                          knew about agreed limits only — so the clause naming
+                          the parties read "carrier_name" and the term read
+                          "from inception to expiry". */}
+                      {(sec.rendered ?? sec.body).split("\n").map((line, j) => {
                         // The clause number hangs in the margin, as on paper.
-                        const m = resolved.match(/^(\d+\.\d+)\s+(.*)$/s);
+                        const m = line.match(/^(\d+\.\d+)\s+(.*)$/s);
                         return (
                           <p key={j}>
                             {m
                               ? <><span className="cl">{m[1]}</span>{m[2]}</>
-                              : resolved}
+                              : line}
                           </p>
                         );
                       })}

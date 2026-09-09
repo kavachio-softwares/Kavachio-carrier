@@ -57,14 +57,6 @@ FIELDS: dict[str, dict[str, Any]] = {
         "attr": "class_of_business", "label": "Class of business", "kind": "text",
         "hint": "What may be written under it, e.g. “Commercial Auto”.",
     },
-    "risk_code": {
-        "attr": "risk_code", "label": "Risk code", "kind": "text",
-        "hint": "Lloyd's risk code, where one applies.",
-    },
-    "section_number": {
-        "attr": "section_number", "label": "Section", "kind": "text",
-        "hint": "For a contract written in sections, which one this row is.",
-    },
     "year_of_account": {
         "attr": "year_of_account", "label": "Year of account", "kind": "text",
         "hint": "The account year the cession attaches to — not the same as "
@@ -120,9 +112,9 @@ CONTRACT_TYPES: dict[str, dict[str, Any]] = {
             "class_of_business",
         ],
         "optional": [
-            "schedule_key", "risk_code", "section_number", "year_of_account",
-            "notice_period_days", "premium_cap_amount", "premium_cap_currency",
-            "executed_date", "earnings_pattern",
+            "schedule_key", "year_of_account", "notice_period_days",
+            "premium_cap_amount", "premium_cap_currency", "executed_date",
+            "earnings_pattern",
         ],
     },
     "insurer_reinsurer": {
@@ -138,9 +130,8 @@ CONTRACT_TYPES: dict[str, dict[str, Any]] = {
             "year_of_account", "notice_period_days",
         ],
         "optional": [
-            "schedule_key", "class_of_business", "risk_code", "section_number",
-            "premium_cap_amount", "premium_cap_currency", "executed_date",
-            "earnings_pattern",
+            "schedule_key", "class_of_business", "premium_cap_amount",
+            "premium_cap_currency", "executed_date", "earnings_pattern",
         ],
     },
 }
@@ -156,13 +147,63 @@ CONTRACT_TYPES: dict[str, dict[str, Any]] = {
 #   · EXECUTED DATE is normally written by signing (submit_signed), not typed —
 #     it is here for a contract already executed before it reached Kavachio.
 #
-# UMR is NOT in either list. The column stays and the record still shows it —
-# extraction reads one off an uploaded wording — but it is not asked for when a
-# contract is raised, and cannot be required. A UMR is issued by the market, not
-# invented in a form: making it mandatory at creation forced people to type a
-# placeholder, which is worse than an empty field because a placeholder looks
-# like an answer. It gets its own flow.
+# UMR, RISK CODE and SECTION are NOT in either list. The columns stay, the
+# record still shows them, a renewal still carries them forward and the schedule
+# still prints them where they are set — extraction reads them off an uploaded
+# wording — but none of the three is ASKED FOR when a contract is raised.
+#
+# All three are market references somebody else issues, not decisions the two
+# parties are making in this form. A UMR is allocated when the risk is placed; a
+# Lloyd's risk code is the market's classification, not the carrier's; a section
+# number only means anything for a contract already written in sections, which
+# an authored one is not. Asking produced blanks on nearly every contract, and
+# the few people who did fill them in were typing a placeholder — which is worse
+# than an empty field, because a placeholder looks like an answer.
+#
+# They stay on ContractIn so an older client sending one is not rejected; it is
+# dropped by validate(), which keeps to the lists above.
 DEFAULT_TYPE = "insurer_broker"
+
+
+# ── how long a term runs ────────────────────────────────────────────────────
+# Inception and expiry are the FACTS, and the only two things stored. A duration
+# is a quicker way of saying the second one: the form offers these lengths and
+# writes the expiry date each works out to. A term matching none of them — 54
+# days, or a treaty that ends when a scheme year does — is typed straight into
+# the expiry field and is no less valid, which is why nothing here is ever
+# required and no duration is kept on the contract. Storing one would be a
+# second answer to a question the two dates already answer, and the two would
+# eventually disagree.
+#
+# Served rather than listed in the form so that the lengths on offer and the
+# convention below have one home.
+#
+# THE CONVENTION — both days count. The wording says so in as many words ("from
+# {{inception}} to {{expiry}}, both days inclusive"), so a 12-month term
+# incepting 1 Jan 2027 expires 31 Dec 2027, not 1 Jan 2028. Where adding the
+# months lands on a day the month does not have — 31 January plus one month —
+# the end of that month is the answer and nothing is taken off it, or a term
+# would come out a day short of the month it was meant to be.
+TERM_DURATION_MONTHS = (*range(1, 13), 18, 24, 36, 48, 60)
+
+
+def _duration_label(months: int) -> str:
+    """Said the way somebody would say it, worked out rather than written down
+    twice — a list of labels beside a list of numbers is a list that drifts."""
+    if months % 12 == 0:
+        years = months // 12
+        return "1 year" if years == 1 else f"{years} years"
+    return "1 month" if months == 1 else f"{months} months"
+
+
+def term_spec() -> dict[str, Any]:
+    """The term lengths the form offers, and how a term is counted."""
+    return {
+        "durations": [{"months": m, "label": _duration_label(m)}
+                      for m in TERM_DURATION_MONTHS],
+        "inclusive": True,
+        "note": "Both the first and the last day are inside the term.",
+    }
 
 
 # ── lifecycle ───────────────────────────────────────────────────────────────
@@ -218,9 +259,15 @@ LIFECYCLE_TRANSITIONS: dict[str, tuple[str, ...]] = {
     # `signed` from a draft is how a contract with no broker seat gets there:
     # an insurer ↔ reinsurer counterparty never logs in, so its signature is
     # recorded rather than typed, and there is no review round in between.
+    # `agreed` from a draft is the carrier waiving the review it is not obliged
+    # to hold — a renewal on last year's wording, or a treaty whose counterparty
+    # has no seat here to read it. It is a deliberate act with its own endpoint
+    # and its own row in the history (see contract_routes.skip_review), never a
+    # side effect: what it skips is the OTHER side's chance to object, so it has
+    # to be visible afterwards that nobody took it.
     # `active` is NOT reachable from here any more — a contract goes in force
     # because both sides signed it, which means passing through `signed`.
-    "draft":             ("pending", "in_review", "signed", "terminated"),
+    "draft":             ("pending", "in_review", "agreed", "signed", "terminated"),
     "pending":           ("signed", "draft", "terminated"),
     # The negotiation loop. in_review ⇄ changes_requested can run as many times
     # as the two sides need; neither side can end it alone.
@@ -403,6 +450,23 @@ AGREED_LIMITS: dict[str, dict[str, Any]] = {
         "kind": "text", "default_severity": "warning",
         "check": "risk_territory in ({v})", "token": "{v}", "group": "cover",
     },
+    # The other way of saying it, and NOT the same thing said backwards. A
+    # permitted list is closed — anywhere unnamed is out — which is unusable for
+    # a contract written across a continent with two states carved out of it.
+    # Naming the carve-outs leaves everywhere else open, and a carrier who tried
+    # to express that as a permitted list had to enumerate the world.
+    #
+    # Both may be set: territory says where the authority runs, this says where
+    # it stops even so. Critical by default where its opposite is only a
+    # warning, because an exclusion is the answer to "we will not touch this"
+    # — the same reason excluded_risks is critical and permitted_risks is not.
+    "excluded_territory": {
+        "question": "Where business may not be written",
+        "sub": "Excluded territory — places that are out of scope even when "
+               "the risk itself would be acceptable.",
+        "kind": "text", "default_severity": "critical",
+        "check": "risk_territory not in ({v})", "token": "{v}", "group": "cover",
+    },
     "permitted_risks": {
         "question": "What may be written",
         "sub": "Permitted risks — e.g. commercial buildings. Anything else "
@@ -584,6 +648,21 @@ AGREED_LIMITS: dict[str, dict[str, Any]] = {
     },
 }
 
+# The terms nearly every contract states, offered before the rest.
+#
+# The form asks these up front and folds the remaining twenty behind "show every
+# term" — thirty rows presented flat is a form nobody finishes. It lives HERE
+# and is served with the vocabulary because the frontend held its own copy, and
+# a limit added to this module then existed everywhere except the screen where
+# somebody would have typed it. Being on this list decides visibility and
+# nothing else: every limit is offered, and any limit already carrying a value
+# is shown whether it is here or not.
+COMMON_LIMITS = (
+    "coverage", "territory", "excluded_territory", "excluded_risks",
+    "max_sum_insured", "premium_cap_total", "underwriting_authority",
+    "commission_pct", "brokerage_pct", "currency",
+)
+
 # The three headings the table is grouped under, in the order they are asked.
 # Cover first because it decides whether a risk belongs here at all; then how
 # much authority the broker has over it; then what the two of you are paid.
@@ -661,4 +740,6 @@ def agreed_limits_spec() -> list[dict[str, Any]]:
         # Whether this row gets the "if a file breaks it" control at all.
         "checkable": bool(s.get("check")),
         "default_severity": s.get("default_severity"),
+        # Shown before "show every term". See COMMON_LIMITS.
+        "common": k in COMMON_LIMITS,
     } for k, s in AGREED_LIMITS.items()]

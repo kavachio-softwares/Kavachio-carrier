@@ -126,7 +126,7 @@ def test_the_whole_journey(world):
     # Nothing to sign yet — the terms have not been anywhere near the broker.
     r = client.post(f"/esign/contracts/{cid}/signing-session", headers=carrier)
     assert r.status_code == 409
-    assert "not been sent to the broker" in r.json()["detail"]
+    assert "terms are not settled" in r.json()["detail"]
 
     # ── 2. send the terms out ──────────────────────────────────────────────
     rec = _post(f"/contracts/{cid}/send-for-review", carrier, {})
@@ -153,6 +153,17 @@ def test_the_whole_journey(world):
     # normalises a percent on the way in.
     assert float(r.json()["agreed_limits"]["commission_pct"]["value"]) == 26.0
 
+    # AND THE CONTRACT NOW SAYS SO. The clause quotes the term rather than the
+    # number, so the sentence people read has to move with it — a record that
+    # still reads "25%" beside a check enforcing 26% is the same contract
+    # saying two things.
+    fin = next(sec for sec in r.json()["wording_sections"]
+               if sec["key"] == "financial")
+    assert "26%" in fin["rendered"], fin["rendered"]
+    assert "25%" not in fin["rendered"]
+    assert "{{commission_pct}}" in fin["body"], "the token is what makes it move"
+    assert not r.json()["wording_unquoted"], "the clause still quotes the term"
+
     rec = _post(f"/contracts/{cid}/send-for-review", carrier, {})
     assert rec["lifecycle"] == "in_review"
     # Answered, so it is off the top of the carrier's screen.
@@ -163,6 +174,13 @@ def test_the_whole_journey(world):
     assert rec["lifecycle"] == "agreed"
     # THE CARRIER SIGNS FIRST. Not the broker, whatever the state name says.
     assert rec["whose_turn"] == "carrier"
+    # And the carrier is not offered a review of terms the broker has just
+    # agreed. There is nothing left to review, the next thing that happens is a
+    # signature, and the transition is refused anyway — a button that 409s is
+    # worse than no button.
+    assert rec["actions"]["send_for_review"] is False
+    r = client.post(f"/contracts/{cid}/send-for-review", headers=carrier, json={})
+    assert r.status_code == 409, r.text
 
     # The broker cannot open a round the carrier has not started.
     r = client.post(f"/esign/contracts/{cid}/signing-session", headers=brokerh)
@@ -293,3 +311,90 @@ def test_the_document_signed_is_the_document_downloaded(world):
     assert any("{{signature:" in w for w in b)
     assert not any("{{" in w for w in a), (
         "and the reading copy must carry no anchors at all")
+
+
+def test_a_figure_typed_over_a_chip_is_tied_back_to_its_term(world):
+    """The bug a carrier reported, in one test.
+
+    The wording editor shows every term as a chip you cannot type by hand — but
+    you can delete one and type the number it was showing, because on the screen
+    it reads exactly the same. It is not the same contract: a chip moves when
+    the term moves and a typed number does not, so the document goes on saying
+    11% long after the commission was settled at 14%, while the check enforces
+    14%. One contract, two answers.
+
+    So it is tied back on the way in, and the tie is reported rather than done
+    quietly — it changes the text of a contract.
+    """
+    carrier = world["carrier"]
+    rec = _post("/contracts", carrier, {
+        "program_id": world["program"], "contract_type": "insurer_broker",
+        "name": "Schedule C — 2027", "counterparty_party_id": world["broker"],
+        "class_of_business": "Commercial Auto",
+        "inception_dt": "2027-01-01", "expiry_dt": "2027-12-31",
+        "agreed_limits": {"commission_pct": {"value": "11"}},
+        "wording_sections": [
+            {"key": "financial", "title": "Financial terms", "origin": "generated",
+             "body": "Commission is payable at {{commission_pct}}."}],
+    })
+    cid = rec["id"]
+
+    # The carrier edits the clause and types the figure in place of the chip.
+    r = client.patch(f"/contracts/{cid}", headers=carrier, json={
+        "wording_sections": [
+            {"key": "financial", "title": "Financial terms", "origin": "edited",
+             "body": "Commission is payable at 11% of premium."}]})
+    assert r.status_code == 200, r.text
+    saved = r.json()
+    assert saved["wording_retied"] == ["Commission"], saved["wording_retied"]
+    body = saved["wording_sections"][0]["body"]
+    assert "{{commission_pct}}" in body, body
+    # The words the carrier actually wrote are kept — only the figure moved.
+    assert "of premium" in body
+
+    # Now settle it at 14%, the way applying a change request does.
+    r = client.patch(f"/contracts/{cid}", headers=carrier,
+                     json={"agreed_limits": {"commission_pct": {"value": "14"}}})
+    assert r.status_code == 200, r.text
+    sec = r.json()["wording_sections"][0]
+    assert "14%" in sec["rendered"], sec["rendered"]
+    assert "11%" not in sec["rendered"]
+    assert not r.json()["wording_unquoted"]
+
+    # And the PDF says the same thing, because it is composed from the same
+    # sections through the same tokens.
+    import fitz
+    pdf = client.get(f"/contracts/{cid}/contract.pdf", headers=carrier)
+    assert pdf.status_code == 200
+    with fitz.open(stream=pdf.content, filetype="pdf") as d:
+        text = "".join(pg.get_text() for pg in d)
+    assert "14%" in text and "11%" not in text
+
+
+def test_a_term_the_wording_stopped_quoting_is_reported(world):
+    """The case a re-tie cannot rescue: the clause was deleted outright. The
+    term is still checked on every row and the document no longer says it —
+    which nobody would notice unless the record says so."""
+    carrier = world["carrier"]
+    rec = _post("/contracts", carrier, {
+        "program_id": world["program"], "contract_type": "insurer_broker",
+        "name": "Schedule D — 2027", "counterparty_party_id": world["broker"],
+        "class_of_business": "Commercial Auto",
+        "inception_dt": "2027-01-01", "expiry_dt": "2027-12-31",
+        "agreed_limits": {"commission_pct": {"value": "11"}},
+        "wording_sections": [
+            {"key": "financial", "title": "Financial terms", "origin": "generated",
+             "body": "Commission is payable at {{commission_pct}}."}],
+    })
+    cid = rec["id"]
+    assert not rec["wording_unquoted"]
+
+    r = client.patch(f"/contracts/{cid}", headers=carrier, json={
+        "wording_sections": [
+            {"key": "financial", "title": "Financial terms", "origin": "edited",
+             "body": "Accounts are settled as agreed between the parties."}]})
+    assert r.status_code == 200, r.text
+    flagged = r.json()["wording_unquoted"]
+    assert [u["key"] for u in flagged] == ["commission_pct"], flagged
+    assert flagged[0]["question"] == "Commission"
+    assert flagged[0]["value"] == "11%"

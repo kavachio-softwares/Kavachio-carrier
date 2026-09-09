@@ -43,6 +43,7 @@ import io
 import re
 from typing import Any
 
+import esign_pdf
 from contract_types import AGREED_LIMITS, LIMIT_GROUPS
 
 # Rough plain-text capacity of one A4 page of contract prose. Only the PREVIEW
@@ -131,6 +132,14 @@ def build_sections(*, values: dict, limits: dict,
     input is missing is left out entirely, because "Commission: __%" is worse
     than no commission section. `locked` marks the one section every contract
     must carry: who the parties are.
+
+    HOW LONG A CLAUSE IS. Every sentence here says enough to be understood by
+    somebody who has not read the terms table — "It covers C." is a true
+    statement that answers nothing, and a reader who has to hold the schedule
+    beside the wording to work out what a clause means will not read the
+    wording. So each states what it applies to and what follows from it. The
+    ceiling is one line on the page: past that a clause stops being read, and
+    anything that needs a second line is a second clause.
     """
     v, lim = values or {}, limits or {}
     has = lambda *keys: any(k in lim for k in keys)  # noqa: E731
@@ -157,25 +166,38 @@ def build_sections(*, values: dict, limits: dict,
         "{{expiry}}, both days inclusive. A risk whose effective date falls "
         "outside that period is not covered by this contract."
         if v.get("inception_dt") and v.get("expiry_dt") else "",
-        "It covers {{class_of_business}}."
+        "The business written under it is {{class_of_business}}, and no "
+        "other class may be declared under this Agreement."
         if v.get("class_of_business") else "",
     ], origin="standard wording", locked=True)
 
-    if has("coverage", "territory", "permitted_risks", "excluded_risks",
-           "policy_period_months", "transaction_types"):
+    if has("coverage", "territory", "excluded_territory", "permitted_risks",
+           "excluded_risks", "policy_period_months", "transaction_types"):
         add("cover", "Cover", [
-            "This Agreement covers {{coverage}}."
+            "The cover granted by this Agreement is {{coverage}}, and a loss "
+            "of any other kind is not recoverable under it."
             if has("coverage") else "",
-            "Business may be written in {{territory}}."
-            if has("territory") else "",
-            "The Broker may write {{permitted_risks}} under this "
-            "Agreement." if has("permitted_risks") else "",
+            "Business may be written only where the risk is situated in "
+            "{{territory}}, and a risk situated elsewhere is outside this "
+            "Agreement." if has("territory") else "",
+            # Placed straight after the permitted territory, where a reader
+            # comparing the two will be looking. A contract may state either or
+            # both: "anywhere in the EU except Malta" is one of each, and it is
+            # the commonest shape of all.
+            "No business may be written in {{excluded_territory}}. A risk "
+            "situated there is not covered by this Agreement, whether or not "
+            "it would otherwise be acceptable."
+            if has("excluded_territory") else "",
+            "The Broker may write {{permitted_risks}} under this Agreement, "
+            "and nothing of any other kind."
+            if has("permitted_risks") else "",
             "No risk of the following kinds may be written under this "
             "Agreement in any circumstances: {{excluded_risks}}. No referral "
             "renders such a risk acceptable."
             if has("excluded_risks") else "",
             "No policy may be written for a period longer than "
-            "{{policy_period_months}}." if has("policy_period_months") else "",
+            "{{policy_period_months}}, whether at inception or on any "
+            "extension of it." if has("policy_period_months") else "",
             "The Broker may declare {{transaction_types}}. Any other "
             "kind of transaction appearing in a bordereau is not covered by "
             "this Agreement." if has("transaction_types") else "",
@@ -185,8 +207,9 @@ def build_sections(*, values: dict, limits: dict,
            "deductible", "referral_threshold", "underwriting_authority",
            "premium_cap_total"):
         add("authority", "Authority and limits", [
-            "The Broker's authority under this Agreement is "
-            "{{underwriting_authority}}."
+            "The Broker binds risks on the Carrier's behalf within "
+            "{{underwriting_authority}}, and refers anything beyond it to the "
+            "Carrier before binding."
             if has("underwriting_authority") else "",
             "The sum insured on any one risk shall not exceed "
             "{{max_sum_insured}}." if has("max_sum_insured") else "",
@@ -210,16 +233,20 @@ def build_sections(*, values: dict, limits: dict,
            "override_commission_pct", "profit_commission_pct", "broker_fee",
            "carrier_share_pct", "premium_basis", "currency", "tax_treatment"):
         add("financial", "Financial terms", [
-            "All amounts under this Agreement are expressed in "
-            "{{currency}}." if has("currency") else "",
-            "Premium is reported on a {{premium_basis}} basis."
+            "All premium, claims and commission under this Agreement are "
+            "expressed and settled in {{currency}}."
+            if has("currency") else "",
+            "Premium is reported to the Carrier on a {{premium_basis}} "
+            "basis, and every bordereau is prepared on that basis."
             if has("premium_basis") else "",
             "The Broker shall be entitled to commission not exceeding "
             "{{commission_max_pct}} of premium on any risk declared under "
             "this Agreement." if has("commission_max_pct") else "",
-            "Commission is payable at {{commission_pct}}."
+            "Commission is payable to the Broker at {{commission_pct}} of "
+            "the premium written on each risk declared under this Agreement."
             if has("commission_pct") else "",
-            "Brokerage is payable at {{brokerage_pct}}."
+            "Brokerage is payable at {{brokerage_pct}} of the premium "
+            "written on each risk declared under this Agreement."
             if has("brokerage_pct") else "",
             "An override commission of {{override_commission_pct}} "
             "applies in addition to the rate above."
@@ -232,7 +259,8 @@ def build_sections(*, values: dict, limits: dict,
             "The Carrier's share of each risk is {{carrier_share_pct}}. "
             "Premium and claims are reported at 100% and apportioned "
             "accordingly." if has("carrier_share_pct") else "",
-            "Premium is reported {{tax_treatment}}."
+            "Premium is reported {{tax_treatment}} on every bordereau, and "
+            "any tax shown is accounted for separately from the premium itself."
             if has("tax_treatment") else "",
             "Commission shall be shown separately on every bordereau, "
             "and returned on the same basis as any premium refunded.",
@@ -241,7 +269,8 @@ def build_sections(*, values: dict, limits: dict,
     add("reporting", "Reporting and settlement", [
         "A bordereau of all business written under this Agreement is "
         "submitted each period in the agreed format.",
-        "Accounts are settled {{settlement_frequency}}."
+        "Accounts between the parties are settled {{settlement_frequency}}, "
+        "and each settlement covers every risk declared in that period."
         if has("settlement_frequency") else "",
         "Premium is payable within {{payment_terms_days}} of the end of "
         "the period in which it was written."
@@ -260,7 +289,88 @@ def build_sections(*, values: dict, limits: dict,
     return out
 
 
-def derive_checks(values: dict, limits: dict) -> tuple[list[dict], list[dict]]:
+def quoted_tokens(sections: list[dict] | None) -> set[str]:
+    """Every token the wording actually quotes, across all its sections."""
+    out: set[str] = set()
+    for sec in (sections or []):
+        if isinstance(sec, dict):
+            out.update(used_tokens(sec.get("body") or ""))
+    return out
+
+
+def unquoted_terms(sections: list[dict] | None, limits: dict | None) -> list[str]:
+    """Terms that were agreed but that no clause quotes.
+
+    A term reaches the contract as a TOKEN, so a term whose token is nowhere in
+    the wording is one of two things, and both are worth saying out loud:
+
+      · a clause was edited and the token replaced by the number that was
+        showing at the time — after which the contract keeps saying the old
+        figure while the check moves with the term. This is the failure the
+        chips exist to prevent and the one that gets through anyway;
+      · a clause was deleted, leaving a term that is CHECKED on every row and
+        stated nowhere in the document either side signed.
+    """
+    quoted = quoted_tokens(sections)
+    return [k for k in (limits or {}) if k not in quoted]
+
+
+# Not letters, digits, or the punctuation that can sit INSIDE a rendered value
+# ("12,500.00", "15%"). Used to keep a re-tie off the tail of a longer number:
+# "13%" must not match inside "113%".
+_VALUE_EDGE_L = r"(?<![0-9A-Za-z_.,])"
+_VALUE_EDGE_R = r"(?![0-9A-Za-z_%])"
+
+
+def retie(sections: list[dict] | None,
+          tokens: dict[str, str]) -> tuple[list[dict], list[str]]:
+    """Put a hand-typed value back on the term it is quoting.
+
+    The editor shows every term as a chip and you cannot type one by accident —
+    but you CAN delete one and type the number you were looking at, and people
+    do, because it reads the same on the screen. What it is not is the same
+    contract: the chip moves when the term moves and the typed number does not,
+    so the wording goes on saying 13% after the commission is settled at 14%.
+
+    So it is tied back on the way in. A value is only re-tied when exactly ONE
+    term renders as that text — two terms agreed at the same number are
+    genuinely ambiguous, and guessing which was meant would be worse than
+    leaving the words alone. What was re-tied is returned rather than done
+    quietly: it changes the text of a contract, so whoever saved it is told.
+    """
+    if not sections:
+        return sections or [], []
+
+    # Longest first, so "123,123%" is claimed before "23%" can take a bite out
+    # of it, and drop anything short enough to appear by coincidence.
+    by_text: dict[str, list[str]] = {}
+    for key, shown in (tokens or {}).items():
+        text = str(shown).strip()
+        if len(text) >= 2:
+            by_text.setdefault(text, []).append(key)
+    candidates = sorted(((txt, keys[0]) for txt, keys in by_text.items()
+                         if len(keys) == 1),
+                        key=lambda kv: len(kv[0]), reverse=True)
+
+    retied: list[str] = []
+    out: list[dict] = []
+    for sec in sections:
+        if not isinstance(sec, dict):
+            out.append(sec)
+            continue
+        body = sec.get("body") or ""
+        for text, key in candidates:
+            pattern = _VALUE_EDGE_L + re.escape(text) + _VALUE_EDGE_R
+            body, n = re.subn(pattern, "{{" + key + "}}", body)
+            if n and key not in retied:
+                retied.append(key)
+        out.append({**sec, "body": body})
+    return out, retied
+
+
+def derive_checks(values: dict, limits: dict,
+                  sections: list[dict] | None = None
+                  ) -> tuple[list[dict], list[dict]]:
     """What this contract will have checked, and what merely looks odd.
 
     Each check carries the severity the carrier chose in step 1 — that choice
@@ -317,6 +427,22 @@ def derive_checks(values: dict, limits: dict) -> tuple[list[dict], list[dict]]:
                           f"higher than the cap "
                           f"({_pct(val('commission_max_pct'))}). One of the "
                           f"two is probably not what was meant."})
+
+    # A term the document does not state. See unquoted_terms: either a clause
+    # was edited and its chip replaced by the number showing at the time, or the
+    # clause was deleted — and in both cases the contract and the checks have
+    # stopped saying the same thing.
+    for key in unquoted_terms(sections, lim) if sections is not None else []:
+        spec = AGREED_LIMITS.get(key)
+        if not spec:
+            continue
+        warnings.append({
+            "title": f"The wording does not quote “{spec['question']}”",
+            "detail": f"{spec['question']} is agreed at "
+                      f"{tokens.get(key, (lim.get(key) or {}).get('value'))}, "
+                      f"but no clause quotes it. If a clause states the figure "
+                      f"in plain text it will keep saying the old one — edit "
+                      f"that clause, or rewrite the wording from the terms."})
 
     if val("brokerage_pct") and val("broker_fee"):
         warnings.append({
@@ -568,6 +694,11 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         "terms set out above.", body_st))
     flow.append(Spacer(1, 16 * mm))
 
+    # Normalised once, here, so every function below may assume the shape. A
+    # row written before the block was configurable — {} or {"arrangement":
+    # "stacked"} — comes back as the four lines it has always had.
+    layout = esign_pdf.normalise_signature_layout(signature_layout)
+
     def anchor(kind: str, side: str) -> str:
         """An invisible tag that puts a signing box of `kind` right here.
 
@@ -588,6 +719,33 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         return ('<font color="#ffffff" size="5">'
                 + "{{" + kind + ":" + key + "}}" + "</font>")
 
+    def lines_under(side: str, sg: dict | None, anchored: bool) -> list[str]:
+        """The lines under one ruled line, in the vocabulary's own order.
+
+        WHICH lines is the carrier's choice, not this function's — it reads
+        `layout` and nothing else. That is the whole of what makes the block
+        configurable: adding a line to esign_pdf.SIGNATURE_BLOCK_FIELDS makes it
+        offerable in the form and drawable here, with no change on either side.
+
+        `sg` is the person named for this side, when one was. Their name and
+        title are PRINTED rather than left as boxes: the carrier already typed
+        them, and asking the signer to type them again is a form, not a
+        signature. `anchored` is false for a second signatory, whose lines are
+        signed by hand — see below.
+        """
+        out: list[str] = []
+        for key in layout["fields"].get(side, ()):
+            if key == "signature":
+                continue                 # the ruled line itself, drawn by the caller
+            label = esign_pdf.FIELD_LABEL[key]
+            if key == "name" and sg:
+                out.append(f"{label}: {esc(sg.get('name') or '')}")
+            elif key == "title" and sg:
+                out.append(f"{label}: {esc(sg.get('role') or '')}")
+            else:
+                out.append(f"{label}: {anchor(key, side) if anchored else ''}")
+        return out
+
     def block_text(party_label: str, org: str | None, side: str) -> str:
         # Whoever was named for this side gets their own block, so the person
         # signing does not have to work out which of two identical lines is
@@ -600,11 +758,13 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         # Above the rule, so a signature stamped from the anchor sits ON the
         # line rather than under it.
         sig = (anchor("signature", side) + "<br/>") if anchors else ""
+
+        def under(sg: dict | None, anchored: bool) -> str:
+            rows = lines_under(side, sg, anchored)
+            return ("<br/>" + "<br/>".join(rows)) if rows else ""
+
         if not named:
-            return (f"{sig}{rule}<br/>{head}<br/><br/>"
-                    f"Name: {anchor('name', side)}<br/>"
-                    f"Title: {anchor('title', side)}<br/>"
-                    f"Date: {anchor('date', side)}")
+            return f"{sig}{rule}<br/>{head}<br/>{under(None, True)}"
         # A rule per signer. Two names under one line is one signature block
         # with two names in it, which is not what a second signatory is.
         #
@@ -614,10 +774,8 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         # second signatory is either. The rest stay as they print today, to be
         # signed by hand.
         return head + "".join(
-            f"<br/><br/>{sig if i == 0 else ''}{rule}<br/>"
-            f"Name: {esc(sg['name'])}<br/>"
-            f"Title: {esc(sg.get('role') or '')}<br/>"
-            f"Date: {anchor('date', side) if i == 0 else ''}"
+            f"<br/><br/>{sig if i == 0 else ''}{rule}"
+            f"{under(sg, i == 0)}"
             for i, sg in enumerate(named))
 
     carrier_block = Paragraph(
@@ -626,7 +784,17 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         block_text("For the Counterparty", counterparty_name, "counterparty"),
         sig_st)
 
-    if (signature_layout or {}).get("arrangement") == "stacked":
+    placed = layout["arrangement"] == "placed"
+    if placed:
+        # The blocks are drawn afterwards, at the points the carrier dragged
+        # them to — see below. The signature PAGE is still emitted, empty of
+        # blocks: it carries the sentence the parties sign under, and keeping
+        # it means the document has the same number of pages whichever
+        # arrangement is chosen. Without that, choosing "placed" would shorten
+        # the contract by a page and every position already recorded against a
+        # page number would quietly point one page too far.
+        flow.append(Spacer(1, 40 * mm))
+    elif layout["arrangement"] == "stacked":
         flow.append(carrier_block)
         flow.append(Spacer(1, 22 * mm))
         flow.append(other_block)
@@ -641,7 +809,56 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         flow.append(t)
 
     doc.build(flow)
-    return buf.getvalue()
+    out = buf.getvalue()
+    if not placed:
+        return out
+    return esign_pdf.draw_signature_blocks(out, [
+        _placed_block(side, label, org, layout, signers, anchors)
+        for side, label, org in (
+            ("carrier", "For the Carrier", carrier_name),
+            ("counterparty", "For the Counterparty", counterparty_name))
+        if side in layout.get("blocks", {})
+    ])
+
+
+def _placed_block(side: str, party_label: str, org: str | None,
+                  layout: dict, signers: list[dict] | None,
+                  anchors: dict[str, str] | None) -> dict:
+    """One hand-placed block, described for the drawer.
+
+    The SAME choices the flowable version reads — which lines this side signs,
+    and whoever was named for it — so the two arrangements produce the same
+    block in different places rather than two different blocks. Only the first
+    named signer is drawn: every box carries the party it belongs to and
+    nothing finer, so a second block for one side would be a second place the
+    same signature lands.
+    """
+    spot = layout["blocks"][side]
+    named = next((sg for sg in (signers or [])
+                  if sg.get("side") == side and (sg.get("name") or "").strip()),
+                 None)
+    lines: list[dict] = []
+    for key in layout["fields"].get(side, ()):
+        if key == "signature":
+            continue                     # the ruled line itself
+        label = f"{esign_pdf.FIELD_LABEL[key]}:"
+        if key == "name" and named:
+            lines.append({"label": label, "value": named.get("name") or ""})
+        elif key == "title" and named:
+            lines.append({"label": label, "value": named.get("role") or ""})
+        else:
+            lines.append({"label": label, "type": key})
+    return {
+        "page": spot["page"], "x": spot["x"], "y": spot["y"],
+        "width": esign_pdf.PLACED_BLOCK["width"],
+        "title": party_label, "org": org, "lines": lines,
+        # Only the copy going out for signature is tagged; a draft download
+        # gets the same block with nothing to click on. Every field type is
+        # offered the same party key, exactly as the flowable version does.
+        "anchors": ({k: (anchors or {}).get(side) for k in
+                     ("signature", "name", "title", "date", "initial")}
+                    if anchors and anchors.get(side) else {}),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════

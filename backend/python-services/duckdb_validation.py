@@ -526,10 +526,14 @@ def _save_cache(session, rule, template_id, sh, rh, result):
 # =====================================================================
 
 def _refresh_if_stale(spec, sql, sheet_names):
-    """Recompile a cached query whose builder's REFERENCE TABLE has changed since
-    it was compiled; return the cached SQL unchanged for everything else.
+    """Bring a cached query up to date with the file in front of it, in memory.
 
-    Only reference-bound templates qualify (see
+    Two things can make a stored query wrong without the rule changing at all:
+    the sheets it names are not the sheets this file has (see the re-targeting
+    below), or its builder's REFERENCE TABLE has moved on since it was compiled.
+    Everything else is returned untouched.
+
+    Only reference-bound templates qualify for the second (see
     `rule_compiler.compiled_sql_is_stale`) — a handful of data-quality rules, not
     the thousands of ordinary contract rules, which keep running their cached SQL
     untouched. Without this a postal rule compiled before CA/GB support keeps
@@ -557,6 +561,40 @@ def _refresh_if_stale(spec, sql, sheet_names):
     ir = spec.get("ir") if isinstance(spec, dict) else None
     if not isinstance(ir, dict):
         return sql
+
+    # THE SHEET A RULE NAMES IS A CACHE, NOT PART OF THE RULE.
+    #
+    # A contract's term is "commission is 17%". Nothing in it says which tab of
+    # which workbook that is measured on — the sheet comes from whatever output
+    # template the programme reported into ON THE DAY THE CHECK WAS WRITTEN, and
+    # gets frozen into the compiled query. Change the template afterwards (a
+    # different jurisdiction's layout, a new version, an uploaded sample whose
+    # tabs are named differently) and the query names a table this run does not
+    # have: DuckDB raises, and the term is reported as "could not be validated"
+    # for the rest of its life, though nothing about it changed.
+    #
+    # So when NONE of the sheets the cached query reads exist in this run, the
+    # rule is re-targeted from its IR onto the sheets that are actually here.
+    # Deliberately all-or-nothing: a rule that still finds ONE of its sheets is
+    # a per-schedule rule looking at a file missing a schedule, and moving it
+    # would check a schedule it was never agreed against.
+    #
+    # `recompile_ir_for_sheets` keeps only the sheets carrying ALL the rule's
+    # fields, so this cannot widen a rule onto a sheet that has nothing to
+    # measure. In memory only: nothing is written back, and the contract does
+    # not need re-binding for the fix to reach it.
+    present = {str(n).strip().lower() for n in (sheet_names or [])}
+    named = sheets_in_sql(sql)
+    if present and named and not any(str(n).strip().lower() in present
+                                     for n in named):
+        try:
+            retargeted = recompile_ir_for_sheets(ir, list(sheet_names))
+            print(f"[DuckDB] rule {ir.get('rule_name')!r} named sheet(s) "
+                  f"{named} which this file does not have; re-targeted onto "
+                  f"{list(sheet_names)}")
+            sql = retargeted
+        except Exception:
+            pass                            # keep the cached query; never worse
     # A rule compiled before compile_ir's collapse guard can carry an arm that an
     # alias folded onto ONE column — it compares that column with itself and its
     # companion type check then flags every non-numeric cell of a column the rule

@@ -132,15 +132,23 @@ def _open(token, headers):
     return v
 
 
+def _initials(name: str) -> str:
+    return "".join(w[0] for w in name.split() if w).upper()
+
+
 def _fill(view, name, title):
-    """The values a signer would type, for their own boxes only."""
+    """The values a signer would type, for their own boxes only.
+
+    An INITIALS box gets initials, not the full name — the browser fills it that
+    way and the two marks are meant to be different. See
+    test_initials_are_a_second_mark_not_the_signature_again."""
     today = "07 Sep 2026"
     out = []
     for f in view["fields"]:
         if not f["mine"]:
             continue
         out.append({"field_id": f["id"], "value": {
-            "signature": name, "initial": name, "name": name,
+            "signature": name, "initial": _initials(name), "name": name,
             "title": title, "date": today}.get(f["type"], "")})
     return out
 
@@ -1199,7 +1207,10 @@ def test_the_broker_signs_in_app_and_the_contract_goes_in_force(world):
 def test_terms_still_being_settled_cannot_be_signed(world):
     """Signing a proposal is signing something the other side is still arguing
     with. This is the gate the whole negotiation exists to reach."""
-    for state, phrase in (("draft", "not been sent to the broker"),
+    # Matched on the part of each refusal that IS the reason, not the whole
+    # sentence — the draft one gained an "or skip review" escape hatch, and a
+    # test that pins the prose fails on a wording change that fixed nothing.
+    for state, phrase in (("draft", "terms are not settled"),
                           ("in_review", "still reading the terms"),
                           ("changes_requested", "asked for changes")):
         cid = _authored_contract(world, lifecycle=state)
@@ -1307,3 +1318,239 @@ def test_a_different_person_on_the_same_side_signs_as_themselves(world):
     insurer = next(r for r in env["recipients"] if r["side"] == "insurer")
     assert insurer["email"] == her_email
     assert insurer["name"] == "Priya Shah"
+
+
+# ── how the signature itself was made ───────────────────────────────────────
+#
+# A signature reaches the document as a data URL, and there are now three ways
+# to make one: type it, draw it, or upload a photo of one. The first two are
+# produced by a canvas and are always a well-formed PNG. The third is a file the
+# signer chose, which means for the first time the picture can be a thing that
+# is not a picture — and esign_pdf's response to an image it cannot decode is to
+# stamp the typed name instead, silently.
+#
+# That silence is right for a corrupt drawing (a canvas glitch must not fail a
+# signing) and wrong for an upload: the signer picked a file, watched a preview
+# of it, and would have no way of learning the document does not carry it. So
+# the shape is checked at the door, and these hold the door shut.
+
+# A real 2×2 JPEG. Not a PNG: the point is that the check accepts the formats a
+# signer actually has on file, not only the one the drawing canvas emits.
+TINY_JPEG = ("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDACgcHiMe"
+             "GSgjISMtKygwPGRBPDc3PHtYXUlkkYCZlo+AjIqgtObDoKrarYqMyP/L2u71////"
+             "m8H////6/+b9//j/2wBDASstLTw1PHZBQXb4pYyl+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4"
+             "+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj/wAARCAACAAIDASIAAhEB"
+             "AxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIE"
+             "AwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkK"
+             "FhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4"
+             "eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT"
+             "1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAA"
+             "AAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdh"
+             "cRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZH"
+             "SElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOk"
+             "paanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3"
+             "+Pn6/9oADAMBAAIRAxEAPwDKooopgf/Z")
+
+
+def _first_signer_ready(world):
+    """A round, sent, with the insurer unlocked and ready to submit."""
+    env = _create(world)
+    sent = client.post(f"/esign/envelopes/{env['id']}/send",
+                       headers=world["headers"], json={}).json()
+    tok = _token(sent, "insurer")
+    h = _unlock(tok)
+    return env, tok, h, _open(tok, h)
+
+
+def test_an_uploaded_photo_of_a_signature_is_accepted(world):
+    """The whole point of the feature: a JPEG off a phone goes on the page.
+
+    Asserted through pdf_version rather than by reading the PDF — the version
+    only moves when stamp_fields has actually rewritten the document, so it is
+    the cheapest honest evidence that the image was carried rather than dropped
+    on the way in."""
+    env, tok, h, view = _first_signer_ready(world)
+    before = client.get(f"/esign/envelopes/{env['id']}",
+                        headers=world["headers"]).json()["pdf_version"]
+
+    r = client.post(f"/esign/sign/{tok}", headers=h, json={
+        "agreed": True, "signature_name": "Dana Whitfield",
+        "signature_image": TINY_JPEG,
+        "fields": _fill(view, "Dana Whitfield", "Head of Underwriting")})
+    assert r.status_code == 200, r.text
+
+    after = client.get(f"/esign/envelopes/{env['id']}", headers=world["headers"]).json()
+    assert after["pdf_version"] > before
+    insurer = next(x for x in after["recipients"] if x["side"] == "insurer")
+    assert insurer["status"] == "signed"
+
+
+@pytest.mark.parametrize("image, because", [
+    ("data:text/plain;base64,aGVsbG8=", "not an image at all"),
+    ("data:image/svg+xml;base64,PHN2Zy8+", "a format the PDF cannot embed"),
+    ("hello", "not a data URL"),
+    ("data:image/png,notbase64", "not base64"),
+    ("data:image/png;base64,????", "damaged base64"),
+    ("data:image/png;base64,", "empty"),
+])
+def test_a_signature_that_is_not_a_usable_image_is_refused(world, image, because):
+    """Refused, and — this is the half that matters — refused BEFORE anything is
+    written. A 400 that had already marked the recipient signed would leave a
+    contract signed by someone whose signature is not on it."""
+    env, tok, h, view = _first_signer_ready(world)
+
+    r = client.post(f"/esign/sign/{tok}", headers=h, json={
+        "agreed": True, "signature_name": "Dana Whitfield",
+        "signature_image": image,
+        "fields": _fill(view, "Dana Whitfield", "Head of Underwriting")})
+    assert r.status_code == 400, f"{because}: {r.status_code} {r.text}"
+
+    after = client.get(f"/esign/envelopes/{env['id']}", headers=world["headers"]).json()
+    insurer = next(x for x in after["recipients"] if x["side"] == "insurer")
+    assert insurer["status"] != "signed", "refused, but signed anyway"
+    assert after["status"] == "sent", "a refused signature must not move the round"
+
+
+def test_a_signature_image_too_big_for_the_document_is_refused(world):
+    """4 MB is esign_pdf's own ceiling. Past it the PDF layer drops the image
+    and stamps the typed name, which for an upload is a signature the signer
+    believes is on the page and is not — so it is stopped here instead."""
+    import base64
+    env, tok, h, view = _first_signer_ready(world)
+    huge = "data:image/png;base64," + base64.b64encode(b"\x00" * 4_100_000).decode()
+
+    r = client.post(f"/esign/sign/{tok}", headers=h, json={
+        "agreed": True, "signature_name": "Dana Whitfield",
+        "signature_image": huge,
+        "fields": _fill(view, "Dana Whitfield", "Head of Underwriting")})
+    assert r.status_code == 400
+    assert "4 MB" in r.json()["detail"]
+
+
+def test_no_image_at_all_still_signs(world):
+    """Typing it is still a signature. The new check must not have turned an
+    absent image into a missing one."""
+    env, tok, h, view = _first_signer_ready(world)
+    r = client.post(f"/esign/sign/{tok}", headers=h, json={
+        "agreed": True, "signature_name": "Dana Whitfield",
+        "signature_image": None,
+        "fields": _fill(view, "Dana Whitfield", "Head of Underwriting")})
+    assert r.status_code == 200, r.text
+
+
+# ── a signature and initials are two marks ──────────────────────────────────
+# Reported from the signing page: a drawn signature was appearing in the
+# initials box as well, because one image was stamped into every box of both
+# kinds. On paper those are different acts — a signature closes the document,
+# initials acknowledge a page or a clause — and initials that ARE the signature
+# let anyone holding one page reproduce the mark on the last one.
+
+def _images_in(pdf: bytes) -> int:
+    """How many DISTINCT images the document holds.
+
+    Distinct, not placements: a page inherits the resource list, so counting per
+    page multiplies by the page count and says nothing. What matters here is
+    whether a second, different mark was put in — one image means every marked
+    box got the same one."""
+    import fitz
+    with fitz.open(stream=pdf, filetype="pdf") as d:
+        return len({im[0] for i in range(d.page_count)
+                    for im in d.get_page_images(i)})
+
+
+def _mine_by_type(view) -> dict:
+    out: dict[str, int] = {}
+    for f in view["fields"]:
+        if f["mine"]:
+            out[f["type"]] = out.get(f["type"], 0) + 1
+    return out
+
+
+def test_initials_are_a_second_mark_not_the_signature_again(world):
+    # initials_every_page, because a document with no initials box cannot show
+    # what a signature is being kept out of.
+    env = _create(world, initials_every_page=True)
+    client.post(f"/esign/envelopes/{env['id']}/send",
+                headers=world["headers"], json={})
+    full = client.get(f"/esign/envelopes/{env['id']}",
+                      headers=world["headers"]).json()
+    tok = _token(full, "insurer")
+    h = _unlock(tok)
+    v = _open(tok, h)
+    counts = _mine_by_type(v)
+    assert counts.get("signature") and counts.get("initial"), counts
+
+    before = _images_in(client.get(f"/esign/sign/{tok}/pdf", headers=h).content)
+    r = client.post(f"/esign/sign/{tok}", headers=h, json={
+        "agreed": True, "signature_name": "Dana Alvarez",
+        "signature_image": TINY_PNG,          # drawn signature, no drawn initials
+        "fields": _fill(v, "Dana Alvarez", "Carrier Admin")})
+    assert r.status_code == 200, r.text
+
+    signed = client.get(f"/esign/envelopes/{env['id']}/pdf",
+                        headers=world["headers"])
+    # ONE image in the whole document, with four initials boxes on it: the
+    # signature went in the signature box and nowhere else. Before the fix this
+    # was the same drawing stamped into all five.
+    assert _images_in(signed.content) - before == 1, (
+        "the signature image belongs in the signature boxes and nowhere else")
+    assert counts["initial"] >= 1
+
+    # And the initials box carries ITS OWN value, which is not the signature.
+    done = client.get(f"/esign/envelopes/{env['id']}",
+                      headers=world["headers"]).json()
+    ini = [f for f in done["fields"]
+           if f["type"] == "initial" and f["owner_side"] == "insurer"]
+    assert ini and all(f["value"] == "DA" for f in ini), ini
+    assert all(f["value"] != "Dana Alvarez" for f in ini)
+
+
+def test_drawn_initials_go_in_the_initials_boxes(world):
+    """The other half: draw them and they are stamped, still only where they
+    belong."""
+    env = _create(world, initials_every_page=True)
+    client.post(f"/esign/envelopes/{env['id']}/send",
+                headers=world["headers"], json={})
+    full = client.get(f"/esign/envelopes/{env['id']}",
+                      headers=world["headers"]).json()
+    tok = _token(full, "insurer")
+    h = _unlock(tok)
+    v = _open(tok, h)
+    counts = _mine_by_type(v)
+
+    before = _images_in(client.get(f"/esign/sign/{tok}/pdf", headers=h).content)
+    r = client.post(f"/esign/sign/{tok}", headers=h, json={
+        "agreed": True, "signature_name": "Dana Alvarez",
+        "signature_image": TINY_PNG,
+        # A different image on purpose: two copies of one PNG would be stored
+        # once, and the count below would prove nothing.
+        "initials_image": TINY_JPEG,
+        "fields": _fill(v, "Dana Alvarez", "Carrier Admin")})
+    assert r.status_code == 200, r.text
+
+    signed = client.get(f"/esign/envelopes/{env['id']}/pdf",
+                        headers=world["headers"])
+    # More than one now: the initials are a different drawing from the
+    # signature, so the document carries both.
+    assert _images_in(signed.content) - before >= 2, (
+        "a drawn set of initials is a second mark, and has to reach the page")
+    assert counts["signature"] and counts["initial"]
+
+
+def test_a_broken_initials_image_is_refused_like_a_signature(world):
+    """It is stamped into a contract the same way, so it is checked the same
+    way. An image only validated on one of the two paths is the one somebody
+    will use."""
+    env = _create(world)
+    client.post(f"/esign/envelopes/{env['id']}/send",
+                headers=world["headers"], json={})
+    full = client.get(f"/esign/envelopes/{env['id']}",
+                      headers=world["headers"]).json()
+    tok = _token(full, "insurer")
+    h = _unlock(tok)
+    v = _open(tok, h)
+    r = client.post(f"/esign/sign/{tok}", headers=h, json={
+        "agreed": True, "signature_name": "Dana Alvarez",
+        "initials_image": "data:image/png;base64,not-actually-an-image",
+        "fields": _fill(v, "Dana Alvarez", "Carrier Admin")})
+    assert r.status_code == 400, r.text

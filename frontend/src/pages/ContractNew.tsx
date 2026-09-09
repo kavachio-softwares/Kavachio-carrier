@@ -28,18 +28,24 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowLeft, Download, FileText, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import { WordingEditor } from "../components/WordingEditor";
+import { TermDurationField, useTermDuration } from "../components/TermDuration";
+import { EXPIRY_FIELD, INCEPTION_FIELD, type TermSpec } from "../utils/term";
+import {
+  chipEdits, readTermMove, restoreChips, type TermMove,
+} from "../utils/wordingEdits";
 import { currentMga, getTenantBrand } from "../auth";
 import {
   createContract, createEndorsement, downloadDraft, fieldErrors, getContract,
   getContractTypes, getCounterparties, listContracts, previewEndorsement,
-  previewWording,
+  previewWording, skipReview,
   type AgreedLimits, type AgreedLimitSpec, type ContractTypeSpec,
+  type SignatureBlockSpec, type SignatureLayout,
   type ContractRecord as ContractRecordT, type Counterparty,
   type ContractField, type EndorsementPreview, type FieldErrors,
-  type LimitGroup, type Signer,
+  type LimitGroup,
   type WordingPreview, type WordingSection,
 } from "../api/contractRecord";
 
@@ -91,6 +97,14 @@ export default function ContractNew() {
   const [specs, setSpecs] = useState<ContractTypeSpec[] | null>(null);
   const [limitSpec, setLimitSpec] = useState<AgreedLimitSpec[]>([]);
   const [limitGroups, setLimitGroups] = useState<LimitGroup[]>([]);
+  const [termSpec, setTermSpec] = useState<TermSpec | null>(null);
+  // What a signature block may contain, and what this contract's will. Both
+  // come from the SERVER — the vocabulary so the form cannot offer a line the
+  // wording builder has no way to draw, and the starting layout so a contract
+  // nobody touches comes out exactly as every contract did before the block
+  // was configurable.
+  const [sigSpec, setSigSpec] = useState<SignatureBlockSpec | null>(null);
+  const [sigLayout, setSigLayout] = useState<SignatureLayout | null>(null);
   const [typeKey, setTypeKey] = useState("");
 
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
@@ -112,11 +126,6 @@ export default function ContractNew() {
 
   // Who signs. Named here only to save doing it later — Kavachio sends
   // nothing, which step 4 says plainly.
-  const [signers, setSigners] = useState<Signer[]>([]);
-  const [sgSide, setSgSide] = useState<"carrier" | "counterparty">("carrier");
-  const [sgName, setSgName] = useState("");
-  const [sgEmail, setSgEmail] = useState("");
-  const [sgRole, setSgRole] = useState("");
 
   // Endorsement: which live contract is being changed, and what the change
   // looks like. Kept apart from the create state because an endorsement does
@@ -158,6 +167,9 @@ export default function ContractNew() {
         setSpecs(d.types);
         setLimitSpec(d.agreed_limits);
         setLimitGroups(d.limit_groups);
+        setTermSpec(d.term);
+        setSigSpec(d.signature_block);
+        setSigLayout(l => l ?? d.signature_block.default);
         setTypeKey(k => k || d.default);
       })
       .catch(() => setMessage("Could not load the contract form."));
@@ -314,6 +326,16 @@ export default function ContractNew() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [values, errors, optionalBasics.length]);
 
+  // Inception, duration, expiry. The duration is not a field and is never
+  // stored — it writes the expiry date and is forgotten. See utils/term.ts.
+  const term = useTermDuration({
+    spec: termSpec,
+    inception: values[INCEPTION_FIELD] ?? "",
+    expiry: values[EXPIRY_FIELD] ?? "",
+    setInception: v => set(INCEPTION_FIELD, v),
+    setExpiry: v => set(EXPIRY_FIELD, v),
+  });
+
   /** One identity field. Placeholder and hint come from the spec too. */
   function input(f: ContractField) {
     const bad = errors[f.name]
@@ -333,7 +355,13 @@ export default function ContractNew() {
           step={f.kind === "decimal" ? "0.01" : undefined}
           placeholder={PLACEHOLDER[f.name]}
           value={values[f.name] ?? ""}
-          onChange={e => set(f.name, e.target.value)}
+          // The dates go through the term so the three inputs stay one fact:
+          // moving inception moves an expiry that was stated as a length, and
+          // typing an expiry is how you say "not one of those lengths".
+          onChange={e => (
+            f.name === INCEPTION_FIELD ? term.onInception(e.target.value)
+            : f.name === EXPIRY_FIELD ? term.onExpiry(e.target.value)
+            : set(f.name, e.target.value))}
           style={bad ? { borderColor: "var(--p-crit)" } : undefined}
         />
         <div className="hint" style={bad ? { color: "var(--p-crit-ink)" } : undefined}>
@@ -341,6 +369,16 @@ export default function ContractNew() {
         </div>
       </div>
     );
+  }
+
+  /** The spec's fields, with the duration picker slipped in ahead of the
+   *  expiry — it belongs between the two dates it works out. Which list the
+   *  expiry is in is the TYPE's business, so this works either way rather than
+   *  assuming the required one. */
+  function renderFields(list: ContractField[]) {
+    return list.flatMap(f => f.name === EXPIRY_FIELD && term.ready
+      ? [<TermDurationField key="term-duration" term={term} />, input(f)]
+      : [input(f)]);
   }
 
   /** What the preview and the composer both need. One shape, so the wording,
@@ -356,7 +394,16 @@ export default function ContractNew() {
     carrier_name: carrierName,
     counterparty_name: counterparty?.name ?? null,
     programme_name: programme?.name ?? null,
-  }), [typeKey, values, limits, carrierName, counterparty, programme]);
+    // Sent so the draft PDF carries the block that was actually chosen. Left
+    // out, the preview would show four lines while the real document showed
+    // whatever step 4 asked for, and the first place anyone would notice is
+    // the copy that went out for signature.
+    signature_layout: sigLayout,
+    // No `signers`: nobody is named at this step any more, so the draft prints
+    // the two unnamed blocks — "For the Carrier" over a ruled line — which is
+    // what an unsigned contract looks like on paper anyway.
+  }), [typeKey, values, limits, carrierName, counterparty, programme,
+       sigLayout]);
 
   /** Re-read the wording. Called when entering steps 2 and 3, and whenever a
    *  term changes while they are open — the chips have to follow. */
@@ -385,6 +432,19 @@ export default function ContractNew() {
     return () => clearTimeout(t);
   }, [step, wordingInput]);
 
+  // A term can move from the WORDING step too, by typing over a chip — so the
+  // chips and the check list have to be re-read there as well, not only while
+  // step 1 is being filled in. Keyed on the TERMS alone: keyed on the sections
+  // it would fire on every keystroke, and rebuild the editor under the caret.
+  useEffect(() => {
+    if (step !== 1) return;
+    const t = setTimeout(() => {
+      previewWording(wordingInput(sections)).then(setPreview).catch(() => {});
+    }, 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, limits]);
+
   function set(name: string, value: string) {
     setValues(v => ({ ...v, [name]: value }));
     setErrors(e => {
@@ -402,6 +462,80 @@ export default function ContractNew() {
       return { ...l, [key]: next };
     });
   }
+
+  /**
+   * A chip was typed over — so move the term, not just the sentence.
+   *
+   * The banner on the wording step promises this in one direction: change a
+   * term and every sentence quoting it follows. This is the other direction,
+   * and without it the two drift apart exactly where it matters most — the
+   * clause reads 15% while the check still enforces 11, and the review screen
+   * is the first place anybody finds out.
+   *
+   * Only where the answer is not a guess: one value standing in the slot, of
+   * the kind that term takes. A chip deleted, replaced with prose, or replaced
+   * with two numbers moves nothing and is reported on the review instead.
+   */
+  function chipsEdited(before: string, after: string) {
+    const moves: TermMove[] = [];
+    for (const edit of chipEdits(before, after)) {
+      const term = limitSpec.find(l => l.name === edit.token);
+      if (!term) continue;          // a name, a date — not a term you agreed
+      const move = readTermMove(edit, { kind: term.kind, choices: term.choices });
+      if (!move) continue;
+      if (String(limits[edit.token]?.value ?? "") === move.value) continue;
+      moves.push(move);
+    }
+    if (!moves.length) return;
+
+    const nextLimits: AgreedLimits = { ...limits };
+    for (const m of moves) {
+      nextLimits[m.token] = { ...(nextLimits[m.token] ?? {}), value: m.value };
+    }
+    const body = restoreChips(before, after, moves);
+    const nextSections = (sections ?? []).map(
+      (x, j) => j === activeSection ? { ...x, body } : x);
+
+    setLimits(nextLimits);
+    setSections(nextSections);
+    // The DOM is only rebuilt when the section key changes, and the chip has to
+    // come back with the new value on it.
+    setWordingVersion(v => v + 1);
+    setMessage(
+      moves.map(m => {
+        const term = limitSpec.find(l => l.name === m.token);
+        return `${term?.question ?? m.token} is now `
+             + `${m.value}${term?.unit ?? ""}`;
+      }).join(", ")
+      + " — the term moved with the sentence, so the check moves too. Change "
+      + "it back on Terms if that is not what you meant.");
+
+    // Re-reading is left to the effect that watches the terms — it runs after
+    // this render, so it sees the limit that was just set. Doing it here would
+    // send the OLD one, because none of the state above has landed yet.
+  }
+
+  /** A chip edited IN PLACE — clicked, and a new value typed into the box that
+   *  opens over it. The same rule as typing over one: the value moves the term,
+   *  or nothing happens. The sentence needs no editing at all here, because the
+   *  chip already quotes the term. */
+  function chipValue(token: string, text: string) {
+    const term = limitSpec.find(l => l.name === token);
+    if (!term) return;
+    const move = readTermMove({ token, text },
+                              { kind: term.kind, choices: term.choices });
+    if (!move) return;
+    if (String(limits[token]?.value ?? "") === move.value) return;
+    setLimits({ ...limits,
+                [token]: { ...(limits[token] ?? {}), value: move.value } });
+    setMessage(`${term.question} is now ${move.value}${term.unit ?? ""} — here, `
+             + "on Terms, and in the check behind it.");
+  }
+
+  /** Which chips can be changed from here. The agreed terms can; the carrier's
+   *  name and the programme cannot — those are not terms of this contract. */
+  const chipEditable = (token: string) =>
+    limitSpec.some(l => l.name === token);
 
   /** Everything still missing, checked against the SERVER's own required list.
    *  The server re-checks on save and is the authority; this exists so the gap
@@ -453,7 +587,15 @@ export default function ContractNew() {
     return out;
   }
 
-  async function create(mode: "draft" | "review" | "live") {
+  /** Finish the wizard.
+   *
+   *  `sign` is not a way of CREATING a contract — the server has no such mode,
+   *  and would be asserting an agreement nobody made if it did. It is two acts:
+   *  the contract is written down as a draft, and then the carrier settles its
+   *  terms alone. Doing it in that order means a failure at the second step
+   *  leaves a saved draft rather than a lost afternoon's work, and the history
+   *  shows both facts rather than one that hides the other. */
+  async function create(mode: "draft" | "review" | "live" | "sign") {
     if (!spec) return;
     setBusy("create");
     setErrors({});
@@ -469,11 +611,26 @@ export default function ContractNew() {
         ...typedValues(),
         agreed_limits: limits,
         renews_contract_id: kind === "renew" && renewsId ? Number(renewsId) : null,
-        signers,
+        signature_layout: sigLayout,
         wording_sections: (sections ?? []).map(
           ({ rendered: _r, tokens: _t, ...keep }) => keep),
-        create_as: mode,
+        create_as: mode === "sign" ? "draft" : mode,
       } as never);
+      if (mode === "sign") {
+        // The draft is SAVED at this point. If settling the terms is refused —
+        // a term the type wants left blank, a referenced document never
+        // uploaded — the work is not lost and the outer catch must not run: it
+        // would send the carrier back to Terms as though nothing had been
+        // created, and they would fill the form in a second time. The contract
+        // record says what is wrong and offers the same skip button.
+        try {
+          await skipReview(created.id);
+          nav(`/contracts/${created.id}/signature`);
+        } catch {
+          nav(`/contracts/${created.id}`);
+        }
+        return;
+      }
       nav(`/contracts/${created.id}`);
     } catch (err) {
       const { message: m, errors: fe } = fieldErrors(err);
@@ -498,20 +655,17 @@ export default function ContractNew() {
   // contracts set five or six of them, and the ones that matter get lost among
   // the ones that do not. So the common ones are here and the rest are one
   // click away, already filled ones always shown.
-  const COMMON = [
-    // Cover
-    "coverage", "territory", "excluded_risks",
-    // Authority
-    "max_sum_insured", "premium_cap_total", "underwriting_authority",
-    // Financial
-    "commission_pct", "brokerage_pct", "currency",
-  ];
+  // WHICH limits are offered before "show every term" is the vocabulary's
+  // business, not this screen's — `common` is served with each one. It was a
+  // list here, which meant a limit added to contract_types.py appeared in the
+  // wording, in the checks and on the record, but not on the form where
+  // somebody would have typed it.
   const [showAllLimits, setShowAllLimits] = useState(false);
   const [showMoreBasics, setShowMoreBasics] = useState(false);
   const [openBecomes, setOpenBecomes] = useState<string | null>(null);
 
   const visibleLimits = limitSpec.filter(
-    l => showAllLimits || COMMON.includes(l.name) || limits[l.name] !== undefined);
+    l => showAllLimits || l.common || limits[l.name] !== undefined);
   const hiddenCount = limitSpec.length - visibleLimits.length;
 
   /** The check a single limit currently produces — so the row can show what it
@@ -891,7 +1045,7 @@ export default function ContractNew() {
                   shown flat made the required ones hard to find, and a contract
                   that needs none of them should not have to scroll past them. */}
               <div className="grid g-3">
-                {basicFields.filter(f => f.required).map(input)}
+                {renderFields(basicFields.filter(f => f.required))}
               </div>
 
               {optionalBasics.length > 0 && (
@@ -905,13 +1059,13 @@ export default function ContractNew() {
                       : `＋ More about this contract (${optionalBasics.length})`}
                   </button>
                   <span className="sub" style={{ marginLeft: 10 }}>
-                    Reference, risk code, year of account and the like — leave
+                    Reference, year of account and the like — leave
                     them out and nothing asks again.
                     {filledOptional > 0 && ` ${filledOptional} set.`}
                   </span>
                   {showMoreBasics && (
                     <div className="grid g-3" style={{ marginTop: 14 }}>
-                      {optionalBasics.map(input)}
+                      {renderFields(optionalBasics)}
                     </div>
                   )}
                 </div>
@@ -935,19 +1089,24 @@ export default function ContractNew() {
                 const rows = visibleLimits.filter(l => l.group === g.key);
                 if (!rows.length) return null;
                 return (
-                  <div key={g.key} style={{ marginBottom: 8 }}>
-                    <div className="sub-h" style={{ marginTop: 14 }}>
-                      {g.label}
+                  // A panel per group, with its name banded across the top.
+                  // The groups ask about different things — what may be written
+                  // at all, how much the broker may commit you to, who pays
+                  // whom — and a loose caption between them let the last row of
+                  // one be read as the first row of the next.
+                  <div className="limgrp" key={g.key}>
+                    <div className="limgrp-h">
+                      <div className="sub-h">{g.label}</div>
+                      <div className="hint">{g.sub}</div>
                     </div>
-                    <div className="hint" style={{ marginTop: 0, marginBottom: 6 }}>
-                      {g.sub}
+                    <div className="limgrp-b">
+                      <div className="lim lim-h">
+                        <div className="lq"><b>What you agreed</b></div>
+                        <div className="sub">The limit</div>
+                        <div className="sub">If a file breaks it</div>
+                      </div>
+                      {rows.map(limitRow)}
                     </div>
-                    <div className="lim lim-h">
-                      <div className="lq"><b>What you agreed</b></div>
-                      <div className="sub">The limit</div>
-                      <div className="sub">If a file breaks it</div>
-                    </div>
-                    {rows.map(limitRow)}
                   </div>
                 );
               })}
@@ -1143,9 +1302,10 @@ export default function ContractNew() {
 
             <div className="note" style={{ marginBottom: 18 }}>
               <b>Kavachio has written the wording from your terms.</b> The shaded
-              bits are <b>live values</b>, not typed text — go back and change the
-              commission cap and every one of them updates, and so does the check
-              behind it. Anything you type yourself stays exactly as you typed it.
+              bits are <b>live values</b>, not typed text — click one to change
+              it without leaving this page, or change it on Terms; either way
+              every sentence quoting it updates, and so does the check behind
+              it. Anything you type yourself stays exactly as you typed it.
             </div>
 
             <div className="doc" style={{ marginBottom: 18 }}>
@@ -1203,6 +1363,9 @@ export default function ContractNew() {
                       tokens={preview?.tokens ?? {}}
                       labels={tokenLabels}
                       onInsertRequest={fn => { insertChip.current = fn; }}
+                      onChipsEdited={chipsEdited}
+                      onChipValue={chipValue}
+                      chipEditable={chipEditable}
                       onChange={body => setSections(list => (list ?? []).map(
                         (x, j) => j === activeSection
                           ? { ...x, body,
@@ -1228,11 +1391,12 @@ export default function ContractNew() {
 
                     <div className="note ok" style={{ marginTop: 16 }}>
                       <b>Why the shaded values matter.</b> A chip is tied to the
-                      term you set in step 1. If the cap moves to 12.5%, this
-                      sentence changes with it and so does the check behind it.
-                      Type “15%” by hand instead and the two quietly drift
-                      apart — which is how a contract ends up saying one thing
-                      while the system checks another.
+                      term you set in step 1. <b>Click one to change it</b> —
+                      here, on Terms, and in the check behind it, all at once —
+                      or change it on Terms and every sentence quoting it
+                      follows. Either way the contract and the checks say the
+                      same thing, which is the whole point of them being shaded
+                      rather than typed.
                     </div>
                   </>
                 ) : (
@@ -1421,43 +1585,73 @@ export default function ContractNew() {
         )}
 
         {/* ══ STEP 4 · SIGNATURES ══
-            The design's step 4 sends the contract out for signature. Kavachio
-            cannot send anything yet, so this step does the part that IS real:
-            it names who signs and in what order, and stores that with the
-            contract so its signature screen opens with the list already in it.
-            Then it creates the contract. Saying that plainly is better than a
-            "Send for signature" button that quietly does nothing. */}
+            This step SETS UP the signing; it does not do any of it. ONE thing
+            is decided here and written onto the contract: what the signature
+            page will ask each side to fill in.
+
+            NAMING THE SIGNERS USED TO BE HERE TOO, and it is gone. A name and
+            an email typed at the end of authoring are a guess: the contract has
+            not been agreed yet, the round may be weeks away, and the person who
+            will actually sign is decided when it goes out — which is why the
+            signature page asks for them anyway, and why this form's own empty
+            state told you that you could do it later. Two places to name a
+            signer, one of them optional and neither of them the one that sends
+            anything, is a form that exists to be skipped. It is named where it
+            is used: the contract's signature page (`updateContract({signers})`).
+
+            NOTHING IS EMAILED FROM THIS STEP. That had to be said out loud on
+            the screen, because everything about it suggested otherwise: an
+            Email field, an "Add signer" button, and a finish button that read
+            "Create and send it to the broker" — which creates the contract and
+            puts it in the broker's queue in Kavachio, and sends no mail at all
+            (contract_routes sends none; the only mail in this flow comes from
+            esign_routes when a signing round actually goes out). A carrier who
+            believed a link had gone would wait for a reply that was never
+            coming. So the words now say what the buttons do. */}
         {step === 3 && (
           <>
             <div className="page-head">
               <div className="t">
-                <h2>Signatures</h2>
+                <h2>Set up the signing</h2>
                 <p>
-                  {values.name} · naming who will sign. Nobody has signed yet —
-                  that happens on the contract's signature page, and both sides
-                  signing is what puts it in force.
+                  {values.name} · what each side has to fill in when they sign.
+                  Nothing is emailed from here, and none of these buttons puts
+                  the contract in force — it goes in force when both sides have
+                  signed it, on its own signature page.
                 </p>
               </div>
               <div className="actions">
                 <button className="btn" type="button" onClick={() => go(2)}>
                   ← Read it through
                 </button>
-                {/* Two ways to finish, and neither puts the contract in
+                {/* Three ways to finish, and none of them puts the contract in
                     force. A contract goes live from its own page, once it has
                     a wording somebody has read and — where there is a broker —
                     terms they agreed to, and — always — signatures from both
                     sides. Offering "make it live" here made the last click of
                     an authoring flow the moment checks start running on real
-                    bordereaux, on a contract nobody had signed. */}
+                    bordereaux, on a contract nobody had signed. That is still
+                    true of "sign it now": it skips the broker's READING of the
+                    terms, not either signature. */}
                 <button className="btn" type="button" disabled={!!busy}
                         onClick={() => create("draft")}>
                   {busy === "create" ? "Saving…" : "Save as a draft"}
+                </button>
+                {/* Straight to signing, for a contract with nothing left to
+                    agree — a renewal on last year's wording — or one whose
+                    counterparty has no seat here to read it. Kept out of the
+                    primary slot: not asking the other side is the exception,
+                    and it should not be the easiest button to hit. */}
+                <button className="btn" type="button" disabled={!!busy}
+                        onClick={() => create("sign")}>
+                  <PenLine size={14} />
+                  {busy === "create" ? "Creating…" : "Create and sign it now"}
                 </button>
                 <button className="btn pri" type="button" disabled={!!busy}
                         onClick={() => create("review")}>
                   <FileText size={14} />
                   {busy === "create"
-                    ? "Creating…" : "Create and send it to the broker"}
+                    ? "Creating…" : "Create and send it for review"}
                 </button>
               </div>
             </div>
@@ -1467,130 +1661,131 @@ export default function ContractNew() {
             )}
 
             <div className="grid g-12">
-              <div className="card">
-                <div className="card-h">
-                  <h3>Who signs it</h3>
-                  <span className="sub">they sign in the order shown</span>
-                </div>
-                <div style={{ padding: "16px 20px" }}>
-                  {signers.length === 0 ? (
-                    <div className="empty" style={{ padding: "18px 10px" }}>
-                      Nobody named yet. You can add them later on the contract's
-                      own signature screen.
-                    </div>
-                  ) : signers.map((sg, i) => (
-                    <div className="kv" key={i}>
-                      <span className="k">
-                        <span className="badge b-mut" style={{ marginRight: 8 }}>
-                          <span className="d" />{i + 1}
-                        </span>
-                        <b style={{ color: "var(--p-ink)" }}>{sg.name}</b>
-                        <div className="sub">
-                          {sg.side === "carrier"
-                            ? carrierName
-                            : counterparty?.name ?? "the broker"}
-                          {sg.role ? ` · ${sg.role}` : ""} · {sg.email}
-                        </div>
-                      </span>
-                      <span
-                        className="linkish" role="button"
-                        onClick={() => setSigners(l => l.filter((_, j) => j !== i))}
-                      >
-                        Remove
-                      </span>
-                    </div>
-                  ))}
-
-                  <div className="divider" />
-                  <div className="grid g-3">
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <label>Signs for</label>
-                      <select value={sgSide}
-                              onChange={e => setSgSide(e.target.value as "carrier" | "counterparty")}>
-                        <option value="carrier">{carrierName} (you)</option>
-                        <option value="counterparty">
-                          {counterparty?.name ?? "The broker"}
-                        </option>
-                      </select>
-                    </div>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <label>Name</label>
-                      <input value={sgName}
-                             onChange={e => setSgName(e.target.value)} />
-                    </div>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <label>Email</label>
-                      <input type="email" value={sgEmail}
-                             onChange={e => setSgEmail(e.target.value)} />
-                    </div>
-                  </div>
-                  <div className="rowacts">
-                    <button
-                      className="btn sm" type="button"
-                      disabled={!sgName.trim() || !sgEmail.trim()}
-                      onClick={() => {
-                        setSigners(l => [...l, {
-                          name: sgName.trim(), email: sgEmail.trim(),
-                          role: sgRole.trim() || undefined, side: sgSide }]);
-                        setSgName(""); setSgEmail(""); setSgRole("");
-                      }}
-                    >
-                      <Plus size={12} /> Add signer
-                    </button>
+              {/* The left column is ONE child of a two-column grid — it held
+                  two cards until the signer form came out, and a third child
+                  here would not make a third column, it would wrap under the
+                  first. */}
+              <div>
+              {/* What the signature page ASKS FOR. Every contract used to get
+                  the same four lines because they were written into the
+                  document builder, and changing them meant changing code. They
+                  are a choice now, and the choice is offered from the server's
+                  own list — so this card cannot offer a line the document has
+                  no way to draw, and a line added to that list turns up here
+                  with no change to this file. */}
+              {sigSpec && sigLayout && (
+                <div className="card">
+                  <div className="card-h">
+                    <h3>What each side has to fill in</h3>
                     <span className="sub">
-                      Optional. Naming them now just saves doing it later.
+                      the lines printed under each signature on the document
                     </span>
                   </div>
+                  <div style={{ padding: "16px 20px" }}>
+                    <div className="grid g-2">
+                      {sigSpec.sides.map(side => (
+                        <div key={side}>
+                          <div className="sub-h" style={{ marginTop: 0 }}>
+                            {side === "carrier"
+                              ? `${carrierName} (you)`
+                              : counterparty?.name ?? "The counterparty"}
+                          </div>
+                          {sigSpec.fields.map(f => {
+                            const on = (sigLayout.fields[side] ?? []).includes(f.key);
+                            return (
+                              <label key={f.key} className="kv"
+                                     style={{ alignItems: "flex-start",
+                                              cursor: f.fixed ? "default" : "pointer" }}>
+                                <span className="k">
+                                  <input
+                                    type="checkbox" checked={on}
+                                    disabled={f.fixed}
+                                    style={{ marginRight: 9 }}
+                                    onChange={() => setSigLayout(l => {
+                                      if (!l) return l;
+                                      const had = l.fields[side] ?? [];
+                                      return {
+                                        ...l,
+                                        fields: {
+                                          ...l.fields,
+                                          [side]: on
+                                            ? had.filter(k => k !== f.key)
+                                            : [...had, f.key],
+                                        },
+                                      };
+                                    })}
+                                  />
+                                  <b style={{ color: "var(--p-ink)" }}>{f.label}</b>
+                                  <div className="sub" style={{ marginLeft: 24 }}>
+                                    {f.hint}
+                                    {f.fixed && " · always on"}
+                                  </div>
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="divider" />
+                    <div className="field" style={{ marginBottom: 0, maxWidth: 320 }}>
+                      <label>How the two blocks sit on the page</label>
+                      <select
+                        value={sigLayout.arrangement}
+                        onChange={e => setSigLayout(
+                          l => l && { ...l, arrangement: e.target.value })}
+                      >
+                        {/* Every arrangement the document builder can draw,
+                            except placing the blocks by hand: that one is done
+                            by dragging them onto the contract's own pages, and
+                            there is no contract to drag onto until this form
+                            has been saved. Offered on the record instead, where
+                            the pages exist. Filtered by what it NEEDS rather
+                            than by its name would be better still — but the
+                            spec says nothing about needing a document, and
+                            inventing a flag for one case is worse than saying
+                            which case it is. */}
+                        {sigSpec.arrangements
+                          .filter(a => a.key !== "placed")
+                          .map(a => (
+                            <option key={a.key} value={a.key}>{a.label}</option>
+                          ))}
+                      </select>
+                      <div className="hint">
+                        {sigSpec.arrangements
+                          .find(a => a.key === sigLayout.arrangement)?.hint}
+                        {" "}You can also place the blocks by hand once the
+                        contract exists — its own page has the document to drag
+                        them onto.
+                      </div>
+                    </div>
+                    <div className="hint" style={{ marginTop: 12 }}>
+                      A ticked line becomes a box the signer has to fill on the
+                      real document. Untick one and it is not on the page at
+                      all — nobody is asked for it and nothing is left blank.
+                      Who signs is not decided here: the contract's own
+                      signature page names them, when there is a document for
+                      them to sign.
+                    </div>
+                  </div>
                 </div>
+              )}
+
               </div>
 
+              {/* What is about to be created, and one line on what each
+                  button does with it.
+
+                  This was five paragraphs explaining the three buttons above —
+                  more words about the buttons than there were on the rest of
+                  the step, all of it read once and never again. What survives
+                  is the part that is not written on any button: none of them
+                  makes the contract live. */}
               <div className="card pad">
                 <h3 style={{ margin: "0 0 12px", fontSize: 14 }}>
-                  What happens when you press the button
+                  What you are about to create
                 </h3>
-                <div className="kv">
-                  <span className="k">
-                    <b style={{ color: "var(--p-ink)" }}>Save as a draft</b>
-                    <div className="sub">
-                      Written down and nothing more. Not live, nothing checked,
-                      and every term still editable — so you can come back to it,
-                      or hand it to a colleague to finish. Nobody else sees it.
-                    </div>
-                  </span>
-                </div>
-                <div className="kv">
-                  <span className="k">
-                    <b style={{ color: "var(--p-ink)" }}>Create and send it to the broker</b>
-                    <div className="sub">
-                      They read the terms and either agree them or ask for
-                      changes. The contract exists either way, but it is not in
-                      force and no check runs until they have agreed.
-                    </div>
-                  </span>
-                </div>
-                <div className="kv">
-                  <span className="k">
-                    <b style={{ color: "var(--p-ink)" }}>Neither one makes it live</b>
-                    <div className="sub">
-                      A contract goes in force when <b>both sides have signed
-                      it</b>, and nothing else does that. You sign on the
-                      contract's signature page, the other side signs theirs,
-                      and the second signature puts it in force — at which point
-                      its checks start running on real bordereaux.
-                    </div>
-                  </span>
-                </div>
-
-                {/* <div className="divider" /> */}
-                {/* <div className="note warn">
-                  <b>Kavachio does not email anyone to sign.</b> The signature
-                  round is not wired to a provider yet, so nothing goes out
-                  today. What this step does is record who signs — the
-                  contract's own Signature screen opens with that list, and the
-                  broker returns the executed copy from there.
-                </div> */}
-
-                {/* <div className="divider" /> */}
                 <div className="kv">
                   <span className="k">Contract</span>
                   <span className="v">{values.name}</span>
@@ -1606,6 +1801,17 @@ export default function ContractNew() {
                 <div className="kv">
                   <span className="k">Checks</span>
                   <span className="v">{preview?.checks.length ?? 0}</span>
+                </div>
+
+                <div className="divider" />
+                <div className="hint">
+                  <b>Save as a draft</b> keeps it to yourself.{" "}
+                  <b>Send it for review</b> puts it in the{" "}
+                  {spec?.counterparty_label?.toLowerCase() ?? "broker"}'s queue
+                  here — no email goes out. <b>Sign it now</b> skips their
+                  reading of the terms, and is recorded as review skipped under
+                  your name. None of the three puts the contract in force: both
+                  signatures do that, on its own signature page.
                 </div>
               </div>
             </div>

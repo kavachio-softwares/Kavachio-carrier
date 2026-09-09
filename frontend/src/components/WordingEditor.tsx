@@ -26,11 +26,15 @@
  * (a different section picked, or the wording regenerated), which `sectionKey`
  * signals.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
-/** Tokens → HTML, for putting into the editable div. */
+/** Tokens → HTML, for putting into the editable div.
+ *
+ *  `editable` marks the chips whose term can be changed from here, which is
+ *  what makes them clickable and what the hover state is for. */
 function toHtml(body: string, tokens: Record<string, string>,
-                labels: Record<string, string>): string {
+                labels: Record<string, string>,
+                editable?: (token: string) => boolean): string {
   const esc = (s: string) =>
     s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return esc(body)
@@ -44,9 +48,13 @@ function toHtml(body: string, tokens: Record<string, string>,
              + `data-token="${key}" title="This term is not set in step 1">`
              + `${esc(labels[key] ?? key)} — not set</span>`;
       }
+      const may = !editable || editable(key);
       return `<span class="term" contenteditable="false" data-token="${key}" `
-           + `title="${esc(labels[key] ?? key)} — set in step 1, changes with it">`
-           + `${esc(shown)}</span>`;
+           + (may ? `data-edit="1" ` : "")
+           + `title="${esc(labels[key] ?? key)} — `
+           + (may ? "click to change it, here and everywhere else it appears"
+                  : "set on Terms, and it changes with it")
+           + `">${esc(shown)}</span>`;
     })
     .replace(/\n/g, "<br>");
 }
@@ -76,7 +84,8 @@ function toTokens(root: HTMLElement): string {
 }
 
 export function WordingEditor({
-  sectionKey, body, tokens, labels, onChange, onInsertRequest,
+  sectionKey, body, tokens, labels, onChange, onInsertRequest, onChipsEdited,
+  onChipValue, chipEditable,
 }: {
   /** Changes when a DIFFERENT section is being edited, or the wording was
    *  regenerated — the only times the DOM should be rebuilt from `body`. */
@@ -88,8 +97,40 @@ export function WordingEditor({
   /** Registers an inserter the toolbar can call, so a chip lands at the caret
    *  rather than always at the end. */
   onInsertRequest?: (insert: (token: string) => void) => void;
+  /** The section as it was when editing began, and as it is now — on blur, and
+   *  only when they differ. The caller works out whether a chip was typed over
+   *  and whether the term should follow (see utils/wordingEdits).
+   *
+   *  ON BLUR, not on every keystroke: half a number is not a term. "1" on the
+   *  way to "15" would set the commission to 1% and put the chip back over it,
+   *  which is a fight with the person typing. */
+  onChipsEdited?: (before: string, after: string) => void;
+  /** A chip was edited IN PLACE — clicked, and a new value typed into the small
+   *  box that opens over it. The caller decides whether that value is one the
+   *  term can take; the chip itself is never rewritten here, because the chip
+   *  is not text. It shows a term, and the term is what changes. */
+  onChipValue?: (token: string, text: string) => void;
+  /** Whether a chip can be edited that way. A commission can; the carrier's
+   *  name cannot — it is not a term of this contract, it is who you are. */
+  chipEditable?: (token: string) => boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const wrap = useRef<HTMLDivElement>(null);
+  // The chip being edited in place, and where to float its box.
+  const [editing, setEditing] = useState<
+    { token: string; top: number; left: number; value: string } | null>(null);
+  // The body as it stood when this section was last written into the DOM.
+  const baseline = useRef<string>(body);
+  // The VALUES the chips in this section were last drawn with. A term can move
+  // while the editor is open — typing over a chip is an edit to the term — and
+  // without this the guard below would skip the rebuild (the body is our own
+  // echo) and leave every chip showing the number it used to have.
+  const lastValues = useRef<string>("");
+  // A chip's value changed while the caret is in here. Redrawing now would
+  // throw the caret to the start of the line mid-sentence, so it waits for the
+  // typing to stop.
+  const owed = useRef(false);
+  const [redrawTick, setRedrawTick] = useState(0);
   // What we last wrote out, so an echo of our own value never rebuilds the DOM
   // mid-type and throws the caret to the start.
   const lastEmitted = useRef<string>("");
@@ -97,11 +138,21 @@ export function WordingEditor({
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    if (body === lastEmitted.current) return;
-    el.innerHTML = toHtml(body, tokens, labels);
+    // Only what THIS section quotes: a term changing elsewhere is not a reason
+    // to rebuild the DOM under somebody's caret.
+    const values = [...(body.matchAll(/\{\{([a-z_]+)\}\}/g))]
+      .map(m => `${m[1]}=${tokens[m[1]] ?? ""}`).join("|");
+    if (body === lastEmitted.current && values === lastValues.current) return;
+    if (body === lastEmitted.current && document.activeElement === el) {
+      owed.current = true;
+      return;
+    }
+    el.innerHTML = toHtml(body, tokens, labels, chipEditable);
     lastEmitted.current = body;
+    lastValues.current = values;
+    baseline.current = body;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sectionKey, body, tokens]);
+  }, [sectionKey, body, tokens, chipEditable, redrawTick]);
 
   useEffect(() => {
     if (!onInsertRequest) return;
@@ -136,7 +187,31 @@ export function WordingEditor({
     });
   }, [onInsertRequest, tokens, labels, onChange]);
 
+  /** Clicking a chip opens a small box over it with the value in it. The chip
+   *  stays atomic — it is not turned into editable text — because what is being
+   *  changed is the TERM, and a term is a value, not a run of characters
+   *  somebody may leave half-typed. */
+  function openChip(target: EventTarget | null) {
+    if (!onChipValue) return;
+    const chip = (target as HTMLElement | null)?.closest?.(".term") as
+      HTMLElement | null;
+    const token = chip?.dataset?.token;
+    if (!chip || !token || !wrap.current) return;
+    if (chipEditable && !chipEditable(token)) return;
+    const box = wrap.current.getBoundingClientRect();
+    const at = chip.getBoundingClientRect();
+    setEditing({
+      token,
+      top: at.bottom - box.top + 4,
+      left: Math.max(0, at.left - box.left),
+      // Seeded with what the chip SHOWS — "11%", not 11 — because that is what
+      // the person clicked on, and the reader that parses it takes either.
+      value: tokens[token] ?? "",
+    });
+  }
+
   return (
+    <div ref={wrap} style={{ position: "relative" }}>
     <div
       ref={ref}
       className="wording"
@@ -150,6 +225,20 @@ export function WordingEditor({
         lastEmitted.current = next;
         onChange(next);
       }}
+      onBlur={() => {
+        const el = ref.current;
+        if (!el) return;
+        // A value moved while they were typing — draw it now they have stopped.
+        // First, and whether or not anybody is listening below: the chip on the
+        // screen is showing a number the contract no longer carries.
+        if (owed.current) { owed.current = false; setRedrawTick(n => n + 1); }
+        if (!onChipsEdited) return;
+        const now = toTokens(el);
+        const was = baseline.current;
+        baseline.current = now;
+        if (was !== now) onChipsEdited(was, now);
+      }}
+      onClick={e => openChip(e.target)}
       onPaste={e => {
         // Plain text only. A paste carrying markup could otherwise bring in
         // something that LOOKS like a chip — styled, bold, the right colour —
@@ -159,5 +248,40 @@ export function WordingEditor({
         document.execCommand("insertText", false, text);
       }}
     />
+
+    {editing && (
+      <div
+        style={{ position: "absolute", top: editing.top, left: editing.left,
+                 zIndex: 30 }}
+        className="flex items-center gap-1.5 rounded-lg border border-border
+                   bg-white px-2 py-1.5 shadow-lg"
+      >
+        <input
+          autoFocus
+          defaultValue={editing.value}
+          aria-label={`${labels[editing.token] ?? editing.token} — the agreed value`}
+          className="w-[130px] rounded-md border border-border px-2 py-1 text-[13px]
+                     text-ink outline-none focus:border-[#077282]"
+          onKeyDown={e => {
+            if (e.key === "Escape") { e.preventDefault(); setEditing(null); }
+            if (e.key === "Enter") {
+              e.preventDefault();
+              const v = (e.target as HTMLInputElement).value;
+              setEditing(null);
+              onChipValue?.(editing.token, v);
+            }
+          }}
+          onBlur={e => {
+            const v = e.target.value;
+            setEditing(null);
+            onChipValue?.(editing.token, v);
+          }}
+        />
+        <span className="whitespace-nowrap text-[11px] text-ink-soft">
+          changes the term
+        </span>
+      </div>
+    )}
+    </div>
   );
 }

@@ -277,7 +277,7 @@ export default function ContractUpload() {
             <div className="note">
               <b>Which one do I want?</b> This screen is for a wording you already
               have — its terms are read out of it.{" "}
-              <Link to="/contracts/new" className="linkish">Raise a contract</Link>{" "}
+              <Link to="/contracts/new" className="linkish">Create Contract</Link>{" "}
               is for terms being agreed now, with no signed document yet. Both end
               at the same record.
             </div>

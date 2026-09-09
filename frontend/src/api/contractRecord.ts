@@ -12,6 +12,7 @@
  * is built from a response rather than from a hardcoded array.
  */
 import { api } from "./client";
+import type { TermSpec } from "../utils/term";
 
 /** How the server renders one input. `kind` says what to draw, not how to store. */
 export type ContractFieldKind =
@@ -85,6 +86,11 @@ export type ContractActions = {
   approve: boolean;
   /** Carrier: put the terms out to the broker, or re-send after revising. */
   send_for_review: boolean;
+  /** Carrier: settle the terms without sending them out, and go straight to
+   *  signing. Draft only. Offered beside send_for_review, never instead of
+   *  it — the review is the default road and this is the one for a contract
+   *  with nothing to negotiate or nobody to ask. */
+  skip_review: boolean;
   /** Broker: push back on the terms. */
   request_changes: boolean;
   /** Broker: agree them. Not the signature, and not going live. */
@@ -140,8 +146,6 @@ export type ContractRecord = {
   schedule_key: string | null;
 
   umr: string | null;
-  risk_code: string | null;
-  section_number: string | null;
   class_of_business: string | null;
   year_of_account: string | null;
   earnings_pattern: string | null;
@@ -174,10 +178,27 @@ export type ContractRecord = {
   /** The authored contract, where there is one. Null on an upload — that is
    *  the fact, not an omission. */
   agreed_limits: AgreedLimits | null;
+  /** Each section BOTH ways: `body` carries the tokens the editor turns into
+   *  chips, `rendered` is the same sentence with today's values in it. Read
+   *  `rendered`; edit `body`. Resolving a token is the server's job — it is
+   *  the only place that knows how a percentage, a money amount or a date is
+   *  written, and a second resolver here is what made a clause naming the
+   *  parties read "carrier_name". */
   wording_sections: WordingSection[] | null;
-  /** Who signs, named while the contract was being written. Kavachio sends
-   *  nothing to them — the signature screen says so before anything else. */
+  /** Terms this contract is CHECKED on that its wording does not state —
+   *  nearly always a clause edited with the figure typed over the chip, after
+   *  which the document keeps saying the old number. */
+  wording_unquoted?: { key: string; question: string; value: string | null }[];
+  /** Who signs, named while the contract was being written. Naming them sends
+   *  them nothing: the address is kept for the signing round, which is the one
+   *  thing in this flow that emails anybody, and it is started separately from
+   *  the contract's own signature page. */
   signers: Signer[] | null;
+  /** What this contract's signature page asks each side for. Always present
+   *  and always normalised — the server fills in the four historic lines for a
+   *  contract raised before the block was configurable, so no screen has to
+   *  know that older rows hold nothing. */
+  signature_layout: SignatureLayout;
   /** Who actually signed. A contract goes in force when both sides have. */
   signatures: ContractSignature[];
   /** The sides still outstanding — [] means it can go in force. */
@@ -189,6 +210,12 @@ export type ContractRecord = {
   whose_turn: "carrier" | "broker" | null;
   /** What the broker asked to change, while it is still unanswered. */
   open_change_request: OpenChangeRequest | null;
+  /** What is actually CHECKED on a file, which is not what the contract says.
+   *  A term becomes a check only once the contract is bound to an output
+   *  template — a check compares a bordereau column, and until a template is
+   *  chosen there are no columns. So `rules` can be 0 while `checkable` is 10,
+   *  and that gap is the thing this field exists to make visible. */
+  checks: ContractChecks;
   /** Only present on a termination response. */
   warning?: string | null;
 };
@@ -248,8 +275,6 @@ export type ContractInput = {
   inception_dt?: string | null;
   expiry_dt?: string | null;
   umr?: string | null;
-  risk_code?: string | null;
-  section_number?: string | null;
   class_of_business?: string | null;
   year_of_account?: string | null;
   earnings_pattern?: string | null;
@@ -263,7 +288,7 @@ export type ContractInput = {
   /** The authored contract: what was agreed, and the wording written from it. */
   agreed_limits?: AgreedLimits;
   wording_sections?: WordingSection[];
-  signature_layout?: Record<string, unknown> | null;
+  signature_layout?: SignatureLayout | null;
   signers?: Signer[];
   /** Start a negotiation instead of putting it straight in force. Default
    *  false, so the carrier's "what I raise is live on arrival" behaviour is
@@ -309,6 +334,10 @@ export type AgreedLimitSpec = {
   group: "underwriting" | "commercial";
   checkable: boolean;
   default_severity: "critical" | "warning" | null;
+  /** Offered before "show every term". Served rather than decided here: the
+   *  form used to hold its own list, so a limit added to the vocabulary existed
+   *  everywhere except the screen somebody would have typed it on. */
+  common: boolean;
 };
 
 /** What the carrier agreed, as the flow holds it. */
@@ -356,17 +385,76 @@ export type WordingInput = {
   carrier_name?: string | null;
   counterparty_name?: string | null;
   programme_name?: string | null;
-  signature_layout?: Record<string, unknown> | null;
+  signature_layout?: SignatureLayout | null;
 };
 
 /** The three headings the limits table is grouped under, served so neither the
  *  create screen nor the contract record restates them. */
 export type LimitGroup = { key: string; label: string; sub: string };
 
+/** One line a signature block can carry. `fixed` marks the one that cannot be
+ *  turned off — a block with nowhere to sign is not a signature block. */
+export type SignatureFieldSpec = {
+  key: string; label: string; hint: string;
+  default_on: boolean; fixed: boolean;
+};
+
+/** How much of this contract is measured on every row.
+ *
+ *  `checkable` counts the agreed limits that CAN become a check; a limit whose
+ *  check is None is wording only by design and is not counted, so a fully bound
+ *  contract reads n of n rather than n of some larger number it can never
+ *  reach. */
+export type ContractChecks = {
+  rules: number;
+  checkable: number;
+  output_template_id: number | null;
+  bindable: boolean;
+  /** The template the checks were written against, and the sheets it reports
+   *  on. Shown because nobody was asked: binding resolves the template itself,
+   *  so a carrier can be measured on a layout for a country they do not write
+   *  in and have no way to notice. Empty on the contracts LIST, which resolves
+   *  nothing per row. */
+  output_template: string | null;
+  sheets: string[];
+};
+
+/** What a signature block may contain and how the two blocks sit on the page.
+ *
+ *  Served, never restated here. The form offers exactly what the wording
+ *  builder can draw and the server will accept, because all three read one
+ *  list — esign_pdf.SIGNATURE_BLOCK_FIELDS. Add a line there and it appears
+ *  here with no frontend change at all. */
+export type SignatureBlockSpec = {
+  fields: SignatureFieldSpec[];
+  arrangements: Array<{ key: string; label: string; hint: string }>;
+  sides: string[];
+  default: SignatureLayout;
+  /** The size of a hand-placed block as a fraction of the page. Served so the
+   *  box somebody drags is the size of the block that gets drawn. */
+  placed_block: { width: number; height: number };
+};
+
+/** What the carrier chose: which lines each side signs, and how the blocks
+ *  sit. Stored on the contract and read by everything that draws the page. */
+export type SignatureLayout = {
+  arrangement: string;
+  fields: Record<string, string[]>;
+  /** Where each side's block was dragged to, when it was placed by hand: a
+   *  page number and the top-left corner as a fraction of that page. Kept
+   *  whatever the arrangement is, so trying the automatic ones and coming back
+   *  does not throw a placement away. */
+  blocks: Record<string, { page: number; x: number; y: number }>;
+};
+
 export const getContractTypes = () =>
   api.get<{
     types: ContractTypeSpec[]; default: string; lifecycle: Lifecycle[];
     agreed_limits: AgreedLimitSpec[]; limit_groups: LimitGroup[];
+    /** The term lengths a form may offer, and how a term is counted. Nothing
+     *  about a duration is stored — see utils/term.ts. */
+    term: TermSpec;
+    signature_block: SignatureBlockSpec;
     severities: string[];
   }>("/contract-types").then(r => r.data);
 
@@ -453,9 +541,14 @@ export const updateContract = (
     agreed_limits?: AgreedLimits;
     wording_sections?: WordingSection[];
     signers?: Signer[];
-    signature_layout?: Record<string, unknown> | null;
+    signature_layout?: SignatureLayout | null;
   },
-) => api.patch<ContractRecord>(`/contracts/${id}`, body).then(r => r.data);
+  // `wording_retied` names the terms a saved clause was tied back to: a figure
+  // typed where a chip used to be is bound to the term it quotes, or the
+  // sentence stops moving when the term does. Never silent — it changed the
+  // text of a contract.
+) => api.patch<ContractRecord & { wording_retied?: string[] }>(
+  `/contracts/${id}`, body).then(r => r.data);
 
 export const submitContract = (id: number, note?: string) =>
   api.post<ContractRecord>(`/contracts/${id}/submit`, { note: note ?? null })
@@ -473,6 +566,15 @@ export const activateContract = (id: number) =>
  *  revising in answer to a change request — the same act, so the same call. */
 export const sendForReview = (id: number, note?: string) =>
   api.post<ContractRecord>(`/contracts/${id}/send-for-review`,
+                           { note: note ?? null }).then(r => r.data);
+
+/** Carrier: agree the terms alone and go straight to signing.
+ *
+ *  Lands in the same state the broker's agreement does, and is recorded
+ *  differently on purpose — the history has to be able to say which of the two
+ *  happened, because one of them means the other side never got a say. */
+export const skipReview = (id: number, note?: string) =>
+  api.post<ContractRecord>(`/contracts/${id}/skip-review`,
                            { note: note ?? null }).then(r => r.data);
 
 /** Broker: push back.
@@ -613,6 +715,52 @@ export async function openDocument(
  * — the client interceptor turns that into a thrown error, so a plain await is
  * enough here.
  */
+/**
+ * Turn this contract's agreed terms into the checks that run on every row.
+ *
+ * The same step the broker page runs when a contract is UPLOADED there, for a
+ * contract written here instead: uploading has to read a document for its
+ * clauses first, whereas a written contract already carries its terms, so the
+ * rules follow by translation. The output template is resolved by the server
+ * from the contract's own scope — the screen never picks one, because every
+ * run resolves it the same way and two answers to that question is how a
+ * bordereau gets checked against a template nobody reports into.
+ */
+/** How many pages the composed contract has, and the shape of each one.
+ *
+ *  Only the placement screen needs this: a hand-placed signature block is a
+ *  page number and a point on it, so the screen has to be looking at the same
+ *  pages the PDF has. */
+export const getContractPages = (id: number) =>
+  api.get<{ pages: number; sizes: Array<{ width: number; height: number }> }>(
+    `/contracts/${id}/pages`).then(r => r.data);
+
+/** One page of the composed contract as an object URL the caller must revoke.
+ *
+ *  Fetched rather than pointed at with an <img src>, because every call to this
+ *  API carries a bearer token and an <img> cannot set a header. */
+export const getContractPageImage = async (
+  id: number, page: number, scale = 1.5,
+): Promise<string> => {
+  const r = await api.get<Blob>(`/contracts/${id}/pages/${page}`, {
+    params: { scale }, responseType: "blob", silent: true,
+  });
+  return URL.createObjectURL(r.data);
+};
+
+export const bindChecks = (id: number) =>
+  api.post<ContractRecord & {
+    mapping: {
+      output_template: { id: number; name: string };
+      rules_written: number;
+      /** Terms this template has no column for. Not a failure — the things
+       *  this contract says that this bordereau cannot measure. */
+      unmapped: Array<{ key: string; question: string; value: string;
+                        reason: string; looked_for: string[] }>;
+      match_level: "contract" | "broker" | "programme" | null;
+    };
+  }>(`/contracts/${id}/bind-checks`).then(r => r.data);
+
 export const generateRules = (id: number, outputTemplateId?: number | null) => {
   const fd = new FormData();
   if (outputTemplateId != null) fd.append("output_template_id", String(outputTemplateId));

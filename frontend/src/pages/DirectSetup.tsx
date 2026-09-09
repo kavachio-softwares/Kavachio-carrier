@@ -17,6 +17,7 @@ import { InfoTip } from "../components/ui/InfoTip";
 import { LoadingOverlay } from "../components/Busy";
 import { MissingColumnsList, UnmappedClausesList } from "../components/MissingColumnsNote";
 import { errText, MissingColumnsResp, scheduleOf } from "../utils/directSetup";
+import { contractLabel } from "../utils/contractLabel";
 import {
   uploadContract, generateContractRules, type ExternalReference,
 } from "../api/contracts";
@@ -231,7 +232,7 @@ export default function DirectSetup() {
   const staged = useMemo<StagedContract[]>(() => [
     ...reusedContracts.map(c => ({
       kind: "existing" as const, id: c.id,
-      name: c.filename || `Contract ${c.id}`,
+      name: contractLabel(c),
     })),
     ...contractFiles.map(f => ({ kind: "file" as const, file: f, name: f.name })),
   ], [reusedContracts, contractFiles]);
@@ -1576,7 +1577,7 @@ export default function DirectSetup() {
                    same document twice. Removable, because replacing a contract
                    with a newer one is a real thing to want. */
                 existing={reusedContracts.map(c => ({
-                  id: c.id, name: c.filename || `Contract ${c.id}`,
+                  id: c.id, name: contractLabel(c),
                   from: c.broker_name,
                 }))}
                 onRemoveExisting={id =>

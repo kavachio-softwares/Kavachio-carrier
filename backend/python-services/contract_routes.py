@@ -39,6 +39,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import tempfile
 from typing import Any, Optional
@@ -51,8 +52,10 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import String, func, or_
+from sqlalchemy import text as sa_text
 
 import contract_types as ct
+import esign_pdf
 import storage
 from auth_deps import Principal, current_principal, resolve_broker_party_id
 from app_routes import _iso_utc, assert_tenant_owns, resolve_tenant_id
@@ -60,6 +63,8 @@ from db import (
     Contract, ContractApproval, ContractDocument, ExportTemplate,
     ContractSignature, Party, Program, ProgramBroker, SessionLocal,
 )
+
+log = logging.getLogger("kavachio.contracts")
 
 router = APIRouter()
 
@@ -228,13 +233,68 @@ def _doc_dict(d: ContractDocument) -> dict:
     }
 
 
+def _wording_context(s, c: Contract) -> dict:
+    """Everything a contract's wording needs to be read: its values, its limits,
+    and what every token in it resolves to.
+
+    Pulled out of the PDF composer so that the SCREEN and the DOCUMENT resolve a
+    token the same way. They did not: the record page carried a second resolver
+    written in TypeScript that knew about agreed limits and nothing else, so a
+    clause naming the parties rendered as "carrier_name" and one naming the
+    term as "from inception to expiry". A token means one thing, and this is
+    where that one thing is worked out.
+    """
+    import contract_wording as cw
+    from db import Tenant
+
+    limits = ct.clean_agreed_limits(c.commercial_terms or {})
+    counterparty = (s.get(Party, c.broker_party_id)
+                    if c.broker_party_id else None)
+    carrier = s.get(Tenant, c.tenant_id) if c.tenant_id else None
+    programme = s.get(Program, c.program_id) if c.program_id else None
+    carrier_name = (getattr(carrier, "legal_name", None)
+                    or getattr(carrier, "tenant_name", None))
+    counterparty_name = getattr(counterparty, "legal_name", None)
+    programme_name = getattr(programme, "name", None)
+    try:
+        type_label = ct.spec(c.contract_type)["label"] if c.contract_type else None
+    except ct.ContractTypeError:
+        type_label = None
+
+    values = {
+        "name": c.name, "inception_dt": c.inception_dt,
+        "expiry_dt": c.expiry_dt, "class_of_business": c.class_of_business,
+        "schedule_key": c.schedule_key, "risk_code": c.risk_code,
+        "section_number": c.section_number,
+        "year_of_account": c.year_of_account,
+        "notice_period_days": c.notice_period_days,
+    }
+    return {
+        "values": values,
+        "limits": limits,
+        "tokens": cw.token_values(
+            values=values, limits=limits, carrier_name=carrier_name,
+            counterparty_name=counterparty_name,
+            programme_name=programme_name),
+        "carrier_name": carrier_name,
+        "counterparty_name": counterparty_name,
+        "programme_name": programme_name,
+        "type_label": type_label,
+    }
+
+
 def _record(s, c: Contract, *, with_docs: bool = True,
-            p: Principal | None = None) -> dict:
+            p: Principal | None = None,
+            rule_counts: dict[int, int] | None = None) -> dict:
     """The contract, as the screens need it.
 
     Deliberately fat: a contract screen that had to make five calls to say what
     state a contract is in would show four different half-states while they
     landed.
+
+    `rule_counts` is how many checks each contract currently has in force,
+    passed in rather than counted here so the LIST can answer it for every row
+    in one query instead of one per row. Left out, this counts its own.
     """
     prog = s.get(Program, c.program_id) if c.program_id else None
     counterparty = s.get(Party, c.broker_party_id) if c.broker_party_id else None
@@ -252,6 +312,25 @@ def _record(s, c: Contract, *, with_docs: bool = True,
     missing = _missing_references(c, docs) if with_docs else []
     active_docs = [d for d in docs if d.is_active]
     sigs = _signatures(s, c.id)
+
+    import contract_wording as cw
+    wording_sections = (c.wording_sections or {}).get("sections")
+    unquoted: list[dict] = []
+    # Only for the detail view. The LIST renders no wording, and resolving every
+    # row's tokens would be three extra reads per contract to compose sentences
+    # nobody is going to see.
+    if with_docs and wording_sections:
+        ctx = _wording_context(s, c)
+        wording_sections = [
+            {**sec, "rendered": cw.render(sec.get("body") or "", ctx["tokens"])}
+            for sec in wording_sections if isinstance(sec, dict)]
+        unquoted = [
+            {"key": k,
+             "question": ct.AGREED_LIMITS[k]["question"],
+             "value": ctx["tokens"].get(k)}
+            for k in cw.unquoted_terms(wording_sections, ctx["limits"])
+            if k in ct.AGREED_LIMITS]
+
     has_wording = (bool((c.wording_sections or {}).get("sections"))
                    or any(d.kind == "contract" and d.is_active for d in active_docs)
                    or bool(c.blob_ref or c.blob))
@@ -277,9 +356,12 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         "schedule_key": c.schedule_key,
 
         # ── the record ──
+        # No `risk_code` / `section_number`: the form does not ask for them and
+        # the record no longer shows them, so serving a column nothing reads
+        # would just be rot. A contract that carries one from an upload or a
+        # renewal still PRINTS it on its schedule — see
+        # contract_wording.schedule_rows.
         "umr": c.umr,
-        "risk_code": c.risk_code,
-        "section_number": c.section_number,
         "class_of_business": c.class_of_business,
         "year_of_account": c.year_of_account,
         "earnings_pattern": c.earnings_pattern,
@@ -317,8 +399,23 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # The authored contract, where there is one. NULL on uploads — that is
         # the fact, not an omission.
         "agreed_limits": c.commercial_terms,
-        "wording_sections": (c.wording_sections or {}).get("sections"),
+        # Each section BOTH ways: `body` keeps the tokens the editor turns into
+        # chips, `rendered` is the same sentence with today's values in it. The
+        # screen reads one and edits the other, and neither has to know how a
+        # percentage or a money amount is written.
+        "wording_sections": wording_sections,
+        # Terms this contract is CHECKED on that its wording does not state.
+        # Nearly always a clause that was edited with the figure typed in place
+        # of the chip — after which the document keeps saying the old number
+        # while the check follows the term. See contract_wording.unquoted_terms.
+        "wording_unquoted": unquoted,
         "signers": (c.wording_sections or {}).get("signers"),
+        # The block this contract's signature page will ask for. Normalised on
+        # the way out, so a screen reading it never has to know that older rows
+        # hold {} — it gets the same shape whatever is stored, and the shape it
+        # gets is the one the document will actually be drawn from.
+        "signature_layout": esign_pdf.normalise_signature_layout(
+            (c.wording_sections or {}).get("signature_layout")),
         # WHO ACTUALLY SIGNED, as opposed to who was named to. The gate that
         # puts a contract in force reads these, so the screen shows the same
         # rows the server decides on.
@@ -344,7 +441,66 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # carrier's screen can show the request beside the terms without a
         # second call.
         "open_change_request": _open_change_request(s, c),
+        # WHAT IS ACTUALLY CHECKED ON A FILE, which is not the same question as
+        # what the contract says. A term becomes a check only once the contract
+        # is bound to an output template, because a check is a comparison
+        # against a bordereau COLUMN and until a template is chosen there are no
+        # columns. So a contract can carry ten agreed limits and nought checks,
+        # and that gap is invisible unless it is reported — which is how a
+        # carrier ends up believing a file is being measured against terms
+        # nothing has ever looked at. See _checks_summary.
+        "checks": _checks_summary(s, c, rule_counts),
     }
+
+
+def _checks_summary(s, c: Contract,
+                    rule_counts: dict[int, int] | None = None) -> dict:
+    """How many of this contract's terms are actually checked, and how many could be.
+
+    `checkable` counts the agreed limits that CAN become a check — a limit whose
+    `check` is None is wording only, by design, and counting it would make every
+    contract look half-bound forever. `rules` is what is in force right now.
+    """
+    limits = c.commercial_terms or {}
+    checkable = sum(
+        1 for k, entry in limits.items()
+        if (ct.AGREED_LIMITS.get(k) or {}).get("check")
+        and (entry or {}).get("value") not in (None, ""))
+    if rule_counts is None:
+        n = s.execute(
+            sa_text("SELECT COUNT(*) FROM validation_rule "
+                    "WHERE contract_id = :cid"), {"cid": c.id}).scalar() or 0
+    else:
+        n = rule_counts.get(c.id, 0)
+    out = {
+        "rules": int(n),
+        "checkable": checkable,
+        "output_template_id": c.output_template_id,
+        # The one thing the screen cannot work out for itself: whether pressing
+        # the button would do anything. Terms with nothing to check produce no
+        # rules however many templates are bound.
+        "bindable": checkable > 0,
+        "output_template": None,
+        "sheets": [],
+    }
+    # WHICH TEMPLATE, SAID OUT LOUD. Binding resolves the template by itself —
+    # deliberately, so nobody picks one the runs do not use — and that made the
+    # answer invisible: a carrier reporting on a Lloyd's US layout had never
+    # been asked about the United States and had nowhere to see that they were.
+    # The template is not the contract's to choose, but it IS the contract's to
+    # show, so the wrong one is noticed here rather than in an exception report.
+    #
+    # Only on the single-record path: the list resolves nothing per row (see
+    # `rule_counts`), and one template lookup per row is how a list turns into
+    # a hundred round trips.
+    if rule_counts is None and c.output_template_id:
+        t = s.get(ExportTemplate, c.output_template_id)
+        if t is not None:
+            out["output_template"] = t.name
+            out["sheets"] = [sh.get("sheet_name") for sh
+                             in ((t.structure or {}).get("sheets") or [])
+                             if sh.get("sheet_name")]
+    return out
 
 
 def _open_change_request(s, c: Contract) -> Optional[dict]:
@@ -405,11 +561,29 @@ def _allowed_actions(c: Contract, missing: list[str],
         # Carrier sends its terms out. Only for a contract it owns and only to a
         # BROKER: a reinsurer has no seat in this app, so there is nobody on the
         # other side to review it.
+        #
+        # NOT once the terms are agreed. `agreed` means the broker has read
+        # these terms and said yes; there is nothing left to review, and the
+        # next thing that happens to the contract is a signature. Offering it
+        # there asked the broker to agree twice to the same thing — and since
+        # `edit` stops at `agreed` too, the terms could not even have moved in
+        # between. If they need to move, the broker asks for changes and the
+        # contract comes back to `changes_requested`, which IS on this list.
         "send_for_review": (
             is_carrier and not blocked
-            and state in ("draft", "changes_requested", "agreed")
+            and state in ("draft", "changes_requested")
             and c.contract_type == "insurer_broker"
             and c.broker_party_id is not None),
+        # Skip the review and go straight to signing. The carrier is not
+        # OBLIGED to hold a review — a renewal on last year's wording, or a
+        # treaty whose counterparty has no seat here to read it, has nothing to
+        # negotiate — and without this the only road to a signature ran through
+        # a broker who had nothing to say. Offered alongside send_for_review and
+        # never instead of it, so the default road stays the one that asks.
+        #
+        # Draft only. Once the terms have been out, skipping the answer to them
+        # is not "no review was needed", it is ignoring one that was asked for.
+        "skip_review": is_carrier and state == "draft" and not blocked,
         # Broker's two answers. Never both sides' — this is their turn.
         "request_changes": is_broker and state in ("in_review", "agreed"),
         "accept_terms": is_broker and state == "in_review" and not blocked,
@@ -511,6 +685,15 @@ def contract_types(_p: Principal = Depends(current_principal)):
             # happens when a file breaks it. Served, not restated client-side.
             "agreed_limits": ct.agreed_limits_spec(),
             "limit_groups": ct.limit_groups_spec(),
+            # How long a term may be said to run for, and how a term is counted.
+            # The form turns a chosen length into an expiry DATE — nothing about
+            # a duration is stored, see contract_types.TERM_DURATION_MONTHS.
+            "term": ct.term_spec(),
+            # What a signature block may contain, and how the two may sit on
+            # the page. Served for the same reason as everything else here: the
+            # form offers exactly what the wording builder can draw and the
+            # validator will accept, because all three read this one list.
+            "signature_block": esign_pdf.signature_block_spec(),
             "severities": list(ct.SEVERITIES)}
 
 
@@ -593,7 +776,17 @@ def list_contracts(
 
         # Lifecycle is filtered in Python, not SQL, because `expired` is derived
         # from the expiry date rather than stored — see _effective_lifecycle.
-        out = [_record(s, c, with_docs=False, p=p) for c in rows]
+        # One query for every row's check count. Counting inside _record would
+        # be one round trip per contract, which on a carrier with a few hundred
+        # of them is the whole cost of the screen.
+        counts: dict[int, int] = {}
+        if rows:
+            counts = {int(cid): int(n) for cid, n in s.execute(
+                sa_text("SELECT contract_id, COUNT(*) FROM validation_rule "
+                        "WHERE contract_id = ANY(:ids) GROUP BY contract_id"),
+                {"ids": [c.id for c in rows]}).all()}
+        out = [_record(s, c, with_docs=False, p=p, rule_counts=counts)
+               for c in rows]
         if lifecycle:
             out = [r for r in out if r["lifecycle"] == lifecycle]
         return out
@@ -627,8 +820,6 @@ class ContractIn(BaseModel):
     inception_dt: Optional[str] = None
     expiry_dt: Optional[str] = None
     umr: Optional[str] = None
-    risk_code: Optional[str] = None
-    section_number: Optional[str] = None
     class_of_business: Optional[str] = None
     year_of_account: Optional[str] = None
     earnings_pattern: Optional[str] = None
@@ -645,9 +836,11 @@ class ContractIn(BaseModel):
     wording_sections: Optional[list] = None
     signature_layout: Optional[dict] = None
     # Who signs, named at step 4. Stored with the wording rather than in a
-    # column of their own: they belong to this authored document, and the
-    # signature screen is the only thing that reads them. Kavachio does not
-    # send anything to them — see the signature screen, which says so first.
+    # column of their own: they belong to this authored document. Naming them
+    # sends them NOTHING — no route in this file emails anybody. The address is
+    # kept for the signing round (esign_routes), which is started separately
+    # from the contract's own signature page and is the only thing in the flow
+    # that puts mail in an inbox.
     signers: Optional[list] = None
     # The contract this one renews, when it is a renewal. A renewal raised here
     # is a NEW contract that points back — last year's terms have to keep
@@ -676,6 +869,17 @@ class ContractIn(BaseModel):
 
 def _bad_fields(e: ct.ContractTypeError):
     return HTTPException(400, e.to_detail())
+
+
+def _clean_signature_layout(raw: Any) -> dict:
+    """The chosen block, checked and put in order — or a 400 saying which side
+    is wrong. Refused on the way IN, while the carrier is still looking at the
+    choice they made, rather than discovered when a document comes out with
+    nowhere to sign."""
+    try:
+        return esign_pdf.normalise_signature_layout(raw, strict=True)
+    except esign_pdf.SignatureLayoutError as e:
+        raise HTTPException(400, {"message": e.message, "errors": e.errors})
 
 
 def _as_date(v: Any) -> Optional[dt.date]:
@@ -804,10 +1008,13 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
             # contract's own state lives in `lifecycle`.
             status="drafted",
         )
-        # `umr` is deliberately absent — see contract_types.
-        for field in ("name", "risk_code", "section_number",
-                      "class_of_business", "year_of_account", "earnings_pattern",
-                      "premium_cap_currency"):
+        # `umr`, `risk_code` and `section_number` are deliberately absent: the
+        # form does not ask for them, nothing on the record shows them, and
+        # `ContractIn` does not accept them either. See contract_types. A
+        # renewal still carries them forward from the contract it succeeds,
+        # which is where an uploaded one gets them.
+        for field in ("name", "class_of_business", "year_of_account",
+                      "earnings_pattern", "premium_cap_currency"):
             setattr(c, field, clean.get(field))
         c.inception_dt = _as_date(clean.get("inception_dt"))
         c.expiry_dt = _as_date(clean.get("expiry_dt"))
@@ -829,10 +1036,17 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
                     "errors": {"renews_contract_id": "already renewed"}})
             c.renews_contract_id = prior.id
         if body.wording_sections:
+            import contract_wording as cw
+            # Same tie as on edit: a figure typed where a chip used to be is
+            # bound back to the term it quotes, or the contract stops following
+            # its own terms from the moment it is created.
+            kept, _retied = cw.retie(
+                [sec for sec in body.wording_sections
+                 if isinstance(sec, dict) and (sec.get("body") or "").strip()],
+                _wording_context(s, c)["tokens"])
             c.wording_sections = {
-                "sections": [sec for sec in body.wording_sections
-                             if isinstance(sec, dict) and (sec.get("body") or "").strip()],
-                "signature_layout": body.signature_layout or {},
+                "sections": kept,
+                "signature_layout": _clean_signature_layout(body.signature_layout),
                 "signers": [sg for sg in (body.signers or [])
                             if isinstance(sg, dict) and (sg.get("name") or "").strip()],
             }
@@ -917,7 +1131,16 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
         #   · signing it      → the executed copy is attached at signing, and
         #                       that is a document from the real world rather
         #                       than one Kavachio invented
-        return _record(s, c, p=p)
+        #
+        # The checks ARE written here, though, and that is the point of the
+        # line above. A contract raised with ten limits on it used to arrive
+        # with nothing measuring any of them until somebody found a step nobody
+        # had been shown — see _auto_bind.
+        bound = _auto_bind(s, c, p)
+        rec = _record(s, c, p=p)
+        if bound:
+            rec["mapping"] = bound
+        return rec
 
 
 class WordingPreviewIn(BaseModel):
@@ -968,7 +1191,7 @@ def wording_preview(body: WordingPreviewIn,
         counterparty_name=body.counterparty_name,
         programme_name=body.programme_name)
 
-    checks, warnings = cw.derive_checks(body.values, limits)
+    checks, warnings = cw.derive_checks(body.values, limits, sections)
     rendered = [{**sec,
                  "rendered": cw.render(sec.get("body") or "", tokens),
                  "tokens": cw.used_tokens(sec.get("body") or "")}
@@ -1109,9 +1332,20 @@ def update_contract(contract_id: int, body: dict,
         # wipe the other.
         if "agreed_limits" in body:
             c.commercial_terms = ct.clean_agreed_limits(body["agreed_limits"]) or None
+        retied: list[str] = []
         if "wording_sections" in body:
+            import contract_wording as cw
             sections = [sec for sec in (body["wording_sections"] or [])
                         if isinstance(sec, dict) and (sec.get("body") or "").strip()]
+            # AFTER the limits above, so a request that changes a term and its
+            # wording together ties the words to the new value, not the old one.
+            #
+            # Why at all: the editor shows every term as a chip you cannot type
+            # by hand, but you can delete one and type the number it was
+            # showing — and then the sentence stops moving when the term does.
+            # That is how a contract ends up saying 13% while the check enforces
+            # 14%. See contract_wording.retie.
+            sections, retied = cw.retie(sections, _wording_context(s, c)["tokens"])
             existing = dict(c.wording_sections or {})
             existing["sections"] = sections
             c.wording_sections = existing or None
@@ -1152,12 +1386,33 @@ def update_contract(contract_id: int, body: dict,
             c.wording_sections = existing or None
         if "signature_layout" in body:
             existing = dict(c.wording_sections or {})
-            existing["signature_layout"] = body["signature_layout"] or {}
+            existing["signature_layout"] = _clean_signature_layout(
+                body["signature_layout"])
             c.wording_sections = existing or None
 
         s.commit()
         s.refresh(c)
-        return _record(s, c, p=p)
+
+        # A TERM THAT MOVED TAKES ITS CHECK WITH IT. Only for a contract whose
+        # checks were already written: binding one that nobody has bound would
+        # be this endpoint quietly deciding a contract should start being
+        # measured, which is a decision with a button of its own. But leaving
+        # rules that say 11% on a contract that now says 15% is the exact drift
+        # the tokens, the re-tie and the chips all exist to prevent, and it is
+        # the one place it could still happen silently.
+        rebound = None
+        if "agreed_limits" in body and _checks_summary(s, c)["rules"] > 0:
+            rebound = _auto_bind(s, c, p)
+
+        out = _record(s, c, p=p)
+        # Named, not silent. It changed the text of a contract, and whoever
+        # saved it is the only person who can say the tie was wrong.
+        out["wording_retied"] = [
+            ct.AGREED_LIMITS[k]["question"] for k in retied
+            if k in ct.AGREED_LIMITS]
+        if rebound:
+            out["mapping"] = rebound
+        return out
 
 
 # =============================================================================
@@ -1249,6 +1504,11 @@ def submit_contract(contract_id: int, body: Note = Note(),
 #      …steps 2–4 repeat for as long as it takes…
 #   5. Terms agreed → signature → in force          activate
 #
+# Steps 2–4 can be skipped outright                 skip-review      → agreed
+# when there is nothing to negotiate or nobody to ask. Same destination, and
+# deliberately NOT the same endpoint: the history has to be able to say which
+# of the two happened. See skip_review.
+#
 # Nobody "approves" anything here, and that is the point. The approve/reject
 # gate answers "may this broker's contract into my book?", which the carrier
 # decides alone. This answers "do we both agree these terms?", which neither
@@ -1303,6 +1563,74 @@ def send_for_review(contract_id: int, body: ReviewRequest = ReviewRequest(),
         now = dt.datetime.now(dt.timezone.utc)
         s.add(ContractApproval(
             tenant_id=c.tenant_id, contract_id=c.id, action="sent_for_review",
+            acted_by_user_id=p.user_id, acted_at=now, note=body.note))
+        s.commit()
+        s.refresh(c)
+        return _record(s, c, p=p)
+
+
+@router.post("/contracts/{contract_id}/skip-review")
+def skip_review(contract_id: int, body: ReviewRequest = ReviewRequest(),
+                p: Principal = Depends(current_principal)):
+    """Settle the terms without sending them out, and go straight to signing.
+
+    The review exists so the OTHER SIDE can object before anyone signs. There
+    are contracts where there is nothing for them to object to — a renewal on
+    last year's wording at last year's numbers — and contracts where there is
+    nobody to ask: an insurer ↔ reinsurer treaty has a counterparty with no seat
+    in Kavachio at all, so `send-for-review` refuses it outright and the signing
+    round refuses a draft. Between the two, a treaty could not be signed in the
+    app by any route. This is that route.
+
+    It is the carrier agreeing the terms on its own, and it is written down as
+    exactly that: a `review_skipped` row in the history, so a reader months
+    later can tell a contract the broker agreed from one they were never asked
+    about. Which is why this is a separate endpoint rather than a flag on
+    send-for-review — those two acts leave the contract in the same state and
+    mean completely different things.
+
+    Everything send-for-review checks is checked here too, and for a stronger
+    reason: nothing is going out for anyone to read, so this is the last point
+    at which an incomplete contract can be stopped before it carries signatures.
+    """
+    _require_carrier(p)
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        docs = s.query(ContractDocument).filter(
+            ContractDocument.contract_id == c.id).all()
+        missing = _missing_references(c, docs)
+        if missing:
+            raise HTTPException(400, {
+                "message": "This contract defers to document(s) that have not "
+                           "been supplied. Signing it now would sign up to "
+                           "terms nobody can read.",
+                "errors": {"documents": ", ".join(missing)}})
+
+        try:
+            ct.validate(c.contract_type or "", {
+                f: getattr(c, ct.FIELDS[f]["attr"])
+                for f in ct.field_names(c.contract_type or "")
+                if f != "counterparty_party_id"
+            } | {"counterparty_party_id": c.broker_party_id})
+        except ct.ContractTypeError as e:
+            raise _bad_fields(e)
+
+        # Draft only, and refused HERE rather than left to `_move` — which
+        # returns quietly when a contract is already where it is being sent, so
+        # a second press would have written a second `review_skipped` row and
+        # reported success. A skip is a fact about a contract, not a setting,
+        # and it happens once.
+        state = _effective_lifecycle(c)
+        if state != "draft":
+            raise HTTPException(
+                409, "the terms of this contract are already settled"
+                     if state == "agreed" else
+                     f"a {state} contract's terms have already been out — "
+                     "there is no review left to skip")
+        _move(c, "agreed")
+        now = dt.datetime.now(dt.timezone.utc)
+        s.add(ContractApproval(
+            tenant_id=c.tenant_id, contract_id=c.id, action="review_skipped",
             acted_by_user_id=p.user_id, acted_at=now, note=body.note))
         s.commit()
         s.refresh(c)
@@ -2313,6 +2641,46 @@ def download_contract_pdf(contract_id: int,
                                  _content_disposition(fname)})
 
 
+@router.get("/contracts/{contract_id}/pages")
+def contract_pages(contract_id: int,
+                   p: Principal = Depends(current_principal)):
+    """How many pages the composed contract has, and how big each one is.
+
+    What it is FOR: placing the signature blocks by hand. A block is stored as
+    a page number and a point on that page, so the screen showing the document
+    has to be showing the same pages the PDF has — and the width/height lets it
+    reserve the right space before an image has loaded, so nothing a person has
+    dragged jumps under them when it does.
+    """
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        data = compose_contract_pdf(s, c)
+        return {"pages": esign_pdf.page_count(data),
+                "sizes": esign_pdf.page_sizes(data)}
+
+
+@router.get("/contracts/{contract_id}/pages/{page_no}")
+def contract_page(contract_id: int, page_no: int,
+                  scale: float = Query(2.0, ge=0.5, le=3.0),
+                  p: Principal = Depends(current_principal)):
+    """One page of the composed contract, as a PNG.
+
+    Composed fresh, like the download and for the same reason: the wording is
+    not a file, so there is no stored copy that could be shown instead — and a
+    cached image is a picture of terms that may have moved since. It is not
+    cached for the same reason.
+    """
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        data = compose_contract_pdf(s, c)
+    try:
+        img = esign_pdf.render_page_png(data, page_no, scale)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return Response(content=img, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
 def compose_contract_pdf(s, c: Contract, *,
                          anchors: dict[str, str] | None = None) -> bytes:
     """This contract's terms and wording as one PDF.
@@ -2329,12 +2697,14 @@ def compose_contract_pdf(s, c: Contract, *,
     can download. See contract_wording.compose_pdf.
     """
     import contract_wording as cw
-    from db import Tenant
 
     sections = ((c.wording_sections or {}).get("sections")
                 if isinstance(c.wording_sections, dict)
                 else c.wording_sections) or []
-    limits = ct.clean_agreed_limits(c.commercial_terms or {})
+    # The same context the RECORD reads, so a clause says the same thing on the
+    # screen and in the file. It used to be worked out twice.
+    ctx = _wording_context(s, c)
+    limits = ctx["limits"]
     if not sections and not limits:
         raise HTTPException(
             404,
@@ -2342,38 +2712,13 @@ def compose_contract_pdf(s, c: Contract, *,
             "and no wording written in Kavachio. If its wording was "
             "uploaded, download the document itself.")
 
-    counterparty = (s.get(Party, c.broker_party_id)
-                    if c.broker_party_id else None)
-    carrier = s.get(Tenant, c.tenant_id) if c.tenant_id else None
-    carrier_name = (getattr(carrier, "legal_name", None)
-                    or getattr(carrier, "tenant_name", None))
-    programme = s.get(Program, c.program_id) if c.program_id else None
-    try:
-        type_label = ct.spec(c.contract_type)["label"] if c.contract_type else None
-    except ct.ContractTypeError:
-        type_label = None
-
-    values = {
-        "name": c.name, "inception_dt": c.inception_dt,
-        "expiry_dt": c.expiry_dt, "class_of_business": c.class_of_business,
-        "schedule_key": c.schedule_key, "risk_code": c.risk_code,
-        "section_number": c.section_number,
-        "year_of_account": c.year_of_account,
-        "notice_period_days": c.notice_period_days,
-    }
-    programme_name = getattr(programme, "name", None)
-    tokens = cw.token_values(
-        values=values, limits=limits, carrier_name=carrier_name,
-        counterparty_name=getattr(counterparty, "legal_name", None),
-        programme_name=programme_name)
-
     return cw.compose_pdf(
-        name=c.name or "Contract", carrier_name=carrier_name,
-        counterparty_name=getattr(counterparty, "legal_name", None),
-        sections=sections, tokens=tokens,
-        schedule=cw.schedule_rows(values=values, limits=limits,
-                                  type_label=type_label,
-                                  programme_name=programme_name),
+        name=c.name or "Contract", carrier_name=ctx["carrier_name"],
+        counterparty_name=ctx["counterparty_name"],
+        sections=sections, tokens=ctx["tokens"],
+        schedule=cw.schedule_rows(values=ctx["values"], limits=limits,
+                                  type_label=ctx["type_label"],
+                                  programme_name=ctx["programme_name"]),
         signers=(c.wording_sections or {}).get("signers")
                 if isinstance(c.wording_sections, dict) else None,
         signature_layout=(c.wording_sections or {}).get("signature_layout")
@@ -2471,48 +2816,163 @@ def map_to_template(contract_id: int, body: MapToTemplateIn,
     rows for the wrong reason, which is worse than not checking at all.
     """
     _require_carrier(p)
-    import contract_rules as cr
-    from app_routes import _template_fields_from_structure
-
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
         tmpl = s.get(ExportTemplate, body.output_template_id)
         if not tmpl:
             raise HTTPException(400, "that output template does not exist")
         assert_tenant_owns(p, tmpl.tenant_id)
+        return _bind_checks(s, c, tmpl, p)
 
-        limits = c.commercial_terms or {}
-        if not limits:
+
+def _write_checks(s, c: Contract, tmpl: ExportTemplate) -> tuple[int, list, list]:
+    """The mapping itself: terms → rules, written. Returns (written, rules,
+    unmapped).
+
+    Separate from the endpoint because three callers need exactly this and
+    nothing else — the explicit bind, the create, and an edit that moves a term
+    a check was already written from. One function, so a contract cannot end up
+    with two different translations of the same terms.
+    """
+    import contract_rules as cr
+    from app_routes import _template_fields_from_structure
+
+    fields = _template_fields_from_structure(tmpl.structure)
+    rules, unmapped = cr.map_limits_to_template(c.commercial_terms or {}, fields)
+
+    from db import engine as _engine
+    with _engine.begin() as conn:
+        written = cr.write_rules(
+            conn, contract_id=c.id, program_id=c.program_id,
+            tenant_id=c.tenant_id, rules=rules, template_id=tmpl.id)
+    c.output_template_id = tmpl.id
+    s.commit()
+    s.refresh(c)
+    return written, rules, unmapped
+
+
+def _resolve_template(s, c: Contract):
+    """The output template this contract reports into, by the same ladder every
+    run uses. None when the programme has none yet.
+
+    Scoped by the CONTRACT'S tenant, not the caller's. The contract knows whose
+    it is, and a broker raising one on a carrier's programme has no tenant of
+    their own — asking the caller would make the answer depend on who pressed
+    the button, and every run resolves it from the contract.
+    """
+    from ingester import _ensure_carrier_party
+    from output_template_routes import _resolve
+
+    tid = c.tenant_id
+    carrier_party_id = _ensure_carrier_party(s, tid) if tid else None
+    s.commit()
+    return _resolve(s, tid, carrier_party_id, c.program_id,
+                    c.broker_party_id, c.id)
+
+
+def _auto_bind(s, c: Contract, p: Principal) -> Optional[dict]:
+    """Bind the checks without being asked, and never at the cost of the thing
+    that WAS asked.
+
+    Two moments need this. A contract raised with ten limits on it should not
+    have to be bound by hand before any of them is measured — that step was
+    invisible, and a contract with no checks looks exactly like a contract with
+    ten. And a term that MOVES has to take its check with it: a contract
+    corrected from 11% to 15% whose rules still hold 11% is the drift this whole
+    design exists to prevent, and it is silent.
+
+    Swallows every failure. The contract is the thing being saved here; a
+    programme with no bordereau template yet is a perfectly ordinary state, and
+    refusing to save a contract over it would be absurd. The record reports how
+    many checks there are, and the button is still on the screen.
+    """
+    if not (c.commercial_terms or {}):
+        return None
+    try:
+        tmpl, level = _resolve_template(s, c)
+        if tmpl is None or tmpl.tenant_id != c.tenant_id:
+            return None
+        written, _rules, unmapped = _write_checks(s, c, tmpl)
+    except Exception:                       # never at the cost of the save
+        log.warning("[contract] checks could not be bound for contract %s",
+                    c.id, exc_info=True)
+        s.rollback()
+        return None
+    return {"output_template": {"id": tmpl.id, "name": tmpl.name},
+            "rules_written": written, "match_level": level,
+            "unmapped": unmapped}
+
+
+def _bind_checks(s, c: Contract, tmpl: ExportTemplate, p: Principal) -> dict:
+    """`_write_checks`, plus the record and the report to show for it.
+
+    What the two ENDPOINTS share — "map to this template" and "bind the
+    checks" — so they answer with the same shape. The refusal belongs here
+    rather than in _write_checks: writing nothing is a perfectly good outcome
+    for the automatic path, and only a person who pressed a button needs to be
+    told there was nothing to press it for.
+    """
+    if not (c.commercial_terms or {}):
+        raise HTTPException(409, {
+            "message": "This contract has no agreed limits to build checks "
+                       "from. A contract read out of a PDF gets its rules "
+                       "from its clauses instead — use Re-read rules.",
+            "errors": {"agreed_limits": "none"}})
+
+    written, rules, unmapped = _write_checks(s, c, tmpl)
+    rec = _record(s, c, p=p)
+    rec["mapping"] = {
+        "output_template": {"id": tmpl.id, "name": tmpl.name},
+        "rules_written": written,
+        "rules": rules,
+        # Named, not hidden: these are things the contract says that this
+        # template cannot measure, and the setup has to show them before
+        # anybody treats the checks as complete.
+        "unmapped": unmapped,
+    }
+    return rec
+
+
+@router.post("/contracts/{contract_id}/bind-checks")
+def bind_checks(contract_id: int,
+                p: Principal = Depends(current_principal)):
+    """Bind this contract's terms to the checks that run on every bordereau.
+
+    THE SAME THING THE BROKER PAGE DOES WHEN A CONTRACT IS UPLOADED, for a
+    contract that was WRITTEN here instead. Uploading reads a document for its
+    clauses and then writes rules from them; a contract written here already
+    HAS its terms — each one carrying the comparison and the severity the
+    carrier chose — so there is nothing to read and the rules follow by
+    translation. What both flows were missing is the same step, and it is the
+    reason a carrier could raise a contract with ten limits on it and find the
+    contract screen reporting no rules at all: nothing had ever bound them.
+
+    THE TEMPLATE IS RESOLVED, NOT ASKED FOR. A rule is a comparison against a
+    bordereau column, so it needs the output template this contract reports
+    into — and which template that is, is already decided by the scope ladder
+    (contract → broker → programme). Asking the carrier to pick one here would
+    be asking them to answer a question the app can answer, and to answer it
+    differently from the way every run will.
+    """
+    _require_carrier(p)
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        tmpl, level = _resolve_template(s, c)
+        if tmpl is None:
             raise HTTPException(409, {
-                "message": "This contract has no agreed limits to build checks "
-                           "from. A contract read out of a PDF gets its rules "
-                           "from its clauses instead — use Re-read rules.",
-                "errors": {"agreed_limits": "none"}})
-
-        fields = _template_fields_from_structure(tmpl.structure)
-        rules, unmapped = cr.map_limits_to_template(limits, fields)
-
-        from db import engine as _engine
-        with _engine.begin() as conn:
-            written = cr.write_rules(
-                conn, contract_id=c.id, program_id=c.program_id,
-                tenant_id=c.tenant_id, rules=rules,
-                template_id=body.output_template_id)
-
-        c.output_template_id = body.output_template_id
-        s.commit()
-        s.refresh(c)
-
-        rec = _record(s, c, p=p)
-        rec["mapping"] = {
-            "output_template": {"id": tmpl.id, "name": tmpl.name},
-            "rules_written": written,
-            "rules": rules,
-            # Named, not hidden: these are things the contract says that this
-            # template cannot measure, and the setup has to show them before
-            # anybody treats the checks as complete.
-            "unmapped": unmapped,
-        }
+                "message": "There is no output template for this contract's "
+                           "programme yet, and a check is a comparison against "
+                           "a bordereau column — so there is nothing to write "
+                           "the checks against. Build the Bordereau Setup for "
+                           "this programme first; the terms are kept and can be "
+                           "bound the moment one exists.",
+                "errors": {"output_template": "none for this scope"}})
+        assert_tenant_owns(p, tmpl.tenant_id)
+        rec = _bind_checks(s, c, tmpl, p)
+        # How specific the template match was, so the screen can say "this is
+        # the programme's template, not this contract's" rather than implying
+        # the carrier chose it.
+        rec["mapping"]["match_level"] = level
         return rec
 
 

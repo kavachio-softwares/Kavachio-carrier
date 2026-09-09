@@ -321,6 +321,11 @@ export async function submitSignature(token: string, body: {
   signature_name: string;
   /** A drawn signature as a data URL. Omitted, the typed name is used. */
   signature_image?: string | null;
+  /** A drawn set of INITIALS, which is a different mark from the signature and
+   *  goes only in the initials boxes. Omitted, those boxes carry the initials
+   *  as text — never the signature image, which would put the two marks back
+   *  together. */
+  initials_image?: string | null;
   fields: { field_id: number; value: string }[];
   agreed: boolean;
 }): Promise<{ ok: boolean; status: string; message: string }> {

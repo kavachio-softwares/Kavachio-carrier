@@ -25,8 +25,9 @@ import { ListFilterBar } from "../components/ListFilterBar";
  *  waiting on THEM — and describing it as "approved" hides exactly the thing
  *  they need to see. */
 const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
-  draft: { label: "Not live yet", cls: "b-mut",
-           note: "no signatures on it yet — it goes live when both sides sign" },
+  draft: { label: "Not in force yet", cls: "b-mut",
+           note: "no signatures on it yet — it comes into force when both "
+               + "sides sign" },
   pending: { label: "Pending", cls: "b-warn", note: "waiting on the carrier" },
   in_review: { label: "For your review", cls: "b-warn",
                note: "read the terms — agree them or ask for changes" },
@@ -34,7 +35,8 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
                        note: "you pushed back — the carrier is revising" },
   agreed: { label: "Terms agreed", cls: "b-ok", note: "yours to sign" },
   signed: { label: "Signed", cls: "b-ok", note: "waiting on the carrier to sign" },
-  active: { label: "Live", cls: "b-ok", note: "in force — you can produce against it" },
+  active: { label: "In force", cls: "b-ok",
+            note: "cover is running — you can produce against it" },
   expired: { label: "Expired", cls: "b-mut", note: "its term has run out" },
   terminated: { label: "Terminated", cls: "b-crit", note: "ended early" },
   superseded: { label: "Superseded", cls: "b-mut", note: "replaced by a renewal" },
@@ -44,7 +46,8 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
 function approval(c: BrokerContract): { cls: string; label: string; note: string } {
   if (c.approval_status === "approved")
     return c.source === "carrier"
-      ? { cls: "b-ok", label: "Live", note: "the carrier added it — no approval needed" }
+      ? { cls: "b-ok", label: "No approval needed",
+          note: "the carrier raised this one themselves" }
       : { cls: "b-ok", label: "Approved", note: "the carrier approved it" };
   if (c.approval_status === "pending_approval")
     return { cls: "b-warn", label: "Pending carrier", note: "you cannot set it up yet" };

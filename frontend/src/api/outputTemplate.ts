@@ -425,7 +425,10 @@ export const getProgrammeBrokers = (programId: number) =>
   api.get<ProgrammeBroker[]>(`/programs/${programId}/brokers`).then(r => r.data);
 
 export type ScopedContract = {
-  id: number; filename: string | null; status: string;
+  // `name` is what the contract is called; `filename` is only set when it
+  // arrived as a document. Show them through contractLabel() — see
+  // utils/contractLabel.
+  id: number; name: string | null; filename: string | null; status: string;
   broker_party_id: number | null; broker_name: string | null;
   approval_status: string;
   inception_dt: string | null; expiry_dt: string | null;

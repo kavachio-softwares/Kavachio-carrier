@@ -813,6 +813,11 @@
 .proto .wording p:last-child{margin:0}
 .proto .term{background:var(--p-primary-soft);color:var(--p-primary-h);border-radius:4px;padding:1px 5px;
       font-weight:600;white-space:nowrap;border-bottom:1.5px solid var(--p-primary)}
+/* A chip whose term can be changed from here says so by behaving like a
+   control: the value is editable in place, and nothing about a coloured
+   rectangle tells you that on its own. */
+.proto .term[data-edit]{cursor:pointer}
+.proto .term[data-edit]:hover{background:var(--p-primary);color:#fff}
 .proto .termbar{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 0}
 .proto .termbar button{border:1px dashed var(--p-border-2);background:var(--p-surface-2);color:var(--p-muted);
       font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer;transition:.12s}
@@ -843,6 +848,34 @@
 .proto .lim .segpick{margin:0;padding:2px}
 .proto .lim .segpick button{padding:7px 8px;font-size:11.5px}
 .proto .lim-h .lq b{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--p-faint)}
+
+/* One GROUP of limits — Cover, then Authority and limits, then Financial
+   terms — drawn as a panel with its name on a band across the top.
+
+   It used to be a small grey uppercase caption with the rows loose underneath
+   it, and the last row of each group had its rule removed (.lim:last-of-type),
+   so nothing at all sat between the end of one group and the name of the next.
+   The caption was lighter than the row above it, which is the wrong way round:
+   the eye reads it as a footnote to what came before rather than a title for
+   what comes after. "What may never be written" is the last line of COVER and
+   was being read as the first line of AUTHORITY AND LIMITS — a carrier
+   answering that question about the wrong thing agrees a term they did not
+   mean, which is not a cosmetic failure.
+
+   So the boundary is drawn rather than implied: a border around the group, its
+   name on a tinted band inside that border, and the rows in a body beneath.
+   The same band the read-only terms table already uses for the same job. */
+.proto .limgrp{border:1px solid var(--p-border);border-radius:var(--p-r-sm);
+  background:var(--p-surface);margin-top:16px;overflow:hidden}
+.proto .limgrp-h{padding:10px 14px;background:var(--p-surface-2);
+  border-bottom:1px solid var(--p-border)}
+/* Darker than a caption, because it is a heading. Its own margins go: the band
+   is what spaces it now. */
+.proto .limgrp-h .sub-h{margin:0;color:var(--p-muted)}
+.proto .limgrp-h .hint{margin-top:3px}
+/* The last row drops its own rule (.lim:last-of-type), so the breathing
+   space under it has to come from here or the ink sits on the border. */
+.proto .limgrp-b{padding:0 14px 10px}
 .proto .startpick.two{grid-template-columns:repeat(2,minmax(0,1fr))}
 .proto .rj-quote{margin:16px 0 0;padding:13px 15px;border-left:3px solid var(--p-border-2);background:var(--p-surface-2);border-radius:0 var(--p-r-sm) var(--p-r-sm) 0;font-size:13px;color:var(--p-ink);line-height:1.6}
 .proto .rj-quote .rj-who{margin-top:9px;font-size:11.5px;color:var(--p-faint);font-weight:600}
@@ -872,3 +905,58 @@
   padding-left:44px;text-indent:-44px;color:var(--p-ink)}
 .proto .contract-doc .cl{display:inline-block;width:44px;text-indent:0;
   color:var(--p-faint);font-variant-numeric:tabular-nums}
+
+/* The same page, with the clauses editable in place. Everything here is about
+   keeping it looking like the contract while it is being written: the editor
+   box has no chrome of its own until it is focused, and the heading stays a
+   heading — a label with a Rename beside it — because a heading typed into by
+   accident is damage nobody notices. */
+.proto .contract-doc.editing .sec-e{margin-bottom:22px}
+.proto .contract-doc.editing h4{display:flex;align-items:baseline;gap:0;
+  margin:26px 0 8px}
+.proto .contract-doc.editing .sec-e:first-child h4{margin-top:0}
+.proto .contract-doc.editing h4 .n{width:44px;flex:0 0 auto;color:var(--p-faint);
+  font-weight:500;font-variant-numeric:tabular-nums}
+.proto .contract-doc.editing h4 .tx{flex:0 1 auto;min-width:0}
+.proto .contract-doc.editing h4 .acts{display:inline-flex;gap:10px;margin-left:12px;
+  opacity:0;transition:opacity .12s;font-family:var(--p-sans);font-size:11.5px;
+  font-weight:500;letter-spacing:0}
+.proto .contract-doc.editing .sec-e:hover h4 .acts,
+.proto .contract-doc.editing h4:focus-within .acts{opacity:1}
+.proto .contract-doc.editing h4 .acts .rm{color:var(--p-crit)}
+.proto .contract-doc.editing h4 input.hd{flex:1;min-width:0;font:inherit;
+  border:1px solid var(--p-primary);border-radius:var(--p-r-sm);
+  padding:3px 8px;background:var(--p-surface);color:var(--p-ink);outline:none}
+.proto .contract-doc.editing .wording{border:1px dashed var(--p-border-2);
+  border-radius:var(--p-r-sm);padding:10px 12px;min-height:0;
+  background:transparent;font-size:13.5px;line-height:1.8}
+.proto .contract-doc.editing .wording:focus{background:var(--p-surface);
+  border-style:solid;outline:2px solid var(--p-primary);outline-offset:1px}
+.proto .contract-doc.editing .add-sec{margin-top:6px}
+
+
+/* Placing the signature blocks by hand. The pages ARE the composed contract,
+   so what is dragged sits on the thing it will be printed on rather than on a
+   diagram of it — and the ghost block is the size the server draws, not a size
+   chosen here. */
+.proto .place-doc{display:flex;flex-direction:column;gap:14px;max-height:520px;
+  overflow-y:auto;padding:12px;background:var(--p-surface-2);
+  border:1px solid var(--p-border);border-radius:var(--p-r-sm)}
+.proto .place-pg{position:relative;width:100%;max-width:520px;margin:0 auto;
+  background:#fff;border:1px solid var(--p-border);border-radius:3px;
+  box-shadow:var(--p-sh-sm);overflow:hidden;cursor:crosshair}
+.proto .place-pg img{display:block;width:100%;height:100%;object-fit:contain;
+  user-select:none;-webkit-user-drag:none}
+.proto .place-pg .ld{display:grid;place-items:center;height:100%;
+  color:var(--p-faint);font-size:11.5px}
+.proto .place-pg .no{position:absolute;right:5px;bottom:4px;font-size:10px;
+  color:var(--p-faint);font-variant-numeric:tabular-nums}
+.proto .place-blk{position:absolute;cursor:grab;touch-action:none;
+  border:1.5px dashed var(--p-primary);background:var(--p-primary-soft);
+  border-radius:4px;padding:4px 6px;font-size:9.5px;line-height:1.3;
+  color:var(--p-primary-h);overflow:hidden}
+.proto .place-blk:active{cursor:grabbing}
+.proto .place-blk b{display:block;font-size:9.5px}
+.proto .place-blk .rule{display:block;height:1px;background:var(--p-primary);
+  opacity:.6;margin:12px 0 3px}
+.proto .place-blk .sub{font-size:8.5px}

@@ -2830,7 +2830,14 @@ def program_contracts_list(program_id: int,
         if broker_ids:
             broker_names = {p.id: p.legal_name for p in
                             s.query(Party).filter(Party.id.in_(broker_ids)).all()}
-        return [{"id": c.id, "filename": c.filename, "status": c.status,
+        # `name` is what the contract is CALLED — what every other screen
+        # shows, and the ONLY label a contract written here has, because a
+        # typed contract never had a file and so carries no filename. It was
+        # simply never returned, which left the pickers falling back to
+        # "Contract 3115" for the contract the Contracts screen calls
+        # "DEMO 2": one row, two names, and no way to tell they were the same.
+        return [{"id": c.id, "name": c.name, "filename": c.filename,
+                 "status": c.status,
                  "extracted": c.extracted,
                  "upload_token": extracted_upload_token(c.extracted),
                  "clause_count": counts.get(c.id, 0),
@@ -4158,7 +4165,11 @@ def program_contract_activate(program_id: int, contract_id: int,
         # Return the full updated list for this program
         rows = s.query(Contract).filter(Contract.program_id == program_id)\
                 .order_by(Contract.id.desc()).all()
-        return [{"id": c.id, "filename": c.filename, "status": c.status,
+        # Same list, same shape as program_contracts_list — `name` included, so
+        # a screen that refreshes after activating does not lose the label it
+        # was showing a moment earlier.
+        return [{"id": c.id, "name": c.name, "filename": c.filename,
+                 "status": c.status,
                  "extracted": c.extracted,
                  "output_template_id": c.output_template_id,
                  "schedule_key": c.schedule_key,

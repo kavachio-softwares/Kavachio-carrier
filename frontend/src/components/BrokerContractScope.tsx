@@ -35,6 +35,7 @@ import {
   getProgrammeBrokers, getScopedContracts,
   type ProgrammeBroker, type ScopedContract,
 } from "../api/outputTemplate";
+import { contractLabel } from "../utils/contractLabel";
 
 export function useBrokerContractScope(programId: number | "") {
   const [brokers, setBrokers] = useState<ProgrammeBroker[]>([]);
@@ -114,7 +115,7 @@ export function useBrokerContractScope(programId: number | "") {
     hasBrokers: programId === "" ? false : (loading ? null : brokers.length > 0),
     brokerName: brokers.find(b => b.id === brokerPartyId)?.legal_name ?? null,
     contractName: contracts.length === 1
-      ? (contracts[0].filename || `Contract ${contracts[0].id}`) : null,
+      ? contractLabel(contracts[0]) : null,
     /** Every contract the scope covers — what a setup binds, and what the
      *  screen shows in place of the dropdown that used to be here. */
     boundContracts: contracts,
@@ -300,7 +301,7 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
                   className="shrink-0 accent-navy"
                   onChange={() => onSelect(c.id)} />
                 <span className={`min-w-0 flex-1 truncate ${on ? "font-medium" : "text-ink-muted"}`}>
-                  {c.filename || `Contract ${c.id}`}
+                  {contractLabel(c)}
                 </span>
                 <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10.5px] text-ink-muted">
                   {c.broker_name ? c.broker_name : "carrier held"}
