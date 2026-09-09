@@ -348,6 +348,11 @@
 .proto .field select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238B93A2' stroke-width='2'><path d='M6 9l6 6 6-6'/></svg>");background-repeat:no-repeat;background-position:right 11px center;padding-right:34px}
 .proto .field input:focus,.proto .field select:focus,.proto .field textarea:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
 .proto .field .hint{font-size:11.5px;color:var(--p-faint);margin-top:5px}
+/* A field that is shut because something else is answering it — the expiry
+   while a duration is in force. It has to read as "not yours to type", not as
+   broken: the value stays legible (it is the answer the person is checking),
+   only the surface says it is not being typed into. */
+.proto .field input:disabled,.proto .field select:disabled,.proto .field textarea:disabled{background:var(--p-surface-2);color:var(--p-muted);cursor:not-allowed}
 .proto .row2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .proto .ro{background:var(--p-surface-3)!important;color:var(--p-muted)!important;cursor:not-allowed}
 

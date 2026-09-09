@@ -118,6 +118,50 @@ export function durationOf(inception: string, expiry: string,
   return null;
 }
 
+/**
+ * How many WHOLE MONTHS a term is, or null where it is not a whole number of
+ * them.
+ *
+ * People do not agree cover in days. "9 Sept 2026 to 8 Sept 2027" is a year,
+ * and reading it back as "365 days" makes somebody count on their fingers to
+ * check the thing they just typed — worse in a leap year, where the same year
+ * is 366. So the answer is worked out the only way that cannot disagree with
+ * the rest of this file: by asking each length what expiry it would produce and
+ * seeing which one lands on this date.
+ *
+ * The range covers a five-year term, which is the longest anything on offer
+ * runs for; beyond that a term is quite reasonably described in days.
+ */
+export function monthsInTerm(inception: string, expiry: string,
+                             inclusive = true): number | null {
+  if (!parse(inception) || !parse(expiry)) return null;
+  for (let m = 1; m <= 60; m++) {
+    if (expiryFor(inception, m, inclusive) === expiry) return m;
+  }
+  return null;
+}
+
+/** A length said the way somebody would say it — "1 year", "18 months", or
+ *  "426 days" for a term that is not a whole number of months.
+ *
+ *  The lengths the form OFFERS are labelled by the server (see
+ *  contract_types._duration_label) and those labels are used as served. This
+ *  names the ones that are not on the list, which the server never sees. */
+export function describeLength(inception: string, expiry: string,
+                               inclusive = true): string {
+  const months = monthsInTerm(inception, expiry, inclusive);
+  if (months !== null) {
+    if (months % 12 === 0) {
+      const years = months / 12;
+      return years === 1 ? "1 year" : `${years} years`;
+    }
+    return months === 1 ? "1 month" : `${months} months`;
+  }
+  const days = daysInTerm(inception, expiry);
+  if (days === null || days <= 0) return "";
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
 /** How many days the term runs for, counting both ends, or null. Negative
  *  where the dates run backwards — which the server refuses to save, and which
  *  the form should therefore be able to say out loud. */
@@ -127,9 +171,12 @@ export function daysInTerm(inception: string, expiry: string): number | null {
   return Math.round((utc(...b) - utc(...a)) / DAY) + 1;
 }
 
-/** "1 Jan 2027 → 31 Dec 2027 · 365 days" — the length of a term in the two
- *  ways people check it, for the hint under the picker. */
-export function describeTerm(inception: string, expiry: string): string {
+/** "1 Jan 2027 → 31 Dec 2027 · 1 year (365 days)" — the length of a term in the
+ *  three ways people check it, for the hint under the picker. Both units, and
+ *  in that order: the unit it was agreed in first, and the day count after it
+ *  for anybody reconciling against a schedule that counts days. */
+export function describeTerm(inception: string, expiry: string,
+                             inclusive = true): string {
   const days = daysInTerm(inception, expiry);
   if (days === null) return "";
   const show = (s: string) => {
@@ -140,6 +187,9 @@ export function describeTerm(inception: string, expiry: string): string {
   if (days <= 0) {
     return `${show(inception)} → ${show(expiry)} · expiry falls before inception`;
   }
-  return `${show(inception)} → ${show(expiry)} · ${days} day`
-       + `${days === 1 ? "" : "s"}, both days inclusive`;
+  const months = monthsInTerm(inception, expiry, inclusive);
+  const length = months === null
+    ? `${days} day${days === 1 ? "" : "s"}`
+    : `${describeLength(inception, expiry, inclusive)} (${days} days)`;
+  return `${show(inception)} → ${show(expiry)} · ${length}, both days inclusive`;
 }

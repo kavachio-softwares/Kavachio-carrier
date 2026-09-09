@@ -349,6 +349,10 @@ export default function ContractNew() {
     const bad = errors[f.name]
       ?? (touched && f.required && !(values[f.name] ?? "").trim()
           ? `${f.label} is required.` : "");
+    // The expiry is the duration's to write unless the person has said Custom.
+    // Two editable ways of stating one fact is how a contract ends up reading
+    // "12 months" beside a date twelve months does not produce.
+    const shut = f.name === EXPIRY_FIELD && term.ready && !term.custom;
     return (
       <div className="field" key={f.name} style={{ marginBottom: 0 }}>
         <label>
@@ -363,6 +367,7 @@ export default function ContractNew() {
           step={f.kind === "decimal" ? "0.01" : undefined}
           placeholder={PLACEHOLDER[f.name]}
           value={values[f.name] ?? ""}
+          disabled={shut}
           // The dates go through the term so the three inputs stay one fact:
           // moving inception moves an expiry that was stated as a length, and
           // typing an expiry is how you say "not one of those lengths".
@@ -373,7 +378,9 @@ export default function ContractNew() {
           style={bad ? { borderColor: "var(--p-crit)" } : undefined}
         />
         <div className="hint" style={bad ? { color: "var(--p-crit-ink)" } : undefined}>
-          {bad || f.hint}
+          {bad
+           || (shut ? "Set by the duration — choose Custom to type a date."
+                    : f.hint)}
         </div>
       </div>
     );

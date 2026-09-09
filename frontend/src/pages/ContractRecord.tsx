@@ -678,6 +678,9 @@ export default function ContractRecord() {
 
   function editInput(f: ContractField) {
     const bad = fieldErrs[f.name];
+    // Same rule as the new-contract form: while a length is in force the
+    // duration owns the expiry, and Custom is how you take it back.
+    const shut = f.name === EXPIRY_FIELD && editTerm.ready && !editTerm.custom;
     return (
       <div className="field" key={f.name} style={{ marginBottom: 0 }}>
         <label>
@@ -688,15 +691,20 @@ export default function ContractRecord() {
                : f.kind === "int" || f.kind === "decimal" ? "number" : "text"}
           step={f.kind === "decimal" ? "0.01" : undefined}
           value={draft[f.name] ?? ""}
+          disabled={shut}
           onChange={e => (
             f.name === INCEPTION_FIELD ? editTerm.onInception(e.target.value)
             : f.name === EXPIRY_FIELD ? editTerm.onExpiry(e.target.value)
             : setDraft(d => ({ ...d, [f.name]: e.target.value })))}
           style={bad ? { borderColor: "var(--p-crit)" } : undefined}
         />
-        {bad && (
+        {bad ? (
           <div className="hint" style={{ color: "var(--p-crit-ink)" }}>{bad}</div>
-        )}
+        ) : shut ? (
+          <div className="hint">
+            Set by the duration — choose Custom to type a date.
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -1467,7 +1475,13 @@ export default function ContractRecord() {
                   <div className="field" style={{ marginBottom: 0 }}>
                     <label>Expiry</label>
                     <input type="date" value={renewTo}
+                           disabled={renewTerm.ready && !renewTerm.custom}
                            onChange={e => renewTerm.onExpiry(e.target.value)} />
+                    {renewTerm.ready && !renewTerm.custom && (
+                      <div className="hint">
+                        Set by the duration — choose Custom to type a date.
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="rowacts">
