@@ -286,25 +286,32 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
               How should the column list be decided?
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Named by what comes OUT, in the words the user already has:
+                  the format they were told to report in, or the contract in
+                  their hand. "Reporting standard" and "Contract-based /
+                  custom" described the mechanism and read as the same
+                  thing twice. */}
               <ChoiceCard
                 icon={<FileSpreadsheet size={17} />}
-                title="Reporting standard"
+                title={standards.length
+                  ? `${standards.map(s => s.label).join(" / ")} format`
+                  : "Reporting standard format"}
                 body={standards.length
-                  ? `The whole published column list — ${standards.map(s => s.label).join(", ")} — for the territory you report on, pruned to the part your binder actually uses. The layout is the standard's.`
+                  ? ["Based on the Lloyd's report format",
+                     "Your input bordereau template and contract are checked to keep only the columns you need"]
                   : "No reporting standard is bundled with this deployment."}
                 disabled={!standards.length}
                 onClick={() => setMode("standard")} />
               <ChoiceCard
                 icon={<FileText size={17} />}
-                title="Contract-based / custom"
+                title="Contract only"
                 body={contractOptions.length
-                  ? `Only what ${contractOptions.length === 1 ? "the contract" : "a contract"} itself requires, plus the columns every bordereau carries and contracts never name — the coverholder, the insured, the period, the currency. The layout is the contract's.`
-                  : "Upload a contract on the setup screen first — this option builds the field list from the contract's terms."}
+                  ? ["Based on your contract alone",
+                     "Only the columns it asks for are used, plus the essential columns common to every bordereau"]
+                  : "Upload a contract on the setup screen first."}
                 disabled={!contractOptions.length}
                 onClick={() => setMode("contract")} />
             </div>
-            <SourcesNote inputFile={p.inputFile ?? null}
-              contracts={contractOptions.length} />
           </div>
         )}
 
@@ -399,9 +406,6 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
                 onChange={e => setName(e.target.value)} />
             </Field>
 
-            <SourcesNote inputFile={p.inputFile ?? null}
-              contracts={contractOptions.length} />
-
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="secondary" disabled={busy}
                 onClick={() => setMode("choose")}>Back</Button>
@@ -448,7 +452,6 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
                     <th className="text-left px-3 py-2">Use</th>
                     <th className="text-left px-3 py-2">Column</th>
                     <th className="text-left px-3 py-2">Asked for by</th>
-                    <th className="text-left px-3 py-2">In your bordereau</th>
                     <th className="text-left px-3 py-2">Why</th>
                   </tr>
                 </thead>
@@ -516,16 +519,20 @@ function ModeLede({ mode, standard, contract, useLibrary }: {
       ${std ? "border-border bg-surface-2" : "border-border bg-surface-2"}`}>
       <div className="flex items-center gap-1.5 font-medium text-ink">
         {std ? <FileSpreadsheet size={14} /> : <FileText size={14} />}
-        {std ? "Building from a reporting standard"
+        {std ? "How the columns are chosen"
              : "Building from the contract"}
       </div>
       <div className="text-ink-muted mt-1">
         {std ? (
-          <>The columns are {standard}&apos;s own published list for the
-            territory you pick below, in its published order. The contract and
-            your bordereau are read too, but only to decide which of those
-            columns this binder actually reports — and to add anything the
-            contract asks for that the list has no column for.</>
+          <>
+            <ul className="list-disc pl-4 space-y-0.5">
+              <li><b>{standard}</b> gives the full list of allowed columns.</li>
+              <li><b>Your bordereau</b> shows which ones you can actually fill.</li>
+              <li><b>Your contract</b> says which ones you must report — and adds
+                any the standard doesn&apos;t have.</li>
+            </ul>
+            <div className="mt-1">You&apos;ll review the result before anything is saved.</div>
+          </>
         ) : (
           <>The columns come from {contract ? <b>{contract}</b> : "the contract"}
             &apos;s own terms{useLibrary
@@ -554,34 +561,10 @@ function isAppended(f: ProposedField, mode: Mode): boolean {
   return mode === "standard" && f.origin !== "standard";
 }
 
-/** What this proposal was read from — said before it is read, and after. */
-function SourcesNote({ inputFile, contracts }: {
-  inputFile: File | null; contracts: number;
-}) {
-  return (
-    <div className="rounded-md border border-sky-200 bg-sky-50 p-2.5
-      text-[11.5px] text-sky-800 leading-relaxed">
-      <div className="font-medium">Read from both sides</div>
-      <div className="mt-0.5">
-        {inputFile
-          ? <>Your bordereau <b>{inputFile.name}</b> decides which columns can
-              actually be filled, </>
-          : <>No input template is staged, so nothing can be checked against your
-              data and only the published requirements will decide, </>}
-        {contracts
-          ? <>and the contract decides what has to be reported.</>
-          : <>and no contract is available to say what has to be reported.</>}
-      </div>
-    </div>
-  );
-}
-
 function Summary({ a, shown, kept, unfilled, extra }: {
   a: SourceAnalysis; shown: ProposedField[]; kept: ProposedField[];
   unfilled: number; extra: number;
 }) {
-  const matched = kept.filter(f => f.in_input).length;
-  const likely = kept.filter(f => f.likely_in_input).length;
   const fromContract = kept.filter(f => f.origin !== "standard").length;
   return (
     <div className="rounded-lg border border-border bg-surface-2 px-3 py-2.5
@@ -600,8 +583,7 @@ function Summary({ a, shown, kept, unfilled, extra }: {
       </div>
       <div className="text-ink-muted mt-1">
         {a.counts.checked_input
-          ? <>{matched} of them matched to a column of your bordereau
-              {likely > 0 && <>, {likely} probable</>}</>
+          ? <>checked against your bordereau</>
           : <>your bordereau was not checked</>}
         {fromContract > 0 && <> · {fromContract} asked for by the contract</>}
         {a.standard && a.standard.scope === "essential" && (
@@ -670,23 +652,10 @@ function ProposalRow({ f, kept, appended, onToggle }: {
           : f.origin === "contract_rule" ? "A rule on the contract"
           : "The contract"}
       </td>
-      <td className="px-3 py-2 text-left align-top">
-        {f.in_input ? (
-          <span className="text-emerald-700">
-            {f.input_column}
-            <span className="text-[10.5px] text-ink-soft ml-1">
-              {Math.round(f.confidence * 100)}%
-            </span>
-          </span>
-        ) : f.best_candidate ? (
-          <span className="text-amber-700">
-            {f.best_candidate.source}
-            <span className="text-[10.5px] text-ink-soft ml-1">
-              {Math.round(f.best_candidate.confidence * 100)}% — confirm
-            </span>
-          </span>
-        ) : <span className="text-ink-soft">—</span>}
-      </td>
+      {/* No "matched input column" cell. The match behind `in_input` is the
+          analysis's include check, not a mapping — the pipeline maps the data
+          later, at its own bar — and a column name with a percentage here read
+          as a mapping decision being made in the wrong place. */}
       <td className="px-3 py-2 text-ink-muted text-left align-top">
         {f.recommend_reason}
         {f.contract_reference && (
@@ -700,7 +669,9 @@ function ProposalRow({ f, kept, appended, onToggle }: {
 }
 
 function ChoiceCard({ icon, title, body, disabled, onClick }: {
-  icon: React.ReactNode; title: string; body: string;
+  icon: React.ReactNode; title: string;
+  /** A sentence, or a few short points shown as a list. */
+  body: string | string[];
   disabled?: boolean; onClick: () => void;
 }) {
   return (
@@ -712,7 +683,14 @@ function ChoiceCard({ icon, title, body, disabled, onClick }: {
       <div className="flex items-center gap-2 font-medium text-sm">
         {icon} {title}
       </div>
-      <p className="text-[12px] text-ink-muted mt-1.5 leading-relaxed">{body}</p>
+      {Array.isArray(body) ? (
+        <ul className="text-[12px] text-ink-muted mt-1.5 leading-relaxed
+          list-disc pl-4 space-y-0.5">
+          {body.map(line => <li key={line}>{line}</li>)}
+        </ul>
+      ) : (
+        <p className="text-[12px] text-ink-muted mt-1.5 leading-relaxed">{body}</p>
+      )}
     </button>
   );
 }

@@ -21,6 +21,14 @@ type Contract = {
   created_at?: string | null; clause_count?: number;
   program_id?: number; program_name?: string;
 };
+// Output templates: the field builder (internal keys, source types, defaults)
+// is the platform admin's half of a template (see OutputTemplate.tsx
+// `platformAdmin`), and this card is the admin's only door to it — the
+// templates themselves are set up on the carrier's own Bordereau Setup screen.
+type OutTemplate = {
+  id: number; name: string; carrier?: string | null; approved: boolean;
+  version?: number; is_active?: boolean;
+};
 type Run = {
   landing_id: number; source_filename?: string | null; program_name?: string | null;
   created_at?: string | null; exception_count?: number; status?: string | null;
@@ -79,6 +87,7 @@ export default function TenantDetail() {
   const [t, setT] = useState<TenantRow | null>(null);
   const [programs, setPrograms] = useState<Program[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
+  const [templates, setTemplates] = useState<OutTemplate[]>([]);
   const [tab, setTab] = useState<"details" | "users" | "pc" | "runs">("details");
   // Org Details tab — an editable copy of the tenant's own fields, seeded from
   // `t` and PUT back on save.
@@ -114,6 +123,8 @@ export default function TenantDetail() {
       );
       setContracts(lists.flat());
     }).catch(() => { setPrograms([]); setContracts([]); });
+    api.get<OutTemplate[]>("/export/template", { params: { mga } })
+      .then(r => setTemplates(r.data)).catch(() => setTemplates([]));
   }, [mga, isAdmin]);
 
   // Seed / re-seed the Details form whenever the tenant record changes (initial
@@ -359,6 +370,7 @@ export default function TenantDetail() {
             ? contracts.filter(c => c.program_id === selectedProgram.id)
             : [];
           return (
+          <>
           <div className="grid g-2">
             <div className="card">
               <div className="card-h"><h3>Programs</h3><span className="sub">{programs.length}</span></div>
@@ -420,6 +432,41 @@ export default function TenantDetail() {
               </div>
             </div>
           </div>
+
+          {/* Output templates: the carrier builds and approves them; the
+              platform admin edits the fields behind them. */}
+          <div className="card" style={{ marginTop: 18 }}>
+            <div className="card-h">
+              <h3>Output Templates</h3>
+              <span className="sub">
+                {templates.length}
+                {templates.some(x => !x.approved) &&
+                  ` · ${templates.filter(x => !x.approved).length} draft`}
+              </span>
+            </div>
+            <div className="tbl-wrap">
+              <table>
+                <tbody>
+                  {templates.map(x => (
+                    <tr key={x.id} className="click" onClick={() => nav(`/outputs/templates/${x.id}`)}>
+                      <td><b>{x.name}</b>
+                        <div className="sub">
+                          {x.carrier ?? "—"} · v{x.version ?? 1}{x.is_active ? " · active" : ""}
+                        </div></td>
+                      <td className="r">
+                        <span className={`badge ${x.approved ? "b-ok" : "b-warn"}`}>
+                          <span className="d" />{x.approved ? "Approved" : "Draft"}
+                        </span>
+                      </td>
+                      <td className="r"><span className="linkish">Edit Fields</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {templates.length === 0 && <div className="empty">No output templates yet.</div>}
+            </div>
+          </div>
+          </>
           );
         })()}
 

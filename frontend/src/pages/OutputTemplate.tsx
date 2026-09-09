@@ -5,7 +5,7 @@ import {
   Search, RefreshCw, FileText, Quote, ShieldAlert, Layers,
 } from "lucide-react";
 import { api } from "../api/client";
-import { currentMga } from "../auth";
+import { currentMga, isKavachioAdmin } from "../auth";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import { Select, TextInput } from "../components/ui/Field";
@@ -101,6 +101,15 @@ type ContractMapping = {
 
 export default function OutputTemplate() {
   const { id } = useParams();
+  // WHO IS LOOKING decides how much of the blueprint this page shows.
+  //
+  // The carrier reviews the column mapping (the sheet blocks below) and sees
+  // the file as it will be delivered (the sheet preview). The field builder —
+  // internal keys, source types, per-field defaults and transforms — is the
+  // platform admin's: it is the mechanism behind the template, not the
+  // template, and on the carrier's screen it read as a second copy of the same
+  // columns with more knobs than anyone there could use.
+  const platformAdmin = isKavachioAdmin();
   const [t, setT] = useState<Template | null>(null);
   const [model, setModel] = useState<Record<string, any>>({});
   const [extras, setExtras] = useState<Record<string, ExtraDef>>({});
@@ -262,7 +271,9 @@ export default function OutputTemplate() {
                 ))}
               </Select>
             </label>
-            <Link to="/direct/setups"><Button variant="ghost">Cancel</Button></Link>
+            <Link to={platformAdmin ? `/tenants/${t.mga}` : "/direct/setups"}>
+              <Button variant="ghost">Cancel</Button>
+            </Link>
             {!hasAnyCandidates && (
               <Button variant="secondary" onClick={refreshCandidates} disabled={busy || refreshing}>
                 <RefreshCw size={14} /> Re-Run AI Mapping
@@ -323,7 +334,7 @@ export default function OutputTemplate() {
             </div>
             <span className="text-xs text-ink-muted">
               Active columns only, in delivery order, under the names the file
-              will carry — edit them below.
+              will carry{platformAdmin ? " — edit them below." : "."}
             </span>
           </div>
           <TemplateSheetPreview sheets={t.structure?.sheets ?? []}
@@ -334,14 +345,17 @@ export default function OutputTemplate() {
         {/* The blueprint itself: which columns the delivered file carries, what
             feeds each one, and in what order. The mapping review below is the
             other half of the same template — this decides WHAT the fields are,
-            that decides where their values come from. */}
-        <OutputTemplateFields templateId={Number(id)} refreshKey={fieldsKey}
-          blockedReason={dirty
-            ? "There are unsaved column-mapping changes above. Save Draft at the "
-              + "top of the page first — this list holds its own copy of the "
-              + "mapping, so saving it now would write the old values back."
-            : null}
-          onSaved={reloadTemplate} />
+            that decides where their values come from. Platform admin only —
+            see `platformAdmin`. */}
+        {platformAdmin && (
+          <OutputTemplateFields templateId={Number(id)} refreshKey={fieldsKey}
+            blockedReason={dirty
+              ? "There are unsaved column-mapping changes above. Save Draft at the "
+                + "top of the page first — this list holds its own copy of the "
+                + "mapping, so saving it now would write the old values back."
+              : null}
+            onSaved={reloadTemplate} />
+        )}
 
         {contractMapping?.contract && (
           <Card>
@@ -440,7 +454,10 @@ function SheetBlock({ sheet: sh, allFields, fieldRules,
   onPatchSheet: (p: Partial<TplSheet>) => void;
   onPatchColumn: (colIdx: number, p: Partial<TplColumn>) => void;
 }) {
-  const [open, setOpen] = useState(true);
+  // Collapsed by default: the header already says how many columns are mapped
+  // and how many need review, which is the answer most visits are after. The
+  // rows are one click away when they are not.
+  const [open, setOpen] = useState(false);
   const mappedCount = sh.columns.filter(c => c.canonical_field).length;
   const unmappedCount = sh.columns.length - mappedCount;
 

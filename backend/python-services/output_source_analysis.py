@@ -287,13 +287,16 @@ def recommend(fields: list[dict], *, checked_input: bool) -> list[dict]:
             reasons.append("the contract requires it too"
                            if f.get("contract_required")
                            else "the contract asks for it too")
+        # Which column, and how sure, is deliberately NOT said. This match is
+        # the include check (``include_confidence``), not the mapping — the
+        # pipeline maps the data later at its own, much higher bar — and a
+        # named column with a percentage in the creation dialog read as a
+        # mapping decision being taken in the wrong place. The match itself
+        # is still recorded on the field for the template screen.
         if f.get("in_input"):
-            reasons.append(f'your bordereau carries it as "{f["input_column"]}"')
+            reasons.append("your bordereau carries it")
         elif f.get("likely_in_input") and f.get("best_candidate"):
-            b = f["best_candidate"]
-            reasons.append(
-                f'your bordereau probably carries it as "{b["source"]}" '
-                f'({float(b["confidence"]):.0%}) — confirm the mapping')
+            reasons.append("your bordereau probably carries it")
         f["recommended"] = bool(reasons)
         if reasons:
             f["recommend_reason"] = "; ".join(reasons)

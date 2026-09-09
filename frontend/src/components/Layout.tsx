@@ -170,7 +170,9 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // opened from the setup screen makes the sidebar lie about where they are.
   // A template is the only thing left under /outputs: the old Output Delivery
   // screen and its party → program → template → output stepper are gone.
-  if (under("/outputs")) return "/direct/setups";
+  // The platform admin reaches a template from the carrier's page and has no
+  // Setups entry at all, so for them it rolls up under Carriers.
+  if (under("/outputs")) return isKavachioAdmin() ? "/tenants" : "/direct/setups";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";
