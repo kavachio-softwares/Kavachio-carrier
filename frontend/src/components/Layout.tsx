@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
+import { BrokerCarrierSwitch } from "./BrokerCarrierSwitch";
 import { api, getDeduped } from "../api/client";
 import { GlobalLoadingOverlay } from "./Busy";
 import PlatformNotificationCard from "./PlatformNotificationCard";
@@ -119,7 +120,6 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       { to: "/tenant", label: "Organization", icon: Building2 },
       // The old party directory. It is a directory to look things up in, not
       // part of building the book, so it sits with the other admin screens.
-      { to: "/parties", label: "All Carriers", icon: Users2 },
       { to: "/users", label: "Users & Roles", icon: UserCog },
       { to: "/rule-library", label: "Rule Library", icon: ListChecks },
     ],
@@ -323,6 +323,14 @@ export default function Layout() {
               <div className="wscard wscard-static">{workspaceIdentity}</div>
             )
           )}
+
+          {/* Which carrier this broker is working on. In the sidebar, above the
+              nav, because it scopes every screen below it — a scope control
+              living inside one page would look like that page's filter, and
+              the broker would not know the dashboard and the bordereau run
+              were following it too. Renders nothing for a broker on one
+              carrier: there is no choice to make. */}
+          {isBrokerSeat() && <BrokerCarrierSwitch />}
         </div>
 
         <nav className="nav">

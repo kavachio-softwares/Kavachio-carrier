@@ -75,7 +75,10 @@ export default function Parties() {
           </div>
           {isAdmin && (
             <div className="actions">
-              <button className="btn pri" onClick={() => nav("/parties/new")}>＋ Add Carrier</button>
+              {/* Adding is done in Users & Roles and nowhere else. This
+                  button added a carrier-shaped row to a COMPANY directory — a
+                  different thing wearing the same word — and gave a second
+                  front door to a list only one screen is supposed to own. */}
             </div>
           )}
         </div>

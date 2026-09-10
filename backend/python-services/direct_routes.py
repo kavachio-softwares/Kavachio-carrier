@@ -2701,7 +2701,11 @@ def pipeline_list(
                      )))
 
         total = query.order_by(None).count()
-        ordered = query.order_by(Pipeline.id.desc())
+        # Newest first. Id descending already achieved this, but by accident of
+        # insertion order rather than by saying so — created_at is the fact the
+        # list is meant to be in, with id as the tiebreak.
+        ordered = query.order_by(Pipeline.created_at.desc().nullslast(),
+                                 Pipeline.id.desc())
         if page is not None:
             size = page_size or 10
             ordered = ordered.offset((page - 1) * size).limit(size)

@@ -29,17 +29,37 @@ import { Metric } from "../components/ui/Metric";
 import { OrgAvatar } from "../components/ui/OrgAvatar";
 import { Sk } from "../components/ui/Skeleton";
 import { OnboardingBadge } from "../components/OnboardingBadge";
-import { getBrokers, type BrokerSummary } from "../api/hierarchy";
+import {
+  getBrokers, resendBrokerInvitation, revokeBrokerInvitation,
+  type BrokerSummary,
+} from "../api/hierarchy";
+import { fmtDate } from "../utils/date";
 
 export default function Brokers() {
   const [rows, setRows] = useState<BrokerSummary[] | null>(null);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
 
-  useEffect(() => {
-    getBrokers().then(setRows).catch(e =>
-      setErr(e?.response?.data?.detail || "Could not load brokers"));
-  }, []);
+  const [note, setNote] = useState("");
+  const load = () => getBrokers().then(setRows).catch(e =>
+    setErr(e?.response?.data?.detail || "Could not load brokers"));
+  useEffect(() => { load(); }, []);
+
+  // An unanswered invitation was a dead end: nothing showed it, and inviting
+  // again was refused. These are the two things a carrier can actually do
+  // about one.
+  async function resend(id: number) {
+    setNote("");
+    try { setNote((await resendBrokerInvitation(id)).message ?? "Sent again."); }
+    catch { setNote("Could not send that again."); }
+  }
+  async function revoke(id: number) {
+    setNote("");
+    try {
+      setNote((await revokeBrokerInvitation(id)).message ?? "Withdrawn.");
+      load();
+    } catch { setNote("Could not withdraw that invitation."); }
+  }
 
   const shown = (rows ?? []).filter(b =>
     !q.trim() || b.legal_name.toLowerCase().includes(q.trim().toLowerCase()));
@@ -50,6 +70,10 @@ export default function Brokers() {
         title="Brokers"
         subtitle="The broker organisations that produce into your programmes."
         action={
+          /* One action, whether or not the broker already has a login. Which
+             of the two it is depends on facts about somebody else's book, and
+             a second button would let a carrier discover them by seeing which
+             one worked. */
           <Link
             to="/users/new"
             className="inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md
@@ -60,6 +84,11 @@ export default function Brokers() {
         }
       />
       <PageBody>
+        {note && (
+          <div className="rounded-md border border-ok/40 bg-ok/10 px-3 py-2 text-sm">
+            {note}
+          </div>
+        )}
         {err && (
           <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">
             {err}
@@ -128,8 +157,41 @@ export default function Brokers() {
                           >
                             {b.legal_name}
                           </Link>
-                          <OnboardingBadge status={b.onboarding_status} />
+                          {/* The relationship with US, which is not the same
+                              as how far the broker has got with their own
+                              account: one who works with another carrier is
+                              fully set up and still only INVITED here until
+                              they answer. */}
+                          {b.relationship === "invited" ? (
+                            <span className="pill pill-amber">Invited</span>
+                          ) : (
+                            <OnboardingBadge status={b.onboarding_status} />
+                          )}
                         </div>
+
+                        {b.relationship === "invited" && b.invitation && (
+                          <div className="mt-1.5 text-[12.5px] text-ink-muted">
+                            Invited {b.invitation.email}
+                            {b.invitation.invited_at
+                              && <> on {fmtDate(b.invitation.invited_at)}</>}
+                            {" — waiting for them to accept. "}
+                            <span
+                              className="cursor-pointer font-medium text-navy hover:underline"
+                              role="button" tabIndex={0}
+                              onClick={() => resend(b.invitation!.id)}
+                            >
+                              Send again
+                            </span>
+                            {" · "}
+                            <span
+                              className="cursor-pointer font-medium text-ink-muted hover:underline"
+                              role="button" tabIndex={0}
+                              onClick={() => revoke(b.invitation!.id)}
+                            >
+                              Withdraw
+                            </span>
+                          </div>
+                        )}
 
                         <div className="mt-2 flex flex-wrap items-center gap-1.5">
                           {/* No programme is the state that blocks everything

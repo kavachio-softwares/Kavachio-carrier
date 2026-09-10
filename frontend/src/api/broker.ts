@@ -68,8 +68,14 @@ export type BrokerDashboard = {
   }[];
 };
 
-export const getBrokerDashboard = () =>
-  api.get<BrokerDashboard>("/broker/dashboard").then(r => r.data);
+/** `carrierId` NARROWS to one carrier; undefined means all of them. It can only
+ *  narrow — the server scopes every broker read to the programmes this broker
+ *  is actually on, and an id they are not linked to yields nothing rather than
+ *  more. */
+export const getBrokerDashboard = (carrierId?: number | null) =>
+  api.get<BrokerDashboard>("/broker/dashboard", {
+    params: carrierId ? { carrier_id: carrierId } : {},
+  }).then(r => r.data);
 
 export const getBrokerCarriers = () =>
   api.get<BrokerCarrier[]>("/broker/carriers").then(r => r.data);
@@ -135,3 +141,29 @@ export type OperatorHome = {
 
 export const getOperatorHome = () =>
   api.get<OperatorHome>("/broker/operator-home").then(r => r.data);
+
+
+/** A carrier asking this broker to work with them.
+ *
+ *  `programme` is usually null: an invitation is to the CARRIER, and which
+ *  programmes follow is their decision afterwards. */
+export type BrokerInvitation = {
+  id: number;
+  carrier: string;
+  programme: string | null;
+  program_id: number | null;
+  invited_at: string | null;
+};
+
+export const getBrokerInvitations = () =>
+  api.get<BrokerInvitation[]>("/broker/invitations").then(r => r.data);
+
+/** Agree to work with them. THIS is what creates the relationship — a carrier
+ *  cannot add a broker to their book without it. */
+export const acceptBrokerInvitation = (id: number) =>
+  api.post<{ message?: string; carrier_id?: number; carrier?: string }>(
+    `/broker/invitations/${id}/accept`, {}).then(r => r.data);
+
+export const declineBrokerInvitation = (id: number) =>
+  api.post<{ message?: string }>(`/broker/invitations/${id}/decline`, {})
+     .then(r => r.data);

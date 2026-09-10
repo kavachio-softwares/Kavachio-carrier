@@ -54,6 +54,9 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // An operator is a seat inside the broker, not a manager of it: their own
   // landing screen, and no access to the admin views above.
   { pattern: "/operator", requires: "operator", only: ["operator"] },
+  // No rule for /invitations: it is routed OUTSIDE the app shell (see App.tsx)
+  // so RequireAccess never sees it, and a rule here would be config that looks
+  // like a guard and enforces nothing. The seat check lives in the component.
   { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
   // Both broker seats, unlike the rest of this block. Running the bordereau IS
   // the operator's job — the seat exists for it — and an admin does it too, so
@@ -71,7 +74,6 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // them explicitly is what actually closes that.
   { pattern: "/direct", requires: "carrier_admin" },
   { pattern: "/parties", requires: "carrier_admin" },
-  { pattern: "/parties/new", requires: "carrier_admin" },
   { pattern: "/parties/:id", requires: "carrier_admin" },
   { pattern: "/programs", requires: "carrier_admin" },
   { pattern: "/programs/new", requires: "carrier_admin" },

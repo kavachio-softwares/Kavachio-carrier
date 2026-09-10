@@ -6,13 +6,14 @@
  * relationship the signed-in carrier actually has.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
-  ArrowLeft, Loader2, FileText, Layers, Search, UserCog, Plus,
+  ArrowLeft, Loader2, FileText, Layers, Search, UserCog, Plus, Upload,
 } from "lucide-react";
 import {
-  getBroker, listBrokerContracts,
+  addProgrammeBroker, getBroker, getHierarchy, listBrokerContracts,
   type BrokerContractRow, type BrokerDetail as Detail,
+  type HierarchyProgramme,
 } from "../api/hierarchy";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useServerList } from "../hooks/useServerList";
@@ -29,6 +30,22 @@ const PAGE_SIZE = 10;
 
 export default function BrokerDetail() {
   const { brokerId } = useParams();
+  const nav = useNavigate();
+
+  // Putting them on a programme lives HERE, because onboarding no longer asks
+  // for one: a broker is invited to work with the carrier, and which
+  // programmes they produce on is a decision made afterwards and repeatedly.
+  // Without this the answer to "they accepted, now what?" was to go and find
+  // the programme and add them from its side.
+  const [allProgrammes, setAllProgrammes] = useState<HierarchyProgramme[]>([]);
+  const [assignTo, setAssignTo] = useState("");
+  const [assigning, setAssigning] = useState(false);
+  const [assignMsg, setAssignMsg] = useState("");
+
+  useEffect(() => {
+    getHierarchy().then(h => setAllProgrammes(h.programmes))
+      .catch(() => setAllProgrammes([]));
+  }, []);
   const bid = Number(brokerId);
   const [b, setB] = useState<Detail | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -44,6 +61,27 @@ export default function BrokerDetail() {
       .catch(() => setErr("That broker is not on any of your programmes."));
   }, [brokerId]);
   useEffect(load, [load]);
+
+  async function assign() {
+    if (!assignTo || !brokerId) return;
+    setAssigning(true); setAssignMsg("");
+    try {
+      const r = await addProgrammeBroker(Number(assignTo), Number(brokerId));
+      const name = allProgrammes.find(p => String(p.id) === assignTo)?.name
+                   ?? "that programme";
+      // Re-assigning somebody taken off before reactivates the existing link
+      // rather than adding a second — say which happened.
+      setAssignMsg(r.reactivated
+        ? `Back on ${name}. Their earlier contracts there are live again.`
+        : `Added to ${name}. They can produce on it now.`);
+      setAssignTo("");
+      load();
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      setAssignMsg((typeof d === "string" ? d : d?.message)
+        ?? "Could not put them on that programme.");
+    } finally { setAssigning(false); }
+  }
 
   // Contract rows carry a programme id, not its name. Built once here rather
   // than scanned out of b.programmes per row — and it is the same list the
@@ -110,7 +148,8 @@ export default function BrokerDetail() {
           <Card title="Programmes" className="md:col-span-1">
             {b.programmes.length === 0 ? (
               <p className="text-sm text-ink-muted">
-                Not on a programme yet, so they cannot produce anything.
+                Not on a programme yet, so they cannot produce anything. Put
+                them on one below.
               </p>
             ) : (
               <ul className="space-y-2.5">
@@ -131,6 +170,50 @@ export default function BrokerDetail() {
                 ))}
               </ul>
             )}
+
+            {/* Only programmes they are not already ON. Offering one they are
+                already on would be offering a button whose only outcome is
+                "already on this programme". */}
+            {(() => {
+              const on = new Set(b.programmes.filter(p => p.status === "active")
+                                             .map(p => p.id));
+              const available = allProgrammes.filter(p => !on.has(p.id));
+              if (!available.length) {
+                return (
+                  <p className="mt-3 text-xs text-ink-muted">
+                    {allProgrammes.length
+                      ? "They are on every programme you have."
+                      : "You have no programmes yet."}
+                  </p>
+                );
+              }
+              return (
+                <div className="mt-4 border-t border-border pt-3">
+                  <label className="mb-1.5 block text-xs font-medium text-ink-muted">
+                    Put them on a programme
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={assignTo}
+                      onChange={e => setAssignTo(e.target.value)}
+                      className="min-w-0 flex-1 rounded-md border border-border bg-white
+                        px-2.5 py-1.5 text-sm text-ink"
+                    >
+                      <option value="">Choose…</option>
+                      {available.map(p => (
+                        <option key={p.id} value={String(p.id)}>{p.name}</option>
+                      ))}
+                    </select>
+                    <Button onClick={assign} disabled={!assignTo || assigning}>
+                      {assigning ? "…" : "Add"}
+                    </Button>
+                  </div>
+                  {assignMsg && (
+                    <p className="mt-2 text-xs text-ink-muted">{assignMsg}</p>
+                  )}
+                </div>
+              );
+            })()}
           </Card>
 
           <Card title="Their team" className="md:col-span-2">
@@ -183,9 +266,25 @@ export default function BrokerDetail() {
           live.length === 0 ? (
             <span className="text-xs text-ink-muted">Put them on a programme first</span>
           ) : (
-            <Button onClick={() => setAdding(true)}>
-              <Plus size={15} /> Add Contract
-            </Button>
+            /* TWO ways a contract starts, and they are different jobs.
+               Uploading reads the terms out of a wording that already exists;
+               raising states terms being agreed now and writes the wording
+               from them. Only the upload was here, so a carrier with nothing
+               to upload had no way to start one with this broker at all. */
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" onClick={() => setAdding(true)}>
+                <Upload size={15} /> Upload contract
+              </Button>
+              <Button onClick={() => nav(
+                // The programme comes too when there is only one it could be.
+                // With several, the raise flow asks — and re-applies this
+                // broker once the programme narrows the list to people who are
+                // actually on it.
+                `/contracts/new?broker_party_id=${b.id}`
+                + (live.length === 1 ? `&program_id=${live[0].id}` : ""))}>
+                <Plus size={15} /> Raise a contract
+              </Button>
+            </div>
           )
         }>
           {added && (

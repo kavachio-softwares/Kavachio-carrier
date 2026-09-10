@@ -48,7 +48,19 @@ export type BrokerSummary = {
   programmes: { id: number; name: string; status: string }[];
   contract_count: number;
   user_count: number;
+  /** THE RELATIONSHIP WITH THIS CARRIER, not a property of the broker. The
+   *  same broker is `active` to one carrier and `invited` to another who is
+   *  still waiting for an answer. */
+  relationship?: "active" | "invited";
+  invitation?: { id: number; email: string; invited_at: string | null } | null;
 };
+
+export const resendBrokerInvitation = (id: number) =>
+  api.post<{ message?: string }>(`/broker-invitations/${id}/resend`, {})
+     .then(r => r.data);
+
+export const revokeBrokerInvitation = (id: number) =>
+  api.delete<{ message?: string }>(`/broker-invitations/${id}`).then(r => r.data);
 
 export type ProgrammeBroker = BrokerSummary & {
   link_id: number;
@@ -144,14 +156,21 @@ export const getApprovalHistory = (contractId: number) =>
 /** Bring a broker on board: the organisation, its first admin and (optionally)
  *  the programme it produces into, in one call. Doing them separately is what
  *  used to leave a carrier with a broker nobody could sign in as. */
-export const createBroker = (body: {
+/** Invite a broker onto a programme.
+ *
+ *  The response is the SAME whether or not that address already has a login —
+ *  which of the two it is depends on facts about another carrier's book, and
+ *  the inviting carrier does not get to learn them. An existing broker sees
+ *  the invitation on their own screen; a new one is onboarded, and completing
+ *  onboarding accepts it for them. Either way the link appears only once the
+ *  broker has agreed. */
+export const inviteBroker = (body: {
   legal_name: string;
   party_type?: string;
   admin_name?: string;
-  admin_email?: string;
-  program_id?: number;
-}) => api.post<BrokerSummary & {
-  admin_invited: boolean; admin_email: string | null; program_id: number | null;
+  admin_email: string;
+}) => api.post<{
+  ok: boolean; invited: boolean; email: string; message: string;
 }>("/brokers", body).then(r => r.data);
 
 

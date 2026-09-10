@@ -24,13 +24,6 @@ const ROLE_LABEL: Record<string, string> = {
   operator: "Operator",
 };
 
-// What each seat can actually do, in the words the prototype uses. Shown as a
-// column so the table answers "what did I just give this person?" on its own.
-const ROLE_CAN_DO: Record<string, string> = {
-  broker_admin: "Contracts, BDX setup, processing, users",
-  operator: "Processing and exceptions only",
-};
-
 function statusBadge(s: string): { cls: string; label: string } {
   if (s === "active") return { cls: "b-ok", label: "Active" };
   if (s === "invited" || s === "pending") return { cls: "b-warn", label: "Invited" };
@@ -157,7 +150,7 @@ export default function BrokerUsers() {
             <table>
               <thead>
                 <tr>
-                  <th>Name</th><th>Role</th><th>Can do</th>
+                  <th>Name</th><th>Role</th>
                   <th>Status</th><th>Last sign-in</th><th></th>
                 </tr>
               </thead>
@@ -176,7 +169,6 @@ export default function BrokerUsers() {
                           <span className="d" />{ROLE_LABEL[u.role] ?? u.role}
                         </span>
                       </td>
-                      <td className="l">{ROLE_CAN_DO[u.role] ?? "—"}</td>
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">

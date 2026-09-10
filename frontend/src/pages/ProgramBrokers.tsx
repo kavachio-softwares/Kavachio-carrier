@@ -352,14 +352,40 @@ export default function ProgramBrokers() {
                       <p className="text-sm text-ink-muted">
                         No contracts with this broker on this programme yet.
                       </p>
+                      {/* TWO ways a contract starts, and they are different
+                          jobs. Uploading reads the terms out of a wording that
+                          already exists; raising states terms being agreed now
+                          and writes the wording from them. Only the first was
+                          offered here, so a carrier with nothing to upload had
+                          no way forward from the page that told them a contract
+                          was the next thing needed. Raise is the primary one:
+                          it is the flow that does not depend on somebody else
+                          having sent a document first. */}
                       {!off && (
-                        <Link
-                          to={`/direct/setup?program_id=${prog.id}&broker_party_id=${b.id}`}
-                          className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-navy px-3 py-1.5
-                            text-[12.5px] font-medium text-white transition hover:bg-navy-dark"
-                        >
-                          <Upload size={13} /> Upload contract
-                        </Link>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {/* To the contract upload screen, NOT Bordereau
+                              Setup. This card's empty state says the broker
+                              has no contract; the thing that fixes it is
+                              putting the contract in. Bordereau Setup happens
+                              afterwards and has its own links further down —
+                              sending someone into a setup wizard to add a
+                              contract makes them finish a different job to
+                              start this one. */}
+                          <Link
+                            to={`/contracts/upload?program_id=${prog.id}&broker_party_id=${b.id}`}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-border
+                              px-3 py-1.5 text-[12.5px] font-medium text-ink transition hover:bg-surface-2"
+                          >
+                            <Upload size={13} /> Upload contract
+                          </Link>
+                          <Link
+                            to={`/contracts/new?program_id=${prog.id}&broker_party_id=${b.id}`}
+                            className="inline-flex items-center gap-1.5 rounded-md bg-navy px-3 py-1.5
+                              text-[12.5px] font-medium text-white transition hover:bg-navy-dark"
+                          >
+                            <Plus size={13} /> Raise a contract
+                          </Link>
+                        </div>
                       )}
                     </div>
                   ) : (

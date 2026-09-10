@@ -322,7 +322,9 @@ export default function ProgramManagement() {
               <div className="empty" style={{ padding: 28 }}>
                 {q.trim()
                   ? "No carrier matches that search."
-                  : <>No carriers yet — <Link className="linkish" to="/parties/new">add one</Link> to get started.</>}
+                  : <>No carriers yet — add one from{" "}
+                      <Link className="linkish" to="/users">Users &amp; Roles</Link>{" "}
+                      to get started.</>}
               </div>
             ) : (
               <>

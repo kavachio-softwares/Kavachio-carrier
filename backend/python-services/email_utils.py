@@ -224,3 +224,47 @@ def invite_email_html(link: str, name: str | None = None, org: str | None = None
     </div>
   </div>
 </body></html>"""
+
+
+def carrier_invite_email_html(link: str, name: str | None = None,
+                              carrier: str | None = None) -> str:
+    """A carrier inviting a broker who ALREADY has a Kavachio login.
+
+    Different from invite_email_html on purpose. That one hands somebody their
+    account — set a password, complete onboarding. This one goes to a person
+    who already has an account and is being asked a question: another carrier
+    would like to work with you. So there is no password, no expiry, and the
+    button says JOIN rather than "complete onboarding" — it drops them on the
+    invitation screen inside the app, signed in as themselves.
+    """
+    greeting = f"Hi {name}," if (name or "").strip() else "Hi,"
+    who = f"<b>{carrier}</b>" if (carrier or "").strip() else "A carrier"
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">{carrier or "A carrier"} wants to work with you</h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 22px">
+        {who} has invited you to work with them on Kavachio. You already have an
+        account &mdash; nothing to set up. Join and they can put you on their
+        programmes; your other carriers are not affected and are never shown to
+        them.
+      </p>
+      <a href="{link}" style="display:inline-block;background:#3149C6;color:#fff;text-decoration:none;
+                font-size:14px;font-weight:600;padding:12px 22px;border-radius:8px">Join now</a>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        If the button doesn't work, copy and paste this link into your browser:<br>
+        <a href="{link}" style="color:#3149C6;word-break:break-all">{link}</a>
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:18px 0 0">
+        You can decline, and nothing happens. If you weren't expecting this, you
+        can safely ignore this email.
+      </p>
+    </div>
+  </div>
+</body></html>"""

@@ -46,6 +46,24 @@
    workspace identity, but reads as a label rather than a control. */
 .proto-side .wscard-static,.proto-side .wscard-static:hover{cursor:default;background:rgba(255,255,255,.045);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),inset 0 1px 0 rgba(255,255,255,.05),0 1px 2px rgba(0,0,0,.28)}
 .proto-side .wscard:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+/* The broker's carrier scope. Occupies the same slot as the carrier admin's
+   workspace card and is built from the same parts, because it answers the same
+   question — which organisation am I looking at — and for a broker that
+   question has an answer they can change. */
+.proto-side .ws-scope{position:relative;width:calc(100% - 24px);margin:13px 12px 0}
+.proto-side .ws-scope .wscard{width:100%;margin:0}
+.proto-side .ws-menu{position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:60;
+  padding:5px;border-radius:12px;background:#141a27;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.10),0 18px 40px -14px rgba(0,0,0,.7)}
+.proto-side .ws-menu button{display:flex;align-items:center;gap:8px;width:100%;
+  padding:8px 10px;border:0;border-radius:8px;background:transparent;color:#fff;
+  font:inherit;font-size:12.5px;text-align:left;cursor:pointer}
+.proto-side .ws-menu button:hover{background:rgba(255,255,255,.08)}
+.proto-side .ws-menu button.on{background:rgba(49,73,198,.28)}
+.proto-side .ws-menu .nm{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto-side .ws-menu .ct{flex:0 0 auto;font-size:10.5px;color:rgba(255,255,255,.45)}
+.proto-side .ws-menu-sep{height:1px;margin:5px 6px;background:rgba(255,255,255,.10)}
+.proto-side.collapsed .ws-scope{display:none}
 .proto-side .wscard-ava{position:relative;flex:0 0 auto;width:34px;height:34px}
 .proto-side .wscard-logo{width:34px;height:34px;border-radius:9px;object-fit:contain;background:transparent;padding:0;display:block}
 .proto-side .wscard-fallback{display:flex;align-items:center;justify-content:center;background:var(--p-brand-grad);color:#fff;font-size:12px;font-weight:700;padding:0;box-shadow:0 3px 8px rgba(7,114,130,.35)}
@@ -355,6 +373,10 @@
 .proto .field input:disabled,.proto .field select:disabled,.proto .field textarea:disabled{background:var(--p-surface-2);color:var(--p-muted);cursor:not-allowed}
 .proto .row2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .proto .ro{background:var(--p-surface-3)!important;color:var(--p-muted)!important;cursor:not-allowed}
+/* Same treatment for anything marked readonly on the element itself, so a
+   derived field (the expiry while a Duration length is chosen) reads as
+   derived without every screen having to remember the class. */
+.proto input[readonly],.proto select[readonly]{background:var(--p-surface-3);color:var(--p-muted);cursor:not-allowed}
 
 /* search box + segmented control */
 .proto .search{display:flex;align-items:center;gap:9px;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:8px 12px;background:var(--p-surface);min-width:250px}
@@ -965,3 +987,13 @@
 .proto .place-blk .rule{display:block;height:1px;background:var(--p-primary);
   opacity:.6;margin:12px 0 3px}
 .proto .place-blk .sub{font-size:8.5px}
+
+/* A carrier to work on, chosen at the door. Bigger than a select because it is
+   a decision that scopes the whole session, not a filter. */
+.proto .pickcard{display:flex;flex-direction:column;gap:4px;align-items:flex-start;text-align:left;
+  padding:15px 16px;border:1px solid var(--p-border);border-radius:var(--p-r);
+  background:var(--p-surface);cursor:pointer;font:inherit;color:inherit;
+  box-shadow:var(--p-sh-sm);transition:border-color .12s,box-shadow .12s,transform .12s}
+.proto .pickcard:hover{border-color:var(--p-primary);box-shadow:var(--p-sh);transform:translateY(-1px)}
+.proto .pickcard b{font-size:14px}
+.proto .pickcard:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}

@@ -366,6 +366,13 @@ class Tenant(Base):
     logo = Column(Text, nullable=True)            # org logo as a data URL (sidebar co-brand)
     internal_codes = Column(JSON, nullable=True)  # JSONB free-form
     is_active = Column("tenant_is_active", Boolean, default=True)
+    # The one person accountable for this organisation. A POINTER, not a fourth
+    # role: always one of this tenant's own carrier_admins, so ownership can
+    # move without anybody's role changing and there is only one place to look
+    # for the answer. Nullable because a legacy organisation may have no admin
+    # to have been the owner — the UI shows that as needing one, rather than
+    # guessing. See migration 18.
+    owner_user_id = Column("tenant_owner_user_id", Integer, nullable=True)
     # Set once the tenant admin explicitly dismisses the first-login onboarding
     # wizard ("Skip for now"). Without this, needs_onboarding (below) is purely
     # derived from setup state, so a tenant that skips before finishing Bordereau
@@ -723,6 +730,44 @@ class ContractSignature(Base):
     note = Column("contract_signature_note", String, nullable=True)
     created_at = Column("contract_signature_created_at", DateTime,
                         default=datetime.utcnow)
+
+
+class BrokerInvitation(Base):
+    """A carrier asking a broker to produce on a programme, and the answer.
+
+    THE CARRIER NEVER LEARNS WHETHER THE BROKER ALREADY EXISTS. That is the
+    whole design. A broker works with several carriers, and which ones is that
+    broker's business and those carriers' — not something the next carrier can
+    discover by typing an address into an invite form. So inviting looks the
+    same either way, and what happens next depends on facts the carrier is not
+    shown: an existing broker sees the invitation on their own screen and
+    accepts it; a new one is onboarded, and completing onboarding accepts it
+    for them.
+
+    It also fixes something the old direct-assign path skipped: the programme
+    link now appears only once the broker has AGREED. A carrier could
+    previously put a broker on a programme by unilateral act, which is not what
+    "invitation" means anywhere else.
+
+    `party_id` is NULL until known — an invitation to an address nobody has
+    claimed yet has no organisation to point at.
+    """
+    __tablename__ = "broker_invitation"
+    id = Column("broker_invitation_id", Integer, primary_key=True)
+    tenant_id = Column("broker_invitation_tenant_id", Integer, nullable=False)
+    program_id = Column("broker_invitation_program_id", Integer, nullable=True)
+    email = Column("broker_invitation_email", String, nullable=False)
+    party_id = Column("broker_invitation_party_id", Integer, nullable=True)
+    # What the carrier typed. Only used if the broker turns out to be new.
+    org_name = Column("broker_invitation_org_name", String, nullable=True)
+    status = Column("broker_invitation_status", String, default="pending")
+    # 'auto' where onboarding accepted it, 'broker' where a person clicked.
+    accepted_by = Column("broker_invitation_accepted_by", String, nullable=True)
+    by_user_id = Column("broker_invitation_by_user_id", Integer, nullable=True)
+    created_at = Column("broker_invitation_created_at", DateTime,
+                        default=datetime.utcnow)
+    answered_at = Column("broker_invitation_answered_at", DateTime, nullable=True)
+    note = Column("broker_invitation_note", String, nullable=True)
 
 
 class ProgramBroker(Base):
@@ -1893,6 +1938,7 @@ def init_db():
         _ensure_column(conn, inspector, "output_exports", "output_format", "VARCHAR")
         _ensure_column(conn, inspector, "output_exports", "sample_comparison", json_type)
         _ensure_column(conn, inspector, "tenant", "onboarding_skipped", "BOOLEAN DEFAULT FALSE")
+        _ensure_column(conn, inspector, "tenant", "tenant_owner_user_id", "BIGINT")
         # _ensure_column(conn, inspector, "program", "canonical_program_id", "INTEGER")
         # tenant_configs folded into `tenant` and dropped (see db_repair_notes.md)
         _ensure_column(conn, inspector, "dwh_bdx", "sheet_name", "VARCHAR")

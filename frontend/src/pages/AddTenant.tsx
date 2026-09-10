@@ -32,8 +32,8 @@ export default function AddTenant() {
   // Naming the gap beats a button that is dead for reasons the user cannot see.
   const missing = [
     !f.name.trim() && "Legal name",
-    !f.admin_name.trim() && "Admin full name",
-    !EMAIL_RE.test(f.admin_email.trim()) && "a valid admin email",
+    !f.admin_name.trim() && "the owner's full name",
+    !EMAIL_RE.test(f.admin_email.trim()) && "a valid owner email",
   ].filter(Boolean) as string[];
   const canCreate = missing.length === 0;
 
@@ -114,12 +114,15 @@ export default function AddTenant() {
             </div>
           </div>
 
-          {/* Its first admin */}
+          {/* Its owner. The same person as the first admin — naming them here
+              is what makes the organisation accountable to somebody from the
+              moment it exists, rather than to whoever happens to log in. */}
           <div className="card pad">
-            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>First admin</h3>
+            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>Owner</h3>
             <p style={{ margin: "0 0 14px", fontSize: 12, color: "var(--p-muted)" }}>
-              They get an email inviting them to set a password. After that they
-              set the company up and add their own colleagues.
+              The one person accountable for this organisation. They get an email
+              inviting them to set a password, then set the company up and add
+              their own colleagues as admins.
             </p>
             <div className="field">
               <label>Full name <span style={{ color: "var(--p-crit)" }}>*</span></label>
@@ -133,7 +136,8 @@ export default function AddTenant() {
             </div>
             <div className="note" style={{ marginTop: 4 }}>
               When they accept, they arrive at an empty account and we guide them
-              through adding their first programme.
+              through adding their first programme. They can hand ownership to
+              one of their own admins later — you do not have to do it for them.
             </div>
           </div>
         </div>

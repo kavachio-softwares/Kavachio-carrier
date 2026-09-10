@@ -9,18 +9,53 @@
  */
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { getBrokerDashboard, type BrokerDashboard as Dash } from "../api/broker";
+import {
+  getBrokerDashboard, getBrokerInvitations, acceptBrokerInvitation,
+  declineBrokerInvitation,
+  type BrokerDashboard as Dash, type BrokerInvitation,
+} from "../api/broker";
+import { useBrokerCarrierId } from "../brokerCarrier";
 import { inAppSigningUrl } from "../api/esign";
 
 export default function BrokerDashboard() {
   const nav = useNavigate();
   const [d, setD] = useState<Dash | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // The carrier this broker is working on, chosen in the sidebar. Every count
+  // below is scoped to it — "two waiting on you" has to mean two on THIS
+  // carrier, or the number is answering a question nobody asked.
+  const carrierId = useBrokerCarrierId();
+
+  // Carriers asking to work with this broker. Above everything else on the
+  // page, because until one is answered nothing else about that carrier
+  // exists — no programmes, no contracts, no files.
+  const [invites, setInvites] = useState<BrokerInvitation[] | null>(null);
+  const [answering, setAnswering] = useState<number | null>(null);
+  const [note, setNote] = useState("");
+
+  const loadInvites = () =>
+    getBrokerInvitations().then(setInvites).catch(() => setInvites([]));
+  useEffect(() => { loadInvites(); }, []);
+
+  async function answer(id: number, accept: boolean) {
+    setAnswering(id); setNote("");
+    try {
+      const r = accept ? await acceptBrokerInvitation(id)
+                       : await declineBrokerInvitation(id);
+      setNote(r?.message ?? (accept ? "Accepted." : "Declined."));
+      await loadInvites();
+      // Accepting adds a carrier, so the counts and the switcher are stale.
+      getBrokerDashboard(carrierId).then(setD).catch(() => {});
+    } catch {
+      setNote("That did not go through. Try again.");
+    } finally { setAnswering(null); }
+  }
 
   useEffect(() => {
-    getBrokerDashboard().then(setD)
+    setD(null);
+    getBrokerDashboard(carrierId).then(setD)
       .catch(() => setErr("Could not load your dashboard."));
-  }, []);
+  }, [carrierId]);
 
   if (err) return (
     <div className="proto"><div className="view full">
@@ -52,13 +87,68 @@ export default function BrokerDashboard() {
         </div>
 
         {/* Nothing assigned yet is a real state, not an error. Say who fixes it. */}
+        {/* Above the no-programmes branch on purpose. A broker who has only
+            been invited has no programmes yet — that is precisely the state
+            this is for, and inside that branch they would never see it. */}
+        {note && (
+          <div className="note ok" style={{ marginBottom: 16 }}>{note}</div>
+        )}
+
+        {!!invites?.length && (
+          <div className="card" style={{ marginBottom: 18 }}>
+            <div className="card-h">
+              <h3>
+                {invites.length === 1
+                  ? "A carrier wants to work with you"
+                  : `${invites.length} carriers want to work with you`}
+              </h3>
+              <span className="sub">nothing happens until you answer</span>
+            </div>
+            <div style={{ padding: "14px 20px" }}>
+              {invites.map(iv => (
+                <div className="kv" key={iv.id}>
+                  <span className="k">
+                    <b style={{ color: "var(--p-ink)" }}>{iv.carrier}</b>
+                    <div className="sub">
+                      {iv.programme
+                        ? `Invited you on to ${iv.programme}`
+                        : "Invited you to work with them"}
+                      {iv.invited_at && <> · {fmtDate(iv.invited_at)}</>}
+                    </div>
+                  </span>
+                  <span style={{ display: "flex", gap: 8 }}>
+                    <button className="btn sm" type="button"
+                            disabled={answering === iv.id}
+                            onClick={() => answer(iv.id, false)}>
+                      Decline
+                    </button>
+                    <button className="btn sm pri" type="button"
+                            disabled={answering === iv.id}
+                            onClick={() => answer(iv.id, true)}>
+                      {answering === iv.id ? "…" : "Accept"}
+                    </button>
+                  </span>
+                </div>
+              ))}
+              <div className="hint" style={{ marginTop: 10 }}>
+                Accepting lets them put you on their programmes. It shows
+                them nothing about the other carriers you work with.
+              </div>
+            </div>
+          </div>
+        )}
+
         {c.programmes === 0 ? (
           <div className="card pad" style={{ maxWidth: 620 }}>
             <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>No programmes yet</h3>
             <p className="muted" style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
-              A carrier has to put you on one of their programmes before you can
-              send anything. Until they do, there is nothing for you to set up —
-              this is not something you can do from your side.
+              {invites?.length
+                ? "Accept the invitation above and that carrier can start "
+                  + "putting you on their programmes."
+                : "A carrier has to put you on one of their programmes before "
+                  + "you can send anything. Until they do, there is nothing "
+                  + "for you to set up — this is not something you can do from "
+                  + "your side."}
             </p>
           </div>
         ) : (

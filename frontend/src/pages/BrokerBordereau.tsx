@@ -35,6 +35,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { History } from "lucide-react";
 import { getBrokerContracts, type BrokerContract } from "../api/broker";
+import { useBrokerCarrierId } from "../brokerCarrier";
 import {
   getBrokerMe, getBordereauReadiness, runBrokerBordereau, getBrokerRuns,
   brokerRunUrls,
@@ -75,9 +76,23 @@ export default function BrokerBordereau() {
   const [runs, setRuns] = useState<BrokerRun[] | null>(null);
   const [showHistory, setShowHistory] = useState(false);
 
+  // THE SCOPE THAT MATTERS MOST. A bordereau is checked against one contract's
+  // rules, and two carriers' contracts sitting in one dropdown are separated
+  // only by a name in brackets — which is how a file gets run against the
+  // wrong carrier and comes back with exceptions that mean nothing. Narrowing
+  // the list to the carrier being worked on removes the mistake rather than
+  // labelling it.
+  const carrierId = useBrokerCarrierId();
+
   useEffect(() => {
     getBrokerMe().then(m => setBrokerId(m.id)).catch(() => setBrokerId(null));
-    getBrokerContracts()
+  }, []);
+
+  useEffect(() => {
+    // Switching carrier drops the current pick: keeping it would leave the
+    // screen addressed at a contract no longer in the list it is showing.
+    setContractId("");
+    getBrokerContracts({ carrierId: carrierId ?? undefined })
       .then(rows => {
         setContracts(rows);
         const live = rows.filter(c => c.lifecycle === "active");
@@ -86,7 +101,7 @@ export default function BrokerBordereau() {
         if (live.length === 1) setContractId(live[0].id);
       })
       .catch(() => setContracts([]));
-  }, []);
+  }, [carrierId]);
 
   // In force, which is what decides whether a file can be produced against it.
   // This used to read the carrier's approval instead — a weaker question, and

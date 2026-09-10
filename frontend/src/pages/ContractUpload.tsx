@@ -19,7 +19,7 @@
  * This is a second door into it, not a second implementation of it.
  */
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { AlertTriangle, ArrowLeft, FileText, Loader2, Upload, X } from "lucide-react";
 import { Dropzone } from "../components/Dropzone";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
@@ -33,9 +33,13 @@ export default function ContractUpload() {
   const nav = useNavigate();
 
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
-  const [programId, setProgramId] = useState("");
+  // Pre-addressed when you arrive from a programme's broker card — that page
+  // already knows the pair. Same params the raise flow takes, so the two ways
+  // in from that card behave alike.
+  const [params] = useSearchParams();
+  const [programId, setProgramId] = useState(params.get("program_id") ?? "");
   const [brokers, setBrokers] = useState<Counterparty[] | null>(null);
-  const [brokerId, setBrokerId] = useState("");
+  const [brokerId, setBrokerId] = useState(params.get("broker_party_id") ?? "");
 
   const [file, setFile] = useState<File | null>(null);
   const [refFiles, setRefFiles] = useState<File[]>([]);

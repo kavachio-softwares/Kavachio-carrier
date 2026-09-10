@@ -12,6 +12,7 @@ read off the link rows, which only exist where a carrier created one.
 """
 from __future__ import annotations
 
+import datetime as dt
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -22,6 +23,7 @@ import contract_routes
 import contract_types as ct
 from auth_deps import Principal, current_principal
 from db import (
+    BrokerInvitation,
     SessionLocal, AppUser, Contract, Party, Program, ProgramBroker, Tenant,
 )
 
@@ -94,18 +96,198 @@ def broker_me(p: Principal = Depends(current_principal)):
         return {"id": bid, "name": (me.legal_name if me else "—"), "role": p.role}
 
 
-@router.get("/broker/carriers")
-def broker_carriers(p: Principal = Depends(current_principal)):
-    """The carriers that have put this broker on at least one programme.
+# =============================================================================
+#  Invitations — the broker's side of being asked
+# =============================================================================
+#
+# A carrier invites; the broker answers. The link that lets them produce is
+# written HERE, on accept, and nowhere else — so a carrier cannot put a broker
+# on a programme by unilateral act. That is what "invitation" means, and the
+# old direct-assign path quietly skipped it.
 
-    This is the first dropdown on BDX Setup. It is a list, not a choice the
-    broker makes freely — a carrier missing here means it never linked them.
+
+def _accept_invitation(s, inv, party_id: int, how: str) -> None:
+    """Record that this broker agreed to work with that carrier.
+
+    THE ACCEPTED INVITATION IS THE RELATIONSHIP. An invitation names a carrier,
+    not a programme — which programmes a broker produces on is a decision the
+    carrier goes on making for years, and it is made afterwards from the
+    programme's own screen. So the usual case writes no programme link at all;
+    the `program_id` branch below exists only for an invitation that named one.
+
+    Shared by the broker clicking Accept and by onboarding accepting on their
+    behalf, so the two cannot drift into writing different rows.
+    """
+    inv.status = "accepted"
+    inv.accepted_by = how
+    inv.answered_at = dt.datetime.now(dt.timezone.utc)
+    inv.party_id = party_id
+    if not inv.program_id:
+        return
+    link = (s.query(ProgramBroker)
+            .filter(ProgramBroker.program_id == inv.program_id,
+                    ProgramBroker.broker_party_id == party_id)
+            .first())
+    if link:
+        # Re-accepting after having been taken off reactivates the row rather
+        # than inserting a second one; when it was first assigned is worth
+        # keeping.
+        link.status = "active"
+        link.tenant_id = inv.tenant_id
+    else:
+        s.add(ProgramBroker(tenant_id=inv.tenant_id, program_id=inv.program_id,
+                            broker_party_id=party_id, status="active",
+                            assigned_by_user_id=inv.by_user_id))
+
+
+def accept_pending_for_email(s, email: str, party_id: int) -> int:
+    """Accept every invitation waiting on this address. Returns how many.
+
+    Called when somebody finishes onboarding. A brand-new broker has nothing to
+    weigh up — the invitation is why their login exists — so making them click
+    Accept afterwards is a second click that can only ever be yes. Invitations
+    that arrived while they were still setting up are swept in the same pass.
+    """
+    pending = (s.query(BrokerInvitation)
+               .filter(func.lower(BrokerInvitation.email) == (email or "").lower(),
+                       BrokerInvitation.status == "pending")
+               .all())
+    for inv in pending:
+        _accept_invitation(s, inv, party_id, "auto")
+    return len(pending)
+
+
+@router.get("/broker/invitations")
+def broker_invitations(p: Principal = Depends(current_principal)):
+    """Carriers asking this broker to produce on a programme.
+
+    Only what is still open and only what is addressed to this broker. A
+    carrier's name appears here because they chose to introduce themselves by
+    inviting — nothing is disclosed in the other direction.
     """
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
-        links = _links(s, bid)
-        by_carrier: dict[int, int] = {}
-        for l in links:
+        me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
+        emails = {(me.email or "").lower()} if me else set()
+        rows = (s.query(BrokerInvitation)
+                .filter(BrokerInvitation.status == "pending",
+                        or_(BrokerInvitation.party_id == bid,
+                            func.lower(BrokerInvitation.email).in_(emails or {""})))
+                .order_by(BrokerInvitation.created_at.desc())
+                .all())
+        if not rows:
+            return []
+        progs = {pr.id: pr.name for pr in s.query(Program).filter(
+            Program.id.in_([r.program_id for r in rows if r.program_id])).all()}
+        tens = {t.id: (t.legal_name or t.tenant_name) for t in s.query(Tenant).filter(
+            Tenant.id.in_([r.tenant_id for r in rows])).all()}
+        return [{
+            "id": r.id,
+            "carrier": tens.get(r.tenant_id, "—"),
+            # Usually none: a carrier invites you to work with THEM, and picks
+            # programmes afterwards. Shown only when one was named.
+            "programme": progs.get(r.program_id) if r.program_id else None,
+            "program_id": r.program_id,
+            "invited_at": r.created_at.isoformat() if r.created_at else None,
+        } for r in rows]
+
+
+class InvitationAnswer(BaseModel):
+    note: Optional[str] = None
+
+
+@router.post("/broker/invitations/{invitation_id}/accept")
+def broker_invitation_accept(invitation_id: int,
+                             body: InvitationAnswer = InvitationAnswer(),
+                             p: Principal = Depends(current_principal)):
+    """Agree to produce on that carrier's programme. This writes the link."""
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
+        inv = s.get(BrokerInvitation, invitation_id)
+        # 404 rather than 403: an invitation addressed to somebody else is not
+        # this broker's to know about.
+        if (not inv or inv.status != "pending"
+                or (inv.party_id not in (None, bid)
+                    and (inv.email or "").lower() != (me.email or "").lower())):
+            raise HTTPException(404, "that invitation is not open to you")
+        _accept_invitation(s, inv, bid, "broker")
+        inv.note = (body.note or "").strip() or None
+        tenant = s.query(Tenant).filter(Tenant.id == inv.tenant_id).first()
+        carrier_name = (tenant.legal_name or tenant.tenant_name) if tenant else None
+        s.commit()
+        # The carrier comes back so the screen can SWITCH TO IT. Somebody who
+        # just deliberately joined one carrier should not be dropped on a
+        # merged view of all of them — that answers a question they did not ask
+        # and hides the thing they came for.
+        return {"ok": True, "program_id": inv.program_id,
+                "carrier_id": inv.tenant_id, "carrier": carrier_name,
+                "message": (f"You are now working with {carrier_name}."
+                            if carrier_name else "Accepted.")
+                           + (" They can put you on their programmes from here."
+                              if not inv.program_id else "")}
+
+
+@router.post("/broker/invitations/{invitation_id}/decline")
+def broker_invitation_decline(invitation_id: int,
+                              body: InvitationAnswer = InvitationAnswer(),
+                              p: Principal = Depends(current_principal)):
+    """Say no. Nothing is linked, and the carrier sees it was declined —
+    which is a fact about the invitation THEY sent, not about this broker's
+    other business."""
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
+        inv = s.get(BrokerInvitation, invitation_id)
+        if (not inv or inv.status != "pending"
+                or (inv.party_id not in (None, bid)
+                    and (inv.email or "").lower() != (me.email or "").lower())):
+            raise HTTPException(404, "that invitation is not open to you")
+        inv.status = "declined"
+        inv.answered_at = dt.datetime.now(dt.timezone.utc)
+        inv.party_id = bid
+        inv.note = (body.note or "").strip() or None
+        s.commit()
+        return {"ok": True, "message": "Declined."}
+
+
+def _carrier_ids(s, broker_id: int) -> set[int]:
+    """Every carrier this broker WORKS WITH.
+
+    Two sources, and both are needed. A programme link proves a working
+    relationship, but it is not the only one: a broker who has accepted a
+    carrier's invitation works with them from that moment, whether or not a
+    programme has been assigned yet — and assigning one may be days later.
+
+    Reading only the links is why a broker could accept two carriers and see
+    neither: they had agreed to work with both and been put on nothing, so the
+    dashboard showed an empty list and the carrier switcher had nothing to
+    switch between. The relationship is the invitation; the programme is what
+    they do inside it.
+    """
+    from_links = {l.tenant_id for l in _links(s, broker_id) if l.tenant_id}
+    from_invites = {
+        r[0] for r in s.query(BrokerInvitation.tenant_id)
+        .filter(BrokerInvitation.party_id == broker_id,
+                BrokerInvitation.status == "accepted").all()
+        if r[0]}
+    return from_links | from_invites
+
+
+@router.get("/broker/carriers")
+def broker_carriers(p: Principal = Depends(current_principal)):
+    """The carriers this broker works with.
+
+    The first dropdown on BDX Setup, and the carrier switcher in the sidebar.
+    It is a list, not a choice the broker makes freely — a carrier appears
+    because the broker accepted their invitation, and `programme_count` says
+    how much of that relationship has actually been set up yet. Zero is a real
+    and common answer: accepted this morning, programmes tomorrow.
+    """
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        by_carrier: dict[int, int] = {t: 0 for t in _carrier_ids(s, bid)}
+        for l in _links(s, bid):
             if l.tenant_id:
                 by_carrier[l.tenant_id] = by_carrier.get(l.tenant_id, 0) + 1
         if not by_carrier:
@@ -219,7 +401,8 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
 
 
 @router.get("/broker/dashboard")
-def broker_dashboard(p: Principal = Depends(current_principal)):
+def broker_dashboard(carrier_id: Optional[int] = Query(None),
+                     p: Principal = Depends(current_principal)):
     """The broker's landing screen: what they hold, and what is holding them up.
 
     TWO QUEUES, not one, and they point in opposite directions. "Waiting on the
@@ -228,13 +411,28 @@ def broker_dashboard(p: Principal = Depends(current_principal)):
     over for review reached a broker who was never told — the negotiation sat
     in a state whose whole purpose is that the broker acts on it, on a
     dashboard that only counted the other side's queue.
+
+    SCOPED TO ONE CARRIER when `carrier_id` is given. A broker on several
+    carriers was shown one merged pile: five contracts waiting, across three
+    companies, with no way to answer "what does Northgate need from me". The
+    counts are the reason to open this screen, and a count that spans carriers
+    answers a question nobody asked. `carriers` always lists them all, so the
+    screen can offer the switch regardless of what is selected.
+
+    An unknown or unlinked carrier_id narrows to nothing rather than falling
+    back to everything: silently widening a scope the caller asked to narrow is
+    how a broker ends up acting on the wrong carrier's contract.
     """
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
         me = s.query(Party).filter(Party.id == bid).first()
-        links = _links(s, bid)
+        # Every carrier, for the switcher — computed before the narrowing, so
+        # selecting one never hides the others.
+        all_links = _links(s, bid)
+        links = ([l for l in all_links if l.tenant_id == carrier_id]
+                 if carrier_id is not None else all_links)
         prog_ids = [l.program_id for l in links]
-        carrier_ids = sorted({l.tenant_id for l in links if l.tenant_id})
+        carrier_ids = sorted(_carrier_ids(s, bid))
         carriers = {t.id: (t.legal_name or t.tenant_name) for t in s.query(Tenant).filter(
             Tenant.id.in_(carrier_ids)).all()} if carrier_ids else {}
         progs = ({pr.id: pr.name for pr in s.query(Program).filter(Program.id.in_(prog_ids)).all()}

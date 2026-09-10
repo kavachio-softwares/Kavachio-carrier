@@ -117,7 +117,12 @@ export default function ContractNew() {
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
   const [programId, setProgramId] = useState(params.get("program_id") ?? "");
   const [counterparties, setCounterparties] = useState<Counterparty[] | null>(null);
-  const [brokerId, setBrokerId] = useState("");
+  // Pre-addressed when you arrive from a programme's broker card: that page
+  // already knows which pair the contract is for, and re-picking both is
+  // exactly the kind of retyping that makes one flow feel like two screens.
+  // The select keeps this value once the options load; if the broker turns out
+  // not to be on the programme, it simply matches nothing and stays unpicked.
+  const [brokerId, setBrokerId] = useState(params.get("broker_party_id") ?? "");
 
   const [values, setValues] = useState<Record<string, string>>({});
   const [limits, setLimits] = useState<AgreedLimits>({});
@@ -304,7 +309,22 @@ export default function ContractNew() {
     setCounterparties(null);
     getCounterparties(spec.counterparty_party_type,
                       gatedOnProgramme ? Number(programId) : undefined)
-      .then(setCounterparties).catch(() => setCounterparties([]));
+      .then(list => {
+        setCounterparties(list);
+        // Re-apply the broker the URL asked for, once the list it has to come
+        // from exists. Arriving from a broker's page names the counterparty but
+        // not always the programme, and choosing a programme deliberately
+        // clears the selection — a broker who is not on the new one must not
+        // stay picked. Without this the prefill would be wiped by the very
+        // step it was waiting for. Only ever re-selects somebody genuinely on
+        // the chosen programme, because that is all this list contains.
+        const wanted = params.get("broker_party_id");
+        if (wanted && list.some(c => String(c.id) === wanted)) {
+          setBrokerId(prev => (prev ? prev : wanted));
+        }
+      })
+      .catch(() => setCounterparties([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spec, gatedOnProgramme, programId]);
 
   const programme = programmes.find(p => String(p.id) === programId);

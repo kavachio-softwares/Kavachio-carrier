@@ -11,11 +11,11 @@ import AdminUsers from "./pages/AdminUsers";
 import BrokerDashboard from "./pages/BrokerDashboard";
 import OperatorHome from "./pages/OperatorHome";
 import BrokerContracts from "./pages/BrokerContracts";
+import BrokerInvitations from "./pages/BrokerInvitations";
 import BrokerBordereau from "./pages/BrokerBordereau";
 import BrokerUsers from "./pages/BrokerUsers";
 import TenantDetail from "./pages/TenantDetail";
 import Parties from "./pages/Parties";
-import AddParty from "./pages/AddParty";
 import PartyDetail from "./pages/PartyDetail";
 import Programs from "./pages/Programs";
 import ProgramManagement from "./pages/ProgramManagement";
@@ -68,8 +68,16 @@ import Brokers from "./pages/Brokers";
 function RequireAuth({ children }: { children: JSX.Element }) {
   // A stored user with an expired refresh token is a dead session — treat it
   // as signed out immediately instead of waiting for the first 401.
+  const location = useLocation();
   if (isRefreshTokenExpired()) clearAuth();
-  if (!getUser()) return <Navigate to="/login" replace />;
+  if (!getUser()) {
+    // REMEMBER WHERE THEY WERE GOING. Somebody arriving from a link — a
+    // carrier's "Join now", a signature request — was being dropped on their
+    // dashboard after signing in, with no trace of what they had clicked. The
+    // link worked and the destination was lost, which reads as the link being
+    // broken.
+    return <Navigate to="/login" replace state={{ from: location }} />;
+  }
   return children;
 }
 
@@ -114,6 +122,12 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/reset" element={<ResetPassword />} />
+      {/* Where "Join now" lands. Signed in, but OUTSIDE the app shell: somebody
+          arriving from an email has one decision to make, and a sidebar of
+          screens about a carrier they have not joined yet is not it. Presented
+          like the sign-in page, which is the other door into this app. */}
+      <Route path="/invitations"
+             element={<RequireAuth><BrokerInvitations /></RequireAuth>} />
       {/* Signing a contract from an emailed link. No Layout, no session,
           no guard: the token in the URL is the whole credential and it
           stands for exactly one signer on exactly one contract. The
@@ -140,7 +154,10 @@ export default function App() {
         <Route path="/tenants/new" element={<AddTenant />} />
         <Route path="/tenants/:mga" element={<TenantDetail />} />
         <Route path="/parties" element={<Parties />} />
-        <Route path="/parties/new" element={<AddParty />} />
+        {/* No /parties/new. Adding a carrier happens in Users & Roles and
+            nowhere else; a route nothing links to is still a way in for anyone
+            who kept the bookmark. The directory itself stays readable — a
+            counterparty on a contract is opened by id. */}
         <Route path="/parties/:id" element={<PartyDetail />} />
         <Route path="/programs" element={<Programs />} />
         {/* The carrier hierarchy: brokers are reached from the carrier, not

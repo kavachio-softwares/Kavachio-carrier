@@ -730,10 +730,29 @@ def auth_reset(body: ResetBody, request: Request):
             exp = exp.replace(tzinfo=timezone.utc)
         if not u or exp is None or exp < datetime.now(timezone.utc):
             raise HTTPException(400, "This reset link is invalid or has expired.")
+        was_invited = (u.status or "") == "invited"
         u.password = hash_password(body.password)
         u.reset_token = None
         u.reset_token_expires = None
         u.status = "active"
+
+        # ONBOARDING ACCEPTS WHAT IT WAS FOR. A broker whose login exists
+        # BECAUSE a carrier invited them has nothing left to weigh up — making
+        # them click Accept afterwards is a second click that can only be yes.
+        # Any invitation that arrived while they were still setting up is swept
+        # in the same pass. Only on first onboarding: an ordinary password
+        # RESET must not silently accept invitations somebody has been sitting
+        # on deliberately.
+        accepted = 0
+        if was_invited and u.broker_party_id:
+            try:
+                from broker_routes import accept_pending_for_email
+                accepted = accept_pending_for_email(s, u.email, u.broker_party_id)
+            except Exception:  # noqa: BLE001
+                # Never block somebody setting their password because an
+                # invitation could not be linked; it stays pending and they can
+                # accept it from their own screen.
+                accepted = 0
         s.commit()
         _log(_tenant_name(s, u.tenant_id), u.email, "password_reset", target=str(u.id),
              details={"email": u.email, "method": "reset_token"})
@@ -743,7 +762,7 @@ def auth_reset(body: ResetBody, request: Request):
                  user_agent=request.headers.get("user-agent"),
                  user_id=u.id, tenant_id=u.tenant_id,
                  details={"email": u.email, "method": "reset_token"})
-        return {"ok": True}
+        return {"ok": True, "invitations_accepted": accepted}
 
 
 # ---- User invites (tokened "complete onboarding" link — reuses the reset page, in invite mode) ----
@@ -785,6 +804,31 @@ def _send_invite_email(email: str, link: str, name: Optional[str],
     except Exception as e:
         import logging
         logging.getLogger("bdx.email").warning("invite email to %s failed: %s", email, e)
+
+
+def _send_carrier_invite_email(email: str, link: str, name: Optional[str],
+                               carrier: Optional[str] = None) -> None:
+    """Best-effort "a carrier wants to work with you" email — never raises.
+
+    For a broker who ALREADY has a login. No password link and no expiry: they
+    are being asked a question, not handed an account. The link lands on the
+    invitation screen inside the app.
+    """
+    try:
+        from email_utils import send_email, carrier_invite_email_html
+        nm = (name or "").strip()
+        who = (carrier or "A carrier").strip()
+        send_email(
+            email, f"{who} wants to work with you on Kavachio",
+            carrier_invite_email_html(link, nm, carrier),
+            text=(f"Hi {nm}, " if nm else "")
+            + f"{who} has invited you to work with them on Kavachio. "
+              f"You already have an account — join here: {link}",
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger("bdx.email").warning(
+            "carrier invite email to %s failed: %s", email, e)
 
 
 # ---- Self-service: change password (signed-in user) ----------------------
@@ -849,6 +893,7 @@ def _tenant_dict(t: Tenant) -> dict:
     # `code`/`is_active` mirror the Tenants-list row shape so the single-tenant
     # fetch (TenantDetail) can render the header without pulling the whole list.
     return {"id": t.id, "mga": t.tenant_name, "legal_name": t.legal_name,
+            "owner_user_id": t.owner_user_id,
             "name": t.legal_name or (t.tenant_name or "").title(),
             "code": t.tenant_name, "is_active": bool(t.is_active),
             "tenant_type": t.tenant_type, "address": t.address,
@@ -972,6 +1017,9 @@ class NewTenantBody(BaseModel):
     tenant_type: Optional[str] = None
     currency: Optional[str] = None
     is_active: Optional[bool] = True
+    # The organisation's OWNER. Named `admin_*` for the callers that already
+    # send it; this person becomes both the first carrier_admin and the owner
+    # of record, which is what "add an organisation and its owner" means.
     admin_name: Optional[str] = None
     admin_email: Optional[str] = None
 
@@ -1035,6 +1083,12 @@ def tenants_create(body: NewTenantBody,
                 # admin doing it is the answer.
                 invited_by_user_id=_p.user_id)
             s.add(admin_user)
+            # …and is the OWNER. "Add an organisation and its owner" is one
+            # act, so the accountable person is named at creation rather than
+            # being something somebody remembers to set afterwards. Needs the
+            # user id, so it is assigned after the flush below.
+            s.flush()
+            t.owner_user_id = admin_user.id
         # Invite the first admin with a tokened set-password link.
         invite_link = _make_invite_link(admin_user) if admin_user else None
         s.commit(); s.refresh(t)
@@ -1044,6 +1098,106 @@ def tenants_create(body: NewTenantBody,
         _log(slug, _actor(_p), "tenant_created", target=slug,
              details={"name": t.legal_name, "tenant_id": t.id})
         return _tenant_dict(t)
+
+
+class TransferOwnershipBody(BaseModel):
+    """Who to hand the organisation to. By email, because that is what the
+    person doing it knows — they were told "transfer it to Dana", not
+    "transfer it to user 47"."""
+    email: Optional[str] = None
+    user_id: Optional[int] = None
+
+
+@router.post("/tenants/{mga}/transfer-ownership")
+def tenant_transfer_ownership(mga: str, body: TransferOwnershipBody,
+                              principal: Principal = Depends(current_principal)):
+    """Hand this organisation to one of its other admins.
+
+    WHO MAY. The current owner, or a Kavachio admin. Not any carrier_admin —
+    an organisation whose ownership could be taken by anyone the owner invited
+    is not owned, and the point of naming an owner is that one person is
+    accountable rather than any of several.
+
+    WHO TO. Someone already in THIS organisation, already a carrier_admin, and
+    not suspended. Ownership does not invite anybody and does not promote
+    anybody: it moves accountability between two people who could already both
+    do the work. Handing it to somebody who cannot sign in would leave the
+    organisation owned by nobody who can act.
+
+    WHAT IT DOES NOT DO. It does not remove the outgoing owner. They stay a
+    carrier_admin and keep working, and the new owner may then deactivate them
+    — which is refused while they still hold ownership (see users_delete), so
+    the two steps cannot be done in the wrong order and leave an organisation
+    with no owner.
+    """
+    from auth_deps import normalize_role
+    with SessionLocal() as s:
+        t = s.query(Tenant).filter(Tenant.tenant_name == mga).first()
+        if not t:
+            raise HTTPException(404, "organisation not found")
+
+        is_platform = principal.role == "kavachio_admin"
+        if not is_platform:
+            if t.owner_user_id != principal.user_id:
+                raise HTTPException(
+                    403,
+                    "only this organisation's owner can hand it on. If the "
+                    "owner has left, a Kavachio admin can transfer it for you.")
+
+        target = None
+        if body.user_id is not None:
+            target = s.get(AppUser, body.user_id)
+        elif body.email:
+            target = (s.query(AppUser)
+                       .filter(func.lower(AppUser.email) == body.email.strip().lower())
+                       .first())
+        if not target:
+            raise HTTPException(404, {
+                "message": "nobody in this organisation has that email. They "
+                           "have to be here already — transferring does not "
+                           "invite anyone.",
+                "errors": {"email": "not found"}})
+
+        if target.tenant_id != t.id:
+            # 404-shaped reason, not "wrong organisation": whether an email
+            # exists in somebody else's organisation is not this caller's
+            # business to learn.
+            raise HTTPException(404, {
+                "message": "nobody in this organisation has that email.",
+                "errors": {"email": "not found"}})
+        if target.id == t.owner_user_id:
+            raise HTTPException(409, f"{target.email} already owns this organisation.")
+        if normalize_role(target.role) != "carrier_admin":
+            raise HTTPException(409, {
+                "message": f"{target.email} is not an admin of this "
+                           f"organisation, so they cannot own it. Make them an "
+                           f"admin first.",
+                "errors": {"email": "not an admin"}})
+        if (target.status or "active") == "suspended":
+            raise HTTPException(409, {
+                "message": f"{target.email} cannot sign in, so the organisation "
+                           f"would be owned by somebody unable to act on it.",
+                "errors": {"email": "suspended"}})
+
+        previous = s.get(AppUser, t.owner_user_id) if t.owner_user_id else None
+        t.owner_user_id = target.id
+        s.commit()
+
+        try:
+            _log(mga, _actor(principal), "ownership_transferred",
+                 target=f"user:{target.id}",
+                 details={"from": previous.email if previous else None,
+                          "to": target.email})
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "ok": True,
+            "owner_user_id": target.id,
+            "message": (f"{target.email} now owns this organisation."
+                        + (f" {previous.email} is still an admin — remove them "
+                           f"separately if they are leaving."
+                           if previous else "")),
+        }
 
 
 @router.post("/tenants/{mga}/resend-invite")
@@ -1412,10 +1566,15 @@ def _program_dict(p: Program, mga: Optional[str] = None) -> dict:
 def programs_list(mga: str, principal: Principal = Depends(current_principal)):
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
+        # Newest first, for the same reason the broker list is: the programme
+        # somebody is looking for right after creating it should be at the top,
+        # not filed under its initial. Id breaks ties so two created in the
+        # same second still have a stable order.
         return [_program_dict(p, mga) for p in
                 s.query(Program).filter(Program.tenant_id == tid,
                                         Program.is_app_managed.is_(True))
-                .order_by(Program.name).all()]
+                .order_by(Program.created_at.desc().nullslast(),
+                          Program.id.desc()).all()]
 
 
 @router.post("/programs")
@@ -5063,6 +5222,19 @@ def users_list(
         broker_ids |= {r[0] for r in s.query(Party.id).filter(
             Party.tenant_id == tid,
             func.cast(Party.party_type, String).in_(PRODUCER_PARTY_TYPES)).all()}
+        # …and every broker who ACCEPTED this carrier's invitation. That is the
+        # relationship; the programme link is what they do inside it and may be
+        # days later. Without this a broker who joined carrier 2 yesterday was
+        # absent from carrier 2's Users & Roles — their party belongs to
+        # whoever onboarded them, and they were on none of carrier 2's
+        # programmes yet, so they matched neither rule above.
+        # Mirrors hierarchy_routes._invited_broker_ids; inlined because
+        # hierarchy_routes imports from here.
+        from db import BrokerInvitation
+        broker_ids |= {r[0] for r in s.query(BrokerInvitation.party_id)
+                       .filter(BrokerInvitation.tenant_id == tid,
+                               BrokerInvitation.status == "accepted",
+                               BrokerInvitation.party_id.isnot(None)).all()}
 
         # kavachio_admin is a cross-tenant platform role, not a member of this
         # tenant's org — never surfaced on a tenant's own Users screen.
@@ -5109,14 +5281,22 @@ def users_list(
         names = {p.id: p.legal_name for p in s.query(Party).filter(
             Party.id.in_({u.broker_party_id for u in rows if u.broker_party_id} or {-1})).all()}
         carrier_name = _tenant_display(s, tid) or mga
+        # Who owns this organisation. Sent with the list so the screen can mark
+        # the row and offer the transfer without a second call — and so it can
+        # show WHY the owner has no Remove link, rather than an inert control
+        # with no explanation.
+        owner_row = s.query(Tenant).filter(Tenant.id == tid).first() if tid else None
+        owner_user_id = owner_row.owner_user_id if owner_row else None
         items = []
         for u in rows:
             d = _user_dict(u, mga)
             d["broker_party_id"] = u.broker_party_id
             d["org_name"] = names.get(u.broker_party_id, "—") if u.broker_party_id else carrier_name
             d["org_kind"] = "broker" if u.broker_party_id else "carrier"
+            d["is_owner"] = bool(owner_user_id and u.id == owner_user_id)
             items.append(d)
         return {"items": items, "total": total, "total_admins": int(total_admins),
+                "owner_user_id": owner_user_id,
                 "page": page, "page_size": page_size}
 
 
@@ -5207,6 +5387,43 @@ def admin_users_list(
                 "page": page, "page_size": page_size}
 
 
+def _assert_is_carrier_admin(s, principal: Principal) -> None:
+    """Only the organisation's CARRIER ADMIN adds or removes its people.
+
+    An organisation has one carrier admin — the person Kavachio named when the
+    organisation was created, or whoever it has since been transferred to. The
+    others are carriers: they do the carrier's work, and they do not decide who
+    else is in the company.
+
+    Why this is a rule and not a convention. Everyone in a carrier organisation
+    holds the same `carrier_admin` DB role — the column only accepts four
+    values and adding a fifth would ripple through every check in the system.
+    So the DISTINCTION lives here, on the one axis that already exists: the
+    organisation's owner pointer. Without this guard, "carrier admin" would be
+    a label on a screen and any carrier could remove any other, including the
+    one accountable for the place.
+
+    Kavachio admins are exempt: they created the organisation, and they are the
+    way back in when the carrier admin has left without transferring.
+    """
+    if principal.is_platform_admin:
+        return
+    t = (s.query(Tenant).filter(Tenant.id == principal.tenant_id).first()
+         if principal.tenant_id else None)
+    if t is None:
+        raise HTTPException(403, "no organisation bound to this user")
+    # A legacy organisation with no owner recorded is not locked shut — that
+    # would strand everyone in it. Migration 18 names one wherever it can; this
+    # covers the case where it could not.
+    if t.owner_user_id is None:
+        return
+    if t.owner_user_id != principal.user_id:
+        raise HTTPException(
+            403,
+            "only your organisation's carrier admin can add or remove people. "
+            "If they have left, ownership has to be transferred first.")
+
+
 def _assert_manages_user(s, principal: Principal, u: AppUser) -> None:
     """Guard the by-id user routes now that BROKER people appear on the
     carrier's Users screen too.
@@ -5269,6 +5486,7 @@ def users_create(mga: str, body: UserBody,
 
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
+        _assert_is_carrier_admin(s, principal)
         if s.query(AppUser).filter(AppUser.email == body.email.strip().lower()).first():
             raise HTTPException(409, "Email already exists")
 
@@ -5325,6 +5543,7 @@ def users_resend_invite(user_id: int,
         if not u:
             raise HTTPException(404, "user not found")
         _assert_manages_user(s, principal, u)
+        _assert_is_carrier_admin(s, principal)
         if u.status not in ("invited", "pending"):
             raise HTTPException(409, "this user has already accepted their invite")
         link = _make_invite_link(u)
@@ -5344,6 +5563,7 @@ def users_update(user_id: int, body: UserBody,
         if not u:
             raise HTTPException(404, "user not found")
         _assert_manages_user(s, principal, u)
+        _assert_is_carrier_admin(s, principal)
         u.full_name = body.full_name
         if body.role:
             # Same reason as on create: the column only accepts the four names,
@@ -5379,11 +5599,28 @@ def users_delete(user_id: int,
         if not u:
             raise HTTPException(404, "user not found")
         _assert_manages_user(s, principal, u)
+        _assert_is_carrier_admin(s, principal)
 
         # Guards the UI already shows, enforced here too — the screen is not
         # the authority, and a bookmarked request bypasses it entirely.
         if u.id == principal.user_id:
             raise HTTPException(409, "You cannot remove your own account.")
+
+        # THE OWNER IS NOT REMOVABLE while they own the place. Removing them
+        # would leave the organisation accountable to nobody, in one click, by
+        # somebody they had themselves invited. Transferring first is not
+        # bureaucracy: it is what makes "the new owner removes the previous
+        # one" safe to do in either order — until ownership has moved there is
+        # no new owner to do the removing.
+        if u.tenant_id:
+            t = s.query(Tenant).filter(Tenant.id == u.tenant_id).first()
+            if t and t.owner_user_id == u.id:
+                raise HTTPException(409, {
+                    "message": f"{u.email} owns this organisation, so they "
+                               f"cannot be removed. Transfer ownership to "
+                               f"another admin first — then remove them.",
+                    "errors": {"owner": "transfer first"}})
+
         if normalize_role(u.role) == "carrier_admin" and u.tenant_id:
             others = (s.query(func.count(AppUser.id))
                        .filter(AppUser.tenant_id == u.tenant_id,

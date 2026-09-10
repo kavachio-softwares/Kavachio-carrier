@@ -17,6 +17,9 @@ type U = {
   broker_party_id?: number | null;
   org_name?: string | null;
   org_kind?: "carrier" | "broker";
+  /** The one person accountable for this organisation. Exactly one row carries
+   *  it, and that row cannot be removed until ownership has moved. */
+  is_owner?: boolean;
 };
 
 // The API normalizes every stored/legacy role string down to the four-role
@@ -29,6 +32,12 @@ const ROLE_LABEL: Record<string, string> = {
 };
 
 // What each seat can actually do — the reason anyone reads this table.
+// Only the carrier admin adds or removes people; a carrier does the work.
+const CARRIER_CAN_DO = {
+  admin: "Everything, plus adding and removing carriers and brokers",
+  member: "Contracts, programmes and bordereaux — not people",
+};
+
 const ROLE_CAN_DO: Record<string, string> = {
   carrier_admin: "Everything you can, including approving contracts",
   broker_admin: "Their contracts and file setups; adds their own staff",
@@ -77,10 +86,11 @@ export default function Users() {
   // last admin" needs the true total, not just however many are on this page.
   const filterKey = `${dq}|${roleFilter}|${statusFilter}`;
   const { page, setPage, items, total, extra, pageCount, reload } = useServerList<
-    U, { total_admins: number }
+    U, { total_admins: number; owner_user_id: number | null }
   >(
     (page, pageSize) =>
-      api.get<{ items: U[]; total: number; total_admins: number }>("/users", {
+      api.get<{ items: U[]; total: number; total_admins: number;
+                owner_user_id: number | null }>("/users", {
         params: {
           mga, page, page_size: pageSize,
           q: dq || undefined, role: roleFilter || undefined, status: statusFilter || undefined,
@@ -92,11 +102,27 @@ export default function Users() {
   const pageRows = items;
   const totalItems = total;
   const adminCount = extra?.total_admins ?? 0;
+  const ownerId = extra?.owner_user_id ?? null;
+  const iAmOwner = !!me?.id && ownerId === me.id;
+
   function canRemove(u: U) {
     if (u.id === me?.id) return false;          // can't remove yourself
+    if (u.is_owner) return false;               // transfer the organisation first
     if (normalizeRole(u.role) === "operator") return false;  // the broker's seat, not yours
     if (normalizeRole(u.role) === "carrier_admin" && adminCount <= 1) return false; // can't remove last admin
     return true;
+  }
+
+  /** Why a Remove link is inert, in the words of the rule that stopped it. The
+   *  server enforces every one of these; this only explains it in place. */
+  function whyNotRemovable(u: U): string {
+    if (u.id === me?.id) return "You cannot remove your own account.";
+    if (u.is_owner)
+      return "This is the carrier admin. Transfer the role to another carrier "
+           + "first — then they can be removed.";
+    if (normalizeRole(u.role) === "operator")
+      return "Operators are removed by their own broker admin.";
+    return "This is the only admin — add another before removing this one.";
   }
 
   const filtersActive = q !== "" || roleFilter !== "" || statusFilter !== "";
@@ -108,6 +134,32 @@ export default function Users() {
   const [removeTarget, setRemoveTarget] = useState<U | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeErr, setRemoveErr] = useState<string | null>(null);
+
+  // Handing the organisation on. A separate flow from removal on purpose: it
+  // is the step that MAKES removal possible, and doing both behind one button
+  // would mean a mis-click both transferred the organisation and deleted
+  // somebody.
+  const [xferTarget, setXferTarget] = useState<U | null>(null);
+  const [xferBusy, setXferBusy] = useState(false);
+  const [xferErr, setXferErr] = useState<string | null>(null);
+
+  function closeXfer() { if (!xferBusy) { setXferTarget(null); setXferErr(null); } }
+  async function confirmXfer() {
+    if (!xferTarget) return;
+    setXferBusy(true); setXferErr(null);
+    try {
+      const { data } = await api.post<{ message?: string }>(
+        `/tenants/${mga}/transfer-ownership`, { email: xferTarget.email });
+      setMsg({ kind: "ok",
+               text: data?.message ?? `${xferTarget.email} now owns this organisation.` });
+      setXferTarget(null);
+      reload();
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      setXferErr((typeof d === "string" ? d : d?.message)
+        ?? "We couldn't transfer ownership. Please try again.");
+    } finally { setXferBusy(false); }
+  }
 
   function askRemove(u: U) {
     if (!canRemove(u)) return;   // link is visibly muted; nothing to explain in a popup
@@ -243,11 +295,24 @@ export default function Users() {
                         </div>
                       </td>
                       <td>
-                        <span className={`badge ${isAdminRow ? "b-info" : "b-mut"}`}>
-                          <span className="d" />{ROLE_LABEL[role] ?? role}
+                        {/* One organisation, one carrier admin — the person
+                            accountable for it and the only one who adds or
+                            removes people. Everyone else is a carrier: the
+                            same DB role, deliberately, because the column
+                            only accepts four values and the distinction that
+                            matters is who owns the place. */}
+                        <span className={`badge ${u.is_owner ? "b-info" : "b-mut"}`}>
+                          <span className="d" />
+                          {u.org_kind === "broker"
+                            ? (ROLE_LABEL[role] ?? role)
+                            : u.is_owner ? "Carrier Admin" : "Carrier"}
                         </span>
                       </td>
-                      <td className="l">{ROLE_CAN_DO[role] ?? "—"}</td>
+                      <td className="l">
+                        {u.org_kind === "broker"
+                          ? (ROLE_CAN_DO[role] ?? "—")
+                          : u.is_owner ? CARRIER_CAN_DO.admin : CARRIER_CAN_DO.member}
+                      </td>
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">
@@ -266,6 +331,23 @@ export default function Users() {
                             does nothing — and aria-disabled drives the styling
                             (grey, not-allowed cursor, no hover underline). The
                             title says which rule applies. */}
+                        {/* Handing the organisation on. Offered only BY the
+                            owner and only TO another admin of this
+                            organisation, which is exactly what the server
+                            allows — a link that 403s is worse than no link. */}
+                        {iAmOwner && !u.is_owner && u.org_kind !== "broker"
+                          && isAdminRow && (
+                          <>
+                            <span
+                              className="linkish"
+                              title={`Make ${u.full_name} the carrier admin of this organisation`}
+                              onClick={() => { setXferErr(null); setXferTarget(u); }}
+                            >
+                              Make carrier admin
+                            </span>
+                            {" · "}
+                          </>
+                        )}
                         {canRemove(u) ? (
                           <span className="linkish" title="Remove this user"
                             onClick={() => askRemove(u)}>
@@ -273,11 +355,7 @@ export default function Users() {
                           </span>
                         ) : (
                           <span className="linkish mut" aria-disabled="true"
-                            title={u.id === me?.id
-                              ? "You can't remove your own account."
-                              : normalizeRole(u.role) === "operator"
-                                ? "Operators belong to the broker. Their own admin adds and removes them."
-                                : "This is the only admin — add another before removing this one."}>
+                                title={whyNotRemovable(u)}>
                             Remove
                           </span>
                         )}
@@ -347,6 +425,37 @@ export default function Users() {
 
       {/* Remove user — same in-app dialog pattern as Reset Password above, so
           the two destructive actions on this screen look like one product. */}
+      {xferTarget && (
+        <div className="proto-modal-overlay" onClick={closeXfer}>
+          <div className="proto-modal" onClick={e => e.stopPropagation()}>
+            <div className="m-h">
+              <h3>Transfer the carrier admin role</h3>
+              <button className="x" onClick={closeXfer} aria-label="Close">×</button>
+            </div>
+            <div className="m-b">
+              Make <b>{xferTarget.full_name || xferTarget.email}</b>{" "}
+              ({xferTarget.email}) the carrier admin of this organisation?
+              <div className="sub" style={{ marginTop: 10 }}>
+                They become the one person accountable for it: the only one who
+                can add or remove carriers and brokers, and the only one who can
+                transfer the role again. <b>You become a carrier</b> — you keep
+                working on contracts, programmes and bordereaux, but no longer
+                manage people. If you are leaving, they remove you afterwards.
+              </div>
+              {xferErr && (
+                <div style={{ marginTop: 10, color: "var(--p-crit)" }}>{xferErr}</div>
+              )}
+            </div>
+            <div className="m-f">
+              <button className="btn" onClick={closeXfer} disabled={xferBusy}>Cancel</button>
+              <button className="btn pri" onClick={confirmXfer} disabled={xferBusy}>
+                {xferBusy ? "Transferring…" : "Transfer the role"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {removeTarget && (
         <div className="proto-modal-overlay" onClick={closeRemove}>
           <div className="proto-modal" onClick={e => e.stopPropagation()}>

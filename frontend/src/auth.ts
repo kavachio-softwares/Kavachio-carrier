@@ -113,6 +113,12 @@ export function setAuth(data: AuthResponse) {
 /** Clear everything — user profile and both tokens. Use on logout / 401. */
 export function clearAuth() {
   store.dispatch(authCleared());
+  // The broker's carrier selection is a per-seat view preference held outside
+  // the auth slice, so it survives a logout unless it is cleared here — and
+  // the next person in this browser would start on the last one's carrier.
+  try {
+    localStorage.removeItem("kav.broker.carrier");
+  } catch { /* storage blocked; nothing persisted to clear */ }
   emitAuthEvent();
 }
 

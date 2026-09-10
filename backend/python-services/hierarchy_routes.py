@@ -36,6 +36,8 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, String
 
 from db import (
+    Tenant,
+    BrokerInvitation,
     SessionLocal, Party, Program, Contract, AppUser,
     ProgramBroker, ContractApproval,
 )
@@ -65,6 +67,24 @@ def _broker_dict(p: Party) -> dict:
     }
 
 
+def _invited_broker_ids(session, tenant_id: int) -> set[int]:
+    """Brokers who ACCEPTED this carrier's invitation.
+
+    The accepted invitation is the relationship. Before invitations there was
+    nothing to be one: a carrier "had" a broker because it had created the
+    party row, or because a programme link happened to exist — so a broker
+    shared with another carrier belonged to nobody until they were put on a
+    programme, and could not be put on one because they belonged to nobody.
+    This is what breaks that circle.
+    """
+    rows = (session.query(BrokerInvitation.party_id)
+            .filter(BrokerInvitation.tenant_id == tenant_id,
+                    BrokerInvitation.status == "accepted",
+                    BrokerInvitation.party_id.isnot(None))
+            .all())
+    return {r[0] for r in rows}
+
+
 def _assert_broker(session, party_id: int, tenant_id: int) -> Party:
     """Fetch a party and prove it can produce on this carrier's programmes.
 
@@ -83,16 +103,24 @@ def _assert_broker(session, party_id: int, tenant_id: int) -> Party:
             400,
             f"party {party_id} is a {party.party_type} — only "
             f"{', '.join(PRODUCER_PARTY_TYPES)} can be put on a programme")
-    # A broker is visible to a carrier either because the carrier created it
-    # (tenant_id matches) or because it sits on one of the carrier's programmes.
+    # A broker is visible to a carrier because the carrier created it
+    # (tenant_id matches), because it sits on one of the carrier's programmes,
+    # or because it ACCEPTED that carrier's invitation — which is the case for
+    # every broker shared with another carrier, and the reason they can be put
+    # on a programme at all.
     if party.tenant_id != tenant_id:
-        on_a_programme = (
+        reachable = (
             session.query(ProgramBroker.id)
             .filter(ProgramBroker.broker_party_id == party_id,
                     ProgramBroker.tenant_id == tenant_id)
             .first()
+            or session.query(BrokerInvitation.id)
+            .filter(BrokerInvitation.party_id == party_id,
+                    BrokerInvitation.tenant_id == tenant_id,
+                    BrokerInvitation.status == "accepted")
+            .first()
         )
-        if not on_a_programme:
+        if not reachable:
             raise HTTPException(404, "broker not found")
     return party
 
@@ -267,9 +295,27 @@ def broker_directory(principal: Principal = Depends(current_principal)):
         # A broker the carrier created but has not yet put on any programme is
         # still in the directory — it is exactly the state the UI must show as
         # "not on a programme yet", not hide.
+        # Brokers this carrier created, PLUS brokers who accepted its
+        # invitation — a shared broker has no party row of this carrier's and
+        # no programme link until one is added, so without the second half they
+        # would be invisible to the carrier who just invited them.
+        invited_ids = _invited_broker_ids(s, tid)
+        # …AND brokers who have been invited but have not answered. Leaving
+        # those out was a dead end: the carrier saw nothing, invited again, and
+        # got "you have already invited them" from a screen that showed no such
+        # invitation. An outstanding invitation is a thing that HAPPENED — it
+        # belongs on the list, marked as unanswered.
+        pending = (s.query(BrokerInvitation)
+                   .filter(BrokerInvitation.tenant_id == tid,
+                           BrokerInvitation.status == "pending")
+                   .order_by(BrokerInvitation.created_at.desc())
+                   .all())
+        pending_by_party = {i.party_id: i for i in pending if i.party_id}
+
         unassigned = (
             s.query(Party)
-            .filter(Party.tenant_id == tid,
+            .filter(or_(Party.tenant_id == tid,
+                        Party.id.in_((invited_ids | set(pending_by_party)) or {-1})),
                     # party_type is the enum party_type_e — its labels are
                     # already lowercase, so cast to text rather than lower().
                     func.cast(Party.party_type, String) == "broker",
@@ -280,6 +326,21 @@ def broker_directory(principal: Principal = Depends(current_principal)):
             by_broker[party.id] = {**_broker_dict(party), "programmes": [],
                                    "contract_count": 0, "user_count": 0}
 
+        # THE SAME BROKER READS DIFFERENTLY TO DIFFERENT CARRIERS, and that is
+        # the point: one who accepted carrier A and has not answered carrier B
+        # is active on A's screen and invited on B's. The status is the
+        # relationship with THIS carrier, not a property of the broker.
+        for pid, d in by_broker.items():
+            inv = pending_by_party.get(pid)
+            d["relationship"] = "invited" if inv else "active"
+            d["invitation"] = ({"id": inv.id, "email": inv.email,
+                                "invited_at": _iso_utc(inv.created_at)}
+                               if inv else None)
+
+        # An invitation with no party is not listed. Inviting a NEW broker
+        # creates the organisation immediately, so the only way to have one is
+        # an address belonging to somebody who is not a broker at all — which
+        # can never be accepted, and does not belong in a directory of brokers.
         for pid, d in by_broker.items():
             d["contract_count"] = (
                 s.query(func.count(Contract.id))
@@ -290,7 +351,15 @@ def broker_directory(principal: Principal = Depends(current_principal)):
                 s.query(func.count(AppUser.id))
                 .filter(AppUser.broker_party_id == pid).scalar() or 0
             )
-        return sorted(by_broker.values(), key=lambda b: (b["legal_name"] or "").lower())
+        # Newest first. A carrier scanning this list is almost always looking
+        # for the one they just added — alphabetical put it wherever its name
+        # happened to fall, which on a long list is nowhere near the top.
+        # `created_at` is an ISO string here; a missing one sorts last rather
+        # than crashing the comparison.
+        return sorted(by_broker.values(),
+                      key=lambda b: (b.get("created_at") or "",
+                                     (b["legal_name"] or "").lower()),
+                      reverse=True)
 
 
 class NewBrokerBody(BaseModel):
@@ -303,6 +372,27 @@ class NewBrokerBody(BaseModel):
     # Put them straight onto a programme. Optional, because a carrier may add a
     # broker to its directory before deciding which programme they belong on.
     program_id: Optional[int] = None
+
+
+def _join_link(invitation_id: int) -> str:
+    """Where "Join now" lands: the invitation itself, inside the app.
+
+    Not a tokened link. The recipient already has a login, and the screen
+    refuses any invitation not addressed to whoever is signed in — so the id in
+    the URL opens nothing on its own, and a forwarded email is useless to
+    anybody else.
+    """
+    import os
+    base = os.getenv("APP_BASE_URL", "http://localhost:5173").rstrip("/")
+    return f"{base}/invitations?id={invitation_id}"
+
+
+# There is no "add an existing broker" endpoint, deliberately. It worked by
+# telling the carrier that an address already belonged to a broker — which is a
+# relationship between that broker and whichever carriers onboarded them, and
+# not the next carrier's to learn by typing an address into a form. Inviting
+# now covers both cases without the carrier ever finding out which one they are
+# in: see broker_create, and BrokerInvitation.
 
 
 @router.post("/brokers")
@@ -320,7 +410,8 @@ def broker_create(body: NewBrokerBody,
     nobody can sign in as, and a broker on no programme cannot produce. Doing
     all three at once means what you end up with actually works.
     """
-    from app_routes import _make_invite_link, _send_invite_email
+    from app_routes import (_make_invite_link, _send_invite_email,
+                            _send_carrier_invite_email)
 
     name = (body.legal_name or "").strip()
     if not name:
@@ -332,27 +423,96 @@ def broker_create(body: NewBrokerBody,
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal)
 
-        # Checked BEFORE anything is created, so a taken email never leaves
-        # behind a broker with no admin invited.
-        if email and s.query(AppUser).filter(AppUser.email == email).first():
-            raise HTTPException(409, "That email is already in use.")
-        if s.query(Party).filter(Party.tenant_id == tid,
-                                 func.lower(Party.legal_name) == name.lower()).first():
-            raise HTTPException(409, f"You already work with a broker called {name}.")
+        if not email:
+            raise HTTPException(400, {
+                "message": "Give the broker admin's email — the invitation "
+                           "goes to a person, not to an organisation.",
+                "errors": {"admin_email": "required"}})
+        # NO PROGRAMME. A broker is invited to work with the CARRIER, not with
+        # one of its programmes: which programmes they produce on is a decision
+        # the carrier goes on making for years, and making the first one part
+        # of onboarding forces it before either side knows the answer. So the
+        # invitation says "come and work with us", the accepted invitation IS
+        # the relationship, and programmes are added afterwards from the
+        # programme's own screen — as many times as needed.
         if body.program_id:
             _assert_programme(s, body.program_id, principal, tid)
 
-        party = Party(tenant_id=tid, party_type=body.party_type, legal_name=name,
-                      scope="tenant", is_app_managed=True, is_active=True)
-        s.add(party); s.flush()
+        # ── facts about THIS carrier's own book: safe to state plainly ──
+        dup = (s.query(BrokerInvitation)
+               .filter(BrokerInvitation.tenant_id == tid,
+                       func.lower(BrokerInvitation.email) == email,
+                       BrokerInvitation.status == "pending")
+               .first())
+        if dup:
+            raise HTTPException(409, {
+                "message": f"You have already invited {email}. They have not "
+                           f"answered yet.",
+                "errors": {"admin_email": "already invited"}})
 
-        if body.program_id:
-            s.add(ProgramBroker(tenant_id=tid, program_id=body.program_id,
-                                broker_party_id=party.id, status="active",
-                                assigned_by_user_id=principal.user_id))
+        # ── facts about somebody ELSE's book: never stated, never implied ──
+        #
+        # From here the two cases diverge and the carrier is told NOTHING about
+        # which one they are in. Whether this address already has a login is a
+        # relationship between that person and whichever carriers onboarded
+        # them; the next carrier does not get to discover it by typing an
+        # address into a form. Both branches end at the same response.
+        existing_user = s.query(AppUser).filter(AppUser.email == email).first()
+        existing_party = (s.get(Party, existing_user.broker_party_id)
+                          if existing_user and existing_user.broker_party_id else None)
+        is_existing_broker = bool(
+            existing_party
+            and (existing_party.party_type or "").lower() in PRODUCER_PARTY_TYPES)
 
-        admin, link = None, None
-        if email:
+        admin, link, party = None, None, None
+        if is_existing_broker:
+            # They exist. Nothing is created — no organisation, no login, and
+            # no programme link. The invitation waits on THEIR screen, and the
+            # link appears when they accept it. A carrier can no longer put a
+            # broker on a programme by unilateral act.
+            party = existing_party
+            already_ours = (
+                s.query(BrokerInvitation)
+                 .filter(BrokerInvitation.tenant_id == tid,
+                         BrokerInvitation.party_id == party.id,
+                         BrokerInvitation.status == "accepted").first()
+                or s.query(ProgramBroker)
+                    .filter(ProgramBroker.broker_party_id == party.id,
+                            ProgramBroker.tenant_id == tid,
+                            ProgramBroker.status == "active").first())
+            if already_ours:
+                # Their own book again — this one they can be told.
+                raise HTTPException(409, {
+                    "message": "You already work with that broker.",
+                    "errors": {"admin_email": "already yours"}})
+        else:
+            # New to the platform, OR an address belonging to somebody who is
+            # not a broker (a carrier's own staff, say). Both are handled the
+            # same way on purpose: a party can only be created when the email
+            # is genuinely free, and the difference between "new" and "taken by
+            # a non-broker" is not the inviting carrier's business either.
+            if existing_user:
+                # The address cannot become a broker login. The invitation is
+                # recorded and simply never accepted — indistinguishable from
+                # one nobody got round to answering, which is the point.
+                s.add(BrokerInvitation(
+                    tenant_id=tid, program_id=body.program_id, email=email,
+                    org_name=name, status="pending",
+                    by_user_id=principal.user_id))
+                s.commit()
+                return {"ok": True, "invited": True, "email": email,
+                        "message": f"Invitation sent to {email}."}
+
+            if s.query(Party).filter(Party.tenant_id == tid,
+                                     func.lower(Party.legal_name) == name.lower()).first():
+                raise HTTPException(409, {
+                    "message": f"You already work with a broker called {name}.",
+                    "errors": {"legal_name": "duplicate"}})
+
+            party = Party(tenant_id=tid, party_type=body.party_type,
+                          legal_name=name, scope="tenant",
+                          is_app_managed=True, is_active=True)
+            s.add(party); s.flush()
             admin = AppUser(
                 email=email,
                 full_name=(body.admin_name or "").strip() or email.split("@")[0].title(),
@@ -364,15 +524,112 @@ def broker_create(body: NewBrokerBody,
             s.add(admin)
             link = _make_invite_link(admin)
 
-        s.commit(); s.refresh(party)
-        if admin and link:
-            _send_invite_email(admin.email, link, admin.full_name, party.legal_name)
+        invitation = BrokerInvitation(
+            tenant_id=tid, program_id=body.program_id, email=email,
+            party_id=party.id if party else None, org_name=name,
+            status="pending", by_user_id=principal.user_id)
+        s.add(invitation)
+        s.commit()
 
-        d = _broker_dict(party)
-        d.update({"admin_invited": bool(admin),
-                  "admin_email": admin.email if admin else None,
-                  "program_id": body.program_id})
-        return d
+        if admin and link:
+            # New: hand them an account. "Complete onboarding."
+            s.refresh(party)
+            _send_invite_email(admin.email, link, admin.full_name, party.legal_name)
+        elif is_existing_broker:
+            # Already has a login: ask them a question. "Join now" drops them on
+            # the invitation screen, signed in as themselves — no password, no
+            # expiry. Without this the invitation sat silently on a dashboard
+            # they had no reason to open.
+            s.refresh(invitation)
+            me = s.query(Tenant).filter(Tenant.id == tid).first()
+            _send_carrier_invite_email(
+                email, _join_link(invitation.id),
+                existing_user.full_name if existing_user else None,
+                (me.legal_name or me.tenant_name) if me else None)
+
+        # ONE response shape for both branches. A carrier comparing two
+        # invitations must not be able to tell which broker already existed.
+        return {"ok": True, "invited": True, "email": email,
+                "message": f"Invitation sent to {email}. They start working "
+                           f"with you once they accept — put them on "
+                           f"programmes after that."}
+
+
+
+
+
+@router.post("/broker-invitations/{invitation_id}/resend")
+def broker_invitation_resend(invitation_id: int,
+                             principal: Principal = Depends(require_role("carrier_admin"))):
+    from app_routes import _make_invite_link, _send_invite_email
+    """Send an outstanding invitation again.
+
+    The way out of a dead end. Inviting twice is refused — one invitation per
+    broker — so without this the only thing a carrier could do about an
+    unanswered invitation was nothing.
+
+    WHAT IT ACTUALLY DOES depends, again, on facts the carrier is not shown. A
+    broker who has never signed in gets a fresh invite link by email, because
+    the old one may have expired. One who already has a login gets nothing sent
+    — the invitation is sitting on their own screen and always was, and mailing
+    them about it would be this carrier telling them something about their own
+    account. Both answer the same way.
+    """
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal)
+        inv = s.get(BrokerInvitation, invitation_id)
+        if not inv or inv.tenant_id != tid:
+            raise HTTPException(404, "invitation not found")
+        if inv.status != "pending":
+            raise HTTPException(409, {
+                "message": f"That invitation was already {inv.status}.",
+                "errors": {"invitation": inv.status}})
+
+        u = (s.query(AppUser)
+             .filter(func.lower(AppUser.email) == (inv.email or "").lower())
+             .first())
+        if u and (u.status or "") == "invited" and u.broker_party_id:
+            # Never signed in: the link is how they get in at all, and it may
+            # have expired since.
+            link = _make_invite_link(u)
+            party = s.get(Party, u.broker_party_id)
+            s.commit()
+            _send_invite_email(u.email, link, u.full_name,
+                               party.legal_name if party else "")
+        else:
+            # Already has a login: the same "Join now" they got the first time.
+            me = s.query(Tenant).filter(Tenant.id == tid).first()
+            s.commit()
+            _send_carrier_invite_email(
+                inv.email, _join_link(inv.id), u.full_name if u else None,
+                (me.legal_name or me.tenant_name) if me else None)
+        return {"ok": True,
+                "message": f"Invitation to {inv.email} sent again."}
+
+
+@router.delete("/broker-invitations/{invitation_id}")
+def broker_invitation_revoke(invitation_id: int,
+                             principal: Principal = Depends(require_role("carrier_admin"))):
+    """Withdraw an invitation nobody has answered.
+
+    Only a pending one. An accepted invitation is the relationship itself, and
+    ending that is taking the broker off your programmes — a different act,
+    with contracts underneath it.
+    """
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal)
+        inv = s.get(BrokerInvitation, invitation_id)
+        if not inv or inv.tenant_id != tid:
+            raise HTTPException(404, "invitation not found")
+        if inv.status != "pending":
+            raise HTTPException(409, {
+                "message": f"That invitation was already {inv.status}, so "
+                           f"there is nothing to withdraw.",
+                "errors": {"invitation": inv.status}})
+        inv.status = "revoked"
+        inv.answered_at = datetime.now(timezone.utc)
+        s.commit()
+        return {"ok": True, "message": f"Invitation to {inv.email} withdrawn."}
 
 
 @router.get("/brokers/{broker_party_id}")
@@ -556,7 +813,9 @@ def hierarchy(principal: Principal = Depends(current_principal)):
         programmes = (
             s.query(Program)
             .filter(Program.tenant_id == tid)
-            .order_by(Program.name)
+            # Newest first — this is the list the Programmes screen renders.
+            .order_by(Program.created_at.desc().nullslast(),
+                      Program.id.desc())
             .all()
         )
         prog_ids = [p.id for p in programmes] or [-1]

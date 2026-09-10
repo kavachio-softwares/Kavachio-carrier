@@ -17,6 +17,7 @@ import {
 import { inAppSigningUrl } from "../api/esign";
 import { fmtDate } from "../utils/date";
 import { ListFilterBar } from "../components/ListFilterBar";
+import { useBrokerCarrierId } from "../brokerCarrier";
 
 /** Where the contract is in its life, said from the BROKER's side. A contract
  *  in `in_review` is one the carrier has sent over for them to read — the
@@ -42,23 +43,26 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
 export default function BrokerContracts() {
   const [rows, setRows] = useState<BrokerContract[] | null>(null);
   const [carriers, setCarriers] = useState<BrokerCarrier[]>([]);
-  const [carrier, setCarrier] = useState("");
+  // The sidebar's selection is the scope, and the only carrier control there
+  // is. This page used to carry its own filter as well; two carrier controls
+  // on one screen was a puzzle, not a feature.
+  const scopeCarrierId = useBrokerCarrierId();
   const [status, setStatus] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => { getBrokerCarriers().then(setCarriers).catch(() => setCarriers([])); }, []);
 
   const load = useCallback(() => {
-    getBrokerContracts({ carrierId: carrier ? Number(carrier) : undefined })
+    getBrokerContracts({ carrierId: scopeCarrierId ?? undefined })
       .then(setRows)
       .catch(() => setErr("Could not load your contracts."));
-  }, [carrier]);
+  }, [scopeCarrierId]);
   useEffect(load, [load]);
 
   const shown = (rows ?? []).filter(r =>
     !status || (status === "mine" ? r.whose_turn === "broker"
                                   : r.lifecycle === status));
-  const filtersActive = carrier !== "" || status !== "";
+  const filtersActive = status !== "";
 
   // The only queue a broker cannot move by waiting. Surfaced above the table
   // because it is the reason to open this page at all — a negotiation that
@@ -111,13 +115,10 @@ export default function BrokerContracts() {
         <div className="card">
           <ListFilterBar
             selects={[
-              // Only the carriers that have actually put this broker on a
-              // programme — a broker never picks a carrier freely.
-              {
-                key: "carrier", ariaLabel: "Filter by carrier", value: carrier, onChange: setCarrier,
-                options: [{ value: "", label: "All carriers" },
-                  ...carriers.map(c => ({ value: String(c.id), label: c.name }))],
-              },
+              // No carrier filter here. The sidebar scope names the carrier
+              // for every broker screen, and a second control on this page —
+              // one that could disagree with it, or widen past it — is exactly
+              // the merged view that scope exists to prevent.
               {
                 key: "status", ariaLabel: "Filter by state", value: status, onChange: setStatus,
                 options: [
@@ -130,7 +131,7 @@ export default function BrokerContracts() {
                 ],
               },
             ]}
-            onClear={() => { setCarrier(""); setStatus(""); }}
+            onClear={() => setStatus("")}
             active={filtersActive}
           />
 

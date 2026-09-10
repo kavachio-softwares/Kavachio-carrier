@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { setAuth, isKavachioAdmin, isTenantAdmin, userRole } from "../auth";
 import { armLoginNotice } from "../api/notifications";
@@ -10,6 +10,12 @@ type View = "signin" | "forgotEmail" | "forgotSent";
 
 export default function Login() {
   const nav = useNavigate();
+  const location = useLocation();
+  // Set when RequireAuth sent them here from a link they clicked. Used both to
+  // return them afterwards and to say WHY they are being asked — a login wall
+  // with no explanation reads as the link having failed.
+  const cameFrom = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname
+                   ?? null;
   const [view, setView] = useState<View>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,6 +29,15 @@ export default function Login() {
     try {
       const { data } = await api.post("/auth/login", { email, password });
       setAuth(data);
+      // Where they were headed before being asked to sign in. Returning them
+      // there is the whole point of having remembered it — see RequireAuth.
+      // Only same-app paths are honoured, so a crafted `state` cannot turn the
+      // login form into an open redirect.
+      const back = (location.state as { from?: { pathname?: string; search?: string } } | null)?.from;
+      const dest = back?.pathname && back.pathname.startsWith("/")
+                   && !back.pathname.startsWith("//")
+        ? `${back.pathname}${back.search ?? ""}`
+        : null;
       // Let the shell show its sign-in message once for this session. Armed for
       // every role; <PlatformNotificationCard/> is what decides it has anything
       // to say (platform admins only, and only when something is waiting).
@@ -31,7 +46,7 @@ export default function Login() {
       // Tenants + Data Mapping queue) and don't run tenant onboarding, so route
       // them straight there instead of the tenant Home dashboard.
       if (isKavachioAdmin()) {
-        nav("/admin/dashboard");
+        nav(dest ?? "/admin/dashboard");
         return;
       }
       // A broker seat has its own landing screen. It must not fall through to
@@ -39,7 +54,7 @@ export default function Login() {
       // a broker is refused, so it would land on a page of blanks.
       const r = userRole();
       if (r === "broker_admin" || r === "operator") {
-        nav("/broker");
+        nav(dest ?? "/broker");
         return;
       }
       // Only tenant admins run the org / carrier / Bordereau setup, so only they
@@ -47,9 +62,10 @@ export default function Login() {
       // shows a "not configured — ask your admin" notice when setup is pending.
       try {
         const onboarding = await api.get("/onboarding/status", { params: { mga: data.mga } });
-        nav(onboarding.data?.needs_onboarding && isTenantAdmin() ? "/welcome" : "/home");
+        nav(dest
+            ?? (onboarding.data?.needs_onboarding && isTenantAdmin() ? "/welcome" : "/home"));
       } catch {
-        nav("/home");
+        nav(dest ?? "/home");
       }
     } catch (e: any) {
       setErr(e?.response?.data?.detail ?? "Login failed.");
@@ -124,6 +140,26 @@ export default function Login() {
         {view === "signin" && (
           <>
             <p className="mb-6 text-sm" style={{ color: "#566071" }}>Bordereau &amp; Contract Validation</p>
+
+            {/* Says why they are here. Somebody who clicked "Join now" in an
+                email and met a bare login has no way to tell whether the link
+                worked — and after signing in they are taken to the invitation
+                rather than the dashboard, so the sentence is a promise the
+                app keeps. */}
+            {cameFrom?.startsWith("/invitations") && (
+              <div className="mb-5 rounded-md px-3 py-2.5 text-[13px]"
+                   style={{ background: "#EEF2FF", color: "#3149C6" }}>
+                <b>Sign in to see your invitation.</b> You will go straight to
+                it — a carrier is waiting for your answer.
+              </div>
+            )}
+            {cameFrom && !cameFrom.startsWith("/invitations") && (
+              <div className="mb-5 rounded-md px-3 py-2.5 text-[13px]"
+                   style={{ background: "#EEF2FF", color: "#3149C6" }}>
+                Sign in and we will take you where you were going.
+              </div>
+            )}
+
             <form onSubmit={submit}>
               <div className="mb-4">
                 <label className="mb-1.5 block text-xs font-semibold" style={{ color: "#566071" }}>Email</label>
