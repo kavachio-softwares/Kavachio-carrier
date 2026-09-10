@@ -11,9 +11,15 @@ type View = "signin" | "forgotEmail" | "forgotSent";
 export default function Login() {
   const nav = useNavigate();
   const location = useLocation();
-  // Set when RequireAuth sent them here from a link they clicked. Used both to
-  // return them afterwards and to say WHY they are being asked — a login wall
-  // with no explanation reads as the link having failed.
+  // Set when RequireAuth sent them here. NOT a reliable sign that somebody
+  // followed a link: the index route lives inside RequireAuth too, so merely
+  // opening the app while signed out arrives with `from: "/"`. So this is used
+  // to explain the wait ONLY for the invitation flow, where the destination is
+  // unambiguous and the promise always holds — every other route is re-checked
+  // by RequireAccess after sign-in and may legitimately end up elsewhere.
+  //
+  // Returning the user to `dest` below is unaffected and still applies to any
+  // same-app path: doing it silently is right, promising it is not.
   const cameFrom = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname
                    ?? null;
   const [view, setView] = useState<View>("signin");
@@ -151,12 +157,6 @@ export default function Login() {
                    style={{ background: "#EEF2FF", color: "#3149C6" }}>
                 <b>Sign in to see your invitation.</b> You will go straight to
                 it — a carrier is waiting for your answer.
-              </div>
-            )}
-            {cameFrom && !cameFrom.startsWith("/invitations") && (
-              <div className="mb-5 rounded-md px-3 py-2.5 text-[13px]"
-                   style={{ background: "#EEF2FF", color: "#3149C6" }}>
-                Sign in and we will take you where you were going.
               </div>
             )}
 

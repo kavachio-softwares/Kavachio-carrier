@@ -76,8 +76,7 @@ export default function BrokerContracts() {
           <div className="t">
             <h2>My Contracts</h2>
             <p>
-              Every contract you hold, across all the programmes you have been
-              put on. You do not add the programme — the carrier does.
+              Every contract you hold, across the programmes each carrier has put you on.
             </p>
           </div>
         </div>

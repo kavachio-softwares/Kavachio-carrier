@@ -119,8 +119,7 @@ export default function ContractUpload() {
           <div className="t">
             <h2>Upload Contract</h2>
             <p>
-              A wording you already have. Its terms are read out of the document
-              rather than retyped.
+              A wording you already have, with its terms read out of the document rather than retyped.
             </p>
           </div>
           <div className="actions">

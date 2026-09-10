@@ -1315,7 +1315,7 @@ export default function DirectSetup() {
         )}
       </Modal>
       <PageHeader title="Bordereau Setup"
-        subtitle="Done once per carrier and programme. Kavachio learns how your data maps to the output, and from then on your team just uploads each new bordereau and gets a validated file back." />
+        subtitle="Done once per carrier and programme, so every later bordereau is just an upload." />
       <PageBody>
         {err && <Banner kind="error"><AlertTriangle size={15} /> {err}</Banner>}
 

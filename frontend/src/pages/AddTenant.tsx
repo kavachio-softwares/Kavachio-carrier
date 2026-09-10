@@ -69,9 +69,7 @@ export default function AddTenant() {
           <div className="t">
             <h2>Create Carrier</h2>
             <p>
-              Add the insurance company and email an invitation to their first
-              admin. From there, they set up their own programmes, brokers and
-              contracts.
+              Add the insurance company and invite its owner, who sets up their own programmes, brokers and contracts from there.
             </p>
           </div>
           <div className="actions">

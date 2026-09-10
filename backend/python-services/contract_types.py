@@ -111,8 +111,12 @@ CONTRACT_TYPES: dict[str, dict[str, Any]] = {
             "name", "counterparty_party_id", "inception_dt", "expiry_dt",
             "class_of_business",
         ],
+        # No year_of_account. It is a TREATY idea — which underwriting year a
+        # cession attaches to — and on a binder with a broker it was an
+        # optional box nobody filled in. It stays REQUIRED on the reinsurer
+        # type below, where it means something.
         "optional": [
-            "schedule_key", "year_of_account", "notice_period_days",
+            "schedule_key", "notice_period_days",
             "premium_cap_amount", "premium_cap_currency", "executed_date",
             "earnings_pattern",
         ],

@@ -98,7 +98,7 @@ export default function RecentRuns() {
         <div className="page-head">
           <div className="t">
             <h2>Process Bordereau History</h2>
-            <p>Every bordereau you've processed — search or filter to find a run, then review its exceptions or download the output.</p>
+            <p>Every bordereau you have processed, with its exceptions and its output.</p>
           </div>
           <div className="actions">
             <button className="btn" onClick={() => navigate("/direct")}>

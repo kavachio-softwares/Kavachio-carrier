@@ -771,12 +771,11 @@ export default function ContractNew() {
                   </button>
                 ))}
               </div>
-              {/* The name alone does not say what happens. "Critical" is the
-                  word the rest of the app uses, and this is what it means for
-                  the file the broker sends. */}
-              <div className="sub" style={{ marginTop: 4 }}>
-                {sevSpec.find(x => x.key === sev)?.action ?? ""}
-              </div>
+              {/* No "Stops the row" line here. Each option already carries
+                  the same explanation in its `title`, and the row's own
+                  "In the contract → On every row" strip below spells out the
+                  consequence in context — three sayings of one fact made the
+                  row noisy. */}
             </>
           ) : (
             <span className="sub">

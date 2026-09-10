@@ -241,8 +241,7 @@ export default function FilesArrive() {
         <div className="page-head">
           <div className="t">
             <h2>How Files Arrive <Badge tone="mut">Set up once</Badge></h2>
-            <p>Where your brokers send their spreadsheets. Set up once when a broker is
-              onboarded, then rarely touched.</p>
+            <p>Where your brokers send their spreadsheets — set up once when a broker is onboarded, then rarely touched.</p>
           </div>
           <div className="actions">
             <button className="btn" onClick={() => nav("/intake/arrivals")}>Files received →</button>

@@ -121,8 +121,7 @@ export default function Tenants() {
           <div className="t">
             <h2>Carriers</h2>
             <p>
-              All the insurance companies using Kavachio. When you add one, we
-              email its first admin an invitation to join.
+              Every insurance company using Kavachio — adding one emails its owner an invitation to join.
             </p>
           </div>
           <div className="actions">

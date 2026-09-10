@@ -225,9 +225,7 @@ export default function Users() {
           <div className="t">
             <h2>Users &amp; Roles</h2>
             <p>
-              Everyone who signs in on your side of the platform — your own team,
-              and the admins at the brokers who send you files. Operators are added
-              by their own broker, so they appear here but are not yours to change.
+              Everyone who signs in on your side — your own team, and the admins at the brokers who send you files.
             </p>
           </div>
           <div className="actions">
