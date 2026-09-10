@@ -1,4 +1,4 @@
-// Feature 10 — "How Files Arrive".
+// Feature 10 — the "Ways in" tab of "Files" (was the "How Files Arrive" page).
 //
 // A broker should not have to log in to send you a file. Most already email
 // their spreadsheet or drop it on a server, and asking them to change that is
@@ -15,12 +15,13 @@
 // the way Calendar.tsx does; modal bodies use `.proto.proto-embed` so they
 // resolve .field/.kv/.badge without painting a grey slab inside the dialog.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   createKey, createRoute, listKeys, listRoutes, patchRoute, pollRoute, revokeKey,
-  type Channel, type FileStyle, type IntakeKey, type IntakeRoute, type NewIntakeKey,
+  type BrokerEmail, type BrokerLite, type Channel, type IntakeKey, type IntakeRoute,
+  type NewIntakeKey,
   type PollResult, type ProgrammeLite, type RoutesResponse,
 } from "../api/intake";
+import { Mail, RefreshCw, Server, Upload, Zap } from "lucide-react";
 import { Modal } from "../components/ui/Modal";
 
 // Copy lives here, not in the API, because it is interface language rather than
@@ -46,6 +47,19 @@ const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }
     title: "We watch a shared folder", sub: "they save the file where they always have",
     hint: "S3 · SharePoint · Google Drive",
   },
+};
+
+// A mark per channel, so four groups that are otherwise four identical grey
+// rows can be told apart by shape. The tones deliberately match CAME_IN_BY on
+// the Inbox tab: the same way in is the same colour on both tabs, which is what
+// makes "Server folder" on a row and "They drop it on a server" here read as
+// one thing rather than two.
+const CHANNEL_MARK: Record<Channel, { Icon: React.ElementType; tone: string }> = {
+  upload: { Icon: Upload, tone: "ok" },
+  email: { Icon: Mail, tone: "info" },
+  sftp: { Icon: Server, tone: "" },
+  api: { Icon: Zap, tone: "" },
+  cloud_folder: { Icon: Server, tone: "" },
 };
 
 // The ways in this carrier actually uses. `cloud_folder` is in the Channel type
@@ -89,63 +103,37 @@ const CHANNEL_BLURB: Partial<Record<Channel, string>> = {
   api: "No person involved. Their software hands the file straight to ours, usually overnight, and gets an answer back immediately.",
 };
 
-const SFTP_DETAIL: [string, string][] = [
-  ["How they sign in", "A key, not a password"],
-  ["How often we look", "Every 5 minutes"],
-  ["After we take it", "Moved into /processed so it cannot be read twice"],
-  ["If the file is still being written", "We wait until it stops growing"],
-  ["If we do not know the folder", "Kept and shown on Files Received — but there is nobody to tell"],
-];
-
-// What a mailbox does, as fixed behaviour rather than settings — the same shape
-// as SFTP_DETAIL, because the question people ask is the same one.
-const EMAIL_DETAIL: [string, string][] = [
-  ["How often we look", "Every 5 minutes"],
-  ["What we take", "Attachments only — signatures and logos are ignored"],
-  ["One email, several files", "Each attachment is recorded on its own"],
-  ["After we read it", "Filed into /Processed so it cannot be read twice"],
-  ["Mail with nothing attached", "Ignored entirely, not recorded as a refusal"],
-  ["If we cannot use it", "The sender can be told — this is the only way in with a reply path"],
-];
-
-const LADDER: [string, string][] = [
-  ["Try their usual way in", "Whatever they normally use."],
-  ["Try the server folder", "If the mailbox is down, the same file is picked up from the folder if they put one there."],
-  ["Ask a person", "Nothing worked, so the broker is told and someone is asked to upload it by hand. The file is never quietly dropped."],
-];
-
-// The six checks every file passes, whichever way it came in. Shown because the
-// most common support question is "why was my file refused?", and the answer is
-// always one of these.
-const CHECKS: [string, string, "away" | "held"][] = [
-  ["Is it a spreadsheet at all?", "A PDF or a photo of a spreadsheet cannot be read.", "away"],
-  ["Can we open it?", "Half-uploaded and password-protected files look fine until you try.", "away"],
-  ["Do we know who sent it?", "Every file has to belong to a broker on one of your programmes.", "away"],
-  ["Is it the same file we already have?", "Brokers often send twice. Loading it twice would double your premium.", "held"],
-  ["Does it have any rows in it?", "An empty file usually means an export that silently failed.", "held"],
-  ["Is there a live contract to check it against?", "There is nothing to check a file against until the contract is agreed.", "held"],
-];
-
 function Badge({ tone, children }:
   { tone: "ok" | "warn" | "crit" | "mut"; children: React.ReactNode }) {
   return <span className={`badge b-${tone}`}><span className="d" />{children}</span>;
 }
 
-/** A note bar flush inside a card, the way the wireframe closes its tables. */
-function CardNote({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="note" style={{
-      margin: 0, border: 0, borderTop: "1px solid var(--p-border)", borderRadius: 0,
-    }}>{children}</div>
-  );
-}
-
-export default function FilesArrive() {
-  const nav = useNavigate();
+export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshKey }: {
+  /** Reported up for the button that opens this panel: how many ways in exist,
+   *  and whether any of them looks live and accepts nothing. */
+  onSummary?: (s: { routes: number; needsAttention: number }) => void;
+  /** True while Settings, "Add a way in" or a collect result is open. Modal has
+   *  its own window-level Escape handler, so without this the same keypress
+   *  closes the dialog AND the panel underneath it. */
+  onDialogOpen?: (open: boolean) => void;
+  /** AddRouteModal is rendered by the shell, OUTSIDE this panel, so it can open
+   *  on its own — a closed panel is `visibility: hidden` and its children
+   *  inherit that, which is why the two used to have to open together. It still
+   *  needs what only this fetch knows, so that goes up. */
+  onAddData?: (d: {
+    brokers: BrokerLite[];
+    programmesByBroker: Record<string, ProgrammeLite[]>;
+    emailsByBroker: Record<string, BrokerEmail[]>;
+    creatable: Channel[];
+    mailbox: string | null;
+    mailReady: boolean;
+  }) => void;
+  /** Bumped by Refresh, and after a route is created. */
+  refreshKey?: number;
+}) {
   const [data, setData] = useState<RoutesResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [settingsFor, setSettingsFor] = useState<IntakeRoute | null>(null);
-  const [adding, setAdding] = useState(false);
   const [poll, setPoll] = useState<PollResult | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -153,7 +141,7 @@ export default function FilesArrive() {
     try { setData(await listRoutes()); setErr(null); }
     catch (e: any) { setErr(e?.response?.data?.detail ?? e?.message ?? "Failed to load."); }
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshKey]);
 
   // One row per channel, with its routes hung underneath. A channel with no
   // routes still renders — it is one of the four whether or not it is used, and
@@ -166,7 +154,6 @@ export default function FilesArrive() {
     return map;
   }, [data]);
 
-  const sftpRoutes = byChannel.get("sftp") ?? [];
   const emailRoutes = byChannel.get("email") ?? [];
 
   // An API route with no live key looks On and accepts nothing — the single
@@ -188,11 +175,6 @@ export default function FilesArrive() {
   // into is a group you forget exists.
   const [collapsed, setCollapsed] = useState<Set<Channel>>(new Set());
 
-  const brokersSetUp = useMemo(
-    () => new Set((data?.routes ?? [])
-      .map(r => r.broker_party_id).filter((b): b is number => b != null)).size,
-    [data]);
-
   // Two things count: a way in switched off, and an API route with no key.
   // Both look like nothing is wrong and neither will take a file.
   const needsAttention = useMemo(() => (data?.routes ?? []).filter(r =>
@@ -200,15 +182,20 @@ export default function FilesArrive() {
     (r.channel === "api" && keys[r.route_id] !== undefined &&
      keys[r.route_id].every(k => !k.is_live))).length, [data, keys]);
 
-  const heldOrAway = (data?.tiles.held ?? 0) + (data?.tiles.turned_away ?? 0);
-
   // Upload always shows — it is real and needs no setup. Everything else shows
   // if it can be created or already has routes.
   const creatable = data?.creatable ?? [];
   const builtChannels = CHANNEL_ORDER.filter(c =>
     c === "upload" || creatable.includes(c) || (byChannel.get(c) ?? []).length > 0);
 
+  // Switching a route off silently stops a broker's files. It used to be a link
+  // in a row of links, at the same weight as Settings, with nothing between a
+  // mis-click and a programme going quiet until month-end.
   async function toggle(route: IntakeRoute) {
+    if (route.is_enabled && !window.confirm(
+      `Switch off this way in for ${route.broker_name ?? "this broker"}?\n\n`
+      + `Files sent to ${route.display_address} will stop being collected. `
+      + `Nothing already received is affected, and you can switch it back on.`)) return;
     setBusy(true);
     try { await patchRoute(route.route_id, { is_enabled: !route.is_enabled }); await load(); }
     catch (e: any) { setErr(e?.response?.data?.detail ?? "Could not change it."); }
@@ -222,275 +209,104 @@ export default function FilesArrive() {
     finally { setBusy(false); }
   }
 
-  const t = data?.tiles;
+  const routeCount = data?.routes.length ?? 0;
+  useEffect(() => {
+    onSummary?.({ routes: routeCount, needsAttention });
+  }, [routeCount, needsAttention, onSummary]);
+
+  useEffect(() => {
+    if (!data) return;
+    onAddData?.({
+      brokers: data.brokers, programmesByBroker: data.broker_programmes,
+      emailsByBroker: data.broker_emails ?? {},
+      creatable: data.creatable, mailbox: data.email_mailbox,
+      mailReady: data.email_ready,
+    });
+  }, [data, onAddData]);
+
+  const dialogOpen = !!settingsFor || !!poll;
+  useEffect(() => { onDialogOpen?.(dialogOpen); }, [dialogOpen, onDialogOpen]);
+
 
   return (
-    <div className="proto">
-      <section className="view full">
-        <div className="note" style={{ marginBottom: 18 }}>
-          <b>A broker does not have to log in to send you a file.</b> Most brokers already
-          email their spreadsheet or drop it on a server, and asking them to change that is
-          usually the thing that stalls a new programme. So Kavachio gives you four ways in.
-          Whichever one a file uses, it lands in the same queue and gets the same checks.{" "}
-          <b>You do this once, when a broker is onboarded</b>, and then rarely again — which is
-          why it sits under Configure rather than in the monthly run. The files that come in
-          this way are on <span className="linkish" onClick={() => nav("/intake/arrivals")}>
-            Files Received</span>.
+    <>
+      {err && <div className="note warn" style={{ marginBottom: 18 }}>{err}</div>}
+
+      {/* One row per CHANNEL crammed every broker into stacked cells — three
+          addresses in one cell, three names in the next — and you matched
+          them by vertical position, so adding a broker shifted everything
+          below it. A channel is a group now, and each broker is a card you
+          read across. */}
+      <div className="card">
+        <div className="card-h">
+          <h3>Ways in</h3>
+          <span className="sub">grouped by how the file gets here</span>
         </div>
 
-        <div className="page-head">
-          <div className="t">
-            <h2>How Files Arrive <Badge tone="mut">Set up once</Badge></h2>
-            <p>Where your brokers send their spreadsheets — set up once when a broker is onboarded, then rarely touched.</p>
-          </div>
-          <div className="actions">
-            <button className="btn" onClick={() => nav("/intake/arrivals")}>Files received →</button>
-            <button className="btn pri" onClick={() => setAdding(true)}>＋ Add a way in</button>
-          </div>
-        </div>
-
-        {err && <div className="note warn" style={{ marginBottom: 18 }}>{err}</div>}
-
-        <div className="tiles" style={{ marginBottom: 18 }}>
-          {/* Brokers, not doors. "Ways in switched on — 3 of 5" counted doors
-              that do not exist yet, so a perfectly healthy setup read as a job
-              two-fifths done. How many brokers can send you a file is the
-              question people actually ask. */}
-          <div className="tile">
-            <div className="k">Brokers set up</div>
-            <div className="v">{data ? brokersSetUp : "—"}</div>
-            <div className="foot">
-              {brokersSetUp === 0 ? "nobody can send yet" : "can send you files"}</div>
-          </div>
-          <div className="tile">
-            <div className="k">Files this month</div>
-            <div className="v">{t?.files_this_month ?? "—"}</div>
-            <div className="foot">across every way in</div>
-          </div>
-          {/* Replaces "Most used way in", which answered no question anyone
-              asks. This is the only tile that ever asks you to do something:
-              a way in that looks live and accepts nothing. */}
-          <div className={`tile${needsAttention > 0 ? " warnl" : ""}`}>
-            <div className="k">Needs attention</div>
-            <div className="v" style={needsAttention > 0 ? { color: "var(--p-warn)" } : undefined}>
-              {data ? needsAttention : "—"}</div>
-            <div className="foot">
-              {!data ? "\u00a0"
-                : needsAttention === 0 ? "every way in is working"
-                : needsAttention === 1 ? "one way in accepts nothing"
-                : `${needsAttention} ways in accept nothing`}</div>
-          </div>
-          <div className={`tile${heldOrAway > 0 ? " alert" : ""}`}>
-            <div className="k">Held or turned away</div>
-            <div className="v" style={heldOrAway > 0 ? { color: "var(--p-crit)" } : undefined}>
-              {t ? heldOrAway : "—"} <small>this month</small></div>
-            <div className="foot">
-              {heldOrAway === 0 ? "nothing refused yet"
-                : <span className="linkish" onClick={() => nav("/intake/arrivals")}>See why →</span>}
-            </div>
-          </div>
-        </div>
-
-        {/* One row per CHANNEL crammed every broker into stacked cells — three
-            addresses in one cell, three names in the next — and you matched
-            them by vertical position, so adding a broker shifted everything
-            below it. A channel is a group now, and each broker is a card you
-            read across. */}
-        <div className="card" style={{ marginBottom: 18 }}>
-          <div className="card-h">
-            <h3>Ways in</h3>
-            <span className="sub">grouped by how the file gets here</span>
-          </div>
-
-          {builtChannels.map(ch => {
-            const routes = byChannel.get(ch) ?? [];
-            const open = !collapsed.has(ch);
-            const files = routes.reduce((n, r) => n + r.files_this_month, 0);
-            const brokers = new Set(routes.map(r => r.broker_party_id)).size;
-            return (
-              <div className="chan-grp" key={ch}>
-                <button type="button" className="chan-hd" aria-expanded={open}
-                  aria-controls={`grp-${ch}`}
-                  onClick={() => setCollapsed(prev => {
-                    const next = new Set(prev);
-                    if (next.has(ch)) next.delete(ch); else next.add(ch);
-                    return next;
-                  })}>
-                  <span className="caret" aria-hidden="true" />
-                  <span className="ttl">{CHANNEL_COPY[ch].title}</span>
-                  <span className="meta">
-                    {ch === "upload"
-                      ? "always on · anyone with a login · nothing to set up"
-                      : routes.length === 0 ? "nobody sends this way yet"
-                      : `${brokers} broker${brokers === 1 ? "" : "s"} · ${files} file${files === 1 ? "" : "s"} this month`}
-                  </span>
-                </button>
-
-                {open && (
-                  <div className="routes" id={`grp-${ch}`}>
-                    {ch === "upload" ? (
-                      <div className="note">
-                        Anyone with a login can drag a file in on the{" "}
-                        <b>Process Bordereau</b> screen. It is the fallback for
-                        everything else, so it cannot be switched off and there is
-                        nothing to configure.
-                      </div>
-                    ) : routes.length === 0 ? (
-                      <div className="note">
-                        No broker sends this way yet. Use <b>Add a way in</b> to give
-                        one their own address on it.
-                      </div>
-                    ) : routes.map(r => (
-                      <RouteCard key={r.route_id} route={r} busy={busy}
-                        keys={keys[r.route_id]}
-                        onSettings={() => setSettingsFor(r)}
-                        onToggle={() => !busy && toggle(r)}
-                        onCollect={() => !busy && collectNow(r)} />
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-
-          <CardNote>
-            <b>The way in never changes what happens next.</b> A spreadsheet that arrives by
-            email and the same spreadsheet sent by machine end up in exactly the same place,
-            checked in exactly the same way. It only changes how the file got here.
-          </CardNote>
-          <CardNote>
-            <b>So what does “Add a way in” do, if there are only four?</b> It does not invent a
-            fifth. It gives one broker <b>their own address</b> on one of the four, so Kavachio
-            never has to work out who sent what.
-          </CardNote>
-        </div>
-
-        <div className="grid g-2" style={{ marginBottom: 18 }}>
-          <div className="card pad">
-            <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Server folders in detail</h3>
-            <p className="muted" style={{ fontSize: 12.5, margin: "0 0 14px", lineHeight: 1.55 }}>
-              Each broker gets a folder of their own. Their system writes the file into it and
-              we pick it up — nobody logs in, and the folder is what tells us who sent it.
-            </p>
-            {sftpRoutes.map(r => (
-              <div className="kv" key={r.route_id}>
-                <span className="k">{r.broker_name}</span>
-                <span className="mono" style={{ fontSize: 11.5 }}>{r.display_address}</span>
-              </div>))}
-            {SFTP_DETAIL.map(([k, v]) => (
-              <div className="kv" key={k}><span className="k">{k}</span><span>{v}</span></div>))}
-            {sftpRoutes.length === 0 && (
-              <div className="note" style={{ marginTop: 14 }}>
-                No broker has a folder yet. Use <b>Add a way in</b> — the address is generated
-                for you, so it always matches the folder we look in.
-              </div>)}
-          </div>
-
-          <div className="card pad">
-            <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>If a way in stops working</h3>
-            <p className="muted" style={{ fontSize: 12.5, margin: "0 0 14px", lineHeight: 1.55 }}>
-              When a broker's usual way in stops working, Kavachio tries the next one down
-              rather than losing the file.
-            </p>
-            {LADDER.map(([name, what], i) => (
-              <div key={name} style={{ display: "flex", gap: 12, marginBottom: 12 }}>
-                <div style={{
-                  flex: "0 0 auto", width: 22, height: 22, borderRadius: "50%",
-                  background: "var(--p-surface-3)", color: "var(--p-muted)",
-                  display: "grid", placeItems: "center", fontSize: 11, fontWeight: 700,
-                }}>{i + 1}</div>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{name}</div>
-                  <div style={{ fontSize: 12, color: "var(--p-muted)", lineHeight: 1.5 }}>{what}</div>
-                </div>
-              </div>))}
-            <div className="note">
-              Only routes we <b>look in</b> can fall back. A broker whose system pushes to us
-              has already chosen their way in, so there is nothing to try next.
-            </div>
-          </div>
-        </div>
-
-        {emailRoutes.length > 0 && (
-          <div className="card pad" style={{ marginBottom: 18 }}>
-            <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>The mailbox in detail</h3>
-            <p className="muted" style={{ fontSize: 12.5, margin: "0 0 14px", lineHeight: 1.55 }}>
-              Every broker emails the same inbox — so unlike a folder, the inbox cannot tell
-              one from another. Who the mail comes from is what does. Each broker is also given
-              a <span className="mono">+address</span> of their own, which is stronger: it can
-              only have come from someone who was told it.
-            </p>
-            <div className="kv">
-              <span className="k">The inbox we read</span>
-              <span className="mono" style={{ fontSize: 11.5 }}>
-                {data?.email_mailbox ?? <span className="muted">not configured yet</span>}</span>
-            </div>
-            {emailRoutes.map(r => (
-              <div className="kv" key={r.route_id}>
-                <span className="k">{r.broker_name}</span>
-                <span className="mono" style={{ fontSize: 11.5 }}>
-                  {r.send_to ?? r.address}
-                  <div className="sub">sends from {r.address}</div>
+        {builtChannels.map(ch => {
+          const routes = byChannel.get(ch) ?? [];
+          const open = !collapsed.has(ch);
+          const files = routes.reduce((n, r) => n + r.files_this_month, 0);
+          const brokers = new Set(routes.map(r => r.broker_party_id)).size;
+          return (
+            <div className="chan-grp" key={ch}>
+              <button type="button" className="chan-hd" aria-expanded={open}
+                aria-controls={`grp-${ch}`}
+                onClick={() => setCollapsed(prev => {
+                  const next = new Set(prev);
+                  if (next.has(ch)) next.delete(ch); else next.add(ch);
+                  return next;
+                })}>
+                <span className="caret" aria-hidden="true" />
+                <span className={`ci ${CHANNEL_MARK[ch].tone}`} aria-hidden="true">
+                  {(() => { const { Icon } = CHANNEL_MARK[ch]; return <Icon size={14} />; })()}
                 </span>
-              </div>))}
-            {EMAIL_DETAIL.map(([k, v]) => (
-              <div className="kv" key={k}><span className="k">{k}</span><span>{v}</span></div>))}
-            {!data?.email_ready && (
-              <div className="note warn" style={{ marginTop: 14 }}>
-                <b>No mailbox is configured, so nothing is being collected.</b> These routes
-                exist and will start working the moment <span className="mono">IMAP_HOST</span>,
-                {" "}<span className="mono">IMAP_USER</span> and
-                {" "}<span className="mono">IMAP_PASS</span> are set — nothing here has to be
-                made again.
-              </div>)}
-            <CardNote>
-              <b>Email is the one way in that can answer back.</b> A folder has nobody to tell
-              and an upload is over before you know anything is wrong — but a refused email can
-              be replied to, so the broker finds out from us rather than from a chase at
-              month-end. It is off until switched on, because an auto-reply answering another
-              auto-reply is how a domain ends up blocked.
-            </CardNote>
-          </div>)}
+                <span className="ttl">{CHANNEL_COPY[ch].title}</span>
+                <span className="meta">
+                  {ch === "upload"
+                    ? "always on · anyone with a login · nothing to set up"
+                    : routes.length === 0 ? "nobody sends this way yet"
+                    : `${brokers} broker${brokers === 1 ? "" : "s"} · ${files} file${files === 1 ? "" : "s"} this month`}
+                </span>
+              </button>
 
-        <div className="card">
-          <div className="card-h">
-            <h3>Checks every file passes before anything else happens</h3>
-            <span className="sub">these run in the first second, whichever way the file came in</span>
-          </div>
-          <div className="tbl-wrap">
-            <table>
-              <thead><tr><th>What we check</th><th>Why it matters</th><th>If it fails</th></tr></thead>
-              <tbody>
-                {CHECKS.map(([what, why, fail]) => (
-                  <tr key={what}>
-                    <td><b>{what}</b></td>
-                    <td className="l">{why}</td>
-                    <td>{fail === "away"
-                      ? <Badge tone="crit">Turned away</Badge>
-                      : <Badge tone="warn">Held, someone decides</Badge>}</td>
-                  </tr>))}
-              </tbody>
-            </table>
-          </div>
-          <CardNote>
-            <b>Better to catch it in the first second than an hour in.</b> Everything these
-            catch would otherwise be found halfway through processing, when the broker has gone
-            home and the numbers are already half loaded.
-          </CardNote>
-        </div>
-      </section>
+              {open && (
+                <div className="routes" id={`grp-${ch}`}>
+                  {ch === "upload" ? (
+                    <div className="note">
+                      Anyone with a login can drag a file in on the{" "}
+                      <b>Process Bordereau</b> screen. It is the fallback for
+                      everything else, so it cannot be switched off and there is
+                      nothing to configure.
+                    </div>
+                  ) : routes.length === 0 ? (
+                    <div className="note">
+                      No broker sends this way yet. Use <b>Add a way in</b> to give
+                      one their own address on it.
+                    </div>
+                  ) : routes.map(r => (
+                    <RouteCard key={r.route_id} route={r} busy={busy}
+                      keys={keys[r.route_id]}
+                      onSettings={() => setSettingsFor(r)}
+                      onToggle={() => !busy && toggle(r)}
+                      onCollect={() => !busy && collectNow(r)} />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Four explainer cards used to sit below this one — roughly 60% of the
+            page height, read once, and printing every SFTP and email address a
+            SECOND time under a "in detail" heading, with no Copy button beside
+            the copy people actually needed. Folded away, addresses removed. */}
+      </div>
 
       <SettingsModal route={settingsFor} onClose={() => setSettingsFor(null)}
         onSaved={() => { setSettingsFor(null); load(); }} />
-      <AddRouteModal open={adding} brokers={data?.brokers ?? []}
-        programmesByBroker={data?.broker_programmes ?? {}}
-        creatable={data?.creatable ?? ["sftp"]}
-        mailbox={data?.email_mailbox ?? null}
-        mailReady={data?.email_ready ?? false}
-        onClose={() => setAdding(false)}
-        onCreated={() => { setAdding(false); load(); }} />
       <PollResultModal result={poll} onClose={() => setPoll(null)} />
-    </div>
+    </>
   );
 }
 
@@ -522,60 +338,88 @@ function RouteCard({ route, busy, keys, onSettings, onToggle, onCollect }: {
 
   return (
     <div className={`route${needsKey ? " needs" : ""}`}>
-      <div className="route-top">
-        <span className="who">{route.broker_name ?? "No broker linked"}</span>
-        {/* The programme is what 10.2 made meaningful, and it was invisible
-            without opening Settings. Italic grey for "Any" because it is not a
-            programme name — and for an API route it means the sender has to
-            name one on every file. */}
-        {route.program_name
-          ? <span className="prog">{route.program_name}</span>
-          : <span className="prog any">Any programme</span>}
-        <span className="rt">
-          <span className="route-cnt" title="files this month">{route.files_this_month}</span>
-          {needsKey ? <Badge tone="warn">No key</Badge>
-            : route.is_enabled ? <Badge tone="ok">On</Badge>
-            : <Badge tone="mut">Off</Badge>}
-          <button type="button" className="linkbtn" onClick={onSettings}>
-            {needsKey ? "Make a key" : "Settings"}
-          </button>
-          <span className="sep" aria-hidden="true">·</span>
-          <button type="button" className="linkbtn mut" onClick={onToggle} disabled={busy}>
-            {route.is_enabled ? "Switch off" : "Switch on"}
-          </button>
-          {canCollect && <>
-            <span className="sep" aria-hidden="true">·</span>
-            <button type="button" className="linkbtn mut" onClick={onCollect} disabled={busy}>
-              Collect now
-            </button>
-          </>}
-        </span>
+      {/* ── who ── */}
+      <div className="route-id">
+        <div className="idtop">
+          <span className="who">{route.broker_name ?? "No broker linked"}</span>
+          {/* The programme is what 10.2 made meaningful, and it was invisible
+              without opening Settings. A chip, because it is a name from a
+              fixed set — italic and unchipped for "Any", which is not a
+              programme name, and for an API route means the sender has to name
+              one on every file. */}
+          {route.program_name
+            ? <span className="prog">{route.program_name}</span>
+            : <span className="prog any">Any programme</span>}
+        </div>
+
+        {/* The deliverable of this screen — people are usually about to paste
+            it into an email to a broker — directly under the broker it belongs
+            to. A field with its Copy attached, sized to the address rather than
+            to a share of the row. */}
+        <div className="route-addr">
+          <code>{handOut}</code>
+          <CopyBtn text={handOut} />
+        </div>
+
+        {/* The one extra true thing about this route, if there is one. Nothing
+            for SFTP: "collected every 5 minutes" is true of every server folder,
+            so repeating it on each row is noise, not information. */}
+        {route.channel === "email" && (
+          <div className="route-sub">
+            sends from <span className="mono">{route.address}</span>
+          </div>)}
+        {isApi && (needsKey
+          ? <div className="route-sub warnt">Nothing can be sent this way until a key exists.</div>
+          : keys === undefined
+          ? <div className="route-sub">checking keys…</div>
+          : <div className="route-sub">
+              {live.length} live key{live.length === 1 ? "" : "s"}
+              {" · "}<span className="mono">{live[0].key}</span>
+              {" · "}{lastUsed ? `last used ${new Date(lastUsed).toLocaleString()}`
+                               : "never used"}
+            </div>)}
       </div>
 
-      <div className="route-addr">
-        <code>{handOut}</code>
-        <CopyBtn text={handOut} />
+      {/* ── the controls ──
+          Collect now is safe, and it is what you press when a broker says "I
+          sent it an hour ago" — behind a ⋯ it cost something every time. Only
+          Switch off was ever worth protecting, and it is protected by its
+          confirm dialog rather than by being hard to find. */}
+      <div className="route-acts">
+        {needsKey && <Badge tone="warn">No key</Badge>}
+
+        {/* The state IS the control. An "On" badge beside a "Switch off" button
+            was two controls saying one thing. */}
+        <button type="button" className="sw" role="switch" aria-checked={route.is_enabled}
+          disabled={busy} onClick={onToggle}
+          aria-label={`${route.is_enabled ? "Switch off" : "Switch on"} this way in for ${route.broker_name ?? "this broker"}`}
+          title={route.is_enabled
+            ? "Switch off — files sent here stop being collected"
+            : "Switch on — start collecting from here again"}>
+          <span className="track" aria-hidden="true"><span className="knob" /></span>
+          <span className="txt">{route.is_enabled ? "On" : "Off"}</span>
+        </button>
+
+        {/* Only a channel we PULL from can be collected early. An API route is
+            pushed to, so there is nothing to go and fetch — the button is not
+            rendered at all rather than rendered disabled, because "you cannot
+            do this here" and "you cannot do this yet" look identical greyed. */}
+        {canCollect && (
+          <button type="button" className="btn sm" disabled={busy} onClick={onCollect}
+            title="Look in this folder now instead of waiting for the timer">
+            <RefreshCw size={13} aria-hidden="true" />Collect now
+          </button>)}
+
+        {/* Only API routes have anything here. Everything the old Settings
+            dialog showed for a folder or a mailbox is already on this row —
+            broker, programme, address — apart from a second on/off control
+            weaker than the switch beside it, because it did not confirm. Keys
+            are the exception: they exist nowhere else. */}
+        {isApi && (
+          <button type="button" className="btn sm" onClick={onSettings}>
+            {needsKey ? "Make a key" : "API keys"}
+          </button>)}
       </div>
-
-      {route.channel === "email" && (
-        <div className="route-sub">
-          they send from <span className="mono">{route.address}</span>
-        </div>)}
-
-      {isApi && (needsKey ? (
-        <div className="route-sub" style={{ color: "var(--p-warn-ink)" }}>
-          Nothing can be sent this way until a key exists.
-        </div>
-      ) : keys === undefined ? (
-        <div className="route-sub">checking keys…</div>
-      ) : (
-        <div className="route-sub">
-          {live.length} live key{live.length === 1 ? "" : "s"}
-          {" · "}<span className="mono">{live[0].key}</span>
-          {" · "}{lastUsed ? `last used ${new Date(lastUsed).toLocaleString()}`
-                           : "never used"}
-        </div>
-      ))}
     </div>
   );
 }
@@ -597,32 +441,24 @@ function CopyBtn({ text }: { text: string }) {
 // Two live controls, and that is deliberate: everything else about a route is
 // fixed behaviour rather than configuration, so showing it as a form would
 // imply a choice that does not exist.
+// API routes only, and about one thing: the keys. Switching a route on and off
+// used to live here too, as a dropdown duplicating the switch on the row —
+// and the weaker of the two, because it did not confirm. The row owns it.
+//
+// Nothing in here is edited any more, so there is nothing to save. "Done"
+// closes AND reloads, because minting or revoking a key changes what the row
+// says about live keys.
 function SettingsModal({ route, onClose, onSaved }:
   { route: IntakeRoute | null; onClose: () => void; onSaved: () => void }) {
-  const [style, setStyle] = useState<FileStyle>("whole_book");
-  const [enabled, setEnabled] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (route) { setStyle(route.file_style); setEnabled(route.is_enabled); setErr(null); }
-  }, [route]);
-
-  async function save() {
-    if (!route) return;
-    setSaving(true);
-    try { await patchRoute(route.route_id, { file_style: style, is_enabled: enabled }); onSaved(); }
-    catch (e: any) { setErr(e?.response?.data?.detail ?? "Could not save."); }
-    finally { setSaving(false); }
-  }
+  useEffect(() => { if (route) setErr(null); }, [route]);
 
   return (
-    <Modal open={!!route} title={route ? CHANNEL_COPY[route.channel].title : ""}
-      onClose={onClose} size="2xl"
+    <Modal open={!!route} size="2xl" onClose={onClose}
+      title={route ? `API keys — ${route.broker_name ?? "this broker"}` : ""}
       footer={<div className="proto proto-embed" style={{ display: "flex", gap: 10 }}>
-        <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn pri" onClick={save} disabled={saving}>
-          {saving ? "Saving…" : "Save changes"}</button>
+        <button className="btn pri" style={{ marginLeft: "auto" }}
+          onClick={onSaved}>Done</button>
       </div>}>
       {route && (
         <div className="proto proto-embed">
@@ -662,25 +498,6 @@ function SettingsModal({ route, onClose, onSaved }:
               separate screen. */}
           {route.channel === "api" && <KeyPanel route={route} />}
 
-          <div className="field" style={{ margin: "14px 0 0" }}>
-            <label>What do they send each month?</label>
-            <select value={style} onChange={e => setStyle(e.target.value as FileStyle)}>
-              <option value="whole_book">The whole book so far — everything since the start, again each time</option>
-              <option value="changes_only">Only what is new or changed since their last file</option>
-            </select>
-            <div className="hint">Either is fine. Rows already loaded are recognised and never
-              counted twice — the choice just tells the checks what a normal file looks like.</div>
-          </div>
-
-          <div className="field" style={{ margin: "14px 0 0" }}>
-            <label>Is this way in switched on?</label>
-            <select value={enabled ? "on" : "off"} onChange={e => setEnabled(e.target.value === "on")}>
-              <option value="on">On — files arriving this way are accepted</option>
-              <option value="off">Off — anything sent this way is turned away with a note</option>
-            </select>
-            <div className="hint">Switching off is not deleting. Files that already came in
-              through it keep their history; only new ones are refused.</div>
-          </div>
         </div>
       )}
     </Modal>
@@ -791,16 +608,21 @@ function KeyPanel({ route }: { route: IntakeRoute }) {
       {/* Two live keys at once, so a broker can move to a new one before the old
           is killed. More than that and "rotate" quietly becomes "accumulate". */}
       {live.length < 2 ? (
-        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <div className="field" style={{ margin: 0, flex: 1 }}>
-            <label>Name this key</label>
+        <div className="field" style={{ margin: 0 }}>
+          <label>Name this key</label>
+          {/* Input and button on one line, with the label above BOTH and the
+              hint below both. They used to be flex siblings aligned to
+              flex-end, which aligned the button to the bottom of the field —
+              and the field's bottom is under its hint, not its input. */}
+          <div style={{ display: "flex", gap: 8 }}>
             <input value={label} onChange={e => setLabel(e.target.value)}
-              placeholder="e.g. nightly job" />
-            <div className="hint">Just so you can tell two apart later.</div>
+              placeholder="e.g. nightly job" style={{ flex: 1, minWidth: 0 }} />
+            <button type="button" className="btn pri" onClick={mint} disabled={busy}
+              style={{ flex: "0 0 auto" }}>
+              {busy ? "Making…" : live.length === 0 ? "Make a key" : "Make a second key"}
+            </button>
           </div>
-          <button type="button" className="btn pri" onClick={mint} disabled={busy}>
-            {busy ? "Making…" : live.length === 0 ? "Make a key" : "Make a second key"}
-          </button>
+          <div className="hint">Just so you can tell two apart later.</div>
         </div>
       ) : (
         <div className="note">
@@ -813,10 +635,13 @@ function KeyPanel({ route }: { route: IntakeRoute }) {
 }
 
 // ── add a way in ────────────────────────────────────────────────────────────
-function AddRouteModal({ open, brokers, programmesByBroker, creatable, mailbox,
+export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroker,
+                               creatable, mailbox,
                         mailReady, onClose, onCreated }: {
   open: boolean; brokers: { party_id: number; legal_name: string }[];
   programmesByBroker: Record<string, ProgrammeLite[]>;
+  /** Addresses already on file per broker, active first. */
+  emailsByBroker: Record<string, BrokerEmail[]>;
   creatable: Channel[];
   /** The inbox brokers email, so the +address can be previewed here. */
   mailbox: string | null;
@@ -829,7 +654,6 @@ function AddRouteModal({ open, brokers, programmesByBroker, creatable, mailbox,
   const [senderEmail, setSenderEmail] = useState("");
   const [brokerId, setBrokerId] = useState<number | "">("");
   const [programId, setProgramId] = useState<number | "">("");
-  const [style, setStyle] = useState<FileStyle>("whole_book");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [created, setCreated] = useState<IntakeRoute | null>(null);
@@ -840,16 +664,25 @@ function AddRouteModal({ open, brokers, programmesByBroker, creatable, mailbox,
     if (open) {
       setChannel(creatable[0] ?? "sftp"); setBrokerId(""); setProgramId("");
       setSenderEmail("");
-      setStyle("whole_book"); setErr(null); setCreated(null); setMinted(null);
+      setErr(null); setCreated(null); setMinted(null);
       setCopied(false);
     }
   }, [open, creatable]);
 
   const progs = programmesByBroker[String(brokerId)] ?? [];
+  const knownEmails = emailsByBroker[String(brokerId)] ?? [];
   // Pre-select when there is only one — a choice of one is not a choice, and
   // leaving it blank would silently create a broker-wide route.
+  //
+  // The sending address is filled in the same pass, as a SUGGESTION. What we
+  // hold is the broker's portal login; the route needs the mailbox their export
+  // job sends as, which is often a service account nobody signs in with.
+  // Filling it saves the typing when the two are the same, and the addresses are
+  // listed under the field so it is visible WHERE the value came from rather
+  // than the box simply appearing full.
   useEffect(() => {
     setProgramId(progs.length === 1 ? progs[0].program_id : "");
+    setSenderEmail(knownEmails.length > 0 ? knownEmails[0].email : "");
   }, [brokerId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function create() {
@@ -857,7 +690,7 @@ function AddRouteModal({ open, brokers, programmesByBroker, creatable, mailbox,
     setSaving(true);
     try {
       const route = await createRoute({
-        channel, broker_party_id: Number(brokerId), file_style: style,
+        channel, broker_party_id: Number(brokerId),
         program_id: programId === "" ? null : Number(programId),
         ...(channel === "email" ? { sender_email: senderEmail.trim() } : {}),
       });
@@ -1009,11 +842,31 @@ function AddRouteModal({ open, brokers, programmesByBroker, creatable, mailbox,
                 <label>Which address do they send from?</label>
                 <input type="email" value={senderEmail} placeholder="ops@bridgebrokers.com"
                   onChange={e => setSenderEmail(e.target.value)} />
+                {/* Where the filled-in value came from, and the other addresses
+                    we hold. Shown rather than silently prefilled: these are
+                    portal logins, and a login that is not the sending mailbox
+                    produces a route that matches nothing — with the field
+                    looking perfectly filled in. */}
+                {knownEmails.length > 0 && (
+                  <div className="hint" style={{ marginTop: 6 }}>
+                    On file for {brokers.find(b => b.party_id === Number(brokerId))?.legal_name}:{" "}
+                    {knownEmails.map((k, i) => (
+                      <span key={k.email}>
+                        {i > 0 && " · "}
+                        <button type="button" className="linkbtn"
+                          onClick={() => setSenderEmail(k.email)}>{k.email}</button>
+                        {k.status !== "active" && (
+                          <span className="muted"> ({k.status})</span>)}
+                      </span>))}
+                    <div style={{ marginTop: 3 }}>
+                      That is their <b>login</b>. Change it if their system sends from
+                      somewhere else.
+                    </div>
+                  </div>)}
                 <div className="hint">
                   Every broker emails the same inbox, so the inbox cannot tell one from
-                  another — <b>who the mail comes from is what does</b>. This is the only
-                  thing on this screen you have to type, and it has to be the address their
-                  system really sends as, not the one a person replies from.
+                  another — <b>who the mail comes from is what does</b>. It has to be the
+                  address their system really sends as, not the one a person replies from.
                 </div>
               </div>)}
 
@@ -1052,13 +905,6 @@ function AddRouteModal({ open, brokers, programmesByBroker, creatable, mailbox,
               </div>
             </div>
 
-            <div className="field" style={{ marginBottom: 0 }}>
-              <label>What do they send each month?</label>
-              <select value={style} onChange={e => setStyle(e.target.value as FileStyle)}>
-                <option value="whole_book">The whole book so far</option>
-                <option value="changes_only">Only what is new or changed</option>
-              </select>
-            </div>
           </>
         )}
       </div>

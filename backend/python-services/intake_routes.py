@@ -23,7 +23,7 @@ from app_routes import (
     _actor, _iso_utc, _log, _tenant_name, assert_tenant_owns, resolve_tenant_id,
 )
 from auth_deps import Principal, current_principal, require_role
-from db import Party, Program, ProgramBroker, SessionLocal
+from db import AppUser, Party, Program, ProgramBroker, SessionLocal
 from intake_auth import mask, mint_key
 from intake_models import FileArrival, IntakeCredential, IntakeRoute
 
@@ -199,6 +199,27 @@ def list_routes(mga: Optional[str] = None,
         for v in broker_programmes.values():
             v.sort(key=lambda x: (x["name"] or "").lower())
 
+        # The addresses we already know for each broker, so the email dialog can
+        # offer them instead of asking somebody to retype one.
+        #
+        # These are PORTAL LOGINS, not sending addresses — the person who signs
+        # in is often not the mailbox their export job sends as. So they are
+        # offered as a suggestion the screen fills in and the user can overwrite,
+        # never as a value taken on trust. Active first: an unaccepted invite is
+        # not evidence of a working mailbox.
+        broker_emails: dict[str, list] = {}
+        if broker_ids:
+            for u in (s.query(AppUser)
+                      .filter(AppUser.broker_party_id.in_(list(broker_ids)))
+                      .all()):
+                if not u.email:
+                    continue
+                broker_emails.setdefault(str(u.broker_party_id), []).append(
+                    {"email": u.email, "name": u.full_name,
+                     "status": u.status or "active"})
+        for v in broker_emails.values():
+            v.sort(key=lambda x: (x["status"] != "active", x["email"].lower()))
+
         month_start = datetime.now(timezone.utc).replace(
             day=1, hour=0, minute=0, second=0, microsecond=0)
         arrivals_q = s.query(FileArrival).filter(
@@ -216,6 +237,7 @@ def list_routes(mga: Optional[str] = None,
             "routes": routes,
             "brokers": brokers,
             "broker_programmes": broker_programmes,
+            "broker_emails": broker_emails,
             "channels": list(CHANNELS),
             "collecting": list(COLLECTING_CHANNELS),
             "creatable": list(CREATABLE_CHANNELS),

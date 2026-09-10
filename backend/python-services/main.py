@@ -158,14 +158,19 @@ _mark_deprecated_aliases()
 import sweep_scheduler  # noqa: E402
 sweep_scheduler.start(app)
 
-# 10.1 — SFTP collector. Looks in each broker's folder every few minutes. OFF
-# unless SFTP_POLLER_ENABLED=1, so nothing changes until it is turned on.
+# 10.1 — SFTP collector. Looks in each broker's folder every five minutes. ON
+# by default: "we look in your folder every five minutes" is what the screen
+# promises a broker, and that promise should not depend on a variable somebody
+# has to remember. Opt out with SFTP_POLLER_ENABLED=0.
 import sftp_poller  # noqa: E402
 sftp_poller.start(app)
 
-# 10.3 — email collector. Reads the intake mailbox every few minutes. OFF unless
-# EMAIL_POLLER_ENABLED=1 *and* a mailbox is configured, so a deployment with no
-# IMAP settings behaves exactly as it did before.
+# 10.3 — email collector. Reads the intake mailbox every five minutes. ON by
+# default, but ONLY where a mailbox is configured — start() returns early
+# without IMAP_HOST/USER/PASS, so a deployment with no IMAP settings behaves
+# exactly as it did before. Opt out with EMAIL_POLLER_ENABLED=0.
+# It MOVES the mail it reads into IMAP_PROCESSED_FOLDER. It still sends nothing:
+# replying to a refused sender remains EMAIL_REPLY_ON_REFUSAL, off by default.
 import email_poller  # noqa: E402
 email_poller.start(app)
 

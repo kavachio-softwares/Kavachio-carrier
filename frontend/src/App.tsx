@@ -52,8 +52,7 @@ import RecentRuns from "./pages/RecentRuns";
 import Calendar from "./pages/Calendar";
 import BordereauCalendar from "./pages/BordereauCalendar";
 // Feature 10 — file intake channels.
-import FilesArrive from "./pages/FilesArrive";
-import FilesReceived from "./pages/FilesReceived";
+import Files from "./pages/Files";
 import AddUser from "./pages/AddUser";
 import Profile from "./pages/Profile";
 import Welcome from "./pages/Welcome";
@@ -206,9 +205,13 @@ export default function App() {
             due month, rather than one programme's deadlines. /calendar stays as
             the place a single programme's schedule is SET. */}
         <Route path="/bordereau-calendar" element={<BordereauCalendar />} />
-        {/* How a broker's file reaches you, and everything that has landed. */}
-        <Route path="/intake" element={<FilesArrive />} />
-        <Route path="/intake/arrivals" element={<FilesReceived />} />
+        {/* How a broker's file reaches you, and everything that has landed —
+            one screen with two tabs. The old paths are kept as redirects: they
+            are in emails to brokers and in bookmarks, and a link that 404s is a
+            support call. */}
+        <Route path="/files" element={<Files />} />
+        <Route path="/intake" element={<Navigate to="/files?panel=ways" replace />} />
+        <Route path="/intake/arrivals" element={<Navigate to="/files" replace />} />
         <Route path="/users/new" element={<AddUser />} />
         <Route path="/profile" element={<Profile />} />
       </Route>

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, Server, Inbox, CalendarDays,
+  FileCheck, Inbox, CalendarDays,
 } from "lucide-react";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
@@ -103,14 +103,19 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
   },
   {
     // How a broker's files reach us, and what has reached us so far — a
-    // different job from building the book above, so it gets its own section
-    // rather than a tail on Configure. Set up once when a broker is onboarded,
-    // then rarely touched, which is why it is not in the monthly run either.
+    // different job from building the book above, so it keeps its own section
+    // rather than becoming a tail on Configure.
+    //
+    // ONE item, not two. "How Files Arrive" and "Files Received" were separate
+    // entries that each carried a button to the other, and nothing in the nav
+    // said which one you wanted on a Tuesday morning. They are two tabs on
+    // /files now: the inbox lands first because it is the daily work, and the
+    // ways in sit behind it because a route is set up once when a broker is
+    // onboarded and then rarely touched.
     title: "Files",
     requires: "carrier_admin",
     items: [
-      { to: "/intake", label: "How Files Arrive", icon: Server },
-      { to: "/intake/arrivals", label: "Files Received", icon: Inbox },
+      { to: "/files", label: "Files", icon: Inbox },
     ],
   },
   {
@@ -173,6 +178,10 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // The platform admin reaches a template from the carrier's page and has no
   // Setups entry at all, so for them it rolls up under Carriers.
   if (under("/outputs")) return isKavachioAdmin() ? "/tenants" : "/direct/setups";
+
+  // /intake and /intake/arrivals redirect to /files; keep the item lit while
+  // the redirect resolves.
+  if (under("/intake") || under("/files")) return "/files";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";

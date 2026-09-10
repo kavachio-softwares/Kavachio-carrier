@@ -44,6 +44,11 @@ export type IntakeRoute = {
 };
 
 export type BrokerLite = { party_id: number; legal_name: string };
+
+/** An address we already hold for a broker — their portal login, NOT necessarily
+ *  the mailbox their export job sends as. Offered as a suggestion the user can
+ *  overwrite, never taken on trust. */
+export type BrokerEmail = { email: string; name: string | null; status: string };
 export type ProgrammeLite = { program_id: number; name: string };
 
 export type RoutesResponse = {
@@ -51,6 +56,8 @@ export type RoutesResponse = {
   brokers: BrokerLite[];
   /** Which programmes each broker is on, keyed by party_id as a string. */
   broker_programmes: Record<string, ProgrammeLite[]>;
+  /** Known addresses per broker, active first. Keyed by party_id as a string. */
+  broker_emails: Record<string, BrokerEmail[]>;
   channels: Channel[];
   /** Channels we PULL from — these get a "Collect now". */
   collecting: Channel[];

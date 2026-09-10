@@ -128,7 +128,7 @@ def quiet_seconds() -> int:
     written to it for this many seconds.
     """
     try:
-        return max(1, int(os.getenv("SFTP_QUIET_SECONDS", "30")))
+        return max(1, int(os.getenv("SFTP_QUIET_SECONDS", "10")))
     except ValueError:
         return 30
 

@@ -671,22 +671,6 @@
 .proto .route.needs{border-color:#EBD9BA;background:#FEFBF5}
 .proto .route.needs::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;
   border-radius:var(--p-r-sm) 0 0 var(--p-r-sm);background:var(--p-warn)}
-.proto .route-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.proto .route-top .who{font-weight:600;font-size:13.5px}
-.proto .route-top .prog{font-size:12.5px;color:var(--p-muted)}
-/* Italic grey because "Any" is not a programme name — and for an API route it
-   means the sender has to name one on every file. */
-.proto .route-top .prog.any{color:var(--p-faint);font-style:italic}
-.proto .route-top .rt{margin-left:auto;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-.proto .route-cnt{font-family:var(--p-mono);font-size:12px;color:var(--p-muted);
-  min-width:14px;text-align:right}
-/* The address is the deliverable of this screen — people are usually about to
-   paste it into an email — so it gets its own line rather than a shared cell. */
-.proto .route-addr{display:flex;align-items:center;gap:9px;margin-top:9px;padding-top:9px;
-  border-top:1px dashed var(--p-border-2)}
-.proto .route-addr code{font-family:var(--p-mono);font-size:11.5px;color:var(--p-muted);
-  word-break:break-all;flex:1}
-.proto .route-sub{font-size:11.5px;color:var(--p-faint);margin-top:7px}
 
 /* ── filter bar + one queue (Files Received) ───────────────────────────── */
 .proto .filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}
@@ -997,3 +981,217 @@
 .proto .pickcard:hover{border-color:var(--p-primary);box-shadow:var(--p-sh);transform:translateY(-1px)}
 .proto .pickcard b{font-size:14px}
 .proto .pickcard:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+
+/* ============================================================================
+   Files — the merged intake screen (Inbox + Ways in)
+   ----------------------------------------------------------------------------
+   "How Files Arrive" and "Files Received" were two sidebar entries that each
+   carried a button to the other. They are one screen with two tabs now: the
+   inbox is daily work and lands first, the ways in are set up once per broker
+   and sit behind tab two.
+   ============================================================================ */
+
+/* ── tiles that filter ──────────────────────────────────────────────────────
+   The tiles and the old chip row showed the same four counts, one row apart,
+   and only the chips did anything. The tile IS the filter now. */
+.proto button.tile{appearance:none;font:inherit;text-align:left;width:100%;
+  cursor:pointer;transition:border-color .12s,transform .12s,box-shadow .12s}
+.proto button.tile:hover{border-color:var(--p-border-2);transform:translateY(-1px)}
+.proto button.tile:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+.proto button.tile[aria-pressed="true"]{border-color:var(--p-primary);
+  box-shadow:0 0 0 1px var(--p-primary),var(--p-sh)}
+.proto button.tile[aria-pressed="true"]::after{background:var(--p-primary)}
+.proto .tile .k .on{font-family:var(--p-mono);font-size:9px;letter-spacing:.06em;
+  text-transform:uppercase;font-weight:700;color:var(--p-primary);
+  background:var(--p-primary-soft);padding:2px 5px;border-radius:var(--p-r-xs)}
+
+/* ── how long it has waited ─────────────────────────────────────────────────
+   The tile says "oldest has waited 6 days" and, sorted newest-first, that file
+   was last in the table. This is the same number on the row itself. */
+.proto .aged{font-family:var(--p-mono);font-size:10px;font-weight:700;
+  color:var(--p-warn-ink);background:var(--p-warn-soft);padding:1px 6px;
+  border-radius:var(--p-r-xs);margin-left:7px;white-space:nowrap;vertical-align:1px}
+
+/* ── search + toolbar ─────────────────────────────────────────────────────── */
+.proto .searchbox{position:relative;display:flex;align-items:center;flex:1 1 210px;
+  min-width:170px;max-width:320px}
+.proto .searchbox input{width:100%;font:inherit;font-size:12.5px;
+  border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);
+  background:var(--p-surface);color:var(--p-ink);padding:6px 11px 6px 30px}
+.proto .searchbox input::placeholder{color:var(--p-faint)}
+.proto .searchbox input:focus-visible{outline:2px solid var(--p-primary);outline-offset:1px}
+.proto .searchbox .si{position:absolute;left:9px;width:14px;height:14px;
+  color:var(--p-faint);pointer-events:none}
+
+/* ── bulk decisions ─────────────────────────────────────────────────────────
+   Twenty files held for one broken export used to be twenty drawer opens. */
+.proto .bulkbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:10px 20px;background:var(--p-primary-soft);
+  border-bottom:1px solid var(--p-border);font-size:12.5px;font-weight:600;
+  color:var(--p-primary)}
+.proto .bulkbar .sp{margin-left:auto;display:flex;gap:8px;align-items:center}
+.proto td.cbcell,.proto th.cbcell{width:34px;padding-right:0}
+.proto tr.arow td.cbcell{padding-left:19px}
+.proto .cbcell input[type=checkbox]{width:15px;height:15px;accent-color:var(--p-primary);
+  cursor:pointer;margin:0;vertical-align:middle}
+
+/* ── new arrivals while you were looking ────────────────────────────────────
+   Rows are never reordered under the cursor; the bar is the invitation. */
+.proto .newbar{display:flex;align-items:center;gap:10px;padding:9px 20px;
+  background:var(--p-ok-soft);color:var(--p-ok-ink);font-size:12.5px;font-weight:600;
+  border-bottom:1px solid var(--p-border)}
+
+/* Three across, for any tile row that is not the Inbox's five. */
+.proto .tiles.three{grid-template-columns:repeat(3,1fr)}
+@media(max-width:1000px){.proto .tiles.three{grid-template-columns:1fr 1fr}}
+@media(max-width:700px){.proto .tiles.three{grid-template-columns:1fr}}
+
+/* ── the File column, after the checkbox ────────────────────────────────────
+   `td:where(:first-child){text-align:left}` above was what left-aligned the
+   filename. Adding a select-all checkbox made the checkbox the first child, so
+   the File column silently inherited the centred default and every filename and
+   refusal reason ragged itself around the middle of a 400px cell. The rule
+   follows the checkbox rather than assuming a position. */
+.proto thead th.cbcell + th,
+.proto tbody td.cbcell + td{text-align:left}
+
+/* ============================================================================
+   Ways in — one route, one full-width row
+   ----------------------------------------------------------------------------
+   Three layouts have been tried here. One row per CHANNEL stacked every broker
+   into shared cells, so you matched a name to an address by vertical position.
+   A card per broker fixed that but ran the full width, putting the name and its
+   controls a screen apart. Capping the card at 900px closed that gap and left
+   the card stranded in a container that runs to the edge — a card stopping
+   short of its own container reads as a rendering fault, and the wider the
+   monitor the worse it looks.
+   The cap belonged on the ADDRESS, not on the card. So: a grid row that fills
+   the width, with each thing in a column of its own. Two brokers on one channel
+   now line up, and are compared by reading straight down.
+   ============================================================================ */
+
+/* A channel gets a mark, so the four groups are told apart by shape before any
+   word is read. Tones match CAME_IN_BY on the Inbox tab — the same way in is
+   the same colour on both tabs. */
+.proto .chan-hd .ci{width:26px;height:26px;border-radius:var(--p-r-xs);flex:0 0 auto;
+  display:grid;place-items:center;background:var(--p-surface-3);color:var(--p-muted)}
+.proto .chan-hd .ci.ok{background:var(--p-ok-soft);color:var(--p-ok-ink)}
+.proto .chan-hd .ci.info{background:var(--p-primary-soft);color:var(--p-primary)}
+/* Ink, not faint. A group heading you have to hunt for is not a heading. */
+.proto .chan-hd .ttl{font-size:11px;letter-spacing:.08em;color:var(--p-ink)}
+
+.proto .routes{padding:0 20px 16px;display:grid;gap:10px}
+
+/* White with a real border. The old grey fill on a white card read as
+   "switched off" — which is a state this row can genuinely be in. */
+.proto .route{display:grid;
+  grid-template-columns:minmax(260px,1fr) auto;
+  align-items:center;gap:16px;max-width:none;
+  background:var(--p-surface);border:1px solid var(--p-border);
+  border-radius:var(--p-r-sm);padding:12px 14px;box-shadow:var(--p-sh-sm)}
+@media(max-width:900px){
+  .proto .route{grid-template-columns:1fr;gap:11px}
+  .proto .route .route-acts{justify-content:flex-end}
+}
+
+/* ── column 1 · who, and what you hand them ─────────────────────────────────
+   The address sits directly beneath the broker it belongs to. In its own middle
+   column it was a long way from the name that gave it meaning, and it stretched
+   a fixed proportion of the row whether it held a 46-character +address or the
+   19 characters of "POST /v1/bordereaux". */
+.proto .route-id{display:flex;flex-direction:column;align-items:flex-start;
+  gap:7px;min-width:0}
+.proto .route-id .idtop{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.proto .route .who{font-weight:600;font-size:13.5px}
+.proto .route .prog{font-size:11.5px;color:var(--p-muted);background:var(--p-surface-3);
+  padding:2px 8px;border-radius:var(--p-r-pill);white-space:nowrap}
+/* Italic and unchipped, because "Any" is not a programme name — and for an API
+   route it means the sender has to name one on every file. */
+.proto .route .prog.any{background:none;padding-left:0;color:var(--p-faint);font-style:italic}
+.proto .route-sub{margin-top:0;font-size:11.5px;color:var(--p-faint);line-height:1.5}
+.proto .route-sub.warnt{color:var(--p-warn-ink);font-weight:600}
+
+/* ── column 2 · the address ─────────────────────────────────────────────────
+   What this screen exists to hand somebody, so it is built as the thing it is:
+   a field with its Copy attached. `flex:1` used to stretch it the width of the
+   card, which put the button a screen away from the string it copies. */
+.proto .route-addr{display:flex;align-items:stretch;gap:0;margin-top:0;padding-top:0;
+  width:fit-content;max-width:min(100%,560px);min-width:0;
+  border:1px solid var(--p-border-2);border-radius:var(--p-r-xs);
+  background:var(--p-surface-2);overflow:hidden}
+.proto .route-addr code{flex:1;min-width:0;display:flex;align-items:center;
+  padding:7px 11px;font-family:var(--p-mono);font-size:11.5px;color:var(--p-ink);
+  word-break:break-all;line-height:1.4}
+.proto .route-addr .btn{flex:0 0 auto;border:0;border-left:1px solid var(--p-border-2);
+  border-radius:0;box-shadow:none;background:var(--p-surface);font-size:11.5px;padding:0 13px}
+.proto .route-addr .btn:hover{background:var(--p-primary-soft);color:var(--p-primary)}
+
+/* ── column 3 · the controls ────────────────────────────────────────────────
+   Collect now is safe, and it is what you press when a broker says "I sent it
+   an hour ago" — hiding it behind a ⋯ cost something every time. Only Switch
+   off was ever worth protecting, and it is protected by its confirm dialog
+   rather than by being hard to find. */
+.proto .route-acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* The state IS the control. An "On" badge next to a "Switch off" button was two
+   controls saying one thing. */
+.proto .sw{appearance:none;font:inherit;display:inline-flex;align-items:center;gap:8px;
+  background:none;border:0;padding:2px;cursor:pointer;border-radius:var(--p-r-xs)}
+.proto .sw:disabled{cursor:not-allowed;opacity:.55}
+.proto .sw:focus-visible{outline:2px solid var(--p-primary);outline-offset:1px}
+.proto .sw .track{width:34px;height:19px;border-radius:var(--p-r-pill);flex:0 0 auto;
+  background:var(--p-border-2);position:relative;transition:background .16s}
+.proto .sw .knob{position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;
+  background:#fff;box-shadow:0 1px 2px rgba(14,19,32,.3);transition:transform .16s}
+.proto .sw[aria-checked="true"] .track{background:var(--p-ok)}
+.proto .sw[aria-checked="true"] .knob{transform:translateX(15px)}
+.proto .sw .txt{font-size:12px;font-weight:600;color:var(--p-muted);min-width:20px;text-align:left}
+.proto .sw[aria-checked="true"] .txt{color:var(--p-ok-ink)}
+@media (prefers-reduced-motion: reduce){
+  .proto .sw .track,.proto .sw .knob{transition:none}
+}
+
+/* ============================================================================
+   Ways in, as a panel over the queue
+   ----------------------------------------------------------------------------
+   The tab strip is gone. The screen is the Inbox — the thing opened every
+   morning — and the setup half, opened about once a quarter, is a panel you
+   enter and leave. Going into setup therefore costs you nothing: the filters,
+   the scroll position and the ticked rows are all still there behind it.
+
+   Built on `.drawer` rather than as a new surface, because that already gets
+   the layering right. It matters here: the Settings and "Add a way in" dialogs
+   render INSIDE this panel, and `position: fixed` resolves against a
+   transformed ancestor rather than the viewport — so a panel animated with a
+   transform would clip its own modals. `.drawer.on` sets `transform: none`, so
+   at rest there is no containing block and the modals fill the viewport.
+
+   `visibility` keeps the closed panel out of the tab order while leaving it
+   MOUNTED, which is what lets the page head show a live route count and an
+   attention dot without opening anything.
+   ============================================================================ */
+.proto .drawer.wide{width:min(620px,94vw);visibility:hidden;
+  transition:transform .2s ease,visibility 0s .2s}
+.proto .drawer.wide.on{visibility:visible;transition:transform .2s ease}
+
+/* The panel is ~620px, and a media query cannot know that — it measures the
+   viewport, which is wide. So the panel restates the narrow layout itself. */
+.proto .wayspanel .tiles.three{grid-template-columns:repeat(3,1fr);gap:9px}
+.proto .wayspanel .tile{padding:11px 12px}
+.proto .wayspanel .tile .v{font-size:21px;margin-top:5px}
+.proto .wayspanel .tile .k{font-size:11px}
+.proto .wayspanel .tile .foot{font-size:10.5px;margin-top:4px}
+.proto .wayspanel .route{grid-template-columns:1fr;gap:11px}
+.proto .wayspanel .route-acts{justify-content:flex-start;flex-wrap:wrap}
+.proto .wayspanel .card{box-shadow:none;border-radius:var(--p-r-sm)}
+.proto .wayspanel .chan-hd{padding:11px 14px}
+.proto .wayspanel .routes{padding:0 14px 14px}
+.proto .wayspanel .card-h{padding:12px 14px}
+
+/* The button that opens it, carrying enough state that most days you never
+   have to. */
+.proto .btn .pcount{font-family:var(--p-mono);font-size:10.5px;font-weight:700;
+  background:var(--p-surface-3);color:var(--p-muted);padding:1px 6px;
+  border-radius:var(--p-r-pill)}
+.proto .btn .pdot{position:absolute;top:-3px;right:-3px;width:8px;height:8px;
+  border-radius:50%;background:var(--p-warn);box-shadow:0 0 0 2px var(--p-surface)}

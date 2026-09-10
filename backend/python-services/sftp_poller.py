@@ -10,11 +10,13 @@ directory — a self-hosted sshd chrooted there, or an Azure Blob SFTP mount —
 this file does not change. That also means the whole feature is testable today
 by copying a file into a folder, with no SSH server anywhere.
 
-OFF BY DEFAULT. Set SFTP_POLLER_ENABLED=1 to run it. Nothing in the app behaves
-differently until you do.
+ON BY DEFAULT. Collecting is what the screen promises a broker — "we look in
+your folder every five minutes" — so the app has to do it without anybody
+remembering to set a variable. Set SFTP_POLLER_ENABLED=0 to stop it; "Collect
+now" on the screen still works either way.
 
 Configuration:
-  SFTP_POLLER_ENABLED   0/1     (default 0 — off)
+  SFTP_POLLER_ENABLED   0/1     (default 1 — on)
   SFTP_POLL_SECONDS     int     (default 300 — the design's "every 5 minutes")
   SFTP_ROOT             path    (default ./sftp-root)         see intake_service
   SFTP_QUIET_SECONDS    int     (default 30)                  see intake_service
@@ -46,7 +48,7 @@ _LOCK_NAMESPACE = 0x5F7B  # "sftp"
 
 
 def _enabled() -> bool:
-    return os.getenv("SFTP_POLLER_ENABLED", "0").strip().lower() in (
+    return os.getenv("SFTP_POLLER_ENABLED", "1").strip().lower() in (
         "1", "true", "yes", "on",
     )
 
@@ -254,7 +256,8 @@ async def _loop() -> None:
 def start(app) -> None:
     """Attach the poller to the app's startup, the same way sweep_scheduler does."""
     if not _enabled():
-        log.info("sftp poller disabled (set SFTP_POLLER_ENABLED=1 to run it)")
+        log.info("sftp poller off (SFTP_POLLER_ENABLED=0) — nothing will be "
+                 "collected from the folders until somebody presses Collect now")
         return
 
     @app.on_event("startup")

@@ -1,4 +1,4 @@
-// Feature 10 — "Files Received".
+// Feature 10 — the Inbox tab of "Files".
 //
 // One queue for everything that has landed, however it landed. The "Came in by"
 // column is the only trace of which door a file used, because after arrival it
@@ -6,16 +6,17 @@
 //
 // ONE table, not two. Splitting by outcome put held files under a heading
 // reading "Turned away on arrival", which contradicted their own badge — and it
-// meant "what came in today" had to be read in two places. The filter chips do
-// what the second table was doing, and the counts stay visible while filtered.
+// meant "what came in today" had to be read in two places. The tiles do what the
+// second table was doing, and the counts stay visible while filtered.
 //
-// Clicking a row opens a drawer with the six checks. "Why was my file refused?"
-// is the most common support question and the answer was one line of text in a
+// Clicking a row opens a drawer with the checks. "Why was my file refused?" is
+// the most common support question and the answer was one line of text in a
 // cell, truncated by the column beside it.
 //
-// Styled with `.proto` (proto.css) to match the wireframe, like FilesArrive.
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+// This used to be a page of its own at /intake/arrivals with a page head and a
+// button across to How Files Arrive. It is a tab now (see Files.tsx) — when two
+// screens each need a shortcut to the other, they are one screen.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   discardArrival, downloadArrival, isHeld, listArrivals, releaseArrival,
   type Arrival, type Channel,
@@ -92,10 +93,25 @@ function failedCheck(reason: string | null): number {
   return -1;
 }
 
-type Filter = "all" | "ok" | "held" | "away";
+// "" is every row. The four values are the four tiles, and a tile is a toggle:
+// pressing the one you are already in clears it.
+type Filter = "" | "today" | "ok" | "held" | "away";
+type Sort = "queue" | "new" | "old";
+type Range = "all" | "30" | "90" | "month";
 
-function state(a: Arrival): Exclude<Filter, "all"> {
+function state(a: Arrival): Exclude<Filter, "" | "today"> {
   return a.outcome === "accepted" ? "ok" : isHeld(a) ? "held" : "away";
+}
+
+/** Days since it landed. Only ever shown on a file still waiting on somebody. */
+function waitDays(a: Arrival): number {
+  if (!a.received_at) return 0;
+  return Math.floor((Date.now() - new Date(a.received_at).getTime()) / 86400000);
+}
+
+/** Held AND undecided — the only rows that are actually a queue. */
+function isWaiting(a: Arrival): boolean {
+  return state(a) === "held" && !a.resolution;
 }
 
 function Badge({ tone, children }:
@@ -136,42 +152,81 @@ function subline(a: Arrival): string {
   return (a.turned_away_reason ?? "").replace(/^Held — /, "");
 }
 
-export default function FilesReceived() {
-  const nav = useNavigate();
+export default function InboxTab({ onWaitingCount, active, refreshKey }: {
+  /** Reported up so a caller can carry the count. */
+  onWaitingCount?: (n: number) => void;
+  /** False while the Ways in tab is showing. Both panes stay mounted so the
+   *  tab badge stays live, but only the visible one polls. */
+  active: boolean;
+  /** Bumped by Refresh in the page head. */
+  refreshKey: number;
+}) {
   const [rows, setRows] = useState<Arrival[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<Filter>("");
+  const [sort, setSort] = useState<Sort>("queue");
+  const [q, setQ] = useState("");
+  const [range, setRange] = useState<Range>("all");
   const [fChannel, setFChannel] = useState<string>("");
   const [fBroker, setFBroker] = useState<string>("");
   const [fProgramme, setFProgramme] = useState<string>("");
   const [open, setOpen] = useState<Arrival | null>(null);
 
+  // Ticked rows, by arrival_id. Cleared whenever the visible set changes, so a
+  // selection can never outlive the rows it was made on.
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [bulkErr, setBulkErr] = useState<string | null>(null);
+
+  // Arrivals fetched by the background poll but NOT yet shown. Rows are never
+  // reordered under the cursor — the bar is the invitation to take them.
+  const [pending, setPending] = useState<Arrival[] | null>(null);
+
   const load = useCallback(async () => {
     setBusy(true);
     try {
-      setRows((await listArrivals()).rows); setErr(null);
+      setRows((await listArrivals()).rows);
+      setPending(null); setErr(null);
     } catch (e: any) {
       setErr(e?.response?.data?.detail ?? e?.message ?? "Failed to load.");
     } finally { setBusy(false); }
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshKey]);
 
-  // Escape closes the drawer, and the scrim behind it is clickable — the two
-  // ways out people try first.
+  // Files land by SFTP and email on a five-minute sweep and by API at any
+  // moment, but the screen only ever changed when somebody pressed Refresh.
+  // Poll while the tab is actually being looked at; skip while it is hidden,
+  // because a backgrounded tab polling every minute is just load.
+  const seen = useRef<number>(0);
   useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(null); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+    if (rows) seen.current = rows.length ? Math.max(...rows.map(r => r.arrival_id)) : 0;
+  }, [rows]);
+  useEffect(() => {
+    const id = window.setInterval(async () => {
+      if (!active || document.hidden || busy || open) return;
+      try {
+        const fresh = (await listArrivals()).rows;
+        const newest = fresh.length ? Math.max(...fresh.map(r => r.arrival_id)) : 0;
+        if (newest > seen.current) setPending(fresh);
+      } catch { /* a failed poll is not worth an error bar; Refresh still works */ }
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [active, busy, open]);
 
   const all = rows ?? [];
 
   const counts = useMemo(() => {
     const today = new Date().toDateString();
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
     return {
+      // Same definition the routes endpoint uses for tiles.files_this_month —
+      // received_at on or after the first of this calendar month. It used to be
+      // a tile on the Ways in panel, which is the wrong place for it: it counts
+      // files, and this is the screen about files.
+      month: all.filter(a => a.received_at &&
+        new Date(a.received_at).getTime() >= monthStart).length,
       today: all.filter(a => a.received_at &&
         new Date(a.received_at).toDateString() === today).length,
       all: all.length,
@@ -181,16 +236,15 @@ export default function FilesReceived() {
       // 12.3 — the queue is HELD AND UNRESOLVED. A held file somebody has
       // already decided is finished, and counting it keeps a tile amber for
       // work that is done.
-      waiting: all.filter(a => state(a) === "held" && !a.resolution).length,
+      waiting: all.filter(isWaiting).length,
       // The oldest thing still waiting. A queue nobody opens is the same as no
       // queue, and one number that says "eleven days" is what makes somebody
       // open it.
-      oldestWaitDays: Math.max(0, ...all
-        .filter(a => state(a) === "held" && !a.resolution && a.received_at)
-        .map(a => Math.floor(
-          (Date.now() - new Date(a.received_at as string).getTime()) / 86400000))),
+      oldestWaitDays: Math.max(0, ...all.filter(isWaiting).map(waitDays)),
     };
   }, [all]);
+
+  useEffect(() => { onWaitingCount?.(counts.waiting); }, [counts.waiting, onWaitingCount]);
 
   // Brokers and programmes come from the rows — those are open sets, and a
   // filter naming a broker who has never sent anything is just noise. The ways
@@ -203,190 +257,345 @@ export default function FilesReceived() {
       .filter((p): p is string => !!p))].sort(),
   }), [all]);
 
-  const shown = useMemo(() => all.filter(a =>
-    (filter === "all" || state(a) === filter) &&
-    (!fChannel || a.channel === fChannel) &&
-    (!fBroker || a.broker_name === fBroker) &&
-    (!fProgramme || a.program_name === fProgramme)
-  ), [all, filter, fChannel, fBroker, fProgramme]);
+  const shown = useMemo(() => {
+    const today = new Date().toDateString();
+    const cutoff = range === "all" ? 0
+      : range === "30" ? Date.now() - 30 * 86400000
+      : range === "90" ? Date.now() - 90 * 86400000
+      : new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+    const needle = q.trim().toLowerCase();
 
-  const filtered = filter !== "all" || !!fChannel || !!fBroker || !!fProgramme;
+    const list = all.filter(a => {
+      if (filter === "today") {
+        if (!a.received_at || new Date(a.received_at).toDateString() !== today) return false;
+      } else if (filter === "held") {
+        // The tile above counts held AND UNDECIDED, so the filter has to mean
+        // the same thing — a tile that is a control must hand you the rows it
+        // counted. A held file somebody has already dealt with is reachable
+        // with the filter cleared.
+        if (!isWaiting(a)) return false;
+      } else if (filter && state(a) !== filter) return false;
+      if (cutoff && (!a.received_at || new Date(a.received_at).getTime() < cutoff)) return false;
+      if (fChannel && a.channel !== fChannel) return false;
+      if (fBroker && a.broker_name !== fBroker) return false;
+      if (fProgramme && a.program_name !== fProgramme) return false;
+      if (needle) {
+        const hay = `${a.filename} ${a.broker_name ?? ""} ${a.claimed_sender ?? ""}`.toLowerCase();
+        if (!hay.includes(needle)) return false;
+      }
+      return true;
+    });
+
+    // Newest-first buried the queue: the tile said "oldest has waited 6 days"
+    // and put that exact file at the bottom of the table. The default now leads
+    // with what needs a decision, oldest of those first, and everything already
+    // dealt with falls in behind it newest-first.
+    const at = (a: Arrival) => a.received_at ? new Date(a.received_at).getTime() : 0;
+    return list.sort((a, b) => {
+      if (sort === "new") return at(b) - at(a);
+      if (sort === "old") return at(a) - at(b);
+      const aw = isWaiting(a) ? 0 : 1, bw = isWaiting(b) ? 0 : 1;
+      if (aw !== bw) return aw - bw;
+      return aw === 0 ? at(a) - at(b) : at(b) - at(a);
+    });
+  }, [all, filter, sort, q, range, fChannel, fBroker, fProgramme]);
+
+  // A tick belongs to the row it was put on. The moment the visible set moves
+  // under it, it is gone.
+  useEffect(() => { setPicked(new Set()); setBulkErr(null); }, [filter, q, range, fChannel, fBroker, fProgramme]);
+
+  const filtered = !!filter || !!q.trim() || range !== "all"
+    || !!fChannel || !!fBroker || !!fProgramme;
+
+  function clearFilters() {
+    setFilter(""); setQ(""); setRange("all");
+    setFChannel(""); setFBroker(""); setFProgramme("");
+  }
+
+  // Only an undecided row can be decided, and only a HELD one can be released:
+  // a turned-away file is one we could not read, and releasing it would hand
+  // processing something broken.
+  const pickedRows = shown.filter(a => picked.has(a.arrival_id));
+  const canRelease = pickedRows.filter(a => state(a) === "held" && !a.resolution);
+  const canDiscard = pickedRows.filter(a => state(a) !== "ok" && !a.resolution);
+
+  async function decideMany(what: "release" | "discard") {
+    const targets = what === "release" ? canRelease : canDiscard;
+    if (targets.length === 0) return;
+    setBusy(true); setBulkErr(null);
+    const call = what === "release" ? releaseArrival : discardArrival;
+    const note = targets.length > 1
+      ? `Decided together with ${targets.length - 1} other file${targets.length === 2 ? "" : "s"}`
+      : undefined;
+    const results = await Promise.allSettled(
+      targets.map(a => call(a.arrival_id, note)));
+    const failed = results.filter(r => r.status === "rejected").length;
+    setPicked(new Set());
+    // Reload either way: some of them may well have gone through.
+    await load();
+    if (failed > 0) {
+      setBulkErr(failed === targets.length
+        ? "None of those went through. Nothing has changed."
+        : `${targets.length - failed} went through, ${failed} did not. The ones that failed are still here.`);
+    }
+  }
+
+  const toggleAll = (on: boolean) =>
+    setPicked(on ? new Set(shown.map(a => a.arrival_id)) : new Set());
 
   return (
-    <div className="proto">
-      <section className="view full">
-        <div className="note" style={{ marginBottom: 18 }}>
-          <b>Everything that has landed, in one list.</b> Emailed, uploaded, dropped on the
-          server or sent by a machine — it all ends up here, in the order it arrived. The only
-          place the way in shows up is one column, because after that it stops mattering.
-        </div>
+    <>
+      {err && <div className="note warn" style={{ marginBottom: 18 }}>{err}</div>}
 
-        <div className="page-head">
-          <div className="t">
-            <h2>Files Received</h2>
-            <p>Every spreadsheet that has reached you, whichever way it came in, and what
-              happened to it.</p>
-          </div>
-          <div className="actions">
-            <button className="btn" onClick={() => nav("/intake")}>← How files arrive</button>
-            <button className="btn" onClick={load} disabled={busy}>
-              {busy ? "Refreshing…" : "Refresh"}</button>
-          </div>
-        </div>
+      {/* Four tiles, and they ARE the filter. The chip row underneath used to
+          repeat these same four counts one row down, and only the chips did
+          anything — the tiles were decoration on top of the control. */}
+      <div className="tiles five" style={{ marginBottom: 18 }}>
+        {/* Not an outcome like the four beside it — it is the period the rest
+            are read against — so it drives the date range rather than the
+            outcome filter, and shows as pressed when that range is on. */}
+        <button type="button" className="tile" aria-pressed={range === "month"}
+          onClick={() => setRange(range === "month" ? "all" : "month")}
+          title={range === "month"
+            ? "Showing this month only — click to show every arrival"
+            : "Show only what arrived this month"}>
+          <div className="k">Files this month
+            {range === "month" && <span className="on">filtering</span>}</div>
+          <div className="v">{rows ? counts.month : "—"}</div>
+          <div className="foot">across every way in</div>
+        </button>
 
-        {err && <div className="note warn" style={{ marginBottom: 18 }}>{err}</div>}
+        {([
+          ["today", "Arrived today", counts.today, "however they came in", ""],
+          ["ok", "Went through", counts.ok, "passed every check", ""],
+          ["held", "Waiting on you", counts.waiting,
+            counts.waiting > 0 && counts.oldestWaitDays > 0
+              ? `oldest has waited ${counts.oldestWaitDays} day${counts.oldestWaitDays === 1 ? "" : "s"}`
+              : "a person has to decide",
+            counts.waiting > 0 ? "warnl" : ""],
+          ["away", "Turned away", counts.away, "never got as far as processing",
+            counts.away > 0 ? "alert" : ""],
+        ] as const).map(([f, label, n, foot, tone]) => {
+          const on = filter === f;
+          const colour = tone === "warnl" ? "var(--p-warn)"
+            : tone === "alert" ? "var(--p-crit)" : undefined;
+          return (
+            <button type="button" key={f} className={`tile ${tone}`} aria-pressed={on}
+              onClick={() => setFilter(on ? "" : f)}
+              title={on ? "Showing only these — click to show everything"
+                        : `Show only ${label.toLowerCase()}`}>
+              <div className="k">{label}{on && <span className="on">filtering</span>}</div>
+              <div className="v" style={colour ? { color: colour } : undefined}>
+                {rows ? n : "—"}</div>
+              <div className="foot">{foot}</div>
+            </button>);
+        })}
+      </div>
 
-        <div className="tiles" style={{ marginBottom: 18 }}>
-          <div className="tile">
-            <div className="k">Arrived today</div>
-            <div className="v">{rows ? counts.today : "—"}</div>
-            <div className="foot">however they came in</div>
-          </div>
-          <div className="tile">
-            <div className="k">Went through</div>
-            <div className="v">{rows ? counts.ok : "—"}</div>
-            <div className="foot">passed every check</div>
-          </div>
-          {/* Held and turned away are genuinely different situations — one is
-              waiting on a person, the other is finished — so they keep separate
-              tiles and separate colours. */}
-          <div className={`tile${counts.waiting > 0 ? " warnl" : ""}`}>
-            <div className="k">Waiting on you</div>
-            <div className="v" style={counts.waiting > 0 ? { color: "var(--p-warn)" } : undefined}>
-              {rows ? counts.waiting : "—"}</div>
-            <div className="foot">
-              {counts.waiting > 0 && counts.oldestWaitDays > 0
-                ? `oldest has waited ${counts.oldestWaitDays} day${counts.oldestWaitDays === 1 ? "" : "s"}`
-                : "a person has to decide"}</div>
-          </div>
-          <div className={`tile${counts.away > 0 ? " alert" : ""}`}>
-            <div className="k">Turned away</div>
-            <div className="v" style={counts.away > 0 ? { color: "var(--p-crit)" } : undefined}>
-              {rows ? counts.away : "—"}</div>
-            <div className="foot">never got as far as processing</div>
-          </div>
-        </div>
+      <div className="filters">
+        <label className="searchbox">
+          <svg className="si" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="2" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input type="search" value={q} onChange={e => setQ(e.target.value)}
+            placeholder="Search filename or sender…" aria-label="Search files" />
+        </label>
+        <span className="spacer">
+          <select className="sel" value={range} aria-label="When it arrived"
+            onChange={e => setRange(e.target.value as Range)}>
+            <option value="all">Any time</option>
+            <option value="month">This month</option>
+            <option value="30">Last 30 days</option>
+            <option value="90">Last 90 days</option>
+          </select>
+          <select className="sel" value={fChannel} onChange={e => setFChannel(e.target.value)}
+            aria-label="Way in">
+            <option value="">Any way in</option>
+            {options.channels.map(c => (
+              <option key={c} value={c}>{CAME_IN_BY[c].label}</option>))}
+          </select>
+          <select className="sel" value={fBroker} onChange={e => setFBroker(e.target.value)}
+            aria-label="Broker">
+            <option value="">Any broker</option>
+            {options.brokers.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+          <select className="sel" value={fProgramme} aria-label="Programme"
+            onChange={e => setFProgramme(e.target.value)}>
+            <option value="">Any programme</option>
+            {options.programmes.map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+          {filtered && (
+            <button type="button" className="linkbtn" onClick={clearFilters}>
+              Clear filters</button>)}
+        </span>
+      </div>
 
-        <div className="filters">
-          {([["all", "All", ""], ["ok", "Went through", ""],
-             ["held", "Held", "warnc"], ["away", "Turned away", "critc"]] as const)
-            .map(([f, label, tone]) => (
-              <button key={f} type="button" className={`chip ${tone}`}
-                aria-pressed={filter === f} onClick={() => setFilter(f)}>
-                {label} <span className="n">{counts[f]}</span>
-              </button>))}
-          <span className="spacer">
-            <select className="sel" value={fChannel} onChange={e => setFChannel(e.target.value)}>
-              <option value="">Any way in</option>
-              {options.channels.map(c => (
-                <option key={c} value={c}>{CAME_IN_BY[c].label}</option>))}
+      <div className="card">
+        {/* Something landed while you were reading. Taking it is a click, so
+            nothing moves under the cursor mid-decision. */}
+        {pending && (
+          <div className="newbar">
+            <b>{pending.length - all.length > 0
+              ? `${pending.length - all.length} new file${pending.length - all.length === 1 ? "" : "s"} arrived`
+              : "Something changed"}</b>
+            <button type="button" className="linkbtn"
+              onClick={() => { setRows(pending); setPending(null); }}>Show them →</button>
+          </div>)}
+
+        {picked.size > 0 && (
+          <div className="bulkbar">
+            <span>{picked.size} selected</span>
+            {canDiscard.length !== picked.size && (
+              <span style={{ fontWeight: 500, color: "var(--p-muted)" }}>
+                {picked.size - canDiscard.length} of them need no decision —
+                already dealt with, or they went straight through
+              </span>)}
+            <span className="sp">
+              <button type="button" className="btn sm pri" disabled={busy || canRelease.length === 0}
+                onClick={() => decideMany("release")}
+                title="Held files only — a file we could not read cannot be released">
+                {busy ? "Working…" : `Load ${canRelease.length} anyway`}</button>
+              <button type="button" className="btn sm" disabled={busy || canDiscard.length === 0}
+                onClick={() => decideMany("discard")}>Discard {canDiscard.length}</button>
+              <button type="button" className="btn sm" onClick={() => setPicked(new Set())}>
+                Cancel</button>
+            </span>
+          </div>)}
+
+        {bulkErr && <div className="note crit" style={{ margin: 0, borderRadius: 0 }}>{bulkErr}</div>}
+
+        <div className="card-h">
+          <h3>What has come in</h3>
+          <span className="sub">
+            {sort === "queue" ? "needs a decision first, then newest"
+              : sort === "new" ? "newest first" : "oldest first"}</span>
+          {/* Counts stay visible while filtered, so nothing is ever hidden
+              without saying how much. */}
+          <span className="right faint" style={{
+            fontSize: 12, display: "flex", alignItems: "center", gap: 12,
+          }}>
+            <select className="sel" value={sort} aria-label="Sort order"
+              onChange={e => setSort(e.target.value as Sort)}>
+              <option value="queue">Needs a decision first</option>
+              <option value="new">Newest first</option>
+              <option value="old">Oldest first</option>
             </select>
-            <select className="sel" value={fBroker} onChange={e => setFBroker(e.target.value)}>
-              <option value="">Any broker</option>
-              {options.brokers.map(b => <option key={b} value={b}>{b}</option>)}
-            </select>
-            <select className="sel" value={fProgramme}
-              onChange={e => setFProgramme(e.target.value)}>
-              <option value="">Any programme</option>
-              {options.programmes.map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
+            {!rows ? "" : filtered
+              ? `showing ${shown.length} of ${counts.all}`
+              : `showing all ${counts.all}`}
           </span>
         </div>
 
-        <div className="card">
-          <div className="card-h">
-            <h3>What has come in</h3><span className="sub">newest first</span>
-            {/* Counts stay visible while filtered, so nothing is ever hidden
-                without saying how much. */}
-            <span className="right faint" style={{ fontSize: 12 }}>
-              {!rows ? "" : filtered
-                ? `showing ${shown.length} of ${counts.all}`
-                : `showing all ${counts.all}`}
-            </span>
+        {rows && counts.all === 0 ? (
+          <div style={{ textAlign: "center", padding: "36px 20px", color: "var(--p-muted)" }}>
+            <b style={{ display: "block", color: "var(--p-ink)", fontSize: 14, marginBottom: 4 }}>
+              Nothing has arrived yet</b>
+            {/* The long explanation of what this screen is lives HERE, in the
+                one state where somebody genuinely does not know — not in a grey
+                slab above the title on every visit. */}
+            <p style={{ margin: "0 auto", fontSize: 12.5, maxWidth: 430, lineHeight: 1.6 }}>
+              Emailed, uploaded, dropped on a server or sent by a machine — every spreadsheet
+              that reaches you ends up here, in the order it arrived, and gets the same checks
+              whichever way it came. Set a broker up on <b>Ways in</b> first.
+            </p>
           </div>
-
-          {rows && counts.all === 0 ? (
-            <div style={{ textAlign: "center", padding: "36px 20px", color: "var(--p-muted)" }}>
-              <b style={{ display: "block", color: "var(--p-ink)", fontSize: 14, marginBottom: 4 }}>
-                Nothing has arrived yet</b>
-              <p style={{ margin: "0 auto", fontSize: 12.5, maxWidth: 400, lineHeight: 1.55 }}>
-                Once a broker drops a file in their folder it appears here.{" "}
-                <span className="linkish" onClick={() => nav("/intake")}>Set a way in up first</span>.
-              </p>
-            </div>
-          ) : rows && shown.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "36px 20px", color: "var(--p-muted)" }}>
-              <b style={{ display: "block", color: "var(--p-ink)", fontSize: 14, marginBottom: 4 }}>
-                Nothing matches these filters</b>
-              <p style={{ margin: 0, fontSize: 12.5 }}>
-                <span className="linkish" onClick={() => {
-                  setFilter("all"); setFChannel(""); setFBroker(""); setFProgramme("");
-                }}>Clear them</span> to see all {counts.all}.
-              </p>
-            </div>
-          ) : (
-            <div className="tbl-wrap">
-              <table>
-                <thead>
-                  <tr><th>File</th><th>Came in by</th><th>From</th><th>Programme</th>
-                    <th>Rows</th><th>What happened</th><th>When</th><th /></tr>
-                </thead>
-                <tbody>
-                  {shown.map(a => {
-                    const st = state(a);
-                    const sub = subline(a);
-                    return (
-                      <tr key={a.arrival_id} className={`arow ${st}`} tabIndex={0}
-                        onClick={() => setOpen(a)}
-                        onKeyDown={e => { if (e.key === "Enter") setOpen(a); }}>
-                        <td>
-                          <div className="fname">{a.filename}</div>
-                          {/* Capped, because a refusal reason is a whole
-                              sentence and the full one is in the drawer. */}
-                          {sub && <div className="sub" style={{ maxWidth: 330 }}>{sub}</div>}
-                        </td>
-                        {/* The way in is a badge, not plain text: it is the one
-                            thing on the row that is a fixed set of five, and it
-                            is read by shape rather than word. */}
-                        <td>{a.channel
-                          ? <Badge tone={CAME_IN_BY[a.channel].tone}>
-                              {CAME_IN_BY[a.channel].label}</Badge>
-                          : <span className="muted">—</span>}</td>
-                        <td>{a.broker_name ?? <span className="muted">unknown sender</span>}</td>
-                        <td className="muted">
-                          {a.program_name ?? <span className="faint">—</span>}</td>
-                        <td className="mono">{rowsOf(a.row_count)}</td>
-                        <td>
-                          {st === "ok"
-                            ? (a.bdx_upload_id ? <Badge tone="ok">Processed</Badge>
-                              : <Badge tone="ok">Waiting to be run</Badge>)
-                            : st === "held" ? <Badge tone="warn">Held</Badge>
-                            : <Badge tone="crit">Turned away</Badge>}
-                        </td>
-                        <td className="mono faint" style={{ fontSize: 12 }}>
-                          {fmtStamp(a.received_at)}</td>
-                        {/* Every row ends in the one thing you would do next.
-                            All of them open the drawer — the word just says
-                            what you will find when you get there. */}
-                        <td><span className="linkish">{actionLabel(a)}</span></td>
-                      </tr>);
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <div className="note" style={{
-            margin: 0, border: 0, borderTop: "1px solid var(--p-border)", borderRadius: 0,
-          }}>
-            <b>Nothing here is lost.</b> A file that was turned away is kept exactly as it
-            arrived, and a held file has landed — it is only waiting on somebody. Click any row
-            to see which check decided it.
+        ) : rows && shown.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "36px 20px", color: "var(--p-muted)" }}>
+            <b style={{ display: "block", color: "var(--p-ink)", fontSize: 14, marginBottom: 4 }}>
+              Nothing matches these filters</b>
+            <p style={{ margin: 0, fontSize: 12.5 }}>
+              <span className="linkish" onClick={clearFilters}>Clear them</span> to see
+              all {counts.all}.
+            </p>
           </div>
+        ) : (
+          <div className="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th className="cbcell">
+                    <input type="checkbox" aria-label="Select every row shown"
+                      checked={shown.length > 0 && picked.size === shown.length}
+                      onChange={e => toggleAll(e.target.checked)} />
+                  </th>
+                  <th>File</th><th>Came in by</th><th>From</th><th>Programme</th>
+                  <th>Rows</th><th>What happened</th><th>When</th><th />
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map(a => {
+                  const st = state(a);
+                  const sub = subline(a);
+                  const on = picked.has(a.arrival_id);
+                  return (
+                    <tr key={a.arrival_id} className={`arow ${st}${on ? " sel" : ""}`} tabIndex={0}
+                      onClick={() => setOpen(a)}
+                      onKeyDown={e => { if (e.key === "Enter") setOpen(a); }}>
+                      <td className="cbcell" onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={on}
+                          aria-label={`Select ${a.filename}`}
+                          onChange={e => setPicked(prev => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(a.arrival_id);
+                            else next.delete(a.arrival_id);
+                            return next;
+                          })} />
+                      </td>
+                      <td>
+                        <div className="fname">
+                          {a.filename}
+                          {/* The wait, on the row. Without it the number was
+                              only ever on the tile, describing a file the sort
+                              order then hid at the bottom of the table. */}
+                          {isWaiting(a) && waitDays(a) > 0 &&
+                            <span className="aged">{waitDays(a)}d waiting</span>}
+                        </div>
+                        {/* Capped, because a refusal reason is a whole
+                            sentence and the full one is in the drawer. */}
+                        {sub && <div className="sub" style={{ maxWidth: 330 }}>{sub}</div>}
+                      </td>
+                      {/* The way in is a badge, not plain text: it is the one
+                          thing on the row that is a fixed set of five, and it
+                          is read by shape rather than word. */}
+                      <td>{a.channel
+                        ? <Badge tone={CAME_IN_BY[a.channel].tone}>
+                            {CAME_IN_BY[a.channel].label}</Badge>
+                        : <span className="muted">—</span>}</td>
+                      <td>{a.broker_name ?? <span className="muted">unknown sender</span>}</td>
+                      <td className="muted">
+                        {a.program_name ?? <span className="faint">—</span>}</td>
+                      <td className="mono">{rowsOf(a.row_count)}</td>
+                      <td>
+                        {st === "ok"
+                          ? (a.bdx_upload_id ? <Badge tone="ok">Processed</Badge>
+                            : <Badge tone="ok">Waiting to be run</Badge>)
+                          : st === "held" ? <Badge tone="warn">Held</Badge>
+                          : <Badge tone="crit">Turned away</Badge>}
+                      </td>
+                      <td className="mono faint" style={{ fontSize: 12 }}>
+                        {fmtStamp(a.received_at)}</td>
+                      {/* Every row ends in the one thing you would do next.
+                          All of them open the drawer — the word just says
+                          what you will find when you get there. */}
+                      <td><span className="linkish">{actionLabel(a)}</span></td>
+                    </tr>);
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="note" style={{
+          margin: 0, border: 0, borderTop: "1px solid var(--p-border)", borderRadius: 0,
+        }}>
+          <b>Nothing here is lost.</b> A file that was turned away is kept exactly as it
+          arrived, and a held file has landed — it is only waiting on somebody. Click any row
+          to see which check decided it, or tick several to decide them together.
         </div>
-      </section>
+      </div>
 
       <ArrivalDrawer arrival={open} onClose={() => setOpen(null)} onResolved={load} />
-    </div>
+    </>
   );
 }
 
@@ -406,6 +615,15 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
   // A fresh drawer must not inherit the last file's half-typed note or its
   // error — they belong to the row that is gone.
   useEffect(() => { setNote(""); setErr(null); setBusy(false); }, [arrival?.arrival_id]);
+
+  // Escape closes the drawer, and the scrim behind it is clickable — the two
+  // ways out people try first.
+  useEffect(() => {
+    if (!arrival) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [arrival, onClose]);
 
   // The one place a decision is made. Both actions are the same shape: send it,
   // reload the list so the row shows resolved, and close — the file has been
@@ -436,7 +654,11 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
           <div className="drawer-h">
             <div style={{ minWidth: 0 }}>
               <h4>{arrival.filename}</h4>
-              <div className="ref">arrival #{arrival.arrival_id}</div>
+              <div className="ref">
+                arrival #{arrival.arrival_id}
+                {isWaiting(arrival) && waitDays(arrival) > 0
+                  && ` · waiting ${waitDays(arrival)} days`}
+              </div>
             </div>
             <button type="button" className="closeb" aria-label="Close"
               onClick={onClose}>×</button>
@@ -484,7 +706,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
                 <span className="v">{arrival.sender_notified_via ?? "Told"}{" "}
                   {fmtStamp(arrival.sender_notified_at)}</span></div>)}
 
-            <div className="sub-h">The six checks</div>
+            <div className="sub-h">The checks, in the order they ran</div>
             <ul className="checks">
               {CHECKS.map(([what, why], i) => {
                 // The checks stop at the first failure, so anything after it
@@ -511,8 +733,8 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
               })}
             </ul>
 
-            {/* Only when the reason matches none of the six — better to show the
-                sentence on its own than to point at the wrong check. */}
+            {/* Only when the reason matches none of the checks — better to show
+                the sentence on its own than to point at the wrong one. */}
             {failed === -1 && st !== "ok" && (
               <div className="note warn" style={{ marginTop: 12 }}>
                 {arrival.turned_away_reason ?? "No reason was recorded."}

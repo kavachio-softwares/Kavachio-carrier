@@ -21,11 +21,22 @@ WHAT IS DIFFERENT FROM SFTP, and why the two collectors are not one function:
     so a refusal can actually reach the person who sent it. Off by default —
     see EMAIL_REPLY_ON_REFUSAL below.
 
-OFF BY DEFAULT. Set EMAIL_POLLER_ENABLED=1 to run it. Nothing in the app behaves
-differently until you do, and "Collect now" on the screen works either way.
+ON BY DEFAULT, but only where a mailbox is actually configured — start() below
+returns early unless IMAP_HOST/USER/PASS are set, so turning this on cannot make
+an unconfigured deployment start reaching for a mail server. Collecting is what
+the screen promises a broker, so it should not depend on anybody remembering to
+set a variable. Set EMAIL_POLLER_ENABLED=0 to stop it; "Collect now" on the
+screen works either way.
+
+NOTE the blast radius: when this runs it MOVES the mail it reads out of INBOX
+and into IMAP_PROCESSED_FOLDER. It does not send anything — replying to a
+refused sender is still EMAIL_REPLY_ON_REFUSAL, still off by default.
 
 Configuration:
-  EMAIL_POLLER_ENABLED    0/1   (default 0 — off)
+  EMAIL_POLLER_ENABLED    0/1   (default 1 — on, when a mailbox is configured)
+  EMAIL_STRICT_SENDERS    0/1   (default 0) take mail ONLY from an address a
+                                route already knows; anything else is left in
+                                the mailbox and never recorded
   EMAIL_POLL_SECONDS      int   (default 300 — the design's "every 5 minutes")
   EMAIL_MAX_ATTACHMENT_MB int   (default 25)  skip anything larger
   EMAIL_REPLY_ON_REFUSAL  0/1   (default 0 — off) tell the sender we refused it
@@ -63,7 +74,7 @@ imaplib._MAXLINE = max(getattr(imaplib, "_MAXLINE", 10000), 10_000_000)
 
 
 def _enabled() -> bool:
-    return os.getenv("EMAIL_POLLER_ENABLED", "0").strip().lower() in (
+    return os.getenv("EMAIL_POLLER_ENABLED", "1").strip().lower() in (
         "1", "true", "yes", "on",
     )
 
@@ -267,6 +278,24 @@ def notify_sender(session, arrival: FileArrival,
 
 # ── collecting ──────────────────────────────────────────────────────────────
 
+def _strict_senders() -> bool:
+    """Only take mail from an address a route already knows.
+
+    OFF by default, and that default is the safer one. Mail with a spreadsheet
+    attached that matches no route is currently recorded as "We do not recognise
+    the sender", and that row is how you find out a broker changed the mailbox
+    their export sends from. Switch it off and that discovery becomes silence:
+    their files simply stop arriving and nothing says so.
+
+    ON is right when the intake mailbox is shared with people, where a colleague
+    forwarding a spreadsheet would otherwise land in Files Received as a refusal
+    every single time.
+    """
+    return os.getenv("EMAIL_STRICT_SENDERS", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def _fallback_tenant(session) -> int | None:
     """Whose Files Received should an UNRECOGNISED sender appear on?
 
@@ -306,6 +335,15 @@ def _handle_message(session, raw: bytes, summary: dict):
         # is not downloaded again, but never moved — see _retire.
         summary["no_attachment"] += 1
         return "nothing"
+
+    # Strict mode: no route, no record. The message is left exactly where it is
+    # and touched in no way, so registering that sender later picks it up on the
+    # next sweep rather than losing it.
+    if route is None and _strict_senders():
+        log.info("strict senders: leaving mail from %s — no route knows it",
+                 parsed.from_addr or "an unknown sender")
+        summary["unattributable"] += 1
+        return False
 
     tenant_id = route.tenant_id if route else _fallback_tenant(session)
     if tenant_id is None:
@@ -533,7 +571,8 @@ async def _loop() -> None:
 def start(app) -> None:
     """Attach the poller to the app's startup, the same way sftp_poller does."""
     if not _enabled():
-        log.info("email poller disabled (set EMAIL_POLLER_ENABLED=1 to run it)")
+        log.info("email poller off (EMAIL_POLLER_ENABLED=0) — no mail will be "
+                 "read until somebody presses Collect now")
         return
     if not mail.is_configured():
         log.warning("email poller enabled but no mailbox configured — "
