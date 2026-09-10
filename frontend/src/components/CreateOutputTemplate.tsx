@@ -327,17 +327,18 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
               <label className="flex items-start gap-2 text-sm">
                 <input type="checkbox" className="mt-1" checked={useLibrary} disabled={busy}
                   onChange={e => setUseLibrary(e.target.checked)} />
-                <span>
-                  <b>Add the columns every bordereau needs.</b>
-                  <span className="block text-[11px] text-ink-soft">
-                    A contract rarely names the coverholder, the insured, the
-                    reporting period or the currency, and a bordereau always
-                    carries them. With this on, the {std?.label ?? "standard"}{" "}
-                    columns marked mandatory are added to the contract's own —
-                    those only, not the whole published list, which would bury
-                    the contract's terms. Anything both name appears once.
-                  </span>
-                </span>
+                <div>
+                  <b>Add the essential columns every bordereau needs</b>
+                  <ul className="list-disc pl-4 space-y-0.5 mt-0.5 text-[11px] text-ink-soft">
+                    <li>Contracts rarely name the basics: coverholder, insured,
+                      reporting period, currency, etc.</li>
+                    <li>Every bordereau still needs them.</li>
+                    <li>Tick this to add only the {std?.label ?? "standard"}{" "}
+                      mandatory columns, not the whole list.</li>
+                    <li>A column named by both the contract and{" "}
+                      {std?.label ?? "the standard"} appears once.</li>
+                  </ul>
+                </div>
               </label>
             )}
 
@@ -422,34 +423,27 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
             <Summary a={analysis} shown={proposed} kept={kept}
               unfilled={unfilledRequired} extra={keptExtra} />
 
-            {!analysis.contract.model_used && analysis.contract.source !== "none" && (
-              <div className="rounded-md border border-amber-300 bg-amber-50 p-3
-                text-[12px] text-amber-800 flex items-start gap-2">
-                <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-                <div>
-                  The contract's wording could not be read just now, so only the
-                  fields its existing rules already name were added. You can add
-                  the rest in the editor.
-                </div>
-              </div>
-            )}
-
             {/* `proposal-grid` makes the header opaque and pins it. Without
                 it the app-wide `thead th` background is 60% transparent, so
                 rows scrolling underneath a sticky header show straight through
                 it and the two sets of words sit on top of each other. */}
             <div className="max-h-80 overflow-auto rounded-lg border border-border">
-              <table className="w-full text-[12.5px] proposal-grid">
+              {/* `table-fixed` so the widths below are the widths you get.
+                  On auto layout the browser re-shares the 40% the percentages
+                  leave over, and the tick column — the narrowest, so the
+                  cheapest to widen — soaked up most of it, leaving a hand's
+                  width of nothing between "Use" and "Column". One `<col>` per
+                  heading, and they add up to the whole table. */}
+              <table className="w-full table-fixed text-[12.5px] proposal-grid">
                 <colgroup>
-                  <col style={{ width: 40 }} />
-                  <col style={{ width: "27%" }} />
-                  <col style={{ width: "13%" }} />
-                  <col style={{ width: "20%" }} />
+                  <col style={{ width: 44 }} />
+                  <col style={{ width: "30%" }} />
+                  <col style={{ width: "16%" }} />
                   <col />
                 </colgroup>
                 <thead>
                   <tr>
-                    <th className="text-left px-3 py-2">Use</th>
+                    <th className="text-left pl-3 py-2">Use</th>
                     <th className="text-left px-3 py-2">Column</th>
                     <th className="text-left px-3 py-2">Asked for by</th>
                     <th className="text-left px-3 py-2">Why</th>
@@ -534,13 +528,13 @@ function ModeLede({ mode, standard, contract, useLibrary }: {
             <div className="mt-1">You&apos;ll review the result before anything is saved.</div>
           </>
         ) : (
-          <>The columns come from {contract ? <b>{contract}</b> : "the contract"}
-            &apos;s own terms{useLibrary
-              ? <>, plus the handful of columns every bordereau carries and
-                  contracts never name — the coverholder, the insured, the
-                  period, the currency.</>
-              : <> and nothing else. Nothing is added for you.</>}
-            {" "}The published list is not the layout here.</>
+          <ul className="list-disc pl-4 space-y-0.5">
+            <li>Columns come only from what{" "}
+              {contract ? <b>{contract}</b> : "the"} contract asks for.</li>
+            {useLibrary
+              ? <li>Plus the essential columns every bordereau needs — ticked below.</li>
+              : <li>Nothing else is added unless you tick the box below.</li>}
+          </ul>
         )}
       </div>
     </div>
@@ -627,7 +621,7 @@ function ProposalRow({ f, kept, appended, onToggle }: {
   const locked = f.required && f.origin === "standard";
   return (
     <tr className={`border-t border-border ${kept ? "" : "opacity-50"}`}>
-      <td className="px-3 py-2 text-left align-top">
+      <td className="pl-3 py-2 text-left align-top">
         <input type="checkbox" checked={kept || locked} disabled={locked}
           title={locked ? "The standard makes this column mandatory" : undefined}
           onChange={onToggle} />
@@ -659,7 +653,11 @@ function ProposalRow({ f, kept, appended, onToggle }: {
       <td className="px-3 py-2 text-ink-muted text-left align-top">
         {f.recommend_reason}
         {f.contract_reference && (
-          <div className="text-[11px] text-ink-soft italic mt-0.5">
+          // A clause quote runs to several lines and made one row as tall as
+          // the whole list. Two lines is enough to recognise it by; the full
+          // wording is on the contract.
+          <div className="text-[11px] text-ink-soft italic mt-0.5 line-clamp-2"
+            title={f.contract_reference}>
             “{f.contract_reference}”
           </div>
         )}

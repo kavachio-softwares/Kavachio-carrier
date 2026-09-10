@@ -579,6 +579,7 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
+    from reportlab.pdfbase.pdfmetrics import stringWidth
     from reportlab.platypus import (
         KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table,
         TableStyle)
@@ -699,7 +700,7 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
     # "stacked"} — comes back as the four lines it has always had.
     layout = esign_pdf.normalise_signature_layout(signature_layout)
 
-    def anchor(kind: str, side: str) -> str:
+    def anchor(kind: str, side: str, slot: int = 1) -> str:
         """An invisible tag that puts a signing box of `kind` right here.
 
         Drawn in white rather than hidden, because this is a ReportLab flowable
@@ -710,6 +711,11 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         its boxes by searching for these, and redacting them would mean a
         re-composed wording could never be re-tagged.
 
+        `slot` is WHICH of this side's signatories the box belongs to. One is
+        the base key and is what a two-signature contract has always used; a
+        second or third person named for the same side gets their own key, so
+        their boxes are theirs and nobody else can fill them.
+
         Empty when the caller asked for no anchors, which is every use of this
         function except the copy going out for signature.
         """
@@ -717,10 +723,17 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         if not key:
             return ""
         return ('<font color="#ffffff" size="5">'
-                + "{{" + kind + ":" + key + "}}" + "</font>")
+                + "{{" + kind + ":" + esign_pdf.slot_key(key, slot) + "}}"
+                + "</font>")
 
-    def lines_under(side: str, sg: dict | None, anchored: bool) -> list[str]:
-        """The lines under one ruled line, in the vocabulary's own order.
+    def lines_under(side: str, sg: dict | None, anchored: bool,
+                    slot: int) -> list[tuple[str, str]]:
+        """The lines under one ruled line, as (label, what goes beside it).
+
+        The two halves are kept APART so the block can set them in two columns.
+        Run together as one string, every line started its box wherever its own
+        label happened to end — "Initials:" a third of an inch left of "Date
+        signed:" — and a signer saw four boxes wandering across the page.
 
         WHICH lines is the carrier's choice, not this function's — it reads
         `layout` and nothing else. That is the whole of what makes the block
@@ -730,59 +743,102 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         `sg` is the person named for this side, when one was. Their name and
         title are PRINTED rather than left as boxes: the carrier already typed
         them, and asking the signer to type them again is a form, not a
-        signature. `anchored` is false for a second signatory, whose lines are
-        signed by hand — see below.
+        signature. `anchored` is false for somebody who is only printed on the
+        page — see block_flow.
         """
-        out: list[str] = []
+        out: list[tuple[str, str]] = []
         for key in layout["fields"].get(side, ()):
             if key == "signature":
                 continue                 # the ruled line itself, drawn by the caller
-            label = esign_pdf.FIELD_LABEL[key]
+            label = f"{esign_pdf.FIELD_LABEL[key]}:"
             if key == "name" and sg:
-                out.append(f"{label}: {esc(sg.get('name') or '')}")
+                out.append((label, esc(sg.get("name") or "")))
             elif key == "title" and sg:
-                out.append(f"{label}: {esc(sg.get('role') or '')}")
+                out.append((label, esc(sg.get("role") or "")))
             else:
-                out.append(f"{label}: {anchor(key, side) if anchored else ''}")
+                out.append((label, anchor(key, side, slot) if anchored else ""))
         return out
 
-    def block_text(party_label: str, org: str | None, side: str) -> str:
-        # Whoever was named for this side gets their own block, so the person
+    # ONE label column, both sides, whatever either of them chose to print.
+    # Measured off the widest label actually used, in the face it is set in, so
+    # the boxes down a block line up with each other and the two blocks line up
+    # with one another.
+    label_w = max(
+        [stringWidth(f"{esign_pdf.FIELD_LABEL[k]}:", sig_st.fontName,
+                     sig_st.fontSize)
+         for sd in esign_pdf.SIGNATURE_SIDES
+         for k in layout["fields"].get(sd, ()) if k != "signature"]
+        or [0.0]) + 12
+
+    def named_for(side: str) -> list[dict]:
+        """The people named for this side, in the order they were named.
+
+        Their position in THIS list is their slot, so the signing round and the
+        page agree about whose boxes are whose — see esign_routes._named_signers,
+        which filters the same list the same way.
+        """
+        return [sg for sg in (signers or []) if sg.get("side") == side
+                and (sg.get("name") or "").strip()]
+
+    def block_flow(party_label: str, org: str | None, side: str, width: float):
+        """One side's signature block, set as a table.
+
+        A table rather than a paragraph because the block has COLUMNS — a label
+        and the thing beside it — and a paragraph has only a left margin.
+        """
+        # Whoever was named for this side gets their own rule, so the person
         # signing does not have to work out which of two identical lines is
         # theirs. Nobody named falls back to a blank block — the contract can
         # still be printed and signed by hand, which is how most of them are.
-        named = [sg for sg in (signers or []) if sg.get("side") == side
-                 and (sg.get("name") or "").strip()]
-        head = (f"<b>{esc(party_label)}</b><br/>{esc(org or '')}")
+        named = named_for(side)
+        rows: list[list] = [[Paragraph(
+            f"<b>{esc(party_label)}</b><br/>{esc(org or '')}", sig_st), ""]]
+        spans: list[int] = [0]
+        rules: list[int] = []
         rule = "____________________________"
-        # Above the rule, so a signature stamped from the anchor sits ON the
-        # line rather than under it.
-        sig = (anchor("signature", side) + "<br/>") if anchors else ""
 
-        def under(sg: dict | None, anchored: bool) -> str:
-            rows = lines_under(side, sg, anchored)
-            return ("<br/>" + "<br/>".join(rows)) if rows else ""
+        def add_signer(sg: dict | None, slot: int, anchored: bool) -> None:
+            # Above the rule, so a signature stamped from the anchor sits ON
+            # the line rather than under it.
+            sig = (anchor("signature", side, slot) + "<br/>") if anchored else ""
+            rows.append([Paragraph(sig + rule, sig_st), ""])
+            spans.append(len(rows) - 1)
+            rules.append(len(rows) - 1)
+            for label, beside in lines_under(side, sg, anchored, slot):
+                rows.append([Paragraph(label, sig_st),
+                             Paragraph(beside or "&nbsp;", sig_st)])
 
         if not named:
-            return f"{sig}{rule}<br/>{head}<br/>{under(None, True)}"
-        # A rule per signer. Two names under one line is one signature block
-        # with two names in it, which is not what a second signatory is.
-        #
-        # Only the FIRST block is anchored. Every box carries the party it
-        # belongs to and nothing finer, so a second one for the same side would
-        # be a second place that same signature lands — which is not what a
-        # second signatory is either. The rest stay as they print today, to be
-        # signed by hand.
-        return head + "".join(
-            f"<br/><br/>{sig if i == 0 else ''}{rule}"
-            f"{under(sg, i == 0)}"
-            for i, sg in enumerate(named))
+            add_signer(None, 1, bool(anchors))
+        for i, sg in enumerate(named, start=1):
+            # ANCHORED unless this person is only being printed. Somebody the
+            # carrier deliberately gave no access to — an outside signatory who
+            # is not to be sent a link — gets the same lines with nothing to
+            # click on, and signs the printed copy.
+            add_signer(sg, i, bool(anchors) and _may_sign_online(sg))
 
-    carrier_block = Paragraph(
-        block_text("For the Carrier", carrier_name, "carrier"), sig_st)
-    other_block = Paragraph(
-        block_text("For the Counterparty", counterparty_name, "counterparty"),
-        sig_st)
+        t = Table(rows, colWidths=[label_w, max(10.0, width - label_w)],
+                  hAlign="LEFT")
+        t.setStyle(TableStyle(
+            [("VALIGN", (0, 0), (-1, -1), "TOP"),
+             ("LEFTPADDING", (0, 0), (-1, -1), 0),
+             ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+             ("TOPPADDING", (0, 0), (-1, -1), 0),
+             ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]
+            # The head and each rule run the width of the block; only the lines
+            # under a rule are in two columns.
+            + [("SPAN", (0, r), (1, r)) for r in spans]
+            # Air above every rule but the first, so a side that sends two
+            # people to sign reads as two blocks rather than one long list.
+            + [("TOPPADDING", (0, r), (1, r), 14) for r in rules[1:]]))
+        return t
+
+    full_w = A4[0] - 48 * mm
+    half_w = full_w / 2 - 10 * mm
+    side_w = half_w if layout["arrangement"] == "side_by_side" else full_w
+    carrier_block = block_flow("For the Carrier", carrier_name, "carrier", side_w)
+    other_block = block_flow("For the Counterparty", counterparty_name,
+                             "counterparty", side_w)
 
     placed = layout["arrangement"] == "placed"
     if placed:
@@ -821,43 +877,74 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
     ])
 
 
+def _may_sign_online(sg: dict) -> bool:
+    """Whether this named signatory gets boxes of their own, or is only printed.
+
+    One question, and it is the carrier's to answer: somebody from outside
+    Kavachio is named on plenty of contracts without ever being given a way
+    into this system, and turning every typed address into a signing link would
+    be this function making that call on their behalf. Said no, the person is
+    printed on the page with their lines and signs the printed copy.
+
+    NOT a question about the email address. A name with nowhere to write to
+    still gets the block — it is the organisation's block, and whoever presses
+    Sign for that organisation signs it. That is how every contract raised
+    before signatories were nameable worked, and it still is.
+
+    `access` missing means yes, which is what every contract raised before the
+    question existed meant.
+    """
+    return sg.get("access") is not False
+
+
 def _placed_block(side: str, party_label: str, org: str | None,
                   layout: dict, signers: list[dict] | None,
                   anchors: dict[str, str] | None) -> dict:
     """One hand-placed block, described for the drawer.
 
     The SAME choices the flowable version reads — which lines this side signs,
-    and whoever was named for it — so the two arrangements produce the same
-    block in different places rather than two different blocks. Only the first
-    named signer is drawn: every box carries the party it belongs to and
-    nothing finer, so a second block for one side would be a second place the
-    same signature lands.
+    and everybody named for it, in the order they were named — so the two
+    arrangements produce the same block in different places rather than two
+    different blocks. Each signatory gets their own rule and their own boxes,
+    keyed by their slot, so three people signing for one side is three places
+    to sign rather than three names under one line.
     """
     spot = layout["blocks"][side]
-    named = next((sg for sg in (signers or [])
-                  if sg.get("side") == side and (sg.get("name") or "").strip()),
-                 None)
-    lines: list[dict] = []
-    for key in layout["fields"].get(side, ()):
-        if key == "signature":
-            continue                     # the ruled line itself
-        label = f"{esign_pdf.FIELD_LABEL[key]}:"
-        if key == "name" and named:
-            lines.append({"label": label, "value": named.get("name") or ""})
-        elif key == "title" and named:
-            lines.append({"label": label, "value": named.get("role") or ""})
-        else:
-            lines.append({"label": label, "type": key})
+    named = [sg for sg in (signers or []) if sg.get("side") == side
+             and (sg.get("name") or "").strip()]
+    base = (anchors or {}).get(side)
+
+    def group(sg: dict | None, slot: int) -> dict:
+        lines: list[dict] = []
+        for key in layout["fields"].get(side, ()):
+            if key == "signature":
+                continue                 # the ruled line itself
+            label = f"{esign_pdf.FIELD_LABEL[key]}:"
+            if key == "name" and sg:
+                lines.append({"label": label, "value": sg.get("name") or ""})
+            elif key == "title" and sg:
+                lines.append({"label": label, "value": sg.get("role") or ""})
+            else:
+                lines.append({"label": label, "type": key})
+        # Only the copy going out for signature is tagged, and only for
+        # somebody who is actually being given a way to sign it; a draft
+        # download, and anybody the carrier is only printing on the page, gets
+        # the same lines with nothing to click on. Every field type is offered
+        # the same key, exactly as the flowable version does.
+        tagged = bool(base) and (sg is None or _may_sign_online(sg))
+        return {
+            "lines": lines,
+            "anchors": ({k: esign_pdf.slot_key(base, slot) for k in
+                         ("signature", "name", "title", "date", "initial")}
+                        if tagged else {}),
+        }
+
     return {
         "page": spot["page"], "x": spot["x"], "y": spot["y"],
         "width": esign_pdf.PLACED_BLOCK["width"],
-        "title": party_label, "org": org, "lines": lines,
-        # Only the copy going out for signature is tagged; a draft download
-        # gets the same block with nothing to click on. Every field type is
-        # offered the same party key, exactly as the flowable version does.
-        "anchors": ({k: (anchors or {}).get(side) for k in
-                     ("signature", "name", "title", "date", "initial")}
-                    if anchors and anchors.get(side) else {}),
+        "title": party_label, "org": org,
+        "signers": ([group(None, 1)] if not named
+                    else [group(sg, i) for i, sg in enumerate(named, start=1)]),
     }
 
 

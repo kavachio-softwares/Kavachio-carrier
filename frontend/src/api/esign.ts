@@ -168,6 +168,9 @@ export type SigningView = {
      *  those boxes mine and these ones not?". */
     party_key: string;
     status: EsignRecipient["status"];
+    /** Where in the queue this signer is. Served, because a round may run to
+     *  three or four people and the page cannot work it out. */
+    order: number;
     my_turn: boolean;
     signature_name: string;
   };
@@ -277,6 +280,31 @@ export type ContractRound = {
 export async function getContractRound(contractId: number): Promise<ContractRound> {
   const { data } = await api.get<ContractRound>(
     `/esign/contracts/${contractId}/round`);
+  return data;
+}
+
+/** What is known about an address the carrier has just typed into the
+ *  signatory list.
+ *
+ *  Answered by the SERVER and only about the two organisations already on this
+ *  contract, so it says "we know them" or "we do not" and can never be used to
+ *  go fishing for who else holds an account here. `known: false` is the answer
+ *  that matters: this person is from outside, and the carrier has to say
+ *  whether they are being let in to sign or only printed on the page. */
+export type SignerLookup = {
+  email: string;
+  known: boolean;
+  name: string | null;
+  role: string | null;
+  org: string | null;
+  side: "carrier" | "counterparty" | null;
+  note: string;
+};
+
+export async function lookupSigner(contractId: number, email: string):
+  Promise<SignerLookup> {
+  const { data } = await api.get<SignerLookup>(
+    `/esign/contracts/${contractId}/signer-lookup`, { params: { email } });
   return data;
 }
 

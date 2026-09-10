@@ -369,6 +369,13 @@ export type Signer = {
   email: string;
   role?: string;
   side: "carrier" | "counterparty";
+  /** Whether this person is given a way to sign IN Kavachio — their own boxes
+   *  on the page and a link to fill them. Somebody from outside is often named
+   *  on a contract without ever being let into the system, and false means
+   *  exactly that: their lines are printed, and they sign the paper copy.
+   *  Missing means yes, which is what every contract written before the
+   *  question existed meant. */
+  access?: boolean;
 };
 
 export type WordingPreview = {

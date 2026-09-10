@@ -85,6 +85,7 @@ def w():
                         role="broker_admin", invited_by_user_id=dana.id)
         s.add(marco); s.commit()
         return {"t": car.id, "b": br.id, "p": pr.id,
+                "dana": dana.email, "marco": marco.email,
                 "ch": {"Authorization":
                        f"Bearer {mint_access_token(dana.id, car.id, 'carrier_admin')}"}}
 
@@ -264,3 +265,152 @@ def test_the_signing_round_asks_for_what_was_chosen(w):
     assert env.status_code == 200, env.text
     kinds = {f["type"] for f in env.json()["fields"]}
     assert kinds == {"signature", "date"}, kinds
+
+
+# ── the lines line up ──────────────────────────────────────────────────────
+def test_the_lines_under_a_rule_all_start_at_one_x():
+    """Two columns, not one run of text.
+
+    Every line under a rule used to start its box at the end of its own label,
+    so "Initials:" and "Date signed:" put their boxes a third of an inch apart
+    and the block read as though it had been thrown at the page. The labels are
+    printed in one column now and everything beside them in another, which is
+    the only thing that makes four boxes look like one block.
+    """
+    pdf = _compose({"fields": {"carrier": ["signature", "name", "title",
+                                           "date", "initial"],
+                               "counterparty": ["signature", "date"]}})
+    xs = {round(f.x, 4) for f in esign_pdf.discover_fields(pdf)
+          if f.party_key == "tenant:1" and f.type != "signature"}
+    assert len(xs) == 1, f"the boxes under one rule start at {sorted(xs)}"
+
+
+def test_no_box_reaches_into_the_row_below_it():
+    """A box owns its own line and no part of anybody else's.
+
+    Two ways it stopped doing that. Initials were given a box twice the height
+    of the rows around them and drawn bottom-aligned, so they printed well
+    under their own label. And the signature was given more height than there
+    is room between its anchor and the ruled line, so it ran past the rule and
+    onto "Full name:" — a signature written through the next label, under a
+    clickable box covering a row it does not own.
+
+    Both were invisible to every other test here, which asks WHICH boxes exist
+    and never where they land. This one measures.
+    """
+    fields = ["signature", "name", "title", "date", "initial"]
+    got = [f for f in esign_pdf.discover_fields(
+        _compose({"fields": {"carrier": fields, "counterparty": fields}}))
+        if f.party_key == "tenant:1"]
+    assert len(got) == len(fields)
+    for above, below in zip(got, got[1:]):
+        assert above.y + above.h <= below.y, (
+            f"the {above.type} box runs into the {below.type} row beneath it")
+    # Every row under the rule is one line tall — the same line, so the block
+    # reads as a block. Only the signature, which sits above a rule, differs.
+    heights = {round(f.h, 6) for f in got if f.type != "signature"}
+    assert len(heights) == 1, f"the rows under one rule are {sorted(heights)} tall"
+
+
+# ── more than two people ───────────────────────────────────────────────────
+def test_a_side_that_sends_two_people_gets_two_sets_of_boxes():
+    """One organisation, two signatories, two places to sign.
+
+    A second name under one rule is one signature block with two names in it,
+    which is not what a second signatory is. Each gets a rule and boxes keyed to
+    THEM — the slot on the party key — so nobody can fill anybody else's.
+    """
+    got = _boxes(_compose(None, signers=[
+        {"side": "carrier", "name": "Dana Alvarez", "email": "d@x.test"},
+        {"side": "carrier", "name": "Sam Okafor", "email": "s@x.test"},
+        {"side": "counterparty", "name": "Marco Diaz", "email": "m@crc.test"}]))
+    assert "signature:tenant:1" in got
+    assert "signature:tenant:1#2" in got
+    assert "signature:broker:2" in got
+    # Still nobody's third block: two were named, two were drawn.
+    assert "signature:tenant:1#3" not in got
+
+
+def test_somebody_given_no_access_is_printed_and_never_asked():
+    """The carrier's answer to "this person is outside Kavachio".
+
+    Said no, their lines are printed on the signature page with nothing to
+    click on and they sign the paper copy — which is how plenty of people named
+    on a contract have always signed it. The block is still drawn; only the
+    boxes are missing.
+    """
+    got = _boxes(_compose(None, signers=[
+        {"side": "carrier", "name": "Dana Alvarez", "email": "d@x.test"},
+        {"side": "carrier", "name": "Outside Counsel", "email": "c@law.test",
+         "access": False},
+        {"side": "counterparty", "name": "Marco Diaz", "email": "m@crc.test"}]))
+    assert "signature:tenant:1" in got
+    assert not any(k.endswith("tenant:1#2") for k in got), got
+
+
+def test_the_round_makes_a_signer_of_everybody_the_page_asks_for(w):
+    """End to end. Three people named, three links to issue, in the order they
+    were named — and the boxes on the page are shared out between them."""
+    r = _create(w, None, signers=[
+        {"side": "carrier", "name": "Dana Alvarez", "role": "Underwriting",
+         "email": w["dana"]},
+        {"side": "carrier", "name": "Sam Okafor", "role": "Chair",
+         "email": "sam@x.test"},
+        {"side": "counterparty", "name": "Marco Diaz", "role": "Broker",
+         "email": w["marco"]}])
+    assert r.status_code == 200, r.text
+    cid = r.json()["id"]
+    assert client.post(f"/contracts/{cid}/skip-review",
+                       headers=w["ch"], json={}).status_code == 200
+
+    env = client.post("/esign/envelopes", headers=w["ch"], json={
+        "contract_id": cid, "source": "contract", "send_now": False})
+    assert env.status_code == 200, env.text
+    body = env.json()
+    keys = [x["party_key"] for x in body["recipients"]]
+    assert keys == [f"tenant:{w['t']}", f"tenant:{w['t']}#2", f"broker:{w['b']}"]
+    # Asked in the order they were named, this side before the other.
+    assert [x["order"] for x in body["recipients"]] == [1, 2, 3]
+    # And every one of them has somewhere to sign.
+    owned = {f["party_key"] for f in body["fields"]}
+    assert owned == set(keys), owned
+
+
+def test_a_signatory_with_no_access_gets_no_link(w):
+    """Printed on the page, and not on the round. A recipient row for somebody
+    with nothing to fill would be a round waiting on a person who was never
+    given a way in."""
+    r = _create(w, None, signers=[
+        {"side": "carrier", "name": "Dana Alvarez", "email": w["dana"]},
+        {"side": "carrier", "name": "Outside Counsel", "email": "c@law.test",
+         "access": False},
+        {"side": "counterparty", "name": "Marco Diaz", "email": w["marco"]}])
+    cid = r.json()["id"]
+    assert client.post(f"/contracts/{cid}/skip-review",
+                       headers=w["ch"], json={}).status_code == 200
+    body = client.post("/esign/envelopes", headers=w["ch"], json={
+        "contract_id": cid, "source": "contract", "send_now": False}).json()
+    keys = [x["party_key"] for x in body["recipients"]]
+    assert keys == [f"tenant:{w['t']}", f"broker:{w['b']}"], keys
+
+
+# ── is this address one of ours? ───────────────────────────────────────────
+def test_an_address_we_know_is_named_and_one_we_do_not_is_flagged(w):
+    """The question the screen puts before a name is added.
+
+    Scoped to the contract's own two organisations, so it answers "we know
+    them" or "we do not" and can never be used to go fishing for who else holds
+    an account here.
+    """
+    cid = _create(w, None).json()["id"]
+
+    mine = client.get(f"/esign/contracts/{cid}/signer-lookup",
+                      headers=w["ch"], params={"email": w["marco"]})
+    assert mine.status_code == 200, mine.text
+    assert mine.json()["known"] is True
+    assert mine.json()["side"] == "counterparty"
+
+    them = client.get(f"/esign/contracts/{cid}/signer-lookup",
+                      headers=w["ch"], params={"email": "someone@law.test"})
+    assert them.status_code == 200, them.text
+    assert them.json()["known"] is False

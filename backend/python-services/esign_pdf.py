@@ -43,15 +43,56 @@ log = logging.getLogger("bdx.esign.pdf")
 # {{<type>:<party kind>:<id>}} — the party half is the party_key stored on both
 # the field and the recipient, so the token literally spells out who owns the
 # box it marks.
-ANCHOR_RE = re.compile(r"\{\{(signature|initial|name|title|date|text):(tenant|broker):(\d+)\}\}")
+# A party key may carry a SIGNER SLOT — `tenant:12#2` — for the second, third …
+# person one organisation sends to sign. No slot means the first signer, which
+# is the key every contract raised before this had: an old document re-read
+# here finds exactly the boxes it always found.
+ANCHOR_RE = re.compile(
+    r"\{\{(signature|initial|name|title|date|text):(tenant|broker):(\d+(?:#\d+)?)\}\}")
 
 FIELD_TYPES = ("signature", "initial", "name", "title", "date", "text")
 
+# What separates the organisation from the person inside a party key.
+SLOT_SEP = "#"
+
+
+def slot_key(party_key: str, slot: int) -> str:
+    """The key for one organisation's `slot`-th signer.
+
+    Slot 1 is the base key unchanged — the person who has always signed there —
+    so adding a second signatory never moves the first one's boxes.
+    """
+    return party_key if slot <= 1 else f"{party_key}{SLOT_SEP}{int(slot)}"
+
+
+def base_key(party_key: str) -> str:
+    """The ORGANISATION a key names, whichever of its people it points at.
+
+    The access rule is still the whole key — a box belongs to one person — but
+    "which side is this?" is answered by the base.
+    """
+    return party_key.split(SLOT_SEP, 1)[0]
+
 # How big a box of each kind is, in points, measured from the anchor's top-left.
 # A signature needs room for a drawn scrawl; a date does not.
+#
+# Everything except a signature is ONE ROW TALL. Initials are asked for beside
+# a printed "Initials:" label, on a row of their own like "Full name" and "Date
+# signed" above them — not above a ruled line. Given a taller box they were
+# bottom-aligned into it (see `_fit`) and landed half an inch below their own
+# label, out of line with every other row in the block. Only the signature,
+# which really does sit above a rule, is allowed the extra height.
+#
+# And that height is the DISTANCE FROM ITS ANCHOR DOWN TO THE RULE, which both
+# layouts leave about the same: the flowable block writes the anchor on the
+# line above the rule (~25pt), and a placed block tags it 18pt above the line
+# it then draws. At 42 the box overshot the rule by a third of an inch and
+# landed on "Full name:" underneath — a signature written through the next
+# label, and a clickable box covering a row it does not own. Anything taller
+# than the gap has nowhere to go but into the row below.
 BOX_SIZE: dict[str, tuple[float, float]] = {
-    "signature": (185.0, 42.0),
-    "initial":   (58.0, 32.0),
+    "signature": (185.0, 23.0),
+    "initial":   (58.0, 15.0),
     "name":      (185.0, 15.0),
     "title":     (185.0, 15.0),
     "date":      (125.0, 15.0),
@@ -120,9 +161,13 @@ SIGNATURE_ARRANGEMENTS: tuple[dict, ...] = (
 
 # How big a placed block is, as a fraction of the page. SERVED, not restated in
 # the browser: the ghost box somebody drags has to be the size of the block that
-# gets drawn, or they are placing one thing and getting another. `height` is the
-# reserve the screen shows — the drawn height depends on how many lines the
-# side asked for, and is always less than this.
+# gets drawn, or they are placing one thing and getting another.
+#
+# `width` is exact. `height` is the reserve the screen shows for ONE signatory
+# — the drawn height follows how many lines that side asked for and how many
+# people sign for it, so a side sending two grows downward from where the block
+# was left. A block that would then run off the foot of the page is lifted so
+# it fits, which is why the top-left corner is what is stored and not the box.
 PLACED_BLOCK: dict[str, float] = {"width": 0.40, "height": 0.13}
 
 # The two sides a block belongs to, in the words the wording prints. Named here
@@ -421,11 +466,16 @@ def discover_fields(pdf_bytes: bytes) -> list[DiscoveredField]:
 _BLK_TITLE_PT = 9.5
 _BLK_LINE_PT = 8.5
 _BLK_SIG_GAP = 30.0        # room above the rule for a signature to land in
+_BLK_CAP_PT = 6.0          # air under the rule, where the audit caption goes
 _BLK_ROW = 11.5            # one printed line under the rule
 
 
-def placed_block_height(line_count: int) -> float:
-    """How much room a block with this many lines needs, in points.
+def placed_block_height(line_count: int | Sequence[int]) -> float:
+    """How much room a block needs, in points.
+
+    `line_count` is the lines under ONE rule, or a list with one entry per
+    signatory in the block — a side that sends three people to sign is three
+    rules tall, and measuring it as one is how the last two run off the paper.
 
     Generous on purpose: it counts the organisation line whether or not there
     is one, and leaves a few points under the last row. A block placed near the
@@ -433,8 +483,11 @@ def placed_block_height(line_count: int) -> float:
     further than strictly necessary, where under-measuring would run the last
     line off the paper.
     """
-    return (_BLK_TITLE_PT + 2 + _BLK_LINE_PT + 2 + _BLK_SIG_GAP
-            + 6 + _BLK_ROW * max(0, line_count))
+    per = ([int(line_count)] if isinstance(line_count, int)
+           else [int(n) for n in line_count] or [0])
+    return (_BLK_TITLE_PT + 2 + _BLK_LINE_PT + 2
+            + sum(_BLK_SIG_GAP + _BLK_CAP_PT + 6 + _BLK_ROW * max(0, n)
+                  for n in per))
 
 
 def draw_signature_blocks(pdf_bytes: bytes, blocks: Sequence[dict]) -> bytes:
@@ -471,21 +524,26 @@ def draw_signature_blocks(pdf_bytes: bytes, blocks: Sequence[dict]) -> bytes:
                             doc.page_count)
             page = doc[page_no - 1]
             pw, ph = page.rect.width, page.rect.height
-            # Each is {"label", "value", "type"}: what is printed, what is
-            # already known (a named signer's own name), and which kind of box
-            # goes there when it is not.
-            lines: list[dict] = list(b.get("lines") or [])
+            # One entry per SIGNATORY in this block, each {"lines", "anchors"}.
+            # A block that names nobody in particular is one signatory with no
+            # anchors, which is what `lines`/`anchors` on the block itself mean
+            # — the older shape, still accepted so a caller that has only ever
+            # drawn one rule needs no change.
+            groups: list[dict] = list(b.get("signers") or [])
+            if not groups:
+                groups = [{"lines": b.get("lines") or [],
+                           "anchors": b.get("anchors") or {}}]
             width = float(b.get("width") or PLACED_BLOCK["width"]) * pw
-            height = placed_block_height(len(lines))
+            height = placed_block_height(
+                [len(g.get("lines") or []) for g in groups])
 
             x0 = max(0.0, min(float(b.get("x") or 0.0) * pw, pw - width))
             y0 = max(0.0, min(float(b.get("y") or 0.0) * ph, ph - height))
 
-            anchors: dict[str, str] = dict(b.get("anchors") or {})
-
-            def tag(kind: str, at: tuple[float, float]) -> None:
+            def tag(kind: str, at: tuple[float, float],
+                    keys: dict[str, str]) -> None:
                 """The invisible token that puts a signing box right here."""
-                key = anchors.get(kind)
+                key = keys.get(kind)
                 if not key:
                     return
                 page.insert_text(fitz.Point(*at), anchor_token(kind, key),
@@ -501,26 +559,45 @@ def draw_signature_blocks(pdf_bytes: bytes, blocks: Sequence[dict]) -> bytes:
                                  fontname="helv", fontsize=_BLK_LINE_PT - 0.5,
                                  color=(0.06, 0.09, 0.20))
 
-            # The signature lands ON the rule, so its anchor sits in the space
-            # above it — the same relationship the flowable layout draws.
-            tag("signature", (x0, y + 12))
-            y += _BLK_SIG_GAP
-            page.draw_line(fitz.Point(x0, y), fitz.Point(x0 + width, y),
-                           color=(0.45, 0.48, 0.55), width=0.7)
+            for g in groups:
+                # Each is {"label", "value", "type"}: what is printed, what is
+                # already known (a named signer's own name), and which kind of
+                # box goes there when it is not.
+                lines: list[dict] = list(g.get("lines") or [])
+                keys: dict[str, str] = dict(g.get("anchors") or {})
 
-            for row in lines:
-                y += _BLK_ROW
-                page.insert_text(fitz.Point(x0, y), row["label"],
-                                 fontname="helv", fontsize=_BLK_LINE_PT - 1,
-                                 color=(0.35, 0.38, 0.45))
-                after = x0 + fitz.get_text_length(
-                    row["label"], "helv", _BLK_LINE_PT - 1) + 3
-                if row.get("value"):
-                    page.insert_text(fitz.Point(after, y), row["value"],
+                # The signature lands ON the rule, so its anchor sits in the
+                # space above it — the same relationship the flowable layout
+                # draws.
+                tag("signature", (x0, y + 12), keys)
+                y += _BLK_SIG_GAP
+                page.draw_line(fitz.Point(x0, y), fitz.Point(x0 + width, y),
+                               color=(0.45, 0.48, 0.55), width=0.7)
+                y += _BLK_CAP_PT     # the audit caption sits in here
+
+                # TWO COLUMNS, not one run of text. Every label is printed at
+                # x0 and everything beside it starts at the same x — measured
+                # off the widest label this block actually prints. Started at
+                # the end of its own label, "Initials:" and "Date signed:" put
+                # their boxes nearly half an inch apart, which is what makes a
+                # signature block look thrown at the page rather than set on it.
+                label_w = max(
+                    [fitz.get_text_length(r["label"], "helv", _BLK_LINE_PT - 1)
+                     for r in lines] or [0.0]) + 4
+                for row in lines:
+                    y += _BLK_ROW
+                    page.insert_text(fitz.Point(x0, y), row["label"],
                                      fontname="helv", fontsize=_BLK_LINE_PT - 1,
-                                     color=(0.06, 0.09, 0.20))
-                elif row.get("type"):
-                    tag(row["type"], (after, y))
+                                     color=(0.35, 0.38, 0.45))
+                    after = x0 + label_w
+                    if row.get("value"):
+                        page.insert_text(fitz.Point(after, y), row["value"],
+                                         fontname="helv",
+                                         fontsize=_BLK_LINE_PT - 1,
+                                         color=(0.06, 0.09, 0.20))
+                    elif row.get("type"):
+                        tag(row["type"], (after, y), keys)
+                y += 6                   # air before the next signatory's rule
         out = doc.tobytes(deflate=True, garbage=3)
     finally:
         doc.close()
@@ -616,8 +693,8 @@ def _stamp_signature(page: fitz.Page, rect: fitz.Rect, st: Stamp) -> None:
     drawn = False
     if img:
         try:
-            page.insert_image(_fit(rect, img), stream=img, keep_proportion=True,
-                              overlay=True)
+            page.insert_image(_fit(rect, img, on_rule=st.type == "signature"),
+                              stream=img, keep_proportion=True, overlay=True)
             drawn = True
         except Exception as e:                     # a corrupt PNG must not stop a signing
             log.warning("[esign] drawn signature could not be placed (%s) — "
@@ -626,21 +703,28 @@ def _stamp_signature(page: fitz.Page, rect: fitz.Rect, st: Stamp) -> None:
         text = (st.value or "").strip()
         if text:
             # Times-Italic ("tiit") reads as a signature where Helvetica reads
-            # as a form field. Shrink to fit rather than overflow the block.
-            size = 20.0
+            # as a form field. Shrink to fit rather than overflow the block —
+            # by HEIGHT as well as width, because initials are set on a
+            # one-row box and a 20pt letter in a 15pt row either drops below
+            # its label or does not fit at all and prints nothing.
+            size = min(20.0, rect.height - 2.0)
             while size > 8.0 and fitz.get_text_length(text, "tiit", size) > rect.width - 6:
                 size -= 1.0
             page.insert_textbox(rect, text, fontname="tiit", fontsize=size,
                                 color=(0.06, 0.09, 0.20), align=fitz.TEXT_ALIGN_LEFT)
     if st.caption:
-        # Just above the ruled line, not across it: the caption is a note about
-        # the signature, and a line through it reads as part of the signature.
-        cap = fitz.Rect(rect.x0, rect.y1 - 10, rect.x0 + max(rect.width, 190), rect.y1 - 1)
+        # UNDER the ruled line. The box now ends ON the rule and a signature
+        # fills it, so the old position — the bottom of the box — printed the
+        # audit line straight through the signature it describes. Below the
+        # rule is where a reader looks for it anyway, and both layouts keep
+        # room there for exactly this.
+        cap = fitz.Rect(rect.x0, rect.y1 + 0.5,
+                        rect.x0 + max(rect.width, 190), rect.y1 + 8)
         page.insert_textbox(cap, st.caption, fontname="helv", fontsize=5.6,
                             color=(0.45, 0.48, 0.55))
 
 
-def _fit(box: fitz.Rect, image: bytes) -> fitz.Rect:
+def _fit(box: fitz.Rect, image: bytes, *, on_rule: bool = True) -> fitz.Rect:
     """Where a drawn signature actually goes inside its box.
 
     The fit is computed here rather than left to `keep_proportion`, for two
@@ -648,6 +732,12 @@ def _fit(box: fitz.Rect, image: bytes) -> fitz.Rect:
     this version — which turns a signature into a smear. And even when it does
     scale correctly it centres the result, whereas a signature belongs sitting
     on the ruled line at the left, exactly where a pen would have left it.
+
+    `on_rule` is what the box sits on. A signature sits on a ruled line and
+    hangs from the bottom of its box. INITIALS do not — they are asked for
+    beside a printed label, on a row with "Full name" and "Date signed", and a
+    scrawl narrower than its row hung from the bottom sits lower than the words
+    either side of it. Those start at the top of the row, so initials do too.
 
     An unreadable image falls back to the whole box; `insert_image` will then
     either place it or raise, and the caller already handles raising.
@@ -661,8 +751,11 @@ def _fit(box: fitz.Rect, image: bytes) -> fitz.Rect:
         return box
     scale = min(box.width / iw, box.height / ih)
     w, h = iw * scale, ih * scale
-    # Left-aligned, bottom-aligned: the baseline of the box is the ruled line.
-    return fitz.Rect(box.x0, box.y1 - h, box.x0 + w, box.y1)
+    # Left-aligned always. Vertically: on the rule for a signature, on the top
+    # of the row for anything else.
+    if on_rule:
+        return fitz.Rect(box.x0, box.y1 - h, box.x0 + w, box.y1)
+    return fitz.Rect(box.x0, box.y0, box.x0 + w, box.y0 + h)
 
 
 def _stamp_text(page: fitz.Page, rect: fitz.Rect, value: str) -> None:

@@ -387,11 +387,21 @@ export default function SignContract() {
             <div className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
               Who signs this
             </div>
-            <Signer order={1} name={me.name} org={me.org} status={me.status} you />
-            {others.sort((a, b) => a.order - b.order).map(o => (
-              <Signer key={o.party_key} order={o.order} name={o.name}
-                      org={o.org} status={o.status} />
-            ))}
+            {/* Everybody, in the order they are asked — the reader included.
+                Numbered from the round rather than from this list: a side that
+                sends two people makes this three or four rows long, and "you
+                are 1" printed above somebody else who is also 1 is worse than
+                no number at all. */}
+            {[{ order: me.order, key: me.party_key, name: me.name,
+                org: me.org, status: me.status, you: true },
+              ...others.map(o => ({ order: o.order, key: o.party_key,
+                                    name: o.name, org: o.org,
+                                    status: o.status, you: false }))]
+              .sort((a, b) => a.order - b.order)
+              .map(r => (
+                <Signer key={r.key} order={r.order} name={r.name}
+                        org={r.org} status={r.status} you={r.you} />
+              ))}
           </section>
 
           {!readOnly && (

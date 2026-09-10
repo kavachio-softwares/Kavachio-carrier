@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, FileSpreadsheet, ShieldCheck, FileUp, FileText,
   FileSpreadsheet as FileOut, FileWarning, UploadCloud, ShieldAlert, ArrowRight,
+  ExternalLink,
   Save, Trash2, Sparkles,
 } from "lucide-react";
 import { api } from "../api/client";
@@ -219,6 +220,19 @@ export default function DirectSetup() {
     // pre-selected in that case; ContractPicker asks which — one of them.
     setReusedContracts(scope.boundContracts.length === 1 ? scope.boundContracts : []);
   }, [boundIds]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // THE CONTRACT THIS SETUP IS FOR — what the radio above holds. The scope hook
+  // only names a contract when the broker holds exactly one; with several on
+  // file it stays blank and the radio is the only thing that says which. The
+  // output-template lookup and the create dialog both read THIS, because a
+  // template is filed under one contract and the server (rightly) never hands
+  // a contract's template out to a broker-wide question — so a lookup sent
+  // without the pick came back empty for a template made a minute earlier.
+  const pickedContractId: number | null =
+    reusedContracts[0]?.id
+    ?? (scope.contractId === "" ? null : Number(scope.contractId));
+  const pickedContractName: string | null =
+    reusedContracts[0] ? contractLabel(reusedContracts[0]) : scope.contractName;
 
   // The contracts this build will use, in one list: the ones already on file
   // first, then anything newly picked. Everything downstream — the extraction
@@ -492,13 +506,13 @@ export default function DirectSetup() {
       program_id: Number(programId),
       carrier_party_id: carrierId === "" ? null : Number(carrierId),
       broker_party_id: scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId),
-      contract_id: scope.contractId === "" ? null : Number(scope.contractId),
+      contract_id: pickedContractId,
     })
       .then(r => { if (!stale) setResolved(r); })
       .catch(() => { if (!stale) setResolved(null); })
       .finally(() => { if (!stale) setResolving(false); });
     return () => { stale = true; };
-  }, [mga, programId, carrierId, scope.brokerPartyId, scope.contractId, resolveTick]);
+  }, [mga, programId, carrierId, scope.brokerPartyId, pickedContractId, resolveTick]);
 
   // Load saved per-schedule contract bindings whenever the active format changes.
   useEffect(() => {
@@ -730,6 +744,15 @@ export default function DirectSetup() {
     if (missingForCreate().length) { setCreateGate(true); return; }
     setErr(null);
     setShowCreateTemplate(true);
+  }
+
+  // Review a template WITHOUT leaving. Navigating away unmounts this screen,
+  // and with it the programme, broker, contract and every staged file — a File
+  // object cannot be carried through a route change at all. A new tab keeps
+  // all of it exactly where it was, and the lookup above finds the template
+  // again the moment the user is back.
+  function openTemplateTab(id: number) {
+    window.open(`/outputs/templates/${id}`, "_blank", "noopener");
   }
 
   // ---- build setup from the uploads ----------------------------------------
@@ -1375,13 +1398,13 @@ export default function DirectSetup() {
               <p className="text-[12.5px] text-emerald-800 mt-0.5 leading-relaxed">
                 Open it to see the file it produces as a spreadsheet, check the
                 columns and their sources, and deal with anything the standard
-                requires that your bordereau does not carry. Your uploads here
-                stay put while you do.
+                requires that your bordereau does not carry. It opens in a new
+                tab, so everything you have picked and uploaded here stays put.
               </p>
               <div className="flex gap-2 mt-2">
                 <Button variant="secondary"
-                  onClick={() => navigate(`/outputs/templates/${justCreated.id}`)}>
-                  Review the columns <ArrowRight size={14} />
+                  onClick={() => openTemplateTab(justCreated.id)}>
+                  Review the columns <ExternalLink size={14} />
                 </Button>
                 <Button variant="ghost" onClick={() => setJustCreated(null)}>
                   Later — build the setup
@@ -1655,7 +1678,7 @@ export default function DirectSetup() {
                   uploading={!!outFile}
                   hideMissing
                   onCreate={openCreateTemplate}
-                  onOpen={id => navigate(`/outputs/templates/${id}`)} />
+                  onOpen={openTemplateTab} />
               </div>
             </div>
           )}
@@ -2010,12 +2033,12 @@ export default function DirectSetup() {
           programId={programId === "" ? 0 : Number(programId)}
           carrierPartyId={carrierId === "" ? null : Number(carrierId)}
           brokerPartyId={scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId)}
-          contractId={scope.contractId === "" ? null : Number(scope.contractId)}
+          contractId={pickedContractId}
           scopeNames={{
             carrier: carrierName || mga,
             programme: programs.find(p => p.id === programId)?.name ?? null,
             broker: scope.brokerName,
-            contract: scope.contractName,
+            contract: pickedContractName,
           }}
           // Both sides of the job. The bordereau says which of a territory's
           // published columns can actually be filled; the contracts say what
@@ -2036,8 +2059,8 @@ export default function DirectSetup() {
             setResolveTick(n => n + 1);
             setMsg(null);
             // The uploads staged here are NOT thrown away by reviewing the
-            // template — the card below links out and the user comes back to
-            // the same screen with the same files attached.
+            // template — the card opens it in a new tab (see openTemplateTab),
+            // so this screen, its scope and its files are still here after.
             setJustCreated({ id: t.id, name: t.name });
           }} />
 

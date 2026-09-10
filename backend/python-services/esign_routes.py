@@ -44,7 +44,7 @@ from fastapi import (
     APIRouter, Depends, Header, HTTPException, Query, Request, Response,
 )
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, text
+from sqlalchemy import desc, func, or_, text
 
 import esign_email
 import esign_otp
@@ -52,7 +52,7 @@ import esign_pdf
 import esign_seal
 import storage
 from auth_deps import (
-    Principal, current_principal, db_role_values, require_role,
+    Principal, current_principal, db_role_values, normalize_role, require_role,
     resolve_broker_party_id,
 )
 from db import (
@@ -440,6 +440,12 @@ class SignerIn(BaseModel):
     # broker: an insurer signer is always pinned to the caller's own tenant.
     broker_party_id: Optional[int] = None
     order: Optional[int] = None
+    # WHICH of this side's people this is. 1 is the organisation's own block —
+    # the key a two-signature contract has always used — and 2, 3 … are the
+    # extra signatories named beside it, each with boxes of their own. It is
+    # the position on the CONTRACT's signatory list, not a free choice, so the
+    # page and the round cannot disagree about whose boxes are whose.
+    slot: int = 1
 
 
 class EnvelopeIn(BaseModel):
@@ -582,10 +588,25 @@ def create_envelope(body: EnvelopeIn, request: Request,
                            or (contract.broker_party_id if contract else None))
         program_id = body.program_id or (contract.program_id if contract else None)
 
-        given = {sg.side: sg for sg in body.signers}
-        insurer = _resolve_carrier_signer(s, p, tenant_id, given.get("insurer"))
+        # WHO SIGNS comes off the contract unless the request names somebody.
+        # The page is composed from the contract's own signatory list, so a
+        # round built without reading it would put boxes on the page for people
+        # it had made no signer of — which is how the second and third
+        # signatory quietly stopped existing between the document and the round.
+        named = list(body.signers) or (
+            _named_signers(contract) if contract is not None else [])
+
+        # SLOT 1 IS THE ORGANISATION'S OWN BLOCK. Whoever the carrier named
+        # there signs it; named nobody, it falls to the carrier admin pressing
+        # Send and the broker admin on the other side, which is who would have
+        # been named anyway.
+        given = {side: [g for g in named if g.side == side]
+                 for side in ("insurer", "broker")}
+        firsts = {side: next((g for g in gs if (g.slot or 1) == 1), None)
+                  for side, gs in given.items()}
+        insurer = _resolve_carrier_signer(s, p, tenant_id, firsts.get("insurer"))
         broker = _resolve_broker_signer(s, tenant_id, broker_party_id,
-                                        given.get("broker"))
+                                        firsts.get("broker"))
         broker_party_id = broker.broker_party_id
 
         # The identities the boxes are matched against. Derived here, from the
@@ -623,22 +644,57 @@ def create_envelope(body: EnvelopeIn, request: Request,
         _store_pdf(env, pdf, original=False)
         env.page_count = esign_pdf.page_count(pdf)
 
+        # Read the boxes out of the document rather than being told where they
+        # are. The document is the authority on its own layout — and now on WHO
+        # SIGNS as well: a signatory the carrier chose not to give a link to has
+        # no boxes on the page, so there is nobody to make a recipient of.
+        placed = esign_pdf.discover_fields(pdf)
+        present = {f.party_key for f in placed}
+
+        # Everybody who signs, in the order they are asked: this side first,
+        # then the other. Slot 1 leads each side, the extra signatories follow
+        # in the order the carrier named them.
+        roster: list[tuple[SignerIn, str]] = []
+        for base, first, side in ((insurer_key, insurer, "insurer"),
+                                  (broker_key, broker, "broker")):
+            extras = sorted((g for g in given.get(side, []) if (g.slot or 1) > 1),
+                            key=lambda g: g.slot or 1)
+            for sg in [first, *extras]:
+                roster.append((sg, esign_pdf.slot_key(base, sg.slot or 1)))
+
         recs: dict[str, EsignRecipient] = {}
-        for sg, key, order in ((insurer, insurer_key, 1), (broker, broker_key, 2)):
+        order_no = 0
+        for sg, key in roster:
+            if key in recs:
+                continue                 # one row per person, however they were named
+            if key not in present:
+                log.info("[esign] envelope %s: %s is named on this contract but "
+                         "the page gives them nothing to sign — printed only",
+                         env.id, sg.email or sg.name)
+                continue
+            order_no += 1
             r = EsignRecipient(
                 envelope_id=env.id, side=sg.side, party_key=key,
                 tenant_id=tenant_id if sg.side == "insurer" else None,
                 broker_party_id=broker_party_id if sg.side == "broker" else None,
                 name=sg.name, email=(sg.email or "").strip(), title=sg.title,
-                org=sg.org, order_no=sg.order or order, status="pending",
+                org=sg.org, order_no=order_no, status="pending",
                 created_at=_now())
             s.add(r)
             recs[key] = r
+
+        # A side with nobody to sign is a contract that completes with one
+        # signature on it. Refused here, while somebody is still looking at the
+        # screen that caused it, rather than discovered when the round closes.
+        for side, who in (("insurer", "your side"),
+                          ("broker", broker.org or "the broker")):
+            if not any(r.side == side for r in recs.values()):
+                raise HTTPException(
+                    400, f"Nobody on {who} can sign this electronically. At "
+                         "least one signatory there needs a signing link — "
+                         "check who signs on the contract.")
         s.flush()
 
-        # Read the boxes out of the document rather than being told where they
-        # are. The document is the authority on its own layout.
-        placed = esign_pdf.discover_fields(pdf)
         known = set(recs)
         for f in placed:
             if f.party_key not in known:
@@ -805,6 +861,32 @@ def _my_party_key(s, p: Principal) -> str:
     return party_key_for_tenant(p.tenant_id)
 
 
+def _my_recipient(env: EsignEnvelope, key: str, email: str | None):
+    """Which signer on this round the caller is, or None.
+
+    BY EMAIL FIRST, then by party key. One organisation may now send two or
+    three people, and only the address tells them apart — matching on the key
+    alone would hand the second signatory the first one's boxes, which is the
+    one mistake this whole module is arranged to prevent.
+
+    Both lookups are confined to the caller's OWN organisation: the base of the
+    key is taken from the seat, never from the request, so an address that
+    happens to appear on the other side of the contract matches nothing.
+    """
+    base = esign_pdf.base_key(key)
+    mine = [r for r in env.recipients
+            if esign_pdf.base_key(r.party_key) == base]
+    if email:
+        want = email.strip().lower()
+        hit = next((r for r in mine
+                    if (r.email or "").strip().lower() == want), None)
+        if hit:
+            return hit
+    # Nobody matched by name, so this is the organisation's own block — which
+    # is what the un-slotted key has always meant.
+    return next((r for r in mine if r.party_key == key), None)
+
+
 def _contract_for_signing(s, p: Principal, contract_id: int) -> Contract:
     """The contract, if this caller is a party to it.
 
@@ -878,14 +960,28 @@ def _assert_terms_settled(c: Contract) -> None:
 
 
 def _named_signers(c: Contract) -> list[SignerIn]:
-    """The people step 4 of the wizard named, as this module spells them.
+    """The people the carrier named on this contract, as this module spells them.
 
-    The wizard writes them onto the contract's wording as
-    {name, email, role, side}; `side` there is carrier/counterparty, which is
-    the same two parties this module calls insurer/broker. Anybody named
-    without an email is dropped: they can be printed on the signature page but
-    they cannot be sent a link, and a recipient row with nowhere to write to is
-    a round that silently never arrives.
+    The contract holds them as {name, email, role, side, access}; `side` there
+    is carrier/counterparty, which is the same two parties this module calls
+    insurer/broker.
+
+    THE SLOT IS THE POSITION IN THE LIST, counted per side over everybody with
+    a name — exactly the list contract_wording walks when it draws the page. So
+    the person printed under the second rule is the person whose boxes carry
+    the second key, and neither side of that has to be told about the other.
+
+    Two kinds of named person are left out, for different reasons:
+
+      no email     nowhere to send a link. Slot 1 is still drawn — it is the
+                   organisation's own block, signed by whoever presses Send —
+                   so they are printed there and create_envelope resolves who
+                   actually signs it. A later slot with no address is simply
+                   printed and signed on paper.
+      no access    the carrier said this one is not to be given a way in. An
+                   outside signatory is named on plenty of contracts without
+                   ever being handed a login; the page prints their lines with
+                   nothing to click on.
 
     Empty is the normal case and not a failure — create_envelope then resolves
     the carrier admin who pressed Sign and the broker admin on the other side,
@@ -893,22 +989,25 @@ def _named_signers(c: Contract) -> list[SignerIn]:
     """
     raw = (c.wording_sections or {}) if isinstance(c.wording_sections, dict) else {}
     out: list[SignerIn] = []
+    seen: dict[str, int] = {}
     for sg in (raw.get("signers") or []):
         if not isinstance(sg, dict):
             continue
         side = {"carrier": "insurer", "counterparty": "broker"}.get(
             (sg.get("side") or "").strip())
         name = (sg.get("name") or "").strip()
-        email = (sg.get("email") or "").strip()
-        if not side or not name or not email:
+        if not side or not name:
             continue
-        # One per side. A second name for the same party is a second signatory
-        # on the paper block, not a second link — see contract_wording.
-        if any(o.side == side for o in out):
+        # Counted whether or not this one ends up with a link, because the page
+        # counts them the same way.
+        seen[side] = slot = seen.get(side, 0) + 1
+        email = (sg.get("email") or "").strip()
+        if not email or sg.get("access") is False:
             continue
         out.append(SignerIn(side=side, name=name, email=email,
                             title=(sg.get("role") or "").strip() or None,
-                            order=1 if side == "insurer" else 2))
+                            slot=slot,
+                            order=slot if side == "insurer" else 100 + slot))
     return out
 
 
@@ -1051,7 +1150,8 @@ def signing_session(contract_id: int, request: Request,
         env = s.get(EsignEnvelope, envelope_id)
         if env is None:
             raise HTTPException(404, "that signing round is gone")
-        rec = next((r for r in env.recipients if r.party_key == key), None)
+        me = s.get(AppUser, p.user_id)
+        rec = _my_recipient(env, key, getattr(me, "email", None))
         if rec is None:
             # A party to the contract who is not a signer on the round. Says so
             # plainly: silently matching them to the nearest recipient is how
@@ -1059,7 +1159,7 @@ def signing_session(contract_id: int, request: Request,
             raise HTTPException(
                 403, "you are not one of the signers named on this contract.")
         _turn_check(env, rec)
-        token, session = _admit(s, env, rec, request, s.get(AppUser, p.user_id))
+        token, session = _admit(s, env, rec, request, me)
         s.commit()
         return InAppSession(token=token, session=session, envelope_id=env.id,
                             status=env.status)
@@ -1096,7 +1196,8 @@ def contract_round(contract_id: int, p: Principal = Depends(current_principal)):
                          "the terms are not settled yet")),
             }
 
-        rec = next((r for r in env.recipients if r.party_key == key), None)
+        rec = _my_recipient(env, key, getattr(s.get(AppUser, p.user_id),
+                                              "email", None))
         turn = _next_recipient(sorted(env.recipients, key=lambda r: r.order_no))
         mine = bool(rec and turn and turn.id == rec.id
                     and env.status not in ("completed", "declined", "voided"))
@@ -1113,6 +1214,71 @@ def contract_round(contract_id: int, p: Principal = Depends(current_principal)):
                     ("everybody has signed" if turn is None else
                      f"waiting on {turn.org or turn.name}")),
         }
+
+
+class SignerLookup(BaseModel):
+    """What can honestly be said about an address somebody has just typed."""
+    email: str
+    known: bool
+    name: Optional[str] = None
+    role: Optional[str] = None
+    org: Optional[str] = None
+    # carrier | counterparty — the words the contract's own signatory list uses.
+    side: Optional[str] = None
+    note: str
+
+
+@router.get("/contracts/{contract_id}/signer-lookup",
+            response_model=SignerLookup)
+def signer_lookup(contract_id: int,
+                  email: str = Query(..., description="the address just typed"),
+                  p: Principal = Depends(require_role("carrier_admin"))):
+    """Is this address somebody Kavachio already knows on this contract?
+
+    Asked while the carrier is naming who signs, so the screen can say plainly
+    that the person just typed is from OUTSIDE — and then ask the one question
+    that follows: are they to be let in to sign here, or only printed on the
+    signature page and signed with on paper.
+
+    SCOPED TO THE CONTRACT, deliberately. It answers only about the two
+    organisations already on it — this carrier and this broker — so it cannot
+    be turned into a way of finding out who else holds an account here.
+    Everybody else comes back unknown, which is exactly what the screen needs
+    to know about a lawyer, a reinsurer or a second broker.
+    """
+    want = (email or "").strip().lower()
+    if "@" not in want or want.startswith("@") or want.endswith("@"):
+        return SignerLookup(email=email, known=False,
+                            note="That is not an email address yet.")
+    with SessionLocal() as s:
+        c = _contract_for_signing(s, p, contract_id)
+        u = (s.query(AppUser)
+             .filter(func.lower(AppUser.email) == want,
+                     AppUser.status != "disabled",
+                     or_(AppUser.tenant_id == c.tenant_id,
+                         AppUser.broker_party_id == c.broker_party_id))
+             .order_by(AppUser.id).first())
+        if not u:
+            return SignerLookup(
+                email=email, known=False,
+                note="Nobody at this address on either side of this contract.")
+        broker = u.broker_party_id is not None
+        org = None
+        if broker:
+            party = s.get(Party, u.broker_party_id)
+            org = getattr(party, "legal_name", None)
+        else:
+            ten = s.get(Tenant, u.tenant_id)
+            org = (getattr(ten, "legal_name", None)
+                   or getattr(ten, "tenant_name", None))
+        return SignerLookup(
+            email=email, known=True, name=u.full_name or u.email,
+            role={"carrier_admin": "Carrier Admin",
+                  "broker_admin": "Broker Admin",
+                  "kavachio_admin": "Kavachio Admin",
+                  "operator": "Operator"}.get(normalize_role(u.role), "User"),
+            org=org, side="counterparty" if broker else "carrier",
+            note="Already on Kavachio. They can sign here.")
 
 
 @router.get("/envelopes")
@@ -1454,6 +1620,11 @@ def open_for_signing(token: str, request: Request,
                 # hidden: it is the answer to "why are those my boxes?".
                 "party_key": rec.party_key,
                 "status": rec.status,
+                # WHERE IN THE QUEUE this signer is. Sent because the page
+                # cannot work it out: a round may now run to three or four
+                # people, and a list that numbers everybody else correctly and
+                # calls the reader "1" is a list that says nothing.
+                "order": rec.order_no,
                 "my_turn": bool(turn and turn.id == rec.id),
                 "signature_name": rec.signature_name or rec.name,
             },

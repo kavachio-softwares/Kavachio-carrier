@@ -38,17 +38,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
-  AlertTriangle, ArrowLeft, Check, Clock, ExternalLink, PenLine,
+  AlertTriangle, ArrowLeft, Check, Clock, ExternalLink, Globe, Move, PenLine,
 } from "lucide-react";
 import { fmtDate } from "../utils/date";
 import {
-  fieldErrors, getContract, signContract, unsignContract, updateContract,
-  type ContractRecord as Rec,
+  fieldErrors, getContract, getContractTypes, signContract, unsignContract,
+  updateContract,
+  type ContractRecord as Rec, type SignatureBlockSpec, type SignatureLayout,
 } from "../api/contractRecord";
 import { isBrokerSeat } from "../auth";
 import {
-  getContractRound, inAppSigningUrl, type ContractRound,
+  getContractRound, inAppSigningUrl, lookupSigner,
+  type ContractRound, type SignerLookup,
 } from "../api/esign";
+import { SignaturePlacer } from "../components/SignaturePlacer";
+import { Modal } from "../components/ui/Modal";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
 /** Which side of the contract a signatory signs for. */
 type Side = "carrier" | "counterparty";
@@ -59,6 +64,14 @@ type Signatory = {
   email: string;
   role: string;
   side: Side;
+  /** Whether this person is given a way to sign IN Kavachio: boxes of their
+   *  own on the document and a link that opens them. False means their lines
+   *  are printed and they sign the paper copy — which is how plenty of people
+   *  named on a contract have always signed it. */
+  access: boolean;
+  /** Whether Kavachio recognised the address when they were added. Kept so the
+   *  list can go on saying "from outside" without asking the server again. */
+  outside?: boolean;
 };
 
 export default function ContractSignature() {
@@ -75,6 +88,20 @@ export default function ContractSignature() {
   const [role, setRole] = useState("");
   const [side, setSide] = useState<Side>("carrier");
   const [saving, setSaving] = useState(false);
+
+  // What the server knows about the address being typed, and — when it knows
+  // nobody — what the carrier decided to do about that.
+  const [look, setLook] = useState<SignerLookup | null>(null);
+  const [grantAccess, setGrantAccess] = useState(true);
+
+  // Where the signature blocks sit on the page, and the screen that drags
+  // them there. The spec is served: what a block may contain and how big a
+  // hand-placed one is are the server's to say, so the box dragged here is the
+  // size of the block that gets drawn.
+  const [sigSpec, setSigSpec] = useState<SignatureBlockSpec | null>(null);
+  const [placing, setPlacing] = useState(false);
+  const [draftLayout, setDraftLayout] = useState<SignatureLayout | null>(null);
+  const [placeSaving, setPlaceSaving] = useState(false);
 
   const [saved, setSaved] = useState("");
   // Where the electronic round has got to. The SERVER answers this — whether
@@ -103,6 +130,7 @@ export default function ContractSignature() {
       await updateContract(id, {
         signers: signatories.map(sg => ({
           name: sg.name, email: sg.email, role: sg.role, side: sg.side,
+          access: sg.access,
         })),
       });
       setSaved("Saved. These are the names the contract\u2019s signature page "
@@ -146,6 +174,16 @@ export default function ContractSignature() {
     }
   }
 
+  // 400ms: long enough that typing an address is one question rather than
+  // twenty, short enough that the answer is there before the name is.
+  const dEmail = useDebouncedValue(email.trim(), 400);
+
+  useEffect(() => {
+    // Its own call and its own failure. Without the spec the page simply does
+    // not offer to place the blocks, which is better than not loading.
+    getContractTypes().then(d => setSigSpec(d.signature_block)).catch(() => {});
+  }, []);
+
   useEffect(() => {
     getContract(id)
       .then(r => {
@@ -158,6 +196,9 @@ export default function ContractSignature() {
             id: i + 1, name: sg.name, email: sg.email,
             role: sg.role || "Authorised signatory",
             side: sg.side,
+            // Missing means yes — every contract written before the question
+            // existed gave everybody named a way to sign.
+            access: sg.access !== false,
           })));
           setNextId(r.signers.length + 1);
         }
@@ -180,15 +221,83 @@ export default function ContractSignature() {
     window.open(inAppSigningUrl(id), "_blank", "noopener");
   }
 
+  /** Ask the server about the address as it is typed.
+   *
+   *  It answers only about the two organisations already on this contract, so
+   *  "we do not know them" is the useful half: that person is from outside,
+   *  and somebody has to say whether they are being let in to sign here or
+   *  only printed on the page. Asking while they type means the question is
+   *  put before the name is added, not after the round has gone out. */
+  useEffect(() => {
+    if (!mayNameSigners || !dEmail.includes("@")) { setLook(null); return; }
+    let stale = false;
+    lookupSigner(id, dEmail)
+      .then(r => {
+        if (stale) return;
+        setLook(r);
+        // A fresh address is a fresh decision. Left alone, a "no link" chosen
+        // for one person would silently follow the next one typed.
+        setGrantAccess(true);
+        // Their own details rather than a second guess at them — but only into
+        // boxes still empty, so nothing typed is ever overwritten.
+        if (r.known) {
+          if (r.name) setName(n => n.trim() || r.name!);
+          if (r.role) setRole(x => x.trim() || r.role!);
+        }
+      })
+      .catch(() => { if (!stale) setLook(null); });
+    return () => { stale = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dEmail, id, mayNameSigners]);
+
+  /** Whether what the lookup says still describes what is in the box. A reply
+   *  that arrived for an address since edited is about somebody else. */
+  const lookFits = !!look
+    && look.email.trim().toLowerCase() === email.trim().toLowerCase();
+  const outside = lookFits && !look!.known;
+
   function add() {
     if (!name.trim() || !email.trim()) return;
     setSignatories(s => [...s, {
       id: nextId, name: name.trim(), email: email.trim(),
       role: role.trim() || "Authorised signatory",
       side,
+      // Somebody Kavachio already knows always signs here. Somebody it does
+      // not signs here only if the carrier said so.
+      access: outside ? grantAccess : true,
+      outside: lookFits ? !look!.known : undefined,
     }]);
     setNextId(n => n + 1);
     setName(""); setEmail(""); setRole("");
+    setLook(null); setGrantAccess(true);
+  }
+
+  /** Open the page and drag the blocks onto it.
+   *
+   *  Placing by hand IS an arrangement — the third one — so opening this puts
+   *  the draft into it rather than inventing a mode of its own. Cancelling
+   *  throws the draft away and the contract keeps the arrangement it had. */
+  function openPlacer() {
+    if (!sigSpec) return;
+    const base = rec?.signature_layout ?? sigSpec.default;
+    setDraftLayout({ ...base, arrangement: "placed",
+                     blocks: { ...(base.blocks ?? {}) } });
+    setPlacing(true);
+  }
+
+  async function savePlacement() {
+    if (!draftLayout) return;
+    setPlaceSaving(true); setErr(""); setSaved("");
+    try {
+      const r = await updateContract(id, { signature_layout: draftLayout });
+      setRec(r);
+      setPlacing(false);
+      setSaved("Saved. The signature blocks are drawn where you put them.");
+    } catch (e) {
+      setErr(fieldErrors(e).message);
+    } finally {
+      setPlaceSaving(false);
+    }
   }
 
   const bySide = useMemo(() => ({
@@ -223,6 +332,17 @@ export default function ContractSignature() {
   // The wording is what would be sent. Without one there is nothing to sign,
   // and that is worth saying before anyone fills in a signatory list.
   const noWording = !rec.has_wording;
+
+  // The sides in the words this contract uses for them, and which of them
+  // still has nowhere to go. The server refuses a hand-placed layout that
+  // leaves a side unplaced — a contract with nowhere to sign is worse than the
+  // wrong layout — so Save says so rather than offering a button that 400s.
+  const placerSides = (sigSpec?.sides ?? []).map(k => ({
+    key: k,
+    label: k === "carrier" ? "You" : rec.counterparty?.name ?? "The counterparty",
+  }));
+  const unplaced = placerSides
+    .filter(sd => !draftLayout?.blocks?.[sd.key]).map(sd => sd.label);
 
   return (
     <div className="proto">
@@ -308,11 +428,27 @@ export default function ContractSignature() {
             <span className="sub">
               {isBrokerSeat()
                 ? "named by the carrier — this is who the contract expects"
-                : "named by you, on both sides. It is what the signature page "
-                  + "of the contract is built from."}
+                : "as many a side as actually sign. Everybody named gets their "
+                  + "own line and their own boxes on the signature page."}
             </span>
             {mayNameSigners && (
-              <span className="right">
+              <span className="right" style={{ display: "flex", gap: 8 }}>
+                {/* Where the blocks go, dragged onto the contract itself. The
+                    two automatic arrangements answer "side by side or one
+                    above the other?", which is the whole question for most
+                    contracts and none of it for one that has to be
+                    countersigned beside a particular clause. */}
+                {sigSpec && (
+                  <button className="btn sm" type="button" onClick={openPlacer}
+                          disabled={noWording}
+                          title={noWording
+                            ? "There is no wording yet, so there is no page to "
+                              + "put a block on"
+                            : "Drag each side\u2019s signature block onto the "
+                              + "page where it should sit"}>
+                    <Move size={12} /> Place the signature boxes
+                  </button>
+                )}
                 <button className="btn sm" type="button" disabled={saving}
                         onClick={saveSigners}>
                   <PenLine size={12} />{" "}
@@ -353,6 +489,31 @@ export default function ContractSignature() {
                           <span className="k">
                             <b style={{ color: "var(--p-ink)" }}>{sig.name}</b>
                             <div className="sub">{sig.role} · {sig.email}</div>
+                            {(sig.outside || !sig.access) && (
+                              <div style={{ display: "flex", gap: 6, marginTop: 4,
+                                            flexWrap: "wrap" }}>
+                                {sig.outside && (
+                                  <span className="badge b-warn">
+                                    <Globe size={11} /> Outside Kavachio
+                                  </span>
+                                )}
+                                <span className={`badge ${sig.access ? "b-info" : "b-mut"}`}>
+                                  {sig.access
+                                    ? "Signs here"
+                                    : "Printed only · signs on paper"}
+                                </span>
+                                {mayNameSigners && (
+                                  <span
+                                    className="linkish" role="button"
+                                    onClick={() => setSignatories(l => l.map(
+                                      x => x.id === sig.id
+                                        ? { ...x, access: !x.access } : x))}
+                                  >
+                                    {sig.access ? "Print only" : "Let them sign here"}
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           </span>
                           <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
                             {has ? (
@@ -382,6 +543,15 @@ export default function ContractSignature() {
               ))}
             </div>
 
+            {signatories.length > 2 && (
+              <div className="hint" style={{ marginTop: 12 }}>
+                They are asked <b>in the order they are listed</b>, your side
+                first: each one is emailed a link once the person before them
+                has signed, and the document they open already carries that
+                signature.
+              </div>
+            )}
+
             {mayNameSigners ? (
               <>
               <div className="divider" />
@@ -406,6 +576,57 @@ export default function ContractSignature() {
                          onChange={e => setEmail(e.target.value)} />
                 </div>
               </div>
+
+              {/* Asked BEFORE the name is added, because it is a decision about
+                  a person and not a setting: somebody from outside is named on
+                  plenty of contracts without ever being let into this system,
+                  and turning every typed address into a signing link would be
+                  this screen making that call on the carrier’s behalf. */}
+              {lookFits && (outside ? (
+                <div className="note warn" style={{ marginTop: 12 }}>
+                  <b>
+                    <Globe size={13} style={{ verticalAlign: "-2px" }} />{" "}
+                    This person is outside Kavachio.
+                  </b>{" "}
+                  Nobody at <span className="mono">{look!.email}</span> holds an
+                  account on either side of this contract. Say what that means
+                  for them:
+                  <div style={{ display: "flex", gap: 20, marginTop: 10,
+                                flexWrap: "wrap" }}>
+                    {[
+                      { on: true, title: "Let them sign here",
+                        why: "They get their own boxes on the contract and an "
+                           + "emailed link with a one-time code. No Kavachio "
+                           + "account is created and they see nothing else." },
+                      { on: false, title: "Print their name only",
+                        why: "Their lines appear on the signature page with "
+                           + "nothing to click on. They sign the printed copy." },
+                    ].map(o => (
+                      <label key={String(o.on)}
+                             style={{ display: "flex", gap: 8, cursor: "pointer",
+                                      alignItems: "flex-start", maxWidth: 330 }}>
+                        <input type="radio" name="signer-access"
+                               checked={grantAccess === o.on}
+                               onChange={() => setGrantAccess(o.on)} />
+                        <span>
+                          <b style={{ color: "var(--p-ink)" }}>{o.title}</b>
+                          <div className="sub">{o.why}</div>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="note ok" style={{ marginTop: 12 }}>
+                  <b>
+                    <Check size={13} style={{ verticalAlign: "-2px" }} />{" "}
+                    {look!.name}
+                  </b>{" "}
+                  {[look!.role, look!.org].filter(Boolean).join(" at ")} —
+                  already on Kavachio, so they can sign here.
+                </div>
+              ))}
+
               <div className="row2" style={{ marginTop: 14, alignItems: "end" }}>
                 <div className="field" style={{ marginBottom: 0 }}>
                   <label>Role</label>
@@ -636,6 +857,53 @@ export default function ContractSignature() {
           </div>
         </div>
       </div>
+
+      {/* ── where the blocks go ──
+          The pages are this contract as it stands, composed on the server, and
+          the box dragged here is the size of the block that gets drawn — so
+          what is on the screen is what comes out of the printer, and a signing
+          box lands exactly where the block was left. */}
+      {sigSpec && draftLayout && (
+        <Modal
+          open={placing} size="3xl"
+          title="Place the signature boxes"
+          onClose={() => setPlacing(false)}
+          footer={
+            <>
+              <span className="sub" style={{ marginRight: "auto" }}>
+                {unplaced.length === 0
+                  ? "Both blocks are placed. Drag either one to move it."
+                  : `Still to place: ${unplaced.join(" and ")}.`}
+              </span>
+              <button className="btn" type="button"
+                      onClick={() => setPlacing(false)}>
+                Cancel
+              </button>
+              <button className="btn pri" type="button"
+                      disabled={placeSaving || unplaced.length > 0}
+                      onClick={savePlacement}>
+                {placeSaving ? "Saving\u2026" : "Save where they go"}
+              </button>
+            </>
+          }
+        >
+          <p className="hint" style={{ marginTop: 0 }}>
+            Pick a side, then click the page where its block should sit — or
+            drag one that is already there. Everything a side signs moves with
+            its block: the ruled line, the printed name, the date, and a rule of
+            its own for every extra signatory named for that side.
+          </p>
+          <SignaturePlacer
+            contractId={id}
+            layout={draftLayout}
+            block={sigSpec.placed_block}
+            sides={placerSides}
+            onPlace={(sideKey, spot) => setDraftLayout(l => l && ({
+              ...l, blocks: { ...(l.blocks ?? {}), [sideKey]: spot },
+            }))}
+          />
+        </Modal>
+      )}
     </div>
   );
 }
