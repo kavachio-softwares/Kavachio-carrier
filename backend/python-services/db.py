@@ -732,6 +732,63 @@ class ContractSignature(Base):
                         default=datetime.utcnow)
 
 
+class CarrierBroker(Base):
+    """Which carriers a broker works with. THE relationship, not a derivation.
+
+    `party.tenant_id` says who ONBOARDED a broker — one carrier, one column.
+    Whether a carrier WORKS WITH one is many-to-many, because a broker produces
+    for several, and using the ownership column for it made a shared broker
+    invisible to every carrier but the first. That bug had to be found and
+    fixed separately in the broker directory, in Users & Roles and in the
+    contract counterparty picker; this is the row that stops there being a
+    fourth place.
+
+    Distinct from `program_broker`, which says WHICH PROGRAMMES they may
+    produce on. This says the two organisations work together at all — true
+    from the moment an invitation is accepted, and before any programme exists.
+    """
+    __tablename__ = "carrier_broker"
+    id = Column("carrier_broker_id", Integer, primary_key=True)
+    tenant_id = Column("carrier_broker_tenant_id", Integer, nullable=False)
+    party_id = Column("carrier_broker_party_id", Integer, nullable=False)
+    # active | ended. Ended rather than deleted: the contracts underneath stay
+    # readable, and "we used to" is a different answer from "we never did".
+    status = Column("carrier_broker_status", String, default="active")
+    origin = Column("carrier_broker_origin", String, nullable=True)
+    since = Column("carrier_broker_since", DateTime, default=datetime.utcnow)
+    ended_at = Column("carrier_broker_ended_at", DateTime, nullable=True)
+    by_user_id = Column("carrier_broker_by_user_id", Integer, nullable=True)
+
+
+def carrier_broker_ids(session, tenant_id: int) -> set[int]:
+    """Party ids of every broker this carrier works with. One place, so a new
+    screen cannot invent a fourth definition of the same question."""
+    if not tenant_id:
+        return set()
+    return {r[0] for r in session.query(CarrierBroker.party_id)
+            .filter(CarrierBroker.tenant_id == tenant_id,
+                    CarrierBroker.status == "active").all()}
+
+
+def link_carrier_broker(session, tenant_id: int, party_id: int,
+                        origin: str = "invitation",
+                        by_user_id: int | None = None) -> None:
+    """Record that this carrier works with this broker. Idempotent, and it
+    revives an ended relationship rather than inserting a second row."""
+    if not tenant_id or not party_id:
+        return
+    row = (session.query(CarrierBroker)
+           .filter(CarrierBroker.tenant_id == tenant_id,
+                   CarrierBroker.party_id == party_id).first())
+    if row:
+        if row.status != "active":
+            row.status, row.ended_at = "active", None
+        return
+    session.add(CarrierBroker(tenant_id=tenant_id, party_id=party_id,
+                              status="active", origin=origin,
+                              by_user_id=by_user_id))
+
+
 class BrokerInvitation(Base):
     """A carrier asking a broker to produce on a programme, and the answer.
 

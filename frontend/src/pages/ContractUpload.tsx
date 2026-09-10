@@ -43,6 +43,7 @@ export default function ContractUpload() {
 
   const [file, setFile] = useState<File | null>(null);
   const [refFiles, setRefFiles] = useState<File[]>([]);
+  const [refOpen, setRefOpen] = useState(false);
 
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState("");
@@ -208,37 +209,25 @@ export default function ContractUpload() {
 
             <div className="divider" />
 
-            <label className="btn" style={{ cursor: "pointer" }}>
-              <Upload size={13} /> Add a reference document
-              <input
-                type="file" style={{ display: "none" }} disabled={busy}
-                onChange={e => {
-                  const f = e.target.files?.[0];
-                  if (f) setRefFiles(r => [...r, f]);
-                  e.target.value = "";
-                }}
-              />
-            </label>
-            <div className="hint" style={{ marginTop: 8 }}>
-              Optional up front. If the wording defers to a document you have not
-              supplied, the read pauses and asks for it — the clauses pointing at
-              it cannot become rules without it.
+            {/* Reference documents live in a dialog, not down the page. They
+                are the exception — most contracts need none — and a second
+                dropzone under the first made the screen read as though two
+                files were expected. What stays here is the one line saying
+                whether any are attached. */}
+            <div className="rowacts">
+              <button className="btn" type="button" disabled={busy}
+                      onClick={() => setRefOpen(true)}>
+                <Upload size={13} />{" "}
+                {refFiles.length
+                  ? `Reference documents (${refFiles.length})`
+                  : "Add a reference document"}
+              </button>
+              <span className="sub">
+                {refFiles.length
+                  ? refFiles.map(f => f.name).join(", ")
+                  : "Only if the wording defers part of its content to one."}
+              </span>
             </div>
-            {refFiles.length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                {refFiles.map((f, i) => (
-                  <div className="kv" key={i}>
-                    <span className="k">{f.name}</span>
-                    <span
-                      className="linkish" role="button"
-                      onClick={() => setRefFiles(r => r.filter((_, j) => j !== i))}
-                    >
-                      <X size={12} /> Remove
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
 
             {busy && step && (
               <div className="note" style={{ marginTop: 14 }}>{step}</div>
@@ -248,6 +237,32 @@ export default function ContractUpload() {
                 {counts.clauses} clauses, {counts.rules} rules.
               </div>
             )}
+
+            {/* The action, where the work ENDS. It is in the page header too,
+                but by the time somebody has chosen a programme and a broker,
+                dropped the contract and added its reference documents, that
+                button is scrolled off the top — so the last thing on the form
+                is the thing to press. */}
+            <div className="divider" />
+            <div className="rowacts">
+              <button
+                className="btn pri" type="button"
+                disabled={!ready || busy || !!halt}
+                onClick={() => submit()}
+              >
+                {busy
+                  ? <><Loader2 size={14} className="animate-spin" /> Reading…</>
+                  : <><FileText size={14} /> Upload and read</>}
+              </button>
+              <span className="sub">
+                {!file ? "Drop the contract above first."
+                 : !ready ? "Choose the programme and broker first."
+                 : refFiles.length
+                   ? `Reads the contract and ${refFiles.length} reference `
+                     + `document${refFiles.length === 1 ? "" : "s"}.`
+                   : "Reads the contract and saves its clauses."}
+              </span>
+            </div>
           </div>
 
           <div className="card pad">
@@ -293,6 +308,67 @@ export default function ContractUpload() {
             </div>
           </div>
         </div>
+
+        {refOpen && (
+          <div className="proto-modal-overlay" onClick={() => setRefOpen(false)}>
+            <div className="proto-modal" onClick={e => e.stopPropagation()}>
+              <div className="m-h">
+                <h3>Reference documents</h3>
+                <button className="x" onClick={() => setRefOpen(false)}
+                        aria-label="Close">×</button>
+              </div>
+              <div className="m-b">
+                <p style={{ margin: "0 0 12px" }}>
+                  A wording sometimes defers part of its content to another
+                  document — a schedule of rates, a set of guidelines. The
+                  clauses pointing at one cannot become rules until it is
+                  supplied.
+                </p>
+                <div className="hint" style={{ marginBottom: 12 }}>
+                  Optional up front: if the read finds a reference you have not
+                  attached, it pauses and asks for it then.
+                </div>
+
+                <label className="btn" style={{ cursor: "pointer" }}>
+                  <Upload size={13} /> Choose a document
+                  <input
+                    type="file" style={{ display: "none" }} disabled={busy}
+                    onChange={e => {
+                      const f = e.target.files?.[0];
+                      if (f) setRefFiles(r => [...r, f]);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+
+                {refFiles.length > 0 ? (
+                  <div style={{ marginTop: 12 }}>
+                    {refFiles.map((f, i) => (
+                      <div className="kv" key={i}>
+                        <span className="k">{f.name}</span>
+                        <span
+                          className="linkish" role="button"
+                          onClick={() => setRefFiles(r => r.filter((_, j) => j !== i))}
+                        >
+                          <X size={12} /> Remove
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="hint" style={{ marginTop: 12 }}>
+                    None attached.
+                  </div>
+                )}
+              </div>
+              <div className="m-f">
+                <button className="btn pri" onClick={() => setRefOpen(false)}>
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* The pause. Not an error — the contract is fine, it just points at
             something nobody has handed over yet. */}

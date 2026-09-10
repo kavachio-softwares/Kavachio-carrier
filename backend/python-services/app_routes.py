@@ -1173,11 +1173,22 @@ def tenant_transfer_ownership(mga: str, body: TransferOwnershipBody,
                            f"organisation, so they cannot own it. Make them an "
                            f"admin first.",
                 "errors": {"email": "not an admin"}})
-        if (target.status or "active") == "suspended":
+        # ACTIVE ONLY. Checking for "suspended" was the wrong shape: it let an
+        # INVITED carrier take the role — somebody who has never signed in and
+        # may never accept — which is how an organisation ends up accountable
+        # to an address rather than a person. The role goes to somebody who has
+        # actually turned up.
+        status = (target.status or "active").lower()
+        if status != "active":
+            reason = ("has not accepted their invitation yet"
+                      if status in ("invited", "pending")
+                      else "cannot sign in")
             raise HTTPException(409, {
-                "message": f"{target.email} cannot sign in, so the organisation "
-                           f"would be owned by somebody unable to act on it.",
-                "errors": {"email": "suspended"}})
+                "message": f"{target.email} {reason}, so the organisation "
+                           f"would be left accountable to somebody unable to "
+                           f"act on it. They have to be an active carrier "
+                           f"first.",
+                "errors": {"email": status}})
 
         previous = s.get(AppUser, t.owner_user_id) if t.owner_user_id else None
         t.owner_user_id = target.id
@@ -5228,13 +5239,9 @@ def users_list(
         # absent from carrier 2's Users & Roles — their party belongs to
         # whoever onboarded them, and they were on none of carrier 2's
         # programmes yet, so they matched neither rule above.
-        # Mirrors hierarchy_routes._invited_broker_ids; inlined because
-        # hierarchy_routes imports from here.
-        from db import BrokerInvitation
-        broker_ids |= {r[0] for r in s.query(BrokerInvitation.party_id)
-                       .filter(BrokerInvitation.tenant_id == tid,
-                               BrokerInvitation.status == "accepted",
-                               BrokerInvitation.party_id.isnot(None)).all()}
+        # One lookup, shared with every other screen that asks the same thing.
+        from db import carrier_broker_ids
+        broker_ids |= carrier_broker_ids(s, tid)
 
         # kavachio_admin is a cross-tenant platform role, not a member of this
         # tenant's org — never surfaced on a tenant's own Users screen.
@@ -5599,26 +5606,36 @@ def users_delete(user_id: int,
         if not u:
             raise HTTPException(404, "user not found")
         _assert_manages_user(s, principal, u)
-        _assert_is_carrier_admin(s, principal)
+        # ANYONE MAY REMOVE THEMSELVES. Managing OTHER people is the carrier
+        # admin's alone, but leaving is not something you should need somebody
+        # else's permission for — and once they have handed the role on, the
+        # outgoing admin is a plain carrier who could otherwise never close
+        # their own account.
+        if u.id != principal.user_id:
+            _assert_is_carrier_admin(s, principal)
 
         # Guards the UI already shows, enforced here too — the screen is not
         # the authority, and a bookmarked request bypasses it entirely.
-        if u.id == principal.user_id:
-            raise HTTPException(409, "You cannot remove your own account.")
-
-        # THE OWNER IS NOT REMOVABLE while they own the place. Removing them
-        # would leave the organisation accountable to nobody, in one click, by
-        # somebody they had themselves invited. Transferring first is not
-        # bureaucracy: it is what makes "the new owner removes the previous
-        # one" safe to do in either order — until ownership has moved there is
-        # no new owner to do the removing.
+        #
+        # THE CARRIER ADMIN IS NOT REMOVABLE — by anyone, themselves included.
+        # It is the one guard that stops an organisation being left accountable
+        # to nobody in a single click. Leaving IS allowed; this says what the
+        # first step is rather than simply refusing, because "you cannot remove
+        # your own account" left somebody who is leaving with nothing to do.
         if u.tenant_id:
             t = s.query(Tenant).filter(Tenant.id == u.tenant_id).first()
             if t and t.owner_user_id == u.id:
+                if u.id == principal.user_id:
+                    raise HTTPException(409, {
+                        "message": "You are the carrier admin, so you cannot "
+                                   "remove yourself yet. Make another carrier "
+                                   "the carrier admin first — then you can "
+                                   "remove your own account.",
+                        "errors": {"owner": "transfer first"}})
                 raise HTTPException(409, {
-                    "message": f"{u.email} owns this organisation, so they "
-                               f"cannot be removed. Transfer ownership to "
-                               f"another admin first — then remove them.",
+                    "message": f"{u.email} is the carrier admin, so they "
+                               f"cannot be removed. Transfer the role to "
+                               f"another carrier first — then remove them.",
                     "errors": {"owner": "transfer first"}})
 
         if normalize_role(u.role) == "carrier_admin" and u.tenant_id:

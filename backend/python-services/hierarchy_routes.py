@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, String
 
 from db import (
+    carrier_broker_ids, link_carrier_broker,
     Tenant,
     BrokerInvitation,
     SessionLocal, Party, Program, Contract, AppUser,
@@ -67,22 +68,36 @@ def _broker_dict(p: Party) -> dict:
     }
 
 
-def _invited_broker_ids(session, tenant_id: int) -> set[int]:
-    """Brokers who ACCEPTED this carrier's invitation.
+# ── Feature gate: one broker, several carrier organisations ─────────────────
+# Default OFF, so the behaviour is exactly what it was: an email that already
+# belongs to a broker admin is refused, every carrier onboards its own brokers,
+# and a broker holds one login for one carrier.
+#
+# Switched ON, the same address can be invited by a second carrier: the broker
+# keeps the login they have, answers the invitation themselves, and works with
+# both — which is the normal shape of the market, but a real change to who can
+# see whom, so it is opt-in rather than assumed.
+#
+# Nothing else is gated. `carrier_broker` rows, the invitation table and the
+# accept flow all behave the same either way; with the flag off a broker simply
+# never accumulates a second carrier. That keeps ONE code path rather than two,
+# so the flag cannot rot into a branch nobody exercises.
+def multi_carrier_brokers_enabled() -> bool:
+    import os
+    return os.getenv("MULTI_CARRIER_BROKERS", "").strip().lower() in (
+        "1", "true", "on", "yes",
+    )
 
-    The accepted invitation is the relationship. Before invitations there was
-    nothing to be one: a carrier "had" a broker because it had created the
-    party row, or because a programme link happened to exist — so a broker
-    shared with another carrier belonged to nobody until they were put on a
-    programme, and could not be put on one because they belonged to nobody.
-    This is what breaks that circle.
+
+def _invited_broker_ids(session, tenant_id: int) -> set[int]:
+    """Brokers this carrier works with. Now one lookup in `carrier_broker`.
+
+    It used to be derived from `broker_invitation.status = 'accepted'` — a rule
+    every query had to know, and an invitation is an EVENT while working
+    together is a FACT that outlives it. Kept as a thin wrapper so the call
+    sites read the same; the definition lives in db.carrier_broker_ids.
     """
-    rows = (session.query(BrokerInvitation.party_id)
-            .filter(BrokerInvitation.tenant_id == tenant_id,
-                    BrokerInvitation.status == "accepted",
-                    BrokerInvitation.party_id.isnot(None))
-            .all())
-    return {r[0] for r in rows}
+    return carrier_broker_ids(session, tenant_id)
 
 
 def _assert_broker(session, party_id: int, tenant_id: int) -> Party:
@@ -114,11 +129,7 @@ def _assert_broker(session, party_id: int, tenant_id: int) -> Party:
             .filter(ProgramBroker.broker_party_id == party_id,
                     ProgramBroker.tenant_id == tenant_id)
             .first()
-            or session.query(BrokerInvitation.id)
-            .filter(BrokerInvitation.party_id == party_id,
-                    BrokerInvitation.tenant_id == tenant_id,
-                    BrokerInvitation.status == "accepted")
-            .first()
+            or party_id in carrier_broker_ids(session, tenant_id)
         )
         if not reachable:
             raise HTTPException(404, "broker not found")
@@ -219,6 +230,11 @@ def programme_broker_add(program_id: int, body: BrokerAssignBody,
             assigned_by_user_id=principal.user_id,
         )
         s.add(link)
+        # Producing on a programme is the strongest evidence there is that the
+        # two work together, so it records the relationship as well. Idempotent
+        # — the usual case is that it already exists.
+        link_carrier_broker(s, tid, party.id, origin="programme",
+                            by_user_id=principal.user_id)
         s.commit()
         return {"ok": True, "reactivated": False, "link_id": link.id}
 
@@ -464,6 +480,14 @@ def broker_create(body: NewBrokerBody,
             existing_party
             and (existing_party.party_type or "").lower() in PRODUCER_PARTY_TYPES)
 
+        if is_existing_broker and not multi_carrier_brokers_enabled():
+            # The old behaviour, and the default. A broker belongs to the
+            # carrier that onboarded them, so a second carrier cannot reach
+            # them at all — the address is simply taken.
+            raise HTTPException(409, {
+                "message": "That email is already in use.",
+                "errors": {"admin_email": "taken"}})
+
         admin, link, party = None, None, None
         if is_existing_broker:
             # They exist. Nothing is created — no organisation, no login, and
@@ -471,15 +495,7 @@ def broker_create(body: NewBrokerBody,
             # link appears when they accept it. A carrier can no longer put a
             # broker on a programme by unilateral act.
             party = existing_party
-            already_ours = (
-                s.query(BrokerInvitation)
-                 .filter(BrokerInvitation.tenant_id == tid,
-                         BrokerInvitation.party_id == party.id,
-                         BrokerInvitation.status == "accepted").first()
-                or s.query(ProgramBroker)
-                    .filter(ProgramBroker.broker_party_id == party.id,
-                            ProgramBroker.tenant_id == tid,
-                            ProgramBroker.status == "active").first())
+            already_ours = party.id in carrier_broker_ids(s, tid)
             if already_ours:
                 # Their own book again — this one they can be told.
                 raise HTTPException(409, {
@@ -523,6 +539,11 @@ def broker_create(body: NewBrokerBody,
                 invited_by_user_id=principal.user_id)
             s.add(admin)
             link = _make_invite_link(admin)
+            # This carrier brought them on, so they work together from now —
+            # the invitation that follows is accepted as onboarding completes,
+            # but the relationship does not wait on that to be true.
+            link_carrier_broker(s, tid, party.id, origin="onboarded",
+                                by_user_id=principal.user_id)
 
         invitation = BrokerInvitation(
             tenant_id=tid, program_id=body.program_id, email=email,

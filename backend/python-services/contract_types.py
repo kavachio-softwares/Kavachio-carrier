@@ -30,10 +30,20 @@ from typing import Any
 # `attr` is the Contract ORM attribute the value lands on, so the routes can
 # apply an edit generically instead of naming all eighteen columns twice.
 # `kind` is what the form should render, not a storage type.
+# `example` is the reference text that belongs INSIDE the box — the form and
+# the record page both use it as the input's placeholder. It lives here rather
+# than in the frontend because it is part of the vocabulary: a hardcoded copy
+# in one screen drifted from the spec (it still offered an example for a field
+# that had been removed), and the record page had no examples at all.
+#
+# `hint` is the sentence UNDER the box, and says what the field means. Where an
+# example used to be buried in that sentence it has moved here, so the two are
+# not two half-copies of the same thing.
 FIELDS: dict[str, dict[str, Any]] = {
     "name": {
         "attr": "name", "label": "Contract name", "kind": "text",
-        "hint": "How people will refer to it — e.g. “Schedule A — 2027”.",
+        "example": "Schedule A — 2027",
+        "hint": "How people will refer to it.",
     },
     "counterparty_party_id": {
         "attr": "broker_party_id", "label": "Counterparty", "kind": "party",
@@ -41,6 +51,7 @@ FIELDS: dict[str, dict[str, Any]] = {
     },
     "schedule_key": {
         "attr": "schedule_key", "label": "Schedule key", "kind": "text",
+        "example": "SCH-A",
         # The design's own hint, verbatim.
         "hint": "Lets one programme hold many contracts.",
     },
@@ -55,20 +66,24 @@ FIELDS: dict[str, dict[str, Any]] = {
     },
     "class_of_business": {
         "attr": "class_of_business", "label": "Class of business", "kind": "text",
-        "hint": "What may be written under it, e.g. “Commercial Auto”.",
+        "example": "Commercial Property",
+        "hint": "What may be written under it.",
     },
     "year_of_account": {
         "attr": "year_of_account", "label": "Year of account", "kind": "text",
+        "example": "2027",
         "hint": "The account year the cession attaches to — not the same as "
                 "the inception year for a treaty written mid-year.",
     },
     "notice_period_days": {
         "attr": "notice_period_days", "label": "Notice period (days)", "kind": "int",
+        "example": "60",
         "hint": "Days of notice needed to cancel. Termination is checked "
                 "against this.",
     },
     "premium_cap_amount": {
         "attr": "premium_cap_amount", "label": "Premium cap", "kind": "decimal",
+        "example": "5,000,000",
         # Says so on the field, because the two are easy to set by accident and
         # only one of them is enforced.
         "hint": "Recorded on the contract only. To have it CHECKED on every "
@@ -87,6 +102,7 @@ FIELDS: dict[str, dict[str, Any]] = {
     },
     "earnings_pattern": {
         "attr": "earnings_pattern", "label": "Earnings pattern", "kind": "text",
+        "example": "Straight line, 12 months",
         "hint": "How premium earns across the term, where it is stated.",
     },
 }
@@ -349,6 +365,9 @@ def public_spec() -> list[dict[str, Any]]:
                           if name == "counterparty_party_id" else f["label"]),
                 "kind": f["kind"],
                 "hint": f["hint"],
+                # The placeholder. Absent for a date or a picker, where the
+                # control already says what shape the answer takes.
+                "example": f.get("example"),
                 "required": name in t["required"],
             })
         out.append({

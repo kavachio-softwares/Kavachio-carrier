@@ -24,6 +24,9 @@ export type ContractField = {
   kind: ContractFieldKind;
   hint: string;
   required: boolean;
+  /** Reference text for the INPUT ITSELF — the placeholder. Null where the
+   *  control already says what shape the answer takes (a date, a picker). */
+  example?: string | null;
 };
 
 export type ContractTypeSpec = {

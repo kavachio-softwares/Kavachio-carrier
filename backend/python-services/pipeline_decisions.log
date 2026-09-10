@@ -182,3 +182,41 @@ TIMING run=1f5b   total 45.4s (0.8 min)
    Call 2 intents                43.6s  95.9%  ######################################
    (other / overlap)              1.9s
 ------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN 6d06  started 2026-09-10 09:52:57  |  contract=tmporw6vgj4.pdf template_fields=0
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=6d06   total 95.3s (1.6 min)
+   Call 1 extraction             95.1s  99.8%  #######################################
+   PDF parse (no AI)              0.2s   0.2%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN d95d  started 2026-09-10 09:57:18  |  contract=tmp4hi9d37i.pdf template_fields=0
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=d95d   total 51.5s (0.9 min)
+   Call 1 extraction             51.3s  99.6%  #######################################
+   PDF parse (no AI)              0.2s   0.4%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN 1134  started 2026-09-10 10:01:51  |  contract=tmp8dsf5uoe.pdf template_fields=0
+============================================================================================================
+10:01:51 | run=1134 | CALL2    | ATTEMPT   | 55 clause(s) in ONE call | est answer ~18,205 of 45,875 tok budget (40%)
+10:02:39 | run=1134 | CALL2    | SPOTCHECK | re-asked 8 of 31 rejected clause(s) | longest first — length is what dilutes attention
+10:02:39 | run=1134 | CALL2    | DILUTED   | clause(s) [26, 25] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+10:02:39 | run=1134 | CALL2    | SIZING    | 23 clause(s) -> batch size 23 | tokens allow 145; attention cap 27 (single call diluted at 55; bisecting to 27)
+10:02:39 | run=1134 | CALL2    | FALLBACK  | 23 item(s) -> 1 batch(es) of 23 | round 1/2; 32 of 55 already trusted (accepted, or re-checked by the spot-check)
+10:02:55 | run=1134 | CALL2    | SPOTCHECK | re-asked 8 of 22 rejected clause(s) | longest first — length is what dilutes attention
+10:02:55 | run=1134 | CALL2    | DILUTED   | clause(s) [13] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+10:02:55 | run=1134 | CALL2    | SIZING    | 14 clause(s) -> batch size 12 | tokens allow 161; attention cap 12 (single call diluted at 23; bisecting to 12)
+10:02:55 | run=1134 | CALL2    | FALLBACK  | 14 item(s) -> 2 batch(es) of 12 | round 2/2; 41 of 55 already trusted (accepted, or re-checked by the spot-check)
+------------------------------------------------------------------------------------------------------------
+TIMING run=1134   total 74.1s (1.2 min)
+   Call 2 intents                72.3s  97.6%  #######################################
+   (other / overlap)              1.8s
+------------------------------------------------------------------------------------------------------------

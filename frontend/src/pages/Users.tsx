@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
-import { currentMga, getUser, normalizeRole } from "../auth";
+import { clearAuth, currentMga, getUser, normalizeRole } from "../auth";
 import { fmtDateTime } from "../utils/date";
 import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
@@ -106,8 +106,10 @@ export default function Users() {
   const iAmOwner = !!me?.id && ownerId === me.id;
 
   function canRemove(u: U) {
-    if (u.id === me?.id) return false;          // can't remove yourself
-    if (u.is_owner) return false;               // transfer the organisation first
+    // Leaving is allowed — you do not need somebody else's permission to close
+    // your own account. What is NOT allowed is walking out as the carrier
+    // admin, because that leaves the organisation accountable to nobody.
+    if (u.is_owner) return false;               // hand the role on first
     if (normalizeRole(u.role) === "operator") return false;  // the broker's seat, not yours
     if (normalizeRole(u.role) === "carrier_admin" && adminCount <= 1) return false; // can't remove last admin
     return true;
@@ -116,7 +118,9 @@ export default function Users() {
   /** Why a Remove link is inert, in the words of the rule that stopped it. The
    *  server enforces every one of these; this only explains it in place. */
   function whyNotRemovable(u: U): string {
-    if (u.id === me?.id) return "You cannot remove your own account.";
+    if (u.is_owner && u.id === me?.id)
+      return "You are the carrier admin. Make another carrier the carrier "
+           + "admin first — then you can remove your own account.";
     if (u.is_owner)
       return "This is the carrier admin. Transfer the role to another carrier "
            + "first — then they can be removed.";
@@ -131,6 +135,9 @@ export default function Users() {
   // Removal is confirmed in an in-app dialog (matching Reset Password below)
   // rather than a native confirm(), and the blocked case explains WHY instead
   // of firing an alert from a link that already looks disabled.
+  // The carrier admin, when somebody clicks Remove on their row. Not a
+  // confirmation — there is nothing to confirm until the role has moved.
+  const [blocked, setBlocked] = useState<U | null>(null);
   const [removeTarget, setRemoveTarget] = useState<U | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeErr, setRemoveErr] = useState<string | null>(null);
@@ -162,7 +169,12 @@ export default function Users() {
   }
 
   function askRemove(u: U) {
-    if (!canRemove(u)) return;   // link is visibly muted; nothing to explain in a popup
+    // The carrier admin's row opens a dialog that EXPLAINS rather than
+    // confirms. A muted link with a tooltip is a dead end for the one person
+    // most likely to be clicking it — somebody who is leaving — and says
+    // nothing about the step that unblocks them.
+    if (u.is_owner) { setBlocked(u); return; }
+    if (!canRemove(u)) return;   // genuinely not yours to do; the title says why
     setRemoveErr(null);
     setRemoveTarget(u);
   }
@@ -175,6 +187,14 @@ export default function Users() {
         `/users/${removeTarget.id}`);
       // Someone other records name is suspended rather than deleted, so the
       // trail of who did what stays readable. Say which happened.
+      // Removing YOURSELF ends the session: reloading the list would fire a
+      // page of requests the server now refuses, and leave somebody staring at
+      // a screen they no longer have access to.
+      if (removeTarget.id === me?.id) {
+        clearAuth();
+        nav("/login", { replace: true });
+        return;
+      }
       setMsg({ kind: "ok", text: data?.message ?? `${removeTarget.email} was removed.` });
       setRemoveTarget(null);
       reload();
@@ -333,8 +353,12 @@ export default function Users() {
                             owner and only TO another admin of this
                             organisation, which is exactly what the server
                             allows — a link that 403s is worse than no link. */}
+                        {/* Only an ACTIVE carrier can take the role — the
+                            server refuses anyone still sitting on an
+                            unaccepted invitation, so offering it here would be
+                            offering a link that 409s. */}
                         {iAmOwner && !u.is_owner && u.org_kind !== "broker"
-                          && isAdminRow && (
+                          && isAdminRow && u.status === "active" && (
                           <>
                             <span
                               className="linkish"
@@ -346,10 +370,13 @@ export default function Users() {
                             {" · "}
                           </>
                         )}
-                        {canRemove(u) ? (
-                          <span className="linkish" title="Remove this user"
-                            onClick={() => askRemove(u)}>
-                            Remove
+                        {canRemove(u) || u.is_owner ? (
+                          <span
+                            className="linkish"
+                            title={u.is_owner ? whyNotRemovable(u) : "Remove this user"}
+                            onClick={() => askRemove(u)}
+                          >
+                            {u.is_owner && u.id === me?.id ? "Leave" : "Remove"}
                           </span>
                         ) : (
                           <span className="linkish mut" aria-disabled="true"
@@ -423,6 +450,51 @@ export default function Users() {
 
       {/* Remove user — same in-app dialog pattern as Reset Password above, so
           the two destructive actions on this screen look like one product. */}
+      {blocked && (
+        <div className="proto-modal-overlay" onClick={() => setBlocked(null)}>
+          <div className="proto-modal" onClick={e => e.stopPropagation()}>
+            <div className="m-h">
+              <h3>
+                {blocked.id === me?.id
+                  ? "Transfer the role before you leave"
+                  : "This is the carrier admin"}
+              </h3>
+              <button className="x" onClick={() => setBlocked(null)}
+                      aria-label="Close">×</button>
+            </div>
+            <div className="m-b">
+              {blocked.id === me?.id ? (
+                <>
+                  You are this organisation&rsquo;s carrier admin, so you cannot
+                  remove yourself yet — it would leave the organisation
+                  accountable to nobody.
+                  <div className="sub" style={{ marginTop: 10 }}>
+                    Make another <b>active</b> carrier the carrier admin using{" "}
+                    <b>Make carrier admin</b> on their row. You become an
+                    ordinary carrier, and can then remove your own account from
+                    here.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <b>{blocked.full_name || blocked.email}</b> is this
+                  organisation&rsquo;s carrier admin, so they cannot be removed.
+                  <div className="sub" style={{ marginTop: 10 }}>
+                    Only they can hand the role on. Once another carrier holds
+                    it, they can be removed like anyone else.
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="m-f">
+              <button className="btn pri" onClick={() => setBlocked(null)}>
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {xferTarget && (
         <div className="proto-modal-overlay" onClick={closeXfer}>
           <div className="proto-modal" onClick={e => e.stopPropagation()}>
@@ -458,12 +530,24 @@ export default function Users() {
         <div className="proto-modal-overlay" onClick={closeRemove}>
           <div className="proto-modal" onClick={e => e.stopPropagation()}>
             <div className="m-h">
-              <h3>Remove User</h3>
+              <h3>{removeTarget.id === me?.id ? "Leave this organisation" : "Remove User"}</h3>
               <button className="x" onClick={closeRemove} aria-label="Close">×</button>
             </div>
             <div className="m-b">
-              Remove <b>{removeTarget.full_name || removeTarget.email}</b> ({removeTarget.email})
-              from your organization? They will lose access immediately.
+              {removeTarget.id === me?.id ? (
+                <>
+                  Remove <b>your own account</b> ({removeTarget.email}) from
+                  this organisation? You will be signed out and will lose
+                  access immediately. This is not something you can undo
+                  yourself — somebody still here would have to invite you back.
+                </>
+              ) : (
+                <>
+                  Remove <b>{removeTarget.full_name || removeTarget.email}</b>{" "}
+                  ({removeTarget.email}) from your organization? They will lose
+                  access immediately.
+                </>
+              )}
               {removeErr && (
                 <div style={{ marginTop: 10, color: "var(--p-crit)" }}>{removeErr}</div>
               )}
@@ -471,7 +555,8 @@ export default function Users() {
             <div className="m-f">
               <button className="btn" onClick={closeRemove} disabled={removeBusy}>Cancel</button>
               <button className="btn pri" onClick={confirmRemove} disabled={removeBusy}>
-                {removeBusy ? "Removing…" : "Remove User"}
+                {removeBusy ? "Removing…"
+                 : removeTarget.id === me?.id ? "Remove my account" : "Remove User"}
               </button>
             </div>
           </div>

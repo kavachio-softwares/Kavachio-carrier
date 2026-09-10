@@ -17,7 +17,7 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink,
   Eye, FileText, History, MessagesSquare, Paperclip, PenLine, Plus, RefreshCw,
-  Send, ShieldCheck, Trash2, Upload, XCircle,
+  Send, Trash2, Upload, XCircle,
 } from "lucide-react";
 import { currentMga, getTenantBrand } from "../auth";
 import { SignaturePlacer } from "../components/SignaturePlacer";
@@ -279,27 +279,6 @@ export default function ContractRecord() {
 
   /** Terms → checks. See bindChecks: the server resolves which bordereau
    *  template this contract reports into, so there is nothing to choose. */
-  async function doBind() {
-    await run("bind", async () => {
-      const r = await bindChecks(id);
-      const m = r.mapping;
-      // Each shortfall carries its OWN reason — "no column that measures it"
-      // and "three columns claim to be this and nothing says which" are
-      // different problems with different fixes, and one summary sentence over
-      // both of them tells the reader neither.
-      setNote(
-        (m.rules_written === 0
-          ? `Nothing could be checked against ${m.output_template.name}.`
-          : `${m.rules_written} check${m.rules_written === 1 ? "" : "s"} `
-            + `written against ${m.output_template.name}.`)
-        + (m.unmapped.length
-            ? " Not measured: "
-              + m.unmapped.map(u => `${u.question} — ${u.reason}`).join("; ")
-              + "."
-            : ""));
-    });
-  }
-
   async function doGenerate() {
     await run("rules", async () => {
       const r = await generateRules(id, rec?.output_template?.id ?? null);
@@ -690,6 +669,10 @@ export default function ContractRecord() {
           type={f.kind === "date" ? "date"
                : f.kind === "int" || f.kind === "decimal" ? "number" : "text"}
           step={f.kind === "decimal" ? "0.01" : undefined}
+          // The same served reference text the create form shows. Editing a
+          // contract used to offer bare boxes, so the shape of an answer was
+          // only ever explained on the way in.
+          placeholder={f.example ?? undefined}
           value={draft[f.name] ?? ""}
           disabled={shut}
           onChange={e => (
@@ -1151,34 +1134,6 @@ export default function ContractRecord() {
                   <CheckCircle2 size={13} /> Put in force
                 </button>
               )}
-              {a.generate_rules && rec.has_wording && (
-                <button className="btn" type="button" disabled={!!busy}
-                        onClick={doGenerate}>
-                  <RefreshCw size={13} />
-                  {busy === "rules" ? "Reading…" : "Re-read rules"}
-                </button>
-              )}
-              {/* The written contract's equivalent of Re-read rules. There is
-                  no document to re-read — the terms ARE the source — so this
-                  translates them into checks instead. A term that moves takes
-                  its check with it on its own (see contract_routes._auto_bind);
-                  what this answers is the other direction, where the TEMPLATE
-                  changed and a term that had no column to measure it now has
-                  one. */}
-              {rec.checks.bindable && (
-                <button className="btn" type="button" disabled={!!busy}
-                        onClick={doBind}
-                        title={rec.checks.rules === 0
-                          ? "Write these terms into the checks that run on "
-                            + "every bordereau row"
-                          : "Write them again — for when a column has been "
-                            + "mapped that had nothing to measure a term "
-                            + "before"}>
-                  <ShieldCheck size={13} />
-                  {busy === "bind" ? "Binding…"
-                    : rec.checks.rules === 0 ? "Bind checks" : "Re-bind checks"}
-                </button>
-              )}
               {a.renew && (
                 <button className="btn" type="button"
                         onClick={() => setShowRenew(v => !v)}>
@@ -1191,12 +1146,12 @@ export default function ContractRecord() {
                   <XCircle size={13} /> Terminate
                 </button>
               )}
-              {rec.programme && (
-                <Link className="btn"
-                      to={`/programs/${rec.programme.id}/contracts/${rec.id}`}>
-                  <FileText size={13} /> Clauses &amp; rules
-                </Link>
-              )}
+              {/* No "Clauses & rules", "Re-read rules" or "Bind checks"
+                  here. This page is the CONTRACT — its terms, its wording, who
+                  signed it. What those terms became downstream is a different
+                  question, asked from the programme, and three buttons about
+                  it crowded the row of actions that are actually about the
+                  contract in front of you. */}
               {/* Screen only — no signing provider is connected yet, which the
                   screen itself says before anything else on it. */}
               <Link className="btn" to={`/contracts/${rec.id}/signature`}>
@@ -1551,7 +1506,7 @@ export default function ContractRecord() {
                       <div className="limgrp-b">
                       <div className="lim lim-h">
                         <div className="lq"><b>What you agreed</b></div>
-                        <div className="sub">The limit</div>
+                        <div className="sub">Contract Limit</div>
                         <div className="sub">Severity Classification</div>
                       </div>
                       {rows.map(l => {

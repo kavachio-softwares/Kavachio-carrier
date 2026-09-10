@@ -709,17 +709,30 @@ def counterparties(party_type: str = Query(..., description="broker | reinsurer"
         q = (s.query(Party)
              .filter(func.cast(Party.party_type, String) == party_type,
                      Party.is_active.is_(True)))
-        if tid is not None:
-            # Global parties (scope='global') are shared; tenant ones are not.
-            q = q.filter(or_(Party.tenant_id == tid, Party.tenant_id.is_(None)))
 
         if party_type == "broker" and program_id:
+            # BEING ON THE PROGRAMME IS THE AUTHORISATION — not owning the
+            # party row. A broker shared with another carrier keeps the row of
+            # whoever onboarded them, so filtering by `Party.tenant_id` as well
+            # hid exactly the brokers a carrier had just put on a programme:
+            # they were on it, and still could not be picked.
+            #
+            # The programme is checked to be THIS carrier's first, which is what
+            # the ownership filter was incidentally providing.
+            prog = s.get(Program, program_id)
+            if not prog or (tid is not None and prog.tenant_id != tid):
+                raise HTTPException(404, "programme not found")
             on_programme = {
                 l.broker_party_id for l in s.query(ProgramBroker).filter(
                     ProgramBroker.program_id == program_id,
                     ProgramBroker.status == "active").all()
             }
             q = q.filter(Party.id.in_(on_programme or {-1}))
+        elif tid is not None:
+            # No programme to gate on (a reinsurer, or a broker list asked for
+            # without one), so the carrier's own directory is the scope.
+            # Global parties (scope='global') are shared; tenant ones are not.
+            q = q.filter(or_(Party.tenant_id == tid, Party.tenant_id.is_(None)))
 
         return [{"id": r.id, "name": r.legal_name, "party_type": r.party_type}
                 for r in q.order_by(Party.legal_name).all()]

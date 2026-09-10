@@ -51,13 +51,10 @@ import {
 
 /** Examples, only where one actually helps. A date input needs none, and a
  *  placeholder on every field is noise. */
-const PLACEHOLDER: Record<string, string> = {
-  name: "e.g. Schedule A — 2027",
-  schedule_key: "e.g. SCH-A",
-  class_of_business: "e.g. Commercial Property",
-  year_of_account: "e.g. 2027",
-  notice_period_days: "e.g. 60",
-};
+// No PLACEHOLDER map here. The examples are SERVED with the field spec
+// (contract_types.FIELDS["…"]["example"]), so this screen and the contract
+// record show the same reference text, and a field that is renamed or removed
+// cannot leave a stale example behind — which is exactly what this map did.
 
 const STEPS = [
   { key: "terms", label: "Terms" },
@@ -385,7 +382,7 @@ export default function ContractNew() {
           type={f.kind === "date" ? "date"
                : f.kind === "int" || f.kind === "decimal" ? "number" : "text"}
           step={f.kind === "decimal" ? "0.01" : undefined}
-          placeholder={PLACEHOLDER[f.name]}
+          placeholder={f.example ?? undefined}
           value={values[f.name] ?? ""}
           disabled={shut}
           // The dates go through the term so the three inputs stay one fact:

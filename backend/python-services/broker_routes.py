@@ -23,6 +23,7 @@ import contract_routes
 import contract_types as ct
 from auth_deps import Principal, current_principal
 from db import (
+    CarrierBroker, link_carrier_broker,
     BrokerInvitation,
     SessionLocal, AppUser, Contract, Party, Program, ProgramBroker, Tenant,
 )
@@ -122,6 +123,11 @@ def _accept_invitation(s, inv, party_id: int, how: str) -> None:
     inv.accepted_by = how
     inv.answered_at = dt.datetime.now(dt.timezone.utc)
     inv.party_id = party_id
+    # THE RELATIONSHIP ITSELF, written where it begins. The invitation records
+    # that they were asked and said yes; this records that they work together,
+    # which is what every screen reads.
+    link_carrier_broker(s, inv.tenant_id, party_id,
+                        origin="invitation", by_user_id=inv.by_user_id)
     if not inv.program_id:
         return
     link = (s.query(ProgramBroker)
@@ -266,12 +272,10 @@ def _carrier_ids(s, broker_id: int) -> set[int]:
     they do inside it.
     """
     from_links = {l.tenant_id for l in _links(s, broker_id) if l.tenant_id}
-    from_invites = {
-        r[0] for r in s.query(BrokerInvitation.tenant_id)
-        .filter(BrokerInvitation.party_id == broker_id,
-                BrokerInvitation.status == "accepted").all()
-        if r[0]}
-    return from_links | from_invites
+    from_rel = {r[0] for r in s.query(CarrierBroker.tenant_id)
+                .filter(CarrierBroker.party_id == broker_id,
+                        CarrierBroker.status == "active").all() if r[0]}
+    return from_links | from_rel
 
 
 @router.get("/broker/carriers")
