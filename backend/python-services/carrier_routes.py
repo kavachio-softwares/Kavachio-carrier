@@ -333,6 +333,23 @@ def _carrier_party_id(s, carrier_id: int) -> int:
     return pid
 
 
+def _scope_pipeline(s, scope: CarrierScope, cpid: int,
+                    broker: Optional[int], active_only: bool):
+    """The newest setup for this carrier + programme, held by `broker` (None =
+    the programme's shared one). What the readiness check falls back on to say
+    a setup exists but is still a draft; live setups go through setup_scope."""
+    from db import Pipeline
+    q = (s.query(Pipeline)
+         .filter(Pipeline.tenant_id == scope.carrier_id,
+                 Pipeline.carrier_party_id == cpid,
+                 Pipeline.program_id == scope.program_id))
+    if active_only:
+        q = q.filter(Pipeline.status == "active")
+    q = q.filter(Pipeline.broker_party_id == broker if broker is not None
+                 else Pipeline.broker_party_id.is_(None))
+    return q.order_by(Pipeline.id.desc()).first()
+
+
 @router.get(_T + "/bordereau")
 def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
     """Can a bordereau be run against this contract yet, and against what.
@@ -355,15 +372,7 @@ def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
         # (carrier, programme, broker) — the CONTRACT supplies the rules, not
         # the layout, which is why one setup can serve several contracts.
         def _pipe(broker: Optional[int], active_only: bool):
-            q = (s.query(Pipeline)
-                 .filter(Pipeline.tenant_id == scope.carrier_id,
-                         Pipeline.carrier_party_id == cpid,
-                         Pipeline.program_id == scope.program_id))
-            if active_only:
-                q = q.filter(Pipeline.status == "active")
-            q = q.filter(Pipeline.broker_party_id == broker if broker is not None
-                         else Pipeline.broker_party_id.is_(None))
-            return q.order_by(Pipeline.id.desc()).first()
+            return _scope_pipeline(s, scope, cpid, broker, active_only)
 
         def _payload(pipe: Pipeline, held_by: str):
             tpl = (s.get(ExportTemplate, pipe.output_template_id)
@@ -379,10 +388,14 @@ def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
                 "output_template": ({"id": tpl.id, "name": tpl.name} if tpl else None),
             }
 
-        pipe, held_by = _pipe(scope.broker_party_id, True), "broker"
-        if pipe is None:
-            pipe, held_by = _pipe(None, True), "programme"
+        # The live setup for THIS contract. A broker with two contracts on two
+        # BDX templates has two live setups, and the one named here has to be
+        # the one a run uses — setup_scope is the single answer to both.
+        from setup_scope import live_setup_for
+        pipe = live_setup_for(s, scope.carrier_id, cpid, scope.program_id,
+                              scope.broker_party_id, scope.contract_id)
         if pipe is not None:
+            held_by = "broker" if pipe.broker_party_id is not None else "programme"
             return {"ready": True, "reason": None, "setup": _payload(pipe, held_by)}
 
         # The pre-pipeline fallback direct_run still honours: an approved
@@ -425,6 +438,28 @@ def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
                        "validate your file against."),
             "setup": None,
         }
+
+
+@router.get(_T + "/bordereau-template")
+def contract_bordereau_template(scope: CarrierScope = Depends(contract_scope)):
+    """The blank bordereau to fill in for this contract: the layout the setup
+    that would run it reads. The setup is resolved as /bordereau and the run
+    resolve it — the live setup for this contract (setup_scope)."""
+    from fastapi import Response
+    import bordereau_template as bt
+    with SessionLocal() as s:
+        cpid = _carrier_party_id(s, scope.carrier_id)
+        from setup_scope import live_setup_for
+        pipe = live_setup_for(s, scope.carrier_id, cpid, scope.program_id,
+                              scope.broker_party_id, scope.contract_id)
+        if pipe is None:
+            raise HTTPException(404, "There is no live bordereau setup for this "
+                                     "contract yet, so there is no layout to download.")
+        try:
+            data, name = bt.setup_input_template(s, pipe)
+        except bt.TemplateUnavailable as e:
+            raise HTTPException(404, str(e))
+    return Response(content=data, media_type=bt.XLSX, headers=bt.attachment(name))
 
 
 @router.post(_T + "/runs")

@@ -33,19 +33,19 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { History } from "lucide-react";
+import { History, Download } from "lucide-react";
 import { getBrokerContracts, type BrokerContract } from "../api/broker";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import {
   getBrokerMe, getBordereauReadiness, runBrokerBordereau, getBrokerRuns,
-  brokerRunUrls,
+  brokerRunUrls, bordereauTemplatePath,
   type ContractPath, type BordereauReadiness, type BrokerRun,
 } from "../api/brokerBordereau";
 import { Dropzone } from "../components/Dropzone";
 import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
 import { type Sheet } from "../components/OutputRows";
 import { LoadingOverlay } from "../components/Busy";
-import { downloadFile } from "../api/client";
+import { downloadFile, downloadErrorText } from "../api/client";
 import { fmtDate } from "../utils/date";
 
 /** Server messages are for the log; this is what the broker can act on. */
@@ -275,6 +275,17 @@ export default function BrokerBordereau() {
                 <span style={{ fontSize: 11.5, color: "var(--p-faint)" }}>
                   — the programme's shared setup, not one built for you.
                 </span>
+              )}
+              {/* The blank layout this setup reads — the file to fill in before
+                  dropping it below. Only for a real setup: the legacy fallback
+                  has no id and no sample of its own to rebuild. */}
+              {ready.setup?.id != null && path && (
+                <button className="btn" style={{ marginLeft: "auto" }}
+                  onClick={() => downloadFile(bordereauTemplatePath(path))
+                    .catch(async e => setErr(await downloadErrorText(e,
+                      "We couldn't download the bordereau template — please try again.")))}>
+                  <Download size={14} /> Bordereau Template
+                </button>
               )}
             </div>
           )}

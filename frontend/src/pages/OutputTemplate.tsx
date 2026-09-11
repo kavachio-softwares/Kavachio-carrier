@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, Wand2,
-  Search, RefreshCw, FileText, Quote, ShieldAlert, Layers,
+  Search, RefreshCw, FileText, Quote, ShieldAlert, Layers, Download,
 } from "lucide-react";
-import { api } from "../api/client";
+import { api, downloadFile, downloadErrorText } from "../api/client";
 import { currentMga, isKavachioAdmin } from "../auth";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
@@ -117,6 +117,7 @@ export default function OutputTemplate() {
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [downloadErr, setDownloadErr] = useState<string | null>(null);
   // Bumped when the grid above changes a column, so the field builder below
   // re-reads rather than showing the list as it was a moment ago.
   const [fieldsKey, setFieldsKey] = useState(0);
@@ -247,6 +248,15 @@ export default function OutputTemplate() {
     sh.columns.some(c => (c.candidates?.length ?? 0) > 0)
   );
 
+  // The file this template produces with no rows in it — written by the same
+  // writer a run uses, so what downloads is what Generate BDX would deliver.
+  function downloadTemplate() {
+    setDownloadErr(null);
+    downloadFile(`/output-template/${id}/download`)
+      .catch(async e => setDownloadErr(await downloadErrorText(e,
+        "We couldn't download this template — please try again.")));
+  }
+
   if (!t) return null;
 
   return (
@@ -271,6 +281,10 @@ export default function OutputTemplate() {
                 ))}
               </Select>
             </label>
+            <Button variant="secondary" onClick={downloadTemplate}
+              title="The file this template produces, with no rows in it">
+              <Download size={14} /> Download Template
+            </Button>
             <Link to={platformAdmin ? `/tenants/${t.mga}` : "/direct/setups"}>
               <Button variant="ghost">Cancel</Button>
             </Link>
@@ -307,6 +321,7 @@ export default function OutputTemplate() {
               </span>
             </div>
             {msg && <span className="text-sm text-emerald-700">{msg}</span>}
+            {downloadErr && <span className="text-sm text-red-700">{downloadErr}</span>}
           </div>
           {!hasAnyCandidates && (
             <div className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200

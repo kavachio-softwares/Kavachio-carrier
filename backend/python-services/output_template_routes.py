@@ -184,17 +184,36 @@ def _resolve(s, tid: int, carrier_party_id: Optional[int], program_id: Optional[
     # Last rung: the setup's own template. This is what keeps every template
     # made before the scope columns existed reachable — they carry no
     # program_id, so only the pipeline knows which programme they serve.
+    #
+    # Never ANOTHER contract's or another broker's template, though. A setup
+    # built for contract A writes into A's template, and handing that to
+    # contract B is exactly the sideways fall this ladder refuses — B would be
+    # shown, and run into, a layout agreed for somebody else's terms. The one
+    # exception is a setup that LISTS the contract: the carrier deliberately
+    # built it to cover B too. Setups listing the contract are asked first.
     if program_id and carrier_party_id is not None:
-        pipe = (s.query(Pipeline)
-                .filter(Pipeline.tenant_id == tid,
-                        Pipeline.carrier_party_id == carrier_party_id,
-                        Pipeline.program_id == program_id,
-                        Pipeline.status == "active")
-                .order_by(Pipeline.id.desc()).first())
-        if pipe and pipe.output_template_id:
-            hit = s.get(ExportTemplate, pipe.output_template_id)
-            if hit and hit.tenant_id == tid:
-                return hit, PROGRAMME_LEVEL
+        pipes = (s.query(Pipeline)
+                 .filter(Pipeline.tenant_id == tid,
+                         Pipeline.carrier_party_id == carrier_party_id,
+                         Pipeline.program_id == program_id,
+                         Pipeline.status == "active")
+                 .order_by(Pipeline.id.desc()).all())
+        listed: set[int] = set()
+        if contract_id:
+            from setup_scope import contract_ids_of
+            listed = {p.id for p in pipes if contract_id in contract_ids_of(s, p.id)}
+            pipes.sort(key=lambda p: p.id not in listed)      # stable: newest first within
+        for pipe in pipes:
+            hit = s.get(ExportTemplate, pipe.output_template_id) if pipe.output_template_id else None
+            if not hit or hit.tenant_id != tid:
+                continue
+            if pipe.id not in listed:
+                if contract_id and hit.contract_id and hit.contract_id != contract_id:
+                    continue
+                if (broker_party_id and hit.broker_party_id
+                        and hit.broker_party_id != broker_party_id):
+                    continue
+            return hit, PROGRAMME_LEVEL
     return None, None
 
 
@@ -242,12 +261,13 @@ def resolve_template(
                       "broker_party_id": broker_party_id, "contract_id": contract_id},
             "scope_names": scope_names,
             "setup": _setup_for_scope(s, tid, carrier_party_id, program_id,
-                                      broker_party_id, t),
+                                      broker_party_id, contract_id, t),
         }
 
 
 def _setup_for_scope(s, tid: int, carrier_party_id: Optional[int],
                      program_id: int, broker_party_id: Optional[int],
+                     contract_id: Optional[int],
                      agreed: Optional[ExportTemplate]) -> Optional[dict]:
     """Which Bordereau Setup would actually run here, and does it write into the
     template this scope agreed on?
@@ -257,18 +277,13 @@ def _setup_for_scope(s, tid: int, carrier_party_id: Optional[int],
     different template: it would produce the right headings with nothing under
     them. `matches` is what lets the screen say that before a file is uploaded
     rather than after one is delivered.
-    """
-    def _active(broker):
-        q = (s.query(Pipeline)
-             .filter(Pipeline.tenant_id == tid,
-                     Pipeline.carrier_party_id == carrier_party_id,
-                     Pipeline.program_id == program_id,
-                     Pipeline.status == "active"))
-        q = q.filter(Pipeline.broker_party_id == broker if broker is not None
-                     else Pipeline.broker_party_id.is_(None))
-        return q.order_by(Pipeline.id.desc()).first()
 
-    pipe = (_active(broker_party_id) if broker_party_id else None) or _active(None)
+    The setup is the one for THIS contract (setup_scope) — a broker with two
+    contracts on two templates has two live setups.
+    """
+    from setup_scope import live_setup_for
+    pipe = live_setup_for(s, tid, carrier_party_id, program_id, broker_party_id,
+                          contract_id, agreed=agreed)
     if pipe is None:
         return None
     running = s.get(ExportTemplate, pipe.output_template_id) if pipe.output_template_id else None
@@ -1314,3 +1329,21 @@ def compare_sample(template_id: int,
         return {"configured": True,
                 "comparison": otv.compare_with_sample(
                     generated, {"sheets": (r.extracted or {}).get("sheets") or []})}
+
+
+@router.get("/output-template/{template_id}/download")
+def download_template(template_id: int,
+                      principal: Principal = Depends(current_principal)):
+    """The file this template produces, with no rows in it — for seeing the
+    layout Generate BDX delivers. It is not the file to fill in for Process
+    Bordereau; that is the setup's input layout (see bordereau_template)."""
+    from fastapi import Response
+    import bordereau_template as bt
+    with SessionLocal() as s:
+        t = _load(s, template_id, principal)
+        structure = t.structure
+        blob = storage.resolve_bytes(t.template_blob_ref, t.template_blob)
+        name = t.name
+    data = bt.output_workbook(structure, blob)
+    return Response(content=data, media_type=bt.XLSX,
+                    headers=bt.attachment(bt.download_name(name, "Output Template")))

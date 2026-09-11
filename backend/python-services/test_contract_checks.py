@@ -156,7 +156,8 @@ def test_but_a_programme_with_no_bordereau_template_still_takes_a_contract(world
         "agreed_limits": {"commission_pct": {"value": 11}}})
     assert r.status_code in (200, 201), r.text
     rec = r.json()
-    assert rec["checks"] == {"rules": 0, "checkable": 1,
+    assert rec["checks"] == {"rules": 0, "checkable": 1, "terms_checked": 0,
+                             "from_terms": 0, "from_clauses": 0, "standard": 0,
                              "output_template_id": None, "bindable": True,
                              "output_template": None, "sheets": []}
     assert "mapping" not in rec
@@ -219,7 +220,8 @@ def test_a_term_the_bordereau_cannot_measure_is_named_not_guessed(world):
     assert m["unmapped"][0]["question"]
     # Reported as a shortfall on the record too: one of two terms is measured.
     rec2 = client.get(f"/contracts/{rec['id']}", headers=world["carrier"]).json()
-    assert rec2["checks"] == {"rules": 1, "checkable": 2,
+    assert rec2["checks"] == {"rules": 1, "checkable": 2, "terms_checked": 1,
+                              "from_terms": 1, "from_clauses": 0, "standard": 0,
                               "output_template_id": world["template"],
                               "bindable": True,
                               "output_template": world["template_name"],
@@ -233,6 +235,37 @@ def test_binding_twice_leaves_one_set_of_checks(world):
     for _ in range(2):
         client.post(f"/contracts/{rec['id']}/bind-checks", headers=world["carrier"])
     assert len(_rule_rows(rec["id"])) == 2
+
+
+def test_rules_from_a_setup_are_never_counted_as_terms_checked(world):
+    """A Bordereau Setup's rules carry no term key. Read against the terms, 102
+    of them once said "102 of 9 · every checkable term is measured" on a
+    contract with not one term checked. A disabled rule runs nowhere, so it is
+    not counted at all — and the list and the record say the same thing."""
+    rec = _raise_contract(world, commission_pct=11, max_sum_insured=250000)
+    client.post(f"/contracts/{rec['id']}/bind-checks", headers=world["carrier"])
+    with SessionLocal() as s:
+        ids = s.execute(text(
+            "SELECT rule_id FROM validation_rule WHERE contract_id = :cid "
+            "ORDER BY rule_id"), {"cid": rec["id"]}).scalars().all()
+        assert len(ids) == 2
+        # One becomes a Setup's standard check; the other is switched off.
+        s.execute(text(
+            "UPDATE validation_rule SET rule_spec = rule_spec - 'source' - 'limit', "
+            "created_by = 'template_binding' WHERE rule_id = :rid"),
+            {"rid": ids[0]})
+        s.execute(text("UPDATE validation_rule SET rule_status = 'disabled' "
+                       "WHERE rule_id = :rid"), {"rid": ids[1]})
+        s.commit()
+    want = {"rules": 1, "checkable": 2, "terms_checked": 0,
+            "from_terms": 0, "from_clauses": 0, "standard": 1}
+    record = client.get(f"/contracts/{rec['id']}",
+                        headers=world["carrier"]).json()["checks"]
+    assert {k: record[k] for k in want} == want
+    listed = next(r for r in client.get("/contracts",
+                                        headers=world["carrier"]).json()
+                  if r["id"] == rec["id"])["checks"]
+    assert {k: listed[k] for k in want} == want
 
 
 def test_the_button_is_still_there_for_a_template_that_changed(world):

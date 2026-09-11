@@ -1368,8 +1368,8 @@ def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
 
 
 def _activate_pipeline(s, p: Pipeline) -> None:
-    """Enforce completeness, then make this the single active pipeline for its
-    (carrier, program) — superseding any prior active one. Raises HTTP 400 with
+    """Enforce completeness, then make this pipeline live — superseding the live
+    ones it replaces (same carrier, program and broker, overlapping contracts). Raises HTTP 400 with
     a user-facing reason when the pipeline isn't complete.
 
     Transition mirror: also flip the input DirectFormat's ``approved`` flag so
@@ -1378,11 +1378,18 @@ def _activate_pipeline(s, p: Pipeline) -> None:
     ready, reason = _pipeline_ready(s, p)
     if not ready:
         raise HTTPException(400, reason)
-    # Supersede other active pipelines for the same (carrier, program, broker).
-    # Including the broker means one programme can run a different input layout
-    # per broker — and, because a pre-broker setup has broker_party_id NULL and
-    # only ever collides with another NULL, nothing that exists today changes.
-    s.query(Pipeline).filter(
+    # Supersede the live setups this one REPLACES: same (carrier, program,
+    # broker), AND covering any of the same contracts. Including the broker
+    # means one programme can run a different input layout per broker; including
+    # the contracts means one broker can run a different BDX template per
+    # contract — a setup built for contract B no longer switches off the one
+    # built for contract A. A setup listing no contracts (made before contracts
+    # were attached) covers every contract, so it still collides with every
+    # other one exactly as before, and a pre-broker setup (broker NULL) still
+    # only ever collides with another NULL.
+    from setup_scope import contract_ids_of
+    mine = contract_ids_of(s, p.id)
+    peers = s.query(Pipeline).filter(
         Pipeline.tenant_id == p.tenant_id,
         Pipeline.carrier_party_id == p.carrier_party_id,
         Pipeline.program_id == p.program_id,
@@ -1390,18 +1397,33 @@ def _activate_pipeline(s, p: Pipeline) -> None:
          else Pipeline.broker_party_id == p.broker_party_id),
         Pipeline.id != p.id,
         Pipeline.status == "active",
-    ).update({Pipeline.status: "superseded"})
+    ).all()
+    for peer in peers:
+        theirs = contract_ids_of(s, peer.id)
+        if not mine or not theirs or (mine & theirs):
+            peer.status = "superseded"
     p.status = "active"
     p.modified_at = datetime.utcnow()
 
-    # Mirror onto the input DirectFormat (transition-only).
+    # Mirror onto the input DirectFormat (transition-only): approve this one,
+    # and withdraw approval from every other format of the (carrier, program)
+    # EXCEPT those still behind a setup that stays live beside this one.
     if p.input_format_id and p.carrier_party_id is not None and p.program_id is not None:
+        s.flush()
+        still_live = {fid for (fid,) in s.query(Pipeline.input_format_id).filter(
+            Pipeline.tenant_id == p.tenant_id,
+            Pipeline.carrier_party_id == p.carrier_party_id,
+            Pipeline.program_id == p.program_id,
+            Pipeline.status == "active",
+            Pipeline.id != p.id,
+        ).all() if fid}
+        still_live.add(p.input_format_id)
         s.query(DirectFormat).filter(
             DirectFormat.tenant_id == p.tenant_id,
             DirectFormat.carrier_party_id == p.carrier_party_id,
             DirectFormat.program_id == p.program_id,
-            DirectFormat.id != p.input_format_id,
-        ).update({DirectFormat.approved: 0})
+            DirectFormat.id.notin_(still_live),
+        ).update({DirectFormat.approved: 0}, synchronize_session=False)
         df = s.get(DirectFormat, p.input_format_id)
         if df:
             df.approved = 1
@@ -2794,7 +2816,8 @@ def pipeline_update(pipeline_id: int, body: PipelineUpdate,
 def pipeline_activate(pipeline_id: int,
                       principal: Principal = Depends(current_principal)):
     """Activate a pipeline (requires input template + output template + >=1
-    contract). Supersedes the prior active pipeline for the same carrier+program.
+    contract). Supersedes the live pipelines it replaces — same carrier, program
+    and broker, covering any of the same contracts (see _activate_pipeline).
 
     Also raises the admin data-model mapping task for the input format, when it
     doesn't have one yet — see `_queue_datamodel_mapping`, and notifies Kavachio
@@ -3138,22 +3161,13 @@ async def direct_run(
         # Resolve the active PIPELINE for this carrier+program — that's the
         # config a run executes against. The pipeline's Input Template (a
         # DirectFormat) supplies the input layout below.
-        def _active_pipeline(broker: Optional[int]):
-            q = (s.query(Pipeline)
-                 .filter(Pipeline.tenant_id == tid,
-                         Pipeline.carrier_party_id == carrier_party_id,
-                         Pipeline.program_id == program_id,
-                         Pipeline.status == "active"))
-            q = q.filter(Pipeline.broker_party_id == broker if broker is not None
-                         else Pipeline.broker_party_id.is_(None))
-            return q.order_by(Pipeline.id.desc()).first()
-
-        # This broker's own setup first, then the programme-wide one. A broker
-        # with no setup of its own runs on the programme's, which is what every
-        # setup looks like today.
-        pipe = _active_pipeline(broker_party_id) if broker_party_id else None
-        if pipe is None:
-            pipe = _active_pipeline(None)
+        # This broker's own setup first, then the programme-wide one — and when
+        # the bordereau names its contract, the setup built for THAT contract.
+        # A broker with two contracts on two templates has two live setups;
+        # setup_scope decides between them, the same answer every screen shows.
+        from setup_scope import live_setup_for
+        pipe = live_setup_for(s, tid, carrier_party_id, program_id,
+                              broker_party_id, contract_id)
         if pipe and pipe.input_format_id:
             fmt = s.get(DirectFormat, pipe.input_format_id)
         else:
@@ -3719,3 +3733,24 @@ def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
     except Exception:  # noqa: BLE001 — auditing must never break ingestion
         pass
     return loaded
+
+
+@router.get("/pipelines/{pipeline_id}/bordereau-template")
+def pipeline_bordereau_template(pipeline_id: int,
+                                principal: Principal = Depends(current_principal)):
+    """The blank bordereau this setup reads — its Input Template's sheets and
+    column headings, nothing under them. What to fill in before Process
+    Bordereau; bordereau_template says why it is the input layout, not the
+    output template."""
+    from fastapi import Response
+    import bordereau_template as bt
+    with SessionLocal() as s:
+        p = s.get(Pipeline, pipeline_id)
+        if not p:
+            raise HTTPException(404, "setup not found")
+        assert_tenant_owns(principal, p.tenant_id)
+        try:
+            data, name = bt.setup_input_template(s, p)
+        except bt.TemplateUnavailable as e:
+            raise HTTPException(404, str(e))
+    return Response(content=data, media_type=bt.XLSX, headers=bt.attachment(name))

@@ -472,7 +472,13 @@ export default function DirectSetup() {
           // just to know its format id, for the supplement-management section
           // and the sheet-contracts fetch below (mapping review/edit itself
           // now happens on the setup's own edit page).
-          const target = list.find(p => p.status === "active") ?? (list.length === 1 ? list[0] : null);
+          // With a contract picked, the live setup built for IT first — a
+          // broker with two contracts on two BDX templates has two live setups.
+          const forContract = pickedContractId == null ? undefined
+            : list.find(p => p.status === "active"
+                && p.contracts?.some(c => c.contract_id === pickedContractId));
+          const target = forContract
+            ?? list.find(p => p.status === "active") ?? (list.length === 1 ? list[0] : null);
           const fid = target?.input_format_id ?? null;
           if (fid != null && fid !== loadedSetupId) loadSetup(fid);
         }

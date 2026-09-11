@@ -463,27 +463,34 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
             {extra.length > 0 && (
               <div className="rounded-md border border-border bg-surface-2 p-3 text-[11.5px]">
                 <div className="font-medium text-ink">
-                  {keptExtra} extra column{keptExtra === 1 ? "" : "s"} the
-                  contract asks for that {stdLabel} does not publish
+                  {keptExtra} extra column{keptExtra === 1 ? "" : "s"} from the contract
                 </div>
                 <div className="text-ink-muted mt-1">
                   {extra.map(f => f.field).join(", ")}
                 </div>
-                <div className="text-ink-soft mt-1">
-                  These are added after the published columns and go in as
-                  optional, so the file still passes the standard's own check.
-                  They are ticked in the list above like any other column —
-                  untick one to leave it out.
-                </div>
+                <ul className="list-disc pl-4 space-y-0.5 text-ink-soft mt-1">
+                  <li>{analysis.standard ? stdLabel : "The standard"} doesn&apos;t
+                    include {extra.length === 1 ? "this one" : "these"}</li>
+                  <li>{extra.length === 1 ? "It goes" : "They go"} at the end as
+                    optional, so the file still passes the{" "}
+                    {analysis.standard?.label ?? "standard"} check</li>
+                  <li>{extra.length === 1
+                    ? "Untick it in the list above if you don't want it"
+                    : "Untick any you don't want in the list above"}</li>
+                </ul>
               </div>
             )}
 
-            <p className="text-[11px] text-ink-soft">
-              Nothing has been created yet. Ticked columns go in; unticked ones
-              stay out. A column the standard marks mandatory goes in whatever
-              you tick, and you can add or remove columns in the editor
-              afterwards too.
-            </p>
+            <ul className="list-disc pl-4 space-y-0.5 text-[11px] text-ink-soft">
+              <li>Nothing is saved yet</li>
+              <li>Ticked columns are added; unticked ones are left out</li>
+              {/* Only a column the standard marks mandatory is locked on (see
+                  ProposalRow), so the promise is made only when there is one. */}
+              {proposed.some(f => f.required && f.origin === "standard") && (
+                <li>Required columns are always added</li>
+              )}
+              <li>You can add or remove columns later in the editor</li>
+            </ul>
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="secondary" disabled={busy} onClick={back}>Back</Button>
               <Button onClick={create} disabled={busy || !kept.length}>
@@ -560,12 +567,17 @@ function Summary({ a, shown, kept, unfilled, extra }: {
   unfilled: number; extra: number;
 }) {
   const fromContract = kept.filter(f => f.origin !== "standard").length;
+  const leftOut = shown.length - kept.length;
+  const clauses = a.contract.clause_count;
+  const clauseWord = `${clauses} clause${clauses === 1 ? "" : "s"}`;
+  const essential = a.standard && a.standard.scope === "essential"
+    ? a.standard.field_count : 0;
   return (
     <div className="rounded-lg border border-border bg-surface-2 px-3 py-2.5
       text-[12px] leading-relaxed">
       <div className="flex items-center gap-1.5 font-medium text-ink">
         <CheckCircle2 size={14} className="text-emerald-600" />
-        {kept.length} of {shown.length} column{shown.length === 1 ? "" : "s"} kept
+        {kept.length} of {shown.length} column{shown.length === 1 ? "" : "s"} selected
         {/* Only say "from the standard" when the standard IS the layout.
             Built from a contract it supplies a handful of columns, and
             crediting the whole list to it would misread the file. */}
@@ -575,40 +587,41 @@ function Summary({ a, shown, kept, unfilled, extra }: {
         )}
         {a.standard && a.standard.scope === "essential" && <> from the contract</>}
       </div>
-      <div className="text-ink-muted mt-1">
-        {a.counts.checked_input
-          ? <>checked against your bordereau</>
-          : <>your bordereau was not checked</>}
-        {fromContract > 0 && <> · {fromContract} asked for by the contract</>}
-        {a.standard && a.standard.scope === "essential" && (
-          <> · {a.standard.field_count} added as the columns every bordereau
-            carries</>
+      <ul className="list-disc pl-4 space-y-0.5 text-ink-muted mt-1">
+        <li>{a.counts.checked_input
+          ? "Checked against your bordereau"
+          : "Your bordereau was not checked"}</li>
+        {fromContract > 0 && (
+          <li>{fromContract} column{fromContract === 1 ? " comes" : "s come"} from
+            the contract{clauses > 0 && ` (read from ${clauseWord})`}</li>
         )}
-        {a.contract.clause_count > 0 &&
-          <> · the contract was read from {a.contract.clause_count} clause
-            {a.contract.clause_count === 1 ? "" : "s"}</>}
-        {" · "}{shown.length - kept.length} left out as not applicable
-      </div>
-      {extra > 0 && (
-        <div className="text-ink-muted mt-1">
-          {extra} of them {extra === 1 ? "is" : "are"} not in the published
-          list — the contract asks for {extra === 1 ? "it" : "them"}, so{" "}
-          {extra === 1 ? "it is" : "they are"} added at the end as optional
-          column{extra === 1 ? "" : "s"}.
-        </div>
-      )}
-      {unfilled > 0 && (
-        // A pointer, not the report. The columns themselves, why each one
-        // stayed in and what to do about it need room and the field editor
-        // beside them, so they are on the template screen — naming the number
-        // here is what sends someone there.
-        <div className="text-ink-muted mt-1">
-          {unfilled} of them {unfilled === 1 ? "is" : "are"} required with
-          nothing in your bordereau to fill {unfilled === 1 ? "it" : "them"} —
-          the template screen lists {unfilled === 1 ? "it" : "them"} once this
-          is created.
-        </div>
-      )}
+        {fromContract === 0 && clauses > 0 && (
+          <li>The contract was read from {clauseWord}</li>
+        )}
+        {essential > 0 && (
+          <li>{essential} essential column{essential === 1 ? "" : "s"} every
+            bordereau needs {essential === 1 ? "is" : "are"} included</li>
+        )}
+        {/* `extra` counts ticked contract columns the published list lacks,
+            so it is always part of the "from the contract" line above. */}
+        {extra > 0 && (
+          <li>{extra} of these {extra === 1 ? "isn't" : "aren't"} in the{" "}
+            {a.standard ? `${a.standard.label} list` : "published list"}, so{" "}
+            {extra === 1 ? "it is" : "they are"} added at the end as optional</li>
+        )}
+        {unfilled > 0 && (
+          // A pointer, not the report. The columns themselves, why each one
+          // stayed in and what to do about it need room and the field editor
+          // beside them, so they are on the template screen — naming the number
+          // here is what sends someone there.
+          <li>{unfilled} required column{unfilled === 1 ? " has" : "s have"} no
+            data in your bordereau (the template screen lists{" "}
+            {unfilled === 1 ? "it" : "them"} after you create it)</li>
+        )}
+        {leftOut > 0 && (
+          <li>{leftOut} column{leftOut === 1 ? "" : "s"} left out as not needed</li>
+        )}
+      </ul>
     </div>
   );
 }

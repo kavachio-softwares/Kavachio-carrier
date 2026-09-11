@@ -16,13 +16,14 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { FilePlus2, History, ShieldCheck, Upload } from "lucide-react";
+import { FilePlus2, History, Upload } from "lucide-react";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import {
-  bindChecks, fieldErrors, listContracts,
+  listContracts,
   type ContractRecord, type Lifecycle,
 } from "../api/contractRecord";
 import { fmtDate } from "../utils/date";
+import { describeChecks } from "../utils/contractChecks";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { ListFilterBar } from "../components/ListFilterBar";
 
@@ -63,13 +64,6 @@ export default function Contracts() {
   const [rows, setRows] = useState<ContractRecord[] | null>(null);
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
   const [err, setErr] = useState("");
-  // Which contract is being bound, and what the last bind produced. Kept by
-  // contract id rather than as one flag, because binding one row must not grey
-  // out the button on every other.
-  const [binding, setBinding] = useState<number | null>(null);
-  const [bound, setBound] = useState<
-    { id: number; name: string; written: number; template: string;
-      unmapped: string[] } | null>(null);
 
   const [programme, setProgramme] = useState("");
   const [lifecycle, setLifecycle] = useState("");
@@ -98,31 +92,6 @@ export default function Contracts() {
   useEffect(load, [load]);
 
   const filtersActive = !!(programme || lifecycle || type || q);
-
-  /** Bind one contract's terms to the checks that run on a file.
-   *
-   *  Reloads the list afterwards rather than patching the row, so the count
-   *  shown is the one the server actually holds — a rule the template had no
-   *  column for is not written, and a row that said "12 checks" because the
-   *  screen had counted the terms would be a lie the next reload corrected. */
-  async function bind(c: ContractRecord) {
-    setBinding(c.id); setErr(""); setBound(null);
-    try {
-      const res = await bindChecks(c.id);
-      setBound({
-        id: c.id, name: c.name ?? `Contract ${c.id}`,
-        written: res.mapping.rules_written,
-        template: res.mapping.output_template.name,
-        unmapped: res.mapping.unmapped.map(u => `${u.question} — ${u.reason}`),
-      });
-      load();
-    } catch (e: unknown) {
-      // The house reader for this API's two error shapes — a plain string and
-      // a {message, errors} object — so a refusal reads the same here as it
-      // does on the contract's own page.
-      setErr(fieldErrors(e).message || "Could not bind that contract's checks.");
-    } finally { setBinding(null); }
-  }
 
   // Surfaced above the table because it is the one thing on this screen that
   // blocks work: a contract that names a document nobody supplied cannot be
@@ -159,32 +128,6 @@ export default function Contracts() {
         {err && (
           <div className="note warn" style={{ marginBottom: 16, maxWidth: 620 }}>
             {err}
-          </div>
-        )}
-
-        {bound && (
-          <div className={`note ${bound.written > 0 ? "ok" : "warn"}`}
-               style={{ marginBottom: 16 }}>
-            <b>
-              {bound.written === 0
-                ? `Nothing on ${bound.name} could be checked against `
-                : `${bound.written} check${bound.written === 1 ? "" : "s"} `
-                  + `written for ${bound.name} against `}
-              {bound.template}.
-            </b>{" "}
-            {bound.unmapped.length > 0 && (
-              <>
-                {/* Each with its own reason: a term with no column and a term
-                    three columns claim at once are different problems, and one
-                    sentence over both explains neither. */}
-                Not measured: {bound.unmapped.join("; ")}. Binding one of them to
-                the nearest-looking column would fail rows for the wrong reason.
-              </>
-            )}{" "}
-            <Link to={`/contracts/${bound.id}`}>Open the contract</Link>.{" "}
-            <span className="linkish" role="button" onClick={() => setBound(null)}>
-              Dismiss
-            </span>
           </div>
         )}
 
@@ -295,8 +238,7 @@ export default function Contracts() {
                           </div>
                         )}
                       </td>
-                      <td><Checks c={c} busy={binding === c.id}
-                                  onBind={() => bind(c)} /></td>
+                      <td><Checks c={c} /></td>
                     </tr>
                   );
                 })}
@@ -319,8 +261,7 @@ export default function Contracts() {
 }
 
 /**
- * How much of one contract is actually measured on a file — and the way to fix
- * it when the answer is none.
+ * How much of one contract is actually measured on a file.
  *
  * The gap this exists to close: a carrier writes a contract with ten limits on
  * it, every one of them stated in the wording and shown on the record, and not
@@ -329,58 +270,28 @@ export default function Contracts() {
  * count was invisible, so the contract looked finished.
  *
  * A contract read out of a PDF gets its rules from its clauses instead, and has
- * no agreed limits at all — it reports its rules and offers no button, because
- * pressing one would write nothing.
+ * no agreed limits at all, so it says where its rules came from.
+ *
+ * The words come from describeChecks, which the contract page uses too.
+ *
+ * Read-only. There used to be a "Bind checks" / "Re-bind" button here; it was
+ * taken off this screen.
  */
-function Checks({ c, busy, onBind }: {
-  c: ContractRecord; busy: boolean; onBind: () => void;
-}) {
-  const { rules, checkable, bindable } = c.checks;
-
-  if (rules === 0 && !bindable) {
-    return (
-      <span className="faint" title={
-        "Nothing on this contract can be checked against a bordereau column. "
-        + "An uploaded wording gets its rules from its clauses instead — "
-        + "open it and use Re-read rules."}>
-        None
-      </span>
-    );
+function Checks({ c }: { c: ContractRecord }) {
+  const w = describeChecks(c.checks);
+  if (w.none) {
+    // Helper text off for now (see contractChecks.ts) — w.detail is "".
+    return <span className="faint">None</span>;
   }
-
   return (
     <>
-      {rules > 0 ? (
-        <span className={`badge ${rules >= checkable ? "b-ok" : "b-warn"}`}>
-          <span className="d" />
-          {checkable > 0 ? `${rules} of ${checkable}` : `${rules}`}
-        </span>
-      ) : (
-        <span className="badge b-warn"><span className="d" />Not bound</span>
-      )}
-      <div className="sub">
-        {/* Three different contracts, three different sentences. An UPLOADED
-            one has rules read from its clauses and no agreed limits at all, so
-            "n of 0" would be arithmetic about a question it was never asked. */}
-        {rules === 0
-          ? `${checkable} agreed term${checkable === 1 ? "" : "s"}, none checked`
-          : checkable === 0
-            ? "read from the wording's clauses"
-            : rules >= checkable
-              ? "every checkable term is measured"
-              : "some terms have no column to measure them"}
-      </div>
-      {bindable && (
-        <button className="btn sm" type="button" disabled={busy}
-                style={{ marginTop: 4 }} onClick={onBind}
-                title={rules === 0
-                  ? "Write these terms into the checks that run on every row"
-                  : "Write them again — for when a column has been mapped "
-                    + "that had nothing to measure a term before"}>
-          {busy ? "Binding…"
-                : <><ShieldCheck size={12} /> {rules === 0 ? "Bind checks" : "Re-bind"}</>}
-        </button>
-      )}
+      <span className={`badge ${w.ok ? "b-ok" : "b-warn"}`}
+        title={w.sources && w.sources !== w.detail ? w.sources : undefined}>
+        <span className="d" />
+        {w.badge}
+      </span>
+      {/* Helper line off for now (see contractChecks.ts) — w.detail is "". */}
+      {!!w.detail && <div className="sub">{w.detail}</div>}
     </>
   );
 }

@@ -173,24 +173,21 @@ export default function BrokerUsers() {
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">
                         {invited && (
-                          <>
-                            <span className="linkish" onClick={() => resend(u)}>Resend</span>
-                            {" · "}
-                          </>
+                          <span className="linkish" onClick={() => resend(u)}>Resend</span>
                         )}
-                        {/* When removal isn't allowed the element carries no
-                            click handler at all — inert, not a link that does
-                            nothing — and the title says which rule applies. */}
-                        {canRemove(u) ? (
+                        {/* The separator only when BOTH actions are there — an
+                            invited user who cannot be removed would otherwise
+                            end on a dangling dot. */}
+                        {invited && canRemove(u) && " · "}
+                        {/* Removal is offered only where the server would allow
+                            it. When it wouldn't — your own account, or the only
+                            admin — the action is simply absent rather than drawn
+                            greyed out: a disabled "Remove" on your own row reads
+                            as something you might be able to do, and there is
+                            nothing on this screen that could make it enabled. */}
+                        {canRemove(u) && (
                           <span className="linkish" title="Remove this user"
                             onClick={() => { setRemoveErr(null); setRemoveTarget(u); }}>
-                            Remove
-                          </span>
-                        ) : (
-                          <span className="linkish mut" aria-disabled="true"
-                            title={u.id === me?.id
-                              ? "You cannot remove your own account."
-                              : "This is the only admin — the carrier has to add another first."}>
                             Remove
                           </span>
                         )}

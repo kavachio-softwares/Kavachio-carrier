@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { History, AlertTriangle } from "lucide-react";
-import { api } from "../api/client";
+import { History, AlertTriangle, Download } from "lucide-react";
+import { api, downloadFile, downloadErrorText } from "../api/client";
 import { LoadingOverlay } from "../components/Busy";
 import { Dropzone } from "../components/Dropzone";
 import { Modal } from "../components/ui/Modal";
@@ -65,6 +65,21 @@ export default function DirectRun() {
     if (scope.brokerPartyId !== "") p.set("broker_party_id", String(scope.brokerPartyId));
     const q = p.toString();
     return q ? `/direct/setup?${q}` : "/direct/setup";
+  }
+
+  /** The blank bordereau the active setup reads — what to fill in and upload
+   *  here. See the note above the drop target for why it is not the output. */
+  function downloadBordereauTemplate() {
+    if (!runSetup) return;
+    downloadFile(`/pipelines/${runSetup.id}/bordereau-template`)
+      .catch(async e => setErr(await downloadErrorText(e,
+        "We couldn't download the bordereau template — please try again.")));
+  }
+
+  function downloadOutputTemplate(templateId: number) {
+    downloadFile(`/output-template/${templateId}/download`)
+      .catch(async e => setErr(await downloadErrorText(e,
+        "We couldn't download the output template — please try again.")));
   }
 
   const carrierName = carriers.find(c => c.id === carrierId)?.legal_name
@@ -225,6 +240,13 @@ export default function DirectRun() {
   const canSubmit = carrierId !== "" && programId !== "" && hasSetup === true
     && !!file && !templateMissing && !templateMismatch
     && !scope.needsContractChoice;
+  // THE SETUP FOR THIS SELECTION — the one the server says a run would use, not
+  // the programme's newest. A broker with two contracts on two BDX templates
+  // has two live setups, so the name shown and the layout downloaded must
+  // follow the contract picked. Until that answer arrives, the programme's.
+  const runSetup: { id: number; name: string | null } | null = tpl?.setup
+    ? { id: tpl.setup.pipeline_id, name: tpl.setup.name }
+    : setup ? { id: setup.id, name: setup.name } : null;
 
 
   return (
@@ -479,9 +501,12 @@ export default function DirectRun() {
               )}
 
               {/* active-setup confirmation / no-setup guidance */}
-              {hasSetup === true && (
+              {/* Not while the selection has no template of its own: naming a
+                  setup built for another contract there reads as "this is what
+                  will run", and it will not — the run is refused. */}
+              {hasSetup === true && !templateMissing && (
                 <div className="note" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
-                  Using setup <b>{setup?.name || `${carrierName} · ${programName}`}</b>
+                  Using setup <b>{runSetup?.name || `${carrierName} · ${programName}`}</b>
                   <span className="tag-pill">Active</span>
                 </div>
               )}
@@ -492,6 +517,37 @@ export default function DirectRun() {
                       <span className="linkish" onClick={() => nav(setupHref())}>Configure It →</span></>
                   ) : (
                     <>No setup for this carrier. <b>Ask your admin to configure it.</b></>
+                  )}
+                </div>
+              )}
+
+              {/* WHAT TO FILL IN — offered before the drop target, not after a
+                  run that could not read the file. The bordereau template is
+                  the layout this setup READS (its Input Template), because a
+                  run finds each column by the name it learned from that
+                  layout. The output template is what Generate BDX WRITES; it
+                  sits beside it for reference, and says so, because filled in
+                  and uploaded its columns are only found where they share a
+                  name with the input layout. */}
+              {hasSetup === true && runSetup && !templateMissing && !templateMismatch && (
+                <div className="note" style={{ marginBottom: 16, display: "flex",
+                  alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <span style={{ flex: 1, minWidth: 260 }}>
+                    <b>Need a blank bordereau?</b> Download the layout this setup
+                    reads, fill it in, and upload it below.
+                    {tpl?.template && !templateMismatch && (
+                      <> The output template is the file Generate BDX gives
+                      back — for reference, not for filling in.</>
+                    )}
+                  </span>
+                  <button className="btn" onClick={downloadBordereauTemplate}>
+                    <Download size={14} /> Bordereau Template
+                  </button>
+                  {tpl?.template && !templateMismatch && (
+                    <button className="btn ghost"
+                      onClick={() => downloadOutputTemplate(tpl.template!.id)}>
+                      <Download size={14} /> Output Template
+                    </button>
                   )}
                 </div>
               )}

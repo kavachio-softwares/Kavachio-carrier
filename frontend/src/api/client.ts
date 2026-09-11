@@ -258,6 +258,20 @@ export async function downloadFile(path: string, filename?: string): Promise<voi
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
+// A refused download arrives as a Blob (the request asked for one), so the
+// server's `detail` is never parsed into JSON — read it here, or the user only
+// ever sees the fallback.
+export async function downloadErrorText(e: unknown, fallback: string): Promise<string> {
+  const data = (e as { response?: { data?: unknown } })?.response?.data;
+  if (data instanceof Blob) {
+    try {
+      const d = JSON.parse(await data.text())?.detail;
+      if (typeof d === "string" && d.trim()) return d;
+    } catch { /* not JSON — use the fallback */ }
+  }
+  return fallback;
+}
+
 // On 401, try a refresh ONCE and replay the request. If the refresh token is
 // expired/invalid, hard-logout and send the user to /login.
 api.interceptors.response.use(

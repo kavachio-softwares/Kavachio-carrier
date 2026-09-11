@@ -227,10 +227,27 @@ export type ContractDetailT = {
   clause_routing?: ClauseRouting[];
 };
 
+/** The reason the server gave, when it gave one a person can read.
+ *
+ *  Most errors carry `detail` as a sentence. An upload the server REFUSES —
+ *  too short, the wrong format, password-protected — carries it as
+ *  `{success: false, error: {code, message}}`, where `message` is written for
+ *  the person uploading. Every screen used to handle that shape badly: one
+ *  printed the JSON around the sentence, another replaced it with "could not be
+ *  read, please try again", which sends someone to retry a file that can never
+ *  pass. Null when there is no such sentence, so each caller keeps its own
+ *  fallback. */
+export function refusalMessage(e: unknown): string | null {
+  const d = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof d === "string") return d;
+  const m = (d as { error?: { message?: unknown } } | null | undefined)?.error?.message;
+  return typeof m === "string" && m.trim() ? m : null;
+}
+
 export function errText(e: unknown): string {
-  const a = e as { response?: { data?: { detail?: string } }; message?: string };
+  const a = e as { response?: { data?: { detail?: unknown } }; message?: string };
   const d = a?.response?.data?.detail;
-  return (typeof d === "string" ? d : d ? JSON.stringify(d) : null) ?? a?.message ?? "Something went wrong";
+  return refusalMessage(e) ?? (d ? JSON.stringify(d) : null) ?? a?.message ?? "Something went wrong";
 }
 
 // ---- contract-upload recovery ------------------------------------------------

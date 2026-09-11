@@ -26,6 +26,7 @@ import { InfoTip } from "../components/InfoTip";
 import { ClauseText } from "../components/ClauseText";
 import { WordingEditor } from "../components/WordingEditor";
 import { fmtDate, fmtStamp } from "../utils/date";
+import { describeChecks } from "../utils/contractChecks";
 import { TermDurationField, useTermDuration } from "../components/TermDuration";
 import { EXPIRY_FIELD, INCEPTION_FIELD, type TermSpec } from "../utils/term";
 import {
@@ -1796,18 +1797,7 @@ export default function ContractRecord() {
                       bound, and it looks identical to a finished one until this
                       says otherwise. */}
                   <Row label="Checks in force">
-                    {rec.checks.rules === 0
-                      ? rec.checks.bindable
-                        ? `none — ${rec.checks.checkable} agreed term`
-                          + `${rec.checks.checkable === 1 ? "" : "s"} are not `
-                          + "checked on any row yet"
-                        : "none — nothing here is measured against a bordereau"
-                      : rec.checks.checkable === 0
-                        // An uploaded wording: its rules were read from its
-                        // clauses, and it has no agreed limits to count against.
-                        ? `${rec.checks.rules}, read from the wording`
-                        : `${rec.checks.rules} of ${rec.checks.checkable} `
-                          + "checkable terms"}
+                    <ChecksInForce checks={rec.checks} />
                   </Row>
                   {/* WHICH SHEET, AND WHY IT IS THAT ONE. A term says
                       "commission is 17%" and never says which tab of which
@@ -1986,9 +1976,17 @@ export default function ContractRecord() {
                           )}
                         </td>
                         <td>
+                          {/* Only a rule written from a typed term is "the
+                              agreed terms". A Setup rule quoting no clause is a
+                              standard check — calling those the terms credited
+                              83 of them to terms on one contract. */}
                           {from
                             ? (from.title || from.section_header || "a clause")
-                            : <span className="sub">the agreed terms</span>}
+                            : <span className="sub">
+                                {r.rule_spec?.source === "contract_terms"
+                                  ? "the agreed terms"
+                                  : r.source_clause_id ? "a clause" : "standard check"}
+                              </span>}
                         </td>
                         <td>
                           <span className={`badge ${
@@ -2531,5 +2529,22 @@ export default function ContractRecord() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** What this contract checks, in the same words as the contracts list. */
+function ChecksInForce({ checks }: { checks: Rec["checks"] }) {
+  const w = describeChecks(checks);
+  return (
+    <>
+      {w.none ? "None yet" : w.badge}
+      {/* Helper line off for now (see contractChecks.ts) — w.detail/sources are "". */}
+      {(w.detail || w.sources) && (
+        <div className="hint" style={{ marginTop: 2 }}>
+          {w.detail}
+          {w.sources && w.sources !== w.detail && <> · {w.sources}</>}
+        </div>
+      )}
+    </>
   );
 }

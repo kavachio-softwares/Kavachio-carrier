@@ -332,14 +332,14 @@ def _wording_context(s, c: Contract) -> dict:
 
 def _record(s, c: Contract, *, with_docs: bool = True,
             p: Principal | None = None,
-            rule_counts: dict[int, int] | None = None) -> dict:
+            rule_counts: dict[int, dict] | None = None) -> dict:
     """The contract, as the screens need it.
 
     Deliberately fat: a contract screen that had to make five calls to say what
     state a contract is in would show four different half-states while they
     landed.
 
-    `rule_counts` is how many checks each contract currently has in force,
+    `rule_counts` is each contract's rules counted by source (_rule_tallies),
     passed in rather than counted here so the LIST can answer it for every row
     in one query instead of one per row. Left out, this counts its own.
     """
@@ -498,28 +498,70 @@ def _record(s, c: Contract, *, with_docs: bool = True,
     }
 
 
+def _rule_tallies(s, contract_ids: list[int]) -> dict[int, dict]:
+    """Each contract's rules, counted by where they came from — one query for
+    any number of contracts, so the list costs what one record does.
+
+    Disabled rules are left out: nothing runs them. A rule written from a typed
+    term carries `rule_spec.source = 'contract_terms'` and the term's key in
+    `rule_spec.limit` (contract_rules.write_rules). A Bordereau Setup rule
+    carries neither — it quotes a clause through `source_clause_id`, or, as a
+    standard check (derived, or from the rule library), quotes nothing.
+    """
+    if not contract_ids:
+        return {}
+    rows = s.execute(sa_text(
+        "SELECT contract_id, COUNT(*) AS total, "
+        "COUNT(*) FILTER (WHERE rule_spec->>'source' = 'contract_terms') "
+        "  AS from_terms, "
+        "COUNT(*) FILTER (WHERE rule_spec->>'source' IS DISTINCT FROM "
+        "  'contract_terms' AND source_clause_id IS NOT NULL) AS from_clauses, "
+        "ARRAY_AGG(DISTINCT rule_spec->>'limit') FILTER (WHERE "
+        "  rule_spec->>'source' = 'contract_terms') AS term_keys "
+        "FROM validation_rule WHERE contract_id = ANY(:ids) "
+        "AND rule_status IS DISTINCT FROM 'disabled' "
+        "GROUP BY contract_id"), {"ids": list(contract_ids)}).mappings().all()
+    return {int(r["contract_id"]): {
+                "total": int(r["total"]),
+                "from_terms": int(r["from_terms"]),
+                "from_clauses": int(r["from_clauses"]),
+                "term_keys": {k for k in (r["term_keys"] or []) if k}}
+            for r in rows}
+
+
 def _checks_summary(s, c: Contract,
-                    rule_counts: dict[int, int] | None = None) -> dict:
+                    rule_counts: dict[int, dict] | None = None) -> dict:
     """How many of this contract's terms are actually checked, and how many could be.
 
     `checkable` counts the agreed limits that CAN become a check — a limit whose
     `check` is None is wording only, by design, and counting it would make every
-    contract look half-bound forever. `rules` is what is in force right now.
+    contract look half-bound forever. `rules` is what runs right now, split by
+    where it came from.
+
+    `terms_checked` is its own number, never `rules` read against `checkable`:
+    the two count different things, and a Bordereau Setup's rules carry no term
+    key, so crediting them to terms would be a guess. Reading one as the other
+    is how a contract showed "102 of 9 · every checkable term is measured" with
+    not one term checked.
     """
     limits = c.commercial_terms or {}
-    checkable = sum(
-        1 for k, entry in limits.items()
+    checkable_keys = {
+        k for k, entry in limits.items()
         if (ct.AGREED_LIMITS.get(k) or {}).get("check")
-        and (entry or {}).get("value") not in (None, ""))
-    if rule_counts is None:
-        n = s.execute(
-            sa_text("SELECT COUNT(*) FROM validation_rule "
-                    "WHERE contract_id = :cid"), {"cid": c.id}).scalar() or 0
-    else:
-        n = rule_counts.get(c.id, 0)
+        and (entry or {}).get("value") not in (None, "")}
+    checkable = len(checkable_keys)
+    tally = ((_rule_tallies(s, [c.id]) if rule_counts is None else rule_counts)
+             .get(c.id) or {})
+    total = tally.get("total", 0)
+    from_terms = tally.get("from_terms", 0)
+    from_clauses = tally.get("from_clauses", 0)
     out = {
-        "rules": int(n),
+        "rules": total,
         "checkable": checkable,
+        "terms_checked": len(checkable_keys & tally.get("term_keys", set())),
+        "from_terms": from_terms,
+        "from_clauses": from_clauses,
+        "standard": total - from_terms - from_clauses,
         "output_template_id": c.output_template_id,
         # The one thing the screen cannot work out for itself: whether pressing
         # the button would do anything. Terms with nothing to check produce no
@@ -834,12 +876,7 @@ def list_contracts(
         # One query for every row's check count. Counting inside _record would
         # be one round trip per contract, which on a carrier with a few hundred
         # of them is the whole cost of the screen.
-        counts: dict[int, int] = {}
-        if rows:
-            counts = {int(cid): int(n) for cid, n in s.execute(
-                sa_text("SELECT contract_id, COUNT(*) FROM validation_rule "
-                        "WHERE contract_id = ANY(:ids) GROUP BY contract_id"),
-                {"ids": [c.id for c in rows]}).all()}
+        counts = _rule_tallies(s, [c.id for c in rows])
         out = [_record(s, c, with_docs=False, p=p, rule_counts=counts)
                for c in rows]
         if lifecycle:
@@ -1538,7 +1575,11 @@ def update_contract(contract_id: int, body: dict,
         # still quoting last week's number would be the exact drift the tokens
         # exist to prevent.
         rebound = None
-        if "agreed_limits" in body and _checks_summary(s, c)["rules"] > 0:
+        # Any rule at all, disabled ones included: `checks.rules` leaves those
+        # out, and the question here is whether the contract was ever bound.
+        if "agreed_limits" in body and s.execute(sa_text(
+                "SELECT 1 FROM validation_rule WHERE contract_id = :cid LIMIT 1"),
+                {"cid": c.id}).first() is not None:
             rebound = _auto_bind(s, c, p)
         if "agreed_limits" in body and "wording_sections" not in body:
             _sections = ((c.wording_sections or {}).get("sections")

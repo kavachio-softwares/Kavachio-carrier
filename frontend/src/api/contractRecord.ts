@@ -417,8 +417,18 @@ export type SignatureFieldSpec = {
  *  contract reads n of n rather than n of some larger number it can never
  *  reach. */
 export type ContractChecks = {
+  /** Rules that run on this contract — disabled ones are left out. */
   rules: number;
+  /** Agreed terms that can be checked. A different thing from `rules`, so
+   *  never shown as a fraction of it. */
   checkable: number;
+  /** How many of the `checkable` terms have a check written from the term. */
+  terms_checked: number;
+  /** Where `rules` came from: the typed terms, a clause of the wording, or a
+   *  standard check (derived, or from the rule library) tied to no clause. */
+  from_terms: number;
+  from_clauses: number;
+  standard: number;
   output_template_id: number | null;
   bindable: boolean;
   /** The template the checks were written against, and the sheets it reports

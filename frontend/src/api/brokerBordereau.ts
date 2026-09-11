@@ -113,3 +113,8 @@ export const brokerRunUrls = (p: ContractPath): RunUrls => ({
   file: id => `${base(p)}/runs/${id}/file`,
   data: (id, q) => `${base(p)}/runs/${id}/data?${q}`,
 });
+
+/** The blank bordereau for this contract — the layout its live setup reads,
+ *  which is what a run finds the columns of an uploaded file by. */
+export const bordereauTemplatePath = (p: ContractPath) =>
+  `${base(p)}/bordereau-template`;

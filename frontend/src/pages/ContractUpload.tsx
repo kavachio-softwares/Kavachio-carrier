@@ -34,7 +34,7 @@ import {
 } from "../api/contracts";
 import { getCounterparties, type Counterparty } from "../api/contractRecord";
 import { currentMga, getTenantBrand } from "../auth";
-import { scheduleOf } from "../utils/directSetup";
+import { refusalMessage, scheduleOf } from "../utils/directSetup";
 
 export default function ContractUpload() {
   const nav = useNavigate();
@@ -118,9 +118,11 @@ export default function ContractUpload() {
         },
       });
     } catch (e) {
-      const d = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-      setErr(typeof d === "string" ? d
-             : "That contract could not be read. Please try again.");
+      // The server's own reason first — "too short", "password-protected" —
+      // because the generic line below tells someone to retry, and a refused
+      // file fails the same way every time.
+      setErr(refusalMessage(e)
+             ?? "That contract could not be read. Please try again.");
     } finally {
       setBusy(false);
       setStep("");
