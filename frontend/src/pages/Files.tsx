@@ -26,6 +26,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Server } from "lucide-react";
+import { watchArrivals } from "../api/intake";
 import InboxTab from "./FilesReceived";
 import WaysInTab, { AddRouteModal } from "./FilesArrive";
 
@@ -44,6 +45,20 @@ export default function Files() {
 
   const [adding, setAdding] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  // Bumped whenever the server says this carrier's files changed. ONE
+  // connection for the whole screen, shared by the queue and the panel. Bursts
+  // are folded: twelve files dropped into a folder commit twelve times, and one
+  // re-read covers them all.
+  const [liveTick, setLiveTick] = useState(0);
+  useEffect(() => {
+    const ctl = new AbortController();
+    let fold: number | undefined;
+    watchArrivals(() => {
+      window.clearTimeout(fold);
+      fold = window.setTimeout(() => setLiveTick(t => t + 1), 400);
+    }, ctl.signal);
+    return () => { ctl.abort(); window.clearTimeout(fold); };
+  }, []);
   // Everything "Add a way in" needs, handed up by the panel's own fetch. The
   // dialog is rendered out here rather than inside the panel: a closed panel is
   // `visibility: hidden` and its children inherit that, so a dialog in there
@@ -53,7 +68,7 @@ export default function Files() {
   // Reported up by the panel while it sits closed, so the button can say how
   // many ways in exist and whether one of them needs looking at.
   const [summary, setSummary] = useState<{ routes: number; needsAttention: number } | null>(null);
-  // Settings / Add a way in / a collect result, open inside the panel.
+  // Settings / API keys, open inside the panel.
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const takeSummary = useCallback(
@@ -108,7 +123,7 @@ export default function Files() {
         </div>
 
         {/* The queue. Unchanged by the merge — this is the screen. */}
-        <InboxTab active refreshKey={refreshKey} />
+        <InboxTab active refreshKey={refreshKey} liveTick={liveTick} />
       </section>
 
       {/* ── Ways in ──
@@ -130,7 +145,7 @@ export default function Files() {
         </div>
 
         <div className="drawer-b wayspanel">
-          <WaysInTab refreshKey={refreshKey} onSummary={takeSummary}
+          <WaysInTab refreshKey={refreshKey} liveTick={liveTick} onSummary={takeSummary}
             onDialogOpen={setDialogOpen} onAddData={takeAddData} />
         </div>
 

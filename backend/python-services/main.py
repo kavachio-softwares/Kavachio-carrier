@@ -158,15 +158,23 @@ _mark_deprecated_aliases()
 import sweep_scheduler  # noqa: E402
 sweep_scheduler.start(app)
 
-# 10.1 — SFTP collector. Looks in each broker's folder every five minutes. ON
-# by default: "we look in your folder every five minutes" is what the screen
-# promises a broker, and that promise should not depend on a variable somebody
-# has to remember. Opt out with SFTP_POLLER_ENABLED=0.
+# 10 — tells an open Files screen the moment a file lands (Postgres
+# LISTEN/NOTIFY → GET /intake/events), replacing its 60-second refresh. Started
+# before the collectors so their very first arrivals are announced.
+# Opt out with INTAKE_LIVE_ENABLED=0.
+import intake_events  # noqa: E402
+intake_events.start(app)
+
+# 10.1 — SFTP collector. Collects the moment a file lands in a broker's folder
+# (a filesystem watcher), with a slow backup sweep; falls back to a timer where
+# the folder cannot be watched. ON by default — collecting is what the screen
+# promises a broker. Opt out with SFTP_POLLER_ENABLED=0.
 import sftp_poller  # noqa: E402
 sftp_poller.start(app)
 
-# 10.3 — email collector. Reads the intake mailbox every five minutes. ON by
-# default, but ONLY where a mailbox is configured — start() returns early
+# 10.3 — email collector. Waits on the intake mailbox with IMAP IDLE and reads
+# it the moment mail arrives; falls back to a timer on a server without IDLE.
+# ON by default, but ONLY where a mailbox is configured — start() returns early
 # without IMAP_HOST/USER/PASS, so a deployment with no IMAP settings behaves
 # exactly as it did before. Opt out with EMAIL_POLLER_ENABLED=0.
 # It MOVES the mail it reads into IMAP_PROCESSED_FOLDER. It still sends nothing:

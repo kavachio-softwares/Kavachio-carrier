@@ -27,6 +27,9 @@ azure-storage-blob==12.23.1
 # JWT auth (access + refresh tokens)
 python-jose[cryptography]==3.5.0
 defusedxml==0.7.1
+# SFTP intake: notices a file the moment it lands in a broker's folder
+# (FSEvents / inotify). See sftp_watch.py.
+watchdog==6.0.0
 # Test-only. The contract as-of suites (test_contract_asof*.py) are
 # pytest-based and cannot run without it.
 pytest==9.1.1

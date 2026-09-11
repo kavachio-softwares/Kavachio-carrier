@@ -1,4 +1,4 @@
-import { api } from "./client";
+import { api, streamNdjson } from "./client";
 import { currentMga } from "../auth";
 
 // Feature 10 — File Intake Channels. Backs "How Files Arrive" and
@@ -59,7 +59,7 @@ export type RoutesResponse = {
   /** Known addresses per broker, active first. Keyed by party_id as a string. */
   broker_emails: Record<string, BrokerEmail[]>;
   channels: Channel[];
-  /** Channels we PULL from — these get a "Collect now". */
+  /** Channels we PULL from, as opposed to being pushed to. */
   collecting: Channel[];
   /** Channels that are wired end to end and can be created. */
   creatable: Channel[];
@@ -69,6 +69,9 @@ export type RoutesResponse = {
   /** True once IMAP_HOST/USER/PASS are set, so the screen can say whether the
    *  mailbox is actually reachable rather than implying it is. */
   email_ready: boolean;
+  /** How each pulled channel is noticing files right now. Optional so an older
+   *  server that does not send it still renders. */
+  collector?: { sftp: CollectorStatus; email: CollectorStatus };
   tiles: {
     ways_on: number;
     ways_total: number;
@@ -133,34 +136,14 @@ export type ArrivalsResponse = {
             waiting: number };
 };
 
-export type PollResult = {
-  route_id: number;
-  address: string;
-  looked_in: string;
-  accepted: number;
-  turned_away: number;
-  /** SFTP only — a file still being written is left for the next sweep. */
-  skipped_still_writing?: number;
-  files: { filename: string; outcome: Outcome; reason: string | null;
-           arrival_id: number; from?: string; matched?: string; subject?: string }[];
-  error?: string;
-  skipped?: string;
-  // ── email only (10.3) ────────────────────────────────────────────────────
-  /** Messages read this sweep. */
-  messages?: number;
-  held?: number;
-  /** Mail with nothing attached — a newsletter, an out-of-office. Not a
-   *  refusal: recording those would bury the real arrivals. */
-  no_attachment?: number;
-  too_large?: number;
-  /** Already landed on a previous sweep, matched on Message-ID. */
-  already_seen?: number;
-  /** Matched no route, and no single tenant owns email intake — left in the
-   *  mailbox rather than filed against the wrong carrier. */
-  unattributable?: number;
-  /** How many of the files collected belong to the route you clicked. */
-  for_this_route?: number;
-  note?: string;
+/** How a pulled channel notices a file, as the server reports it.
+ *  `watching` (SFTP, a filesystem watcher) and `idle` (email, IMAP IDLE) both
+ *  mean the moment it lands; `timer` is the fallback when that cannot run.
+ *  `check_seconds` is the backup sweep for the first two, the timer for the
+ *  third. */
+export type CollectorStatus = {
+  mode: "watching" | "idle" | "timer" | "connecting" | "off" | "not_configured";
+  check_seconds: number;
 };
 
 /** A refused file the design would call "held": kept, and waiting on a person. */
@@ -243,11 +226,41 @@ export async function downloadArrival(arrivalId: number, filename: string): Prom
   URL.revokeObjectURL(url);
 }
 
-/** Collect this folder now instead of waiting for the timer. */
-export async function pollRoute(routeId: number): Promise<PollResult> {
-  const { data } = await api.post(`/intake/routes/${routeId}/poll`, null,
-    { params: { mga: currentMga() } });
-  return data;
+/** Calls `onChange` whenever this carrier's files change — a file landed by any
+ *  way in, or somebody decided one. The server pushes it the moment the change
+ *  commits (GET /intake/events), which replaced a 60-second poll.
+ *
+ *  Keeps itself connected until `signal` aborts. A dropped stream, a server
+ *  restart and the server's own periodic close (it re-checks the token) all
+ *  reconnect — and a REconnect calls `onChange` too, because anything that
+ *  landed in the gap was announced to nobody. */
+export function watchArrivals(onChange: () => void, signal: AbortSignal): void {
+  void (async () => {
+    let connectedBefore = false;
+    let wait = 1000;
+    while (!signal.aborted) {
+      const opened = Date.now();
+      try {
+        await streamNdjson("/intake/events", { mga: currentMga() ?? undefined }, msg => {
+          if (msg?.type === "ready") {
+            if (connectedBefore) onChange();
+            connectedBefore = true;
+          } else if (msg?.type === "arrivals") {
+            onChange();
+          }
+        }, signal, { quiet: true });
+      } catch { /* dropped, restarting or signed out — retried below */ }
+      if (signal.aborted) return;
+      // A stream that ran a while ended normally: reconnect at once. One that
+      // failed straight away backs off, so a server that is down is not hammered.
+      wait = Date.now() - opened > 30_000 ? 1000 : Math.min(wait * 2, 30_000);
+      await new Promise<void>(resolve => {
+        const t = window.setTimeout(resolve, wait);
+        signal.addEventListener("abort", () => { window.clearTimeout(t); resolve(); },
+          { once: true });
+      });
+    }
+  })();
 }
 
 

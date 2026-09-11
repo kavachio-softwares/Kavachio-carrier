@@ -152,14 +152,16 @@ function subline(a: Arrival): string {
   return (a.turned_away_reason ?? "").replace(/^Held — /, "");
 }
 
-export default function InboxTab({ onWaitingCount, active, refreshKey }: {
+export default function InboxTab({ onWaitingCount, active, refreshKey, liveTick = 0 }: {
   /** Reported up so a caller can carry the count. */
   onWaitingCount?: (n: number) => void;
   /** False while the Ways in tab is showing. Both panes stay mounted so the
-   *  tab badge stays live, but only the visible one polls. */
+   *  tab badge stays live, but only the visible one fetches changes. */
   active: boolean;
   /** Bumped by Refresh in the page head. */
   refreshKey: number;
+  /** Bumped when the server says files changed (Files.tsx holds the feed). */
+  liveTick?: number;
 }) {
   const [rows, setRows] = useState<Arrival[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -194,25 +196,40 @@ export default function InboxTab({ onWaitingCount, active, refreshKey }: {
   }, []);
   useEffect(() => { load(); }, [load, refreshKey]);
 
-  // Files land by SFTP and email on a five-minute sweep and by API at any
-  // moment, but the screen only ever changed when somebody pressed Refresh.
-  // Poll while the tab is actually being looked at; skip while it is hidden,
-  // because a backgrounded tab polling every minute is just load.
+  // Files land by SFTP, email and API at any moment. The server says so the
+  // instant one commits — Files.tsx holds that feed and bumps `liveTick` — which
+  // replaced asking for the whole list every 60 seconds just in case.
+  //
+  // What changed is fetched into `pending`, never applied under the cursor.
+  // While the tab is hidden, a row is open or a load is running, the change is
+  // remembered and fetched the moment that ends: there is no next tick to catch
+  // it any more.
   const seen = useRef<number>(0);
   useEffect(() => {
     if (rows) seen.current = rows.length ? Math.max(...rows.map(r => r.arrival_id)) : 0;
   }, [rows]);
+  const gate = useRef({ active, busy, open: !!open });
+  gate.current = { active, busy, open: !!open };
+  const stale = useRef(false);
+  const lookForNew = useCallback(async () => {
+    const g = gate.current;
+    if (!g.active || g.busy || g.open || document.hidden) { stale.current = true; return; }
+    stale.current = false;
+    try {
+      const fresh = (await listArrivals()).rows;
+      const newest = fresh.length ? Math.max(...fresh.map(r => r.arrival_id)) : 0;
+      if (newest > seen.current) setPending(fresh);
+    } catch { /* not worth an error bar; the next change or Refresh tries again */ }
+  }, []);
+  useEffect(() => { if (liveTick) lookForNew(); }, [liveTick, lookForNew]);
   useEffect(() => {
-    const id = window.setInterval(async () => {
-      if (!active || document.hidden || busy || open) return;
-      try {
-        const fresh = (await listArrivals()).rows;
-        const newest = fresh.length ? Math.max(...fresh.map(r => r.arrival_id)) : 0;
-        if (newest > seen.current) setPending(fresh);
-      } catch { /* a failed poll is not worth an error bar; Refresh still works */ }
-    }, 60_000);
-    return () => window.clearInterval(id);
-  }, [active, busy, open]);
+    if (stale.current) lookForNew();
+  }, [active, busy, open, lookForNew]);
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden && stale.current) lookForNew(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [lookForNew]);
 
   const all = rows ?? [];
 

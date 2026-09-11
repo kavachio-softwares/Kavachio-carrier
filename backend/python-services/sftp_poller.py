@@ -1,32 +1,49 @@
 """Feature 10.1 — the collector that picks files out of the SFTP folders.
 
-This is deliberately the smallest part of the feature. It looks in each enabled
-SFTP route's `incoming` folder every few minutes, takes anything that has
-finished uploading, hands it to intake_service.land_file, and moves it out of
-the way so it is never read twice.
+This is deliberately the smallest part of the feature. It takes anything in an
+enabled SFTP route's `incoming` folder that has finished uploading, hands it to
+intake_service.land_file, and moves it out of the way so it is never read twice.
+
+WHEN IT LOOKS. It used to look in every folder on a five-minute timer, so a file
+sat unseen for up to five minutes. Now the operating system says when something
+lands — sftp_watch (FSEvents on macOS, inotify on Linux) — and the collector
+runs within about a second. Two things still run on a clock, and neither is the
+old poll:
+
+  * a RECHECK, when a file was still being written: it is looked at again as
+    soon as SFTP_QUIET_SECONDS has passed, rather than at the next sweep;
+  * a slow BACKUP SWEEP (SFTP_SWEEP_SECONDS), because the OS can drop events
+    under a burst and a network mount delivers none at all.
+
+If the watcher cannot run — watchdog not installed, or SFTP_WATCH_ENABLED=0 for
+a network mount — the collector falls back to the old timer, SFTP_POLL_SECONDS.
 
 It talks to the FILESYSTEM, not to SSH. Whatever serves SFTP in front of that
 directory — a self-hosted sshd chrooted there, or an Azure Blob SFTP mount —
 this file does not change. That also means the whole feature is testable today
 by copying a file into a folder, with no SSH server anywhere.
 
-ON BY DEFAULT. Collecting is what the screen promises a broker — "we look in
-your folder every five minutes" — so the app has to do it without anybody
-remembering to set a variable. Set SFTP_POLLER_ENABLED=0 to stop it; "Collect
-now" on the screen still works either way.
+ON BY DEFAULT. Collecting is what the screen promises a broker, so the app has
+to do it without anybody remembering to set a variable. Set
+SFTP_POLLER_ENABLED=0 to stop it; POST /intake/routes/{id}/poll still works
+either way.
 
 Configuration:
   SFTP_POLLER_ENABLED   0/1     (default 1 — on)
-  SFTP_POLL_SECONDS     int     (default 300 — the design's "every 5 minutes")
+  SFTP_WATCH_ENABLED    0/1     (default 1) set 0 where SFTP_ROOT is a network
+                                mount (NFS, SMB, blobfuse): those deliver no events
+  SFTP_SWEEP_SECONDS    int     (default 900)  backup sweep while watching
+  SFTP_POLL_SECONDS     int     (default 300)  the timer, only when not watching
   SFTP_ROOT             path    (default ./sftp-root)         see intake_service
-  SFTP_QUIET_SECONDS    int     (default 30)                  see intake_service
+  SFTP_QUIET_SECONDS    int     (default 10)                  see intake_service
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import shutil
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,30 +51,69 @@ from sqlalchemy import text
 
 import intake_safety as svc_safety
 import intake_service as svc
+import sftp_watch
 import storage
 from db import SessionLocal
 from intake_models import IntakeRoute
 
 log = logging.getLogger("kavachio.sftp_poller")
 
-_task: asyncio.Task | None = None
+_thread: threading.Thread | None = None
+_stop = threading.Event()
+# Set by the folder watcher's thread; read by the collector's.
+_wake = threading.Event()
+# What the collector is actually doing, for the screen: watching | timer | off.
+_mode = "off"
+
+# How long a burst of events is left to settle before looking. Copying twelve
+# files into a folder is twelve events; one look collects all twelve.
+_SETTLE_SECONDS = 1.0
+
+# After a pass that failed outright (the database was unreachable, say), how
+# soon to try again. Waiting for the backup sweep would leave a file the watcher
+# already announced sitting there for up to SFTP_SWEEP_SECONDS.
+_RETRY_SECONDS = 30
 
 # Namespace for the Postgres advisory locks below, so a route lock cannot
 # collide with an advisory lock taken by some other part of the system.
 _LOCK_NAMESPACE = 0x5F7B  # "sftp"
 
 
+def _flag(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _enabled() -> bool:
-    return os.getenv("SFTP_POLLER_ENABLED", "1").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    return _flag("SFTP_POLLER_ENABLED", "1")
+
+
+def _watch_enabled() -> bool:
+    return _flag("SFTP_WATCH_ENABLED", "1")
+
+
+def _seconds(name: str, default: int, floor: int = 10) -> int:
+    try:
+        return max(floor, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
 
 
 def _interval() -> int:
-    try:
-        return max(10, int(os.getenv("SFTP_POLL_SECONDS", "300")))
-    except ValueError:
-        return 300
+    """The timer, used only when the folders cannot be watched."""
+    return _seconds("SFTP_POLL_SECONDS", 300)
+
+
+def _sweep_interval() -> int:
+    """The backup sweep while watching. Slow on purpose — it only catches what
+    the watcher missed."""
+    return _seconds("SFTP_SWEEP_SECONDS", 900, floor=60)
+
+
+def status() -> dict:
+    """How files are being noticed in this process, for the Ways in panel."""
+    mode = _mode if _enabled() else "off"
+    return {"mode": mode,
+            "check_seconds": _sweep_interval() if mode == "watching" else _interval()}
 
 
 def _stamped(name: str) -> str:
@@ -74,8 +130,8 @@ def _stamped(name: str) -> str:
 def collect_route(session, route: IntakeRoute) -> dict:
     """Collect one route's folder once.
 
-    Returns a small summary so the manual "poll now" button on the screen can
-    say what happened rather than just spinning.
+    Returns a small summary so a manual poll can say what happened rather than
+    just spinning.
 
     ORDER MATTERS, and it is the one thing in this file worth being careful
     about: read the bytes, record the arrival, COMMIT, and only then move the
@@ -96,10 +152,12 @@ def collect_route(session, route: IntakeRoute) -> dict:
         summary["error"] = "folder does not exist yet"
         return summary
 
-    # One worker per route. Several app replicas each run their own poller, and
-    # unlike the daily calendar sweep this one is NOT harmless when it doubles
-    # up: two workers reading the same file would land it twice and double the
-    # premium. Whoever gets the lock does the work; the others move on.
+    # One worker per route. Several app replicas each run their own collector,
+    # and unlike the daily calendar sweep this one is NOT harmless when it
+    # doubles up: two workers reading the same file would land it twice and
+    # double the premium. Whoever gets the lock does the work; the others move
+    # on. With a watcher on every replica they all wake at once, so this lock
+    # now matters on every single arrival, not just on an unlucky timer tick.
     #
     # The lock is taken on a DEDICATED connection, inside its own transaction,
     # for two reasons that are easy to get wrong:
@@ -131,9 +189,16 @@ def collect_route(session, route: IntakeRoute) -> dict:
 
     try:
         for path in sorted(p for p in incoming.iterdir() if p.is_file()):
-            if path.name.startswith("."):
-                continue                      # editor swap files, .DS_Store
-            if not svc.is_quiet(path):
+            # Dotfiles (.DS_Store, editor swap files) and uploads still wearing
+            # a temporary name (.filepart, .part). The second used to be taken
+            # once it had been quiet long enough — half a bordereau, followed by
+            # the whole one as a "duplicate" the moment the client renamed it.
+            if sftp_watch.is_temp_name(path.name):
+                continue
+            # Finished if nothing has touched it for the quiet window — or if
+            # the watcher saw it renamed from a temporary name, which IS the
+            # client saying "done" and needs no waiting out.
+            if not (svc.is_quiet(path) or sftp_watch.finished_by_rename(path)):
                 summary["skipped_still_writing"] += 1
                 continue
 
@@ -190,6 +255,7 @@ def collect_route(session, route: IntakeRoute) -> dict:
             destination.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.move(str(path), str(destination / _stamped(path.name)))
+                sftp_watch.forget(path)
             except OSError as exc:
                 # The row is committed, so the file is accounted for. Leaving it
                 # in `incoming` is safe — the duplicate check refuses it next
@@ -215,7 +281,8 @@ def collect_route(session, route: IntakeRoute) -> dict:
 
 def collect_all() -> dict:
     """Every enabled SFTP route, across every tenant. Safe to run repeatedly."""
-    totals = {"routes": 0, "accepted": 0, "held": 0, "turned_away": 0}
+    totals = {"routes": 0, "accepted": 0, "held": 0, "turned_away": 0,
+              "skipped_still_writing": 0}
     with SessionLocal() as s:
         routes = (s.query(IntakeRoute)
                   .filter(IntakeRoute.channel == "sftp",
@@ -225,9 +292,8 @@ def collect_all() -> dict:
             try:
                 result = collect_route(s, route)
                 totals["routes"] += 1
-                totals["accepted"] += result.get("accepted", 0)
-                totals["held"] += result.get("held", 0)
-                totals["turned_away"] += result.get("turned_away", 0)
+                for key in ("accepted", "held", "turned_away", "skipped_still_writing"):
+                    totals[key] += result.get(key, 0)
             except Exception as exc:
                 # One broken folder must not stop the others being collected.
                 s.rollback()
@@ -236,39 +302,93 @@ def collect_all() -> dict:
     return totals
 
 
-async def _loop() -> None:
-    from fastapi.concurrency import run_in_threadpool
-    interval = _interval()
-    log.info("sftp poller started — every %ss, root=%s", interval, svc.sftp_root())
-    while True:
-        try:
-            totals = await run_in_threadpool(collect_all)
-            if totals["accepted"] or totals["turned_away"]:
-                log.info("sftp poll: %s", totals)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # Never let a bad poll kill the loop; the next one retries.
-            log.exception("sftp poll failed: %s", exc)
-        await asyncio.sleep(interval)
+def _run() -> None:
+    """The collector's thread: sleep until something lands, then collect.
+
+    A thread rather than an asyncio task because everything it does blocks —
+    the filesystem, the database, the virus scanner — and the watcher calls
+    back from a thread of its own anyway.
+    """
+    global _mode
+    watcher = sftp_watch.FolderWatcher(svc.sftp_root(), _wake.set)
+    watching = _watch_enabled() and watcher.start()
+    _mode = "watching" if watching else "timer"
+    if watching:
+        log.info("sftp collector: collecting the moment a file lands in %s "
+                 "(backup sweep every %ss)", svc.sftp_root(), _sweep_interval())
+    else:
+        log.info("sftp collector: not watching — checking %s every %ss",
+                 svc.sftp_root(), _interval())
+
+    # Due at once: whatever landed while the app was down is collected on start.
+    next_sweep = 0.0
+    recheck_at: float | None = None
+    try:
+        while not _stop.is_set():
+            due = next_sweep if recheck_at is None else min(next_sweep, recheck_at)
+            if _wake.wait(max(0.0, due - time.monotonic())):
+                if _stop.wait(_SETTLE_SECONDS):
+                    break
+                # Cleared AFTER the settle, so everything that landed during it
+                # is covered by this pass; anything landing during the pass sets
+                # it again and gets a pass of its own.
+                _wake.clear()
+            if _stop.is_set():
+                break
+
+            failed = False
+            totals: dict = {}
+            try:
+                totals = collect_all()
+                if totals["accepted"] or totals["held"] or totals["turned_away"]:
+                    log.info("sftp: %s", totals)
+            except Exception as exc:
+                # Never let a bad pass kill the collector; retry shortly.
+                failed = True
+                log.exception("sftp collection failed: %s", exc)
+
+            # A watcher that has died is restarted; one that cannot be is
+            # replaced by the timer rather than leaving the folders unwatched.
+            if watching and not watcher.alive:
+                log.warning("sftp watcher stopped — restarting it")
+                watcher.stop()
+                watching = watcher.start()
+                _mode = "watching" if watching else "timer"
+
+            now = time.monotonic()
+            next_sweep = now + (_sweep_interval() if watching else _interval())
+            if failed:
+                recheck_at = now + _RETRY_SECONDS
+            elif totals.get("skipped_still_writing"):
+                # Look again the moment the quiet window can have passed, not
+                # at the next sweep. A file still growing is skipped again and
+                # re-armed again, so a long upload is followed to its end.
+                recheck_at = now + svc.quiet_seconds() + 1
+            else:
+                recheck_at = None
+    finally:
+        watcher.stop()
+        _mode = "off"
 
 
 def start(app) -> None:
-    """Attach the poller to the app's startup, the same way sweep_scheduler does."""
+    """Attach the collector to the app's startup, the same way sweep_scheduler does."""
     if not _enabled():
-        log.info("sftp poller off (SFTP_POLLER_ENABLED=0) — nothing will be "
-                 "collected from the folders until somebody presses Collect now")
+        log.info("sftp collector off (SFTP_POLLER_ENABLED=0) — nothing will be "
+                 "collected from the folders")
         return
 
     @app.on_event("startup")
-    async def _start_sftp_poller() -> None:       # pragma: no cover - wiring
-        global _task
-        if _task is None or _task.done():
-            _task = asyncio.create_task(_loop())
+    async def _start_sftp_collector() -> None:    # pragma: no cover - wiring
+        global _thread
+        if _thread is None or not _thread.is_alive():
+            _stop.clear()
+            _thread = threading.Thread(target=_run, name="sftp-collector", daemon=True)
+            _thread.start()
 
     @app.on_event("shutdown")
-    async def _stop_sftp_poller() -> None:        # pragma: no cover - wiring
-        global _task
-        if _task is not None:
-            _task.cancel()
-            _task = None
+    async def _stop_sftp_collector() -> None:     # pragma: no cover - wiring
+        # Daemon thread: it stops within a second, and never holds up exit if
+        # it is halfway through a large file.
+        _stop.set()
+        _wake.set()

@@ -14,9 +14,12 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
 
+import intake_events
 import intake_review as review
 import intake_service as svc
 from app_routes import (
@@ -95,6 +98,18 @@ def _mail_ready() -> bool:
         return mailsvc.is_configured()
     except Exception:
         return False
+
+
+def _collector_status() -> dict:
+    """How each pulled channel is noticing files right now.
+
+    "The moment it lands" is only true while the folder watcher or the IDLE
+    connection is actually up, so the screen reads this rather than printing a
+    promise. Per process — every replica runs its own collectors.
+    """
+    import email_poller
+    import sftp_poller
+    return {"sftp": sftp_poller.status(), "email": email_poller.status()}
 
 
 def _send_to(r: IntakeRoute) -> Optional[str]:
@@ -247,6 +262,7 @@ def list_routes(mga: Optional[str] = None,
             # intake mailbox must not strand every stored address.
             "email_mailbox": _mail_cfg().user or None,
             "email_ready": _mail_ready(),
+            "collector": _collector_status(),
             "tiles": {
                 "ways_on": sum(1 for r in rows if r.is_enabled),
                 "ways_total": len(CHANNELS),
@@ -559,13 +575,39 @@ def run_retention(principal: Principal = Depends(require_role("carrier_admin")))
     return review.run_retention()
 
 
+@router.get("/events")
+async def arrival_events(request: Request, mga: Optional[str] = None,
+                         principal: Principal = Depends(current_principal)):
+    """A live feed for the Files screen: one line whenever this carrier's
+    files change — a file landed by any way in, or somebody decided one.
+
+    Replaces the screen asking for the whole list every 60 seconds. Newline-
+    delimited JSON (`ready`, then `arrivals` / `ping`), read with fetch so the
+    bearer token travels in a header like every other call. The lines carry no
+    data at all — the screen re-reads /intake/arrivals, which is where the
+    tenant scoping lives. See intake_events.
+    """
+    def _tenant() -> int:
+        with SessionLocal() as s:
+            return resolve_tenant_id(s, principal, mga)
+
+    tid = await run_in_threadpool(_tenant)
+    return StreamingResponse(
+        intake_events.stream(tid, request),
+        media_type="application/x-ndjson",
+        # A proxy that buffers the response would hold every line back until
+        # the stream ends, which is the whole point defeated.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @router.post("/routes/{route_id}/poll")
 def poll_route(route_id: int, principal: Principal = Depends(require_role("carrier_admin"))):
-    """Collect this route's folder right now instead of waiting for the timer.
+    """Collect this route's folder or mailbox right now.
 
-    Exists so the feature can be tested and demonstrated without waiting five
-    minutes, and so "is my folder working?" has an answer on the screen rather
-    than in a log file.
+    The screen no longer needs this — files are collected the moment they land
+    (sftp_watch, IMAP IDLE) — so it has no button any more. It stays for support
+    and scripts: the one-call answer to "is this folder working?", with a
+    summary of exactly what was found.
     """
     with SessionLocal() as s:
         route = s.get(IntakeRoute, route_id)

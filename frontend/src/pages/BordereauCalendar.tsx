@@ -1,11 +1,10 @@
 // Requirement 17.2 — the carrier's Bordereau Calendar.
 //
 // Follows the carrier-centric design's `c-calendar` screen: five headline
-// counts, one row for every file somebody owes this month, how often each
-// programme reports, and what "corrected" means. The shape of the screen is the
-// argument it makes — you read what is owed, then what turned up, then what
-// went onward, in that order, because that is the order the questions get
-// asked.
+// counts, one row for every file somebody owes this month, and how often each
+// programme reports. The shape of the screen is the argument it makes — you
+// read what is owed, then what turned up, then what went onward, in that order,
+// because that is the order the questions get asked.
 //
 // KEYED ON THE DUE MONTH, not on the reporting period. Programmes on different
 // frequencies have to share one page: a monthly programme's July file and a
@@ -25,6 +24,7 @@ import {
   type CalendarStatus, type SubmissionVersionRow,
 } from "../api/calendar";
 import NotificationBell from "../components/NotificationBell";
+import { Pagination } from "../components/Pagination";
 
 // Same vocabulary as ProgramCalendar's status badges, so a period reads the
 // same on the carrier's board as it does inside a bordereau setup.
@@ -67,6 +67,9 @@ function fmtMonth(key?: string | null): string {
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
+// Rows per page in the programme list — the same size Users & Roles pages at.
+const PAGE_SIZE = 10;
+
 export default function BordereauCalendar() {
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [month, setMonth] = useState<string | undefined>(undefined);
@@ -82,6 +85,7 @@ export default function BordereauCalendar() {
   // The rows a pending chase would cover. null = no dialog open. One row for
   // "Chase them", every late row for "Chase what is late".
   const [chasing, setChasing] = useState<BoardRow[] | null>(null);
+  const [schedPage, setSchedPage] = useState(1);
 
   const load = useCallback(async (m?: string) => {
     setLoading(true); setErr(null);
@@ -100,6 +104,14 @@ export default function BordereauCalendar() {
 
   const rows = board?.rows ?? [];
   const counts = board?.counts;
+
+  // The programme list arrives whole (one row per programme), so it pages here
+  // rather than on the server. A reload can leave fewer programmes than the
+  // page we were on, hence the clamp.
+  const schedules = board?.schedules ?? [];
+  const schedPageCount = Math.max(1, Math.ceil(schedules.length / PAGE_SIZE));
+  const schedPageNow = Math.min(schedPage, schedPageCount);
+  const schedRows = schedules.slice((schedPageNow - 1) * PAGE_SIZE, schedPageNow * PAGE_SIZE);
 
   // Who is actually late, for the header button. Unattributed rows are excluded
   // for the same reason they are excluded from the counts: there is nobody to
@@ -360,92 +372,59 @@ export default function BordereauCalendar() {
           </div>
         </div>
 
-        {/* ---- what fills the calendar, and what versions mean ------------ */}
-        <div className="grid g-2">
-          <div className="card">
-            <div className="card-h">
-              <h3>How often each programme reports</h3>
-              <span className="sub">this is what fills the calendar</span>
-            </div>
-            <div className="tbl-wrap">
-              <table>
-                <thead>
-                  <tr><th>Programme</th><th>How often</th><th>Due</th>
-                    <th>Next one</th><th>Covered until</th><th></th></tr>
-                </thead>
-                <tbody>
-                  {(board?.schedules ?? []).length === 0 && (
-                    <tr><td colSpan={6} className="muted"
-                      style={{ padding: "14px 12px" }}>No programmes yet.</td></tr>
-                  )}
-                  {(board?.schedules ?? []).map(sch => (
-                    <tr key={sch.program_id}>
-                      <td>
-                        <b>{sch.program_name}</b>
-                        <div className="sub">
-                          {sch.broker_count === 0 ? "no brokers on it"
-                            : plural(sch.broker_count, "broker")}
-                        </div>
-                      </td>
-                      <td>
-                        {sch.frequency
-                          ? sch.frequency_label
-                          : <span className="badge b-warn"><span className="d" />Not set</span>}
-                      </td>
-                      <td className="l">{sch.due_rule}</td>
-                      <td className="mono">{fmtFull(sch.next_due)}</td>
-                      {/* Why the deadlines stop where they do. Without this the
-                          list just runs out and the reader has to guess whether
-                          that is the contract ending or the screen truncating. */}
-                      <td className="mono">
-                        {sch.covers_until
-                          ? fmtFull(sch.covers_until)
-                          : <span className="sub">no end date on the contract</span>}
-                      </td>
-                      <td>
-                        <Link className="linkish"
-                          to={`/calendar?program=${sch.program_id}`}>Change →</Link>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+        {/* ---- what fills the calendar ---------------------------------- */}
+        <div className="card">
+          <div className="card-h">
+            <h3>How often each programme reports</h3>
+            <span className="sub">this is what fills the calendar</span>
           </div>
-
-          {/* The versions explainer. It is on the screen rather than in a help
-              page because the rule it states — the original is never replaced —
-              is the reason the Version column exists at all. */}
-          <div className="card pad">
-            <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>What "corrected" means</h3>
-            <p className="muted" style={{ fontSize: 12.5, margin: "0 0 14px", lineHeight: 1.55 }}>
-              A file can be sent more than once for the same period. The versions
-              are kept apart so nothing is lost.
-            </p>
-            <div className="step s3" style={{ marginBottom: 14 }}>
-              <span className="n">1</span>
-              <div><h4>First version</h4>
-                <p>What arrived by the due date. It stays exactly as it was,
-                  permanently — and it alone decides whether the deadline was met.</p></div>
-            </div>
-            <div className="step s2" style={{ marginBottom: 14 }}>
-              <span className="n">2</span>
-              <div><h4>Corrected version</h4>
-                <p>Something was wrong, so the period is sent again. Both are
-                  kept and you can see what changed.</p></div>
-            </div>
-            <div className="step s1">
-              <span className="n">3</span>
-              <div><h4>Late arrival</h4>
-                <p>A file that turns up after the deadline still belongs to its
-                  own period, not to the month it arrived in.</p></div>
-            </div>
-            <div className="note" style={{ marginTop: 14 }}>
-              Replacing the original instead of adding a version would quietly
-              rewrite history. Anybody looking back later would see numbers that
-              never actually went out.
-            </div>
+          <div className="tbl-wrap">
+            <table>
+              <thead>
+                <tr><th>Programme</th><th>How often</th><th>Due</th>
+                  <th>Next one</th><th>Covered until</th><th></th></tr>
+              </thead>
+              <tbody>
+                {schedules.length === 0 && (
+                  <tr><td colSpan={6} className="muted"
+                    style={{ padding: "14px 12px" }}>No programmes yet.</td></tr>
+                )}
+                {schedRows.map(sch => (
+                  <tr key={sch.program_id}>
+                    <td>
+                      <b>{sch.program_name}</b>
+                      <div className="sub">
+                        {sch.broker_count === 0 ? "no brokers on it"
+                          : plural(sch.broker_count, "broker")}
+                      </div>
+                    </td>
+                    <td>
+                      {sch.frequency
+                        ? sch.frequency_label
+                        : <span className="badge b-warn"><span className="d" />Not set</span>}
+                    </td>
+                    <td className="l">{sch.due_rule}</td>
+                    <td className="mono">{fmtFull(sch.next_due)}</td>
+                    {/* Why the deadlines stop where they do. Without this the
+                        list just runs out and the reader has to guess whether
+                        that is the contract ending or the screen truncating. */}
+                    <td className="mono">
+                      {sch.covers_until
+                        ? fmtFull(sch.covers_until)
+                        : <span className="sub">no end date on the contract</span>}
+                    </td>
+                    <td>
+                      <Link className="linkish"
+                        to={`/calendar?program=${sch.program_id}`}>Change →</Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
+          <Pagination page={schedPageNow} pageCount={schedPageCount}
+            pageSize={PAGE_SIZE} totalItems={schedules.length}
+            onPageChange={setSchedPage} noun="programmes" />
         </div>
       </div>
 

@@ -1,9 +1,15 @@
 """Feature 10.3 — the collector that takes bordereaux out of a mailbox.
 
-The email twin of sftp_poller. It logs into one IMAP mailbox every few minutes,
-takes the attachments off anything new, hands each one to
-intake_service.land_file, and moves the message out of the way so it is never
-read twice.
+The email twin of sftp_poller. It reads one IMAP mailbox, takes the attachments
+off anything new, hands each one to intake_service.land_file, and moves the
+message out of the way so it is never read twice.
+
+WHEN IT LOOKS. It used to log in every five minutes and ask. Now one connection
+waits in IMAP IDLE (imap_idle) and the server says the instant a message lands,
+so the mailbox is read within a second or two. That connection re-issues IDLE
+every EMAIL_IDLE_REFRESH_SECONDS — a keepalive; nothing is read — and a slow
+backup sweep (EMAIL_SWEEP_SECONDS) catches anything a dropped connection hid.
+A server without IDLE, or EMAIL_IDLE_ENABLED=0, falls back to the old timer.
 
 It talks to IMAP with the standard library — `imaplib` and `email`, no new
 dependency. Whatever hosts the mailbox (Dovecot, an appliance, a provider that
@@ -25,8 +31,8 @@ ON BY DEFAULT, but only where a mailbox is actually configured — start() below
 returns early unless IMAP_HOST/USER/PASS are set, so turning this on cannot make
 an unconfigured deployment start reaching for a mail server. Collecting is what
 the screen promises a broker, so it should not depend on anybody remembering to
-set a variable. Set EMAIL_POLLER_ENABLED=0 to stop it; "Collect now" on the
-screen works either way.
+set a variable. Set EMAIL_POLLER_ENABLED=0 to stop it; POST
+/intake/routes/{id}/poll works either way.
 
 NOTE the blast radius: when this runs it MOVES the mail it reads out of INBOX
 and into IMAP_PROCESSED_FOLDER. It does not send anything — replying to a
@@ -37,7 +43,12 @@ Configuration:
   EMAIL_STRICT_SENDERS    0/1   (default 0) take mail ONLY from an address a
                                 route already knows; anything else is left in
                                 the mailbox and never recorded
-  EMAIL_POLL_SECONDS      int   (default 300 — the design's "every 5 minutes")
+  EMAIL_IDLE_ENABLED      0/1   (default 1) wait for mail with IMAP IDLE
+  EMAIL_IDLE_REFRESH_SECONDS int (default 180) re-issue IDLE this often — kept
+                                under the ~4-minute idle timeout of cloud NATs
+                                and load balancers, which drop silent sockets
+  EMAIL_SWEEP_SECONDS     int   (default 3600) backup sweep while in IDLE
+  EMAIL_POLL_SECONDS      int   (default 300)  the timer, only without IDLE
   EMAIL_MAX_ATTACHMENT_MB int   (default 25)  skip anything larger
   EMAIL_REPLY_ON_REFUSAL  0/1   (default 0 — off) tell the sender we refused it
   EMAIL_REPLY_MAX_PER_DAY int   (default 3)   per sender, a loop-breaker
@@ -45,16 +56,18 @@ Configuration:
 """
 from __future__ import annotations
 
-import asyncio
 import imaplib
 import logging
 import os
 import ssl
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 
 import email_intake_service as mail
+import imap_idle
 import intake_service as svc
 import storage
 from db import SessionLocal
@@ -62,7 +75,17 @@ from intake_models import FileArrival, IntakeRoute
 
 log = logging.getLogger("kavachio.email_poller")
 
-_task: asyncio.Task | None = None
+_thread: threading.Thread | None = None
+_stop = threading.Event()
+# What the collector is actually doing, for the screen:
+# idle | timer | connecting | off.
+_mode = "off"
+
+# After a pass that did not get through (database down, mailbox refused us),
+# how soon to try again rather than waiting for the backup sweep.
+_RETRY_SECONDS = 60
+# Reconnect backoff after the IDLE connection drops, doubling to the ceiling.
+_BACKOFF_START, _BACKOFF_MAX = 5, 300
 
 # Namespace for the Postgres advisory lock, distinct from sftp_poller's so the
 # two collectors can never block each other.
@@ -80,10 +103,47 @@ def _enabled() -> bool:
 
 
 def _interval() -> int:
+    """The timer, used only when the server cannot IDLE."""
     try:
         return max(10, int(os.getenv("EMAIL_POLL_SECONDS", "300")))
     except ValueError:
         return 300
+
+
+def _idle_enabled() -> bool:
+    return os.getenv("EMAIL_IDLE_ENABLED", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _idle_refresh() -> int:
+    """How long one IDLE runs before it is ended and re-issued.
+
+    Capped at 29 minutes, the most RFC 2177 allows before a server may hang up.
+    """
+    try:
+        return min(29 * 60, max(30, int(os.getenv("EMAIL_IDLE_REFRESH_SECONDS", "180"))))
+    except ValueError:
+        return 180
+
+
+def _sweep_interval() -> int:
+    try:
+        return max(60, int(os.getenv("EMAIL_SWEEP_SECONDS", "3600")))
+    except ValueError:
+        return 3600
+
+
+def status() -> dict:
+    """How mail is being noticed in this process, for the Ways in panel."""
+    if not _enabled():
+        mode = "off"
+    elif not mail.is_configured():
+        mode = "not_configured"
+    else:
+        mode = _mode
+    return {"mode": mode,
+            "check_seconds": _sweep_interval() if mode == "idle" else _interval()}
 
 
 def _max_bytes() -> int:
@@ -108,13 +168,17 @@ def _reply_cap() -> int:
 
 # ── IMAP plumbing ───────────────────────────────────────────────────────────
 
-def connect(cfg: mail.MailboxConfig) -> imaplib.IMAP4:
+def connect(cfg: mail.MailboxConfig, readonly: bool = False) -> imaplib.IMAP4:
     """Log in and select the folder. Raises on failure — the caller reports it.
 
     Port 993 is implicit TLS; 143 is plaintext upgraded by STARTTLS. The
     credential never crosses the wire unencrypted either way, and a server that
     refuses STARTTLS on 143 fails here rather than silently sending the password
     in the clear.
+
+    `readonly` selects with EXAMINE. The IDLE connection uses it: it only ever
+    waits, and on a read-only mailbox a CLOSE can never expunge messages that
+    somebody else's mail client flagged for deletion.
     """
     context = ssl.create_default_context()
     if cfg.use_ssl:
@@ -123,7 +187,7 @@ def connect(cfg: mail.MailboxConfig) -> imaplib.IMAP4:
         imap = imaplib.IMAP4(cfg.host, cfg.port)
         imap.starttls(ssl_context=context)
     imap.login(cfg.user, cfg.password)
-    imap.select(cfg.folder)
+    imap.select(cfg.folder, readonly=readonly)
     return imap
 
 
@@ -481,7 +545,7 @@ def collect_mailbox(session, account: str = "") -> dict:
             imap = connect(cfg)
         except Exception as exc:
             # Wrong password, server down, folder renamed. Reported rather than
-            # raised so "Collect now" can say what happened on the screen.
+            # raised so a manual poll can say what happened.
             summary["error"] = f"could not open the mailbox: {exc}"
             return summary
 
@@ -512,7 +576,7 @@ def collect_mailbox(session, account: str = "") -> dict:
 
 
 def collect_route(session, route: IntakeRoute) -> dict:
-    """"Collect now" for one email route.
+    """A manual poll (POST /intake/routes/{id}/poll) for one email route.
 
     Reading a mailbox cannot be narrowed to a single broker — every email route
     shares the inbox — so this collects everything and then says which of the
@@ -532,7 +596,7 @@ def collect_route(session, route: IntakeRoute) -> dict:
 
 
 def collect_all() -> dict:
-    """The whole mailbox, for the timer. Safe to run repeatedly."""
+    """The whole mailbox, for the collector thread. Safe to run repeatedly."""
     totals = {"messages": 0, "accepted": 0, "held": 0, "turned_away": 0}
     with SessionLocal() as s:
         try:
@@ -549,45 +613,123 @@ def collect_all() -> dict:
     return totals
 
 
-async def _loop() -> None:
-    from fastapi.concurrency import run_in_threadpool
-    interval = _interval()
-    cfg = mail.mailbox_config()
-    log.info("email poller started — every %ss, mailbox=%s folder=%s",
-             interval, cfg.user or "(unset)", cfg.folder)
-    while True:
+def _collect_safely() -> bool:
+    """One pass over the mailbox. False when it did not get through."""
+    try:
+        totals = collect_all()
+    except Exception as exc:
+        # Never let a bad pass kill the collector; the caller retries.
+        log.exception("reading the mailbox failed: %s", exc)
+        return False
+    if totals.get("messages"):
+        log.info("email: %s", totals)
+    if totals.get("error"):
+        log.warning("email: %s", totals["error"])
+        return False
+    return True
+
+
+def _run_timer() -> None:
+    """The old way, for a server without IDLE: read the mailbox on a clock."""
+    global _mode
+    _mode = "timer"
+    log.info("email collector: checking %s every %ss",
+             mail.mailbox_config().user, _interval())
+    while not _stop.is_set():
+        _collect_safely()
+        _stop.wait(_interval())
+
+
+def _run_idle() -> None:
+    """Wait in IDLE; read the mailbox when mail lands. Reconnects on its own."""
+    global _mode
+    backoff = _BACKOFF_START
+    while not _stop.is_set():
+        cfg = mail.mailbox_config()
+        imap = None
         try:
-            totals = await run_in_threadpool(collect_all)
-            if totals.get("messages"):
-                log.info("email poll: %s", totals)
-        except asyncio.CancelledError:
-            raise
+            _mode = "connecting"
+            imap = connect(cfg, readonly=True)
+            if not imap_idle.server_supports_idle(imap):
+                log.warning("mail server %s does not support IMAP IDLE — "
+                            "falling back to a timer", cfg.host)
+                _close(imap)
+                imap = None
+                _run_timer()
+                return
+
+            reader = imap_idle.LineReader(imap.sock)
+            _mode = "idle"
+            backoff = _BACKOFF_START
+            log.info("email collector: waiting on %s / %s with IMAP IDLE "
+                     "(backup sweep every %ss)", cfg.user, cfg.folder,
+                     _sweep_interval())
+
+            # Whatever arrived while nothing was listening — at startup, or in
+            # the gap before a reconnect.
+            ok = _collect_safely()
+            last_pass = time.monotonic()
+            while not _stop.is_set():
+                new_mail = imap_idle.wait_for_mail(
+                    imap, reader, _idle_refresh() if ok else _RETRY_SECONDS, _stop)
+                if _stop.is_set():
+                    break
+                if (new_mail or not ok
+                        or time.monotonic() - last_pass >= _sweep_interval()):
+                    ok = _collect_safely()
+                    last_pass = time.monotonic()
         except Exception as exc:
-            # Never let a bad poll kill the loop; the next one retries.
-            log.exception("email poll failed: %s", exc)
-        await asyncio.sleep(interval)
+            # Dropped connection, wrong password, server restarting. The pass
+            # straight after reconnecting picks up anything that came meanwhile.
+            log.warning("email IDLE connection lost (%s) — reconnecting in %ss",
+                        exc, backoff)
+            _mode = "connecting"
+            _close(imap)
+            imap = None
+            _stop.wait(backoff)
+            backoff = min(backoff * 2, _BACKOFF_MAX)
+        finally:
+            _close(imap)
+
+
+def _run() -> None:
+    """The collector's thread.
+
+    A thread, not an asyncio task: imaplib blocks, and so does everything
+    collect_mailbox does after it.
+    """
+    global _mode
+    try:
+        if _idle_enabled():
+            _run_idle()
+        else:
+            _run_timer()
+    finally:
+        _mode = "off"
 
 
 def start(app) -> None:
-    """Attach the poller to the app's startup, the same way sftp_poller does."""
+    """Attach the collector to the app's startup, the same way sftp_poller does."""
     if not _enabled():
-        log.info("email poller off (EMAIL_POLLER_ENABLED=0) — no mail will be "
-                 "read until somebody presses Collect now")
+        log.info("email collector off (EMAIL_POLLER_ENABLED=0) — no mail will "
+                 "be read")
         return
     if not mail.is_configured():
-        log.warning("email poller enabled but no mailbox configured — "
+        log.warning("email collector enabled but no mailbox configured — "
                     "set IMAP_HOST, IMAP_USER and IMAP_PASS")
         return
 
     @app.on_event("startup")
-    async def _start_email_poller() -> None:      # pragma: no cover - wiring
-        global _task
-        if _task is None or _task.done():
-            _task = asyncio.create_task(_loop())
+    async def _start_email_collector() -> None:   # pragma: no cover - wiring
+        global _thread, _mode
+        if _thread is None or not _thread.is_alive():
+            _stop.clear()
+            _mode = "connecting"
+            _thread = threading.Thread(target=_run, name="email-collector", daemon=True)
+            _thread.start()
 
     @app.on_event("shutdown")
-    async def _stop_email_poller() -> None:       # pragma: no cover - wiring
-        global _task
-        if _task is not None:
-            _task.cancel()
-            _task = None
+    async def _stop_email_collector() -> None:    # pragma: no cover - wiring
+        # Noticed within a second by the IDLE wait. Daemon, so a pass halfway
+        # through a large attachment never holds up exit.
+        _stop.set()

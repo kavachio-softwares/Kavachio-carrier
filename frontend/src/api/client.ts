@@ -182,12 +182,16 @@ export async function ensureAccessToken(): Promise<string | null> {
  *  design, and holding the app-wide overlay up for their whole duration would
  *  block the page. Callers show their own progress instead. Pass `signal` to
  *  abort (e.g. when the component unmounts mid-stream).
+ *
+ *  `quiet` skips the global error popup — for a background connection that
+ *  reconnects by itself, where a server restart is nothing to tell anyone about.
  */
 export async function streamNdjson(
   path: string,
   params: Record<string, string | number | boolean | undefined>,
   onMessage: (msg: any) => void,
   signal?: AbortSignal,
+  opts: { quiet?: boolean } = {},
 ): Promise<void> {
   const token = await ensureAccessToken();
   const qs = new URLSearchParams();
@@ -205,14 +209,14 @@ export async function streamNdjson(
     });
   } catch (e) {
     if ((e as DOMException)?.name === "AbortError") throw e; // deliberate cancel
-    publishApiError({ kind: "network", message: FRIENDLY_NETWORK_ERROR });
+    if (!opts.quiet) publishApiError({ kind: "network", message: FRIENDLY_NETWORK_ERROR });
     throw new Error(FRIENDLY_NETWORK_ERROR);
   }
   if (!res.ok) {
     let detail: unknown = `Request failed (${res.status})`;
     try { detail = (await res.json())?.detail ?? detail; } catch { /* non-JSON body */ }
     if (res.status >= 500 || typeof detail !== "string") {
-      publishApiError({ kind: "server", message: FRIENDLY_SERVER_ERROR });
+      if (!opts.quiet) publishApiError({ kind: "server", message: FRIENDLY_SERVER_ERROR });
       throw new Error(FRIENDLY_SERVER_ERROR);
     }
     throw new Error(detail);
