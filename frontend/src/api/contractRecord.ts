@@ -842,3 +842,43 @@ export const createEndorsement = (id: number, body: EndorsementInput) =>
                    changes: EndorsementChange[]; effective_from: string | null };
     rules_stale: boolean;
   }>(`/contracts/${id}/endorsement`, body).then(r => r.data);
+
+
+/** A clause of this contract, and the rules written from it.
+ *
+ *  For a contract WRITTEN here the clauses are its wording sections — the text
+ *  was typed, so there is nothing to extract. For an uploaded one they are what
+ *  the extraction read out of the document. Both land in the same place, which
+ *  is why one screen can show either.
+ *
+ *  `rules` is empty until BDX setup binds the terms to a template's columns: a
+ *  rule is a comparison against a COLUMN, and until a template is chosen there
+ *  is nothing to compare against. */
+export type ContractClause = {
+  clause_id: number;
+  clause_type: string;
+  title: string | null;
+  text: string;
+  page_number: number | null;
+  section_header: string | null;
+  generated_rule_count: number;
+};
+
+export type ContractClauseRule = {
+  /** The payload names it `validation_rule_id`; `rule_id` does not exist on
+   *  it, and reading that gave every row an undefined key. */
+  validation_rule_id: number;
+  rule_name?: string | null;
+  rule_description?: string | null;
+  severity?: string | null;
+  source_clause_id?: number | null;
+  canonical_target?: Record<string, unknown> | null;
+  rule_spec?: Record<string, unknown> | null;
+};
+
+/** What this contract SAYS and what it CHECKS. Read from the programme-scoped
+ *  endpoint, which is where clause and rule storage already lives. */
+export const getContractClauses = (programId: number, contractId: number) =>
+  api.get<{ clauses?: ContractClause[]; rules?: ContractClauseRule[] }>(
+    `/programs/${programId}/contracts/${contractId}`,
+  ).then(r => ({ clauses: r.data.clauses ?? [], rules: r.data.rules ?? [] }));

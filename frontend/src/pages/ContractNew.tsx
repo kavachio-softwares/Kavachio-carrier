@@ -1320,9 +1320,13 @@ export default function ContractNew() {
                 <button
                   className="btn" type="button"
                   onClick={() => setSections(s => {
+                    // BOTH empty. The body especially: "Write this section in
+                    // your own words." is an instruction, and leaving it as the
+                    // value means that sentence goes into the contract if
+                    // nobody overwrites it. Instructions belong in placeholders.
                     const next = [...(s ?? []), {
-                      key: `custom_${Date.now()}`, title: "New section",
-                      body: "Write this section in your own words.",
+                      key: `custom_${Date.now()}`, title: "",
+                      body: "",
                       origin: "your own words" }];
                     setActiveSection(next.length - 1);
                     return next;
@@ -1354,7 +1358,9 @@ export default function ContractNew() {
                   >
                     <span className="no">§{i + 1}</span>
                     <span className="txt">
-                      <span className="nm">{s.title}</span>
+                      <span className={s.title ? "nm" : "nm faint"}>
+                        {s.title || "Untitled section"}
+                      </span>
                       <span className="st">{s.origin}</span>
                     </span>
                     {s.locked ? (
@@ -1378,7 +1384,10 @@ export default function ContractNew() {
               <div className="doc-body">
                 {active ? (
                   <>
-                    <h4>§{activeSection + 1} &nbsp; {active.title}</h4>
+                    <h4>
+                      §{activeSection + 1} &nbsp;
+                      {active.title || <span className="faint">Untitled section</span>}
+                    </h4>
                     <p className="muted" style={{ fontSize: 12.5, margin: "0 0 14px" }}>
                       Click into the text and type. This is the wording that will
                       appear in the signed contract. To remove a whole section,
@@ -1388,6 +1397,7 @@ export default function ContractNew() {
                       <label>Section title</label>
                       <input
                         value={active.title}
+                        placeholder="Name this section"
                         onChange={e => setSections(list => (list ?? []).map(
                           (x, j) => j === activeSection
                             ? { ...x, title: e.target.value } : x))}

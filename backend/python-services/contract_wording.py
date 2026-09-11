@@ -337,6 +337,14 @@ def retie(sections: list[dict] | None,
     genuinely ambiguous, and guessing which was meant would be worse than
     leaving the words alone. What was re-tied is returned rather than done
     quietly: it changes the text of a contract, so whoever saved it is told.
+
+    NOT IN A CLAUSE THE USER WROTE. This repairs a chip somebody deleted out of
+    a clause Kavachio generated; it has no business reaching into one they
+    added themselves. Writing "the deductible is 500" in your own clause and
+    having "500" silently become a term reference is the opposite of helpful —
+    the sentence now moves when a term you never mentioned moves. A clause
+    marked `your own words` is left exactly as typed, and a term gets into it
+    only when the person writing it inserts one.
     """
     if not sections:
         return sections or [], []
@@ -357,6 +365,9 @@ def retie(sections: list[dict] | None,
     for sec in sections:
         if not isinstance(sec, dict):
             out.append(sec)
+            continue
+        if (sec.get("origin") or "").strip().lower().startswith("your own words"):
+            out.append(sec)          # theirs; nothing to repair
             continue
         body = sec.get("body") or ""
         for text, key in candidates:

@@ -164,6 +164,7 @@
 .proto .card-h .ci{width:18px;height:18px;color:var(--p-faint)}
 .proto .card-h .sub{color:var(--p-faint);font-size:12.5px;font-weight:500}
 .proto .card-h .right{margin-left:auto;display:flex;gap:10px;align-items:center}
+.proto .card-h .info-tip{margin-left:-4px}
 .proto .grid{display:grid;gap:18px}
 /* Grid items default to min-width:auto, so a wide child (e.g. a preview table)
    blows its column past the track and makes the whole page scroll sideways.
@@ -820,6 +821,10 @@
 .proto .wording{border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:16px 18px;
       font-size:13.5px;line-height:1.85;background:var(--p-surface);min-height:120px}
 .proto .wording:focus{outline:2px solid var(--p-primary);outline-offset:1px}
+/* The empty editor's prompt. Drawn rather than stored, so it can never be
+   mistaken for the clause's text or end up in the signed contract. */
+.proto .wording:empty::before{content:attr(data-placeholder);color:var(--p-faint);pointer-events:none}
+.proto .wording:focus:empty::before{opacity:.6}
 .proto .wording p{margin:0 0 11px}
 .proto .wording p:last-child{margin:0}
 .proto .term{background:var(--p-primary-soft);color:var(--p-primary-h);border-radius:4px;padding:1px 5px;
@@ -1195,3 +1200,96 @@
   border-radius:var(--p-r-pill)}
 .proto .btn .pdot{position:absolute;top:-3px;right:-3px;width:8px;height:8px;
   border-radius:50%;background:var(--p-warn);box-shadow:0 0 0 2px var(--p-surface)}
+
+/* The contract record, in two columns. LEFT is the contract; RIGHT is the
+   paper trail about it. Below ~1150px they stack — side by side, neither is
+   wide enough to read a clause in, and the clause is the point. `align-items:
+   start` so the side column does not stretch to the height of a long wording. */
+.proto .rec-split{display:grid;grid-template-columns:minmax(0,1fr);gap:18px}
+@media (min-width:1150px){
+  .proto .rec-split{grid-template-columns:minmax(0,1fr) minmax(320px,360px);align-items:start}
+  /* Sticky only once there is something to sit beside. Stacked, it would pin
+     the card over the content below it. */
+  .proto .rec-side{position:sticky;top:18px}
+}
+.proto .rec-main{min-width:0}
+.proto .rec-side{min-width:0}
+/* The attach form lives in the side column, which is ~320px. Stack its
+   fields at every width rather than columns that only fit on the left. */
+.proto .docform{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
+.proto .docform .field{min-width:0}
+.proto .docform input[type=file]{max-width:100%}
+.proto .rec-side > .card{margin-bottom:18px}
+.proto .rec-side > .card:last-child{margin-bottom:0}
+
+/* Documents as tiles. In a side column a row of name-then-buttons wraps into
+   an unreadable ribbon; a tile keeps each document and its actions together. */
+.proto .doc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.proto .doc-tile{display:flex;flex-direction:column;gap:8px;padding:11px 12px;
+  border:1px solid var(--p-border);border-radius:var(--p-r-sm);background:var(--p-surface-2)}
+.proto .doc-tile .fn{display:block;margin-top:6px;color:var(--p-ink);font-size:12.5px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .doc-tile .sub{margin-top:3px}
+.proto .doc-tile .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto}
+
+/* History as a stepper. It is a sequence — sent, pushed back, revised, agreed,
+   signed — and the line down the left is what says so. */
+.proto .hist{list-style:none;margin:0;padding:0 0 0 22px;position:relative}
+.proto .hist::before{content:"";position:absolute;left:5px;top:6px;bottom:6px;
+  width:2px;background:var(--p-border)}
+.proto .hist li{position:relative;padding:0 0 16px}
+.proto .hist li:last-child{padding-bottom:0}
+.proto .hist .dot{position:absolute;left:-22px;top:3px;width:12px;height:12px;
+  border-radius:50%;background:var(--p-surface);box-shadow:0 0 0 2px var(--p-border)}
+.proto .hist li.now .dot{background:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .hist .what{font-size:13px;font-weight:600;color:var(--p-ink);text-transform:capitalize}
+.proto .hist li.now .what{color:var(--p-primary-h)}
+.proto .hist .when{font-size:11px;color:var(--p-faint);margin-top:1px}
+.proto .hist .said{margin-top:5px;font-size:12.5px;color:var(--p-muted);
+  border-left:2px solid var(--p-border-2);padding-left:8px}
+.proto .hist .moved{margin-top:5px;font-size:12px;color:var(--p-muted)}
+.proto .hist .moved .arrow{margin:0 5px;color:var(--p-faint)}
+
+/* ── narrow screens ─────────────────────────────────────────────────────────
+   Everything below is a fixed width giving way. Each breakpoint is the width
+   at which that particular thing stops being readable rather than a round
+   number applied to all of them. */
+
+/* The page header: title and actions share a row until the actions need more
+   than the title can spare, then they stack and the buttons go left-aligned
+   under it rather than stranded on the right. */
+@media(max-width:760px){
+  .proto .page-head{flex-direction:column;gap:12px}
+  .proto .page-head .actions{margin-left:0;width:100%}
+  .proto .page-head .t h2{font-size:21px}
+}
+
+/* The wording editor's section rail. 214px beside the text is most of a narrow
+   screen, so below this the rail becomes a strip above the clause it is
+   picking — still a list, no longer a column. */
+@media(max-width:900px){
+  .proto .doc{grid-template-columns:minmax(0,1fr)}
+  .proto .doc-rail{border-right:0;border-bottom:1px solid var(--p-border);
+    display:flex;gap:6px;overflow-x:auto;padding:8px}
+  .proto .doc-rail .doc-sec{flex:0 0 auto;max-width:190px;margin-bottom:0}
+  .proto .doc-rail > .btn{flex:0 0 auto}
+  .proto .doc-body{padding:16px 18px}
+}
+
+/* An agreed limit is three things across — the question, the value, and what
+   happens when a row breaks it. Under ~820px the value column squeezes the
+   question to two words a line, so they stack and the row keeps its meaning. */
+@media(max-width:820px){
+  .proto .lim{grid-template-columns:minmax(0,1fr);gap:8px;padding:14px 0}
+  .proto .lim.lim-h{display:none}
+  .proto .lim .unit{max-width:260px}
+}
+
+/* Card headers carry a title, a subtitle and sometimes actions. Let the
+   subtitle drop below the title rather than crushing both. */
+@media(max-width:700px){
+  .proto .card-h{flex-wrap:wrap}
+  .proto .card-h .right{margin-left:auto}
+  .proto .view{padding:20px 16px 56px}
+  .proto .doc-grid{grid-template-columns:minmax(0,1fr)}
+}

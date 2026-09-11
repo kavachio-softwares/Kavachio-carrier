@@ -17,10 +17,11 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink,
   Eye, FileText, History, MessagesSquare, Paperclip, PenLine, Plus, RefreshCw,
-  Send, Trash2, Upload, XCircle,
+  Send, ShieldCheck, Trash2, Upload, XCircle,
 } from "lucide-react";
 import { currentMga, getTenantBrand } from "../auth";
 import { SignaturePlacer } from "../components/SignaturePlacer";
+import { InfoTip } from "../components/InfoTip";
 import { WordingEditor } from "../components/WordingEditor";
 import { fmtDate, fmtStamp } from "../utils/date";
 import { TermDurationField, useTermDuration } from "../components/TermDuration";
@@ -44,6 +45,8 @@ import {
   type AgreedLimits, type AgreedLimitSpec, type ContractTypeSpec, type FieldErrors,
   type Lifecycle, type LimitGroup,
   type SignatureBlockSpec, type SignatureLayout, type SeveritySpec,
+  getContractClauses,
+  type ContractClause, type ContractClauseRule,
   type ProposedChange, type WordingSection,
 } from "../api/contractRecord";
 
@@ -78,21 +81,21 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
 };
 
 const DOC_KIND: Record<ContractDocumentKind, { label: string; blurb: string }> = {
+  // One sentence each. These sit beside the Attach button as you pick a kind,
+  // so they have to be readable at a glance — the reasoning behind each rule
+  // is in the code, not on the screen.
   contract: {
     label: "Wording",
-    blurb: "The contract itself. One at a time — attaching a new one retires "
-         + "the previous, because a contract has one wording.",
+    blurb: "The contract itself — attaching a new one retires the previous.",
   },
   reference: {
     label: "Reference",
-    blurb: "A document the wording defers to. Required once the wording names "
-         + "one: the clauses pointing at it cannot be checked without it.",
+    blurb: "A document the wording defers to, and cannot be checked without.",
   },
   endorsement: {
     label: "Endorsement",
-    blurb: "A change agreed after the fact. It does NOT replace the wording — "
-         + "both stay active, and the endorsed value is the one that becomes "
-         + "a rule.",
+    blurb: "A change agreed later; it sits alongside the wording rather than "
+         + "replacing it.",
   },
 };
 
@@ -116,6 +119,11 @@ export default function ContractRecord() {
 
   const [rec, setRec] = useState<Rec | null>(null);
   const [history, setHistory] = useState<ApprovalEvent[]>([]);
+  // What this contract SAYS (its clauses) and what it CHECKS (the rules those
+  // became). Loaded here rather than reached through a link, because both are
+  // facts about the contract on this page.
+  const [clauses, setClauses] = useState<ContractClause[] | null>(null);
+  const [clauseRules, setClauseRules] = useState<ContractClauseRule[]>([]);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
@@ -225,7 +233,18 @@ export default function ContractRecord() {
 
   const load = useCallback(() => {
     getContract(id)
-      .then(setRec)
+      .then(r => {
+        setRec(r);
+        // Needs the programme: clauses and rules are stored against the
+        // (programme, contract) pair, which is the scope they are read in.
+        if (r.programme?.id) {
+          getContractClauses(r.programme.id, id)
+            .then(d => { setClauses(d.clauses); setClauseRules(d.rules); })
+            .catch(() => { setClauses([]); setClauseRules([]); });
+        } else {
+          setClauses([]);
+        }
+      })
       .catch(e => setErr(e?.response?.data?.detail || "Could not load this contract."));
     getApprovalHistory(id).then(setHistory).catch(() => setHistory([]));
     // Its own call and its own failure: a round that cannot be read must never
@@ -1459,6 +1478,15 @@ export default function ContractRecord() {
           </div>
         </div>
 
+        {/* ── two columns from here down ──
+            LEFT is the contract itself: what it is, what was agreed, what it
+            says, and the words it says it in. RIGHT is the paper trail about
+            it — the files attached and how it got here. They were stacked, so
+            reaching the history meant scrolling past the whole wording, and
+            the wording is the longest thing on the page. */}
+        <div className="rec-split">
+          <div className="rec-main">
+
         {/* ── the record ── */}
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-h">
@@ -1870,6 +1898,102 @@ export default function ContractRecord() {
           </div>
         )}
 
+        {/* ── what it says ──
+            The clauses of this contract. For one written here they are its
+            wording with the terms resolved — a clause row is READ, so it holds
+            words rather than the tokens the wording keeps. */}
+        {!!clauses?.length && (
+          <div className="card" style={{ marginBottom: 18 }}>
+            <div className="card-h">
+              <FileText size={16} className="ci" />
+              <h3>Clauses</h3>
+              <span className="sub">
+                {clauses.length} clause{clauses.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div className="tbl-wrap">
+              <table>
+                <thead>
+                  <tr><th style={{ width: 220 }}>Clause</th><th>What it says</th></tr>
+                </thead>
+                <tbody>
+                  {clauses.map(cl => (
+                    <tr key={cl.clause_id}>
+                      <td>
+                        <b>{cl.title || cl.section_header || "Untitled"}</b>
+                        {cl.page_number != null && (
+                          <div className="sub">page {cl.page_number}</div>
+                        )}
+                      </td>
+                      <td>
+                        <span className="muted" style={{ fontSize: 12.5,
+                              lineHeight: 1.7, whiteSpace: "pre-line" }}>
+                          {cl.text}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ── and what is checked ──
+            A SEPARATE list, not a column beside the clauses. Most rules do not
+            come from a clause at all — the ones written from agreed terms have
+            no clause to point at — so a per-clause column was blank for them
+            and read as "nothing checks this", which was false. Shown only when
+            rules exist: until BDX setup binds the terms to a template there are
+            none, and an empty table says nothing worth the space. */}
+        {!!clauseRules.length && (
+          <div className="card" style={{ marginBottom: 18 }}>
+            <div className="card-h">
+              <ShieldCheck size={16} className="ci" />
+              <h3>Rules</h3>
+              <span className="sub">
+                {clauseRules.length} check{clauseRules.length === 1 ? "" : "s"}
+                {" "}run on every bordereau row
+              </span>
+            </div>
+            <div className="tbl-wrap">
+              <table>
+                <thead>
+                  <tr><th>Rule</th><th>From</th><th>If a row breaks it</th></tr>
+                </thead>
+                <tbody>
+                  {clauseRules.map(r => {
+                    const from = clauses?.find(
+                      cl => cl.clause_id === r.source_clause_id);
+                    return (
+                      <tr key={r.validation_rule_id}>
+                        <td>
+                          <b>{r.rule_name || `Rule ${r.validation_rule_id}`}</b>
+                          {r.rule_description && (
+                            <div className="sub">{r.rule_description}</div>
+                          )}
+                        </td>
+                        <td>
+                          {from
+                            ? (from.title || from.section_header || "a clause")
+                            : <span className="sub">the agreed terms</span>}
+                        </td>
+                        <td>
+                          <span className={`badge ${
+                            r.severity === "critical" ? "b-crit" : "b-warn"}`}>
+                            <span className="d" />
+                            {r.severity === "critical" ? "Stopped" : "Flagged"}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {/* ── the wording it was written from ──
             Read as a document by default; editable in place while the contract
             is still a draft, because the wording IS the contract and a draft
@@ -1954,6 +2078,7 @@ export default function ContractRecord() {
                           <input
                             className="hd" autoFocus
                             value={sec.title}
+                            placeholder="Name this clause"
                             aria-label="Clause heading"
                             onChange={e => {
                               const v = e.target.value;
@@ -1970,7 +2095,9 @@ export default function ContractRecord() {
                           />
                         ) : (
                           <>
-                            <span className="tx">{sec.title}</span>
+                            <span className={sec.title ? "tx" : "tx faint"}>
+                              {sec.title || "Untitled clause"}
+                            </span>
                             <span className="acts">
                               <button type="button" className="linkish"
                                       onClick={() => setWRenaming(sec.key)}>
@@ -2023,9 +2150,12 @@ export default function ContractRecord() {
                     className="btn sm add-sec" type="button"
                     onClick={() => {
                       const key = `own_${Date.now()}`;
+                      // Empty, not "New clause". A heading you have to delete
+                      // before you can type your own is a box that arrives
+                      // already wrong; the words belong in the placeholder,
+                      // where they describe the box rather than fill it.
                       setWSections(ss => [...ss, {
-                        key, title: "New clause", origin: "your own words",
-                        body: "",
+                        key, title: "", origin: "your own words", body: "",
                       }]);
                       setWVersion(v => v + 1);
                       setWRenaming(key);
@@ -2171,213 +2301,222 @@ export default function ContractRecord() {
           </div>
         )}
 
-        {/* ── documents ── */}
-        <div className="card" style={{ marginBottom: 18 }}>
-          <div className="card-h">
-            <Paperclip size={16} className="ci" />
-            <h3>Documents</h3>
           </div>
-          <div style={{ padding: "16px 20px" }}>
-            {active.length === 0 ? (
-              <div className="empty" style={{ padding: "18px 10px" }}>
-                {authored
-                  ? "Nothing attached — and nothing needs to be. This contract's "
-                    + "wording is above, and its checks come from the terms it "
-                    + "was written from. Attach a reference the wording defers "
-                    + "to, an endorsement, or the executed copy once it is signed."
-                  : "Nothing attached yet. This contract exists as a record — "
-                    + "with no wording there are no clauses and no rules, so "
-                    + "nothing can be produced against it."}
-              </div>
-            ) : (
-              active.map(d => (
-                <div className="kv" key={d.id}>
-                  <span className="k">
-                    <span className="badge b-mut" style={{ marginRight: 8 }}>
-                      <span className="d" />{DOC_KIND[d.kind]?.label ?? d.kind}
-                    </span>
-                    <b style={{ color: "var(--p-ink)" }}>{d.filename}</b>
-                    {d.is_executed_copy && (
-                      <span className="badge b-ok" style={{ marginLeft: 8 }}>
-                        <span className="d" />signed copy
+
+          <div className="rec-side">
+          {/* ── documents ── */}
+          <div className="card" style={{ marginBottom: 18 }}>
+            <div className="card-h">
+              <Paperclip size={16} className="ci" />
+              <h3>Documents</h3>
+              <InfoTip text="Files attached to this contract: references the wording relies on, endorsements agreed later, and the signed copy." />
+            </div>
+            <div style={{ padding: "16px 20px" }}>
+              {active.length === 0 ? (
+                <div className="empty" style={{ padding: "12px 10px" }}>
+                  {authored
+                    ? "Nothing attached, and nothing needs to be — this "
+                      + "contract's wording is written above."
+                    : "Nothing attached yet — without a wording this contract "
+                      + "has no clauses."}
+                </div>
+              ) : (
+                /* A grid of tiles rather than wide rows: in a side column a
+                   row of name-then-buttons wraps into an unreadable ribbon,
+                   and each document is one thing you act on as a unit. */
+                <div className="doc-grid">
+                {active.map(d => (
+                  <div className="doc-tile" key={d.id}>
+                    <span className="k">
+                      <span className="badge b-mut" style={{ marginRight: 8 }}>
+                        <span className="d" />{DOC_KIND[d.kind]?.label ?? d.kind}
                       </span>
-                    )}
-                    <div className="sub">
-                      {d.satisfies_reference && <>answers “{d.satisfies_reference}” · </>}
-                      {d.effective_from && <>effective {fmtDate(d.effective_from)} · </>}
-                      attached {fmtStamp(d.created_at)}
-                    </div>
-                  </span>
-                  <span style={{ display: "flex", gap: 8 }}>
-                    {d.has_file && (
-                      <>
+                      {d.is_executed_copy && (
+                        <span className="badge b-ok">
+                          <span className="d" />signed copy
+                        </span>
+                      )}
+                      <b className="fn" title={d.filename ?? undefined}>{d.filename}</b>
+                      <div className="sub">
+                        {d.satisfies_reference && <>answers “{d.satisfies_reference}” · </>}
+                        {d.effective_from && <>effective {fmtDate(d.effective_from)} · </>}
+                        attached {fmtStamp(d.created_at)}
+                      </div>
+                    </span>
+                    <span className="acts">
+                      {d.has_file && (
+                        <>
+                          <button
+                            className="btn sm" type="button" disabled={!!busy}
+                            onClick={() => run("view", async () => {
+                              if (viewing) URL.revokeObjectURL(viewing.url);
+                              const { url, type } = await openDocument(id, d.id);
+                              setViewing({ id: d.id, name: d.filename ?? "Document",
+                                           url, type });
+                            })}
+                          >
+                            <Eye size={12} /> View
+                          </button>
+                          <button
+                            className="btn sm" type="button" disabled={!!busy}
+                            onClick={() => run("download", () =>
+                              downloadDocument(id, d.id, d.filename))}
+                          >
+                            <Download size={12} /> Download
+                          </button>
+                        </>
+                      )}
+                      {a.upload_documents && (
                         <button
                           className="btn sm" type="button" disabled={!!busy}
-                          onClick={() => run("view", async () => {
-                            if (viewing) URL.revokeObjectURL(viewing.url);
-                            const { url, type } = await openDocument(id, d.id);
-                            setViewing({ id: d.id, name: d.filename ?? "Document",
-                                         url, type });
+                          title="Retire it — never deleted, because the rules in force were read from it"
+                          onClick={() => run("retire", async () => {
+                            const r = await deactivateDocument(id, d.id);
+                            if (r.rules_stale) setRulesStale(true);
                           })}
                         >
-                          <Eye size={12} /> View
+                          <Trash2 size={12} /> Retire
                         </button>
-                        <button
-                          className="btn sm" type="button" disabled={!!busy}
-                          onClick={() => run("download", () =>
-                            downloadDocument(id, d.id, d.filename))}
-                        >
-                          <Download size={12} /> Download
-                        </button>
-                      </>
-                    )}
-                    {a.upload_documents && (
-                      <button
-                        className="btn sm" type="button" disabled={!!busy}
-                        title="Retire it — never deleted, because the rules in force were read from it"
-                        onClick={() => run("retire", async () => {
-                          const r = await deactivateDocument(id, d.id);
-                          if (r.rules_stale) setRulesStale(true);
-                        })}
-                      >
-                        <Trash2 size={12} /> Retire
-                      </button>
-                    )}
-                  </span>
-                </div>
-              ))
-            )}
-
-            {retired.length > 0 && (
-              <details style={{ marginTop: 12 }}>
-                <summary className="sub" style={{ cursor: "pointer" }}>
-                  {retired.length} retired document{retired.length === 1 ? "" : "s"}
-                </summary>
-                <div className="hint">
-                  {retired.map(d => (
-                    <div key={d.id}>
-                      {DOC_KIND[d.kind]?.label ?? d.kind}: {d.filename} — retired,
-                      kept so the rules it produced stay explainable
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
-
-            {a.upload_documents && (
-              <>
-                <div className="divider" />
-                <div className="grid g-3">
-                  <div className="field" style={{ marginBottom: 0 }}>
-                    <label>Kind</label>
-                    <select
-                      value={kind}
-                      onChange={e => setKind(e.target.value as ContractDocumentKind)}
-                    >
-                      {attachableKinds.map(k => (
-                        <option key={k} value={k}>{DOC_KIND[k].label}</option>
-                      ))}
-                    </select>
+                      )}
+                    </span>
                   </div>
+                ))}
+                </div>
+              )}
 
-                  {kind === "reference" && (
+              {retired.length > 0 && (
+                <details style={{ marginTop: 12 }}>
+                  <summary className="sub" style={{ cursor: "pointer" }}>
+                    {retired.length} retired document{retired.length === 1 ? "" : "s"}
+                  </summary>
+                  <div className="hint">
+                    Kept, not deleted, so the rules they produced stay
+                    explainable.
+                    {retired.map(d => (
+                      <div key={d.id}>
+                        {DOC_KIND[d.kind]?.label ?? d.kind}: {d.filename}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+
+              {a.upload_documents && (
+                <>
+                  <div className="divider" />
+                  <div className="grid gap-12" style={{ marginBottom: 12 }}>
                     <div className="field" style={{ marginBottom: 0 }}>
-                      <label>Answers which reference</label>
-                      <select value={satisfies}
-                              onChange={e => setSatisfies(e.target.value)}>
-                        <option value="">(match by name)</option>
-                        {rec.missing_references.map(n => (
-                          <option key={n} value={n}>{n}</option>
+                      <label>Kind</label>
+                      <select
+                        value={kind}
+                        onChange={e => setKind(e.target.value as ContractDocumentKind)}
+                      >
+                        {attachableKinds.map(k => (
+                          <option key={k} value={k}>{DOC_KIND[k].label}</option>
                         ))}
                       </select>
                     </div>
+
+                    {kind === "reference" && (
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <label>Answers which reference</label>
+                        <select value={satisfies}
+                                onChange={e => setSatisfies(e.target.value)}>
+                          <option value="">(match by name)</option>
+                          {rec.missing_references.map(n => (
+                            <option key={n} value={n}>{n}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {kind === "endorsement" && (
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <label>Effective from</label>
+                        <input type="date" value={effectiveFrom}
+                               onChange={e => setEffectiveFrom(e.target.value)} />
+                      </div>
+                    )}
+
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label>File</label>
+                      <input type="file"
+                             onChange={e => setFile(e.target.files?.[0] ?? null)} />
+                    </div>
+                  </div>
+
+                  {kind === "contract" && (
+                    <label className="hint" style={{ display: "block", marginTop: 10 }}>
+                      <input
+                        type="checkbox" checked={executedCopy}
+                        onChange={e => setExecutedCopy(e.target.checked)}
+                        style={{ marginRight: 6, width: "auto" }}
+                      />
+                      This is the signed copy
+                    </label>
                   )}
 
-                  {kind === "endorsement" && (
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <label>Effective from</label>
-                      <input type="date" value={effectiveFrom}
-                             onChange={e => setEffectiveFrom(e.target.value)} />
+                  <div className="rowacts">
+                    <button className="btn pri" type="button"
+                            disabled={!file || !!busy} onClick={doUpload}>
+                      <Upload size={13} />{" "}
+                      {busy === "upload" ? "Attaching…" : "Attach"}
+                    </button>
+                    <span className="sub">{DOC_KIND[kind].blurb}</span>
+                  </div>
+                  {authored && (
+                    <div className="hint">
+                      This contract's wording was written here, not uploaded —
+                      change it above rather than attaching a new one.
                     </div>
                   )}
+                </>
+              )}
+            </div>
+          </div>
 
-                  <div className="field" style={{ marginBottom: 0 }}>
-                    <label>File</label>
-                    <input type="file"
-                           onChange={e => setFile(e.target.files?.[0] ?? null)} />
-                  </div>
-                </div>
-
-                {kind === "contract" && (
-                  <label className="hint" style={{ display: "block", marginTop: 10 }}>
-                    <input
-                      type="checkbox" checked={executedCopy}
-                      onChange={e => setExecutedCopy(e.target.checked)}
-                      style={{ marginRight: 6, width: "auto" }}
-                    />
-                    This is the signed copy
-                  </label>
-                )}
-
-                <div className="rowacts">
-                  <button className="btn pri" type="button"
-                          disabled={!file || !!busy} onClick={doUpload}>
-                    <Upload size={13} />{" "}
-                    {busy === "upload" ? "Attaching…" : "Attach"}
-                  </button>
-                  <span className="sub">{DOC_KIND[kind].blurb}</span>
-                </div>
-                {authored && (
-                  <div className="hint">
-                    The wording of this contract is not uploaded — it was
-                    written from the terms above, and the two are tied to each
-                    other. To change what it says, change a term and re-read the
-                    contract, or endorse it if it is already running.
-                  </div>
-                )}
-              </>
-            )}
+          {/* ── how it got here ── */}
+          {history.length > 0 && (
+            <div className="card">
+              <div className="card-h">
+                <h3>History</h3>
+                <InfoTip text="View the complete record of contract changes, discussions, approvals, and actions, with details on who made each change and when." />
+              </div>
+              {/* A STEPPER, oldest at the top. History is a sequence — sent,
+                  pushed back, revised, agreed, signed — and a two-column table
+                  of label-and-note hid the one thing it is: an order. The
+                  latest step is marked, because "where did this get to" is
+                  what the card is opened for. */}
+              <div style={{ padding: "16px 20px" }}>
+                <ol className="hist">
+                  {history.map((h, i) => (
+                    <li key={i} className={i === history.length - 1 ? "now" : ""}>
+                      <span className="dot" aria-hidden="true" />
+                      <div className="what">
+                        {h.action.replace(/_/g, " ")}
+                      </div>
+                      <div className="when">
+                        {fmtStamp(h.acted_at)}
+                        {h.acted_by && <> · {h.acted_by.full_name}</>}
+                      </div>
+                      {h.note && <div className="said">“{h.note}”</div>}
+                      {h.proposed_changes?.length > 0 && h.proposed_changes.map((ch, j) => (
+                        <div className="moved" key={j}>
+                          <b>{labelOf(ch.field)}</b>{" "}
+                          <span className="mono">{ch.current || "—"}</span>
+                          <span className="arrow">→</span>
+                          <span className="mono">{ch.proposed || "—"}</span>
+                          {ch.comment && <div className="sub">{ch.comment}</div>}
+                        </div>
+                      ))}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            </div>
+          )}
           </div>
         </div>
-
-        {/* ── how it got here ── */}
-        {history.length > 0 && (
-          <div className="card">
-            <div className="card-h">
-              <h3>History</h3>
-              <span className="sub">
-                the approval gate and the negotiation, in one thread
-              </span>
-            </div>
-            <div style={{ padding: "16px 20px" }}>
-              {history.map((h, i) => (
-                <div className="kv" key={i} style={{ alignItems: "flex-start" }}>
-                  <span className="k" style={{ minWidth: 150 }}>
-                    <b style={{ color: "var(--p-ink)", textTransform: "capitalize" }}>
-                      {h.action.replace(/_/g, " ")}
-                    </b>
-                    <div className="sub">
-                      {fmtStamp(h.acted_at)}
-                      {h.acted_by && <> · {h.acted_by.full_name}</>}
-                    </div>
-                  </span>
-                  <span className="v" style={{ fontWeight: 400, textAlign: "right" }}>
-                    {h.note && <div className="muted">“{h.note}”</div>}
-                    {h.proposed_changes?.length > 0 && h.proposed_changes.map((ch, j) => (
-                      <div className="sub" key={j}>
-                        <b>{labelOf(ch.field)}</b>:{" "}
-                        <span className="mono">{ch.current || "—"}</span>
-                        {" → "}
-                        <span className="mono">{ch.proposed || "—"}</span>
-                        {ch.comment && <> — {ch.comment}</>}
-                      </div>
-                    ))}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

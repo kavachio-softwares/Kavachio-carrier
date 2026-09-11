@@ -117,7 +117,13 @@ def contract(world):
             "max_sum_insured": {"value": 100000},            # lte
         }})
     assert r.status_code in (200, 201), r.text
-    return r.json()
+    rec = r.json()
+    # Creating a contract no longer binds checks — authoring writes clauses, and
+    # rules are bound at bordereau setup, once the template's columns are known.
+    # These tests are about what the checks DO, so bind them the way setup does.
+    b = client.post(f"/contracts/{rec['id']}/bind-checks", headers=world["carrier"])
+    assert b.status_code == 200, b.text
+    return rec
 
 
 def _validate(rules, rows):

@@ -132,15 +132,16 @@ def _rule_rows(contract_id: int) -> list[dict]:
             {"cid": contract_id})]
 
 
-def test_a_contract_is_measured_from_the_moment_it_is_raised(world):
-    """The step nobody had been shown. A carrier raising a contract with two
-    limits on it should not have to find a button before either of them is
-    checked — so the checks are written as it is created, against the template
-    its programme already reports into."""
+def test_raising_a_contract_records_its_terms_without_binding_them(world):
+    """Raising a contract writes what was AGREED, not what is checked. A rule
+    is a comparison against a bordereau template's columns, and no template is
+    chosen while a contract is being written — binding happens at BDX setup,
+    which is the first moment the columns are known. What the carrier gets here
+    is both limits recorded and countable as checkable."""
     rec = _raise_contract(world, commission_pct=11, max_sum_insured=250000)
     assert rec["checks"]["checkable"] == 2
-    assert rec["checks"]["rules"] == 2
-    assert rec["mapping"]["rules_written"] == 2
+    assert rec["checks"]["rules"] == 0
+    assert not rec.get("mapping")
 
 
 def test_but_a_programme_with_no_bordereau_template_still_takes_a_contract(world):
@@ -171,6 +172,7 @@ def test_a_term_corrected_after_binding_takes_its_check_with_it(world):
     happen silently: a contract corrected from 11% to 15% whose checks still
     hold 11%."""
     rec = _raise_contract(world, commission_pct=11)
+    client.post(f"/contracts/{rec['id']}/bind-checks", headers=world["carrier"])
     assert _rule_rows(rec["id"])[0]["rule_spec"]["operand"] == 11.0
     client.patch(f"/contracts/{rec['id']}", headers=world["carrier"],
                  json={"agreed_limits": {"commission_pct": {"value": "15"}}})

@@ -230,6 +230,56 @@ def _doc_dict(d: ContractDocument) -> dict:
     }
 
 
+def _store_authored_clauses(s, c: Contract, sections: list[dict] | None) -> int:
+    """Write an authored wording's sections into `clauses_extracted`.
+
+    A contract WRITTEN here had no clauses at all. Uploading one runs the
+    extraction pipeline and lands rows in `clauses_extracted`; authoring one
+    only ever stored `wording_sections` on the contract, so every screen and
+    query downstream that asks "what does this contract say" — the clause list,
+    the routing, the exception's source text — found nothing for it.
+
+    There is nothing to EXTRACT here in the model sense: the clauses were typed,
+    so the text is already the text. This just puts it where clauses live.
+
+    STORED AS WORDS, NOT AS TOKENS. A section body holds `{{carrier_name}}` so
+    the sentence can follow the term it quotes — but a clause row is READ, by
+    people and by everything downstream, and "{{carrier_name}} may bind" is not
+    a clause anybody can act on. The tokens are resolved on the way in. The
+    body keeps its tokens on the contract, which is what makes the wording
+    move when a term does; this is the settled text at the moment it was
+    saved, and it is rewritten whenever the wording or the terms change.
+
+    CLAUSES ONLY — NO RULES. `rule_generation_status` is left `pending`, the
+    state that means "not looked at yet", because a rule is written against a
+    bordereau template's COLUMNS and no template is chosen at authoring time.
+    That mapping happens once during BDX setup, which is the only moment the
+    columns are known. See contract_rules.map_limits_to_template.
+    """
+    import contract_wording as cw
+    from sqlalchemy import text as _sql
+    rows = [sec for sec in (sections or [])
+            if isinstance(sec, dict) and (sec.get("body") or "").strip()]
+    tokens = _wording_context(s, c)["tokens"]
+    # Replace rather than append: the wording is saved whole, so the clauses
+    # are whatever it now says. Appending would leave the deleted ones behind.
+    s.execute(_sql("DELETE FROM clauses_extracted WHERE contract_id = :cid "
+                   "AND created_by = 'contract_wording'"), {"cid": c.id})
+    for i, sec in enumerate(rows, start=1):
+        s.execute(_sql("""
+            INSERT INTO clauses_extracted
+                (contract_id, clause_type, title, text, section_header,
+                 rule_generation_status, generated_rule_count,
+                 extraction_confidence, created_by, updated_by)
+            VALUES
+                (:cid, 'other', :title, :text, :header,
+                 'pending', 0, 1.0, 'contract_wording', 'contract_wording')
+        """), {"cid": c.id, "title": sec.get("title"),
+               "text": cw.render((sec.get("body") or ""), tokens).strip(),
+               "header": f"{i}. {sec.get('title') or 'Section'}"})
+    return len(rows)
+
+
 def _wording_context(s, c: Contract) -> dict:
     """Everything a contract's wording needs to be read: its values, its limits,
     and what every token in it resolves to.
@@ -962,6 +1012,8 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
       * a BROKER gets a draft to finish and submit, and the DB trigger — not
         this code — marks it pending the carrier's decision.
     """
+    # Set when the caller sent a wording; stored as clauses after the commit.
+    authored_sections: list[dict] | None = None
     with SessionLocal() as s:
         prog, tenant_id = _program_access(s, p, body.program_id)
 
@@ -1049,6 +1101,7 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
                 [sec for sec in body.wording_sections
                  if isinstance(sec, dict) and (sec.get("body") or "").strip()],
                 _wording_context(s, c)["tokens"])
+            authored_sections = kept
             c.wording_sections = {
                 "sections": kept,
                 "signature_layout": _clean_signature_layout(body.signature_layout),
@@ -1128,15 +1181,19 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
         #                       that is a document from the real world rather
         #                       than one Kavachio invented
         #
-        # The checks ARE written here, though, and that is the point of the
-        # line above. A contract raised with ten limits on it used to arrive
-        # with nothing measuring any of them until somebody found a step nobody
-        # had been shown — see _auto_bind.
-        bound = _auto_bind(s, c, p)
-        rec = _record(s, c, p=p)
-        if bound:
-            rec["mapping"] = bound
-        return rec
+        # CLAUSES YES, RULES NO. The wording that was just written is stored as
+        # this contract's clauses, because that is what it says and every screen
+        # downstream asks for it that way. No rule is written: a rule is a
+        # comparison against a bordereau template's COLUMNS, and no template is
+        # chosen at authoring time. Binding the terms to columns happens once,
+        # during BDX setup, which is the only moment the columns are known.
+        # After the commit above, so the contract has an id to hang them on —
+        # and committed in its own right, or the rows would be discarded when
+        # the session closes.
+        if authored_sections:
+            _store_authored_clauses(s, c, authored_sections)
+            s.commit()
+        return _record(s, c, p=p)
 
 
 class WordingPreviewIn(BaseModel):
@@ -1345,6 +1402,9 @@ def update_contract(contract_id: int, body: dict,
             existing = dict(c.wording_sections or {})
             existing["sections"] = sections
             c.wording_sections = existing or None
+            # The wording IS the clauses. See _store_authored_clauses — it
+            # stores them and deliberately writes no rules.
+            _store_authored_clauses(s, c, sections)
 
         # A SIGNATURE IS ON A VERSION. Changing what was signed deletes the
         # signatures on it — anything else leaves a name attached to words it
@@ -1396,9 +1456,25 @@ def update_contract(contract_id: int, body: dict,
         # rules that say 11% on a contract that now says 15% is the exact drift
         # the tokens, the re-tie and the chips all exist to prevent, and it is
         # the one place it could still happen silently.
+        # Rules are never WRITTEN here — a rule is a comparison against a
+        # bordereau template's columns, and those are chosen at BDX setup. But a
+        # contract that has ALREADY been bound there keeps its checks in step:
+        # the `rules > 0` guard means this corrects existing rules and creates
+        # none, so a term corrected from 11% to 15% cannot leave a check behind
+        # still measuring 11%.
+        #
+        # The CLAUSES are rewritten too. Their text is the wording with its
+        # tokens resolved, so moving a limit moves the words — and a clause row
+        # still quoting last week's number would be the exact drift the tokens
+        # exist to prevent.
         rebound = None
         if "agreed_limits" in body and _checks_summary(s, c)["rules"] > 0:
             rebound = _auto_bind(s, c, p)
+        if "agreed_limits" in body and "wording_sections" not in body:
+            _sections = ((c.wording_sections or {}).get("sections")
+                         if isinstance(c.wording_sections, dict) else None)
+            if _sections:
+                _store_authored_clauses(s, c, _sections)
 
         out = _record(s, c, p=p)
         # Named, not silent. It changed the text of a contract, and whoever

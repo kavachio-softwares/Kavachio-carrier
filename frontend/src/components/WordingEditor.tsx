@@ -215,6 +215,12 @@ export function WordingEditor({
     <div
       ref={ref}
       className="wording"
+      // A contentEditable has no placeholder of its own, so the prompt is
+      // carried as an attribute and drawn by CSS while the box is empty (see
+      // .wording:empty::before). It used to be the section's VALUE — which
+      // meant "Write this section in your own words." was real text, and went
+      // into the contract whenever nobody replaced it.
+      data-placeholder="Write this clause in your own words, or insert a term from the right."
       contentEditable
       spellCheck={false}
       suppressContentEditableWarning

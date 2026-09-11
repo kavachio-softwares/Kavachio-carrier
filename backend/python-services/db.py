@@ -24,6 +24,7 @@ from sqlalchemy import (
     ForeignKey, Text, LargeBinary, Boolean, Numeric, inspect, UniqueConstraint,
     func, text,
 )
+from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.orm import declarative_base, deferred, sessionmaker, relationship
 
 from canonical import canonical_metadata  # 53 canonical xlsx-derived tables
@@ -83,6 +84,12 @@ if RLS_ENABLED:
             connection.exec_driver_sql("SET LOCAL app.tenant_id = %s", (str(tid),))
         # tid is None -> leave app.tenant_id unset -> current_setting(...,true) is NULL
         #             -> policy matches only tenant_id IS NULL rows (fail-closed).
+
+PARTY_TYPE_E = PGEnum(
+    "agency", "broker", "mgu", "mga", "tpa", "carrier", "reinsurer", "insured",
+    "vendor", "individual", "other", "insurer",
+    name="party_type_e", create_type=False,
+)
 
 Base = declarative_base()
 
@@ -359,7 +366,7 @@ class Tenant(Base):
     # code); tenant_legal_name is the display/legal name.
     tenant_name = Column("tenant_code", String, unique=True, index=True, nullable=False)
     legal_name = Column("tenant_legal_name", String, nullable=True)
-    tenant_type = Column(String, nullable=True)
+    tenant_type = Column(PARTY_TYPE_E, nullable=True)
     # --- operational columns (outside the canonical model) -----------------
     address = Column(JSON, nullable=True)
     currency = Column(String, nullable=True)      # ISO 4217 (USD, EUR, GBP …)
@@ -418,7 +425,7 @@ class Party(Base):
     __tablename__ = "party"
     id = Column("party_id", Integer, primary_key=True)
     tenant_id = Column("party_tenant_id", Integer, nullable=True)
-    party_type = Column(String, nullable=False)
+    party_type = Column(PARTY_TYPE_E, nullable=False)
     legal_name = Column("party_legal_name", String, nullable=False, index=True)
     # Stable business identifier (v4). The ingester keys synthetic parties on it.
     reference = Column("party_reference", String, nullable=True, index=True)
