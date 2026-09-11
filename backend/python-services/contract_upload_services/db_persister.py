@@ -285,6 +285,77 @@ def persist_resolved_rules(
     return created
 
 
+def refresh_review_reasons(contract_id, program_id, tenant_id, review_queue):
+    """Re-state WHY each still-unmapped clause is unmapped, for THIS run.
+
+    `persist_resolved_rules` deletes a clause's review row the moment it gets a
+    rule. What it cannot do is correct the rows that remain: those were written
+    by the UPLOAD, and a contract added before any Bordereau Setup existed was
+    told, accurately at the time, "no output template yet — a rule can only be
+    written against an output template's columns".
+
+    Once a setup binds a template and generates rules, that sentence is false,
+    and it is the sentence the setup screen prints under every leftover clause
+    (missing_columns._unmapped_clauses reads contract_clause_routing.reason).
+    A user looking at a screen that HAS a template is told the template is
+    missing, and the true reason — the mapper found no column that could hold
+    this clause's value — is nowhere on the page.
+
+    So the reasons this run produced replace the ones the upload left behind.
+    Rows are UPDATEd, never deleted and re-inserted, so a clause somebody has
+    already resolved by hand keeps its identity; a clause with no row yet gets
+    one, because a run can route a clause to review that the upload did not.
+    Best-effort by design: a failure here must not undo rules that were written.
+    """
+    if not review_queue:
+        return 0
+    touched = 0
+    try:
+        with canonical_engine.begin() as conn:
+            for it in review_queue:
+                if not isinstance(it, dict):
+                    continue
+                cid = it.get("clause_id")
+                reason = (it.get("reason") or "").strip()
+                if cid is None or not reason:
+                    continue
+                res = conn.execute(
+                    text("""
+                        UPDATE contract_clause_routing
+                           SET reason = :reason, created_at = now()
+                         WHERE contract_id = :contract_id
+                           AND clause_id = :clause_id
+                           AND bucket = 'review'
+                    """),
+                    {"reason": reason, "contract_id": contract_id,
+                     "clause_id": cid},
+                )
+                if not res.rowcount:
+                    conn.execute(
+                        text("""
+                            INSERT INTO contract_clause_routing
+                                (tenant_id, contract_id, program_id, clause_id,
+                                 bucket, rule_name, clause_text, source_page, reason)
+                            VALUES
+                                (:tenant_id, :contract_id, :program_id, :clause_id,
+                                 'review', :rule_name, :clause_text, :source_page,
+                                 :reason)
+                        """),
+                        {"tenant_id": tenant_id, "contract_id": contract_id,
+                         "program_id": program_id, "clause_id": cid,
+                         "rule_name": it.get("rule_name"),
+                         "clause_text": it.get("clause_text"),
+                         "source_page": it.get("source_page"),
+                         "reason": reason},
+                    )
+                touched += 1
+    except Exception as e:  # noqa: BLE001 — never cost a run its rules
+        log.warning("refresh_review_reasons failed for contract %s: %s",
+                    contract_id, e)
+        return 0
+    return touched
+
+
 def _parse_date(value, default):
     """Parse an ISO YYYY-MM-DD date; fall back to `default` on any failure."""
     if isinstance(value, datetime.date):

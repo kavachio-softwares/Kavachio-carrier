@@ -75,13 +75,21 @@ export default function DirectRun() {
   // dropdown that leaves the user stuck with nothing to select.
   const noPrograms = carrierId !== "" && !programsLoading && programs.length === 0;
 
-  // A generated output (and the uploaded file) belongs to the scope it was run
-  // for — clear stale state when the carrier or program changes, so re-locking
-  // the Dropzone on a cleared selection never leaves a stale file behind.
+  // A generated output belongs to the scope it was run for, so any change to
+  // that scope makes it stale.
   useEffect(() => {
     setResult(null); setPreview(null); setErr(null);
-    setFile(null);
   }, [carrierId, programId, scope.brokerPartyId, scope.contractId]);
+
+  // The FILE is dropped only when WHO the run is for changes — clearing it then
+  // is what stops re-locking the Dropzone on a cleared selection from leaving a
+  // stale file behind. Naming a different contract is not that: the file is the
+  // bordereau, and the contract is whose terms it is checked against. Since
+  // picking the contract is now something you do deliberately, wiping an
+  // already-dropped file for it would be a surprise with no reason behind it.
+  useEffect(() => {
+    setFile(null);
+  }, [carrierId, programId, scope.brokerPartyId]);
 
   // Resolve the output template for whatever is selected right now.
   useEffect(() => {
@@ -164,6 +172,12 @@ export default function DirectRun() {
     if (!file || carrierId === "" || programId === "") {
       setErr("Pick carrier, program and an input file."); return;
     }
+    // The server refuses this too. Said here as well, because a disabled button
+    // with no sentence beside it is a screen that will not say what is wrong.
+    if (scope.needsContractChoice) {
+      setErr("Pick which contract this bordereau was written under — its terms "
+             + "are what every row is checked against."); return;
+    }
     setMode(checkOnly ? "check" : "run");
     setBusy(true); setErr(null); setResult(null); setPreview(null);
     try {
@@ -205,8 +219,12 @@ export default function DirectRun() {
   // template. Running anyway would deliver a file with the right headings and
   // no data, so it is blocked here as well as on the server.
   const templateMismatch = !!tpl?.found && !!tpl.setup && !tpl.setup.matches;
+  // Several contracts and none picked is not a runnable state: the run would
+  // fall back on whatever the setup was built against, which is the silent
+  // wrong answer this picker exists to stop.
   const canSubmit = carrierId !== "" && programId !== "" && hasSetup === true
-    && !!file && !templateMissing && !templateMismatch;
+    && !!file && !templateMissing && !templateMismatch
+    && !scope.needsContractChoice;
 
 
   return (
@@ -286,7 +304,7 @@ export default function DirectRun() {
                   <label>Program</label>
                   <select value={programId} disabled={carrierId === "" || noPrograms}
                     onChange={e => setProgramId(e.target.value ? Number(e.target.value) : "")}>
-                    <option value="">
+                    <option value="" disabled>
                       {carrierId === "" ? "Select Program…"
                         : programsLoading ? "Loading programs…"
                         : noPrograms ? "No program for this carrier"
@@ -310,7 +328,7 @@ export default function DirectRun() {
                     disabled={programId === "" || scope.brokers.length === 0}
                     onChange={e => scope.setBrokerPartyId(
                       e.target.value ? Number(e.target.value) : "")}>
-                    <option value="">
+                    <option value="" disabled>
                       {programId === "" ? "Select a program first"
                         : scope.brokers.length === 0 ? "No brokers on this program"
                         : "All brokers"}
@@ -322,16 +340,62 @@ export default function DirectRun() {
                 </div>
                 <div className="field">
                   <label>Contract</label>
-                  <input readOnly disabled value={
-                    programId === "" ? "Select a program first"
-                      : scope.contractsLoading ? "Finding the live contracts…"
-                      : scope.contracts.length === 0
-                        ? "No approved contract for this selection"
-                        : scope.contracts.length === 1
-                          ? contractLabel(scope.contracts[0])
-                          : `${scope.contracts.length} contracts on this broker`} />
+                  {/* A CHOICE ONLY WHEN THERE IS ONE.
+                      With one contract on file there is nothing to ask — it is
+                      the only answer and it is simply reported, exactly as this
+                      field has always done.
+                      With SEVERAL there is a real question, and it used to be
+                      answered silently: the run measured the file against
+                      whichever contract the setup was built on, whatever the
+                      bordereau was actually written under. A broker's two live
+                      contracts are two different sets of terms. */}
+                  {scope.contracts.length > 1 ? (
+                    <select value={scope.contractId}
+                      onChange={e => scope.setContractId(
+                        e.target.value ? Number(e.target.value) : "")}>
+                      <option value="" disabled>
+                        Select Contract
+                      </option>
+                      {scope.contracts.map(c => (
+                        <option key={c.id} value={c.id}>
+                          {contractLabel(c)}
+                          {c.broker_name ? "" : " — carrier held"}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input readOnly disabled value={
+                      programId === "" ? "Select a program first"
+                        : scope.contractsLoading ? "Finding the live contracts…"
+                        : scope.contracts.length === 0
+                          ? "No approved contract for this selection"
+                          : contractLabel(scope.contracts[0])} />
+                  )}
                 </div>
               </div>
+
+              {/* What the pick decides, said once and only where it is a
+                  question. The terms are what the file is checked against, so
+                  naming the wrong contract is not a labelling mistake — it is a
+                  bordereau measured against somebody else's binder. */}
+              {scope.contracts.length > 1 && (
+                <div className={`note${scope.contractId === "" ? " warn" : ""}`}
+                     style={{ marginBottom: 16 }}>
+                  {scope.contractId === "" ? (
+                    <>
+                      <b>This broker has {scope.contracts.length} live
+                      contracts.</b> Pick the one this bordereau was written
+                      under — its terms are what every row is checked against.
+                    </>
+                  ) : (
+                    <>
+                      Checked against the terms of{" "}
+                      <b>{scope.contractName}</b>. Its clauses are the rules
+                      this run applies.
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* Which output template this run would write into — answered
                   before the file is uploaded, not after. */}

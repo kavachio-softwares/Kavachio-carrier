@@ -15,8 +15,14 @@
  * (programme × broker) and no wording states which row of that mesh it is.
  *
  * It runs the SAME upload the broker's own page runs — same endpoint, same
- * extraction, same halt when the wording defers to a document nobody supplied.
- * This is a second door into it, not a second implementation of it.
+ * extraction, same schedule slot, same halt when the wording defers to a
+ * document nobody supplied. This is a second door into it, not a second
+ * implementation of it.
+ *
+ * Neither door sends an output template, deliberately. Adding a contract reads
+ * it and saves its clauses; turning those clauses into rules is mapping, and
+ * mapping happens in Bordereau Setup, which is the only place that knows which
+ * output template the bordereau is reported into.
  */
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -28,6 +34,7 @@ import {
 } from "../api/contracts";
 import { getCounterparties, type Counterparty } from "../api/contractRecord";
 import { currentMga, getTenantBrand } from "../auth";
+import { scheduleOf } from "../utils/directSetup";
 
 export default function ContractUpload() {
   const nav = useNavigate();
@@ -83,6 +90,13 @@ export default function ContractUpload() {
         programId: Number(programId),
         brokerPartyId: Number(brokerId),
         file,
+        // The last thing that made this a second IMPLEMENTATION rather than a
+        // second door (see the header). Without it a "Schedule H" wording
+        // uploaded here took the broker's programme-wide slot and SUPERSEDED
+        // their other schedules, where the same file added from the broker's
+        // own page took the H slot and left them alone. Same file, same
+        // broker, two different outcomes decided by which screen was open.
+        scheduleKey: scheduleOf(file.name),
         referenceFiles: [...refFiles, ...(opts?.extraRefs ?? [])],
         // Opted into, because this screen CAN answer the pause — and a wording
         // that defers to a document nobody has is exactly the case where
@@ -282,11 +296,19 @@ export default function ContractUpload() {
                   <p>Caps, minimums and required fields are read from the document.</p>
                 </div>
               </div>
+              {/* Says what THIS screen leaves behind, not what eventually
+                  becomes of it. It promised "rules generated" and could never
+                  deliver: no output template is sent from here, and a rule is
+                  written against a template's columns. The clauses were saved
+                  correctly all along — the step was describing somebody else's
+                  job as though it were this one's. */}
               <div className="step s3">
                 <span className="n">3</span>
                 <div>
-                  <h4>Rules generated</h4>
-                  <p>Each clause becomes a validation rule on an output column.</p>
+                  <h4>Held for a setup</h4>
+                  <p>Clauses that carry a rule wait for a Bordereau Setup, which
+                     turns them into checks on your output columns. The document
+                     is not read again.</p>
                 </div>
               </div>
             </div>

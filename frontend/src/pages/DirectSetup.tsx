@@ -320,7 +320,7 @@ export default function DirectSetup() {
     pipelineId: number | null;
     inputSheets: number; outputSheets: number; contracts: number;
     rules: number; fieldsWithRules: number; totalFields: number;
-    sheetsBoundToContract: number; deferredCount: number;
+    deferredCount: number;
     // How each output column got its source. Shown here because a required
     // column with no source is invisible until the file is opened.
     mappingReview: MappingReviewData | null;
@@ -1025,7 +1025,7 @@ export default function DirectSetup() {
       rules: ruleIds.size,
       fieldsWithRules: of.data.fields.filter(f => (f.clauses?.length ?? 0) > 0).length,
       totalFields: of.data.fields.length,
-      sheetsBoundToContract: nMapped, deferredCount: missing.length,
+      deferredCount: missing.length,
       missing: missingCols,
       mappingReview: u.data.mapping_review ?? null,
     });
@@ -1229,7 +1229,12 @@ export default function DirectSetup() {
             <p className="text-sm text-ink-muted mb-4">
               <span className="font-semibold text-ink">{setupName}</span> is mapped and ready to review.
             </p>
-            <div className="grid grid-cols-2 gap-2.5 text-left">
+            {/* Three across, pinned. The dialog's width does not follow the
+                viewport once past it (max-w-md, or max-w-2xl when there are
+                missing columns to read), so a `sm:` breakpoint would be
+                measuring the wrong thing; and at two columns the last tile
+                sits alone in a half-empty row. */}
+            <div className="grid grid-cols-3 gap-2.5 text-left">
               <div className="rounded-lg border border-border p-3">
                 <div className="text-[20px] font-semibold text-ink">{buildSummary.outputSheets}</div>
                 <div className="text-[11px] text-ink-muted">
@@ -1248,12 +1253,6 @@ export default function DirectSetup() {
                 <div className="text-[20px] font-semibold text-ink">{buildSummary.contracts}</div>
                 <div className="text-[11px] text-ink-muted">
                   Contract{buildSummary.contracts === 1 ? "" : "s"} Processed
-                </div>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-[20px] font-semibold text-ink">{buildSummary.sheetsBoundToContract}</div>
-                <div className="text-[11px] text-ink-muted">
-                  Sheet{buildSummary.sheetsBoundToContract === 1 ? "" : "s"} Bound To A Contract
                 </div>
               </div>
             </div>

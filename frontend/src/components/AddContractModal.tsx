@@ -107,6 +107,10 @@ export default function AddContractModal({
   // Which output template this exact scope points at — the server's answer,
   // never a guess assembled here, because it also reports how specific the
   // match was ("this is the programme's template, not this broker's").
+  //
+  // Read to TELL the user what their clauses will be measured against later,
+  // and for nothing else: it is deliberately NOT sent with the upload. See the
+  // note in `submit`.
   useEffect(() => {
     if (!open || programId === "") { setResolved(null); return; }
     let stale = false;
@@ -122,26 +126,31 @@ export default function AddContractModal({
     return () => { stale = true; };
   }, [open, mga, programId, carrierId, broker.id]);
 
-  // Used when the scope has one; null is a perfectly good answer — it decides
-  // how far the reading gets, not whether it happens.
-  const templateId: number | null = resolved?.template?.id ?? null;
-
   const ready = programId !== "" && !!file && !busy;
 
   async function submit(opts?: { continueAnyway?: boolean; extraRefs?: File[] }) {
-    // Deliberately NOT gated on a template: without one the contract is still
-    // read and its clauses still saved — see the header.
     if (programId === "" || !file) return;
     const refs = [...refFiles, ...(opts?.extraRefs ?? [])];
     if (opts?.extraRefs?.length) setRefFiles(refs);
     setBusy(true); setErr(null); setHalt(null); setSaved(null);
-    setStep(templateId == null
-      ? `Reading “${file.name}” and saving its clauses…`
-      : `Reading “${file.name}” and writing its rules…`);
+    setStep(`Reading “${file.name}” and saving its clauses…`);
     try {
       const res = await uploadContract({
         programId: Number(programId),
-        outputTemplateId: templateId,
+        // NO TEMPLATE, DELIBERATELY — and this is the whole point of the
+        // screen. Adding a contract reads the document and saves its clauses;
+        // turning those clauses into rules is mapping, and mapping belongs to
+        // Bordereau Setup, which is the only place that knows which output
+        // template the bordereau is actually reported into.
+        //
+        // This used to send whatever template the scope happened to resolve
+        // to, so the SAME action did two different jobs depending on how far
+        // the programme's setup had got — and it bound the contract to that
+        // template permanently: rules name a template's own columns, so a
+        // contract carrying rules for one template is refused against another
+        // (see generate-rules' 409). A contract added here now stays free to
+        // serve whichever setup claims it, and none of the reading is wasted —
+        // the clause verdicts and their intents are kept and reused.
         file,
         brokerPartyId: broker.id,
         // Derived the same way the setup builder derives it, so a "Schedule H"
@@ -315,12 +324,13 @@ function SavedPanel({ saved, programId, filename }: {
         </div>
       )}
 
-      {c && c.rules === 0 && c.review > 0 && (
+      {c && c.review > 0 && (
         <Note>
-          No rules yet, which is expected without an output template — a rule is
-          written against a template's columns. The {c.review} clause
-          {c.review === 1 ? "" : "s"} that carry one are held, and a Bordereau
-          Setup can pick this contract up without reading the document again.
+          No rules yet, and that is the expected outcome here — a rule is written
+          against an output template's columns, which Bordereau Setup supplies.
+          The {c.review} clause{c.review === 1 ? "" : "s"} that carry one are
+          held, and a setup can pick this contract up without reading the
+          document again.
         </Note>
       )}
 
@@ -363,10 +373,10 @@ function TemplateState({ resolving, resolved }: {
   if (!t) {
     return (
       <Note>
-        No output template on this programme yet, so this reads the contract and
-        saves its <b>clauses</b>. Rules are written against a template's columns,
-        so the clauses that carry one are held until a Bordereau Setup exists —
-        the contract itself will not need reading again.
+        This reads the contract and saves its <b>clauses</b>. Rules are written
+        against an output template's columns, so the clauses that carry one are
+        held until a Bordereau Setup picks this contract up — the contract
+        itself will not need reading again.
       </Note>
     );
   }
@@ -385,7 +395,8 @@ function TemplateState({ resolving, resolved }: {
           : level === "contract"
             ? "The template this scope's contract is bound to"
             : "The programme's output template"}
-        {" — so the clauses become validation rules in the same pass."}
+        {" — what a Bordereau Setup would measure this contract against. "}
+        This step only reads the contract and saves its clauses.
       </p>
     </div>
   );

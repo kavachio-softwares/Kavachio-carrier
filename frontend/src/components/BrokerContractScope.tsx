@@ -93,13 +93,32 @@ export function useBrokerContractScope(programId: number | "") {
                                  && selectable.has(c.broker_party_id));
   }, [allContracts, brokerPartyId, brokers]);
 
-  // The contract this scope resolves to. One live contract means the scope is
-  // that contract; several means the broker holds more than one and the scope
-  // stops at the broker — a template made here covers all of them, which is
-  // what a broker-level template is for.
-  const contractId = useMemo<number | "">(
-    () => (contracts.length === 1 ? contracts[0].id : ""),
-    [contracts]);
+  // WHICH contract this scope resolves to.
+  //
+  // One live contract is not a choice — it is the only answer, so it arrives
+  // chosen and nothing is asked. SEVERAL is a real question: a broker holding
+  // two live contracts has two different sets of terms, and which of them a
+  // given bordereau was written under is something only the person holding the
+  // file knows. It used to resolve to nothing in that case and the screens
+  // simply stopped at the broker, which is why a run measured every file
+  // against whichever contract the setup happened to be built on.
+  const [picked, setPicked] = useState<number | "">("");
+
+  // A new list invalidates the pick — a contract from the last broker is not on
+  // this one. Keyed on the IDS rather than the array: the fetch hands back a
+  // fresh array every time, and resetting on identity would wipe the pick on
+  // any unrelated re-render.
+  const contractKey = contracts.map(c => c.id).join(",");
+  useEffect(() => {
+    setPicked(contracts.length === 1 ? contracts[0].id : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contractKey]);
+
+  // Never a contract that is no longer in the list: the pick is state, and
+  // state outlives the thing it points at.
+  const contractId: number | "" =
+    contracts.some(c => c.id === picked) ? picked : "";
+  const selected = contracts.find(c => c.id === contractId) ?? null;
 
   return {
     brokers, contracts, awaitingBroker, loading, contractsLoading,
@@ -108,14 +127,20 @@ export function useBrokerContractScope(programId: number | "") {
     awaitingBrokerCount: new Set(awaitingBroker.map(c => c.broker_party_id)).size,
     brokerPartyId, setBrokerPartyId,
     contractId,
+    /** Pick which of several contracts this scope is for. A no-op where there
+     *  is only one — that one is already chosen. */
+    setContractId: setPicked,
+    /** Whether the scope holds a question nobody has answered: several
+     *  contracts on file and none of them picked. */
+    needsContractChoice: contracts.length > 1 && contractId === "",
+    selectedContract: selected,
     /** Has the carrier put ANY broker on this programme? Until they have, there
      *  is no production relationship to build a setup against — which is why
      *  the setup screen holds its uploads shut on this. `null` while loading,
      *  so the screen never flashes the empty answer before it has one. */
     hasBrokers: programId === "" ? false : (loading ? null : brokers.length > 0),
     brokerName: brokers.find(b => b.id === brokerPartyId)?.legal_name ?? null,
-    contractName: contracts.length === 1
-      ? contractLabel(contracts[0]) : null,
+    contractName: selected ? contractLabel(selected) : null,
     /** Every contract the scope covers — what a setup binds, and what the
      *  screen shows in place of the dropdown that used to be here. */
     boundContracts: contracts,

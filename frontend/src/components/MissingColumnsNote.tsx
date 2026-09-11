@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  AlertTriangle, ArrowRight, CheckCircle2, FileWarning, Info, Loader2, Quote,
-  RefreshCw,
+  AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronRight,
+  FileWarning, Info, Loader2, Quote, RefreshCw,
 } from "lucide-react";
 import { api } from "../api/client";
 import { fmtStamp } from "../utils/date";
@@ -164,6 +164,7 @@ function CountPills({ counts }: { counts: MissingColumnsResp["counts"] }) {
  * result is reused and no model call is made.
  */
 export function MissingColumnsNote({ pipelineId, autoCheck = true, refreshKey = 0,
+                                     defaultCollapsed = false,
                                      className = "" }: {
   pipelineId: number | string; autoCheck?: boolean;
   /** Bump to re-read the note. The server drops findings whose output field is
@@ -171,12 +172,20 @@ export function MissingColumnsNote({ pipelineId, autoCheck = true, refreshKey = 
    *  this is how the page says "I just changed a mapping, look again". Re-reading
    *  is free: it never spends a model call on an already-analyzed setup. */
   refreshKey?: number;
+  /** Start shut. For a page that is READ — a saved setup shown alongside its
+   *  contracts and its sheets, both of which start shut — the header already
+   *  carries the whole finding: how many clauses, how many columns, and how
+   *  many of those are required. The lists are what you open when you have
+   *  decided to act on it. Left false, the note opens as it always has, which
+   *  is what a page you are still EDITING wants. */
+  defaultCollapsed?: boolean;
   className?: string;
 }) {
   const [data, setData] = useState<MissingColumnsResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [open, setOpen] = useState(!defaultCollapsed);
 
   const runCheck = useCallback(async (force: boolean) => {
     setChecking(true); setFailed(false);
@@ -281,12 +290,24 @@ export function MissingColumnsNote({ pipelineId, autoCheck = true, refreshKey = 
 
   return (
     <section className={`rounded-lg border border-amber-200 bg-white shadow-card overflow-hidden ${className}`}>
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 py-3.5 bg-amber-50 border-b border-amber-200">
+      {/* The whole header is the toggle — the same shape the contracts and the
+          sheets on this page use, so three sections that shut do not shut in
+          three different ways. It stays a full-width button even when the note
+          opens by default: a section you can close is better than one you
+          cannot, and nothing about it is hidden while it is open. */}
+      <button type="button" onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+        className={`w-full text-left flex flex-wrap items-center gap-x-3 gap-y-2
+                    px-5 py-3.5 bg-amber-50 transition hover:bg-amber-100/70
+                    ${open ? "border-b border-amber-200" : ""}`}>
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-amber-100 text-amber-700">
           <FileWarning size={17} />
         </span>
         <div className="min-w-0">
-          <h2 className="text-base font-semibold text-amber-900">
+          <h2 className="flex items-center gap-1.5 text-base font-semibold text-amber-900">
+            {open
+              ? <ChevronDown size={15} className="shrink-0 text-amber-700" />
+              : <ChevronRight size={15} className="shrink-0 text-amber-700" />}
             Note ·{" "}
             {c > 0 && <>{c} Clause{c === 1 ? "" : "s"} Awaiting a Column</>}
             {c > 0 && n > 0 && " · "}
@@ -305,8 +326,12 @@ export function MissingColumnsNote({ pipelineId, autoCheck = true, refreshKey = 
           </p>
         </div>
         {n > 0 && <div className="ml-auto"><CountPills counts={data.counts} /></div>}
-      </header>
-      <div className="p-3 space-y-4">
+      </button>
+      {/* Hidden rather than unmounted, unlike the sheets above it: both lists
+          scroll INSIDE their own capped box, and unmounting would send someone
+          who shut the note to compare it with the contract back to the top of a
+          list they had scrolled halfway down. */}
+      <div className={`p-3 space-y-4${open ? "" : " hidden"}`}>
         {c > 0 && (
           <div>
             <h3 className="mb-1.5 px-1 text-xs font-semibold text-ink-muted">

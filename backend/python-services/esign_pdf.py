@@ -73,6 +73,28 @@ def base_key(party_key: str) -> str:
     """
     return party_key.split(SLOT_SEP, 1)[0]
 
+
+def slot_of(party_key: str) -> int | None:
+    """Which of an organisation's signatories a key points at, or None.
+
+    The inverse of `slot_key`, and it is deliberately strict: a bare key is
+    slot 1, `key#n` is slot n for a whole n of 2 or more, and anything else is
+    not a key this module wrote. None rather than a guess, because the caller
+    that asks is validating something somebody typed, and "carrier#0" quietly
+    becoming the carrier's first signatory is how a block ends up drawn over
+    somebody else's.
+    """
+    head, sep, tail = party_key.partition(SLOT_SEP)
+    if not head:
+        return None
+    if not sep:
+        return 1
+    try:
+        n = int(tail)
+    except ValueError:
+        return None
+    return n if n >= 2 else None
+
 # How big a box of each kind is, in points, measured from the anchor's top-left.
 # A signature needs room for a drawn scrawl; a date does not.
 #
@@ -275,21 +297,107 @@ def normalise_signature_layout(raw: Any, *, strict: bool = False) -> dict:
     # ── where a hand-placed block sits ──────────────────────────────────────
     # Kept whatever the arrangement is, so switching to side-by-side to see how
     # it looks and back again does not throw away a placement somebody made.
+    #
+    # KEYED BY SIGNATORY, not by side. A key is a party key — `carrier` for the
+    # side itself and its first signatory, `carrier#2` for its second — which
+    # is the same spelling the signing round keys its boxes by, so a block
+    # dragged for one person and the boxes that person signs in cannot drift
+    # apart. A side names three people, three blocks can be placed, and each
+    # one goes where it was dropped rather than stacking under the first.
+    #
+    # Slot 1 is the side key unchanged, so every layout written before this
+    # existed is already a valid one: `{"carrier": ...}` means what it always
+    # meant. Nothing has to be migrated.
+    #
+    # Placing a signatory is OPTIONAL. Somebody named but never dragged stacks
+    # under their side's block exactly as they used to — the old behaviour is
+    # what you get by not using the new one.
     blocks: dict[str, dict] = {}
     given_blocks = src.get("blocks")
     given_blocks = given_blocks if isinstance(given_blocks, dict) else {}
-    for side in SIGNATURE_SIDES:
-        spot = given_blocks.get(side)
-        if not isinstance(spot, dict):
+    for raw_key, spot in given_blocks.items():
+        key = str(raw_key).strip()
+        side, slot = base_key(key), slot_of(key)
+        if slot is None or side not in SIGNATURE_SIDES:
+            if strict:
+                errors[key or "blocks"] = (
+                    f"\u201c{key}\u201d is not a side of this contract, nor "
+                    "anybody named to sign for one")
             continue
+        # The spelling this module writes, whatever spelling arrived. Two keys
+        # that mean the same signatory must not become two blocks.
+        key = slot_key(side, slot)
+        if not isinstance(spot, dict):
+            # Not "placed nowhere" — not placed. A side left out is caught
+            # below, by the check that every side has somewhere to sign.
+            continue
+
+        # ── ANCHORED TO A CLAUSE ────────────────────────────────────────────
+        # The other way to answer "where does this block go", and the only one
+        # that cannot cover the wording: the block joins the document's FLOW
+        # after clause n, so the text below it moves down to make room. A
+        # coordinate is a point on a finished page and is drawn on top of it;
+        # an anchor is a place in the contract and is typeset with it.
+        #
+        # Sides only. `block_flow` sets a side's whole block — every person
+        # named for it, in one table — so anchoring one person out of three
+        # would mean splitting that, and the answer for one person is a
+        # coordinate of their own.
+        # ── DROPPED ONTO A PAGE ─────────────────────────────────────────────
+        # `{at, gap, x}` — after mark n, that far below it, that far across.
+        # What "a point on the page" now means: the block joins the flow, so
+        # the wording moves down for it exactly as it does for a clause anchor,
+        # and it cannot be drawn over a word. The screen resolves a drop to
+        # this from the marks it was served with the pages.
+        if "at" in spot:
+            try:
+                at = int(spot.get("at"))
+                gap = float(spot.get("gap") or 0.0)
+                x = float(spot.get("x") or 0.0)
+            except (TypeError, ValueError):
+                if strict:
+                    errors[key] = ("that block was not dropped on the page — "
+                                   "drag it where it should sit")
+                continue
+            if at < 1 or not (0.0 <= gap <= 1.0) or not (0.0 <= x <= 1.0):
+                if strict:
+                    errors[key] = "that block is off the page"
+                continue
+            blocks[key] = {"at": at, "gap": round(gap, 6), "x": round(x, 6)}
+            continue
+
+        if "after" in spot:
+            if slot != 1:
+                if strict:
+                    errors[key] = (
+                        "only a side can be anchored to a clause — one person "
+                        "out of several signs in their side's block, or "
+                        "somewhere of their own on the page")
+                continue
+            try:
+                after = int(spot.get("after"))
+            except (TypeError, ValueError):
+                after = 0
+            if after < 1:
+                if strict:
+                    errors[key] = ("that block is not anchored to a clause — "
+                                   "choose the clause it should follow")
+                continue
+            # Not checked against the number of clauses: this function is given
+            # a layout, never the wording. A block anchored past the end falls
+            # to the signature page, which is the same forgiving rule a block
+            # on a page that no longer exists gets.
+            blocks[key] = {"after": after}
+            continue
+
         try:
             page = int(spot.get("page"))
             x = float(spot.get("x"))
             y = float(spot.get("y"))
         except (TypeError, ValueError):
             if strict:
-                errors[side] = ("that block was not placed on the page — drag "
-                                "it where it should sit")
+                errors[key] = ("that block was not placed on the page — drag "
+                               "it where it should sit")
             continue
         # A block whose top-left is off the page cannot be drawn anywhere
         # sensible. Refused on the way in rather than silently pulled back to
@@ -297,11 +405,33 @@ def normalise_signature_layout(raw: Any, *, strict: bool = False) -> dict:
         # off the page".
         if page < 1 or not (0.0 <= x <= 1.0) or not (0.0 <= y <= 1.0):
             if strict:
-                errors[side] = "that block is off the page"
+                errors[key] = "that block is off the page"
             continue
-        blocks[side] = {"page": page, "x": round(x, 6), "y": round(y, 6)}
+        blocks[key] = {"page": page, "x": round(x, 6), "y": round(y, 6)}
+
+    # Side order first, then slot, so the same layout always reads back the
+    # same way — a dict that came off JSON in whatever order the browser sent.
+    blocks = dict(sorted(
+        blocks.items(),
+        key=lambda kv: (SIGNATURE_SIDES.index(base_key(kv[0])),
+                        slot_of(kv[0]) or 1)))
+
+    # A side anchored to a clause signs THERE, in one block that carries
+    # everybody named for it. Placing one of its people on the page as well
+    # would draw that person twice, so it is refused rather than half-honoured.
+    if strict:
+        tied = {k for k, v in blocks.items() if "after" in v}
+        for k in blocks:
+            if k not in tied and base_key(k) in tied:
+                errors[k] = (
+                    "this side is anchored to a clause, so everybody named for "
+                    "it signs in that block — untie the side first to place "
+                    "one of its people on the page")
 
     if arrangement == "placed":
+        # Every SIDE needs somewhere to sign; every named signatory does not.
+        # The side key is slot 1's key, so this asks exactly what it always
+        # asked — an extra signatory left undragged stacks under their side.
         missing_sides = [s for s in SIGNATURE_SIDES if s not in blocks]
         if missing_sides:
             if strict:
@@ -488,6 +618,43 @@ def placed_block_height(line_count: int | Sequence[int]) -> float:
     return (_BLK_TITLE_PT + 2 + _BLK_LINE_PT + 2
             + sum(_BLK_SIG_GAP + _BLK_CAP_PT + 6 + _BLK_ROW * max(0, n)
                   for n in per))
+
+
+def text_regions(pdf_bytes: bytes) -> list[list[dict]]:
+    """Where the WORDS are on each page, as fractions of it.
+
+    What it is FOR: a hand-placed block is drawn ON TOP of a finished page, so
+    nothing stops one landing over the wording — and a signature covering the
+    clause it agrees to is worse than an ugly one. The screen shades these and
+    keeps a dropped block clear of them, which turns "do not do that" into
+    something the page simply does not let you do.
+
+    Blocks, not lines: a paragraph is one region, which is what somebody is
+    avoiding. Empty ones are dropped — an image or a rule has no words to
+    cover — and every rect is clamped to the page, because a glyph whose box
+    starts a hair off the paper would otherwise shade a negative margin.
+    """
+    doc = _open(pdf_bytes)
+    try:
+        pages: list[list[dict]] = []
+        for page in doc:
+            pw, ph = page.rect.width, page.rect.height
+            here: list[dict] = []
+            for b in page.get_text("blocks"):
+                x0, y0, x1, y1 = (float(v) for v in b[:4])
+                if not str(b[4] or "").strip():
+                    continue
+                x0, x1 = max(0.0, min(x0, pw)), max(0.0, min(x1, pw))
+                y0, y1 = max(0.0, min(y0, ph)), max(0.0, min(y1, ph))
+                if x1 <= x0 or y1 <= y0:
+                    continue
+                here.append({"x": round(x0 / pw, 5), "y": round(y0 / ph, 5),
+                             "w": round((x1 - x0) / pw, 5),
+                             "h": round((y1 - y0) / ph, 5)})
+            pages.append(here)
+        return pages
+    finally:
+        doc.close()
 
 
 def draw_signature_blocks(pdf_bytes: bytes, blocks: Sequence[dict]) -> bytes:

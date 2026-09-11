@@ -2976,8 +2976,50 @@ class ValidationRuleGenerator:
         # also carries an `intents` list that Call 3 maps to output fields.
         # -------------------------------------------------
 
-        with plog.stage("Call 2 intents"):
-            classifications = extract_rule_intents(clauses_extracted)
+        # CACHED, because Call 2 is field-agnostic BY CONSTRUCTION — the same
+        # clauses yield the same verdicts and the same intents whatever output
+        # template turns up later. That matters because this pass runs TWICE for
+        # the ordinary contract: once when it is added from a broker page or the
+        # contracts list, where it stops right below for want of a template, and
+        # again when a Bordereau Setup picks the contract up. The second run was
+        # pure repetition — the VERDICT survives on the clause row
+        # (rule_generation_status / classified_*), but the `intents` list, which
+        # is the expensive half and the only thing Call 3 consumes, was never
+        # persisted anywhere and had to be rebuilt from scratch. On a measured
+        # run that is ~6 of ~12 model calls, bought to reproduce an answer
+        # already paid for.
+        #
+        # The key is the clause TEXTS alone: they are the entire input to the
+        # call, so a hit can only ever be this exact set of clauses. Re-reading
+        # the document mints new clause ids, so a re-upload misses and pays
+        # again — which is correct, the text may have changed.
+        _intent_key = ai_cache.make_key("rule_intents_v1", [
+            {"id": c.get("clause_id"), "text": c.get("text")}
+            for c in clauses_extracted
+        ])
+        classifications = ai_cache.get("rule_intents", _intent_key)
+        # Length is re-checked rather than trusted: `zip` below pairs verdicts to
+        # clauses positionally, so a short list would silently leave the tail of
+        # the contract unclassified instead of failing.
+        if classifications is not None and len(classifications) != len(clauses_extracted):
+            plog.log("CALL2", "CACHE_REJECTED",
+                     f"stored answer has {len(classifications)} verdict(s) for "
+                     f"{len(clauses_extracted)} clause(s)",
+                     "a positional mismatch would mis-assign rules — re-asking")
+            classifications = None
+
+        if classifications is None:
+            with plog.stage("Call 2 intents"):
+                classifications = extract_rule_intents(clauses_extracted)
+            ai_cache.put("rule_intents", _intent_key, classifications,
+                         tenant_id=tenant_id)
+        else:
+            print(f"[Call 2] reusing cached intents for "
+                  f"{len(clauses_extracted)} clause(s) — no model call.")
+            plog.log("CALL2", "SKIPPED",
+                     f"intents for {len(clauses_extracted)} clause(s) served from cache",
+                     "answer depends only on the clause texts, which have not "
+                     "changed — the template arriving later cannot alter it")
 
         # Update each clause's rule_generation_status from the verdict
         for clause, classification in zip(clauses_extracted, classifications):

@@ -223,7 +223,11 @@ export type GeneratedRules = {
   ok: boolean;
   contract_id: number;
   output_template_id: number;
-  /** Present only when nothing was done because it already had been. */
+  /** Set when there was nothing to do, and the build should carry on.
+   *  `already_generated` — this contract's rules for this template exist.
+   *  `authored_contract` — terms were typed, not read off a document, so there
+   *  are no clauses to write rules from; its checks come from its agreed
+   *  limits instead. */
   skipped?: string;
   created: number;
   clauses?: number;

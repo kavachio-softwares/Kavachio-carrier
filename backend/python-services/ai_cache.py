@@ -1,8 +1,10 @@
 """
 ai_cache.py
 ───────────
-Memoization for model calls whose answer does NOT depend on the uploaded file —
-see db.AiResponseCache for which calls those are and why.
+Memoization for model calls whose answer is fully determined by inputs the key
+covers, so re-asking can only reproduce it — see db.AiResponseCache for which
+calls those are and why. Most of them do not depend on the uploaded file at all;
+`rule_intents` does, and is keyed on the clause texts that are its whole input.
 
 Contract with every caller:
   • A hit returns EXACTLY the payload the model returned on the miss, so the

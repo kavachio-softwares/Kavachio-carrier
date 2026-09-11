@@ -553,7 +553,10 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
                 subtitle: str | None = None,
                 schedule: list[tuple[str, list]] | None = None,
                 signers: list[dict] | None = None,
-                anchors: dict[str, str] | None = None) -> bytes:
+                anchors: dict[str, str] | None = None,
+                blank_signature_space: bool = False,
+                marks_out: list | None = None,
+                landings_out: dict | None = None) -> bytes:
     """The WHOLE contract as a PDF: schedule, wording, signature page.
 
     WHY A PDF, AND WHY NOTHING IS STORED. The wording is not a document in this
@@ -592,8 +595,38 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
     from reportlab.lib.units import mm
     from reportlab.pdfbase.pdfmetrics import stringWidth
     from reportlab.platypus import (
-        KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table,
-        TableStyle)
+        Flowable, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate,
+        Spacer, Table, TableStyle)
+
+    class FlowMark(Flowable):
+        """A zero-height note of where this point in the flow ended up.
+
+        THE WHOLE TRICK behind dropping a signature block onto a page and
+        having the wording move down for it. A point on a finished page means
+        nothing to a typesetter — it can only put things one after another —
+        so the screen cannot say "here" in coordinates and be understood. What
+        it can say is "after this paragraph, and this far below it", and these
+        marks are what let it: one is emitted after every paragraph, each
+        reports the page and height it landed at, and the screen turns a drop
+        into the nearest one plus a gap.
+
+        Zero-height and draws nothing, so emitting them cannot change the
+        layout it is measuring.
+        """
+
+        def __init__(self, tag: dict, sink: list, page_h: float):
+            super().__init__()
+            self.tag, self.sink, self.page_h = tag, sink, page_h
+            self.width = self.height = 0
+
+        def wrap(self, avail_w, avail_h):
+            return (0, 0)
+
+        def draw(self):
+            _, y = self.canv.absolutePosition(0, 0)
+            self.sink.append({**self.tag,
+                              "page": self.canv.getPageNumber(),
+                              "y": round(1 - y / self.page_h, 5)})
 
     tokens = tokens or {}
     buf = io.BytesIO()
@@ -667,6 +700,19 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         if sections:
             flow.append(Paragraph("Wording", head_st))
 
+    clause_end: dict[int, int] = {}
+    # Where each mark sits in `flow`, so a block resolved to mark n can be
+    # spliced straight after it. The marks themselves report where they landed
+    # on the PAGE, which is the other half of the same question.
+    mark_at: dict[int, int] = {}
+    marks: list[dict] = []
+
+    def note() -> None:
+        n = len(mark_at) + 1
+        flow.append(FlowMark({"n": n}, marks, A4[1]))
+        mark_at[n] = len(flow)
+
+    note()                       # the very top of the wording
     for i, s in enumerate(sections, start=1):
         block: list = [Paragraph(f"{i}. &nbsp;{esc(s.get('title') or 'Section')}",
                                  head_st)]
@@ -694,22 +740,84 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         # A heading must never be the last thing on a page with its first
         # clause overleaf.
         flow.append(KeepTogether(block[:2]) if len(block) > 1 else block[0])
-        flow.extend(block[2:])
+        note()
+        for para in block[2:]:
+            flow.append(para)
+            note()
+        # Where this clause ENDS in the flow, so a signature block anchored to
+        # it can be spliced in here later — after `block_flow` exists to build
+        # one. Recorded rather than inserted now, because the block depends on
+        # a layout that is not read until the signature page below.
+        clause_end[i] = len(flow)
 
-    # The signature page is Kavachio's: both blocks are placed without being
-    # asked for, because a contract with nowhere to sign is a draft that merely
-    # looks finished.
-    flow.append(PageBreak())
-    flow.append(Paragraph("Signatures", head_st))
-    flow.append(Paragraph(
-        "Signed for and on behalf of the parties, whereby they agree to the "
-        "terms set out above.", body_st))
-    flow.append(Spacer(1, 16 * mm))
-
-    # Normalised once, here, so every function below may assume the shape. A
-    # row written before the block was configurable — {} or {"arrangement":
+    # Normalised once, here, so everything below may assume the shape. A row
+    # written before the block was configurable — {} or {"arrangement":
     # "stacked"} — comes back as the four lines it has always had.
     layout = esign_pdf.normalise_signature_layout(signature_layout)
+    spots = {k: v for k, v in (layout.get("blocks") or {}).items()
+             if isinstance(v, dict)}
+
+    # ── is there a signature page at all? ───────────────────────────────────
+    # There is, for every contract that signs where contracts have always
+    # signed: a heading, the sentence the parties sign under, and the blocks.
+    # It is Kavachio's, added without being asked for, because a contract with
+    # nowhere to sign is a draft that merely looks finished.
+    #
+    # But a contract whose blocks have all been moved INTO the wording — tied
+    # to clauses, or dropped on a page — has already signed everywhere it is
+    # going to, and the page left behind is a heading promising signatures with
+    # none underneath it. That is worse than no page: it reads as a document
+    # that lost something. So it is emitted only when something will be on it.
+    #
+    # Recoverable, and that matters: taking a block off (×) gives its side back
+    # to the signature page, and the page comes back with it.
+    sig_mark = len(mark_at) + 1
+
+    # PLACED BY HAND MEANS BY HAND. Choosing it is saying "I will say where
+    # these go", and a page Kavachio adds anyway — a heading, the sentence, and
+    # the room underneath — is the screen not taking that answer. So it is not
+    # emitted, from the moment the choice is made rather than once the last
+    # block has been dragged: half-placed is a state somebody passes through,
+    # and a page that appears and vanishes underneath them while they work is
+    # worse than either answer.
+    #
+    # The CANVAS reads the arrangement as asked for, not as normalised. A
+    # layout that says "placed" and has placed nothing is downgraded on the way
+    # in — correctly, because a real document has to be signable — but that
+    # downgrade is what put the page back on the screen of somebody who had
+    # just chosen not to have one.
+    asked = str((signature_layout or {}).get("arrangement") or "").strip()
+    by_hand = (layout["arrangement"] == "placed"
+               or (blank_signature_space and asked == "placed"))
+
+    needs_sig_page = (
+        # Every automatic arrangement signs where contracts have always signed.
+        not by_hand
+        # The LEGACY coordinate blocks keep it unconditionally: they are drawn
+        # on top of a page BY NUMBER, and a page that came and went underneath
+        # them would move every one of those numbers.
+        or any("page" in v for v in spots.values())
+        # Somebody dropped a block on the signature page itself — or on a
+        # paragraph that has since been edited away, which is the same need for
+        # the opposite reason: that block has nowhere to go, and it has to fall
+        # back to somewhere rather than vanish.
+        or any(v.get("at", 0) >= sig_mark for v in spots.values() if "at" in v)
+        or any(not _clause_exists(v["after"], clause_end, sections)
+               for v in spots.values() if "after" in v)
+        # A REAL document must never reach a signer with a side that has
+        # nowhere to sign. On the canvas that state is just "not finished yet",
+        # and the screen says so in words.
+        or (not blank_signature_space
+            and any(sd not in spots for sd in esign_pdf.SIGNATURE_SIDES)))
+
+    if needs_sig_page:
+        flow.append(PageBreak())
+        flow.append(Paragraph("Signatures", head_st))
+        flow.append(Paragraph(
+            "Signed for and on behalf of the parties, whereby they agree to "
+            "the terms set out above.", body_st))
+        flow.append(Spacer(1, 16 * mm))
+        note()                   # the top of the signature page's free space
 
     def anchor(kind: str, side: str, slot: int = 1) -> str:
         """An invisible tag that puts a signing box of `kind` right here.
@@ -791,7 +899,8 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         return [sg for sg in (signers or []) if sg.get("side") == side
                 and (sg.get("name") or "").strip()]
 
-    def block_flow(party_label: str, org: str | None, side: str, width: float):
+    def block_flow(party_label: str, org: str | None, side: str, width: float,
+                   slots: set[int] | None = None):
         """One side's signature block, set as a table.
 
         A table rather than a paragraph because the block has COLUMNS — a label
@@ -801,7 +910,13 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         # signing does not have to work out which of two identical lines is
         # theirs. Nobody named falls back to a blank block — the contract can
         # still be printed and signed by hand, which is how most of them are.
-        named = named_for(side)
+        # WHICH of this side's people this particular block carries. Their
+        # slot is their position in `named_for`, which is the same thing the
+        # signing round counts — so the boxes drawn here are the boxes they are
+        # asked to fill, and not somebody else's. `None` means all of them,
+        # which is what every block was before one could be dropped per person.
+        pairs = [(i, sg) for i, sg in enumerate(named_for(side), start=1)
+                 if slots is None or i in slots]
         rows: list[list] = [[Paragraph(
             f"<b>{esc(party_label)}</b><br/>{esc(org or '')}", sig_st), ""]]
         spans: list[int] = [0]
@@ -819,9 +934,11 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
                 rows.append([Paragraph(label, sig_st),
                              Paragraph(beside or "&nbsp;", sig_st)])
 
-        if not named:
+        if not pairs:
+            # Nobody named for this side, or nobody left riding this block:
+            # one blank rule, which is how most contracts are still signed.
             add_signer(None, 1, bool(anchors))
-        for i, sg in enumerate(named, start=1):
+        for i, sg in pairs:
             # ANCHORED unless this person is only being printed. Somebody the
             # carrier deliberately gave no access to — an outside signatory who
             # is not to be sent a link — gets the same lines with nothing to
@@ -844,15 +961,172 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
             + [("TOPPADDING", (0, r), (1, r), 14) for r in rules[1:]]))
         return t
 
+    def has_own_place(key: str) -> bool:
+        """Whether this party key will actually be drawn somewhere of its own.
+
+        A block dropped after a paragraph — or tied to a clause — that has
+        since been edited away has a place that no longer exists. Saying it
+        does would take its signatory off their side's block AND fail to draw
+        them anywhere: one deletion in the wording, and nobody can sign. So the
+        question is not "was it placed" but "will it land", and everything that
+        decides where a block goes asks this one function.
+        """
+        v = spots.get(key)
+        if not isinstance(v, dict):
+            return False
+        if "at" in v:
+            return mark_at.get(int(v["at"])) is not None
+        if "after" in v:
+            return _clause_exists(v["after"], clause_end, sections)
+        return "page" in v
+
+    LABEL = {"carrier": ("For the Carrier", carrier_name),
+             "counterparty": ("For the Counterparty", counterparty_name)}
+
+    # ── the sides that sign WITH the wording rather than after it ───────────
+    # An anchored side is spliced into the flow after the clause it was tied
+    # to, so ReportLab typesets it: the clauses below it move down, room is
+    # made, and nothing is drawn over anything. That is the one thing a
+    # coordinate cannot promise, and it is why both ways of answering "where
+    # does this block go" exist.
+    anchored = {sd: spot["after"]
+                for sd, spot in (layout.get("blocks") or {}).items()
+                if sd in esign_pdf.SIGNATURE_SIDES and isinstance(spot, dict)
+                and "after" in spot}
+
     full_w = A4[0] - 48 * mm
     half_w = full_w / 2 - 10 * mm
-    side_w = half_w if layout["arrangement"] == "side_by_side" else full_w
-    carrier_block = block_flow("For the Carrier", carrier_name, "carrier", side_w)
-    other_block = block_flow("For the Counterparty", counterparty_name,
-                             "counterparty", side_w)
+    # A side that keeps the signature page shares it only with another side
+    # that does; the last one left there gets the whole width.
+    # WHO STILL SIGNS ON THE SIGNATURE PAGE: whoever has nowhere else to.
+    #
+    # Keyed off SLOT 1, because slot 1's block is the one that carries a side's
+    # other people — asking "was any of them placed" took the first and third
+    # signatory off the page when only the second was dropped, and left neither
+    # of them anywhere to sign. And keyed off has_own_place rather than "has a
+    # spot", so a block whose paragraph was edited away comes home instead of
+    # disappearing.
+    page_sides = [sd for sd in esign_pdf.SIGNATURE_SIDES if not has_own_place(sd)]
+    dropped_sides = {sd for sd in esign_pdf.SIGNATURE_SIDES
+                     if "at" in (spots.get(sd) or {}) and has_own_place(sd)}
+    side_w = (half_w if layout["arrangement"] == "side_by_side"
+              and len(page_sides) > 1 else full_w)
 
-    placed = layout["arrangement"] == "placed"
-    if placed:
+    def indent(fl, x: float):
+        """Keep a block's horizontal position while it flows vertically.
+
+        A block dropped two-thirds across the page belongs two-thirds across
+        the page. Flowables only stack, so the offset is an empty column
+        beside it — which is the same thing to a reader and, unlike a
+        coordinate, cannot end up on top of a word.
+        """
+        # Measured from the PAGE and then taken back to the text column: the
+        # box was dragged across a page, and a fraction of the column would put
+        # it somewhere else on every document with a different margin.
+        margin = (A4[0] - full_w) / 2
+        left = max(0.0, min(float(x or 0.0), 0.9) * A4[0] - margin)
+        if left < 1:
+            return fl
+        t = Table([["", fl]], colWidths=[left, max(10.0, full_w - left)],
+                  hAlign="LEFT")
+        t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                               ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                               ("TOPPADDING", (0, 0), (-1, -1), 0),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+        return t
+
+    # ── blocks DROPPED on a page ────────────────────────────────────────────
+    # `{at, gap, x}` — after mark n, that far below it, that far across. Not a
+    # coordinate: the block joins the flow, so the wording below it moves down
+    # to make room exactly as it does for a clause-anchored one. The screen
+    # turns a drop into this, because it has the same marks this does.
+    #
+    # On the CANVAS the block is reserved rather than drawn: the room is made,
+    # and the box the person is dragging sits in it. Drawn as well, every drop
+    # would leave a printed twin behind the box being moved.
+    def riding(sd: str, slot: int) -> set[int]:
+        """Which of a side's people a block for `slot` actually carries.
+
+        Somebody named but never given a place of their own has always signed
+        under the block in front of them, and still does — so slot 1's block
+        carries slot 1 AND everybody after it who was left alone. Any other
+        slot carries exactly itself. Getting this wrong loses a signatory
+        silently, which is the worst way to lose one.
+        """
+        if slot != 1:
+            return {slot}
+        n = max(1, len([sg for sg in (signers or []) if sg.get("side") == sd
+                        and (sg.get("name") or "").strip()]))
+        return {i for i in range(1, n + 1)
+                if i == 1 or not has_own_place(esign_pdf.slot_key(sd, i))}
+
+    def dropped_block(key: str):
+        sd, slot = esign_pdf.base_key(key), (esign_pdf.slot_of(key) or 1)
+        if sd not in LABEL:
+            return None
+        slots = riding(sd, slot)
+        per = len([k for k in layout["fields"].get(sd, ()) if k != "signature"])
+        if blank_signature_space:
+            # Room for every rule this block will carry, so the gap the screen
+            # puts a box in is the gap the block will fill.
+            return Spacer(1, esign_pdf.placed_block_height([per] * len(slots)))
+        lbl, org = LABEL[sd]
+        # The SAME width as the box that was dragged — served as a fraction of
+        # the page, so what was on the screen is what comes out of the printer.
+        return block_flow(lbl, org, sd,
+                          esign_pdf.PLACED_BLOCK["width"] * A4[0], slots=slots)
+
+    inserts: list[tuple[int, list]] = []
+    landings: list[dict] = []
+    for key, spot in (layout.get("blocks") or {}).items():
+        if not isinstance(spot, dict) or "at" not in spot:
+            continue
+        idx = mark_at.get(int(spot["at"]))
+        fl = dropped_block(key)
+        if idx is None or fl is None:
+            # The paragraph it was dropped after is gone. Its side is already
+            # back on the signature page — has_own_place said so — and `riding`
+            # keeps this slot on that block for the same reason.
+            continue
+        gap = max(0.0, float(spot.get("gap") or 0.0)) * A4[1]
+        fl = indent(fl, spot.get("x"))
+        landed = FlowMark({"key": key}, landings, A4[1])
+        inserts.append((idx, [Spacer(1, gap), landed, fl, Spacer(1, 4 * mm)]
+                        if gap > 0.5 else [landed, fl, Spacer(1, 4 * mm)]))
+
+    for sd, n in anchored.items():
+        # Anchored past the last clause: falls through to the signature page,
+        # the same forgiving rule a block on a page that no longer exists gets.
+        at = clause_end.get(min(int(n), len(sections))) if sections else None
+        if at is None:
+            continue             # no such clause — page_sides already has it
+        lbl, org = LABEL[sd]
+        inserts.append((at, [Spacer(1, 9 * mm),
+                             block_flow(lbl, org, sd, full_w),
+                             Spacer(1, 9 * mm)]))
+    # Descending, so an earlier splice cannot move a later one's index.
+    for at, items in sorted(inserts, key=lambda t: -t[0]):
+        flow[at:at] = items
+
+    # THE CANVAS SOMEBODY DRAGS ONTO. `blank_signature_space` composes the
+    # contract with the signature page reserved and nothing drawn on it — the
+    # page count is identical, because the reserve is what takes the room, and
+    # the blocks are the thing being positioned rather than something already
+    # printed underneath. Without it the screen shows the automatic blocks and
+    # the boxes dragged on top of them, which reads as a mistake and makes the
+    # words the blocks occupy look like space that is already taken.
+    placed = layout["arrangement"] == "placed" or blank_signature_space
+    if not needs_sig_page:
+        # Every block was moved into the wording, so there is no page and
+        # nothing to put on it — see the decision above.
+        pass
+    elif blank_signature_space or (placed and not page_sides):
+        # RESERVE, draw nothing. On the canvas that is the whole point — the
+        # blocks are what somebody is positioning, and printing them underneath
+        # the boxes being dragged reads as a mistake. In a real document it
+        # means every side already has a place of its own, so all this page
+        # owes them is the room any legacy coordinate block is drawn into.
         # The blocks are drawn afterwards, at the points the carrier dragged
         # them to — see below. The signature PAGE is still emitted, empty of
         # blocks: it carries the sentence the parties sign under, and keeping
@@ -861,13 +1135,18 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         # the contract by a page and every position already recorded against a
         # page number would quietly point one page too far.
         flow.append(Spacer(1, 40 * mm))
-    elif layout["arrangement"] == "stacked":
-        flow.append(carrier_block)
-        flow.append(Spacer(1, 22 * mm))
-        flow.append(other_block)
+    elif layout["arrangement"] == "stacked" or len(page_sides) < 2:
+        # One side left on the page reads as stacked whatever was asked for —
+        # a two-column table with one column in it is just a narrow block.
+        for idx, sd in enumerate(page_sides):
+            if idx:
+                flow.append(Spacer(1, 22 * mm))
+            flow.append(block_flow(*LABEL[sd], sd, side_w, slots=riding(sd, 1)))
     else:
         w = (A4[0] - 48 * mm) / 2
-        t = Table([[carrier_block, other_block]], colWidths=[w, w])
+        t = Table([[block_flow(*LABEL[sd], sd, side_w, slots=riding(sd, 1))
+                    for sd in page_sides]],
+                  colWidths=[w] * len(page_sides))
         t.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
@@ -876,15 +1155,25 @@ def compose_pdf(*, name: str | None, carrier_name: str | None,
         flow.append(t)
 
     doc.build(flow)
+    # Sorted into reading order — they are drawn in flow order anyway, but a
+    # screen looking for "the mark just above where I dropped" should not have
+    # to trust that.
+    if marks_out is not None:
+        marks_out.extend(sorted(marks, key=lambda m: (m["page"], m["y"])))
+    if landings_out is not None:
+        landings_out.update({d["key"]: {"page": d["page"], "y": d["y"]}
+                             for d in landings})
     out = buf.getvalue()
-    if not placed:
+    if not placed or blank_signature_space:
         return out
     return esign_pdf.draw_signature_blocks(out, [
-        _placed_block(side, label, org, layout, signers, anchors)
+        b
         for side, label, org in (
             ("carrier", "For the Carrier", carrier_name),
             ("counterparty", "For the Counterparty", counterparty_name))
         if side in layout.get("blocks", {})
+        and side not in anchored and side not in dropped_sides
+        for b in _placed_blocks(side, label, org, layout, signers, anchors)
     ])
 
 
@@ -908,10 +1197,22 @@ def _may_sign_online(sg: dict) -> bool:
     return sg.get("access") is not False
 
 
-def _placed_block(side: str, party_label: str, org: str | None,
-                  layout: dict, signers: list[dict] | None,
-                  anchors: dict[str, str] | None) -> dict:
-    """One hand-placed block, described for the drawer.
+def _clause_exists(after, clause_end: dict, sections) -> bool:
+    """Whether a block tied to clause `after` still has a clause to sit under.
+
+    Clamped the way the composer clamps it: tied past the end means the last
+    one. False only when there are no clauses at all to tie to."""
+    try:
+        n = int(after)
+    except (TypeError, ValueError):
+        return False
+    return bool(sections) and clause_end.get(min(n, len(sections))) is not None
+
+
+def _placed_blocks(side: str, party_label: str, org: str | None,
+                   layout: dict, signers: list[dict] | None,
+                   anchors: dict[str, str] | None) -> list[dict]:
+    """This side's hand-placed blocks, described for the drawer.
 
     The SAME choices the flowable version reads — which lines this side signs,
     and everybody named for it, in the order they were named — so the two
@@ -919,8 +1220,27 @@ def _placed_block(side: str, party_label: str, org: str | None,
     different blocks. Each signatory gets their own rule and their own boxes,
     keyed by their slot, so three people signing for one side is three places
     to sign rather than three names under one line.
+
+    WHY A LIST. A signatory who was dragged onto the page gets a block of their
+    own, at the point they were dropped; one who was not rides their side's
+    block, stacked under whoever came before them. So a side is one block when
+    nobody was placed individually — exactly what it has always been — and as
+    many blocks as were placed when they were. The two are not modes: the same
+    loop produces both, and a contract can have one side placed per person and
+    the other left to stack.
+
+    Slot 1 is never its own block, because slot 1's key IS the side key: the
+    first signatory is who the side block was always for, and giving them a
+    second one would draw the same person twice.
     """
-    spot = layout["blocks"][side]
+    # COORDINATES ONLY. A spot is one of three things now — a point on a
+    # finished page, a place in the flow (`at`), or a clause (`after`) — and
+    # only the first is drawn on top of the page by this function. The other
+    # two are typeset into the document and never reach here.
+    every = {k: v for k, v in (layout.get("blocks") or {}).items()
+             if isinstance(v, dict)}
+    blocks = {k: v for k, v in every.items() if "page" in v}
+    spot = blocks.get(side)
     named = [sg for sg in (signers or []) if sg.get("side") == side
              and (sg.get("name") or "").strip()]
     base = (anchors or {}).get(side)
@@ -950,13 +1270,42 @@ def _placed_block(side: str, party_label: str, org: str | None,
                         if tagged else {}),
         }
 
-    return {
-        "page": spot["page"], "x": spot["x"], "y": spot["y"],
-        "width": esign_pdf.PLACED_BLOCK["width"],
-        "title": party_label, "org": org,
-        "signers": ([group(None, 1)] if not named
-                    else [group(sg, i) for i, sg in enumerate(named, start=1)]),
-    }
+    def block_at(where: dict, groups: list[dict]) -> dict:
+        """One drawn block. The heading goes on every one of them — a block
+        sitting on its own beside some clause has to say whose signature it
+        is collecting, or it is a ruled line in the middle of a page."""
+        return {
+            "page": where["page"], "x": where["x"], "y": where["y"],
+            "width": esign_pdf.PLACED_BLOCK["width"],
+            "title": party_label, "org": org,
+            "signers": groups,
+        }
+
+    # A side that names nobody still signs: one block, one rule, no name on it.
+    entries = ([(1, None)] if not named
+               else [(i, sg) for i, sg in enumerate(named, start=1)])
+
+    placed: list[dict] = []
+    stacked: list[dict] = []
+    for slot, sg in entries:
+        # Slot 1 has no key of its own to be placed by — see the docstring.
+        key = esign_pdf.slot_key(side, slot) if slot > 1 else None
+        if key and key in every:
+            own = blocks.get(key)
+            if own:
+                placed.append(block_at(own, [group(sg, slot)]))
+            # Otherwise this person was dropped on a page or tied to a clause:
+            # they are TYPESET into the document, and stacking them here as
+            # well would put the same signature in two places.
+            continue
+        stacked.append(group(sg, slot))
+    # The side's own block leads, when anybody is still riding it. `spot` is
+    # present for any side reaching here — a layout that leaves a side unplaced
+    # is not a placed layout — but a missing one drops the block rather than
+    # raising, which is the same call made everywhere else in this file.
+    if stacked and spot:
+        placed.insert(0, block_at(spot, stacked))
+    return placed
 
 
 # ═══════════════════════════════════════════════════════════════════════════

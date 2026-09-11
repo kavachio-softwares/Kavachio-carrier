@@ -1,5 +1,6 @@
 import re
 import os
+import math
 import json
 import time
 import random
@@ -253,9 +254,35 @@ def _is_transient(exc) -> bool:
 
 
 def _retry_after_seconds(exc):
-    """Extract a server-suggested Retry-After (seconds) if present, else None."""
-    m = re.search(r"retry[-\s]?after['\":\s]+(\d+)", f"{exc}".lower())
-    return int(m.group(1)) if m else None
+    """Extract a server-suggested wait (seconds) if present, else None.
+
+    THREE SHAPES, because Gemini does not send the HTTP header this originally
+    looked for. A 429 from generativelanguage carries the wait in its own body:
+
+        'details': [{'@type': '...RetryInfo', 'retryDelay': '17s'}]
+        'message': '... Please retry in 17.189112315s.'
+
+    Matching only ``retry-after`` therefore returned None for every real quota
+    error, and the caller fell back to ``1.5 ** attempt`` — 1.0s, 1.5s, 2.3s,
+    3.4s. Four attempts burn out in about eleven seconds against a quota window
+    of sixty, so the call fails, the batch raises, and stage_b routes its whole
+    intent set to review. That is silent RULE LOSS caused by nothing worse than
+    a rate limit, and it is invisible afterwards: the clauses simply sit unmapped
+    with no indication that a 429, rather than the contract, put them there.
+
+    The largest advertised wait wins — the shapes can disagree, and waiting too
+    long only costs time whereas waiting too little costs the rules.
+    """
+    blob = f"{exc}".lower()
+    waits = []
+    for pat in (r"retry[-\s]?after['\":\s]+(\d+(?:\.\d+)?)",
+                r"retrydelay['\":\s]+(\d+(?:\.\d+)?)s?",
+                r"retry in\s+(\d+(?:\.\d+)?)\s*s"):
+        waits += [float(m) for m in re.findall(pat, blob)]
+    if not waits:
+        return None
+    # Ceil, so a 17.19s instruction is honoured as 18 rather than 17.
+    return int(math.ceil(max(waits)))
 
 
 def invoke_with_retry(kwargs, label="LLM", est_tokens=None, gen_client=None):

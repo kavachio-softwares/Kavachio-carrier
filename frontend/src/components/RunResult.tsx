@@ -22,6 +22,7 @@ import {
   InlineAllRows, HighlightGrid, firstDataSheet, HL_BG, HL_BD,
   HL_WARN_BG, HL_WARN_BD, type Sheet,
 } from "./OutputRows";
+import { contractLabel } from "../utils/contractLabel";
 
 export type RunException = {
   severity?: string; sheet?: string; row?: number;
@@ -32,6 +33,10 @@ export type RunException = {
 
 export type GoverningContract = {
   sheet: string; contract_id: number | null;
+  /** What the contract is CALLED. A contract written in Kavachio is typed and
+   *  has only this; one that arrived as a document has only a filename. Both
+   *  are served, and contractLabel picks. */
+  contract_name?: string | null;
   contract_filename: string | null; fallback: boolean;
 };
 
@@ -220,7 +225,8 @@ export function RunResult({
         const withContract = gcs.filter(g => g.contract_id != null);
         const distinct = new Set(withContract.map(g => g.contract_id));
         const nameOf = (g: GoverningContract) =>
-          g.contract_filename || `Contract #${g.contract_id}`;
+          contractLabel({ id: g.contract_id ?? 0, name: g.contract_name,
+                          filename: g.contract_filename });
         if (distinct.size === 1 && withContract.length === gcs.length) {
           return (
             <div className="note" style={{ marginBottom: 18 }}>

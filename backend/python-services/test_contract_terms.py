@@ -426,6 +426,121 @@ def test_a_placement_survives_a_look_at_the_other_arrangements():
     assert lay["blocks"]["carrier"]["page"] == 3
 
 
+# ── a block per PERSON, not a block per side ────────────────────────────────
+#
+# A side that sends three people to sign used to get one dragged point and
+# three rules stacked under it. That is the right answer when the three sign in
+# a column and the wrong one whenever a contract wants a countersignature
+# somewhere else on the page. A block is now keyed by PARTY KEY — `carrier` for
+# the side and its first signatory, `carrier#2` for its second — which is the
+# spelling the signing round already keys its boxes by, so a block dragged for
+# one person and the boxes that person signs in cannot drift apart.
+
+def test_every_named_signatory_can_be_placed_somewhere_of_their_own():
+    lay = esign_pdf.normalise_signature_layout(
+        _placed(**{"carrier": {"page": 1, "x": 0.08, "y": 0.2},
+                   "carrier#2": {"page": 1, "x": 0.55, "y": 0.45},
+                   "carrier#3": {"page": 2, "x": 0.08, "y": 0.7},
+                   "counterparty": {"page": 1, "x": 0.55, "y": 0.7}}),
+        strict=True)
+    assert lay["blocks"]["carrier#2"] == {"page": 1, "x": 0.55, "y": 0.45}
+    assert lay["blocks"]["carrier#3"]["page"] == 2
+
+
+def test_only_the_sides_have_to_be_placed_not_everybody_named():
+    """Naming a third signatory must not make a saved layout unsaveable. Left
+    undragged they stack under their side, which is what they always did."""
+    lay = esign_pdf.normalise_signature_layout(
+        _placed(carrier={"page": 1, "x": 0.1, "y": 0.5},
+                counterparty={"page": 1, "x": 0.5, "y": 0.5}),
+        strict=True)
+    assert lay["arrangement"] == "placed"
+
+
+def test_a_block_for_nobody_on_this_contract_is_refused():
+    """`carrier#0` is not the carrier's first signatory and `reinsurer` is not
+    a side — guessing either is how a block gets drawn over somebody else."""
+    for bad in ("carrier#0", "reinsurer", "carrier#x"):
+        with pytest.raises(esign_pdf.SignatureLayoutError):
+            esign_pdf.normalise_signature_layout(
+                _placed(**{"carrier": {"page": 1, "x": 0.1, "y": 0.5},
+                           "counterparty": {"page": 1, "x": 0.5, "y": 0.5},
+                           bad: {"page": 1, "x": 0.2, "y": 0.2}}),
+                strict=True)
+
+
+def test_a_slot_key_and_the_side_key_it_belongs_to_agree():
+    """slot_of is the inverse of slot_key, and strict about it."""
+    for side in esign_pdf.SIGNATURE_SIDES:
+        for slot in (1, 2, 7):
+            key = esign_pdf.slot_key(side, slot)
+            assert esign_pdf.base_key(key) == side
+            assert esign_pdf.slot_of(key) == slot
+
+
+def test_the_blocks_read_back_in_the_same_order_however_they_arrived():
+    """A dict off JSON arrives in whatever order the browser sent it. Two saves
+    of one layout must not look like two different layouts."""
+    spots = {"counterparty": {"page": 1, "x": 0.5, "y": 0.5},
+             "carrier#3": {"page": 1, "x": 0.3, "y": 0.3},
+             "carrier": {"page": 1, "x": 0.1, "y": 0.1},
+             "carrier#2": {"page": 1, "x": 0.2, "y": 0.2}}
+    lay = esign_pdf.normalise_signature_layout(_placed(**spots), strict=True)
+    assert list(lay["blocks"]) == [
+        "carrier", "carrier#2", "carrier#3", "counterparty"]
+
+
+# ── tied to a clause instead of to a point ─────────────────────────────────
+
+def test_a_side_can_be_tied_to_a_clause_instead_of_a_point():
+    lay = esign_pdf.normalise_signature_layout(
+        _placed(carrier={"after": 3},
+                counterparty={"page": 1, "x": 0.5, "y": 0.5}), strict=True)
+    assert lay["blocks"]["carrier"] == {"after": 3}
+    assert lay["blocks"]["counterparty"]["page"] == 1
+
+
+def test_a_tie_to_no_clause_at_all_is_refused():
+    for bad in (0, -2, "later", None):
+        with pytest.raises(esign_pdf.SignatureLayoutError):
+            esign_pdf.normalise_signature_layout(
+                _placed(carrier={"after": bad},
+                        counterparty={"page": 1, "x": 0.5, "y": 0.5}),
+                strict=True)
+
+
+def test_one_person_out_of_several_cannot_be_tied_to_a_clause():
+    """A side's block carries everybody named for it, so there is no single
+    person's block to tie. Refused rather than half-honoured."""
+    with pytest.raises(esign_pdf.SignatureLayoutError) as e:
+        esign_pdf.normalise_signature_layout(
+            _placed(**{"carrier": {"page": 1, "x": 0.1, "y": 0.1},
+                       "carrier#2": {"after": 2},
+                       "counterparty": {"page": 1, "x": 0.5, "y": 0.5}}),
+            strict=True)
+    assert "carrier#2" in e.value.errors
+
+
+def test_a_tied_side_cannot_also_place_one_of_its_people():
+    """Its people sign in the block it was tied to. Placing one on the page as
+    well would draw that person twice."""
+    with pytest.raises(esign_pdf.SignatureLayoutError) as e:
+        esign_pdf.normalise_signature_layout(
+            _placed(**{"carrier": {"after": 2},
+                       "carrier#2": {"page": 1, "x": 0.2, "y": 0.2},
+                       "counterparty": {"page": 1, "x": 0.5, "y": 0.5}}),
+            strict=True)
+    assert "carrier#2" in e.value.errors
+
+
+def test_a_tied_side_counts_as_having_somewhere_to_sign():
+    """It is placed — just not at a point. The check that every side has
+    somewhere to sign must not insist on coordinates."""
+    lay = esign_pdf.normalise_signature_layout(
+        _placed(carrier={"after": 1}, counterparty={"after": 2}), strict=True)
+    assert lay["arrangement"] == "placed"
+
+
 def test_the_form_is_told_how_big_a_placed_block_is():
     """The box dragged on the screen and the block drawn on the page are one
     number, served — two copies of it is how somebody places one thing and gets

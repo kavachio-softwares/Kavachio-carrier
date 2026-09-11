@@ -51,7 +51,8 @@ import {
   getContractRound, inAppSigningUrl, lookupSigner,
   type ContractRound, type SignerLookup,
 } from "../api/esign";
-import { SignaturePlacer } from "../components/SignaturePlacer";
+import { SignaturePlacer, signerTargets, type PlaceTarget }
+  from "../components/SignaturePlacer";
 import { Modal } from "../components/ui/Modal";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
@@ -289,7 +290,18 @@ export default function ContractSignature() {
     if (!draftLayout) return;
     setPlaceSaving(true); setErr(""); setSaved("");
     try {
-      const r = await updateContract(id, { signature_layout: draftLayout });
+      // The NAMES go with it. A block keyed `carrier#3` is the third carrier
+      // signatory's, so saving where it sits without saving who they are would
+      // store a placement for somebody the contract does not have yet — and
+      // the document, which draws a block per person actually named, would
+      // quietly ignore it.
+      const r = await updateContract(id, {
+        signers: signatories.map(sg => ({
+          name: sg.name, email: sg.email, role: sg.role, side: sg.side,
+          access: sg.access,
+        })),
+        signature_layout: draftLayout,
+      });
       setRec(r);
       setPlacing(false);
       setSaved("Saved. The signature blocks are drawn where you put them.");
@@ -333,16 +345,26 @@ export default function ContractSignature() {
   // and that is worth saying before anyone fills in a signatory list.
   const noWording = !rec.has_wording;
 
-  // The sides in the words this contract uses for them, and which of them
-  // still has nowhere to go. The server refuses a hand-placed layout that
-  // leaves a side unplaced — a contract with nowhere to sign is worse than the
-  // wrong layout — so Save says so rather than offering a button that 400s.
-  const placerSides = (sigSpec?.sides ?? []).map(k => ({
-    key: k,
-    label: k === "carrier" ? "You" : rec.counterparty?.name ?? "The counterparty",
-  }));
-  const unplaced = placerSides
-    .filter(sd => !draftLayout?.blocks?.[sd.key]).map(sd => sd.label);
+  // EVERY BLOCK THAT CAN BE PLACED: each side, and each person named to sign
+  // for it. Keyed by party key — `carrier`, `carrier#2`, `carrier#3` — the
+  // same spelling the server keys the signing boxes by, so the block dragged
+  // for somebody and the boxes they are asked to fill are one thing.
+  //
+  // Slot 1 IS the side key. A side that has named nobody offers exactly one
+  // block, which is what it has always offered, and naming three people turns
+  // that one into three rather than adding a mode.
+  //
+  // Read from the list ON SCREEN, not the saved one, because somebody places
+  // the people they can see — which is why savePlacement saves both.
+  const placerTargets: PlaceTarget[] = signerTargets(
+    sigSpec?.sides ?? [], signatories,
+    side => (side === "carrier"
+      ? "You" : rec.counterparty?.name ?? "The counterparty"));
+  // The server refuses a hand-placed layout that leaves a SIDE unplaced — a
+  // contract with nowhere to sign is worse than the wrong layout — so Save
+  // says so rather than offering a button that 400s.
+  const unplaced = placerTargets
+    .filter(t => t.required && !draftLayout?.blocks?.[t.key]).map(t => t.label);
 
   return (
     <div className="proto">
@@ -872,7 +894,8 @@ export default function ContractSignature() {
             <>
               <span className="sub" style={{ marginRight: "auto" }}>
                 {unplaced.length === 0
-                  ? "Both blocks are placed. Drag either one to move it."
+                  ? "Every side has somewhere to sign. Drag any block to move "
+                    + "it — anybody left unplaced signs under their side."
                   : `Still to place: ${unplaced.join(" and ")}.`}
               </span>
               <button className="btn" type="button"
@@ -888,18 +911,29 @@ export default function ContractSignature() {
           }
         >
           <p className="hint" style={{ marginTop: 0 }}>
-            Pick a side, then click the page where its block should sit — or
-            drag one that is already there. Everything a side signs moves with
-            its block: the ruled line, the printed name, the date, and a rule of
-            its own for every extra signatory named for that side.
+            Pick a block, then click the page where it should sit — or drag one
+            that is already there. <b>Everybody named gets a block of their
+            own</b>, so three people signing can go in three different places.
+            Everything that person signs moves with their block: the ruled line,
+            the printed name, the job title and the date. Leave somebody
+            unplaced and they sign under their side, stacked, as before.
           </p>
           <SignaturePlacer
-            contractId={id}
+            source={{ kind: "contract", id }}
             layout={draftLayout}
             block={sigSpec.placed_block}
-            sides={placerSides}
+            targets={placerTargets}
             onPlace={(sideKey, spot) => setDraftLayout(l => l && ({
               ...l, blocks: { ...(l.blocks ?? {}), [sideKey]: spot },
+            }))}
+            onRemove={sideKey => setDraftLayout(l => {
+              if (!l) return l;
+              const rest = { ...(l.blocks ?? {}) };
+              delete rest[sideKey];
+              return { ...l, blocks: rest };
+            })}
+            onAnchor={(sideKey, after) => setDraftLayout(l => l && ({
+              ...l, blocks: { ...(l.blocks ?? {}), [sideKey]: { after } },
             }))}
           />
         </Modal>

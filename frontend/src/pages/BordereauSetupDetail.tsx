@@ -336,7 +336,8 @@ export default function BordereauSetupDetail() {
                 was judged against. Self-loading from the stored check — reading
                 it costs nothing, and a setup built before this check existed
                 runs it once on its first visit. */}
-            <MissingColumnsNote pipelineId={pipeline.id} refreshKey={noteKey} />
+            <MissingColumnsNote pipelineId={pipeline.id} refreshKey={noteKey}
+              defaultCollapsed />
 
             {/* Contracts — same expand-to-detail (terms, rules, clause routing) the
                 builder itself shows; a contract's own rules stay editable here even

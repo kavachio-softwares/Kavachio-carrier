@@ -31,6 +31,8 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import { WordingEditor } from "../components/WordingEditor";
+import { SignaturePlacer, signerTargets }
+  from "../components/SignaturePlacer";
 import { TermDurationField, useTermDuration } from "../components/TermDuration";
 import { EXPIRY_FIELD, INCEPTION_FIELD, type TermSpec } from "../utils/term";
 import {
@@ -436,6 +438,43 @@ export default function ContractNew() {
     // what an unsigned contract looks like on paper anyway.
   }), [typeKey, values, limits, carrierName, counterparty, programme,
        sigLayout]);
+
+  /** The document the signature blocks are dragged onto, on step 4.
+   *
+   *  Composed with an AUTOMATIC arrangement, never the placed one being edited:
+   *  a page composed from the blocks you are moving would print them where they
+   *  were a moment ago and leave a ghost behind the one under your pointer. So
+   *  the pages show the contract, and the boxes on top of them are the thing
+   *  being chosen. The page COUNT is the same either way — the composer
+   *  reserves the signature page whichever arrangement is asked for — so a
+   *  block placed on page 3 here is on page 3 of what comes out.
+   *
+   *  The fields are kept, because those do change what is printed. */
+  const placeBody = useMemo(() => ({
+    ...wordingInput(sections),
+    signature_layout: sigLayout && {
+      ...sigLayout,
+      // ALL of them, because every block is part of the document now — one
+      // tied to a clause and one dropped on a page are both typeset, and the
+      // wording below either of them moves down. The canvas has to show that
+      // or there is no reflow to look at.
+      //
+      // The server RESERVES a dropped block rather than drawing it (see
+      // blank_signature_space): the room is made, and the box being dragged
+      // sits in the room. Drawn as well, every drop would leave a printed twin
+      // behind the box that is still moving.
+      blocks: sigLayout.blocks ?? {},
+    },
+  }), [wordingInput, sections, sigLayout]);
+
+  /** Sides that asked to be placed by hand and have not been. The server
+   *  refuses a layout like that — a contract with nowhere to sign is worse
+   *  than the wrong layout — so the finish buttons say so rather than being
+   *  offered and 400ing. Empty for every automatic arrangement. */
+  const unplacedSides = (sigLayout?.arrangement === "placed"
+    ? (sigSpec?.sides ?? []).filter(k => !sigLayout.blocks?.[k])
+    : []);
+  const blocksUnplaced = unplacedSides.length > 0;
 
   /** Re-read the wording. Called when entering steps 2 and 3, and whenever a
    *  term changes while they are open — the chips have to follow. */
@@ -1679,7 +1718,7 @@ export default function ContractNew() {
                     bordereaux, on a contract nobody had signed. That is still
                     true of "sign it now": it skips the broker's READING of the
                     terms, not either signature. */}
-                <button className="btn" type="button" disabled={!!busy}
+                <button className="btn" type="button" disabled={!!busy || blocksUnplaced}
                         onClick={() => create("draft")}>
                   {busy === "create" ? "Saving…" : "Save as a draft"}
                 </button>
@@ -1688,12 +1727,12 @@ export default function ContractNew() {
                     counterparty has no seat here to read it. Kept out of the
                     primary slot: not asking the other side is the exception,
                     and it should not be the easiest button to hit. */}
-                <button className="btn" type="button" disabled={!!busy}
+                <button className="btn" type="button" disabled={!!busy || blocksUnplaced}
                         onClick={() => create("sign")}>
                   <PenLine size={14} />
                   {busy === "create" ? "Creating…" : "Create and sign it now"}
                 </button>
-                <button className="btn pri" type="button" disabled={!!busy}
+                <button className="btn pri" type="button" disabled={!!busy || blocksUnplaced}
                         onClick={() => create("review")}>
                   <FileText size={14} />
                   {busy === "create"
@@ -1704,6 +1743,17 @@ export default function ContractNew() {
 
             {message && (
               <div className="note warn" style={{ marginBottom: 16 }}>{message}</div>
+            )}
+            {blocksUnplaced && (
+              <div className="note warn" style={{ marginBottom: 16 }}>
+                <b>Drag the signature blocks onto the page first.</b> You chose
+                to place them by hand, and {unplacedSides.length === 1
+                  ? "one side has" : "both sides have"} nowhere to sign yet —
+                still to place:{" "}
+                {unplacedSides.map(k => (k === "carrier"
+                  ? `${carrierName} (you)`
+                  : counterparty?.name ?? "the counterparty")).join(" and ")}.
+              </div>
             )}
 
             <div className="grid g-12">
@@ -1782,37 +1832,96 @@ export default function ContractNew() {
                         onChange={e => setSigLayout(
                           l => l && { ...l, arrangement: e.target.value })}
                       >
-                        {/* Every arrangement the document builder can draw,
-                            except placing the blocks by hand: that one is done
-                            by dragging them onto the contract's own pages, and
-                            there is no contract to drag onto until this form
-                            has been saved. Offered on the record instead, where
-                            the pages exist. Filtered by what it NEEDS rather
-                            than by its name would be better still — but the
-                            spec says nothing about needing a document, and
-                            inventing a flag for one case is worse than saying
-                            which case it is. */}
-                        {sigSpec.arrangements
-                          .filter(a => a.key !== "placed")
-                          .map(a => (
-                            <option key={a.key} value={a.key}>{a.label}</option>
-                          ))}
+                        {/* EVERY arrangement, placing by hand included.
+                            It used to be filtered out here, because dragging a
+                            block needs pages and there is no contract to get
+                            them from until this form is saved — so a carrier
+                            who wanted a block somewhere particular had to
+                            create the contract, leave this flow, and go and
+                            move it on the record. The document was composable
+                            from what this form holds the whole time; that is
+                            what "Download the draft" does. It is now served as
+                            PAGES too, so the choice can be made where it is
+                            made. */}
+                        {sigSpec.arrangements.map(a => (
+                          <option key={a.key} value={a.key}>{a.label}</option>
+                        ))}
                       </select>
                       <div className="hint">
                         {sigSpec.arrangements
                           .find(a => a.key === sigLayout.arrangement)?.hint}
-                        {" "}You can also place the blocks by hand once the
-                        contract exists — its own page has the document to drag
-                        them onto.
                       </div>
                     </div>
+
+                    {/* Placed by hand: the pages below are this contract as it
+                        stands, composed from what is typed above and saved
+                        nowhere. Drag the blocks onto them. */}
+                    {sigLayout.arrangement === "placed" && (
+                      <div style={{ marginTop: 16 }}>
+                        <SignaturePlacer
+                          source={{ kind: "draft", key: "wizard",
+                                    body: placeBody }}
+                          layout={sigLayout}
+                          block={sigSpec.placed_block}
+                          targets={signerTargets(
+                            sigSpec.sides, null,
+                            side => (side === "carrier"
+                              ? `${carrierName} (you)`
+                              : counterparty?.name ?? "The counterparty"))}
+                          onPlace={(key, spot) => setSigLayout(l => l && ({
+                            ...l, blocks: { ...(l.blocks ?? {}), [key]: spot },
+                          }))}
+                          onRemove={key => setSigLayout(l => {
+                            if (!l) return l;
+                            const rest = { ...(l.blocks ?? {}) };
+                            delete rest[key];
+                            return { ...l, blocks: rest };
+                          })}
+                          onAnchor={(key, after) => setSigLayout(l => l && ({
+                            ...l, blocks: { ...(l.blocks ?? {}), [key]: { after } },
+                          }))}
+                        />
+                        <div className="hint" style={{ marginTop: 8 }}>
+                          <ul>
+                            <li>
+                              <b>Drop a block anywhere.</b> The wording moves
+                              down to make room for it, so it never covers a
+                              clause.
+                            </li>
+                            {/* <li>
+                              <b>Nothing has been sent.</b> These pages are
+                              composed from what you have typed and saved
+                              nowhere.
+                            </li> */}
+                            <li>
+                              <b>One block per side here</b> — nobody is named
+                              to sign until the contract exists.
+                            </li>
+                            <li>
+                              <b>Name them afterwards</b> on the contract's own
+                              signature page, and each person gets a block of
+                              their own to place next to these.
+                            </li>
+                          </ul>
+                        </div>
+                      </div>
+                    )}
                     <div className="hint" style={{ marginTop: 12 }}>
-                      A ticked line becomes a box the signer has to fill on the
-                      real document. Untick one and it is not on the page at
-                      all — nobody is asked for it and nothing is left blank.
-                      Who signs is not decided here: the contract's own
-                      signature page names them, when there is a document for
-                      them to sign.
+                      <ul>
+                        <li>
+                          <b>Ticked</b> — the signer gets a box they have to
+                          fill in on the real document.
+                        </li>
+                        <li>
+                          <b>Unticked</b> — the line is not on the page at all.
+                          Nobody is asked for it, and nothing is left blank.
+                        </li>
+                        <li>
+                          <b>Who signs is not decided here.</b> The contract's
+                          own signature page names them, once there is a
+                          document for them to sign.
+                        </li>
+                      </ul>
                     </div>
                   </div>
                 </div>

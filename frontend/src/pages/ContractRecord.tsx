@@ -20,7 +20,8 @@ import {
   Send, ShieldCheck, Trash2, Upload, XCircle,
 } from "lucide-react";
 import { currentMga, getTenantBrand } from "../auth";
-import { SignaturePlacer } from "../components/SignaturePlacer";
+import { SignaturePlacer, signerTargets }
+  from "../components/SignaturePlacer";
 import { InfoTip } from "../components/InfoTip";
 import { WordingEditor } from "../components/WordingEditor";
 import { fmtDate, fmtStamp } from "../utils/date";
@@ -1685,22 +1686,35 @@ export default function ContractRecord() {
                       {draftSig.arrangement === "placed" && (
                         <div style={{ marginTop: 14 }}>
                           <SignaturePlacer
-                            contractId={id}
+                            source={{ kind: "contract", id }}
                             layout={draftSig}
                             block={sigSpec.placed_block}
-                            sides={sigSpec.sides.map(s => ({
-                              key: s,
-                              label: s === "carrier"
+                            targets={signerTargets(
+                              sigSpec.sides, rec.signers,
+                              side => (side === "carrier"
                                 ? "You"
-                                : rec.counterparty?.name ?? "The counterparty",
-                            }))}
+                                : rec.counterparty?.name
+                                  ?? "The counterparty"))}
                             onPlace={(side, spot) => setDraftSig(l => l && ({
                               ...l,
                               blocks: { ...(l.blocks ?? {}), [side]: spot },
                             }))}
+                            onRemove={side => setDraftSig(l => {
+                              if (!l) return l;
+                              const rest = { ...(l.blocks ?? {}) };
+                              delete rest[side];
+                              return { ...l, blocks: rest };
+                            })}
+                            onAnchor={(side, after) => setDraftSig(l => l && ({
+                              ...l, blocks: { ...(l.blocks ?? {}), [side]: { after } },
+                            }))}
                           />
                           <div className="hint" style={{ marginTop: 8 }}>
-                            The pages are this contract as it stands. Save the
+                            The pages are this contract as it stands. Everybody
+                            named to sign gets a block of their own here, so
+                            three people can sign in three different places;
+                            anybody left unplaced signs under their side.
+                            Names are added on the signature page. Save the
                             terms to keep where you put the blocks — and if the
                             wording later grows or shrinks, a block left past
                             the end is drawn on the last page rather than lost.

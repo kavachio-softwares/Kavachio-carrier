@@ -4120,6 +4120,11 @@ def contract_generate_rules(program_id: int, contract_id: int,
         tenant_id = contract.tenant_id
         tenant_mga = body.mga or _tenant_name(s, tenant_id)
         bound_template_id = contract.output_template_id
+        # An AUTHORED contract — terms typed into the wizard rather than read
+        # off a document. It has no clauses and never will: its checks come
+        # from its agreed limits, bound separately. Read here, inside the
+        # session, because the no-clause branch below runs after it closes.
+        authored = bool(getattr(contract, "commercial_terms", None))
 
         # What this contract already carries. Counting matters twice over: a
         # second pass would DOUBLE every rule, and a contract already bound to a
@@ -4183,6 +4188,21 @@ def contract_generate_rules(program_id: int, contract_id: int,
 
     clauses = [dict(r) for r in rows]
     if not clauses:
+        # An authored contract reaching here is ORDINARY, not an error. A
+        # Bordereau Setup calls this for every contract it binds, and a
+        # programme is perfectly entitled to run on typed terms — there is no
+        # document, so there are no clauses, and its checks come from its
+        # agreed limits instead. Refusing used to fail the WHOLE build: the
+        # setup screen surfaces this as "Build failed", after minutes of work,
+        # for a contract that had nothing to do and said so.
+        if authored:
+            return {"ok": True, "skipped": "authored_contract",
+                    "contract_id": contract_id,
+                    "output_template_id": body.output_template_id,
+                    "rules": 0, "created": 0}
+        # No clauses and no typed terms is a different thing entirely — a
+        # document that was read and yielded nothing. That stays an error,
+        # because silence there would hide a failed extraction.
         raise HTTPException(
             400, "this contract has no extracted clauses to build rules from")
 
@@ -4224,6 +4244,16 @@ def contract_generate_rules(program_id: int, contract_id: int,
             actor=body.actor or "system",
             created_by="template_binding",
         )
+
+    # Correct the leftovers. Every clause that got a rule has just had its
+    # review row deleted by persist_resolved_rules; the ones still in the queue
+    # keep whatever reason was written when the contract was UPLOADED — and for
+    # a contract added before any setup existed that reason is "no output
+    # template yet", which the setup screen then prints on a screen that plainly
+    # has one. This replaces those with the reason THIS run produced.
+    db_persister.refresh_review_reasons(
+        contract_id=contract_id, program_id=program_id, tenant_id=tenant_id,
+        review_queue=p2.get("review_queue") or [])
 
     # The contract now speaks this template's language. Say so on the row, or
     # every reader that looks up a template's contract still finds nothing —

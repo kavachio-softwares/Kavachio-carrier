@@ -1607,9 +1607,19 @@ class MissingBdxColumn(Base):
 class AiResponseCache(Base):
     """Memo of a model answer, keyed by a hash of the EXACT input that produced it.
 
-    Several calls in the upload pipeline ask a question whose answer does not
-    depend on the file being uploaded at all:
+    Several calls in the upload pipeline ask a question whose answer is fully
+    determined by inputs the key covers, so re-asking can only reproduce it:
 
+      rule_intents   — which clauses carry a rule, and what each one says
+                       (Call 2). Field-agnostic by construction, so the answer
+                       cannot change when an output template turns up later.
+                       Keyed on the clause texts. This is the one kind whose
+                       input IS the uploaded file, and it earns its place
+                       because the pass runs twice for the ordinary contract:
+                       once on upload, where it stops for want of a template,
+                       and again when a Bordereau Setup picks the contract up.
+                       The verdict survives on the clause row; the intents,
+                       which are the expensive half, were memory-only.
       generic_bind   — binding Kavachio's generic rule library to an output
                        template's columns. Depends only on (library rows,
                        template fields), so every contract uploaded against the

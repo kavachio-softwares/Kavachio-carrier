@@ -1262,19 +1262,25 @@ def wording_preview(body: WordingPreviewIn,
     }
 
 
-@router.post("/contract-wording/draft")
-def wording_draft(body: WordingPreviewIn,
-                  _p: Principal = Depends(current_principal)):
-    """Download a draft — the composed PDF, before anything is saved.
+def _compose_from_body(body: WordingPreviewIn, *,
+                       blank_signature_space: bool = False,
+                       marks_out: list | None = None,
+                       landings_out: dict | None = None) -> bytes:
+    """The composed document for a contract that does not exist yet.
 
-    "Nothing has been sent yet" has to stay true while someone takes the draft
-    to a colleague, so this writes no row anywhere: the same composer the saved
+    "Nothing has been sent yet" has to stay true while somebody is still
+    building one, so this writes no row anywhere: the same composer the saved
     contract uses, run on what the builder holds right now.
+
+    Shared by the three things the create wizard can do with a document it has
+    not saved — download it, count its pages, and draw one of them to drag a
+    signature block onto. One composer, because a page somebody places a block
+    on has to be the page that comes out of the printer; two would be two
+    documents that agree until they do not.
     """
     import contract_wording as cw
 
-    sections = [sec for sec in (body.sections or [])
-                if isinstance(sec, dict) and (sec.get("body") or "").strip()]
+    sections = _composable(body.sections)
     if not sections:
         raise HTTPException(400, "there are no sections to compose — write or "
                                  "generate the wording first")
@@ -1299,10 +1305,74 @@ def wording_draft(body: WordingPreviewIn,
         schedule=cw.schedule_rows(values=body.values, limits=limits,
                                   type_label=type_label,
                                   programme_name=body.programme_name),
-        signers=body.signers, signature_layout=body.signature_layout)
+        signers=body.signers, signature_layout=body.signature_layout,
+        blank_signature_space=blank_signature_space, marks_out=marks_out,
+        landings_out=landings_out)
+    return data
+
+
+@router.post("/contract-wording/draft")
+def wording_draft(body: WordingPreviewIn,
+                  _p: Principal = Depends(current_principal)):
+    """Download a draft — the composed PDF, before anything is saved."""
+    data = _compose_from_body(body)
     fname = f"{(body.values.get('name') or 'contract-draft').strip()} (draft).pdf"
     return Response(content=data, media_type="application/pdf",
                     headers={"Content-Disposition": _content_disposition(fname)})
+
+
+# ── the pages of a contract that does not exist yet ─────────────────────────
+#
+# The saved record has /contracts/{id}/pages for this. The create wizard cannot
+# use it, and used to have nothing: placing the blocks by hand was offered only
+# after the contract was saved, so a carrier who wanted them somewhere
+# particular had to create the contract, leave the flow, and go and move them.
+# The document was composable from the builder's own state the whole time —
+# that is what "Download the draft" does — so the only thing missing was
+# serving it as PAGES rather than as a file.
+#
+# POST, not GET, for both: the body IS the contract. There is no id to put in a
+# path because there is no row, and the terms are far too big for a query
+# string.
+
+@router.post("/contract-wording/pages")
+def wording_pages(body: WordingPreviewIn,
+                  _p: Principal = Depends(current_principal)):
+    """How many pages the unsaved contract has, and how big each one is.
+
+    The same answer /contracts/{id}/pages gives for a saved one, and for the
+    same purpose: a block is stored as a page number and a point on that page,
+    so the screen has to be showing the pages the PDF actually has.
+    """
+    marks: list = []
+    landings: dict = {}
+    data = _compose_from_body(body, blank_signature_space=True,
+                              marks_out=marks, landings_out=landings)
+    return {"marks": marks, "landings": landings,
+            "pages": esign_pdf.page_count(data),
+            "sizes": esign_pdf.page_sizes(data),
+            # Where the wording is, so a block can be kept off it.
+            "text": esign_pdf.text_regions(data),
+            "clauses": _clause_list(_composable(body.sections))}
+
+
+@router.post("/contract-wording/pages/{page_no}")
+def wording_page(page_no: int, body: WordingPreviewIn,
+                 scale: float = Query(2.0, ge=0.5, le=3.0),
+                 _p: Principal = Depends(current_principal)):
+    """One page of the unsaved contract, as a PNG.
+
+    Composed fresh and never cached, exactly like the saved contract's pages:
+    the wording is not a file, and a cached image is a picture of terms that
+    may have moved since.
+    """
+    data = _compose_from_body(body, blank_signature_space=True)
+    try:
+        img = esign_pdf.render_page_png(data, page_no, scale)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return Response(content=img, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
 
 
 @router.patch("/contracts/{contract_id}")
@@ -2671,9 +2741,16 @@ def contract_pages(contract_id: int,
     """
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
-        data = compose_contract_pdf(s, c)
-        return {"pages": esign_pdf.page_count(data),
-                "sizes": esign_pdf.page_sizes(data)}
+        marks: list = []
+        landings: dict = {}
+        data = compose_contract_pdf(s, c, blank_signature_space=True,
+                                    marks_out=marks, landings_out=landings)
+        return {"marks": marks, "landings": landings,
+                "pages": esign_pdf.page_count(data),
+                "sizes": esign_pdf.page_sizes(data),
+                # Where the wording is, so a block can be kept off it.
+                "text": esign_pdf.text_regions(data),
+                "clauses": _clause_list(_contract_sections(c))}
 
 
 @router.get("/contracts/{contract_id}/pages/{page_no}")
@@ -2689,7 +2766,86 @@ def contract_page(contract_id: int, page_no: int,
     """
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
-        data = compose_contract_pdf(s, c)
+        data = compose_contract_pdf(s, c, blank_signature_space=True)
+    try:
+        img = esign_pdf.render_page_png(data, page_no, scale)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return Response(content=img, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+def _clause_list(sections) -> list[dict]:
+    """The clauses a signature block may be anchored to, numbered as the
+    document numbers them.
+
+    Served with the pages rather than restated on the screen, and numbered off
+    the SAME list the composer typesets: `compose_pdf` numbers what it is
+    given, from 1, so a screen counting its own copy would tie a block to
+    clause 4 and get clause 5 the first time an empty section was dropped on
+    the way in. Give this exactly what was composed — see `_composable`.
+    """
+    return [{"n": i,
+             "title": str((sec.get("title") if isinstance(sec, dict) else None)
+                          or f"Clause {i}")}
+            for i, sec in enumerate(sections or [], start=1)]
+
+
+def _composable(raw) -> list[dict]:
+    """The sections that actually reach the page — the one filter, named once.
+
+    A section with no body is dropped before composing, so it is not a clause,
+    has no number, and must not be offered as one to anchor a block to.
+    """
+    return [sec for sec in (raw or [])
+            if isinstance(sec, dict) and (sec.get("body") or "").strip()]
+
+
+def _contract_sections(c: Contract) -> list:
+    """This contract's wording sections, however the row happens to hold it."""
+    return ((c.wording_sections or {}).get("sections")
+            if isinstance(c.wording_sections, dict)
+            else c.wording_sections) or []
+
+
+class PagesIn(BaseModel):
+    """A layout to compose the canvas with, instead of the saved one.
+
+    Anchoring a block to a clause CHANGES the document — the clauses below it
+    move down — so a screen that offered the choice against pages composed from
+    the saved layout would show nothing happening. Sent, never stored: this
+    writes no row, exactly like the GET twins it sits beside.
+    """
+    signature_layout: Optional[dict] = None
+
+
+@router.post("/contracts/{contract_id}/pages")
+def contract_pages_preview(contract_id: int, body: PagesIn,
+                           p: Principal = Depends(current_principal)):
+    """The pages of a contract as a layout WOULD compose it. See PagesIn."""
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        marks: list = []
+        landings: dict = {}
+        data = compose_contract_pdf(s, c, blank_signature_space=True,
+                                    layout_override=body.signature_layout,
+                                    marks_out=marks, landings_out=landings)
+        return {"marks": marks, "landings": landings,
+                "pages": esign_pdf.page_count(data),
+                "sizes": esign_pdf.page_sizes(data),
+                "text": esign_pdf.text_regions(data),
+                "clauses": _clause_list(_contract_sections(c))}
+
+
+@router.post("/contracts/{contract_id}/pages/{page_no}")
+def contract_page_preview(contract_id: int, page_no: int, body: PagesIn,
+                          scale: float = Query(2.0, ge=0.5, le=3.0),
+                          p: Principal = Depends(current_principal)):
+    """One page of a contract as a layout WOULD compose it. See PagesIn."""
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        data = compose_contract_pdf(s, c, blank_signature_space=True,
+                                    layout_override=body.signature_layout)
     try:
         img = esign_pdf.render_page_png(data, page_no, scale)
     except ValueError as e:
@@ -2699,7 +2855,11 @@ def contract_page(contract_id: int, page_no: int,
 
 
 def compose_contract_pdf(s, c: Contract, *,
-                         anchors: dict[str, str] | None = None) -> bytes:
+                         anchors: dict[str, str] | None = None,
+                         blank_signature_space: bool = False,
+                         layout_override: dict | None = None,
+                         marks_out: list | None = None,
+                         landings_out: dict | None = None) -> bytes:
     """This contract's terms and wording as one PDF.
 
     Split out of the download endpoint because the SIGNING round needs the same
@@ -2715,9 +2875,7 @@ def compose_contract_pdf(s, c: Contract, *,
     """
     import contract_wording as cw
 
-    sections = ((c.wording_sections or {}).get("sections")
-                if isinstance(c.wording_sections, dict)
-                else c.wording_sections) or []
+    sections = _contract_sections(c)
     # The same context the RECORD reads, so a clause says the same thing on the
     # screen and in the file. It used to be worked out twice.
     ctx = _wording_context(s, c)
@@ -2738,9 +2896,12 @@ def compose_contract_pdf(s, c: Contract, *,
                                   programme_name=ctx["programme_name"]),
         signers=(c.wording_sections or {}).get("signers")
                 if isinstance(c.wording_sections, dict) else None,
-        signature_layout=(c.wording_sections or {}).get("signature_layout")
-                         if isinstance(c.wording_sections, dict) else None,
-        anchors=anchors)
+        signature_layout=(
+            layout_override if layout_override is not None
+            else ((c.wording_sections or {}).get("signature_layout")
+                  if isinstance(c.wording_sections, dict) else None)),
+        anchors=anchors, blank_signature_space=blank_signature_space,
+        marks_out=marks_out, landings_out=landings_out)
 
 
 # =============================================================================

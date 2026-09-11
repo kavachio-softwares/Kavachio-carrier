@@ -448,14 +448,47 @@ export type SignatureBlockSpec = {
 
 /** What the carrier chose: which lines each side signs, and how the blocks
  *  sit. Stored on the contract and read by everything that draws the page. */
+/**
+ * Where one block goes — the two ways of answering that, and they are not the
+ * same kind of answer.
+ *
+ * A POINT is a place on a finished page: the block is drawn on top of it, can
+ * go anywhere including a margin, and is the only way to put one person's boxes
+ * somewhere of their own.
+ *
+ * A CLAUSE is a place in the contract: the block joins the flow after clause n,
+ * so the clauses below it move down and room is made for it. It cannot cover
+ * the wording, by construction — and it cannot be put at an exact point either.
+ */
+export type BlockSpot =
+  /** DROPPED on a page: after flow mark `at`, `gap` of a page below it, `x`
+   *  across. What "a point on the page" means — the block joins the flow, so
+   *  the wording moves down for it and cannot be covered. */
+  | { at: number; gap: number; x: number }
+  /** Tied to a clause. */
+  | { after: number }
+  /** Drawn ON TOP at a coordinate. The original answer, kept because
+   *  documents composed before this still hold it. */
+  | { page: number; x: number; y: number };
+
+/** Narrow a spot to the one that was dropped onto a page. */
+export const isDropSpot = (
+  s: BlockSpot | undefined | null,
+): s is { at: number; gap: number; x: number } =>
+  !!s && typeof (s as { at?: number }).at === "number";
+
+/** One measured point in the composed document's flow: emitted after every
+ *  paragraph, and where it landed. A drop is resolved against these — see
+ *  contract_wording.FlowMark. */
+export type FlowMark = { n: number; page: number; y: number };
+
 export type SignatureLayout = {
   arrangement: string;
   fields: Record<string, string[]>;
-  /** Where each side's block was dragged to, when it was placed by hand: a
-   *  page number and the top-left corner as a fraction of that page. Kept
+  /** Where each block goes, keyed by party key — `carrier`, `carrier#2`. Kept
    *  whatever the arrangement is, so trying the automatic ones and coming back
    *  does not throw a placement away. */
-  blocks: Record<string, { page: number; x: number; y: number }>;
+  blocks: Record<string, BlockSpot>;
 };
 
 /** How hard a check bites, and the words for it — served, never typed here.
@@ -497,6 +530,25 @@ export async function downloadDraft(body: WordingInput): Promise<void> {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+/** The pages of a contract that does not exist yet, for placing the signature
+ *  blocks while it is still being written.
+ *
+ *  The same two calls the saved record answers with /contracts/{id}/pages, on
+ *  the same composed document — POSTed, because the body IS the contract: there
+ *  is no id to put in a path until somebody saves it. */
+export const getDraftPages = (body: WordingInput) =>
+  api.post<ContractPages>("/contract-wording/pages", body).then(r => r.data);
+
+/** One page of the unsaved contract as an object URL the caller must revoke. */
+export const getDraftPageImage = async (
+  body: WordingInput, page: number, scale = 1.5,
+): Promise<string> => {
+  const r = await api.post<Blob>(`/contract-wording/pages/${page}`, body, {
+    params: { scale }, responseType: "blob", silent: true,
+  });
+  return URL.createObjectURL(r.data);
+};
 
 /**
  * The WHOLE contract as a PDF — schedule, wording, signature page.
@@ -748,20 +800,50 @@ export async function openDocument(
  *  Only the placement screen needs this: a hand-placed signature block is a
  *  page number and a point on it, so the screen has to be looking at the same
  *  pages the PDF has. */
-export const getContractPages = (id: number) =>
-  api.get<{ pages: number; sizes: Array<{ width: number; height: number }> }>(
-    `/contracts/${id}/pages`).then(r => r.data);
+/** One page's worth of word-rectangles, as fractions of the page. */
+export type TextRegion = { x: number; y: number; w: number; h: number };
+
+export type ContractPages = {
+  pages: number;
+  sizes: Array<{ width: number; height: number }>;
+  /** Where the wording is on each page, so a hand-placed block can be kept off
+   *  it — a signature covering the clause it agrees to is worse than an ugly
+   *  one. Indexed by page, 0-based. */
+  text: TextRegion[][];
+  /** The clauses a side's block can be anchored to, numbered as the document
+   *  numbers them. Served, never counted here — see _clause_list. */
+  clauses: Array<{ n: number; title: string }>;
+  /** Where a block dropped on these pages can be inserted into the flow. */
+  marks: FlowMark[];
+  /** Where each placed block ACTUALLY ended up, keyed by party key.
+   *
+   *  Not always where it was aimed: a block dropped near the foot of a page
+   *  does not fit there, and the typesetter carries it to the next one. The
+   *  box on screen follows this, or it would claim a page the block is not
+   *  on. */
+  landings: Record<string, { page: number; y: number }>;
+};
+
+/** The pages of a saved contract, as `layout` WOULD compose them.
+ *
+ *  POSTed with the layout being edited rather than read with the saved one:
+ *  anchoring a block to a clause moves every clause below it, and a canvas
+ *  composed from what is stored would show nothing happening. Writes nothing. */
+export const getContractPages = (id: number, layout?: SignatureLayout | null) =>
+  api.post<ContractPages>(`/contracts/${id}/pages`,
+                          { signature_layout: layout ?? null })
+    .then(r => r.data);
 
 /** One page of the composed contract as an object URL the caller must revoke.
  *
  *  Fetched rather than pointed at with an <img src>, because every call to this
  *  API carries a bearer token and an <img> cannot set a header. */
 export const getContractPageImage = async (
-  id: number, page: number, scale = 1.5,
+  id: number, page: number, scale = 1.5, layout?: SignatureLayout | null,
 ): Promise<string> => {
-  const r = await api.get<Blob>(`/contracts/${id}/pages/${page}`, {
-    params: { scale }, responseType: "blob", silent: true,
-  });
+  const r = await api.post<Blob>(`/contracts/${id}/pages/${page}`,
+    { signature_layout: layout ?? null },
+    { params: { scale }, responseType: "blob", silent: true });
   return URL.createObjectURL(r.data);
 };
 

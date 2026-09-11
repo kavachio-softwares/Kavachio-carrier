@@ -549,6 +549,127 @@ def _name_tokens(name: str) -> frozenset[str]:
     return frozenset(out)
 
 
+# ── does the bordereau already carry this, under another name? ─────────────
+#
+# `_norm` answers that by exact spelling, which is the one form a real
+# bordereau never uses: its headings are shorthand. A file whose underwriter
+# column is headed `UW` was reported as missing "Authorized Underwriter Name",
+# and a reviewer looking at their own spreadsheet can see the column right
+# there. The prompt asks the model to match by meaning; this is the part that
+# does not depend on it having done so.
+#
+# Everything below is ORDINARY INSURANCE AND SPREADSHEET SHORTHAND — nothing
+# here is specific to a carrier, a programme or a template, which is the rule
+# this module is written to.
+_ABBREV: dict[str, str] = {
+    "uw": "underwriter", "uwr": "underwriter", "ins": "insured",
+    "pol": "policy", "prem": "premium", "comm": "commission",
+    "eff": "effective", "exp": "expiration", "expiry": "expiration",
+    "endt": "endorsement", "ded": "deductible", "agg": "aggregate",
+    "occ": "occurrence", "reins": "reinsurance", "fac": "facultative",
+    "qs": "quota", "sl": "surplus", "tiv": "value",
+    "amt": "amount", "pct": "percent", "perc": "percent", "dt": "date",
+    "no": "number", "num": "number", "nbr": "number", "qty": "quantity",
+    "addr": "address", "st": "state", "yr": "year", "mo": "month",
+    "veh": "vehicle", "cert": "certificate", "cov": "coverage",
+    "req": "required", "desc": "description", "ref": "reference",
+}
+
+# Words that qualify a column without changing WHICH value it holds. "Insured"
+# and "Insured Name" are one column; so are "Underwriter" and "Authorized
+# Underwriter Name". Kept deliberately short — a long list starts merging real,
+# distinct columns.
+_FILLER = frozenset((
+    "name", "the", "of", "and", "or", "for", "per", "each", "any", "all",
+    "authorized", "authorised", "applicable", "relevant", "field", "column",
+))
+
+# Words that name a DOCUMENT or an edition of one. These are never a per-row
+# value — every row of a bordereau would carry the same answer — and the prompt
+# already refuses them, so a finding built on one is the model having slipped.
+# "as defined by the … Underwriting Guidelines version 2025.1" is a reference to
+# a manual, not a column of the spreadsheet.
+_NOT_A_COLUMN = frozenset((
+    "documentation", "version", "guideline", "manual", "addendum",
+    "reconciliation", "attestation", "appendix", "exhibit",
+))
+
+# A trailing measure word says how a value is expressed, not which value it is:
+# "Policy Fees" and "Policy Fees Amount" are one column asked for twice. Only
+# ever stripped from the END, and never from a one-word name — "Total Insured
+# Value" must not collapse onto "Insured".
+_MEASURE_TAIL = frozenset(("amount", "value", "total", "sum", "figure"))
+
+
+def _meaning_tokens(name: str) -> frozenset[str]:
+    """What a column name actually IDENTIFIES: its words, de-pluralised, common
+    shorthand spelled out, and pure qualifiers dropped."""
+    out = {_ABBREV.get(t, t) for t in _name_tokens(name)}
+    return frozenset(out - _FILLER)
+
+
+def _bdx_meanings(bdx_cols: dict[str, list[str]]) -> list[frozenset[str]]:
+    """One meaning-set per column the bordereau actually has."""
+    seen: list[frozenset[str]] = []
+    for cols in bdx_cols.values():
+        for c in cols:
+            m = _meaning_tokens(c)
+            if m and m not in seen:
+                seen.append(m)
+    return seen
+
+
+def _covered_by_bdx(name: str, meanings: list[frozenset[str]]) -> bool:
+    """Whether some existing BDX column already carries this data point.
+
+    ONE DIRECTION ONLY: the bordereau column has to say at least everything the
+    finding names. `UW` covers "Authorized Underwriter Name" because underwriter
+    is all the finding identifies; `Gross Premium` does NOT cover "Net Premium",
+    because the finding names something the column does not.
+    """
+    want = _meaning_tokens(name)
+    return bool(want) and any(want <= have for have in meanings)
+
+
+def _is_not_a_column(name: str) -> bool:
+    """A finding that names a document or its edition rather than a value."""
+    return bool(_NOT_A_COLUMN & _name_tokens(name))
+
+
+def _fold_key(name: str) -> frozenset[str]:
+    """The key two findings share when they are the same column named twice."""
+    toks = list(re.split(r"[^a-z0-9]+", str(name or "").lower()))
+    toks = [t for t in toks if t]
+    if len(toks) > 1 and _ABBREV.get(toks[-1], toks[-1]) in _MEASURE_TAIL:
+        toks = toks[:-1]
+    return _name_tokens(" ".join(toks))
+
+
+def _drop_false_positives(items: list[dict],
+                          bdx_cols: dict[str, list[str]]) -> list[dict]:
+    """The deterministic sweep over what the model returned.
+
+    Applied on the way IN, so nothing wrong is stored, and again on the way OUT,
+    so a setup checked before these guards existed reads correctly without
+    paying for the check a second time. Both callers pass the same bordereau, so
+    both get the same answer.
+    """
+    meanings = _bdx_meanings(bdx_cols)
+    kept: list[dict] = []
+    for it in items:
+        name = it.get("column_name") or ""
+        if _is_not_a_column(name):
+            log.debug("[missing-cols] dropped %r — names a document, not a column",
+                      name)
+            continue
+        if meanings and _covered_by_bdx(name, meanings):
+            log.debug("[missing-cols] dropped %r — the bordereau already has it",
+                      name)
+            continue
+        kept.append(it)
+    return kept
+
+
 def _collapse_respellings(items: list[dict]) -> list[dict]:
     """Fold findings whose names are the SAME WORDS — reordered, re-punctuated
     or pluralised ("Fee, Modeling" / "Modeling Fees"). Nothing that changes a
@@ -565,7 +686,7 @@ def _collapse_respellings(items: list[dict]) -> list[dict]:
     out: list[dict] = []
     by_tokens: dict[frozenset[str], int] = {}
     for it in items:
-        key = _name_tokens(it["column_name"])
+        key = _fold_key(it["column_name"])
         if not key:
             out.append(it)
             continue
@@ -625,7 +746,7 @@ def _clean_findings(items: list[dict], bdx_cols: dict[str, list[str]],
         })
     # Fold two-spellings-of-one-gap BEFORE the cap, so a batch full of twins
     # can't push a real finding past the limit.
-    return _collapse_respellings(out)[:_MAX_FINDINGS]
+    return _drop_false_positives(_collapse_respellings(out), bdx_cols)[:_MAX_FINDINGS]
 
 
 def _ask_model(prompt: str) -> Optional[list[dict]]:
@@ -774,13 +895,24 @@ def _review_clauses(s, pipeline_id: int) -> list[dict]:
     contract_ids = _pipeline_contract_ids(s, pipe)
     if not contract_ids:
         return []
+    # THE NAME COMES FROM THE CLAUSE WHEN THE ROUTING ROW HAS NONE.
+    # `rule_name` is only filled for a clause the generator got far enough to
+    # name a rule for — which is, by definition, not what lands in this bucket.
+    # So every entry here rendered as "Untitled clause", while the extraction
+    # had all along recorded a perfectly good title for it on the clause row
+    # ("Administrator Fees", "Binding Authority Grant"). Joined rather than
+    # copied at write time so contracts already processed read correctly too.
     try:
         rows = s.execute(
-            text("SELECT contract_id, clause_id, rule_name, clause_text, "
-                 "       source_page, reason "
-                 "FROM contract_clause_routing "
-                 "WHERE contract_id IN :cids AND bucket = 'review' "
-                 "ORDER BY contract_id, routing_id")
+            text("SELECT r.contract_id, r.clause_id, r.clause_text, "
+                 "       r.source_page, r.reason, "
+                 "       COALESCE(NULLIF(TRIM(r.rule_name), ''), "
+                 "                NULLIF(TRIM(c.title), ''), "
+                 "                NULLIF(TRIM(c.section_header), '')) AS rule_name "
+                 "FROM contract_clause_routing r "
+                 "LEFT JOIN clauses_extracted c ON c.clause_id = r.clause_id "
+                 "WHERE r.contract_id IN :cids AND r.bucket = 'review' "
+                 "ORDER BY r.contract_id, r.routing_id")
             .bindparams(bindparam("cids", expanding=True)),
             {"cids": contract_ids}).mappings().all()
     except Exception as e:  # noqa: BLE001
@@ -818,6 +950,13 @@ def _stored(s, pipeline_id: int) -> dict:
             .filter(MissingBdxColumn.pipeline_id == pipeline_id)
             .order_by(MissingBdxColumn.id).all())
     items = [_row_to_dict(r) for r in rows if r.status == "missing"]
+    # Swept again on the way out. A setup checked before these guards existed
+    # holds findings that were never true — a column the bordereau has under a
+    # shorthand heading, or a document mistaken for a column — and re-reading is
+    # free where re-checking is a model call and a wait.
+    fmt_id = next((r.format_id for r in rows if r.format_id), None)
+    items = _collapse_respellings(
+        _drop_false_positives(items, _bdx_columns(s, fmt_id)))
     mapped_fields, mapped_labels = _mapped_rule_index(s, pipeline_id)
     # Drop what is already covered, by either handle. _norm(None) is "" and no
     # empty key is ever in these sets, so a finding carrying neither a field nor
@@ -830,15 +969,19 @@ def _stored(s, pipeline_id: int) -> dict:
     items.sort(key=lambda i: 0 if i["severity"] == "required" else 1)
     analyzed_at = max((r.analyzed_at for r in rows if r.analyzed_at), default=None)
     clauses = _review_clauses(s, pipeline_id)
-    # Keep the two groups from saying the same thing twice. A finding that names
-    # a clause already listed above — by its own column name or by the clause it
-    # was quoted from — is fully visible there, complete with the extraction's
-    # reason for why no column fitted. Showing it again below only pads the note.
+    # Keep the two groups from saying the same thing twice. A finding whose own
+    # NAME is a clause already listed above is fully visible there, complete
+    # with the extraction's reason for why no column fitted; showing it again
+    # below only pads the note.
+    #
+    # Being QUOTED FROM one of those clauses is not the same thing and is not
+    # filtered on. One clause routinely calls for several columns — a fee clause
+    # naming a policy, inspection, modeling and audit fee is four columns to add
+    # and one clause to read — and suppressing all four because they share a
+    # source would leave the reviewer a clause with no idea what to do about it.
     clause_names = {_norm(c["rule_name"]) for c in clauses if c.get("rule_name")}
     if clause_names:
-        items = [i for i in items
-                 if _norm(i["column_name"]) not in clause_names
-                 and _norm(i["clause_label"]) not in clause_names]
+        items = [i for i in items if _norm(i["column_name"]) not in clause_names]
     return {
         "pipeline_id": pipeline_id,
         "analyzed": bool(rows),

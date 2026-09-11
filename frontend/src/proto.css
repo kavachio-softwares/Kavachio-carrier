@@ -955,12 +955,29 @@
    so what is dragged sits on the thing it will be printed on rather than on a
    diagram of it — and the ghost block is the size the server draws, not a size
    chosen here. */
-.proto .place-doc{display:flex;flex-direction:column;gap:14px;max-height:520px;
-  overflow-y:auto;padding:12px;background:var(--p-surface-2);
+/* The pages are READ, not glanced at: "where should this block go" is answered
+   by the words underneath it, so the sheet has to be big enough to have words
+   on it. --pg-w is set by the zoom control; overflow is both axes because a
+   page enlarged past the column has to be scrolled to, not squashed back. */
+.proto .place-doc{display:flex;flex-direction:column;gap:14px;max-height:72vh;
+  overflow:auto;padding:12px;background:var(--p-surface-2);
   border:1px solid var(--p-border);border-radius:var(--p-r-sm)}
-.proto .place-pg{position:relative;width:100%;max-width:520px;margin:0 auto;
+.proto .place-pg{position:relative;width:100%;max-width:var(--pg-w,520px);
+  flex:none;margin:0 auto;
   background:#fff;border:1px solid var(--p-border);border-radius:3px;
   box-shadow:var(--p-sh-sm);overflow:hidden;cursor:crosshair}
+.proto .place-zoom{align-items:center;gap:6px;margin:0 0 10px}
+.proto .place-tgt{display:inline-flex;align-items:center;gap:5px}
+/* Points somebody needs, as points. A paragraph of four of them runs together
+   and gets read as none. */
+.proto .hint ul{margin:6px 0 0;padding-left:16px;display:flex;
+  flex-direction:column;gap:4px}
+.proto .hint li{list-style:disc}
+.proto .place-tie{height:26px;padding:0 6px;font-size:11.5px;max-width:210px;
+  border:1px solid var(--p-border);border-radius:var(--p-r-sm);
+  background:var(--p-surface);color:var(--p-ink)}
+.proto .place-zoom .zval{min-width:38px;text-align:center;
+  font-variant-numeric:tabular-nums}
 .proto .place-pg img{display:block;width:100%;height:100%;object-fit:contain;
   user-select:none;-webkit-user-drag:none}
 .proto .place-pg .ld{display:grid;place-items:center;height:100%;
@@ -972,6 +989,13 @@
   border-radius:4px;padding:4px 6px;font-size:9.5px;line-height:1.3;
   color:var(--p-primary-h);overflow:hidden}
 .proto .place-blk:active{cursor:grabbing}
+/* Taking a block back off. A placement with no way to undo it is a decision
+   somebody has to get right first time. */
+.proto .place-blk .rm{position:absolute;top:3px;right:3px;width:17px;height:17px;
+  display:grid;place-items:center;border-radius:50%;cursor:pointer;
+  border:1px solid var(--p-border);background:var(--p-surface);
+  color:var(--p-muted);box-shadow:var(--p-sh-sm)}
+.proto .place-blk .rm:hover{border-color:#c0392b;color:#c0392b}
 .proto .place-blk b{display:block;font-size:9.5px}
 .proto .place-blk .rule{display:block;height:1px;background:var(--p-primary);
   opacity:.6;margin:12px 0 3px}

@@ -1005,17 +1005,37 @@ def map_intents_to_ir(clauses, intent_clfs, template_fields=None, batch_size=Non
         if still:
             print(f"[Call 3] auto-retry (attempt 2, relaxed) for "
                   f"{len(still)} unmapped intent(s).")
+            # LOGGED, because this pass was previously invisible. The plog
+            # ATTEMPT/OK pair lives inside _map_optimistically, and the relaxed
+            # retry calls _run_mapping_batches directly — so the decision log
+            # showed one CALL3 attempt and nothing else, and "did the safety net
+            # run?" was unanswerable after the fact. It matters: the first pass
+            # is not stable at this batch size (the same 29 intents, same
+            # template, temperature 0, decline a DIFFERENT subset run to run),
+            # so this retry is what stands between a wobble and a missing rule.
+            plog.log("CALL3", "RETRY",
+                     f"relaxed retry for {len(still)} unmapped intent(s)",
+                     "the strict pass left these unbound — re-asking with the "
+                     "reconsider prompt before they are routed to review")
             retry = _run_mapping_batches(
                 still, template_fields,
                 min(len(still), _CALL3_AUTO_BATCH) or 1,
                 forced_field=None, relaxed=True, temperature=_CALL3_RETRY_TEMP)
+            recovered = 0
             for key, ir in retry.items():
                 # Overwrite a prior null/missing entry when the retry now binds a
                 # real template (setdefault would keep the earlier null).
                 if isinstance(ir, dict) and ir.get("template"):
                     mapped[key] = ir
+                    recovered += 1
                     print(f"  [retry] recovered intent {key} → "
                           f"template {ir.get('template')!r}")
+            lost = len(still) - recovered
+            plog.log("CALL3", "RECOVERED" if recovered else "UNRECOVERED",
+                     f"{recovered} of {len(still)} rescued by the relaxed retry",
+                     f"{lost} intent(s) still unbound — these become "
+                     f"'awaiting a column' clauses on the setup screen"
+                     if lost else "nothing left unbound")
 
     # Regroup IRs per clause (preserve input order).
     output = []

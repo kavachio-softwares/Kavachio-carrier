@@ -431,6 +431,13 @@ export default function OutputTemplate() {
           </div>
         </Card>
 
+ {/* HIDDEN, not deleted. The per-sheet column list sat under the two
+            cards above and repeated what they already answer — Sheet
+            Classification names every tab and says which are validated, and
+            the sample grid at the top shows the columns themselves. SheetBlock
+            and the patch handlers are left intact below: put this block back
+            and the section returns exactly as it was.
+
         {t.structure.sheets.map((sh, si) => (
           <SheetBlock
             key={sh.sheet_name}
@@ -441,6 +448,7 @@ export default function OutputTemplate() {
             onPatchColumn={(ci, p) => patchColumn(si, ci, p)}
           />
         ))}
+        */}
       </PageBody>
     </>
   );

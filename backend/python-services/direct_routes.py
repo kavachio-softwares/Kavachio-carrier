@@ -1874,12 +1874,8 @@ async def _render_landing(
         # Governing set = the per-sheet contracts ∪ the fallback contract. Every
         # governing contract's rules are validated (each only fires on the sheets
         # its compiled SQL references), and their constants are merged.
-        governing_ids = []
-        for cid in ([int(v) for v in sheet_contracts.values() if v]
-                    + ([eff_contract_id] if eff_contract_id else [])
-                    + list(asof_extra_ids or [])):
-            if cid not in governing_ids:
-                governing_ids.append(cid)
+        governing_ids = _governing_ids(sheet_contracts, eff_contract_id,
+                                       asof_extra_ids)
         base_consts = {}
         for cid in governing_ids:
             base_consts.update(_contract_constants(s, cid))
@@ -1897,9 +1893,15 @@ async def _render_landing(
                 asof_windows = _asof_contract_windows(s, governing_ids)
         except Exception:      # noqa: BLE001 — fail-open: no filter, no harm
             asof_windows = {}
-        _fname = {c.id: c.filename for c in
-                  (s.query(Contract).filter(Contract.id.in_(governing_ids)).all()
-                   if governing_ids else [])}
+        # BOTH labels, because a contract may carry either. One written in
+        # Kavachio is typed and has a name and no file at all; one that arrived
+        # as a document has a filename. Sending only the filename left the run
+        # result calling a named contract "Contract #4019" — the one place the
+        # operator checks that the file was measured against what they chose.
+        _gov_rows = (s.query(Contract).filter(Contract.id.in_(governing_ids)).all()
+                     if governing_ids else [])
+        _fname = {c.id: c.filename for c in _gov_rows}
+        _cname = {c.id: c.name for c in _gov_rows}
         _mapped = {str(k).strip(): int(v)
                    for k, v in sheet_contracts.items() if v}
         _pinned = set(_mapped.values())
@@ -1915,6 +1917,7 @@ async def _render_landing(
             governing_contracts.append({
                 "sheet": _sh,
                 "contract_id": _cid,
+                "contract_name": _cname.get(_cid) if _cid else None,
                 "contract_filename": _fname.get(_cid) if _cid else None,
                 "fallback": _is_fallback,
             })
@@ -3016,6 +3019,80 @@ def direct_runs(
 
 
 @router.post("/direct/run")
+def _run_contract_for_render(chosen: Optional[int], pipeline_id: Optional[int],
+                             legacy_fallback: Optional[int]) -> Optional[int]:
+    """Which contract a run hands the renderer, in one place.
+
+    THE CHOICE ON THE SCREEN WINS. Named on the run, the contract is what the
+    file is measured against — it replaces the setup's own sheet-less pin, which
+    is the contract the setup happened to be built on rather than the one this
+    bordereau was written under. That pin used to win unconditionally, so a
+    broker's second contract could be chosen on screen and never reach the
+    validation at all.
+
+    Named nothing, this is byte-for-byte what it always did: with a pipeline the
+    pipeline's own contracts govern (None, so the renderer reads them off it),
+    and on the legacy no-pipeline path the format's contract stays the fallback.
+    """
+    if chosen:
+        return chosen
+    return None if pipeline_id else legacy_fallback
+
+
+def _governing_ids(sheet_contracts: dict, eff_contract_id: Optional[int],
+                   asof_extra_ids=None) -> list:
+    """Every contract whose rules run on this bordereau, in order, deduplicated.
+
+    Per-schedule pins FIRST and always: a setup that gives each output sheet its
+    own contract is answering a different question from "which contract is this
+    file under", and one answer there must never wipe out several here. Each
+    such rule only fires on the sheets its compiled SQL names, so they coexist.
+    """
+    out: list = []
+    for cid in ([int(v) for v in sheet_contracts.values() if v]
+                + ([eff_contract_id] if eff_contract_id else [])
+                + list(asof_extra_ids or [])):
+        if cid not in out:
+            out.append(cid)
+    return out
+
+
+def _assert_run_contract(s, tid: int, program_id: int,
+                         broker_party_id: Optional[int],
+                         contract_id: int) -> Contract:
+    """The contract this run says its bordereau is written under, checked.
+
+    It arrives from a form field, and a form field is a request — not a fact.
+    Left unchecked it would let a run be pointed at any contract id in the
+    database, and the terms of somebody else's binder would then be the terms
+    this bordereau was measured against. So the same rule the picker is built
+    from is applied again here, on the server:
+
+      · the contract is on THIS programme, and
+      · it belongs to the broker this run named, or to no broker at all — a
+        carrier-held contract predates the broker level and governs the whole
+        programme.
+
+    Refused with a plain 400 rather than silently ignored: a run that quietly
+    measured the file against a different contract than the screen said is the
+    failure this whole change exists to prevent.
+    """
+    c = s.get(Contract, contract_id)
+    prog = s.get(Program, program_id)
+    if c is None or prog is None or prog.tenant_id != tid or c.tenant_id != tid:
+        raise HTTPException(400, "that contract is not on this programme")
+    if c.program_id != program_id:
+        raise HTTPException(
+            400, "that contract belongs to a different programme, so its terms "
+                 "do not govern this bordereau")
+    if c.broker_party_id is not None and c.broker_party_id != broker_party_id:
+        raise HTTPException(
+            400, "that contract belongs to a different broker. A contract "
+                 "belongs to one programme and one broker — pick the broker it "
+                 "is held by, or choose one of this broker's own.")
+    return c
+
+
 async def direct_run(
     mga: str = Form(...),
     carrier_party_id: int = Form(...),
@@ -3029,6 +3106,13 @@ async def direct_run(
     # before the broker level existed sends neither and behaves exactly as it
     # always has. When they ARE sent, they pick the output template the four
     # levels agreed on — see plan sections 18/19.
+    #
+    # `contract_id` also decides WHOSE TERMS the file is measured against. A
+    # broker with two live contracts has two different sets of terms, and which
+    # of them governs a given bordereau is a question only the person holding
+    # the file can answer. It used to be dropped the moment a setup was running
+    # — the setup's own pinned contract governed every run — so a bordereau
+    # written under the second contract was silently checked against the first.
     broker_party_id: Optional[int] = Form(default=None),
     contract_id: Optional[int] = Form(default=None),
     principal: Principal = Depends(current_principal),
@@ -3049,6 +3133,8 @@ async def direct_run(
 
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
+        if contract_id:
+            _assert_run_contract(s, tid, program_id, broker_party_id, contract_id)
         # Resolve the active PIPELINE for this carrier+program — that's the
         # config a run executes against. The pipeline's Input Template (a
         # DirectFormat) supplies the input layout below.
@@ -3169,8 +3255,10 @@ async def direct_run(
     # rethrows it. With a pipeline, governing contracts come from it (pass
     # contract_id=None); on the fallback path keep the legacy fallback contract.
     async def _render():
+        governing = _run_contract_for_render(contract_id, pipeline_id,
+                                             eff_contract_id)
         result = await _render_landing(
-            landing_id, None if pipeline_id else eff_contract_id,
+            landing_id, governing,
             filename, actor or mga, {}, auto_ingest=not check_only,
             pipeline_id=pipeline_id, check_only=check_only, scope=run_scope)
         result["format_drift"] = drift
