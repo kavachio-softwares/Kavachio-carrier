@@ -23,6 +23,7 @@ import { currentMga, getTenantBrand } from "../auth";
 import { SignaturePlacer, signerTargets }
   from "../components/SignaturePlacer";
 import { InfoTip } from "../components/InfoTip";
+import { ClauseText } from "../components/ClauseText";
 import { WordingEditor } from "../components/WordingEditor";
 import { fmtDate, fmtStamp } from "../utils/date";
 import { TermDurationField, useTermDuration } from "../components/TermDuration";
@@ -1940,10 +1941,7 @@ export default function ContractRecord() {
                         )}
                       </td>
                       <td>
-                        <span className="muted" style={{ fontSize: 12.5,
-                              lineHeight: 1.7, whiteSpace: "pre-line" }}>
-                          {cl.text}
-                        </span>
+                        <ClauseText text={cl.text} className="muted" />
                       </td>
                     </tr>
                   ))}
