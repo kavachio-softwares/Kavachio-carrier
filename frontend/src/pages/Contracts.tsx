@@ -26,6 +26,7 @@ import { fmtDate } from "../utils/date";
 import { describeChecks } from "../utils/contractChecks";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { ListFilterBar } from "../components/ListFilterBar";
+import AddContractModal from "../components/AddContractModal";
 
 /** What the lifecycle means to someone scanning the list.
  *
@@ -63,6 +64,7 @@ const TYPE_LABEL: Record<string, string> = {
 export default function Contracts() {
   const [rows, setRows] = useState<ContractRecord[] | null>(null);
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
+  const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState("");
 
   const [programme, setProgramme] = useState("");
@@ -116,9 +118,9 @@ export default function Contracts() {
             <Link to="/contracts/signatures" className="btn">
               <History size={14} /> Signature history
             </Link>
-            <Link to="/contracts/upload" className="btn">
+            <button type="button" className="btn" onClick={() => setUploading(true)}>
               <Upload size={14} /> Upload existing
-            </Link>
+            </button>
             <Link to="/contracts/new" className="btn pri">
               <FilePlus2 size={14} /> Create Contract
             </Link>
@@ -256,6 +258,13 @@ export default function Contracts() {
           </div>
         </div>
       </div>
+
+      <AddContractModal
+        open={uploading}
+        onClose={() => setUploading(false)}
+        programmes={programmes}
+        // The new contract belongs in the list — re-read it.
+        onAdded={() => load()} />
     </div>
   );
 }

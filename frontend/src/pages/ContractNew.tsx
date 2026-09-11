@@ -30,6 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
+import AddContractModal from "../components/AddContractModal";
 import { WordingEditor } from "../components/WordingEditor";
 import { SignaturePlacer, signerTargets }
   from "../components/SignaturePlacer";
@@ -122,6 +123,9 @@ export default function ContractNew() {
   // The select keeps this value once the options load; if the broker turns out
   // not to be on the programme, it simply matches nothing and stays unpicked.
   const [brokerId, setBrokerId] = useState(params.get("broker_party_id") ?? "");
+  // "Upload the signed PDF instead" — the upload dialog, over this page, carrying
+  // whatever programme and broker are already chosen here.
+  const [uploading, setUploading] = useState(false);
 
   const [values, setValues] = useState<Record<string, string>>({});
   const [limits, setLimits] = useState<AgreedLimits>({});
@@ -1328,9 +1332,9 @@ export default function ContractNew() {
               <p className="muted" style={{ fontSize: 12.5, lineHeight: 1.6,
                    textAlign: "center", margin: "18px auto 0", maxWidth: 640 }}>
                 Already have a contract somebody else drafted?{" "}
-                <Link to="/contracts/upload" className="linkish">
+                <span className="linkish" role="button" onClick={() => setUploading(true)}>
                   Upload the signed PDF instead →
-                </Link>{" "}
+                </span>{" "}
                 Kavachio reads the terms out of it and builds what checks it can
                 — but a contract written from its own terms never has a clause
                 the checks cannot read.
@@ -1973,6 +1977,13 @@ export default function ContractNew() {
           </>
         )}
       </div>
+
+      <AddContractModal
+        open={uploading}
+        onClose={() => setUploading(false)}
+        programId={programId ? Number(programId) : undefined}
+        brokerId={brokerId ? Number(brokerId) : undefined}
+        onAdded={() => {}} />
     </div>
   );
 }

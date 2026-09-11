@@ -26,7 +26,6 @@ import ContractRecord from "./pages/ContractRecord";
 import ContractSignature from "./pages/ContractSignature";
 import Contracts from "./pages/Contracts";
 import ContractNew from "./pages/ContractNew";
-import ContractUpload from "./pages/ContractUpload";
 // Create-a-Contract, step 4 from the carrier's side: what is out for
 // signature and where each one got to. Steps 1-3 are the wizard at
 // /contracts/new.
@@ -173,7 +172,8 @@ export default function App() {
         <Route path="/contracts" element={<Contracts />} />
         <Route path="/contracts/new" element={<ContractNew />} />
         {/* The other way in: a wording that already exists, read on upload. */}
-        <Route path="/contracts/upload" element={<ContractUpload />} />
+        {/* Uploading is a dialog now (AddContractModal); old links land on the list. */}
+        <Route path="/contracts/upload" element={<Navigate to="/contracts" replace />} />
         <Route path="/contracts/:contractId" element={<ContractRecord />} />
         {/* Screen only — no signing provider is connected. See the page. */}
         <Route path="/contracts/:contractId/signature" element={<ContractSignature />} />

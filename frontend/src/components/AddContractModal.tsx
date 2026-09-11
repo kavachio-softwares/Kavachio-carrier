@@ -1,5 +1,7 @@
 /**
- * Add a contract for ONE broker, from the broker's own page.
+ * Add a contract — the ONE upload dialog, opened from a broker's page, a
+ * programme's broker card, the Contracts list and Create Contract. The broker
+ * is fixed when the opener already knows it, and asked for when it does not.
  *
  * Same job the Bordereau Setup builder does, minus everything that is about the
  * bordereau: the file is read by the same extraction, against the same output
@@ -29,6 +31,8 @@ import {
   uploadContract, type ContractUploadCounts, type ExternalReference,
 } from "../api/contracts";
 import { errText, scheduleOf } from "../utils/directSetup";
+import { getHierarchy } from "../api/hierarchy";
+import { getCounterparties, type Counterparty } from "../api/contractRecord";
 import {
   resolveOutputTemplate, type ResolveResult,
 } from "../api/outputTemplate";
@@ -37,17 +41,24 @@ import Modal from "./ui/Modal";
 import { Button } from "./ui/Button";
 import { Field, Select } from "./ui/Field";
 
-type Programme = { id: number; name: string; status: string };
+type Programme = { id: number; name: string; status: string | null };
 
 export default function AddContractModal({
-  open, onClose, broker, programmes, onAdded,
+  open, onClose, broker, programmes, programId: initialProgramId,
+  brokerId: initialBrokerId, onAdded,
 }: {
   open: boolean;
   onClose: () => void;
-  broker: { id: number; legal_name: string };
-  /** The broker's programmes with this carrier. A contract is (programme ×
-   *  broker), so one of these is what it will be filed under. */
-  programmes: Programme[];
+  /** The broker this contract is for, when the opener knows it. Left out, the
+   *  dialog asks for one from the chosen programme's brokers. */
+  broker?: { id: number; legal_name: string };
+  /** The programmes it can be filed under. A contract is (programme × broker),
+   *  so one of these is what it will be filed under. Left out, every one of the
+   *  carrier's programmes is offered. */
+  programmes?: Programme[];
+  /** Pre-selected, not fixed — when the opening page already has a selection. */
+  programId?: number;
+  brokerId?: number;
   /** Called once the contract is saved, with where it landed. The dialog closes
    *  itself afterwards unless it still has something to report, so this should
    *  refresh the page rather than close it. */
@@ -57,10 +68,22 @@ export default function AddContractModal({
 
   // Only a programme the broker is still ON can take a new contract — the
   // server refuses the rest, so they are not offered.
+  // Every programme, read only when the opener did not say which apply.
+  const [allProgrammes, setAllProgrammes] = useState<Programme[] | null>(null);
+  useEffect(() => {
+    if (!open || programmes) return;
+    getHierarchy().then(h => setAllProgrammes(h.programmes))
+      .catch(() => setAllProgrammes([]));
+  }, [open, programmes]);
+  const offered = programmes ?? allProgrammes;
   const live = useMemo(
-    () => programmes.filter(p => p.status !== "inactive"), [programmes]);
+    () => (offered ?? []).filter(p => p.status !== "inactive"), [offered]);
 
   const [programId, setProgramId] = useState<number | "">("");
+  const fixedBrokerId = broker?.id;
+  const [brokerId, setBrokerId] = useState<number | "">("");
+  // The chosen programme's brokers — only read when no broker is fixed.
+  const [brokers, setBrokers] = useState<Counterparty[] | null>(null);
   const [carrierId, setCarrierId] = useState<number | "">("");
   const [file, setFile] = useState<File | null>(null);
   const [refFiles, setRefFiles] = useState<File[]>([]);
@@ -85,7 +108,8 @@ export default function AddContractModal({
   // along into the next.
   useEffect(() => {
     if (open) return;
-    setProgramId(""); setFile(null); setRefFiles([]);
+    setProgramId(""); setBrokerId(""); setBrokers(null);
+    setFile(null); setRefFiles([]);
     setHalt(null); setSaved(null); setErr(null); setStep("");
   }, [open]);
 
@@ -94,6 +118,23 @@ export default function AddContractModal({
     if (!open) return;
     if (programId === "" && live.length === 1) setProgramId(live[0].id);
   }, [open, live, programId]);
+
+  // Pre-addressed: what the opening page already knows is not asked again.
+  useEffect(() => {
+    if (!open) return;
+    if (initialProgramId != null) setProgramId(initialProgramId);
+    setBrokerId(fixedBrokerId ?? initialBrokerId ?? "");
+  }, [open, initialProgramId, initialBrokerId, fixedBrokerId]);
+
+  useEffect(() => {
+    if (!open || fixedBrokerId != null || programId === "") { setBrokers(null); return; }
+    let stale = false;
+    setBrokers(null);
+    getCounterparties("broker", Number(programId))
+      .then(r => { if (!stale) setBrokers(r); })
+      .catch(() => { if (!stale) setBrokers([]); });
+    return () => { stale = true; };
+  }, [open, fixedBrokerId, programId]);
 
   // Who this carrier is. Resolved, never asked: the signed-in seat IS the
   // carrier, and the template ladder is scoped by it.
@@ -118,18 +159,21 @@ export default function AddContractModal({
     resolveOutputTemplate(mga, {
       program_id: Number(programId),
       carrier_party_id: carrierId === "" ? null : Number(carrierId),
-      broker_party_id: broker.id,
+      broker_party_id: brokerId === "" ? null : Number(brokerId),
     })
       .then(r => { if (!stale) setResolved(r); })
       .catch(() => { if (!stale) setResolved(null); })
       .finally(() => { if (!stale) setResolving(false); });
     return () => { stale = true; };
-  }, [open, mga, programId, carrierId, broker.id]);
+  }, [open, mga, programId, carrierId, brokerId]);
 
-  const ready = programId !== "" && !!file && !busy;
+  const addressed = programId !== "" && brokerId !== "";
+  const ready = addressed && !!file && !busy;
+  const pickNote = programId === "" ? "Choose a programme first"
+    : brokerId === "" ? "Choose a broker first" : "Reading…";
 
   async function submit(opts?: { continueAnyway?: boolean; extraRefs?: File[] }) {
-    if (programId === "" || !file) return;
+    if (programId === "" || brokerId === "" || !file) return;
     const refs = [...refFiles, ...(opts?.extraRefs ?? [])];
     if (opts?.extraRefs?.length) setRefFiles(refs);
     setBusy(true); setErr(null); setHalt(null); setSaved(null);
@@ -152,7 +196,7 @@ export default function AddContractModal({
         // serve whichever setup claims it, and none of the reading is wasted —
         // the clause verdicts and their intents are kept and reused.
         file,
-        brokerPartyId: broker.id,
+        brokerPartyId: Number(brokerId),
         // Derived the same way the setup builder derives it, so a "Schedule H"
         // contract added here occupies the same slot it would have there —
         // rather than superseding the whole programme's contracts.
@@ -173,11 +217,11 @@ export default function AddContractModal({
     } finally { setBusy(false); setStep(""); }
   }
 
-  const noProgrammes = live.length === 0;
+  const noProgrammes = offered !== null && live.length === 0;
 
   return (
     <Modal open={open} size="xl" onClose={busy ? () => {} : onClose}
-      title={`Add a contract for ${broker.legal_name}`}
+      title={broker ? `Add a contract for ${broker.legal_name}` : "Upload a contract"}
       footer={saved ? (
         // Nothing left to do here — the contract is added. Offering "Add
         // contract" again beside a contract that was just added is what made
@@ -208,19 +252,44 @@ export default function AddContractModal({
 
         {noProgrammes ? (
           <Note tone="warn">
-            {broker.legal_name} is not on any of your programmes yet, and a
-            contract belongs to a programme. Put them on one first — until then
-            there is nothing for a contract to sit under.
+            {broker
+              ? <>{broker.legal_name} is not on any of your programmes yet, and a
+                  contract belongs to a programme. Put them on one first — until
+                  then there is nothing for a contract to sit under.</>
+              : <>You have no active programmes yet, and a contract belongs to
+                  one. Create a programme first.</>}
           </Note>
         ) : (
           <>
             <Field label="Programme">
               <Select value={programId} disabled={busy || live.length === 1}
-                onChange={e => setProgramId(e.target.value ? Number(e.target.value) : "")}>
+                onChange={e => {
+                  setProgramId(e.target.value ? Number(e.target.value) : "");
+                  if (fixedBrokerId == null) setBrokerId("");
+                }}>
                 <option value="">Choose a programme…</option>
                 {live.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </Select>
             </Field>
+
+            {fixedBrokerId == null && (
+              <Field label="Broker">
+                <Select value={brokerId} disabled={busy || programId === ""}
+                  onChange={e => setBrokerId(e.target.value ? Number(e.target.value) : "")}>
+                  <option value="">
+                    {programId === "" ? "Choose a programme first"
+                      : brokers === null ? "Loading brokers…" : "Choose a broker…"}
+                  </option>
+                  {(brokers ?? []).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </Select>
+              </Field>
+            )}
+            {fixedBrokerId == null && programId !== "" && brokers?.length === 0 && (
+              <Note tone="warn">
+                No brokers are on this programme yet. Put one on it from the
+                programme's own screen first.
+              </Note>
+            )}
 
             {/* What this reading will produce, given what the scope has. Never a
                 gate — the contract is added either way. */}
@@ -238,8 +307,8 @@ export default function AddContractModal({
                 file={file}
                 onPick={f => { setFile(f); setHalt(null); }}
                 hint="The signed contract, as a PDF or Word file"
-                disabled={busy || programId === ""}
-                disabledNote={programId === "" ? "Choose a programme first" : "Reading…"} />
+                disabled={busy || !addressed}
+                disabledNote={pickNote} />
               <MultiFileDrop
                 label="Reference Document(s)" tone="optional"
                 icon={<FileText size={15} />}
@@ -247,8 +316,8 @@ export default function AddContractModal({
                 files={refFiles}
                 onChange={setRefFiles}
                 hint="Guidelines the contract defers to (e.g. Purchasing Guidelines)"
-                disabled={busy || programId === ""}
-                disabledNote={programId === "" ? "Choose a programme first" : "Reading…"} />
+                disabled={busy || !addressed}
+                disabledNote={pickNote} />
             </div>
 
             {/* What this upload REPLACES, said before it happens. A contract

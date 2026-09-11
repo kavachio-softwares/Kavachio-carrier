@@ -25,6 +25,7 @@ import {
 import { OnboardingBadge } from "../components/OnboardingBadge";
 import { BrokerOnboarding } from "../components/BrokerOnboarding";
 import { api } from "../api/client";
+import AddContractModal from "../components/AddContractModal";
 import { currentMga } from "../auth";
 
 /**
@@ -77,6 +78,10 @@ export default function ProgramBrokers() {
   const [msg, setMsg] = useState<string | null>(null);
   const [adding, setAdding] = useState("");
   const [busy, setBusy] = useState(false);
+  // The upload dialog, opened over this page for one broker card. The broker is
+  // kept after closing so the dialog's title does not change while it fades.
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadFor, setUploadFor] = useState<{ id: number; legal_name: string } | null>(null);
 
   const load = useCallback(() => {
     getHierarchy()
@@ -363,21 +368,19 @@ export default function ProgramBrokers() {
                           having sent a document first. */}
                       {!off && (
                         <div className="flex shrink-0 items-center gap-2">
-                          {/* To the contract upload screen, NOT Bordereau
+                          {/* The upload dialog, over this page, NOT Bordereau
                               Setup. This card's empty state says the broker
                               has no contract; the thing that fixes it is
                               putting the contract in. Bordereau Setup happens
-                              afterwards and has its own links further down —
-                              sending someone into a setup wizard to add a
-                              contract makes them finish a different job to
-                              start this one. */}
-                          <Link
-                            to={`/contracts/upload?program_id=${prog.id}&broker_party_id=${b.id}`}
+                              afterwards and has its own links further down. */}
+                          <button
+                            type="button"
+                            onClick={() => { setUploadFor({ id: b.id, legal_name: b.legal_name }); setUploadOpen(true); }}
                             className="inline-flex items-center gap-1.5 rounded-md border border-border
                               px-3 py-1.5 text-[12.5px] font-medium text-ink transition hover:bg-surface-2"
                           >
                             <Upload size={13} /> Upload contract
-                          </Link>
+                          </button>
                           <Link
                             to={`/contracts/new?program_id=${prog.id}&broker_party_id=${b.id}`}
                             className="inline-flex items-center gap-1.5 rounded-md bg-navy px-3 py-1.5
@@ -405,18 +408,17 @@ export default function ProgramBrokers() {
                       ))}
                       {!off && (
                         <li className="bg-surface-2/40">
-                          {/* To the broker's own page, not straight into the
-                              wizard: a second contract is usually a decision
-                              about what they already hold, so it starts from
-                              seeing that — across every programme, not just
-                              this one. The upload lives there. */}
-                          <Link
-                            to={`/brokers/${b.id}`}
-                            className="flex items-center gap-1.5 px-3 py-2 text-[12.5px] font-medium
+                          {/* The same upload dialog, over this page — the
+                              contracts they already hold are listed just
+                              above, so there is no need to leave for them. */}
+                          <button
+                            type="button"
+                            onClick={() => { setUploadFor({ id: b.id, legal_name: b.legal_name }); setUploadOpen(true); }}
+                            className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[12.5px] font-medium
                               text-ink-muted transition hover:text-navy"
                           >
                             <Plus size={13} /> Add another contract
-                          </Link>
+                          </button>
                         </li>
                       )}
                     </ul>
@@ -434,6 +436,16 @@ export default function ProgramBrokers() {
             what they do on <b className="font-medium">{prog.name}</b>.
           </span>
         </p>
+
+        {uploadFor && (
+          <AddContractModal
+            open={uploadOpen}
+            onClose={() => setUploadOpen(false)}
+            broker={uploadFor}
+            programmes={[{ id: prog.id, name: prog.name, status: prog.status }]}
+            // The new contract belongs on this broker's card — re-read it.
+            onAdded={() => load()} />
+        )}
       </PageBody>
     </>
   );
