@@ -3041,7 +3041,6 @@ def direct_runs(
         return items
 
 
-@router.post("/direct/run")
 def _run_contract_for_render(chosen: Optional[int], pipeline_id: Optional[int],
                              legacy_fallback: Optional[int]) -> Optional[int]:
     """Which contract a run hands the renderer, in one place.
@@ -3116,6 +3115,7 @@ def _assert_run_contract(s, tid: int, program_id: int,
     return c
 
 
+@router.post("/direct/run")
 async def direct_run(
     mga: str = Form(...),
     carrier_party_id: int = Form(...),

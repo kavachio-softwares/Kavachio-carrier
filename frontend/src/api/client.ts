@@ -307,6 +307,28 @@ api.interceptors.response.use(
   }
 );
 
+// A request that fails FastAPI's own schema check — a field missing, or the
+// wrong type — is answered 422 with `detail` as a LIST of {type, loc, msg,
+// input}, not the sentence every page renders `detail` as. React cannot render
+// that list: the page throws and goes blank, so the user never learns the
+// request was refused at all.
+function isValidationList(detail: unknown): detail is { loc?: unknown; msg?: unknown }[] {
+  return Array.isArray(detail) && detail.length > 0
+    && detail.every(d => d !== null && typeof d === "object" && "msg" in d);
+}
+
+/** That list as one sentence: which field, and what was wrong with it. */
+function validationText(detail: { loc?: unknown; msg?: unknown }[]): string {
+  const parts = detail.map(({ loc, msg }) => {
+    // loc opens with WHERE the value was looked for (body, query, path…); the
+    // field is what follows it.
+    const field = Array.isArray(loc) ? loc.slice(1).join(".") : "";
+    const what = typeof msg === "string" ? msg : "is not valid";
+    return field ? `${field}: ${what}` : what;
+  });
+  return `This request wasn't accepted — ${parts.join("; ")}.`;
+}
+
 // Last line of defence — registered AFTER the 401 handler so it only sees
 // errors that survive the refresh/replay flow. Unexpected failures (HTTP 5xx,
 // server unreachable) carry raw internals in `detail` (str(e), tracebacks,
@@ -314,7 +336,8 @@ api.interceptors.response.use(
 // existing `e?.response?.data?.detail` callsite renders friendly text, and
 // publish so <GlobalErrorPopup/> shows a popup. Meaningful 4xx messages
 // (validation, not-found, conflicts) pass through untouched — pages already
-// present those well.
+// present those well. The one 4xx that is rewritten is the schema-check list
+// above, and only into a sentence: no page can render it as it arrives.
 api.interceptors.response.use(
   (r) => r,
   (err) => {
@@ -341,6 +364,10 @@ api.interceptors.response.use(
       };
       err.message = FRIENDLY_SERVER_ERROR;
       publishApiError({ kind: "server", message: FRIENDLY_SERVER_ERROR });
+    } else if (isValidationList(err.response.data?.detail)) {
+      const text = validationText(err.response.data.detail);
+      err.response.data = { ...err.response.data, detail: text };
+      err.message = text;
     }
     return Promise.reject(err);
   }

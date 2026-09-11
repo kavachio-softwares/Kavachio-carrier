@@ -15,7 +15,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink,
+  AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, ChevronDown,
+  ChevronRight, Download, ExternalLink,
   Eye, FileText, History, MessagesSquare, Paperclip, PenLine, Plus, RefreshCw,
   Send, ShieldCheck, Trash2, Upload, XCircle,
 } from "lucide-react";
@@ -207,6 +208,11 @@ export default function ContractRecord() {
   // at a time, and the chips that tie its sentences to the terms above.
   const [wEditing, setWEditing] = useState(false);
   const [wSections, setWSections] = useState<WordingSection[]>([]);
+  // Collapsed by default — see the What was agreed, Clauses and Rules cards
+  // below.
+  const [agreedOpen, setAgreedOpen] = useState(false);
+  const [clausesOpen, setClausesOpen] = useState(false);
+  const [rulesOpen, setRulesOpen] = useState(false);
   // Which heading is open for renaming. A heading is not part of the clause
   // text and must not be typed into by accident — it is the thing a reader
   // navigates by — so it is a label until it is asked to be an input.
@@ -1841,103 +1847,124 @@ export default function ContractRecord() {
             groups and the same words, each showing what happens when a file
             breaks it. Without this the record showed a contract's identity and
             none of its substance. */}
+        {/* Collapsed by default, same reasoning as Clauses and Rules below. */}
         {rec.agreed_limits && Object.keys(rec.agreed_limits).length > 0 && (
           <div className="card" style={{ marginBottom: 18 }}>
-            <div className="card-h">
+            <button type="button" className="card-h" style={{ width: "100%",
+              textAlign: "left", cursor: "pointer", border: "none",
+              background: "none" }}
+              onClick={() => setAgreedOpen(o => !o)}>
+              {agreedOpen
+                ? <ChevronDown size={16} className="ci" />
+                : <ChevronRight size={16} className="ci" />}
               <h3>What was agreed</h3>
               <span className="sub">
                 each one is a clause in the wording and a check on every row
               </span>
-            </div>
-            <div className="tbl-wrap">
-              <table>
-                <thead>
-                  <tr><th>Term</th><th>Agreed</th><th>Severity Classification</th></tr>
-                </thead>
-                <tbody>
-                  {limitGroups.map(g => {
-                    const rows = limitSpec.filter(
-                      l => l.group === g.key && rec.agreed_limits?.[l.name]);
-                    if (!rows.length) return null;
-                    return (
-                      <>
-                        <tr key={g.key}>
-                          <td colSpan={3} style={{ textAlign: "left",
-                               background: "var(--p-surface-2)" }}>
-                            <span className="sub-h">{g.label}</span>
-                          </td>
-                        </tr>
-                        {rows.map(l => {
-                          const e = rec.agreed_limits![l.name];
-                          return (
-                            <tr key={l.name}>
-                              <td>
-                                <b>{l.question}</b>
-                                <div className="sub">{l.sub}</div>
-                              </td>
-                              <td className="mono">
-                                {String(e.value)}{l.unit ? ` ${l.unit}` : ""}
-                              </td>
-                              <td>
-                                {!l.checkable ? (
-                                  <span className="sub">
-                                    In the wording only
-                                  </span>
-                                ) : (
-                                  <span className={`badge ${
-                                    e.severity === "critical" ? "b-crit" : "b-warn"}`}>
-                                    <span className="d" />
-                                    {sevLabel(e.severity)}
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            </button>
+            {agreedOpen && (
+              <div className="tbl-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Term</th><th>Agreed</th><th>Severity Classification</th></tr>
+                  </thead>
+                  <tbody>
+                    {limitGroups.map(g => {
+                      const rows = limitSpec.filter(
+                        l => l.group === g.key && rec.agreed_limits?.[l.name]);
+                      if (!rows.length) return null;
+                      return (
+                        <>
+                          <tr key={g.key}>
+                            <td colSpan={3} style={{ textAlign: "left",
+                                 background: "var(--p-surface-2)" }}>
+                              <span className="sub-h">{g.label}</span>
+                            </td>
+                          </tr>
+                          {rows.map(l => {
+                            const e = rec.agreed_limits![l.name];
+                            return (
+                              <tr key={l.name}>
+                                <td>
+                                  <b>{l.question}</b>
+                                  <div className="sub">{l.sub}</div>
+                                </td>
+                                <td className="mono">
+                                  {String(e.value)}{l.unit ? ` ${l.unit}` : ""}
+                                </td>
+                                <td>
+                                  {!l.checkable ? (
+                                    <span className="sub">
+                                      In the wording only
+                                    </span>
+                                  ) : (
+                                    <span className={`badge ${
+                                      e.severity === "critical" ? "b-crit" : "b-warn"}`}>
+                                      <span className="d" />
+                                      {sevLabel(e.severity)}
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 
         {/* ── what it says ──
             The clauses of this contract. For one written here they are its
             wording with the terms resolved — a clause row is READ, so it holds
-            words rather than the tokens the wording keeps. */}
+            words rather than the tokens the wording keeps.
+
+            Collapsed by default: the header already says how many clauses
+            there are, which is the answer most visits are after, and the
+            table can run long. */}
         {!!clauses?.length && (
           <div className="card" style={{ marginBottom: 18 }}>
-            <div className="card-h">
+            <button type="button" className="card-h" style={{ width: "100%",
+              textAlign: "left", cursor: "pointer", border: "none",
+              background: "none" }}
+              onClick={() => setClausesOpen(o => !o)}>
+              {clausesOpen
+                ? <ChevronDown size={16} className="ci" />
+                : <ChevronRight size={16} className="ci" />}
               <FileText size={16} className="ci" />
               <h3>Clauses</h3>
               <span className="sub">
                 {clauses.length} clause{clauses.length === 1 ? "" : "s"}
               </span>
-            </div>
-            <div className="tbl-wrap">
-              <table>
-                <thead>
-                  <tr><th style={{ width: 220 }}>Clause</th><th>What it says</th></tr>
-                </thead>
-                <tbody>
-                  {clauses.map(cl => (
-                    <tr key={cl.clause_id}>
-                      <td>
-                        <b>{cl.title || cl.section_header || "Untitled"}</b>
-                        {cl.page_number != null && (
-                          <div className="sub">page {cl.page_number}</div>
-                        )}
-                      </td>
-                      <td>
-                        <ClauseText text={cl.text} className="muted" />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            </button>
+            {clausesOpen && (
+              <div className="tbl-wrap">
+                <table>
+                  <thead>
+                    <tr><th style={{ width: 220 }}>Clause</th><th>What it says</th></tr>
+                  </thead>
+                  <tbody>
+                    {clauses.map(cl => (
+                      <tr key={cl.clause_id}>
+                        <td>
+                          <b>{cl.title || cl.section_header || "Untitled"}</b>
+                          {cl.page_number != null && (
+                            <div className="sub">page {cl.page_number}</div>
+                          )}
+                        </td>
+                        <td>
+                          <ClauseText text={cl.text} className="muted" />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 
@@ -1948,59 +1975,68 @@ export default function ContractRecord() {
             and read as "nothing checks this", which was false. Shown only when
             rules exist: until BDX setup binds the terms to a template there are
             none, and an empty table says nothing worth the space. */}
+        {/* Collapsed by default, same reasoning as Clauses above. */}
         {!!clauseRules.length && (
           <div className="card" style={{ marginBottom: 18 }}>
-            <div className="card-h">
+            <button type="button" className="card-h" style={{ width: "100%",
+              textAlign: "left", cursor: "pointer", border: "none",
+              background: "none" }}
+              onClick={() => setRulesOpen(o => !o)}>
+              {rulesOpen
+                ? <ChevronDown size={16} className="ci" />
+                : <ChevronRight size={16} className="ci" />}
               <ShieldCheck size={16} className="ci" />
               <h3>Rules</h3>
               <span className="sub">
                 {clauseRules.length} check{clauseRules.length === 1 ? "" : "s"}
                 {" "}run on every bordereau row
               </span>
-            </div>
-            <div className="tbl-wrap">
-              <table>
-                <thead>
-                  <tr><th>Rule</th><th>From</th><th>If a row breaks it</th></tr>
-                </thead>
-                <tbody>
-                  {clauseRules.map(r => {
-                    const from = clauses?.find(
-                      cl => cl.clause_id === r.source_clause_id);
-                    return (
-                      <tr key={r.validation_rule_id}>
-                        <td>
-                          <b>{r.rule_name || `Rule ${r.validation_rule_id}`}</b>
-                          {r.rule_description && (
-                            <div className="sub">{r.rule_description}</div>
-                          )}
-                        </td>
-                        <td>
-                          {/* Only a rule written from a typed term is "the
-                              agreed terms". A Setup rule quoting no clause is a
-                              standard check — calling those the terms credited
-                              83 of them to terms on one contract. */}
-                          {from
-                            ? (from.title || from.section_header || "a clause")
-                            : <span className="sub">
-                                {r.rule_spec?.source === "contract_terms"
-                                  ? "the agreed terms"
-                                  : r.source_clause_id ? "a clause" : "standard check"}
-                              </span>}
-                        </td>
-                        <td>
-                          <span className={`badge ${
-                            r.severity === "critical" ? "b-crit" : "b-warn"}`}>
-                            <span className="d" />
-                            {r.severity === "critical" ? "Stopped" : "Flagged"}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            </button>
+            {rulesOpen && (
+              <div className="tbl-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Rule</th><th>From</th><th>If a row breaks it</th></tr>
+                  </thead>
+                  <tbody>
+                    {clauseRules.map(r => {
+                      const from = clauses?.find(
+                        cl => cl.clause_id === r.source_clause_id);
+                      return (
+                        <tr key={r.validation_rule_id}>
+                          <td>
+                            <b>{r.rule_name || `Rule ${r.validation_rule_id}`}</b>
+                            {r.rule_description && (
+                              <div className="sub">{r.rule_description}</div>
+                            )}
+                          </td>
+                          <td>
+                            {/* Only a rule written from a typed term is "the
+                                agreed terms". A Setup rule quoting no clause is
+                                a standard check — calling those the terms
+                                credited 83 of them to terms on one contract. */}
+                            {from
+                              ? (from.title || from.section_header || "a clause")
+                              : <span className="sub">
+                                  {r.rule_spec?.source === "contract_terms"
+                                    ? "the agreed terms"
+                                    : r.source_clause_id ? "a clause" : "standard check"}
+                                </span>}
+                          </td>
+                          <td>
+                            <span className={`badge ${
+                              r.severity === "critical" ? "b-crit" : "b-warn"}`}>
+                              <span className="d" />
+                              {r.severity === "critical" ? "Stopped" : "Flagged"}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 

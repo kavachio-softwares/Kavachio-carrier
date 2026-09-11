@@ -67,15 +67,6 @@ export default function DirectRun() {
     return q ? `/direct/setup?${q}` : "/direct/setup";
   }
 
-  /** The blank bordereau the active setup reads — what to fill in and upload
-   *  here. See the note above the drop target for why it is not the output. */
-  function downloadBordereauTemplate() {
-    if (!runSetup) return;
-    downloadFile(`/pipelines/${runSetup.id}/bordereau-template`)
-      .catch(async e => setErr(await downloadErrorText(e,
-        "We couldn't download the bordereau template — please try again.")));
-  }
-
   function downloadOutputTemplate(templateId: number) {
     downloadFile(`/output-template/${templateId}/download`)
       .catch(async e => setErr(await downloadErrorText(e,
@@ -216,9 +207,14 @@ export default function DirectRun() {
                      data: (id, q) => `/export/downloads/${id}/data?${q}` },
                    data.export_id).then(setPreview);
     } catch (e: unknown) {
-      const a = e as { response?: { data?: { detail?: string } }; message?: string };
-      const msg = a?.response?.data?.detail ?? a?.message ?? "Run failed.";
-      if (/multiple tables|more than one table/i.test(String(msg))) setMultiTableModal(String(msg));
+      const a = e as { response?: { data?: { detail?: unknown } }; message?: string };
+      // Only ever a sentence on screen. A detail that is not one would be handed
+      // to React as a child, which throws and blanks the page instead of saying
+      // the run was refused.
+      const detail = a?.response?.data?.detail;
+      const msg = typeof detail === "string" && detail.trim()
+        ? detail : a?.message ?? "Run failed.";
+      if (/multiple tables|more than one table/i.test(msg)) setMultiTableModal(msg);
       else setErr(msg);
     } finally { setBusy(false); }
   }
@@ -521,34 +517,19 @@ export default function DirectRun() {
                 </div>
               )}
 
-              {/* WHAT TO FILL IN — offered before the drop target, not after a
-                  run that could not read the file. The bordereau template is
-                  the layout this setup READS (its Input Template), because a
-                  run finds each column by the name it learned from that
-                  layout. The output template is what Generate BDX WRITES; it
-                  sits beside it for reference, and says so, because filled in
-                  and uploaded its columns are only found where they share a
-                  name with the input layout. */}
-              {hasSetup === true && runSetup && !templateMissing && !templateMismatch && (
+              {/* The output template is the file Generate BDX WRITES — offered
+                  for reference only, once a contract is picked. */}
+              {hasSetup === true && runSetup && !templateMissing && !templateMismatch
+                && scope.contractId !== "" && tpl?.template && (
                 <div className="note" style={{ marginBottom: 16, display: "flex",
                   alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <span style={{ flex: 1, minWidth: 260 }}>
-                    <b>Need a blank bordereau?</b> Download the layout this setup
-                    reads, fill it in, and upload it below.
-                    {tpl?.template && !templateMismatch && (
-                      <> The output template is the file Generate BDX gives
-                      back — for reference, not for filling in.</>
-                    )}
+                    The output template is the file Generate BDX gives back.
                   </span>
-                  <button className="btn" onClick={downloadBordereauTemplate}>
-                    <Download size={14} /> Bordereau Template
+                  <button className="btn"
+                    onClick={() => downloadOutputTemplate(tpl.template!.id)}>
+                    <Download size={14} /> Output Template
                   </button>
-                  {tpl?.template && !templateMismatch && (
-                    <button className="btn ghost"
-                      onClick={() => downloadOutputTemplate(tpl.template!.id)}>
-                      <Download size={14} /> Output Template
-                    </button>
-                  )}
                 </div>
               )}
 
