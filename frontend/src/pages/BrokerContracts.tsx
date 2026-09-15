@@ -8,12 +8,14 @@
  * policed it were removed together, so what is left is the single question this
  * page was always really scanned for: whose move is it.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  getBrokerContracts, getBrokerCarriers,
+  getBrokerContractsPaged, getBrokerCarriers,
   type BrokerContract, type BrokerCarrier, type Lifecycle,
 } from "../api/broker";
+import { useServerList } from "../hooks/useServerList";
+import { Pagination } from "../components/Pagination";
 import { inAppSigningUrl } from "../api/esign";
 import { fmtDate } from "../utils/date";
 import { ListFilterBar } from "../components/ListFilterBar";
@@ -40,8 +42,10 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   superseded: { label: "Superseded", cls: "b-mut", note: "replaced by a renewal" },
 };
 
+/** Rows per page. */
+const PAGE_SIZE = 10;
+
 export default function BrokerContracts() {
-  const [rows, setRows] = useState<BrokerContract[] | null>(null);
   const [carriers, setCarriers] = useState<BrokerCarrier[]>([]);
   // The sidebar's selection is the scope, and the only carrier control there
   // is. This page used to carry its own filter as well; two carrier controls
@@ -52,22 +56,32 @@ export default function BrokerContracts() {
 
   useEffect(() => { getBrokerCarriers().then(setCarriers).catch(() => setCarriers([])); }, []);
 
-  const load = useCallback(() => {
-    getBrokerContracts({ carrierId: scopeCarrierId ?? undefined })
-      .then(setRows)
-      .catch(() => setErr("Could not load your contracts."));
-  }, [scopeCarrierId]);
-  useEffect(load, [load]);
-
-  const shown = (rows ?? []).filter(r =>
-    !status || (status === "mine" ? r.whose_turn === "broker"
-                                  : r.lifecycle === status));
+  // The state filter AND the page are applied by the server, so the count under
+  // the table is the size of the filtered set rather than of the page. The
+  // filter has to run there because both facts it matches on — the lifecycle
+  // and whose turn it is — are worked out per row rather than stored.
+  const filterKey = [scopeCarrierId ?? "", status].join("|");
+  const {
+    items: shown, total, page, pageCount, loading, setPage, extra,
+  } = useServerList<BrokerContract, { waiting_on_me?: number }>(
+    (pg, size) => getBrokerContractsPaged({
+      carrierId: scopeCarrierId ?? undefined,
+      status: status || undefined,
+      page: pg, page_size: size,
+    }).catch(e => { setErr("Could not load your contracts."); throw e; }),
+    filterKey, PAGE_SIZE,
+  );
   const filtersActive = status !== "";
 
   // The only queue a broker cannot move by waiting. Surfaced above the table
   // because it is the reason to open this page at all — a negotiation that
   // does not announce itself is one nobody answers.
-  const mine = (rows ?? []).filter(r => r.whose_turn === "broker");
+  //
+  // The COUNT is the server's and covers every contract they hold; the names
+  // listed are the ones on this page. Counting the page instead would have told
+  // a broker with nine waiting that two were.
+  const waitingTotal = extra?.waiting_on_me ?? 0;
+  const mine = shown.filter(r => r.whose_turn === "broker");
 
   return (
     <div className="proto">
@@ -83,10 +97,10 @@ export default function BrokerContracts() {
 
         {err && <div className="note warn" style={{ marginBottom: 14, maxWidth: 560 }}>{err}</div>}
 
-        {mine.length > 0 && (
+        {waitingTotal > 0 && (
           <div className="note warn" style={{ marginBottom: 16 }}>
             <b>
-              {mine.length} contract{mine.length === 1 ? " is" : "s are"} waiting
+              {waitingTotal} contract{waitingTotal === 1 ? " is" : "s are"} waiting
               on you.
             </b>{" "}
             {mine.map((m, i) => (
@@ -96,6 +110,16 @@ export default function BrokerContracts() {
                 {" "}({STATE[m.lifecycle].label.toLowerCase()})
               </span>
             ))}
+            {/* Only the ones on this page can be named, so when more are
+                waiting than this page holds, the filter is the way to them. */}
+            {waitingTotal > mine.length && (
+              <>
+                {mine.length > 0 && " "}
+                <span className="linkish" onClick={() => setStatus("mine")}>
+                  See all {waitingTotal} waiting on you →
+                </span>
+              </>
+            )}
             {mine.some(m => m.lifecycle === "agreed" || m.lifecycle === "signed")
               ? " The carrier has signed the ones marked terms agreed — they "
                 + "are waiting on your signature, and the contract goes in "
@@ -197,15 +221,18 @@ export default function BrokerContracts() {
                 })}
               </tbody>
             </table>
-            {rows !== null && shown.length === 0 && (
+            {!loading && shown.length === 0 && (
               <div className="empty">
                 {filtersActive
                   ? "No contracts match the filters."
                   : "No contracts yet. A carrier has to put you on a programme first."}
               </div>
             )}
-            {rows === null && !err && <div className="empty">Loading…</div>}
+            {loading && !err && <div className="empty">Loading…</div>}
           </div>
+          <Pagination
+            page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
+            totalItems={total} onPageChange={setPage} noun="contracts" />
         </div>
       </div>
     </div>

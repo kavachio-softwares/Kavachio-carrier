@@ -284,12 +284,24 @@ def programme_broker_remove(program_id: int, broker_party_id: int,
 # =============================================================================
 
 @router.get("/brokers")
-def broker_directory(principal: Principal = Depends(current_principal)):
+def broker_directory(q: Optional[str] = None,
+                     page: Optional[int] = Query(None, ge=1),
+                     page_size: Optional[int] = Query(None, ge=1, le=200),
+                     principal: Principal = Depends(current_principal)):
     """Every broker this carrier works with, and how far each one reaches.
 
     Sourced from program_broker, not from party.tenant_id: a broker the carrier
     did not create still belongs on this list the moment it is put on one of
     the carrier's programmes.
+
+    Pagination is OPT-IN. Without `page` this returns the plain list exactly as
+    it always has — the Programmes screen and Add Programme both read the whole
+    directory to offer it in a picker. With `page` it returns
+    {"items", "total", "page", "page_size", "stranded"}.
+
+    `stranded` counts brokers on NO programme across the whole directory, not
+    the page: the Brokers screen states it above the table as a fact about the
+    book, and a count that shrank as you paged would be a different sentence.
     """
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal)
@@ -357,7 +369,37 @@ def broker_directory(principal: Principal = Depends(current_principal)):
         # creates the organisation immediately, so the only way to have one is
         # an address belonging to somebody who is not a broker at all — which
         # can never be accepted, and does not belong in a directory of brokers.
-        for pid, d in by_broker.items():
+        #
+        # Newest first. A carrier scanning this list is almost always looking
+        # for the one they just added — alphabetical put it wherever its name
+        # happened to fall, which on a long list is nowhere near the top.
+        # `created_at` is an ISO string here; a missing one sorts last rather
+        # than crashing the comparison.
+        rows = sorted(by_broker.values(),
+                      key=lambda b: (b.get("created_at") or "",
+                                     (b["legal_name"] or "").lower()),
+                      reverse=True)
+
+        # Searched over the SAME two fields the screen searched in the browser,
+        # so moving the search to the server did not quietly change what counts
+        # as a match.
+        if q and q.strip():
+            needle = q.strip().lower()
+            rows = [b for b in rows
+                    if needle in (b["legal_name"] or "").lower()
+                    or needle in (b["dba_name"] or "").lower()]
+
+        stranded = sum(1 for b in rows if not b["programmes"])
+        total = len(rows)
+        if page is not None:
+            size = page_size or 10
+            rows = rows[(page - 1) * size:(page - 1) * size + size]
+
+        # Two COUNTs per broker, and the reason they are down here rather than
+        # in the loop above: paged, they run for the ten brokers being read
+        # instead of for every broker the carrier holds.
+        for d in rows:
+            pid = d["id"]
             d["contract_count"] = (
                 s.query(func.count(Contract.id))
                 .filter(Contract.tenant_id == tid, Contract.broker_party_id == pid)
@@ -367,15 +409,11 @@ def broker_directory(principal: Principal = Depends(current_principal)):
                 s.query(func.count(AppUser.id))
                 .filter(AppUser.broker_party_id == pid).scalar() or 0
             )
-        # Newest first. A carrier scanning this list is almost always looking
-        # for the one they just added — alphabetical put it wherever its name
-        # happened to fall, which on a long list is nowhere near the top.
-        # `created_at` is an ISO string here; a missing one sorts last rather
-        # than crashing the comparison.
-        return sorted(by_broker.values(),
-                      key=lambda b: (b.get("created_at") or "",
-                                     (b["legal_name"] or "").lower()),
-                      reverse=True)
+
+        if page is not None:
+            return {"items": rows, "total": total, "page": page,
+                    "page_size": page_size or 10, "stranded": stranded}
+        return rows
 
 
 class NewBrokerBody(BaseModel):

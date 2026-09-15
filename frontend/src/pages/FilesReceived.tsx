@@ -22,6 +22,7 @@ import {
   type Arrival, type Channel,
 } from "../api/intake";
 import { fmtStamp } from "../utils/date";
+import { Pagination } from "../components/Pagination";
 
 // Each door gets a name and a tone, as in the carrier-centric design: email is
 // the one with a reply path so it reads as info, an upload was done by a person
@@ -40,6 +41,13 @@ const CAME_IN_BY: Record<Channel, { label: string; tone: "ok" | "info" | "mut" }
 // to find that out — and leaving "Uploaded" out until a hand-uploaded file
 // turned up made it look as though uploads were not counted here at all.
 const WAY_IN_ORDER: Channel[] = ["upload", "email", "sftp", "api"];
+
+// Rows drawn at once. Paged IN THE BROWSER, deliberately: every tile count, the
+// filter options, the queue-first sort and the "new files have landed" check all
+// read the whole fetched set, so moving the page to the server would quietly
+// turn each of them into a fact about ten rows. This changes what is DRAWN and
+// nothing else.
+const PAGE_SIZE = 25;
 
 // The checks in the order land_file() runs them. That order is the whole point:
 // it stops at the FIRST failure, so a file that fails check three has passed one
@@ -175,6 +183,7 @@ export default function InboxTab({ onWaitingCount, active, refreshKey, liveTick 
   const [fBroker, setFBroker] = useState<string>("");
   const [fProgramme, setFProgramme] = useState<string>("");
   const [open, setOpen] = useState<Arrival | null>(null);
+  const [page, setPage] = useState(1);
 
   // Ticked rows, by arrival_id. Cleared whenever the visible set changes, so a
   // selection can never outlive the rows it was made on.
@@ -317,9 +326,22 @@ export default function InboxTab({ onWaitingCount, active, refreshKey, liveTick 
     });
   }, [all, filter, sort, q, range, fChannel, fBroker, fProgramme]);
 
+  // What the table actually draws. `shown` stays the whole filtered set, so the
+  // count beside the sort, the select-all tick and the bulk actions all go on
+  // meaning what they meant.
+  const pageCount = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  const current = Math.min(page, pageCount);
+  const paged = shown.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
+
+  // Re-sorting reorders the whole queue, so page 3 of the old order is not page
+  // 3 of the new one.
+  useEffect(() => { setPage(1); }, [sort]);
+
   // A tick belongs to the row it was put on. The moment the visible set moves
   // under it, it is gone.
-  useEffect(() => { setPicked(new Set()); setBulkErr(null); }, [filter, q, range, fChannel, fBroker, fProgramme]);
+  useEffect(() => {
+    setPicked(new Set()); setBulkErr(null); setPage(1);
+  }, [filter, q, range, fChannel, fBroker, fProgramme]);
 
   const filtered = !!filter || !!q.trim() || range !== "all"
     || !!fChannel || !!fBroker || !!fProgramme;
@@ -541,7 +563,7 @@ export default function InboxTab({ onWaitingCount, active, refreshKey, liveTick 
                 </tr>
               </thead>
               <tbody>
-                {shown.map(a => {
+                {paged.map(a => {
                   const st = state(a);
                   const sub = subline(a);
                   const on = picked.has(a.arrival_id);
@@ -601,6 +623,11 @@ export default function InboxTab({ onWaitingCount, active, refreshKey, liveTick 
               </tbody>
             </table>
           </div>
+        )}
+        {shown.length > PAGE_SIZE && (
+          <Pagination
+            page={current} pageCount={pageCount} pageSize={PAGE_SIZE}
+            totalItems={shown.length} onPageChange={setPage} noun="files" />
         )}
         <div className="note" style={{
           margin: 0, border: 0, borderTop: "1px solid var(--p-border)", borderRadius: 0,

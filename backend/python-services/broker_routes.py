@@ -339,6 +339,9 @@ def broker_programmes(carrier_id: Optional[int] = Query(None),
 @router.get("/broker/contracts")
 def broker_contracts(carrier_id: Optional[int] = Query(None),
                      program_id: Optional[int] = Query(None),
+                     status: Optional[str] = Query(None),
+                     page: Optional[int] = Query(None, ge=1),
+                     page_size: Optional[int] = Query(None, ge=1, le=200),
                      p: Principal = Depends(current_principal)):
     """Every contract this broker holds, across every programme it is on.
 
@@ -353,12 +356,36 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
     renders as an ordinary approved row, and the negotiation is invisible to
     the one person it is waiting on. `whose_turn` is included for the same
     reason: it is the question the list is actually being scanned for.
+
+    Pagination is OPT-IN — without `page` the plain list comes back exactly as
+    before. `status` takes the screen's own vocabulary: "mine" means whose_turn
+    is the broker, anything else is matched against the lifecycle. Both facts
+    are derived per row rather than stored, so the filter runs HERE — and it
+    runs BEFORE the page is cut, so the total counts what the filter kept
+    rather than what the page happened to hold.
     """
+    def _page(out: list):
+        # Counted over EVERYTHING this broker holds — before the status filter,
+        # and before the page is cut. The screen states it above the table as
+        # the reason to open the page at all, so a number that shrank as you
+        # paged would be answering a different question.
+        waiting = sum(1 for r in out if r["whose_turn"] == "broker")
+        if status:
+            out = [r for r in out
+                   if (r["whose_turn"] == "broker" if status == "mine"
+                       else r["lifecycle"] == status)]
+        if page is None:
+            return out
+        size = page_size or 10
+        start = (page - 1) * size
+        return {"items": out[start:start + size], "total": len(out),
+                "page": page, "page_size": size, "waiting_on_me": waiting}
+
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
         links = _links(s, bid, carrier_id=carrier_id, program_id=program_id)
         if not links:
-            return []
+            return _page([])
         prog_ids = [l.program_id for l in links]
         carrier_of = {l.program_id: l.tenant_id for l in links}
         progs = {pr.id: pr for pr in s.query(Program).filter(Program.id.in_(prog_ids)).all()}
@@ -401,7 +428,7 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
                 "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
                 "created_at": c.created_at.isoformat() if getattr(c, "created_at", None) else None,
             })
-        return out
+        return _page(out)
 
 
 @router.get("/broker/dashboard")

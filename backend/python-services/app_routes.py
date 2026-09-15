@@ -5819,18 +5819,32 @@ def rule_library_classes(principal: Principal = Depends(require_role("tenant_adm
 
 
 @router.get("/rule-library")
-def rule_library_list(principal: Principal = Depends(require_role("tenant_admin"))):
+def rule_library_list(page: Optional[int] = Query(None, ge=1),
+                      page_size: Optional[int] = Query(None, ge=1, le=200),
+                      principal: Principal = Depends(require_role("tenant_admin"))):
     """Rules in the caller's scope. kavachio_admin sees the platform's GLOBAL
     rules; a tenant_admin sees only their own tenant's rules (globals are hidden
-    from the tenant screen). Includes disabled rules so they can be re-enabled."""
+    from the tenant screen). Includes disabled rules so they can be re-enabled.
+
+    Pagination is OPT-IN and the response shape does not change either way — it
+    was already {"items", "total"}. Without `page` every rule comes back, which
+    the edit form depends on: there is no GET-one endpoint, so it reads the list
+    and picks its rule out of it by id."""
     with SessionLocal() as s:
         q = s.query(GenericRuleSpecification)
         if principal.is_platform_admin:
             q = q.filter(GenericRuleSpecification.tenant_id.is_(None))
         else:
             q = q.filter(GenericRuleSpecification.tenant_id == principal.tenant_id)
-        rows = q.order_by(GenericRuleSpecification.id.desc()).all()
-        return {"items": [_rule_dict(r) for r in rows], "total": len(rows)}
+        ordered = q.order_by(GenericRuleSpecification.id.desc())
+        if page is None:
+            rows = ordered.all()
+            return {"items": [_rule_dict(r) for r in rows], "total": len(rows)}
+        size = page_size or 10
+        total = q.order_by(None).count()
+        rows = ordered.offset((page - 1) * size).limit(size).all()
+        return {"items": [_rule_dict(r) for r in rows], "total": int(total),
+                "page": page, "page_size": size}
 
 
 @router.post("/rule-library")

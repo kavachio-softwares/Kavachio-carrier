@@ -101,6 +101,14 @@ export type BrokerRun = {
 export const getBrokerRuns = (p: ContractPath, limit = 20) =>
   api.get<BrokerRun[]>(`${base(p)}/runs`, { params: { limit } }).then(r => r.data);
 
+/** One page of them, counted by the server.
+ *
+ *  The unpaged call above stops at the twentieth most recent file with no way
+ *  to reach the twenty-first; this is the same history, pageable. */
+export const getBrokerRunsPaged = (p: ContractPath, page: number, pageSize: number) =>
+  api.get<{ items: BrokerRun[]; total: number }>(`${base(p)}/runs`,
+    { params: { page, page_size: pageSize } }).then(r => r.data);
+
 /**
  * Where the shared RunResult component reads this run's file and preview rows.
  *

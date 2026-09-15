@@ -849,6 +849,8 @@ def list_contracts(
     contract_type: Optional[str] = Query(None),
     lifecycle: Optional[str] = Query(None),
     q: Optional[str] = Query(None, description="match on name, UMR or filename"),
+    page: Optional[int] = Query(None, ge=1),
+    page_size: Optional[int] = Query(None, ge=1, le=200),
     p: Principal = Depends(current_principal),
 ):
     """Every contract the caller can see, across all their programmes.
@@ -856,6 +858,11 @@ def list_contracts(
     The carrier-wide view the app never had: contracts could only be reached one
     broker or one programme at a time, which is the wrong shape for "what is
     expiring", "what is waiting on me" and "where is that contract".
+
+    Pagination is OPT-IN. Without `page` this returns the plain list exactly as
+    it always has — ContractNew's endorsement picker reads the whole thing and
+    must keep working. With `page` it returns
+    {"items", "total", "page", "page_size"} for the Contracts screen.
     """
     with SessionLocal() as s:
         query = s.query(Contract)
@@ -877,10 +884,28 @@ def list_contracts(
                                      Contract.umr.ilike(like),
                                      Contract.filename.ilike(like)))
 
+        size = page_size or 10
+
+        # THE FAST PATH, and the only one that avoids building every record:
+        # with no lifecycle filter the page can be cut in SQL, so a carrier with
+        # ten thousand contracts pays for ten of them.
+        #
+        # Lifecycle cannot take this path. `expired` is DERIVED from the expiry
+        # date rather than stored (see _effective_lifecycle), so it is knowable
+        # only after _record has run — slicing first would hand back a page
+        # holding however many of its ten rows happened to survive the filter,
+        # and a total counting rows the filter would have dropped.
+        if page is not None and not lifecycle:
+            total = query.order_by(None).count()
+            rows = (query.order_by(Contract.id.desc())
+                    .offset((page - 1) * size).limit(size).all())
+            counts = _rule_tallies(s, [c.id for c in rows])
+            return {"items": [_record(s, c, with_docs=False, p=p, rule_counts=counts)
+                              for c in rows],
+                    "total": int(total), "page": page, "page_size": size}
+
         rows = query.order_by(Contract.id.desc()).all()
 
-        # Lifecycle is filtered in Python, not SQL, because `expired` is derived
-        # from the expiry date rather than stored — see _effective_lifecycle.
         # One query for every row's check count. Counting inside _record would
         # be one round trip per contract, which on a carrier with a few hundred
         # of them is the whole cost of the screen.
@@ -889,6 +914,10 @@ def list_contracts(
                for c in rows]
         if lifecycle:
             out = [r for r in out if r["lifecycle"] == lifecycle]
+        if page is not None:
+            start = (page - 1) * size
+            return {"items": out[start:start + size], "total": len(out),
+                    "page": page, "page_size": size}
         return out
 
 

@@ -624,6 +624,17 @@ export type ContractFilters = {
 export const listContracts = (filters: ContractFilters = {}) =>
   api.get<ContractRecord[]>("/contracts", { params: filters }).then(r => r.data);
 
+/** One page of contracts, filtered and counted by the server.
+ *
+ *  A SEPARATE function rather than an option on listContracts above, because
+ *  the two return different shapes and the unpaged one has its own callers —
+ *  the endorsement picker in Create Contract reads the whole list. */
+export const listContractsPaged = (
+  filters: ContractFilters & { page: number; page_size: number },
+) =>
+  api.get<{ items: ContractRecord[]; total: number }>(
+    "/contracts", { params: filters }).then(r => r.data);
+
 export const getContract = (id: number) =>
   api.get<ContractRecord>(`/contracts/${id}`).then(r => r.data);
 

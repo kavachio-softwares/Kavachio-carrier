@@ -24,34 +24,52 @@
  * hold a contract, has anyone signed in — and the state that blocks everything
  * (no programme) is still said in words, not left as a 0 to be spotted.
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ChevronRight, FileText, Layers, Search, UserPlus, Users2 } from "lucide-react";
 import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
 import { OrgAvatar } from "../components/ui/OrgAvatar";
 import { Sk } from "../components/ui/Skeleton";
 import { OnboardingBadge } from "../components/OnboardingBadge";
 import {
-  getBrokers, resendBrokerInvitation, revokeBrokerInvitation,
+  getBrokersPaged, resendBrokerInvitation, revokeBrokerInvitation,
   type BrokerSummary,
 } from "../api/hierarchy";
 import { fmtDate } from "../utils/date";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { useServerList } from "../hooks/useServerList";
 
 /** How many programme chips a row shows before it says "+N more". Enough for
  *  the common case, few enough that one busy broker cannot make its row tall. */
 const MAX_CHIPS = 2;
 
+/** Rows per page. The server cuts the page, so this is what gets fetched. */
+const PAGE_SIZE = 10;
+
 export default function Brokers() {
   const nav = useNavigate();
-  const [rows, setRows] = useState<BrokerSummary[] | null>(null);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
-
   const [note, setNote] = useState("");
-  const load = () => getBrokers().then(setRows).catch(e =>
-    setErr(e?.response?.data?.detail || "Could not load brokers"));
-  useEffect(() => { load(); }, []);
+  // Debounced because the search runs on the SERVER now — an undebounced box
+  // would be one request per keystroke.
+  const dq = useDebouncedValue(q, 300);
+
+  const {
+    items: shown, total, page, pageCount, loading, setPage, extra,
+    reload: load,
+  } = useServerList<BrokerSummary, { stranded?: number }>(
+    (pg, size) => getBrokersPaged({
+      q: dq.trim() || undefined, page: pg, page_size: size,
+    }).catch(e => {
+      setErr(e?.response?.data?.detail || "Could not load brokers");
+      throw e;
+    }),
+    dq.trim(), PAGE_SIZE,
+  );
+  const needle = dq.trim();
 
   // An unanswered invitation was a dead end: nothing showed it, and inviting
   // again was refused. These are the two things a carrier can actually do
@@ -69,15 +87,11 @@ export default function Brokers() {
     } catch { setNote("Could not withdraw that invitation."); }
   }
 
-  const needle = q.trim().toLowerCase();
-  const shown = (rows ?? []).filter(b =>
-    !needle
-    || b.legal_name.toLowerCase().includes(needle)
-    || (b.dba_name ?? "").toLowerCase().includes(needle));
-
   // Said once above the table, the way Programmes says "has no broker yet",
   // rather than leaving the reader to scan a column for the amber cells.
-  const stranded = (rows ?? []).filter(b => b.programmes.length === 0).length;
+  // Counted by the server across the WHOLE directory — a count that shrank as
+  // you paged would be a different sentence.
+  const stranded = extra?.stranded ?? 0;
 
   return (
     <>
@@ -111,13 +125,13 @@ export default function Brokers() {
           </div>
         )}
 
-        {rows === null ? (
+        {loading && shown.length === 0 ? (
           <Card>
             <div className="space-y-2">
               {Array.from({ length: 3 }, (_, i) => <Sk key={i} className="h-12 w-full" />)}
             </div>
           </Card>
-        ) : rows.length === 0 ? (
+        ) : total === 0 && !needle ? (
           <Card>
             <div className="py-12 text-center">
               <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2">
@@ -154,8 +168,8 @@ export default function Brokers() {
               </div>
               <span className="text-xs text-ink-muted">
                 {needle
-                  ? `${shown.length} of ${rows.length}`
-                  : `${rows.length} broker${rows.length === 1 ? "" : "s"}`}
+                  ? `${total} match${total === 1 ? "" : "es"}`
+                  : `${total} broker${total === 1 ? "" : "s"}`}
               </span>
             </div>
 
@@ -313,6 +327,27 @@ export default function Brokers() {
                 </tbody>
               </table>
             </div>
+
+            {pageCount > 1 && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3
+                border-t border-border pt-3 text-xs text-ink-muted">
+                <span>
+                  {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)}
+                  {" of "}{total} broker{total === 1 ? "" : "s"}
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button variant="secondary" className="!px-2.5 !py-1 !text-xs"
+                    disabled={page <= 1} onClick={() => setPage(page - 1)}>
+                    ← Prev
+                  </Button>
+                  <span>Page {page} of {pageCount}</span>
+                  <Button variant="secondary" className="!px-2.5 !py-1 !text-xs"
+                    disabled={page >= pageCount} onClick={() => setPage(page + 1)}>
+                    Next →
+                  </Button>
+                </div>
+              </div>
+            )}
 
             <p className="mt-3 border-t border-border pt-3 text-xs text-ink-muted">
               Open a broker to see its contracts and people across every

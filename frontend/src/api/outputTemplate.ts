@@ -433,12 +433,11 @@ export type ScopedContract = {
   output_template_id: number | null;
 };
 
+// No `approved_only` any more: the endpoint dropped that parameter when the
+// carrier-approval gate was removed, so it was being sent and ignored.
 export const getScopedContracts = (
-  programId: number, brokerPartyId?: number | null, approvedOnly = true,
+  programId: number, brokerPartyId?: number | null,
 ) =>
   api.get<ScopedContract[]>(`/programs/${programId}/contracts`, {
-    params: {
-      broker_party_id: brokerPartyId ?? undefined,
-      approved_only: approvedOnly || undefined,
-    },
+    params: { broker_party_id: brokerPartyId ?? undefined },
   }).then(r => r.data);

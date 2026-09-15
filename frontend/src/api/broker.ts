@@ -93,6 +93,25 @@ export const getBrokerContracts = (opts: { carrierId?: number; programId?: numbe
     },
   }).then(r => r.data);
 
+/** One page of them, filtered and counted by the server.
+ *
+ *  `status` is the screen's own vocabulary — "mine" for the ones waiting on
+ *  this broker, otherwise a lifecycle. It is sent rather than applied here so
+ *  the count under the table is the size of the filtered set, not of the page. */
+export const getBrokerContractsPaged = (opts: {
+  carrierId?: number; programId?: number; status?: string;
+  page: number; page_size: number;
+}) =>
+  api.get<{ items: BrokerContract[]; total: number; waiting_on_me: number }>(
+    "/broker/contracts", {
+    params: {
+      carrier_id: opts.carrierId || undefined,
+      program_id: opts.programId || undefined,
+      status: opts.status || undefined,
+      page: opts.page, page_size: opts.page_size,
+    },
+  }).then(r => r.data);
+
 // --- the broker's own team ---------------------------------------------------
 // Scoped by broker, never by carrier: a broker producing for three carriers has
 // one team, not three. Only OPERATOR can be invited from here — a second broker

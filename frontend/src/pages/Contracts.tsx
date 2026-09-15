@@ -14,19 +14,25 @@
  * out for signature is a fact about the contracts listed here, and reading it
  * anywhere else means first remembering which contract you meant.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { FilePlus2, History, Upload } from "lucide-react";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import {
-  listContracts,
+  listContractsPaged,
   type ContractRecord, type Lifecycle,
 } from "../api/contractRecord";
 import { fmtDate } from "../utils/date";
 import { describeChecks } from "../utils/contractChecks";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { useServerList } from "../hooks/useServerList";
 import { ListFilterBar } from "../components/ListFilterBar";
+import { Pagination } from "../components/Pagination";
 import AddContractModal from "../components/AddContractModal";
+
+/** Rows per page. The server cuts the page in SQL, so this is what gets
+ *  FETCHED — not what is shown out of a larger fetch. */
+const PAGE_SIZE = 10;
 
 /** What the lifecycle means to someone scanning the list.
  *
@@ -62,7 +68,6 @@ const TYPE_LABEL: Record<string, string> = {
 };
 
 export default function Contracts() {
-  const [rows, setRows] = useState<ContractRecord[] | null>(null);
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
   const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState("");
@@ -81,17 +86,27 @@ export default function Contracts() {
       .catch(() => setProgrammes([]));
   }, []);
 
-  const load = useCallback(() => {
-    listContracts({
+  // TRUE server-side paging: every filter AND the page are applied in SQL, so a
+  // carrier holding thousands of contracts fetches ten rows rather than
+  // thousands to show ten. The filters are folded into one key, which the hook
+  // uses to snap back to page 1 — a filter that narrowed the list while you sat
+  // on page 4 would otherwise show an empty table.
+  const filterKey = [programme, lifecycle, type, query.trim()].join("|");
+  const {
+    items: rows, total, page, pageCount, loading, setPage, reload,
+  } = useServerList<ContractRecord>(
+    (pg, size) => listContractsPaged({
       program_id: programme ? Number(programme) : undefined,
       lifecycle: lifecycle || undefined,
       contract_type: type || undefined,
       q: query.trim() || undefined,
-    })
-      .then(setRows)
-      .catch(e => setErr(e?.response?.data?.detail || "Could not load contracts."));
-  }, [programme, lifecycle, type, query]);
-  useEffect(load, [load]);
+      page: pg, page_size: size,
+    }).catch(e => {
+      setErr(e?.response?.data?.detail || "Could not load contracts.");
+      throw e;
+    }),
+    filterKey, PAGE_SIZE,
+  );
 
   const filtersActive = !!(programme || lifecycle || type || q);
 
@@ -192,7 +207,7 @@ export default function Contracts() {
                 </tr>
               </thead>
               <tbody>
-                {(rows ?? []).map(c => {
+                {rows.map(c => {
                   const st = STATE[c.lifecycle] ?? STATE.draft;
                   return (
                     <tr key={c.id}>
@@ -246,7 +261,7 @@ export default function Contracts() {
                 })}
               </tbody>
             </table>
-            {rows !== null && rows.length === 0 && (
+            {!loading && rows.length === 0 && (
               <div className="empty">
                 {filtersActive
                   ? "No contracts match those filters."
@@ -254,8 +269,11 @@ export default function Contracts() {
                     + "one from its terms and let the wording follow."}
               </div>
             )}
-            {rows === null && !err && <div className="empty">Loading…</div>}
+            {loading && !err && <div className="empty">Loading…</div>}
           </div>
+          <Pagination
+            page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
+            totalItems={total} onPageChange={setPage} noun="contracts" />
         </div>
       </div>
 
@@ -264,7 +282,7 @@ export default function Contracts() {
         onClose={() => setUploading(false)}
         programmes={programmes}
         // The new contract belongs in the list — re-read it.
-        onAdded={() => load()} />
+        onAdded={() => reload()} />
     </div>
   );
 }

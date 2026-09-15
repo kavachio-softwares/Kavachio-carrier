@@ -1,7 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { isKavachioAdmin } from "../auth";
-import { Rule, listRules, toggleRule, deleteRule } from "../api/ruleLibrary";
+import { Rule, listRulesPaged, toggleRule, deleteRule } from "../api/ruleLibrary";
+import { useServerList } from "../hooks/useServerList";
+import { Pagination } from "../components/Pagination";
+
+const PAGE_SIZE = 10;
 
 // Severity → badge class, mirroring the exception screens' colour language.
 function sevBadge(s: string): { cls: string; label: string } {
@@ -14,30 +18,32 @@ function sevBadge(s: string): { cls: string; label: string } {
 export default function RuleLibrary() {
   const nav = useNavigate();
   const platform = isKavachioAdmin();
-  const [rows, setRows] = useState<Rule[]>([]);
-  const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [delTarget, setDelTarget] = useState<Rule | null>(null);
   const [delBusy, setDelBusy] = useState(false);
 
-  async function load() {
-    setLoading(true); setErr(null);
-    try {
-      const { items } = await listRules();
-      setRows(items);
-    } catch (e: any) {
+  // One page, counted by the server. The edit form still reads the WHOLE list
+  // through listRules(): there is no GET-one endpoint, so it finds its rule by
+  // id out of the full set — which is why paging here had to be opt-in.
+  const {
+    items: rows, total, page, pageCount, loading, setPage, reload,
+  } = useServerList<Rule>(
+    (pg, size) => listRulesPaged(pg, size).catch(e => {
       setErr(e?.response?.data?.detail ?? "Couldn't load rules. Please try again.");
-    } finally { setLoading(false); }
-  }
-  useEffect(() => { load(); }, []);
+      throw e;
+    }),
+    "", PAGE_SIZE,
+  );
 
   async function onToggle(r: Rule) {
     setBusyId(r.id); setMsg(null);
     try {
       await toggleRule(r.id, !r.is_active);
-      setRows(rs => rs.map(x => x.id === r.id ? { ...x, is_active: !x.is_active } : x));
+      // Re-read the page rather than patching the row in place: the list is the
+      // server's now, and a locally edited copy would drift from it.
+      reload();
       setMsg(`"${r.rule_name}" ${r.is_active ? "disabled" : "enabled"}.`);
     } catch (e: any) {
       setMsg(e?.response?.data?.detail ?? "Couldn't update the rule.");
@@ -49,7 +55,7 @@ export default function RuleLibrary() {
     setDelBusy(true);
     try {
       await deleteRule(delTarget.id);
-      setRows(rs => rs.filter(x => x.id !== delTarget.id));
+      reload();
       setMsg(`"${delTarget.rule_name}" was deleted.`);
       setDelTarget(null);
     } catch (e: any) {
@@ -135,6 +141,9 @@ export default function RuleLibrary() {
             )}
             {loading && <div className="empty">Loading…</div>}
           </div>
+          <Pagination
+            page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
+            totalItems={total} onPageChange={setPage} noun="rules" />
         </div>
 
         <div className="note" style={{ marginTop: 14}}>

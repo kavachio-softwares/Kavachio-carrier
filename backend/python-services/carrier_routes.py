@@ -497,8 +497,15 @@ async def contract_bordereau_run(
 
 @router.get(_T + "/runs")
 def contract_bordereau_runs(limit: int = Query(default=20, le=100),
+                            page: Optional[int] = Query(default=None, ge=1),
+                            page_size: Optional[int] = Query(default=None, ge=1, le=200),
                             scope: CarrierScope = Depends(contract_scope)):
-    """What has been submitted against this contract, newest first."""
+    """What has been submitted against this contract, newest first.
+
+    Pagination is OPT-IN and handed straight to /direct/runs, which already
+    does the work: without `page` this stays the capped plain list it was, and
+    with it the broker's own history becomes pageable instead of stopping at
+    the twentieth most recent file with no way to reach the twenty-first."""
     import direct_routes as _direct
     with SessionLocal() as s:
         cpid = _carrier_party_id(s, scope.carrier_id)
@@ -517,8 +524,8 @@ def contract_bordereau_runs(limit: int = Query(default=20, le=100),
         program_id=scope.program_id,
         broker_party_id=scope.broker_party_id,
         contract_id=scope.contract_id,
-        page=None,
-        page_size=None,
+        page=page,
+        page_size=page_size,
         limit=limit,
         principal=scope.acting,
     )

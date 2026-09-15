@@ -378,6 +378,14 @@ export default function ContractRecord() {
     .some(d => d.kind === "contract" && d.is_active);
   const canWriteWording = rec.actions.edit && !authored && !hasUploadedWording;
 
+  // Was this contract UPLOADED as a document, rather than CREATED through the
+  // raise-contract flow? An uploaded contract was imported with a PDF — it has
+  // no authored wording and no agreed limits (commercial terms). Signatures are
+  // not relevant for it: nobody negotiated its terms in Kavachio, so there is
+  // nothing to sign here.
+  const isUploaded = !authored
+    && !(rec.agreed_limits && Object.keys(rec.agreed_limits).length > 0);
+
   // An authored contract's wording is generated from its terms, and the two are
   // tied: the sentences hold tokens, so changing a term moves the wording and
   // the check together. Uploading a replacement wording would put a document on
@@ -798,8 +806,11 @@ export default function ContractRecord() {
             because "why is this not live yet" and "who signed this" are the
             two questions this page gets asked most once the terms are settled.
             Read-only here: signing itself is done on the signature screen,
-            where the contract can be read first. */}
-        {(rec.signatures.length > 0
+            where the contract can be read first.
+
+            Hidden for uploaded contracts — they were imported as a document,
+            not created through a negotiation, so there is nothing to sign. */}
+        {!isUploaded && (rec.signatures.length > 0
           || ["agreed", "signed"].includes(rec.lifecycle)) && (
           <div className="card" style={{ marginBottom: 14 }}>
             <div className="card-h">
@@ -1089,7 +1100,7 @@ export default function ContractRecord() {
                 Terminated {fmtDate(rec.terminated_date)} — {rec.termination_reason}
               </div>
             )}
-            {rec.lifecycle === "agreed" && (
+            {rec.lifecycle === "agreed" && !isUploaded && (
               <div className="hint">
                 Terms are settled. The broker signs and returns it, then the
                 carrier puts it in force.{" "}
@@ -1129,7 +1140,7 @@ export default function ContractRecord() {
               {/* Second-tier on purpose. Sending it out is the ordinary road
                   and stays the primary button; this is the exception, and it
                   should look like one. */}
-              {a.skip_review && (
+              {a.skip_review && !isUploaded && (
                 <button className="btn" type="button" disabled={!!busy}
                         onClick={() => setShowSkip(v => !v)}>
                   <PenLine size={13} /> Skip the review — sign it now
@@ -1143,7 +1154,7 @@ export default function ContractRecord() {
                   <CheckCircle2 size={13} /> Agree these terms
                 </button>
               )}
-              {a.submit_signed && !round?.can_sign && (
+              {a.submit_signed && !round?.can_sign && !isUploaded && (
                 <button
                   className="btn pri" type="button" disabled={!!busy}
                   onClick={() => setShowSign(v => !v)}
@@ -1166,7 +1177,7 @@ export default function ContractRecord() {
                   intermediate screen adds a click and shows less. Everything
                   else still goes to the signature screen, which is where
                   signatories are named and a paper signature is recorded. */}
-              {round?.can_sign ? (
+              {!isUploaded && (round?.can_sign ? (
                 <a className="btn pri" href={inAppSigningUrl(id)}
                    target="_blank" rel="noreferrer">
                   <PenLine size={13} /> Sign the contract
@@ -1177,7 +1188,7 @@ export default function ContractRecord() {
                   <PenLine size={13} />{" "}
                   {a.sign ? "Sign the contract" : "Record their signature"}
                 </Link>
-              )}
+              ))}
               {a.activate && (
                 <button
                   className="btn pri" type="button" disabled={!!busy}
@@ -1205,10 +1216,13 @@ export default function ContractRecord() {
                   it crowded the row of actions that are actually about the
                   contract in front of you. */}
               {/* Screen only — no signing provider is connected yet, which the
-                  screen itself says before anything else on it. */}
-              <Link className="btn" to={`/contracts/${rec.id}/signature`}>
-                <PenLine size={13} /> Signature
-              </Link>
+                  screen itself says before anything else on it. Hidden for
+                  uploaded contracts — there is nothing to sign. */}
+              {!isUploaded && (
+                <Link className="btn" to={`/contracts/${rec.id}/signature`}>
+                  <PenLine size={13} /> Signature
+                </Link>
+              )}
             </div>
 
             {/* ── carrier: settle the terms alone ── */}
@@ -1646,7 +1660,7 @@ export default function ContractRecord() {
                 {/* The signature block, offered from the server's own list so
                     this screen and step 4 cannot drift apart about what a block
                     may contain. */}
-                {sigSpec && draftSig && (
+                {sigSpec && draftSig && !isUploaded && (
                   <div className="limgrp">
                     <div className="limgrp-h">
                       <div className="sub-h">What each side signs</div>

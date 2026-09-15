@@ -44,6 +44,15 @@ export async function listRules() {
   return r.data;
 }
 
+/** One page of them. Kept separate from listRules above, which must go on
+ *  returning every rule: getRule below has no GET-one endpoint to call and
+ *  finds its rule by reading the whole list. */
+export async function listRulesPaged(page: number, pageSize: number) {
+  const r = await api.get<{ items: Rule[]; total: number }>(
+    "/rule-library", { params: { page, page_size: pageSize } });
+  return r.data;
+}
+
 // No dedicated GET-one endpoint: the list is small and scope-filtered, so the
 // edit form loads it once and picks the row by id.
 export async function getRule(id: number): Promise<Rule | undefined> {

@@ -127,6 +127,20 @@ export const getHierarchy = () =>
 export const getBrokers = () =>
   api.get<BrokerSummary[]>("/brokers").then(r => r.data);
 
+/** One page of the broker directory, searched and counted by the server.
+ *
+ *  Left alongside the unpaged getBrokers above, which still has callers that
+ *  need every broker at once to fill a picker (Add Programme, and the
+ *  programme's own broker screen).
+ *
+ *  `stranded` counts brokers on no programme across the WHOLE directory, not
+ *  this page — the screen states it above the table as a fact about the book. */
+export const getBrokersPaged = (params: {
+  q?: string; page: number; page_size: number;
+}) =>
+  api.get<{ items: BrokerSummary[]; total: number; stranded: number }>(
+    "/brokers", { params }).then(r => r.data);
+
 export const getBroker = (brokerId: number) =>
   api.get<BrokerDetail>(`/brokers/${brokerId}`).then(r => r.data);
 

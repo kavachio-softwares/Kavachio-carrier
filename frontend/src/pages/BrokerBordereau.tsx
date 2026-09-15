@@ -37,7 +37,7 @@ import { History, Download } from "lucide-react";
 import { getBrokerContracts, type BrokerContract } from "../api/broker";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import {
-  getBrokerMe, getBordereauReadiness, runBrokerBordereau, getBrokerRuns,
+  getBrokerMe, getBordereauReadiness, runBrokerBordereau, getBrokerRunsPaged,
   brokerRunUrls, bordereauTemplatePath,
   type ContractPath, type BordereauReadiness, type BrokerRun,
 } from "../api/brokerBordereau";
@@ -47,6 +47,11 @@ import { type Sheet } from "../components/OutputRows";
 import { LoadingOverlay } from "../components/Busy";
 import { downloadFile, downloadErrorText } from "../api/client";
 import { fmtDate } from "../utils/date";
+import { Pagination } from "../components/Pagination";
+
+/** Runs per page of the history. Server-side: the endpoint used to stop at the
+ *  twentieth most recent file with no way to reach the twenty-first. */
+const RUNS_PAGE_SIZE = 10;
 
 /** Server messages are for the log; this is what the broker can act on. */
 function errorText(e: any): string {
@@ -74,6 +79,8 @@ export default function BrokerBordereau() {
   const [result, setResult] = useState<RunResp | null>(null);
   const [preview, setPreview] = useState<Sheet | null>(null);
   const [runs, setRuns] = useState<BrokerRun[] | null>(null);
+  const [runsPage, setRunsPage] = useState(1);
+  const [runsTotal, setRunsTotal] = useState(0);
   const [showHistory, setShowHistory] = useState(false);
 
   // THE SCOPE THAT MATTERS MOST. A bordereau is checked against one contract's
@@ -133,12 +140,16 @@ export default function BrokerBordereau() {
   // changes, so a stale exception list can never be read as this one's.
   useEffect(() => {
     setResult(null); setPreview(null); setErr(null); setFile(null);
+    // A different contract is a different history, so it is read from its start.
+    setRunsPage(1);
   }, [contractId]);
 
   const loadRuns = useCallback(() => {
-    if (!path) { setRuns(null); return; }
-    getBrokerRuns(path).then(setRuns).catch(() => setRuns([]));
-  }, [path]);
+    if (!path) { setRuns(null); setRunsTotal(0); return; }
+    getBrokerRunsPaged(path, runsPage, RUNS_PAGE_SIZE)
+      .then(r => { setRuns(r.items); setRunsTotal(r.total); })
+      .catch(() => { setRuns([]); setRunsTotal(0); });
+  }, [path, runsPage]);
 
   useEffect(() => {
     if (!path) { setReady(null); return; }
@@ -148,9 +159,12 @@ export default function BrokerBordereau() {
       .then(r => { if (!stale) setReady(r); })
       .catch(() => { if (!stale) setReady(null); })
       .finally(() => { if (!stale) setReadyLoading(false); });
-    loadRuns();
     return () => { stale = true; };
-  }, [path, loadRuns]);
+  }, [path]);
+
+  // The history fetches on its own, so turning its page does not also re-ask
+  // whether this contract is ready to be run.
+  useEffect(() => { loadRuns(); }, [loadRuns]);
 
   async function submit(checkOnly: boolean) {
     if (!file || !path || !urls) return;
@@ -163,7 +177,10 @@ export default function BrokerBordereau() {
       // missing preview must never make a good run look like a failure.
       fetchPreview(urls, r.export_id).then(setPreview);
       // A self-check records nothing, so only a real submission changes history.
-      if (!checkOnly) loadRuns();
+      // Back to the first page with it: a submitted run is the newest row, and
+      // it belongs at the top of the history rather than wherever the reader
+      // happened to have paged to.
+      if (!checkOnly) { setRunsPage(1); loadRuns(); }
     } catch (e) {
       setErr(errorText(e));
     } finally { setBusy(false); }
@@ -412,6 +429,11 @@ export default function BrokerBordereau() {
                 </div>
               )}
             </div>
+            <Pagination
+              page={runsPage}
+              pageCount={Math.max(1, Math.ceil(runsTotal / RUNS_PAGE_SIZE))}
+              pageSize={RUNS_PAGE_SIZE} totalItems={runsTotal}
+              onPageChange={setRunsPage} noun="files" />
           </div>
         )}
 

@@ -63,7 +63,7 @@ export function useBrokerContractScope(programId: number | "") {
     if (programId === "") { setAllContracts([]); return; }
     setContractsLoading(true);
     getScopedContracts(Number(programId),
-                       brokerPartyId === "" ? null : Number(brokerPartyId), true)
+                       brokerPartyId === "" ? null : Number(brokerPartyId))
       .then(setAllContracts)
       .catch(() => setAllContracts([]))
       .finally(() => setContractsLoading(false));
@@ -254,15 +254,15 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
   if (scope.contracts.length === 0) {
     // Nothing bound, but that can mean two different things and only one of
     // them is a problem. Contracts DO exist here — they just belong to brokers
-    // nobody has chosen yet, and saying "no approved contract" would send
-    // someone off to upload a duplicate of one already on file.
+    // nobody has chosen yet, and saying "no contract" would send someone off
+    // to upload a duplicate of one already on file.
     if (scope.awaitingBroker.length > 0) {
       const n = scope.awaitingBroker.length;
       const b = scope.awaitingBrokerCount;
       return (
         <>
         <Hint>
-          {n} approved contract{n === 1 ? "" : "s"} on this programme, held by{" "}
+          {n} contract{n === 1 ? "" : "s"} on this programme, held by{" "}
           {b} broker{b === 1 ? "" : "s"}. <b>Pick the broker</b> to bring theirs
           in — a contract belongs to one broker, so it cannot be attached until
           you say whose.
@@ -274,9 +274,14 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
     return (
       <>
       <Hint tone="warn">
+        {/* There is no approval step: the gate this used to describe was
+            removed along with the broker-side upload it policed, and the
+            contract field below files one under the picked broker straight
+            away. The old wording told people to wait for something that can
+            never happen. */}
         {scope.brokerPartyId === ""
-          ? "This programme has no approved contract yet. A contract a broker uploads stays out until the carrier approves it."
-          : "This broker has no approved contract on the programme yet. A contract they uploaded stays out of this list until the carrier approves it."}
+          ? "This programme has no contract yet — upload one below."
+          : "This broker has no contract on this programme yet — upload one below."}
       </Hint>
       <ProgrammeWideNote scope={scope} />
       </>

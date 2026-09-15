@@ -386,7 +386,7 @@ export default function DirectRun() {
                       programId === "" ? "Select a program first"
                         : scope.contractsLoading ? "Finding the live contracts…"
                         : scope.contracts.length === 0
-                          ? "No approved contract for this selection"
+                          ? "No contract for this selection"
                           : contractLabel(scope.contracts[0])} />
                   )}
                 </div>
