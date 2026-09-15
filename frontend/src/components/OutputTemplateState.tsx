@@ -8,7 +8,7 @@
  * programme's template, not this contract's" — while there is still time to
  * make one is the entire reason this shows the match level rather than a tick.
  */
-import { AlertTriangle, CheckCircle2, FileSpreadsheet, Plus } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, FileSpreadsheet, Plus } from "lucide-react";
 import Button from "./ui/Button";
 import type { ResolveResult } from "../api/outputTemplate";
 
@@ -36,8 +36,11 @@ export function isBroaderThanScope(r: ResolveResult | null): boolean {
 }
 
 export default function OutputTemplateState({
-  resolving, resolved, disabled, uploading, onCreate, onOpen, compact, hideMissing,
+  resolving, resolved, disabled, uploading, onCreate, onOpen, onDownload, compact, hideMissing,
 }: {
+  /** Download the saved template file. Only offered once one exists — before
+   *  creation there is nothing saved to download. */
+  onDownload?: (templateId: number) => void;
   resolving: boolean;
   resolved: ResolveResult | null;
   disabled?: boolean;
@@ -142,6 +145,11 @@ export default function OutputTemplateState({
             {onOpen && (
               <Button variant="secondary" onClick={() => onOpen(t.id)}>
                 Review fields
+              </Button>
+            )}
+            {onDownload && (
+              <Button variant="secondary" onClick={() => onDownload(t.id)}>
+                <Download size={14} /> Download template
               </Button>
             )}
             <Button variant="secondary" onClick={onCreate}>

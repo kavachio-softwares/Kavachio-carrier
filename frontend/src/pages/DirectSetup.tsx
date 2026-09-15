@@ -4,10 +4,10 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, FileSpreadsheet, ShieldCheck, FileUp, FileText,
   FileSpreadsheet as FileOut, FileWarning, UploadCloud, ShieldAlert, ArrowRight,
-  ExternalLink,
+  ExternalLink, Download,
   Save, Trash2, Sparkles,
 } from "lucide-react";
-import { api } from "../api/client";
+import { api, downloadFile, downloadErrorText } from "../api/client";
 import { currentMga, isTenantAdmin } from "../auth";
 import { PageBody, PageHeader } from "../components/Layout";
 import Card from "../components/ui/Card";
@@ -761,6 +761,15 @@ export default function DirectSetup() {
     window.open(`/outputs/templates/${id}`, "_blank", "noopener");
   }
 
+  // The saved template as a file. Offered only once a template EXISTS (the
+  // created banner and the template card) — inside the create dialog nothing
+  // is saved yet, so a download there would be a draft that can still change.
+  function downloadTemplate(id: number) {
+    downloadFile(`/output-template/${id}/download`)
+      .catch(async e => setErr(await downloadErrorText(e,
+        "We couldn't download the output template — please try again.")));
+  }
+
   // ---- build setup from the uploads ----------------------------------------
   async function buildSetup() {
     // The output template no longer has to be an uploaded file: one created
@@ -1411,6 +1420,10 @@ export default function DirectSetup() {
                   onClick={() => openTemplateTab(justCreated.id)}>
                   Review the columns <ExternalLink size={14} />
                 </Button>
+                <Button variant="secondary"
+                  onClick={() => downloadTemplate(justCreated.id)}>
+                  <Download size={14} /> Download template
+                </Button>
                 <Button variant="ghost" onClick={() => setJustCreated(null)}>
                   Later — build the setup
                 </Button>
@@ -1683,7 +1696,8 @@ export default function DirectSetup() {
                   uploading={!!outFile}
                   hideMissing
                   onCreate={openCreateTemplate}
-                  onOpen={openTemplateTab} />
+                  onOpen={openTemplateTab}
+                  onDownload={downloadTemplate} />
               </div>
             </div>
           )}

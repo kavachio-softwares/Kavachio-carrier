@@ -445,13 +445,15 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
                   <tr>
                     <th className="text-left pl-3 py-2">Use</th>
                     <th className="text-left px-3 py-2">Column</th>
-                    <th className="text-left px-3 py-2">Asked for by</th>
+                    <th className="text-left px-3 py-2">Required by</th>
                     <th className="text-left px-3 py-2">Why</th>
                   </tr>
                 </thead>
                 <tbody>
                   {proposed.map(f => (
                     <ProposalRow key={f.field} f={f}
+                      standardName={analysis?.standard ? stdLabel : "Reporting standard"}
+                      contractName={stagedFile?.name ?? contract?.label ?? null}
                       appended={isAppended(f, mode)}
                       kept={!dropped.has(f.field)}
                       onToggle={() => toggle(f.field)} />
@@ -626,8 +628,12 @@ function Summary({ a, shown, kept, unfilled, extra }: {
   );
 }
 
-function ProposalRow({ f, kept, appended, onToggle }: {
+function ProposalRow({ f, kept, appended, onToggle, standardName, contractName }: {
   f: ProposedField; kept: boolean; appended: boolean; onToggle: () => void;
+  /** The standard by name ("Lloyd's v5.2 (US)"), so the cell says WHICH one. */
+  standardName: string;
+  /** The contract by name; "The contract" when there is none to show. */
+  contractName: string | null;
 }) {
   // Locked means the server will keep it whatever the tick says: a column the
   // standard marks mandatory is never switched off (apply_selection).
@@ -654,10 +660,12 @@ function ProposalRow({ f, kept, appended, onToggle }: {
         )}
       </td>
       <td className="px-3 py-2 text-ink-muted text-left align-top break-words">
+        {/* Named sources, not "The standard": the header already says which
+            standard this is, so the cell can too. */}
         {f.origin === "standard"
-          ? (f.also_in_contract ? "The standard and the contract" : "The standard")
+          ? (f.also_in_contract ? `${standardName} and the contract` : standardName)
           : f.origin === "contract_rule" ? "A rule on the contract"
-          : "The contract"}
+          : (contractName ?? "The contract")}
       </td>
       {/* No "matched input column" cell. The match behind `in_input` is the
           analysis's include check, not a mapping — the pipeline maps the data
