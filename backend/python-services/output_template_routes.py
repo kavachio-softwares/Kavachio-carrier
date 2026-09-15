@@ -457,11 +457,27 @@ class FromStandardBody(BaseModel):
     output_format: str = "xlsx"
     name: Optional[str] = None
     mga: Optional[str] = None
+    # A contract still staged on the form has no id yet — its file name is what
+    # the sheet is titled after instead.
+    contract_name: Optional[str] = None
     # The reviewed field list from /analyze-sources: which of the territory's
     # published columns this binder actually reports, each optionally carrying
     # the input column it was matched to. Omitted, the whole territory is taken
     # — which is what every caller did before this existed.
     fields: Optional[list[dict]] = None
+
+
+def _standard_sheet_title(standard: str, jurisdiction: Optional[str],
+                          contract: str) -> str:
+    """"Lloyds v5.2 US - DEMO_sign_v6" — the standard AND the contract, since
+    the sheet carries the contract's columns too. Excel caps titles at 31
+    characters and forbids a few, so the contract name is what gets cut."""
+    head = f"{standard} {jurisdiction or ''}".strip()[:31]
+    contract = "".join(ch for ch in contract if ch not in '[]:*?/\\').strip()
+    room = 31 - len(head) - 3
+    if not contract or room < 1:
+        return head
+    return f"{head} - {contract[:room].rstrip()}"
 
 
 @router.post("/output-template/from-standard")
@@ -489,8 +505,11 @@ async def create_from_standard(body: FromStandardBody,
             carrier_name = p.legal_name if p else None
         name = body.name or _scope_name(s, body.program_id, body.broker_party_id,
                                         body.contract_id, carrier_name)
+        c = s.get(Contract, body.contract_id) if body.contract_id else None
+        contract_label = _drop_ext((c.filename if c else None)
+                                   or body.contract_name or "")
 
-    label = f"{std['label']} - {body.jurisdiction or ''}".strip(" -")[:31]
+    label = _standard_sheet_title(std["label"], body.jurisdiction, contract_label)
     try:
         blob, jurisdiction = await run_in_threadpool(
             standards.sheet_bytes, std["id"], body.jurisdiction, label)

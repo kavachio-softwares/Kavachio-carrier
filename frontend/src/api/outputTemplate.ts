@@ -134,7 +134,8 @@ export type CreateScope = {
 };
 
 export const createFromStandard = (
-  scope: CreateScope, standard_id: string, jurisdiction: string,
+  scope: CreateScope & { contract_name?: string | null },
+  standard_id: string, jurisdiction: string,
   fields?: ProposedField[] | null,
 ) =>
   api.post<OutputTemplate & { structure: unknown }>(

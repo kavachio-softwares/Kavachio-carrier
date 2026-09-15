@@ -238,7 +238,8 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
         // slices the published layout to what is ticked, then appends those
         // after it as optional columns.
         p.onCreated(await createFromStandard(
-          scope, standardId, jurisdiction, kept));
+          { ...scope, contract_name: stagedFile?.name ?? contract?.label ?? null },
+          standardId, jurisdiction, kept));
       } else {
         p.onCreated(await createFromContract(
           { ...scope, contract_name: stagedFile?.name ?? contract?.label ?? null },
