@@ -455,6 +455,12 @@ export default function ContractRecord() {
       carrier_name: getTenantBrand()?.legal_name || currentMga(),
       counterparty_name: rec?.counterparty?.name ?? null,
       programme_name: rec?.programme?.name ?? null,
+      // What this contract's wording had deleted from it. The preview writes a
+      // clause for any agreed term the document does not state, so without
+      // these a clause deleted on purpose would come back every time the
+      // editor opened.
+      dropped_sections: rec?.wording_dropped?.sections ?? [],
+      dropped_terms: rec?.wording_dropped?.terms ?? [],
     };
   }
 
@@ -474,6 +480,16 @@ export default function ContractRecord() {
       setWEditing(true);
       if (rebuild) {
         setNote("Rewritten from the terms. Nothing is saved until you save it.");
+      } else if (pv.added?.length) {
+        // Terms agreed after this wording was written had no clause quoting
+        // them, so the editor opens with the sentences they never had. Said
+        // out loud, and not saved until the carrier saves it.
+        setNote(
+          `${pv.added.map(a => a.question).join(", ")} `
+          + `${pv.added.length === 1 ? "was agreed" : "were agreed"} after this `
+          + "wording was written, so the clause was missing from the contract "
+          + "and from the PDF. It is written in below — nothing is saved until "
+          + "you save it.");
       }
     } catch (e) {
       setErr(fieldErrors(e).message);
@@ -583,11 +599,19 @@ export default function ContractRecord() {
         load();
         return;
       }
+      // A term agreed after this wording was written had no clause quoting it,
+      // so one was written. Named for the same reason as a re-tie: it is the
+      // text of a contract.
+      const wAdded = saved.wording_added ?? [];
       setNote(retied.length
         ? `The wording was updated. ${retied.join(" and ")} `
           + `${retied.length === 1 ? "was" : "were"} typed in as a figure, so `
           + `${retied.length === 1 ? "it has" : "they have"} been tied back to `
           + `the term — the clause now moves when the term does.`
+        : wAdded.length
+        ? `The wording was updated, and it now states ${wAdded.join(" and ")} `
+          + `— ${wAdded.length === 1 ? "that term had" : "those terms had"} no `
+          + `clause quoting ${wAdded.length === 1 ? "it" : "them"}.`
         : "The wording was updated.");
       load();
     } catch (e) {

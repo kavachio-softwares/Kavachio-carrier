@@ -189,6 +189,11 @@ export type ContractRecord = {
    *  nearly always a clause edited with the figure typed over the chip, after
    *  which the document keeps saying the old number. */
   wording_unquoted?: { key: string; question: string; value: string | null }[];
+  /** What was deleted from this wording on purpose. The preview writes a clause
+   *  for any agreed term the document does not state, so these travel back with
+   *  it — otherwise a deleted clause would reappear each time the editor opened.
+   *  A term the wording states again drops off the list by itself. */
+  wording_dropped?: { sections: string[]; terms: string[] } | null;
   /** Who signs, named while the contract was being written. Naming them sends
    *  them nothing: the address is kept for the signing round, which is the one
    *  thing in this flow that emails anybody, and it is started separately from
@@ -290,6 +295,10 @@ export type ContractInput = {
   wording_sections?: WordingSection[];
   signature_layout?: SignatureLayout | null;
   signers?: Signer[];
+  /** Clauses deleted while writing it. A term with no clause is given one on
+   *  the way in, so a deletion has to be named or it arrives back. */
+  dropped_sections?: string[];
+  dropped_terms?: string[];
   /** Start a negotiation instead of putting it straight in force. Default
    *  false, so the carrier's "what I raise is live on arrival" behaviour is
    *  unchanged — this is a choice for when there is something to agree. */
@@ -386,6 +395,11 @@ export type WordingPreview = {
   warnings: Array<{ title: string; detail: string }>;
   uncheckable: Array<{ key: string; title: string }>;
   pages: number;
+  /** Terms this call wrote a sentence for, because the wording did not state
+   *  them. A term agreed AFTER the wording was written has no clause quoting
+   *  it, and a contract that does not say what it is measured on is one nobody
+   *  should be asked to sign. Empty on every ordinary re-read. */
+  added?: Array<{ key: string; question: string }>;
 };
 
 export type WordingInput = {
@@ -397,6 +411,11 @@ export type WordingInput = {
   counterparty_name?: string | null;
   programme_name?: string | null;
   signature_layout?: SignatureLayout | null;
+  /** What the carrier deleted on purpose. Without these the server would write
+   *  a missing term's clause straight back in, and deleting it would be a
+   *  thing you cannot do. */
+  dropped_sections?: string[];
+  dropped_terms?: string[];
 };
 
 /** The three headings the limits table is grouped under, served so neither the
@@ -630,7 +649,12 @@ export const updateContract = (
   // typed where a chip used to be is bound to the term it quotes, or the
   // sentence stops moving when the term does. Never silent — it changed the
   // text of a contract.
-) => api.patch<ContractRecord & { wording_retied?: string[] }>(
+  //
+  // `wording_added` names the terms that had no clause at all and were given
+  // one. A term agreed after the wording was written is stated nowhere in the
+  // document either side signs, and that is what this reports.
+) => api.patch<ContractRecord & { wording_retied?: string[];
+                                  wording_added?: string[] }>(
   `/contracts/${id}`, body).then(r => r.data);
 
 export const activateContract = (id: number) =>

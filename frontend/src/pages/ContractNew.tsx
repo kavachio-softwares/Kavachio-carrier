@@ -132,6 +132,13 @@ export default function ContractNew() {
 
   const [sections, setSections] = useState<WordingSection[] | null>(null);
   const [activeSection, setActiveSection] = useState(0);
+  // What was taken OUT of the wording on purpose. The server writes a clause
+  // for any term the document does not state — that is what stops a term
+  // agreed after the wording was written from going unsaid — so it has to be
+  // told which silences were deliberate, or deleting a clause would be
+  // impossible: it would be back the next time this screen re-read the wording.
+  const [dropped, setDropped] = useState<{ sections: string[]; terms: string[] }>(
+    { sections: [], terms: [] });
   // Bumped when the wording is REGENERATED, so the editor rebuilds its DOM.
   // Ordinary typing must not trigger that — rebuilding on every keystroke
   // throws the caret to the start of the line.
@@ -437,11 +444,14 @@ export default function ContractNew() {
     // whatever step 4 asked for, and the first place anyone would notice is
     // the copy that went out for signature.
     signature_layout: sigLayout,
+    // Sections and terms deleted here, so the server's top-up leaves them out.
+    dropped_sections: dropped.sections,
+    dropped_terms: dropped.terms,
     // No `signers`: nobody is named at this step any more, so the draft prints
     // the two unnamed blocks — "For the Carrier" over a ruled line — which is
     // what an unsigned contract looks like on paper anyway.
   }), [typeKey, values, limits, carrierName, counterparty, programme,
-       sigLayout]);
+       sigLayout, dropped]);
 
   /** The document the signature blocks are dragged onto, on step 4.
    *
@@ -487,7 +497,25 @@ export default function ContractNew() {
       const pv = await previewWording(wordingInput(secs));
       setPreview(pv);
       setSections(pv.sections);
-      if (!secs) setWordingVersion(v => v + 1);
+      // Sections came back with clauses the wording did not have — terms
+      // agreed after it was written. Said out loud: the wording is the
+      // carrier's, and text appearing in it is not something to slip in.
+      if (secs && pv.added?.length) {
+        setWordingVersion(v => v + 1);
+        setMessage(
+          `The wording now states ${pv.added.map(a => a.question).join(", ")}`
+          + ` — ${pv.added.length === 1 ? "that term was" : "those terms were"}`
+          + " agreed after it was written, so the clause was missing from the"
+          + " contract and from the PDF. Everything you had typed is untouched.");
+      }
+      if (!secs) {
+        // Written again from the terms, so every clause is back by definition
+        // and there is nothing left to remember as deleted. Keeping the old
+        // list would silence the top-up for a term the carrier has just had
+        // written back in.
+        setDropped({ sections: [], terms: [] });
+        setWordingVersion(v => v + 1);
+      }
       return pv;
     } catch (e) {
       setMessage(fieldErrors(e).message);
@@ -642,8 +670,10 @@ export default function ContractNew() {
     }
     setMessage("");
     // Entering the wording or the review re-reads from the current terms, so a
-    // number changed on step 1 is reflected in both.
-    if (to >= 1) await refresh(to === 1 ? sections : sections);
+    // number changed on step 1 is reflected in both — and a term AGREED on
+    // step 1 since the wording was written gets the clause it never had, which
+    // is the server's doing (contract_wording.missing_clauses), not a rebuild.
+    if (to >= 1) await refresh(sections);
     setStep(to);
     setFurthest(f => Math.max(f, to));
   }
@@ -689,6 +719,11 @@ export default function ContractNew() {
         signature_layout: sigLayout,
         wording_sections: (sections ?? []).map(
           ({ rendered: _r, tokens: _t, ...keep }) => keep),
+        // Deleted here, and deleted in what gets saved: the server writes a
+        // clause for any agreed term the wording does not state, so it has to
+        // know which silences were meant.
+        dropped_sections: dropped.sections,
+        dropped_terms: dropped.terms,
         create_as: mode === "sign" ? "draft" : mode,
       } as never);
       if (mode === "sign") {
@@ -1413,6 +1448,16 @@ export default function ContractNew() {
                         className="rm" title="Delete this section"
                         onClick={e => {
                           e.stopPropagation();
+                          // Remembered as deleted, along with every term it
+                          // quoted: the server writes a clause for any term the
+                          // wording does not state, and without this the
+                          // section would reappear on the next re-read.
+                          setDropped(d => ({
+                            sections: [...d.sections, s.key],
+                            terms: [...d.terms,
+                                    ...[...s.body.matchAll(/\{\{([a-z_]+)\}\}/g)]
+                                      .map(m => m[1])],
+                          }));
                           setSections(list => (list ?? []).filter((_, j) => j !== i));
                           setActiveSection(a => Math.max(0, a - (i <= a ? 1 : 0)));
                         }}

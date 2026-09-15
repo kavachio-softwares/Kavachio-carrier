@@ -41,15 +41,24 @@ from dataclasses import dataclass, field as dc_field
 from typing import Any, Optional
 
 import field_aliases as fa
+from output_template_fields import SOURCE_BDX
 
 log = logging.getLogger("bdx.semantic_mapping")
 
 # --- how a mapping was decided (plan section 7) ------------------------------
 EXACT, NORMALIZED, ALIAS, SEMANTIC, MANUAL = (
     "EXACT", "NORMALIZED", "ALIAS", "SEMANTIC", "MANUAL")
+# A column whose NAME merely looks like the field. Recorded so the model can be
+# asked to verify it and a reviewer can see it — never a mapping on its own.
+SIMILAR = "SIMILAR"
 
 AUTO_MAPPED, REVIEW_REQUIRED, MANUALLY_CONFIRMED, REJECTED = (
     "AUTO_MAPPED", "REVIEW_REQUIRED", "MANUALLY_CONFIRMED", "REJECTED")
+# Bordereau Setup's verdicts beyond those (see `review_floor` on resolve_field):
+# nothing suitable was found, the model never answered, or the field is
+# configured to come from somewhere other than the bordereau.
+UNMAPPED, AI_UNAVAILABLE, NOT_FROM_INPUT = (
+    "UNMAPPED", "AI_UNAVAILABLE", "NOT_FROM_INPUT")
 
 MAPPING_VERSION = "1"
 
@@ -70,6 +79,37 @@ def min_confidence() -> float:
     if v > 1.0:
         v = v / 100.0
     return min(max(v, 0.0), 1.0)
+
+
+def _fraction(env: str, default: float) -> float:
+    """An env-configured bar, written as 0.9 or 90 — parsed like the one above."""
+    raw = (os.getenv(env) or "").strip()
+    try:
+        v = float(raw) if raw else default
+    except ValueError:
+        v = default
+    if v > 1.0:
+        v = v / 100.0
+    return min(max(v, 0.0), 1.0)
+
+
+def auto_accept_confidence() -> float:
+    """Bordereau Setup: how sure the model must be that an input column holds
+    the same business data before it is wired up without a person (90%)."""
+    return _fraction("KAVACHIO_MAPPING_AUTO_CONFIDENCE", 0.90)
+
+
+def review_confidence() -> float:
+    """Bordereau Setup: a model answer ABOVE this and under the auto bar goes to
+    a person to verify; at or under it the field stays unmapped (80%)."""
+    return _fraction("KAVACHIO_MAPPING_REVIEW_CONFIDENCE", 0.80)
+
+
+def candidate_similarity() -> float:
+    """How alike two column NAMES must be (above this) for the input column to
+    be handed to the model as a candidate. It chooses what is ASKED about and is
+    never evidence that the two columns hold the same data (80%)."""
+    return _fraction("KAVACHIO_MAPPING_CANDIDATE_SIMILARITY", 0.80)
 
 
 def _norm(s: Any) -> str:
@@ -171,6 +211,13 @@ class Decision:
     data_type: Optional[str] = None
     version: str = MAPPING_VERSION
     alias_version: str = fa.ALIAS_VERSION
+    # Bordereau Setup's verification trail — empty on a decision made without it.
+    source_type: Optional[str] = None
+    suggestion: Optional[str] = None      # proposed for a person, NOT wired up
+    similarity: Optional[float] = None    # name likeness, 0..1
+    ai_confidence: Optional[float] = None
+    ai_status: Optional[str] = None       # ok | failed — None when not asked
+    ai_error: Optional[str] = None
 
     @property
     def mapped(self) -> bool:
@@ -184,7 +231,15 @@ class Decision:
             "reason": self.reason, "candidates": self.candidates[:5],
             "required": self.required, "data_type": self.data_type,
             "version": self.version, "alias_version": self.alias_version,
+            "source_type": self.source_type, "suggestion": self.suggestion,
+            "similarity": _round(self.similarity),
+            "ai_confidence": _round(self.ai_confidence),
+            "ai_status": self.ai_status, "ai_error": self.ai_error,
         }
+
+
+def _round(v: Optional[float]) -> Optional[float]:
+    return None if v is None else round(float(v), 4)
 
 
 def resolve_field(
@@ -195,12 +250,25 @@ def resolve_field(
     existing_source: Optional[str] = None,
     semantic: Optional[dict] = None,
     threshold: Optional[float] = None,
+    review_floor: Optional[float] = None,
+    similar: Optional[list[dict]] = None,
+    ai: Optional[dict] = None,
 ) -> Decision:
     """Walk the ladder for ONE output field.
 
     `out_field`       {"field_key","display_name","column_name","data_type","required"}
+                      plus "source_type" when the template says where it comes from
     `existing_source` a mapping already configured for this field — rung 1, final
     `semantic`        the model's proposal for this field, {"source","confidence"}
+
+    Bordereau Setup's verification mode. Leaving all three out keeps the ladder
+    exactly as it was, which the output-template builder relies on.
+    `review_floor`    a model answer above this but under `threshold` goes to a
+                      person; at or under it the field is UNMAPPED
+    `similar`         name-alike columns the model was asked to verify,
+                      [{"source","similarity"}] — recorded, never accepted alone
+    `ai`              {"asked","ok","error"} for this field — a model that never
+                      answered is AI_UNAVAILABLE, not "no match"
     """
     bar = min_confidence() if threshold is None else threshold
     key = out_field.get("field_key") or _norm(out_field.get("column_name"))
@@ -210,7 +278,12 @@ def resolve_field(
     match_on = out_field.get("column_name") or label
     d = Decision(field_key=key, display_name=label,
                  required=bool(out_field.get("required")),
-                 data_type=out_field.get("data_type"))
+                 data_type=out_field.get("data_type"),
+                 source_type=out_field.get("source_type"))
+    # Only a field configured to come from the bordereau is looked for in it
+    # beyond its own name. No setting at all counts as the bordereau — the
+    # template builder's fields, and columns that predate the setting.
+    from_input = str(d.source_type or SOURCE_BDX).upper() == SOURCE_BDX
 
     by_exact = {str(c).strip().lower(): c for c in reversed(input_cols)}
     by_norm: dict[str, str] = {}
@@ -250,11 +323,28 @@ def resolve_field(
         considered.append({"source": c, "confidence": 0.99, "method": ALIAS})
 
     # 5 — what the model proposed, if anything.
-    if semantic and semantic.get("source") in input_cols:
+    if from_input and semantic and semantic.get("source") in input_cols:
         src = semantic["source"]
         conf = float(semantic.get("confidence") or 0.0)
-        if not any(x["source"] == src for x in considered):
-            considered.append({"source": src, "confidence": conf, "method": SEMANTIC})
+        hit = next((x for x in considered if x["source"] == src), None)
+        if hit is None:
+            considered.append({"source": src, "confidence": conf, "method": SEMANTIC,
+                               "ai_confidence": conf})
+        else:
+            hit["ai_confidence"] = conf
+
+    # The name-alike columns the model was asked to verify. Kept at zero
+    # confidence, so a similar NAME can never be accepted as the same data.
+    for s_ in (similar or []) if from_input else []:
+        src, sim = s_.get("source"), s_.get("similarity")
+        if src not in input_cols or sim is None:
+            continue
+        hit = next((x for x in considered if x["source"] == src), None)
+        if hit is None:
+            considered.append({"source": src, "confidence": 0.0,
+                               "method": SIMILAR, "similarity": float(sim)})
+        else:
+            hit["similarity"] = float(sim)
 
     # Compatibility is applied to every candidate BEFORE ranking, so a
     # well-named column full of the wrong kind of data cannot win (section 6).
@@ -269,6 +359,8 @@ def resolve_field(
 
     considered.sort(key=lambda c: (c["compatible"], c["confidence"]), reverse=True)
     d.candidates = considered
+    if review_floor is not None:
+        return _settle(d, considered, bar, review_floor, from_input, ai or {})
     if not considered:
         d.status = REVIEW_REQUIRED
         d.reason = "no column in this file looks like this field"
@@ -314,6 +406,83 @@ def resolve_field(
     return d
 
 
+def _settle(d: Decision, considered: list[dict], bar: float, floor: float,
+            from_input: bool, ai: dict) -> Decision:
+    """Bordereau Setup's verdict for one field, from the evidence gathered.
+
+    Name evidence (exact, normalised, alias) decides as it always has. The
+    model's confidence is a verdict on MEANING and is banded:
+
+        confidence >= bar            AUTO_MAPPED
+        floor < confidence < bar     REVIEW_REQUIRED  — a person verifies
+        otherwise                    UNMAPPED         — no suitable mapping
+
+    A column that only looks similar decides nothing, and a field the model was
+    asked about but never answered is AI_UNAVAILABLE: the call failed, not the
+    file, so "no match" would be untrue.
+    """
+    failed = bool(ai.get("asked")) and not ai.get("ok")
+    if ai.get("asked"):
+        d.ai_status = "failed" if failed else "ok"
+        d.ai_error = (ai.get("error") or "no response") if failed else None
+    sims = [c["similarity"] for c in considered if c.get("similarity") is not None]
+    d.similarity = max(sims) if sims else None
+    said = next((c for c in considered if c.get("ai_confidence") is not None), None)
+    d.ai_confidence = said["ai_confidence"] if said else None
+    evidence = [c for c in considered if c["method"] != SIMILAR]
+
+    if not evidence:
+        if not from_input:
+            d.status, d.reason = NOT_FROM_INPUT, "not taken from the bordereau"
+        elif failed:
+            d.status, d.reason = AI_UNAVAILABLE, "AI matching didn't respond"
+            d.suggestion = considered[0]["source"] if considered else None
+        else:
+            d.status, d.reason = UNMAPPED, "no suitable mapping found"
+        return d
+
+    best = evidence[0]
+    d.method, d.confidence = best["method"], best["confidence"]
+    if best.get("similarity") is not None:
+        d.similarity = best["similarity"]
+    qualifying = [c for c in evidence if c["compatible"] and c["confidence"] >= bar]
+    if best["compatible"] and best["confidence"] >= bar and (
+            best["method"] == EXACT or len(qualifying) == 1):
+        d.source, d.status = best["source"], AUTO_MAPPED
+        d.reason = {
+            EXACT: "the file uses the same column name",
+            NORMALIZED: "the same name once punctuation and case are ignored",
+            ALIAS: f"'{best['source']}' is a known way of writing this field",
+            SEMANTIC: f"AI confirmed the same data at {best['confidence']:.0%}",
+        }.get(best["method"], "")
+        return d
+    if not from_input:
+        d.status, d.reason = NOT_FROM_INPUT, "not taken from the bordereau"
+        return d
+    if not best["compatible"]:
+        # The type check caps `confidence` for ranking; the band reads what the
+        # evidence itself said — a name rung is sure of the name, the model of
+        # its own number.
+        sure = best.get("ai_confidence") if best["method"] == SEMANTIC else 1.0
+        if sure is not None and sure > floor:
+            d.status, d.suggestion = REVIEW_REQUIRED, best["source"]
+            d.reason = f"values don't suit this field — {best.get('reason', '')}"
+        else:
+            d.status, d.reason = UNMAPPED, "no suitable mapping found"
+        return d
+    if len(qualifying) > 1:
+        d.status, d.suggestion = REVIEW_REQUIRED, best["source"]
+        d.reason = "more than one column fits: " + ", ".join(
+            c["source"] for c in qualifying[:4])
+        return d
+    if best["confidence"] > floor:
+        d.status, d.suggestion = REVIEW_REQUIRED, best["source"]
+        d.reason = f"AI {best['confidence']:.0%} — needs a person to confirm"
+        return d
+    d.status, d.reason = UNMAPPED, "no suitable mapping found"
+    return d
+
+
 def resolve_sheet(
     out_fields: list[dict],
     input_cols: list[str],
@@ -322,17 +491,26 @@ def resolve_sheet(
     existing: Optional[dict[str, str]] = None,
     semantic: Optional[dict[str, dict]] = None,
     threshold: Optional[float] = None,
+    review_floor: Optional[float] = None,
+    similar: Optional[dict[str, list[dict]]] = None,
+    ai: Optional[dict[str, dict]] = None,
 ) -> list[Decision]:
-    """Every output field of one sheet, in the template's own order."""
+    """Every output field of one sheet, in the template's own order.
+
+    `similar` and `ai` are keyed by column name, like `semantic`.
+    """
     existing = existing or {}
     semantic = semantic or {}
+    similar = similar or {}
+    ai = ai or {}
     out: list[Decision] = []
     for f in out_fields:
         col = f.get("column_name") or f.get("display_name") or ""
         out.append(resolve_field(
             f, input_cols, samples,
             existing_source=existing.get(col) or existing.get(f.get("field_key") or ""),
-            semantic=semantic.get(col), threshold=threshold))
+            semantic=semantic.get(col), threshold=threshold,
+            review_floor=review_floor, similar=similar.get(col), ai=ai.get(col)))
     return out
 
 
@@ -342,4 +520,5 @@ def unresolved_required(decisions: list[Decision]) -> list[Decision]:
     Reported rather than left blank: a mandatory column silently full of nothing
     is the one failure that looks like a successful delivery.
     """
-    return [d for d in decisions if d.required and not d.mapped]
+    return [d for d in decisions
+            if d.required and not d.mapped and d.status != NOT_FROM_INPUT]

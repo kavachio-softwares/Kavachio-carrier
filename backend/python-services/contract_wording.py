@@ -315,6 +315,198 @@ def unquoted_terms(sections: list[dict] | None, limits: dict | None) -> list[str
     return [k for k in (limits or {}) if k not in quoted]
 
 
+def renumber(sections: list[dict] | None) -> list[dict]:
+    """Restate the clause numbers from where the clauses actually sit.
+
+    Numbers are POSITIONAL here, never written into a sentence (see
+    build_sections): section three's second clause reads "3.2" because it is
+    the second clause of the third section, and for no other reason. So a
+    section added, removed or moved has to renumber everything after it, or the
+    document reads 3.1, 3.2, 3.1 — which on a contract looks like a clause went
+    missing rather than like one was added.
+
+    Only the number is touched. The words after it are the contract, and a
+    clause somebody typed themselves is left alone entirely — a person who
+    numbered their own clause meant that number.
+    """
+    out: list[dict] = []
+    for i, sec in enumerate(sections or [], start=1):
+        if not isinstance(sec, dict):
+            out.append(sec)
+            continue
+        if (sec.get("origin") or "").strip().lower().startswith("your own words"):
+            out.append(sec)
+            continue
+        n = 0
+        lines: list[str] = []
+        for line in (sec.get("body") or "").split("\n"):
+            text = line.strip()
+            if not text:
+                lines.append(line)
+                continue
+            # Every clause in a generated section carries a number, whether it
+            # arrived with one or not: a sentence added later would otherwise be
+            # the single unnumbered line in the document, which is the tell that
+            # something was bolted on.
+            m = _CLAUSE_NO.match(text)
+            n += 1
+            lines.append(f"{i}.{n}  {m.group(2) if m else text}")
+        out.append({**sec, "body": "\n".join(lines)})
+    return out
+
+
+def missing_clauses(sections: list[dict] | None, *, values: dict, limits: dict,
+                    type_label: str | None = None,
+                    dropped_sections: list[str] | None = None,
+                    dropped_terms: list[str] | None = None
+                    ) -> tuple[list[dict], list[str]]:
+    """Clauses for terms agreed AFTER the wording was first written.
+
+    THE HOLE THIS FILLS. The wording is written once, from the terms as they
+    stood at that moment, and from then on it is the carrier's text — so it is
+    never rebuilt underneath them. That is right for the words and wrong for a
+    term set later: fill in the basics, look at the wording, go back and agree a
+    commission, and the commission had no sentence in the document at all. It
+    was checked on every row and stated nowhere in the contract either side
+    signs, and because a PDF is composed from the sections, it was missing from
+    the download and from the copy that goes out for signature too.
+
+    So a term with no sentence gets one, and NOTHING ELSE IS TOUCHED. Only
+    clauses whose terms no sentence quotes are added; a clause already quoting
+    the term stays exactly as written, edits included, and so does every word
+    around it. That is the difference between this and "start the wording
+    again", which is a separate button that throws the edits away on purpose.
+
+    A term the carrier deliberately took out stays out: `dropped_sections` and
+    `dropped_terms` carry what they deleted, so a clause removed on purpose is
+    not quietly put back the next time the screen is opened.
+
+    Returns the sections and the term keys it wrote a sentence for — named, not
+    silent, because it changed the text of a contract.
+    """
+    if not sections:
+        return list(sections or []), []
+
+    lim = limits or {}
+    canonical = build_sections(values=values or {}, limits=lim,
+                               type_label=type_label)
+    quoted = quoted_tokens(sections)
+    gone_sections = set(dropped_sections or [])
+    gone_terms = set(dropped_terms or [])
+
+    out = list(sections)
+    added: list[str] = []
+    # Whether the document CHANGED, which is not the same question as which
+    # TERMS were added: a clause naming the class of business or the period
+    # quotes no agreed limit, and a sentence appended without renumbering it
+    # would be the one line in the contract with no clause number.
+    changed = False
+
+    def index_of(key: str) -> int | None:
+        for i, sec in enumerate(out):
+            if isinstance(sec, dict) and sec.get("key") == key:
+                return i
+        return None
+
+    for ci, csec in enumerate(canonical):
+        # The sentences this section would carry that the wording does not say
+        # yet. A line quoting nothing is boilerplate — the wording has its own,
+        # and a second copy of "Commission shall be shown separately" is not an
+        # improvement.
+        at = index_of(csec["key"])
+        if at is None and csec["key"] in gone_sections:
+            # Deleted on purpose, so nothing about it is considered — not even
+            # marking its terms as spoken for, which would quietly stop another
+            # section from stating one.
+            continue
+        new_lines: list[str] = []
+        states_a_term = False
+        for line in (csec.get("body") or "").split("\n"):
+            toks = used_tokens(line)
+            terms = [t for t in toks if t in lim]
+            if toks and not terms:
+                # A sentence about the parties, the period or the class of
+                # business. Those are not terms that get agreed later — they
+                # are written once, with the wording — so completing them here
+                # would be rewriting somebody's document rather than finishing
+                # it. A wording of one section stays a wording of one section.
+                continue
+            if terms and any(t in quoted or t in gone_terms for t in terms):
+                continue
+            if not toks and at is not None:
+                # Boilerplate, and the section is already in the document with
+                # its own copy of it. A second "Commission shall be shown
+                # separately" is not an improvement.
+                continue
+            m = _CLAUSE_NO.match(line.strip())
+            new_lines.append(m.group(2) if m else line.strip())
+            if terms:
+                states_a_term = True
+                quoted.update(terms)
+        # Only ever for a term the document does not state. Boilerplate on its
+        # own would put back a section somebody deleted on purpose, which is
+        # the one thing this must not do.
+        if not states_a_term:
+            continue
+
+        if at is not None:
+            # The section is there; the sentence is what is missing. Appended,
+            # so a clause the carrier moved or rewrote keeps its place.
+            sec = out[at]
+            body = (sec.get("body") or "").rstrip()
+            out[at] = {**sec,
+                       "body": (body + "\n" if body else "") + "\n".join(new_lines)}
+        else:
+            out.insert(_place_for(out, canonical, ci), {**csec,
+                                                        "body": "\n".join(new_lines)})
+        changed = True
+        added.extend(t for line in new_lines for t in used_tokens(line)
+                     if t in (limits or {}))
+
+    if not changed:
+        return out, []
+    return renumber(out), list(dict.fromkeys(added))
+
+
+def dropped_between(before: list[dict] | None,
+                    after: list[dict] | None) -> tuple[list[str], list[str]]:
+    """What a save TOOK OUT of a wording — the sections, and the terms.
+
+    A screen saving a wording sends it as it now stands; it carries no record
+    of what was deleted. That difference is the record, and without reading it
+    a clause deleted on one save would be written straight back on the next —
+    which would make deleting a clause a thing you cannot do.
+
+    It also protects the case a re-tie cannot rescue: a clause whose chip was
+    replaced by prose. The term is then stated nowhere, and what that wants is
+    the warning the record already raises — not a second sentence quietly added
+    beside the one somebody rewrote.
+    """
+    old_keys = {s.get("key") for s in (before or []) if isinstance(s, dict)}
+    new_keys = {s.get("key") for s in (after or []) if isinstance(s, dict)}
+    gone_sections = sorted(k for k in old_keys - new_keys if k)
+    gone_terms = sorted(quoted_tokens(before) - quoted_tokens(after))
+    return gone_sections, gone_terms
+
+
+def _place_for(sections: list[dict], canonical: list[dict], ci: int) -> int:
+    """Where a section Kavachio is adding back belongs, in reading order.
+
+    Next to the neighbours it was written beside: after the last canonical
+    section that comes before it and is present, or failing that before the
+    first one that comes after. A contract whose financial terms turn up after
+    the termination clause is a contract somebody has to re-read to trust.
+    """
+    keys = [s.get("key") for s in sections if isinstance(s, dict)]
+    for earlier in reversed(canonical[:ci]):
+        if earlier["key"] in keys:
+            return keys.index(earlier["key"]) + 1
+    for later in canonical[ci + 1:]:
+        if later["key"] in keys:
+            return keys.index(later["key"])
+    return len(sections)
+
+
 # Not letters, digits, or the punctuation that can sit INSIDE a rendered value
 # ("12,500.00", "15%"). Used to keep a re-tie off the tail of a longer number:
 # "13%" must not match inside "113%".

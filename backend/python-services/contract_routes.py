@@ -454,6 +454,14 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # of the chip — after which the document keeps saying the old number
         # while the check follows the term. See contract_wording.unquoted_terms.
         "wording_unquoted": unquoted,
+        # What was deleted from this wording on purpose. Served because the
+        # editor re-reads through the preview, which writes a clause for any
+        # agreed term the document does not state — without this, a clause
+        # deleted last week would be back the next time somebody opened it.
+        "wording_dropped": {
+            "sections": list((c.wording_sections or {}).get("dropped_sections") or []),
+            "terms": list((c.wording_sections or {}).get("dropped_terms") or []),
+        },
         "signers": (c.wording_sections or {}).get("signers"),
         # The block this contract's signature page will ask for. Normalised on
         # the way out, so a screen reading it never has to know that older rows
@@ -934,6 +942,11 @@ class ContractIn(BaseModel):
     # from the contract's own signature page and is the only thing in the flow
     # that puts mail in an inbox.
     signers: Optional[list] = None
+    # What the carrier deleted while writing it. A term with no clause is given
+    # one on the way in (contract_wording.missing_clauses), so a clause removed
+    # on purpose has to be named or it would arrive back in the saved contract.
+    dropped_sections: Optional[list] = None
+    dropped_terms: Optional[list] = None
     # The contract this one renews, when it is a renewal. A renewal raised here
     # is a NEW contract that points back — last year's terms have to keep
     # meaning what they meant while bordereaux were checked against them, so
@@ -1134,10 +1147,21 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
             # Same tie as on edit: a figure typed where a chip used to be is
             # bound back to the term it quotes, or the contract stops following
             # its own terms from the moment it is created.
+            ctx = _wording_context(s, c)
             kept, _retied = cw.retie(
                 [sec for sec in body.wording_sections
                  if isinstance(sec, dict) and (sec.get("body") or "").strip()],
-                _wording_context(s, c)["tokens"])
+                ctx["tokens"])
+            # The last chance to catch a term with no sentence. The wizard tops
+            # the wording up as it goes, but nothing stops a client sending
+            # sections written before the terms were finished, and a contract
+            # that does not state a term it is measured on is the failure this
+            # whole file exists to prevent.
+            kept, _added = cw.missing_clauses(
+                kept, values=ctx["values"], limits=ctx["limits"],
+                type_label=ctx["type_label"],
+                dropped_sections=body.dropped_sections,
+                dropped_terms=body.dropped_terms)
             authored_sections = kept
             c.wording_sections = {
                 "sections": kept,
@@ -1246,6 +1270,13 @@ class WordingPreviewIn(BaseModel):
     # Who signs, so a draft circulated for comment already carries the names
     # on its signature page rather than two blank lines.
     signers: Optional[list] = None
+    # What the carrier took OUT. A clause deleted on purpose must not come back
+    # the next time the screen re-reads the wording — see
+    # contract_wording.missing_clauses, which writes a sentence for any term
+    # the document does not state and needs to be told which silences were
+    # meant.
+    dropped_sections: Optional[list] = None
+    dropped_terms: Optional[list] = None
 
 
 @router.post("/contract-wording/preview")
@@ -1271,9 +1302,20 @@ def wording_preview(body: WordingPreviewIn,
 
     sections = [sec for sec in (body.sections or [])
                 if isinstance(sec, dict) and (sec.get("body") or "").strip()]
+    added: list[str] = []
     if not sections:
         sections = cw.build_sections(values=body.values, limits=limits,
                                      type_label=type_label)
+    else:
+        # There IS a wording, and it was written from the terms as they stood
+        # at the time. A term agreed since then has no sentence in it, so it
+        # gets one — and everything already written, edits included, is left
+        # exactly as it is. Without this the contract goes out for signature
+        # stating the terms it had on the day the wording was first opened.
+        sections, added = cw.missing_clauses(
+            sections, values=body.values, limits=limits, type_label=type_label,
+            dropped_sections=body.dropped_sections,
+            dropped_terms=body.dropped_terms)
 
     tokens = cw.token_values(
         values=body.values, limits=limits,
@@ -1296,6 +1338,12 @@ def wording_preview(body: WordingPreviewIn,
         # contract_wording.uncheckable_sections.
         "uncheckable": cw.uncheckable_sections(sections),
         "pages": cw.estimate_pages(sections),
+        # Terms this call wrote a sentence for. Named rather than slipped in:
+        # the wording is the carrier's, and text appearing in it is something
+        # they are told about.
+        "added": [{"key": k,
+                   "question": ct.AGREED_LIMITS[k]["question"]}
+                  for k in added if k in ct.AGREED_LIMITS],
     }
 
 
@@ -1493,6 +1541,7 @@ def update_contract(contract_id: int, body: dict,
         if "agreed_limits" in body:
             c.commercial_terms = ct.clean_agreed_limits(body["agreed_limits"]) or None
         retied: list[str] = []
+        added: list[str] = []
         if "wording_sections" in body:
             import contract_wording as cw
             sections = [sec for sec in (body["wording_sections"] or [])
@@ -1505,9 +1554,43 @@ def update_contract(contract_id: int, body: dict,
             # showing — and then the sentence stops moving when the term does.
             # That is how a contract ends up saying 13% while the check enforces
             # 14%. See contract_wording.retie.
-            sections, retied = cw.retie(sections, _wording_context(s, c)["tokens"])
+            ctx = _wording_context(s, c)
+            sections, retied = cw.retie(sections, ctx["tokens"])
+            # And a term agreed since this wording was written gets the
+            # sentence it never had. Same rule as the wizard: add only what the
+            # document does not already say, and touch nothing else.
+            #
+            # What THIS save deleted stays deleted. The screen sends the
+            # wording as it now stands, so the difference against what was
+            # stored is the only record of the intention — and a clause whose
+            # chip was replaced by prose belongs to the warning on the record,
+            # not to a second sentence written beside it. Read AFTER the
+            # re-tie, so a figure tied back still counts as quoted.
+            _held = c.wording_sections if isinstance(c.wording_sections, dict) else {}
+            _gone_sections, _gone_terms = cw.dropped_between(
+                _held.get("sections"), sections)
+            # Remembered ON THE CONTRACT, not just for this save. The editor
+            # re-reads the wording through the preview every time it opens, and
+            # a clause taken out on purpose must not be written back then.
+            #
+            # Self-healing in the other direction: anything the wording states
+            # again falls off the list, so a term written back in — by a
+            # rebuild, or by putting the chip back — starts being topped up
+            # again like any other.
+            _present = {s.get("key") for s in sections if isinstance(s, dict)}
+            _quoted = cw.quoted_tokens(sections)
+            _drop_sections = sorted((set(_held.get("dropped_sections") or [])
+                                     | set(_gone_sections)) - _present)
+            _drop_terms = sorted((set(_held.get("dropped_terms") or [])
+                                  | set(_gone_terms)) - _quoted)
+            sections, added = cw.missing_clauses(
+                sections, values=ctx["values"], limits=ctx["limits"],
+                type_label=ctx["type_label"],
+                dropped_sections=_drop_sections, dropped_terms=_drop_terms)
             existing = dict(c.wording_sections or {})
             existing["sections"] = sections
+            existing["dropped_sections"] = _drop_sections
+            existing["dropped_terms"] = _drop_terms
             c.wording_sections = existing or None
             # The wording IS the clauses. See _store_authored_clauses — it
             # stores them and deliberately writes no rules.
@@ -1582,16 +1665,46 @@ def update_contract(contract_id: int, body: dict,
                 {"cid": c.id}).first() is not None:
             rebound = _auto_bind(s, c, p)
         if "agreed_limits" in body and "wording_sections" not in body:
+            import contract_wording as cw2
             _sections = ((c.wording_sections or {}).get("sections")
                          if isinstance(c.wording_sections, dict) else None)
             if _sections:
+                # A term moved (or arrived) without the wording being sent with
+                # it — the terms panel saves limits alone. The sentences that
+                # quote a term already follow it, because they hold tokens; a
+                # term that is NEW has no sentence to follow, and this is where
+                # it gets one.
+                _ctx = _wording_context(s, c)
+                _held = (c.wording_sections
+                         if isinstance(c.wording_sections, dict) else {})
+                _sections, _added = cw2.missing_clauses(
+                    _sections, values=_ctx["values"], limits=_ctx["limits"],
+                    type_label=_ctx["type_label"],
+                    # What was deleted from this wording before now. Saving a
+                    # TERM must not write back a clause somebody removed on
+                    # purpose — the deletion is remembered on the contract.
+                    dropped_sections=_held.get("dropped_sections"),
+                    dropped_terms=_held.get("dropped_terms"))
+                if _added:
+                    _existing = dict(c.wording_sections or {})
+                    _existing["sections"] = _sections
+                    c.wording_sections = _existing
+                    added.extend(_added)
                 _store_authored_clauses(s, c, _sections)
+                # The clause rows are written by raw SQL and the wording above
+                # is an ORM change; neither is durable until this.
+                s.commit()
 
         out = _record(s, c, p=p)
         # Named, not silent. It changed the text of a contract, and whoever
         # saved it is the only person who can say the tie was wrong.
         out["wording_retied"] = [
             ct.AGREED_LIMITS[k]["question"] for k in retied
+            if k in ct.AGREED_LIMITS]
+        # Same reason as the re-tie: text appeared in a contract, and the person
+        # who saved it is the one who gets to say whether it belongs there.
+        out["wording_added"] = [
+            ct.AGREED_LIMITS[k]["question"] for k in dict.fromkeys(added)
             if k in ct.AGREED_LIMITS]
         if rebound:
             out["mapping"] = rebound

@@ -1749,44 +1749,80 @@ def _scope_template_conflict(s, tid: int, scope: dict, pipe, fmt) -> Optional[st
 def _mapping_review(decisions: Optional[dict]) -> dict:
     """A short summary of the mapping ladder's verdict, for the setup screen.
 
-    Three numbers and two lists. `unresolved_required` is the one that matters:
-    those columns will be EMPTY in the delivered file, and the plan is explicit
-    that they must not be silently generated as if all were well.
+    Every field the bordereau is meant to fill lands in one of four states —
+    auto (wired up), verify (a proposal a person must confirm), unmapped
+    (nothing suitable) and ai_failed (the model never answered, so "no match"
+    would be untrue). A field configured to come from the contract, a party
+    record or a constant is not the bordereau's to fill and is left out.
+    `unresolved_required` is still the one that matters: those columns will be
+    EMPTY in the delivered file.
     """
     decisions = decisions or {}
-    auto = review = 0
+    counts = {"auto": 0, "verify": 0, "unmapped": 0, "ai_failed": 0}
+    entries: list[dict] = []
     unresolved: list[dict] = []
     ambiguous: list[dict] = []
     for sheet, rows in decisions.items():
         for d in rows or []:
-            if d.get("status") in ("AUTO_MAPPED", "MANUALLY_CONFIRMED"):
-                auto += 1
+            state = _review_state(d)
+            if state is None:
                 continue
-            review += 1
+            counts[state] += 1
+            cands = d.get("candidates") or []
             entry = {"sheet": sheet, "field": d.get("display_name"),
                      "field_key": d.get("field_key"),
+                     "state": state, "required": bool(d.get("required")),
+                     "source": d.get("source"),
+                     "suggestion": d.get("suggestion") or (
+                         cands[0].get("source") if state == "verify" and cands else None),
                      "confidence": d.get("confidence"),
-                     "reason": d.get("reason"),
-                     "candidates": [c.get("source") for c in (d.get("candidates") or [])][:4]}
-            if d.get("required"):
-                unresolved.append(entry)
-            else:
-                ambiguous.append(entry)
+                     "ai_confidence": d.get("ai_confidence"),
+                     "similarity": d.get("similarity"),
+                     "reason": d.get("reason"), "error": d.get("ai_error"),
+                     "candidates": [c.get("source") for c in cands][:4]}
+            entries.append(entry)
+            if state != "auto":
+                (unresolved if entry["required"] else ambiguous).append(entry)
     return {
-        "checked": auto + review,
-        "auto_mapped": auto,
-        "needs_review": review,
+        "checked": len(entries),
+        "auto_mapped": counts["auto"],
+        "needs_review": len(entries) - counts["auto"],
         # Required and unmapped — blocks a clean delivery.
         "unresolved_required": unresolved,
         # Optional and unmapped — worth a look, not a blocker.
         "unmapped_optional": ambiguous,
+        "counts": counts,
+        "entries": entries,
         "threshold": _semantic_threshold(),
+        "review_floor": _review_floor(),
     }
 
 
+def _review_state(d: dict) -> Optional[str]:
+    """Which of the four states one saved decision is in — None when the field
+    is not the bordereau's to fill. A decision saved before the states existed
+    carries only REVIEW_REQUIRED: with a candidate it reads as verify, without
+    one as unmapped."""
+    status = d.get("status")
+    if status in ("AUTO_MAPPED", "MANUALLY_CONFIRMED"):
+        return "auto"
+    if status == "NOT_FROM_INPUT":
+        return None
+    if status == "AI_UNAVAILABLE":
+        return "ai_failed"
+    if status == "UNMAPPED":
+        return "unmapped"
+    return "verify" if (d.get("suggestion") or d.get("candidates")) else "unmapped"
+
+
 def _semantic_threshold() -> float:
-    from semantic_mapping import min_confidence
-    return min_confidence()
+    from semantic_mapping import auto_accept_confidence
+    return auto_accept_confidence()
+
+
+def _review_floor() -> float:
+    from semantic_mapping import review_confidence
+    return review_confidence()
 
 
 def _output_sample_layout(s, template_id: Optional[int]) -> Optional[dict]:
