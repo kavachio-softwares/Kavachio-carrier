@@ -399,6 +399,45 @@ def _numeric_field_on_text(ir, output_schema):
     return None
 
 
+_LIMIT_WORD = re.compile(r"\blimits?\b", re.I)
+
+
+def _words(s) -> str:
+    """snake_case / CamelCase / punctuation split into plain words, so a word
+    pattern reads "SumInsuredLimit" and "sum_insured_limit" like "Sum Insured Limit"."""
+    return re.sub(r"[_\W]+|(?<=[a-z])(?=[A-Z])", " ", str(s or ""))
+# A value / exposure measure: what is insured, not how much one loss may cost.
+_VALUE_MEASURE = re.compile(
+    r"sum[\s_]*insured|insured[\s_]*values?|\btiv\b|total[\s_]*insured", re.I)
+
+
+def _limit_clause_on_value_column(ir, output_schema):
+    """Always-on guard: a clause that caps a LIMIT ("APD per auto limit $250,000",
+    "maximum limit per policy $3M") bound to a sum-insured / insured-value column.
+    A wide standard template often has no column for the limit itself, and the
+    mapper then reaches for the one insured-value amount it does have — which
+    holds a whole fleet's or schedule's value, so the rule flags almost every row
+    for a limit nobody breached. Route it to review with the reason instead. A
+    limit bound to a real limit column is untouched."""
+    if ir.get("template") not in ("max_limit", "min_limit", "range_check"):
+        return None
+    field = (ir.get("params") or {}).get("field")
+    if not isinstance(field, str) or not field.strip():
+        return None
+    rule_name = _words(ir.get("rule_name"))
+    # A cap ON insured value ("TIV limit per location") is rightly bound there.
+    if not _LIMIT_WORD.search(rule_name) or _VALUE_MEASURE.search(rule_name):
+        return None
+    canon = next((str(f.get("canonical_field") or "")
+                  for f in (output_schema.template_fields or [])
+                  if (f.get("name") or "").strip().lower() == field.strip().lower()), "")
+    if _LIMIT_WORD.search(_words(field)) or not (_VALUE_MEASURE.search(_words(field))
+                                                 or _VALUE_MEASURE.search(_words(canon))):
+        return None
+    return (f"a limit clause is bound to {field!r}, an insured-value column, not a "
+            f"limit — the output template has no column for this limit")
+
+
 # Country / nation names (normalized, punctuation+spaces stripped) that must
 # never appear as an ALLOWED value in a STATE-level column.
 _COUNTRY_ALIASES = {
@@ -3558,6 +3597,9 @@ def verify_and_build_ir_rule(ir, clause, contract_ctx, output_schema, con=None,
         kind_reason = _numeric_field_on_text(ir, output_schema)
         if kind_reason:
             return {"route": "review", "reason": kind_reason}
+        limit_reason = _limit_clause_on_value_column(ir, output_schema)
+        if limit_reason:
+            return {"route": "review", "reason": limit_reason}
 
         # ALWAYS-ON geographic-level guard: never keep a value_in_set that lists a
         # COUNTRY as an allowed value in a STATE column (dead rule). Drop the

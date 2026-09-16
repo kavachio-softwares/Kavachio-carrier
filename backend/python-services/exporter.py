@@ -53,6 +53,11 @@ from openpyxl.styles.numbers import is_date_format
 
 from data_model import DATA_MODEL
 from contract_upload_services.gemini_service import invoke_with_retry as _gateway_invoke
+from contract_upload_services.gemini_service import DETERMINISTIC_SEED, model_for
+
+# Today's model for the template-mapping and sheet-role calls; each can be moved
+# by config (KAVACHIO_MODEL_TEMPLATE_MAPPING / KAVACHIO_MODEL_SHEET_ROLES).
+_DEFAULT_MAPPING_MODEL = "gemini-2.5-flash"
 
 log = logging.getLogger("bdx.exporter")
 
@@ -1170,10 +1175,14 @@ def _call_gemini_for_chunk(
     # the global concurrency + rate limiter live in ONE place. We keep exporter's
     # own client (600 s timeout) and its lenient JSON recovery below.
     kwargs = {
-        "model": "gemini-2.5-flash",
+        "model": model_for("template_mapping", _DEFAULT_MAPPING_MODEL),
         "contents": prompt,
         "config": {
             "response_mime_type": "application/json",
+            # Same columns, same answer: two templates built from one standard
+            # should not map it differently by chance.
+            "temperature": 0,
+            "seed": DETERMINISTIC_SEED,
             "max_output_tokens": _LLM_MAX_OUTPUT_TOKENS,
             # KEY FIX: disable extended thinking so all output tokens go to the
             # JSON response instead of internal reasoning. Without this, ~15k
@@ -1181,6 +1190,21 @@ def _call_gemini_for_chunk(
             "thinking_config": {"thinking_budget": 0},
         },
     }
+    # Same prompt, same answer: temperature 0 + seed still moved a few columns'
+    # canonical field between two builds of one standard (3 of 147 measured), which
+    # flips a column between "from the bordereau" and "from the contract". Only a
+    # complete answer (finished, parsed) is stored; the key covers the whole
+    # prompt, the generation config and the model.
+    import ai_cache
+    import hashlib
+    cache_key = ai_cache.make_key(*ai_cache.model_scoped(
+        ("template_canonical_v1", hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+         {k: v for k, v in kwargs["config"].items()}), kwargs["model"]))
+    cached = ai_cache.get("template_canonical", cache_key)
+    if isinstance(cached, dict):
+        log.info("    Gemini ← '%s' chunk %d served from cache", sheet_name, chunk_index)
+        return cached
+
     try:
         resp = _gateway_invoke(kwargs, label=label, gen_client=client)
     except Exception as e:
@@ -1208,6 +1232,8 @@ def _call_gemini_for_chunk(
     if parsed is None:
         log.error("Could not recover JSON for '%s' chunk %d (finish=%s)",
                   sheet_name, chunk_index, finish_reason)
+    elif isinstance(parsed, dict) and str(finish_reason).endswith("STOP"):
+        ai_cache.put("template_canonical", cache_key, parsed)
     return parsed
 
 
@@ -1344,10 +1370,12 @@ def classify_sheet_roles(client, structure: dict) -> dict:
     for attempt in range(1, 3):
         try:
             resp = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model_for("sheet_roles", _DEFAULT_MAPPING_MODEL),
                 contents=prompt,
                 config={
                     "response_mime_type": "application/json",
+                    "temperature": 0,
+                    "seed": DETERMINISTIC_SEED,
                     "response_schema": _SHEET_ROLE_SCHEMA,
                     "thinking_config": {"thinking_budget": 0},
                 },
@@ -1577,17 +1605,29 @@ def _cell_has_visible_style(cell) -> bool:
     return bool(getattr(cell, "has_style", False))
 
 
-def _is_non_data_row_values(vals: list) -> bool:
+def _is_non_data_row_values(vals: list, names: list | None = None,
+                            measure_cols=None) -> bool:
     """True when a row's VALUES mark it as a summary/totals or blank spacer
     row — not a transaction row (mirrors row_classifier's categories): blank,
     carries summary/total wording, or is sparse with nothing but bare numbers
-    (an unlabelled totals row)."""
-    filled = [v for v in vals if v is not None and str(v).strip()]
+    (an unlabelled totals row).
+
+    `names` (the column of each value) and `measure_cols` (the columns the setup
+    fills) together narrow the blank and numeric-only tests to the filled
+    columns, as row_classifier does — otherwise a wide template's unmapped
+    columns make every row look sparse. Summary wording is looked for in every
+    value. Without both, or when no name is measured, all values count."""
+    measured = vals
+    if names is not None and measure_cols:
+        keep = set(measure_cols)
+        measured = [v for n, v in zip(names, vals) if n in keep] or vals
+    everything = [v for v in vals if v is not None and str(v).strip()]
+    filled = [v for v in measured if v is not None and str(v).strip()]
     if not filled:
         return True
     try:
         from row_classifier import _SUMMARY_KEYWORDS
-        if any(_SUMMARY_KEYWORDS.match(str(v).strip()) for v in filled):
+        if any(_SUMMARY_KEYWORDS.match(str(v).strip()) for v in everything):
             return True
     except Exception:  # noqa: BLE001 — keyword check is best-effort
         pass
@@ -1604,7 +1644,7 @@ def _is_non_data_row_values(vals: list) -> bool:
         except ValueError:
             return False
 
-    n_cols = len(vals) or 1
+    n_cols = len(measured) or 1
     return len(filled) < n_cols * 0.5 and all(_numeric(v) for v in filled)
 
 

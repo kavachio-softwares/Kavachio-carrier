@@ -600,7 +600,8 @@ async def analyze_contract(body: AnalyzeBody,
         assert_tenant_owns(principal, c.tenant_id)
         library = standards.fields(body.standard_id, body.jurisdiction)
         known = [f["field"] for f in library]
-        result = await run_in_threadpool(cof.analyze, s, [c.id], known)
+        result = await run_in_threadpool(cof.analyze, s, [c.id], known,
+                                         tenant_id=tid)
     result["standard_field_count"] = len(known)
     return result
 
@@ -656,6 +657,9 @@ async def analyze_sources(
     # filling in what a contract never names. See _library.
     standard_scope: str = Form(standards.SCOPE_FULL),
     read_contract: bool = Form(True),
+    # A deliberate re-analysis: ask the model again rather than reuse the
+    # answers stored for these exact inputs (which is what keeps a repeat the same).
+    refresh: bool = Form(False),
     input_sheets: Optional[list[str]] = Form(None),
     input_file: Optional[UploadFile] = File(None),
     contract_file: Optional[UploadFile] = File(None),
@@ -708,15 +712,17 @@ async def analyze_sources(
         known = [f["field"] for f in library]
         with SessionLocal() as s:
             result = await run_in_threadpool(
-                cof.analyze, s, [cid] if cid else [], known, documents=documents)
+                cof.analyze, s, [cid] if cid else [], known, documents=documents,
+                tenant_id=tid, refresh=refresh)
         if cid:
             contract_source = "saved and uploaded" if documents else "saved"
 
     # Fold first: a contract field the published list already has a column for
     # belongs ON that column, not beside it.
     extras, folded = await run_in_threadpool(
-        osa.fold_contract_fields, library, result.get("fields") or [])
-    merged = _merge_fields(library, extras, folded)
+        osa.fold_contract_fields, library, result.get("fields") or [],
+        tenant_id=tid, refresh=refresh)
+    merged = osa.merge_fields(library, extras, folded)
     if not merged:
         raise HTTPException(
             400, "nothing to propose — include a reporting standard, or pick a "
@@ -741,7 +747,8 @@ async def analyze_sources(
     # Threadpool: the ladder's last rung asks the model about whatever the
     # deterministic rungs could not place.
     fields = await run_in_threadpool(
-        osa.cross_reference, merged, layout["columns"], layout["samples"])
+        osa.cross_reference, merged, layout["columns"], layout["samples"],
+        tenant_id=tid, refresh=refresh)
     osa.recommend(fields, checked_input=checked)
 
     std = standards.get(standard_id) if library else None
@@ -828,7 +835,7 @@ async def create_from_contract(body: FromContractBody,
         if contract_fields is None:
             known = [f["field"] for f in library]
             contract_fields = (await run_in_threadpool(
-                cof.analyze, s, [c.id], known))["fields"]
+                cof.analyze, s, [c.id], known, tenant_id=tid))["fields"]
         carrier_name = None
         if body.carrier_party_id:
             p = s.get(Party, body.carrier_party_id)
@@ -846,8 +853,8 @@ async def create_from_contract(body: FromContractBody,
         merged = list(contract_fields)
     else:
         extras, folded = await run_in_threadpool(
-            osa.fold_contract_fields, library, contract_fields)
-        merged = _merge_fields(library, extras, folded)
+            osa.fold_contract_fields, library, contract_fields, tenant_id=tid)
+        merged = osa.merge_fields(library, extras, folded)
     if not merged:
         raise HTTPException(
             400, "nothing to build a template from — the contract produced no "
@@ -897,54 +904,6 @@ async def create_from_contract(body: FromContractBody,
         _audit(principal, t, "contract",
                {"contract_id": body.contract_id, "fields": len(merged)})
         return _tpl_dict(s, t, with_structure=True)
-
-
-def _merge_fields(library: list[dict], contract_fields: list[dict],
-                  folded: Optional[dict[str, dict]] = None) -> list[dict]:
-    """Standard library + contract-specific, standard first, no duplicates.
-
-    `folded` comes from ``osa.fold_contract_fields``: a contract requirement
-    that turned out to BE one of the published columns, keyed by that column's
-    name. It is stamped onto the standard's own row rather than added beside
-    it, so a field the contract merely worded differently ends up as one column
-    that the contract is on record as asking for.
-    """
-    folded = folded or {}
-    out: list[dict] = []
-    seen: set[str] = set()
-    for f in library or []:
-        key = str(f.get("field", "")).strip().lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        row = {"field": f["field"], "required": bool(f.get("required")),
-               "source_field": None, "data_type": "string",
-               "origin": "standard",
-               "requirement": f.get("requirement"),
-               "reason": f.get("comments") or None}
-        c = folded.get(key)
-        if c:
-            row["also_in_contract"] = True
-            row["contract_reference"] = c.get("contract_reference")
-            if c.get("required"):
-                row["contract_required"] = True
-        out.append(row)
-    for f in contract_fields or []:
-        name = str(f.get("field") or f.get("display_name") or "").strip()
-        key = name.lower()
-        if not name or key in seen:
-            continue
-        seen.add(key)
-        out.append({"field": name, "required": bool(f.get("required")),
-                    "source_field": f.get("source_field"),
-                    "data_type": f.get("data_type") or "string",
-                    "origin": f.get("origin") or "contract",
-                    "category": f.get("category"),
-                    # Kept so the review table can say WHY a field is there —
-                    # dropped before, which left the user with a bare list.
-                    "reason": f.get("reason"),
-                    "contract_reference": f.get("contract_reference")})
-    return out
 
 
 def _structure_from_fields(sheet_name: str, fields: list[dict]) -> dict:
@@ -1222,7 +1181,8 @@ def validate(template_id: int, principal: Principal = Depends(current_principal)
         contract_fields = None
         if t.source_kind == "contract" and t.contract_id:
             import contract_output_fields as cof
-            contract_fields = cof.analyze(s, [t.contract_id])["fields"]
+            contract_fields = cof.analyze(s, [t.contract_id],
+                                          tenant_id=t.tenant_id)["fields"]
         return otv.validate_template(
             structure, standard_fields=_standard_fields_for(t),
             contract_fields=contract_fields,

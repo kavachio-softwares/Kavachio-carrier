@@ -78,7 +78,17 @@ def _dedup_cols(cols):
     return out
 
 
-def build_connection(records_by_sheet, schema_cols=None, label=None):
+def _lookup_sheet(by_sheet, raw_sheet, sheet):
+    """`by_sheet[raw_sheet]`, else `by_sheet[sheet]` (the stripped name), else
+    None — the same lookup schema_cols gets, for the same trailing-space reason."""
+    if not by_sheet:
+        return None
+    if raw_sheet in by_sheet:
+        return by_sheet[raw_sheet]
+    return by_sheet.get(sheet)
+
+
+def build_connection(records_by_sheet, schema_cols=None, label=None, filled_cols=None):
     """Load each sheet as a DuckDB table (all columns VARCHAR + a synthetic
     integer __rowid = the 1-based data row). Returns (connection, tables) where
     tables = { sheet_name: {"columns": [...], "samples": {col: [vals]}} }.
@@ -87,6 +97,14 @@ def build_connection(records_by_sheet, schema_cols=None, label=None):
     structure. When given, tables are created with the full template column set
     even for sheets/columns that have no data in this run — this keeps the schema
     (and its hash) stable and shows the LLM every column it may reference.
+
+    `filled_cols` (optional) is {sheet: [column_name, ...]} — the columns the
+    SETUP writes a value into. The template can be far wider than the mapping,
+    and a column nothing fills is blank on every row, so the row classifier
+    measures blankness over this set (falling back to the keys the records
+    carry, then to every column). When given, it is also kept on the table as
+    `filled` so run_validation can refuse to run a rule on a column the setup
+    never fills. Each table records rows_total / rows_loaded / excluded.
 
     Everything is VARCHAR on purpose: the LLM uses TRY_CAST(... AS DOUBLE/DATE)
     so we never crash on a stray non-numeric value, and identifiers are always
@@ -187,7 +205,21 @@ def build_connection(records_by_sheet, schema_cols=None, label=None):
         # every exception below an excluded row up by one, highlighting the
         # wrong cells (summary rows showed flags that belonged to their
         # neighbours).
-        data_records, excluded_rows = row_classifier.classify_sheet_rows(records, cols)
+        #
+        # Blankness is measured over the columns the setup fills — see the
+        # docstring. Given explicitly, that set is the caller's; otherwise the
+        # keys the records carry (a projection writes exactly the columns it
+        # maps); failing both, every column, as before.
+        filled = _lookup_sheet(filled_cols, raw_sheet, sheet)
+        filled = None if filled is None else [c for c in cols if c in set(filled)]
+        measure = filled
+        if measure is None and records:
+            keys = set()
+            for rec in records:
+                keys.update(rec.keys())
+            measure = [c for c in cols if c in keys]
+        data_records, excluded_rows = row_classifier.classify_sheet_rows(
+            records, cols, measure_cols=measure or None)
         if excluded_rows:
             print(f"[DuckDB] sheet {sheet!r}: excluded {len(excluded_rows)} "
                   f"non-data row(s) from validation "
@@ -210,7 +242,11 @@ def build_connection(records_by_sheet, schema_cols=None, label=None):
                     v = rec.get(c)
                     vals.append(None if v is None else str(v))
                 rows.append(vals)
-            con.executemany(ins, rows)
+            # Every row can be excluded, and DuckDB refuses an empty batch. The
+            # table already exists, so the rules simply run on zero rows — the
+            # caller sees rows_loaded 0 rather than a crash.
+            if rows:
+                con.executemany(ins, rows)
 
         # Collect up to 3 distinct sample values per column to help the LLM
         # understand formats / enums actually present in the data.
@@ -230,7 +266,11 @@ def build_connection(records_by_sheet, schema_cols=None, label=None):
             if vals:
                 samples[c] = vals
 
-        tables[sheet] = {"columns": cols, "samples": samples, "excluded_rows": excluded_rows}
+        tables[sheet] = {"columns": cols, "samples": samples, "excluded_rows": excluded_rows,
+                         "filled": filled,
+                         "rows_total": len(records),
+                         "rows_loaded": len(records) - len(excluded_rows),
+                         "excluded": row_classifier.excluded_summary(excluded_rows)}
 
     # Ensure EVERY template sheet exists as a table — even ones with no data in
     # this run — so a rule that fans out across sheets (UNION ALL) never
@@ -243,7 +283,10 @@ def build_connection(records_by_sheet, schema_cols=None, label=None):
         coldefs = ", ".join(f'{_qid(c)} VARCHAR' for c in cols)
         con.execute(
             f'CREATE TABLE {_qid(sheet)} (__rowid INTEGER{"," + coldefs if coldefs else ""})')
-        tables[sheet] = {"columns": cols, "samples": {}}
+        filled = _lookup_sheet(filled_cols, raw_sheet, sheet)
+        tables[sheet] = {"columns": cols, "samples": {},
+                         "filled": None if filled is None else [c for c in cols if c in set(filled)],
+                         "rows_total": 0, "rows_loaded": 0, "excluded": {}}
 
     return con, tables
 
@@ -678,6 +721,90 @@ def _missing_columns(sql, tables):
     return [c for c in refs if c not in known]
 
 
+def _unfilled_columns(sql, tables):
+    """Columns a query reads that exist in the table but that the SETUP never
+    fills, as (columns, sql_to_run).
+
+    A template is often far wider than its mapping. The table carries every
+    template column, so `_missing_columns` finds nothing wrong, yet a column
+    the setup writes nothing into is NULL on every row: a "must not be empty"
+    rule flags all of them, and every other rule on it passes having checked
+    nothing. Neither is a finding a person can act on in triage, so such a rule
+    is reported as not checked instead.
+
+    Judged per UNION arm, because a fan-out rule reads each sheet in its own
+    arm and one sheet may fill a column another leaves empty. When only some
+    arms read an unfilled column, those sheets' arms are dropped
+    (`drop_sheet_arms`) and the rest still run — `sql_to_run` is the pruned
+    query and `columns` names what was left out. An arm that reads several
+    sheets (an aggregate over a row union) counts a column as filled if ANY of
+    them fills it, and when the query cannot be cut safely the same test is
+    applied to every sheet the query reads. `sql_to_run` is None when nothing
+    is left to run. Only sheets whose filled set is known
+    (`tables[sheet]["filled"]`) are judged; for the rest every column counts as
+    filled, which is today's behaviour."""
+    arms = sql.split("\nUNION ALL\n")
+    judged = []                                  # (sheets read, unfilled columns)
+    for arm in arms:
+        froms = {sh for sh in re.findall(r'FROM\s+"([^"]+)"', arm) if sh in tables}
+        refs = set(re.findall(r'"([^"]+)"', arm)) - froms
+        refs.discard("__rowid")
+        present, filled = set(), set()
+        for sh in froms:
+            cols = set((tables.get(sh) or {}).get("columns") or [])
+            present |= cols
+            f = (tables.get(sh) or {}).get("filled")
+            filled |= cols if f is None else set(f)
+        judged.append((froms, {c for c in refs if c in present and c not in filled}))
+    bad = [(sheets, cols) for sheets, cols in judged if cols]
+    if not bad:
+        return [], sql
+    unfilled = sorted(set().union(*(cols for _, cols in bad)))
+    if len(bad) < len(judged):
+        try:
+            from contract_upload_services.rule_compiler import drop_sheet_arms
+            pruned = drop_sheet_arms(sql, set().union(*(sheets for sheets, _ in bad)))
+        except Exception:
+            pruned = None
+        if pruned:
+            return unfilled, pruned
+        # Not cuttable: fall back to the whole query — only a column that no
+        # sheet it reads fills stops the rule.
+        filled_any = set()
+        for sheets, _ in judged:
+            for sh in sheets:
+                t = tables.get(sh) or {}
+                f = t.get("filled")
+                filled_any |= set(t.get("columns") or []) if f is None else set(f)
+        unfilled = [c for c in unfilled if c not in filled_any]
+        if not unfilled:
+            return [], sql
+    return unfilled, None
+
+
+def _switched_off(columns, sheets, tables, inactive):
+    """The `columns` the output template switches off on every one of `sheets`
+    that carries them — told apart from columns the mapping leaves empty only
+    so the message can say which fix applies."""
+    out = []
+    for c in columns:
+        carrying = [sh for sh in sheets if c in ((tables.get(sh) or {}).get("columns") or [])]
+        if carrying and all(c in inactive.get(sh, ()) for sh in carrying):
+            out.append(c)
+    return out
+
+
+def _unfilled_phrase(unfilled, off):
+    """"this setup does not fill: X" / "the output template switches off: Y"."""
+    unmapped = [c for c in unfilled if c not in off]
+    parts = []
+    if unmapped:
+        parts.append(f"this setup does not fill: {', '.join(unmapped)}")
+    if off:
+        parts.append(f"the output template switches off: {', '.join(off)}")
+    return " and ".join(parts)
+
+
 # =====================================================================
 # 5b. Deterministic column TYPE checks (date / amount) — no LLM
 # =====================================================================
@@ -1033,6 +1160,9 @@ def run_type_checks(con, tables, column_types, max_rows=10_000):
         if not kinds:
             continue
         present = set(tinfo.get("columns") or [])
+        # A column the setup never fills has nothing to type-check.
+        if tinfo.get("filled") is not None:
+            present &= set(tinfo["filled"])
         for col, kind in kinds.items():
             if kind not in _TYPE_HINT or col not in present:
                 continue
@@ -1113,7 +1243,8 @@ def run_type_checks(con, tables, column_types, max_rows=10_000):
 
 
 def run_validation(records_by_sheet, rules, contract=None, template_id=None,
-                   session=None, max_exc=500, schema_cols=None, column_types=None):
+                   session=None, max_exc=500, schema_cols=None, column_types=None,
+                   filled_cols=None, inactive_cols=None, tenant_id=None):
     """Validate the resolved output records against the contract rules using
     DuckDB.
 
@@ -1123,12 +1254,33 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
     silently dropped: it is returned in `unprocessable` so the UI can highlight
     that the clause was not validated.
 
+    `filled_cols` ({sheet: [column, ...]}, optional) names the columns the
+    setup fills — see build_connection. When given, a rule that reads a column
+    the setup leaves empty is returned in `unprocessable` rather than run on
+    NULLs (see _unfilled_columns).
+
+    `inactive_cols` ({sheet: [column, ...]}, optional) names the columns the
+    output template switches off. They stay in the table — every sheet keeps
+    the template's full column set, so a fan-out rule never meets a sheet that
+    lacks one — but count as unfilled wherever `filled_cols` is known, and a
+    rule stopped by them says so rather than asking for a mapping.
+
+    A fan-out rule that runs on only some of its sheets (the others do not fill
+    a column it reads) is listed in `partially_checked` with the sheets it
+    skipped; it still counts as a rule that ran.
+
     Returns:
       {
         "exceptions":   [ ...structured data-violation dicts (incl. fuzzy warnings)... ],
-        "unprocessable":[ {rule_id, rule_name, message} ],
-        "stats": {rules_total, rules_ok, rules_unprocessable, exceptions, truncated}
+        "unprocessable":[ {rule_id, rule_name, message, columns?, kind?} ],
+        "partially_checked": [ {rule_id, rule_name, message, columns, sheets} ],
+        "stats": {rules_total, rules_ok, rules_unprocessable, rules_partial,
+                  exceptions, truncated, rows_total, rows_validated,
+                  rows_excluded, excluded}
       }
+    rows_validated is what the rules actually ran over: rows_total less the
+    blank/summary/header rows the classifier set aside (`excluded` counts them
+    by category). A run whose rows_validated is 0 checked nothing.
     """
     own_session = False
     if session is None:
@@ -1145,15 +1297,25 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
 
     exceptions = []
     unprocessable = []
+    partially_checked = []
     rules_ok = 0
     rules = list(rules or [])
     truncated = False
 
-    def _flag(rule, message, sh, rh):
+    # A switched-off column is never written, so it fills nothing.
+    inactive = {str(sh).strip(): set(cols or ()) for sh, cols in (inactive_cols or {}).items()}
+    if inactive and filled_cols:
+        filled_cols = {sh: [c for c in (cols or []) if c not in inactive.get(str(sh).strip(), ())]
+                       for sh, cols in filled_cols.items()}
+
+    def _flag(rule, message, sh, rh, columns=None, kind=None):
         unprocessable.append({
             "rule_id": rule.get("rule_id"),
             "rule_name": rule.get("rule_name"),
             "message": message,
+            **({"columns": columns} if columns else {}),
+            # "not_filled": the rule reads a column the setup leaves empty.
+            **({"kind": kind} if kind else {}),
         })
         # Record the outcome for audit (no LLM was involved).
         try:
@@ -1167,9 +1329,11 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
         _cid = (contract or {}).get("id")
         _run_label = f"t{template_id or 'NA'}_c{_cid or 'NA'}"
         con, tables = build_connection(
-            records_by_sheet, schema_cols=schema_cols, label=_run_label
+            records_by_sheet, schema_cols=schema_cols, label=_run_label,
+            filled_cols=filled_cols,
         )
         sh = schema_hash(tables)
+        gate_unfilled = any(t.get("filled") is not None for t in tables.values())
 
         # BDX-time variation reconciliation: make enum rules match the data's OWN
         # spellings (fuzzy pre-check first, AI only for the unmatched remainder).
@@ -1181,7 +1345,8 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
             from contract_upload_services.variation_reconcile import (
                 reconcile as _reconcile_variations,
             )
-            _reconcile_variations(con, tables, rules, session=session)
+            _reconcile_variations(con, tables, rules, session=session,
+                                  tenant_id=tenant_id)
         except Exception:
             pass
 
@@ -1208,8 +1373,40 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
             if missing:
                 _flag(rule, f"Not validated — the BDX has no column for: "
                             f"{', '.join(missing)}. Add it to the output template "
-                            f"to run this rule.", sh, rh)
+                            f"to run this rule.", sh, rh, columns=sorted(missing))
                 continue
+
+            # …and every column it needs is one the setup actually fills.
+            if gate_unfilled:
+                unfilled, runnable = _unfilled_columns(cleaned, tables)
+                read = [s for s in dict.fromkeys(re.findall(r'FROM\s+"([^"]+)"', cleaned))
+                        if s in tables]
+                if unfilled and runnable is None:
+                    off = _switched_off(unfilled, read, tables, inactive)
+                    fix = ("Map it in Bordereau Setup" if not off
+                           else "Switch it on in the output template" if len(off) == len(unfilled)
+                           else "Map it in Bordereau Setup or switch it on in the output template")
+                    _flag(rule, f"Not checked — {_unfilled_phrase(unfilled, off)}. "
+                                f"{fix} to run this check.", sh, rh, columns=unfilled,
+                          kind="not_filled")
+                    continue
+                if unfilled:
+                    kept = set(re.findall(r'FROM\s+"([^"]+)"', runnable))
+                    skipped = [s for s in read if s not in kept]
+                    off = _switched_off(unfilled, skipped, tables, inactive)
+                    print(f"[DuckDB] rule {rule.get('rule_name')!r}: skipped the "
+                          f"sheet arm(s) {skipped} that do not fill {unfilled}")
+                    # Not a failure — the rule runs where it can — but a person
+                    # must be able to see the sheets it did not look at.
+                    partially_checked.append({
+                        "rule_id": rule.get("rule_id"),
+                        "rule_name": rule.get("rule_name"),
+                        "columns": unfilled, "sheets": skipped,
+                        "message": f"Checked only on {', '.join(s for s in read if s in kept)}"
+                                   f" — not on {', '.join(skipped)}, where "
+                                   f"{_unfilled_phrase(unfilled, off)}.",
+                    })
+                    cleaned = runnable
 
             try:
                 found = execute_rule(con, cleaned, rule, contract,
@@ -1246,14 +1443,26 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
         if own_session:
             session.close()
 
+    excluded_by_category: dict = {}
+    for t in tables.values():
+        for cat, n in (t.get("excluded") or {}).items():
+            excluded_by_category[cat] = excluded_by_category.get(cat, 0) + n
+    rows_total = sum(t.get("rows_total") or 0 for t in tables.values())
+    rows_validated = sum(t.get("rows_loaded") or 0 for t in tables.values())
     return {
         "exceptions": exceptions[:max_exc],
         "unprocessable": unprocessable,
+        "partially_checked": partially_checked,
         "stats": {
             "rules_total": len(rules),
             "rules_ok": rules_ok,
             "rules_unprocessable": len(unprocessable),
+            "rules_partial": len(partially_checked),
             "exceptions": len(exceptions[:max_exc]),
             "truncated": truncated,
+            "rows_total": rows_total,
+            "rows_validated": rows_validated,
+            "rows_excluded": rows_total - rows_validated,
+            "excluded": excluded_by_category,
         },
     }

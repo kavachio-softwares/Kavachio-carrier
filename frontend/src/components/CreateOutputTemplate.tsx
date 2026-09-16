@@ -148,13 +148,25 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
   const stagedFile = contract?.kind === "staged"
     ? (p.contractFiles ?? [])[contract.index] ?? null : null;
   const savedId = contract?.kind === "saved" ? contract.id : null;
+  // The first staged contract that is not the saved one being sent, matched on
+  // either name a saved contract can carry. Only that one: a staged file named
+  // like ANOTHER saved contract is still the only way that contract is read.
+  const sentContractId = savedId ?? p.contractId;
+  const firstNewStagedFile = useMemo(() => {
+    const onFile = new Set((p.boundContracts ?? [])
+      .filter(c => c.id === sentContractId)
+      .flatMap(c => [c.name, c.filename]
+        .map(n => (n ?? "").trim().toLowerCase()).filter(Boolean)));
+    return (p.contractFiles ?? []).find(
+      f => !onFile.has(f.name.trim().toLowerCase())) ?? null;
+  }, [p.boundContracts, p.contractFiles, sentContractId]);
 
   const scope = {
     mga: p.mga,
     program_id: p.programId,
     carrier_party_id: p.carrierPartyId,
     broker_party_id: p.brokerPartyId,
-    contract_id: savedId ?? p.contractId,
+    contract_id: sentContractId,
     output_format: outputFormat,
     name: name.trim() || null,
   };
@@ -170,7 +182,7 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
         mga: p.mga,
         program_id: p.programId,
         broker_party_id: p.brokerPartyId,
-        contract_id: savedId ?? p.contractId,
+        contract_id: sentContractId,
         standard_id: forMode === "standard" || useLibrary ? standardId : null,
         jurisdiction: forMode === "standard" || useLibrary ? jurisdiction : null,
         include_standard_library: forMode === "standard" ? true : useLibrary,
@@ -187,9 +199,12 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
         // the published standard — so everything to hand is read: the contract
         // already on file AND one staged on the screen behind. They are
         // different documents, and a staged one is usually the newer of the
-        // two, so ignoring it would propose against last year's terms.
+        // two, so ignoring it would propose against last year's terms. A staged
+        // file with the name of the saved contract sent here is that same
+        // contract, and is not read again: its terms are already in, and reading both
+        // made the column list depend on what was still on the screen.
         contractFile: forMode === "standard"
-          ? ((p.contractFiles ?? [])[0] ?? stagedFile) : stagedFile,
+          ? (firstNewStagedFile ?? stagedFile) : stagedFile,
       });
       setAnalysis(a);
       setDropped(new Set(a.fields.filter(f => !f.recommended).map(f => f.field)));

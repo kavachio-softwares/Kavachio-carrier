@@ -219,6 +219,8 @@ export const analyzeSources = (opts: {
    *  layout and the standard is filling in what contracts never name. */
   standard_scope?: "full" | "essential";
   read_contract?: boolean;
+  /** Ask the AI again instead of reusing its stored answers for these inputs. */
+  refresh?: boolean;
   inputFile?: File | null;
   inputSheets?: string[];
   contractFile?: File | null;
@@ -234,6 +236,7 @@ export const analyzeSources = (opts: {
             String(opts.include_standard_library !== false));
   fd.append("standard_scope", opts.standard_scope ?? "full");
   fd.append("read_contract", String(opts.read_contract !== false));
+  if (opts.refresh) fd.append("refresh", "true");
   if (opts.inputFile) fd.append("input_file", opts.inputFile);
   for (const s of opts.inputSheets ?? []) fd.append("input_sheets", s);
   if (opts.contractFile) fd.append("contract_file", opts.contractFile);

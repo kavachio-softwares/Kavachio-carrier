@@ -102,7 +102,18 @@ def _parse_client_dt(v: Optional[str]) -> Optional[datetime]:
     return dt
 
 
-def _template_fields_from_structure(structure: Optional[dict]) -> list[dict]:
+def _template_fields_from_structure(structure: Optional[dict],
+                                    include_inactive: bool = False) -> list[dict]:
+    """The template's columns as rule-generation fields.
+
+    A column the user switched OFF (`active` is False) is left out by default: it
+    is never delivered in the output file, so a rule generated against it can only
+    run on NULLs. Callers that edit, recompile or DISPLAY rules which already
+    exist pass `include_inactive=True`, because such a rule may name a column that
+    was switched off after it was written and must still resolve and compile.
+    A column with no `active` flag counts as active. The contract content
+    fingerprint hashes these (active) names too, so switching a column on or off
+    makes the next identical upload regenerate rather than reuse stale ones."""
     from exporter import is_reference_sheet
     fields: list[dict] = []
     for sheet in (structure or {}).get("sheets", []):
@@ -113,6 +124,8 @@ def _template_fields_from_structure(structure: Optional[dict]) -> list[dict]:
             continue
         sheet_name = sheet.get("sheet_name", "")
         for col in sheet.get("columns", []):
+            if not include_inactive and col.get("active") is False:
+                continue
             name = col.get("column_name") or col.get("header") or ""
             if name:
                 fields.append({
@@ -145,6 +158,10 @@ def _template_fields_from_structure(structure: Optional[dict]) -> list[dict]:
                     # header (e.g. "Payable due X = Gross Premium − Commission …").
                     # Read ONLY by the formula deriver, never by the mapping LLM.
                     "formula": col.get("formula"),
+                    # Declared value type ("decimal", "string", …): tells an amount
+                    # column from a code column when there are no samples. Only
+                    # carried when declared, so untyped columns' fields are unchanged.
+                    **({"data_type": col["data_type"]} if col.get("data_type") else {}),
                 })
     return fields
 
@@ -2782,7 +2799,14 @@ async def program_setup(
                     # reference the same fields.
                     c = s.get(Contract, cid)
                     if c:
-                        c.output_template_id = resolved_template_id
+                        # Not when rule sets were added for other templates:
+                        # re-pointing moves the contract's OWN set onto the new
+                        # template, and could land it in the family of a set
+                        # added beside it (rule_scope.py). Never true of a
+                        # contract that has not had a set added.
+                        import rule_scope
+                        if not rule_scope.added_set_templates(s, c.id):
+                            c.output_template_id = resolved_template_id
                         c.status = "active"
                         # Siblings are NOT demoted. status_ops means "approved
                         # and usable", not "newest" — which version applies to a
@@ -3146,7 +3170,10 @@ def program_contract_detail(program_id: int, contract_id: int,
         if contract.output_template_id:
             tmpl = s.get(ExportTemplate, contract.output_template_id)
             if tmpl:
-                template_fields = _template_fields_from_structure(tmpl.structure)
+                # Display: a rule written before its column was switched off still
+                # needs that column's data-model label.
+                template_fields = _template_fields_from_structure(
+                    tmpl.structure, include_inactive=True)
                 template = {
                     "id": tmpl.id,
                     "name": tmpl.name,
@@ -3397,6 +3424,22 @@ def _load_rule_for_contract(s, contract_id: int, rule_id: int) -> dict:
     return dict(row)
 
 
+def _rule_template_id(s, contract, rule_id: int) -> Optional[int]:
+    """The output template a rule is edited and recompiled against: the one it
+    was written for. That is the contract's bound template for the contract's
+    own set, and the rule's tag for a set added for another template — whose
+    columns the bound template may not even have (see rule_scope.py)."""
+    import rule_scope
+    if rule_scope.tag_column_present(s):
+        tag = s.execute(
+            text("SELECT output_template_id FROM validation_rule "
+                 "WHERE rule_id = :rid AND contract_id = :cid"),
+            {"rid": rule_id, "cid": contract.id}).scalar()
+        if tag is not None:
+            return tag
+    return contract.output_template_id
+
+
 def _purge_rule_sql(s, rule_id: int) -> None:
     """Drop the rule's compiled-SQL cache row in its OWN transaction. On Postgres
     a failed statement aborts the surrounding transaction, so this must NOT share
@@ -3432,10 +3475,13 @@ def rule_retarget_output_field(program_id: int, contract_id: int, rule_id: int,
         assert_tenant_owns(principal, contract.tenant_id)
         if not contract.output_template_id:
             raise HTTPException(400, "this contract has no output template to map fields against")
-        tmpl = s.get(ExportTemplate, contract.output_template_id)
+        tmpl = s.get(ExportTemplate, _rule_template_id(s, contract, rule_id))
         if not tmpl:
             raise HTTPException(404, "output template not found")
-        schema = build_output_schema(_template_fields_from_structure(tmpl.structure))
+        # Edits an EXISTING rule, which may name a column switched off since it
+        # was written — it must still resolve and recompile.
+        schema = build_output_schema(
+            _template_fields_from_structure(tmpl.structure, include_inactive=True))
         tenant_id = contract.tenant_id
 
         row = _load_rule_for_contract(s, contract_id, rule_id)
@@ -3511,10 +3557,13 @@ def rule_update_tolerance(program_id: int, contract_id: int, rule_id: int,
         assert_tenant_owns(principal, contract.tenant_id)
         if not contract.output_template_id:
             raise HTTPException(400, "this contract has no output template to map fields against")
-        tmpl = s.get(ExportTemplate, contract.output_template_id)
+        tmpl = s.get(ExportTemplate, _rule_template_id(s, contract, rule_id))
         if not tmpl:
             raise HTTPException(404, "output template not found")
-        schema = build_output_schema(_template_fields_from_structure(tmpl.structure))
+        # Edits an EXISTING rule, which may name a column switched off since it
+        # was written — it must still resolve and recompile.
+        schema = build_output_schema(
+            _template_fields_from_structure(tmpl.structure, include_inactive=True))
         tenant_id = contract.tenant_id
 
         row = _load_rule_for_contract(s, contract_id, rule_id)
@@ -3604,10 +3653,13 @@ def rule_add_variation_value(program_id: int, contract_id: int, rule_id: int,
         assert_tenant_owns(principal, contract.tenant_id)
         if not contract.output_template_id:
             raise HTTPException(400, "this contract has no output template to map fields against")
-        tmpl = s.get(ExportTemplate, contract.output_template_id)
+        tmpl = s.get(ExportTemplate, _rule_template_id(s, contract, rule_id))
         if not tmpl:
             raise HTTPException(404, "output template not found")
-        schema = build_output_schema(_template_fields_from_structure(tmpl.structure))
+        # Edits an EXISTING rule, which may name a column switched off since it
+        # was written — it must still resolve and recompile.
+        schema = build_output_schema(
+            _template_fields_from_structure(tmpl.structure, include_inactive=True))
         tenant_id = contract.tenant_id
 
         row = _load_rule_for_contract(s, contract_id, rule_id)
@@ -3804,10 +3856,13 @@ def rule_remove_variation_value(program_id: int, contract_id: int, rule_id: int,
         assert_tenant_owns(principal, contract.tenant_id)
         if not contract.output_template_id:
             raise HTTPException(400, "this contract has no output template to map fields against")
-        tmpl = s.get(ExportTemplate, contract.output_template_id)
+        tmpl = s.get(ExportTemplate, _rule_template_id(s, contract, rule_id))
         if not tmpl:
             raise HTTPException(404, "output template not found")
-        schema = build_output_schema(_template_fields_from_structure(tmpl.structure))
+        # Edits an EXISTING rule, which may name a column switched off since it
+        # was written — it must still resolve and recompile.
+        schema = build_output_schema(
+            _template_fields_from_structure(tmpl.structure, include_inactive=True))
         tenant_id = contract.tenant_id
 
         row = _load_rule_for_contract(s, contract_id, rule_id)
@@ -4076,6 +4131,101 @@ class ContractGenerateRulesBody(BaseModel):
     mga: Optional[str] = None
 
 
+def _add_template_rule_set(*, contract_id: int, program_id: int, tenant_id,
+                           tenant_mga, body, template_fields: list[dict],
+                           clause_rows, terms: dict,
+                           bound_template_id: int) -> dict:
+    """Write a rule set for an output template OTHER than the one the contract
+    is bound to, beside the contract's own set (rule_scope.py). Every rule is
+    tagged with that template; nothing of the own set is touched — not its
+    rules, not its clauses' review state, not the binding.
+
+    What the set is made of:
+      * the contract's extracted clauses, through the same Pipeline 2 as a
+        first binding — but not the clauses generated from an AUTHORED
+        contract's wording, which are rewritten whenever that wording is saved
+        (a rule pointing at one would block the save);
+      * an authored contract's agreed terms, mapped onto this template's
+        columns the way its own checks are (contract_rules).
+
+    One transaction for all of it, holding the contract row, so it lands whole
+    or not at all and a Re-read running at the same time cannot remove it
+    halfway: the first binding recovers from an interruption because binding
+    is its last step, and an added set never binds."""
+    from contract_upload_services.validation_rule_generator import ValidationRuleGenerator
+    from contract_upload_services import db_persister
+    import contract_rules as cr
+    import rule_scope
+    from db import canonical_engine
+
+    tid = body.output_template_id
+    with SessionLocal() as s:
+        wording_ids = {cid for (cid,) in s.execute(
+            text("SELECT clause_id FROM clauses_extracted WHERE contract_id = :cid "
+                 "AND created_by = 'contract_wording'"), {"cid": contract_id}).all()}
+        family = sorted(rule_scope.families(s, [tid]).get(tid, {tid}))
+    clauses = [dict(r) for r in clause_rows if r["clause_id"] not in wording_ids]
+    if not clauses and not terms:
+        raise HTTPException(
+            400, "this contract has no extracted clauses to build rules from")
+
+    p2 = {"validation_rules": [], "review_queue": [], "control_register": []}
+    if clauses:
+        gen = ValidationRuleGenerator(tenant_id=tenant_id, program_id=program_id)
+        p2 = gen.run_pipeline_2(clauses, template_fields, contract_id,
+                                tenant_id=tenant_id)
+    own_clause_ids = {c["clause_id"] for c in clauses}
+    by_clause: dict = {}
+    for r in p2["validation_rules"]:
+        if not isinstance(r, dict):
+            continue
+        cid = r.get("source_clause_id")
+        by_clause.setdefault(cid if cid in own_clause_ids else None, []).append(r)
+    term_rules, _unmapped = (cr.map_limits_to_template(terms, template_fields)
+                             if terms else ([], []))
+
+    created: list = []
+    terms_written = 0
+    with canonical_engine.begin() as conn:
+        conn.execute(text("SELECT 1 FROM contract WHERE contract_id = :cid FOR SHARE"),
+                     {"cid": contract_id})
+        for clause_id, rules in by_clause.items():
+            created += db_persister.persist_resolved_rules(
+                contract_id=contract_id, program_id=program_id,
+                tenant_id=tenant_id, db_clause_id=clause_id,
+                output_template_id=tid, validation_rules=rules,
+                actor=body.actor or "system", created_by="template_binding",
+                tag_template_id=tid, conn=conn, leave_review_queue=True)
+        if term_rules:
+            terms_written = cr.write_rules(
+                conn, contract_id=contract_id, program_id=program_id,
+                tenant_id=tenant_id, rules=term_rules, template_id=tid,
+                set_scope={"family": family, "tag": tid})
+        # A statement that failed inside this transaction and was swallowed
+        # (the compiled-SQL cache write is best-effort) leaves it aborted, and
+        # COMMIT would then quietly roll the whole set back. Asking once more
+        # makes that fail out loud instead of reporting rules that are not there.
+        conn.execute(text("SELECT 1"))
+
+    _log(tenant_mga, body.actor, "contract.rules_generated",
+         target=f"contract:{contract_id}",
+         details={"program_id": program_id, "output_template_id": tid,
+                  "bound_template_id": bound_template_id, "rule_set": "added",
+                  "clauses": len(clauses), "rules_created": len(created),
+                  "terms_rules": terms_written})
+    return {
+        "ok": True,
+        "contract_id": contract_id,
+        "output_template_id": tid,
+        "rule_set": "added",
+        "bound_template_id": bound_template_id,
+        "clauses": len(clauses),
+        "created": len(created) + terms_written,
+        "review_queue": len(p2["review_queue"]),
+        "control_register": len(p2["control_register"]),
+    }
+
+
 @router.post("/programs/{program_id}/contracts/{contract_id}/generate-rules")
 def contract_generate_rules(program_id: int, contract_id: int,
                             body: ContractGenerateRulesBody,
@@ -4134,6 +4284,28 @@ def contract_generate_rules(program_id: int, contract_id: int,
             text("""SELECT COUNT(*) FROM validation_rule
                      WHERE contract_id = :cid AND rule_status <> 'disabled'"""),
             {"cid": contract_id}).scalar() or 0
+        # A bound contract can carry one rule set per template (rule_scope.py):
+        #   set_rules — live rules of THIS template's set: the contract's own set
+        #               when this is the template it is bound to, else a set
+        #               added for (a version of) this template earlier.
+        #   own_live  — live rules of the contract's own set.
+        # Every contract that has never had a set added has only its own set,
+        # and for all of those the answers below are exactly the ones this
+        # route always gave.
+        import rule_scope
+        set_rules, own_live, other_family = 0, 0, False
+        tag_ready = rule_scope.tag_column_present(s)
+        if bound_template_id is not None:
+            _, set_rules = rule_scope.set_for_template(
+                s, contract_id, body.output_template_id)
+            other_family = not rule_scope.same_family(
+                s, bound_template_id, body.output_template_id)
+            own_live = s.execute(
+                text("SELECT COUNT(*) FROM validation_rule WHERE contract_id = :cid "
+                     "AND rule_status <> 'disabled' "
+                     + ("AND output_template_id IS NULL" if tag_ready else "")),
+                {"cid": contract_id}).scalar() or 0
+        terms = dict(getattr(contract, "commercial_terms", None) or {})
 
         rows = s.execute(
             text("""SELECT clause_id, contract_id, clause_type, title, text,
@@ -4143,23 +4315,38 @@ def contract_generate_rules(program_id: int, contract_id: int,
                      ORDER BY clause_id"""),
             {"cid": contract_id}).mappings().all()
 
-    if live_rules and bound_template_id == body.output_template_id:
-        # Already done for THIS template. Saying so is the answer; doing it
+    same_as_bound = bound_template_id == body.output_template_id
+    if set_rules and (same_as_bound or other_family):
+        # Already done for THIS template — the one the contract is bound to, or
+        # one a set was added for before. Saying so is the answer; doing it
         # again would double the rule set.
         return {"ok": True, "skipped": "already_generated",
                 "contract_id": contract_id,
                 "output_template_id": body.output_template_id,
-                "rules": int(live_rules), "created": 0}
+                "rules": int(set_rules), "created": 0}
 
-    if live_rules and bound_template_id is not None:
+    # Bound to a DIFFERENT template that has a live rule set of its own.
+    #   Another version of the bound template: refused, exactly as before.
+    #   A different template: a separate set is written, tagged with this
+    #   template, beside the contract's own (_add_template_rule_set). The own
+    #   set, its clauses' review state and the binding are left as they are, so
+    #   every setup running on the bound template keeps running what it ran.
+    #   Where the database cannot record a tag yet, refused as before.
+    if own_live and bound_template_id is not None and not same_as_bound:
+        if other_family and tag_ready:
+            return _add_template_rule_set(
+                contract_id=contract_id, program_id=program_id,
+                tenant_id=tenant_id, tenant_mga=tenant_mga, body=body,
+                template_fields=template_fields, clause_rows=rows,
+                terms=terms, bound_template_id=bound_template_id)
         raise HTTPException(
             409,
-            f"this contract already carries {live_rules} rule(s) written against "
+            f"this contract already carries {own_live} rule(s) written against "
             f"output template {bound_template_id}. Rules name a template's own "
             f"columns, so they cannot be mixed — upload the contract again "
             f"against this template instead.")
 
-    if live_rules:
+    if live_rules and bound_template_id is None:
         # Rules, but the contract was never bound to a template: an earlier run
         # of THIS route wrote some and then failed, because the binding is the
         # last thing it does. Nothing can be reading them — every path finds a
@@ -4446,6 +4633,12 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             OutputExport.tenant_id == tid,
             OutputExport.status == "has_exceptions",
         ).one()
+        # Runs whose checks never ran (validation_outcome) — no findings to
+        # review, but they still need someone's attention, so counted apart.
+        not_validated_runs = s.query(func.count(OutputExport.id)).filter(
+            OutputExport.tenant_id == tid,
+            OutputExport.status == "not_validated",
+        ).scalar() or 0
 
         # "Mapping tasks" tile (Kavachio admin) — open items in the data-model queue.
         mapping_tasks_open = s.query(AdminMappingTask).filter(
@@ -4518,6 +4711,7 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             "parties_in_directory": parties,
             "pending_exceptions": int(exc_sum or 0),
             "exception_runs": int(exc_runs or 0),
+            "not_validated_runs": int(not_validated_runs),
             "ai_cache_hit_rate": None,
             "runs_this_week": runs_this_week,
             "runs_by_day": runs_by_day,
@@ -5098,12 +5292,17 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
             func.date(OutputExport.created_at), func.count(OutputExport.id))
             .filter(OutputExport.created_at >= dstart, OutputExport.status == "has_exceptions")
             .group_by(func.date(OutputExport.created_at)).all()}
+        nv_rows = {str(d): c for d, c in s.query(
+            func.date(OutputExport.created_at), func.count(OutputExport.id))
+            .filter(OutputExport.created_at >= dstart, OutputExport.status == "not_validated")
+            .group_by(func.date(OutputExport.created_at)).all()}
         series = []
         for i in range(days - 1, -1, -1):
             k = str(today - timedelta(days=i))
             series.append({"date": k,
                            "total": int(tot_rows.get(k, 0) or 0),
-                           "exceptions": int(exc_rows.get(k, 0) or 0)})
+                           "exceptions": int(exc_rows.get(k, 0) or 0),
+                           "not_validated": int(nv_rows.get(k, 0) or 0)})
 
         # --- Exceptions by severity (true window totals) ---
         # Summed from the denormalized per-run counts (written at export time,
@@ -5127,9 +5326,16 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
                              .filter(OutputExport.created_at >= dstart,
                                      OutputExport.status == "has_exceptions")
                              .group_by(OutputExport.tenant_id).all())
+        # A run that was never validated is not a clean run.
+        nv_by_tenant = dict(s.query(OutputExport.tenant_id, func.count(OutputExport.id))
+                            .filter(OutputExport.created_at >= dstart,
+                                    OutputExport.status == "not_validated")
+                            .group_by(OutputExport.tenant_id).all())
         runs_win_total = sum(int(v or 0) for v in total_by_tenant.values())
         exc_win_total = sum(int(v or 0) for v in exc_by_tenant.values())
-        clean_rate = (round((runs_win_total - exc_win_total) * 100.0 / runs_win_total)
+        nv_win_total = sum(int(v or 0) for v in nv_by_tenant.values())
+        clean_rate = (round((runs_win_total - exc_win_total - nv_win_total) * 100.0
+                            / runs_win_total)
                       if runs_win_total else None)
 
         top_tenants = sorted(
@@ -5144,7 +5350,8 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
         table = []
         for t in tenants:
             runs = int(total_by_tenant.get(t.id, 0) or 0)
-            exc = int(exc_by_tenant.get(t.id, 0) or 0)
+            exc = (int(exc_by_tenant.get(t.id, 0) or 0)
+                   + int(nv_by_tenant.get(t.id, 0) or 0))
             if not t.is_active:
                 status = "inactive"
             elif int(pending_by_tenant.get(t.id, 0) or 0) > 0:
@@ -5191,7 +5398,8 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
             "setups": {"active": int(active_setups), "tenants": int(setup_tenants)},
             "programs_active": int(programs_active),
             "runs": {"window_count": int(runs_win), "prev_count": int(runs_prev),
-                     "delta_pct": runs_delta_pct, "clean_rate": clean_rate},
+                     "delta_pct": runs_delta_pct, "clean_rate": clean_rate,
+                     "not_validated_count": nv_win_total},
             "runs_series": series,
             "exceptions_by_severity": sev,
             "top_tenants": top_tenants,

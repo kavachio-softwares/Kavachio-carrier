@@ -54,6 +54,8 @@ def env(tmp_path, monkeypatch):
     log = tmp_path / "decisions.log"
     monkeypatch.setenv("KAVACHIO_DECISION_LOG", str(log))
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    # No cached answers here: ai_cache would reach the database.
+    monkeypatch.setenv("KAVACHIO_AI_CACHE_COLUMN_CANDIDATES", "0")
     for k in ("KAVACHIO_MAPPING_AUTO_CONFIDENCE", "KAVACHIO_MAPPING_REVIEW_CONFIDENCE",
               "KAVACHIO_MAPPING_CANDIDATE_SIMILARITY"):
         monkeypatch.delenv(k, raising=False)
@@ -78,7 +80,9 @@ def run(monkeypatch, answer=ANSWER, error=None, text=None, finish="STOP",
 
 def test_one_call_and_loose_matches_reach_the_model(monkeypatch):
     _, by, prompts = run(monkeypatch)
-    assert len(prompts) == 1
+    # one call, plus one re-ask for the column the answer left out — alone
+    assert len(prompts) == 2
+    assert json.dumps(["Commission Amount"]) in prompts[1]
     p = prompts[0]
     # the loose match is SENT to be verified, not discarded or accepted
     assert '"Total gross written premium": ["Gross Written Premium"]' in p
@@ -195,7 +199,8 @@ def test_review_summary_states(monkeypatch):
 def test_every_attempt_is_logged(monkeypatch, env):
     run(monkeypatch)
     text = env.read_text()
-    assert "MAPPING" in text and "5 of 8 field(s) sent to AI in one call" in text
+    assert "MAPPING" in text and "5 of 8 field(s) sent to AI (2 call(s)" in text
+    assert "AI-PARTIAL" in text and "unanswered: Commission Amount" in text
     line = next(l for l in text.splitlines() if "'Total gross written premium'" in l)
     for part in ("AUTO", "<- Gross Written Premium", "name 93%", "AI 97%",
                  "AI confirmed the same data"):

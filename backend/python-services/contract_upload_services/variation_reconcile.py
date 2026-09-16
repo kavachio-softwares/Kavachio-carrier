@@ -40,6 +40,14 @@ _ENUM_TEMPLATES = ("value_in_set", "value_not_in_set")
 _DISTINCT_CAP = int(os.getenv("KAVACHIO_VARIATION_DISTINCT_CAP", "300"))
 _AI_CAP = int(os.getenv("KAVACHIO_VARIATION_AI_CAP", "80"))
 _SEED = int(os.getenv("KAVACHIO_LLM_SEED", "7"))
+# A closed lookup ("which of these strings name that entity?"), so no thinking by
+# default: on 2.5/3.x thinking tokens come out of max_output_tokens, and an
+# uncapped trace could starve the answer. A model that cannot switch thinking off
+# (e.g. a Pro tier, via KAVACHIO_MODEL_VARIATION_RECONCILE) needs this raised too.
+_THINKING = int(os.getenv("KAVACHIO_VARIATION_RECONCILE_THINKING", "0"))
+_MAX_OUTPUT = int(os.getenv("KAVACHIO_VARIATION_RECONCILE_TOKENS", "4096"))
+# Bump when the prompt below or the stored payload changes.
+_PROMPT_VERSION = "var_reconcile_v1"
 
 
 def _on() -> bool:
@@ -107,18 +115,49 @@ def _sheets_with_field(tables: dict, field: str) -> list:
 
 
 def _distinct_values(con, sheet: str, field: str, cap: int) -> list:
+    # ORDERED, so the capped set and the spelling kept per normalized value are
+    # the same on every run of one file — they feed the prompt and its cache key.
     q = (f'SELECT DISTINCT {_q(field)} FROM {_q(sheet)} '
          f'WHERE {_q(field)} IS NOT NULL AND TRIM({_q(field)}) <> \'\' '
-         f'LIMIT {int(cap)}')
+         f'ORDER BY 1 LIMIT {int(cap)}')
     try:
         return [r[0] for r in con.execute(q).fetchall() if r[0] is not None]
     except Exception:
         return []
 
 
-def _ai_reconcile(ai, field: str, authorized: list, candidates: list) -> list:
+def _reconcile_model() -> str:
+    from contract_upload_services.gemini_service import EXTRACTION_MODEL, model_for
+    return model_for("variation_reconcile", EXTRACTION_MODEL)
+
+
+def _ai_reconcile(ai, field: str, authorized: list, candidates: list,
+                  tenant_id=None) -> list:
     """Ask the AI which CANDIDATE data values are a genuine alternate spelling of
-    an AUTHORIZED entity. Returns a subset of `candidates` (closed-list filtered)."""
+    an AUTHORIZED entity. Returns a subset of `candidates` (closed-list filtered).
+
+    CACHED (ai_cache kind 'var_reconcile'), because this runs on every Process
+    Bordereau run and a re-ask was not repeatable: the same file gave different
+    exception counts on two runs purely through this answer. The key is the
+    question itself — column, authorized values and candidates, both sorted so
+    the data's row order cannot move it — plus prompt version, tenant and model.
+    Only an answer that parsed is stored; a failed call is re-asked."""
+    model = _reconcile_model()
+    key = None
+    try:
+        import ai_cache
+        key = ai_cache.make_key(*ai_cache.model_scoped(
+            (_PROMPT_VERSION, tenant_id, field,
+             sorted(str(a) for a in authorized), sorted(str(c) for c in candidates),
+             {"temperature": 0, "seed": _SEED, "thinking_budget": _THINKING,
+              "max_output_tokens": _MAX_OUTPUT}),
+            model))
+        stored = ai_cache.get("var_reconcile", key)
+        if isinstance(stored, list):
+            # Re-filtered, so a stored pick can never be a value this data lacks.
+            return _parse_matches(json.dumps({"matches": stored}), candidates)
+    except Exception:
+        key = None
     prompt = (
         "You decide which actual data values are alternate spellings of an "
         "authorized value. Be conservative: a wrong match hides a real violation.\n\n"
@@ -134,10 +173,30 @@ def _ai_reconcile(ai, field: str, authorized: list, candidates: list) -> list:
     )
     try:
         raw = ai(prompt, label="VarValuesReconcile", temperature=0, seed=_SEED,
-                 max_output_tokens=2048)
+                 max_output_tokens=_MAX_OUTPUT, thinking_budget=_THINKING,
+                 model=model)
     except Exception:
         return []
-    return _parse_matches(raw, candidates)
+    picks = _parse_matches(raw, candidates)
+    if key and _answer_parsed(raw):
+        try:
+            import ai_cache
+            ai_cache.put("var_reconcile", key, picks, tenant_id=tenant_id)
+        except Exception:
+            pass
+    return picks
+
+
+def _answer_parsed(raw) -> bool:
+    """True when the model returned the {"matches": [...]} shape (an empty list is
+    a real "none of them"); garbage or a bare error is not an answer to keep."""
+    txt = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", str(raw or "").strip()).strip()
+    try:
+        obj = json.loads(txt)
+    except Exception:
+        return False
+    return isinstance(obj, list) or (isinstance(obj, dict)
+                                     and isinstance(obj.get("matches"), list))
 
 
 def _parse_matches(raw, candidates: list) -> list:
@@ -199,11 +258,12 @@ def _persist(session, rule: dict, new_sql: str, variation_values: list) -> None:
 
 
 def reconcile(con, tables: dict, rules: list, *, session=None, ai=None,
-              persist=None) -> dict:
+              persist=None, tenant_id=None) -> dict:
     """Reconcile enum rules' variation_values against the real BDX distinct values.
     Mutates rule dicts in place (rule['compiled_sql'] and rule['rule_spec']).
     `ai` is the AI callable (defaults to gemini_service.call_gemini); inject a
-    fake in tests so no network call is made. Returns a small summary dict."""
+    fake in tests so no network call is made. `tenant_id` scopes the stored AI
+    answers (see _ai_reconcile). Returns a small summary dict."""
     if not _on():
         return {"rules_updated": 0, "skipped": "disabled"}
     if ai is None:
@@ -273,12 +333,15 @@ def reconcile(con, tables: dict, rules: list, *, session=None, ai=None,
             # test — a value that merely resembles one of the rule's spellings is
             # not matched by the query and IS a candidate, which is exactly the
             # spelling this step exists to find and record.
-            candidates = [d for d in distinct if _norm(d) not in known]
+            # Sorted: SELECT DISTINCT has no order, so the cap below (and the
+            # prompt) would otherwise depend on how DuckDB happened to scan.
+            candidates = sorted((d for d in distinct if _norm(d) not in known), key=str)
             if not candidates:
                 continue
 
             # AI decides which candidates are genuinely the same authorized entity.
-            picks = _ai_reconcile(ai, field, vvals, candidates[:_AI_CAP])
+            picks = _ai_reconcile(ai, field, vvals, candidates[:_AI_CAP],
+                                  tenant_id=tenant_id)
             # The contract-authorized values (NOT the surface variations) are the
             # ground truth a real data spelling must trace back to. Reject any AI
             # pick that shares no word / no substring with any authorized value —

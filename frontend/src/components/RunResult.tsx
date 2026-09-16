@@ -29,6 +29,15 @@ export type RunException = {
   column?: string; field?: string; rule_name?: string;
   policy_number?: string; actual_value?: string | number;
   expected_value?: string | number; reason?: string; message?: string;
+  /** "not_validated" — the run's checks did not run; "not_checked" — the one
+   *  row-less summary of rules that could not run (shown as a note, not a finding). */
+  error_class?: string;
+  /** On the "not_checked" entry: the columns its rules needed. */
+  columns?: string[];
+  /** On the "not_checked" entry: rules that did not run at all… */
+  rules?: { rule_name?: string; columns?: string[] }[];
+  /** …and rules that ran on only some of their sheets. */
+  partial?: { rule_name?: string; sheets?: string[]; columns?: string[] }[];
 };
 
 export type GoverningContract = {
@@ -50,6 +59,15 @@ export type RunResp = {
   /** True when produced by the pre-submission self-check — not ingested, not
    *  recorded as a run. */
   check_only?: boolean;
+  /** Why the run is "not_validated" (null otherwise). */
+  status_reason?: string | null;
+  /** Rows the checks ran over, and rows set aside as blank/summary rows. Null
+   *  when there was nothing to check with. */
+  rows_total?: number | null;
+  rows_validated?: number | null;
+  rows_excluded?: number | null;
+  rules_not_checked?: number;
+  rules_partly_checked?: number;
 };
 
 export type RunUrls = {
@@ -98,6 +116,11 @@ export function RunResult({
   const isCheck = !!result.check_only;
   const spine = result.status === "clean" ? "ok" : "warn";
   const listFindings = findings === "always" || isCheck;
+  const notValidated = result.status === "not_validated";
+  // The grouped "checks not run" entry is a note about the run, not a finding.
+  const notChecked = result.exceptions.find(e => e.error_class === "not_checked");
+  const findingsList = result.exceptions.filter(e => e.error_class !== "not_checked");
+  const notRun = notChecked?.rules?.length ?? result.rules_not_checked ?? 0;
 
   // "See all rows": the full output (every sheet, all rows) with the same
   // highlighting as the download, expanded IN PLACE rather than in a modal.
@@ -122,7 +145,7 @@ export function RunResult({
     const header = ["Severity", "Rule", "Policy", "Sheet", "Column",
                     "Actual value", "Expected", "Reason"];
     const cell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const rows = result.exceptions.map(e => [
+    const rows = findingsList.map(e => [
       e.severity, e.rule_name, e.policy_number, e.sheet,
       e.column ?? e.field, e.actual_value, e.expected_value,
       e.reason ?? e.message,
@@ -140,7 +163,11 @@ export function RunResult({
         style={{ margin: "18px 0", display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
         <div style={{ flex: 1, minWidth: 220 }}>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 3 }}>
-            {isCheck && result.status === "clean"
+            {notValidated
+              ? <span style={{ color: "var(--p-warn-ink)" }}>
+                  Not validated — {result.status_reason ?? "the checks did not run on this file"}
+                </span>
+              : isCheck && result.status === "clean"
               ? <span style={{ color: "var(--p-ok)" }}>✓ Ready to send — no issues found</span>
               : <>
                   {result.row_count.toLocaleString()} rows {isCheck ? "checked" : "validated"}
@@ -158,6 +185,14 @@ export function RunResult({
                 // what they can do is read the list below and send a fixed file.
                 : "Sent. Exceptions don't block the file — the carrier has it either way. Fix what's listed below and send again if you need to."}
           </div>
+          {result.rows_validated != null && (
+            <div style={{ color: "var(--p-muted)", fontSize: 12.5, marginTop: 3 }}>
+              {result.rows_validated.toLocaleString()} of {(result.rows_total ?? 0).toLocaleString()} rows checked
+              {result.rows_excluded
+                ? ` · ${result.rows_excluded.toLocaleString()} set aside as blank or summary rows`
+                : ""}
+            </div>
+          )}
         </div>
         {listFindings && result.exception_count > 0 && (
           <button className="btn" onClick={downloadFixList}>Download Fix-List (CSV)</button>
@@ -173,7 +208,33 @@ export function RunResult({
       {/* The findings, inline. Read-only in both cases: on a check because a
           check is a look, not a submission; on a real run because whoever sees
           this list here is the party that has no triage screen. */}
-      {listFindings && result.exceptions.length > 0 && (
+      {notChecked && (
+        <div className="note warn" style={{ marginBottom: 18 }}>
+          {/* An entry carrying only partly-run checks has no "not run" line. */}
+          {(notRun > 0 || !notChecked.partial?.length) && <>
+            <strong>
+              {notRun || "Some"} check{notRun === 1 ? "" : "s"} not run
+              {notChecked.columns?.length ? " — columns not mapped" : ""}.
+            </strong>{" "}
+            {notChecked.columns?.length
+              ? <>Map these in Bordereau Setup, or add or switch them on in the output template, to run them: {notChecked.columns.slice(0, 12).join(", ")}
+                  {notChecked.columns.length > 12 ? ` and ${notChecked.columns.length - 12} more` : ""}.</>
+              : notChecked.message}
+          </>}
+          {!!notChecked.partial?.length && (
+            <div style={{ marginTop: notRun ? 6 : 0 }}>
+              <strong>
+                {notChecked.partial.length} check{notChecked.partial.length === 1 ? "" : "s"} ran on only some sheets.
+              </strong>{" "}
+              {notChecked.partial.slice(0, 5).map(p =>
+                `${p.rule_name ?? "A check"} skipped ${(p.sheets ?? []).join(", ")}`).join("; ")}
+              {notChecked.partial.length > 5 ? ` and ${notChecked.partial.length - 5} more` : ""}.
+            </div>
+          )}
+        </div>
+      )}
+
+      {listFindings && findingsList.length > 0 && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-h">
             <h3>{isCheck ? "What to Fix Before Sending" : "What Failed Validation"}</h3>
@@ -187,7 +248,7 @@ export function RunResult({
                 <tr><th>Severity</th><th>Policy</th><th>Field</th><th>Value</th><th>Why</th></tr>
               </thead>
               <tbody>
-                {result.exceptions.slice(0, 200).map((e, i) => {
+                {findingsList.slice(0, 200).map((e, i) => {
                   const sev = (e.severity || "").toLowerCase();
                   const tone = sev.includes("crit") || sev === "error" ? "var(--p-crit)"
                     : sev.includes("warn") ? "var(--p-warn, #b45309)" : "var(--p-muted)";
@@ -210,7 +271,7 @@ export function RunResult({
               </tbody>
             </table>
           </div>
-          {result.exceptions.length > 200 && (
+          {findingsList.length > 200 && (
             <div className="note" style={{ margin: 12 }}>
               Showing the first 200 of {result.exception_count.toLocaleString()} — download the CSV for the full list.
             </div>

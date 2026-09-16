@@ -905,11 +905,16 @@ def _gemini_candidates_call(
              TOP_N_CANDIDATES, len(headers), len(prompt))
     t0 = time.time()
     try:
+        # gemini-2.5-flash unless KAVACHIO_MODEL_DATAMODEL_MAPPING says otherwise;
+        # temperature 0 + seed so the same headers are not mapped differently by chance.
+        from contract_upload_services.gemini_service import DETERMINISTIC_SEED, model_for
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model_for("datamodel_mapping", "gemini-2.5-flash"),
             contents=prompt,
             config={
                 "response_mime_type": "application/json",
+                "temperature": 0,
+                "seed": DETERMINISTIC_SEED,
                 "max_output_tokens": _MAX_OUTPUT_TOKENS,
             },
         )

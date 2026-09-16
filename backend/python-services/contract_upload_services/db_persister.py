@@ -172,6 +172,9 @@ def persist_resolved_rules(
     validation_rules,
     actor="user",
     created_by=None,
+    tag_template_id=None,
+    conn=None,
+    leave_review_queue=False,
 ):
     """Persist rules built by a human review-queue resolution for ONE existing
     clause (see manual_rule_resolution.generate_rules_for_clause_field).
@@ -187,24 +190,36 @@ def persist_resolved_rules(
     that only arrived later) passes its own, so a bulk regeneration is not
     recorded as somebody's hand-made fix.
 
+    The last three are for a rule set ADDED for a second output template (see
+    rule_scope.py); every other caller leaves them out and gets exactly what
+    this always did:
+      `tag_template_id`    stamps validation_rule.output_template_id — the
+                           template the added set belongs to. Left out, the
+                           column is not even named, so a database the
+                           migration has not reached yet still accepts it.
+      `conn`               writes inside the caller's transaction, so a set
+                           made of many clauses lands whole or not at all.
+      `leave_review_queue` leaves the clause's status and review routing as
+                           they are: those describe the contract against the
+                           template it is bound to, and the setups already on
+                           that template read them.
+
     Returns: list of {rule_id, rule_name, output_field} for the inserted rows.
     """
+    from contextlib import nullcontext
+
     created_by = created_by or f"manual_resolution:{actor}"
     created = []
-    with canonical_engine.begin() as conn:
-        for r in validation_rules:
-            if not isinstance(r, dict):
-                continue
-            ct = r.get("canonical_target") or {}
-            new_rule_id = conn.execute(
-                text("""
+    tag_col = ", output_template_id" if tag_template_id is not None else ""
+    tag_val = ", :output_template_id" if tag_template_id is not None else ""
+    insert_sql = text(f"""
                     INSERT INTO validation_rule
                         (tenant_id, contract_id, program_id, rule_engine,
                          rule_class_id, rule_name, rule_description,
                          validation_stage, severity, canonical_target, rule_spec,
                          error_message, source_clause_id, source_verbatim_text,
                          source_page_number, generation_confidence, rule_status,
-                         created_by)
+                         created_by{tag_col})
                     VALUES
                         (:tenant_id, :contract_id, :program_id, :rule_engine,
                          :rule_class_id, :rule_name, :rule_description,
@@ -212,9 +227,17 @@ def persist_resolved_rules(
                          CAST(:canonical_target AS JSONB), CAST(:rule_spec AS JSONB),
                          :error_message, :source_clause_id, :source_verbatim_text,
                          :source_page_number, :generation_confidence, :rule_status,
-                         :created_by)
+                         :created_by{tag_val})
                     RETURNING rule_id
-                """),
+                """)
+    tx = nullcontext(conn) if conn is not None else canonical_engine.begin()
+    with tx as conn:
+        for r in validation_rules:
+            if not isinstance(r, dict):
+                continue
+            ct = r.get("canonical_target") or {}
+            new_rule_id = conn.execute(
+                insert_sql,
                 {
                     "tenant_id":        tenant_id,
                     "contract_id":      contract_id,
@@ -236,6 +259,7 @@ def persist_resolved_rules(
                     # go live immediately (consistent with the IR generator default).
                     "rule_status":      r.get("rule_status") or "active",
                     "created_by":       created_by,
+                    "output_template_id": tag_template_id,
                 },
             ).scalar()
 
@@ -258,7 +282,7 @@ def persist_resolved_rules(
         # contract — a generic library rule, which the whole-contract path sends
         # through here with a NULL source. There is no clause to take out of the
         # review queue, and both statements below would match nothing anyway.
-        if created and db_clause_id is not None:
+        if created and db_clause_id is not None and not leave_review_queue:
             # The clause now has runnable rules → leave the review queue.
             conn.execute(
                 text("""
@@ -424,7 +448,7 @@ def normalize_upload_token(token):
 
 def build_extracted_payload(document_type, program_name, program_metadata,
                             upload_token=None, reference_documents=None,
-                            identity=None, regen_report=None):
+                            identity=None, regen_report=None, extraction=None):
     """The contract row's `extracted` JSON.
 
     `upload_token` is the caller's correlation id for THIS upload. It rides in
@@ -475,6 +499,11 @@ def build_extracted_payload(document_type, program_name, program_metadata,
         payload["identity"] = dict(identity)
     if regen_report:
         payload["regen_report"] = regen_report
+    # How the clauses were read — {model, prompt_sha256, cache: hit|miss, path:
+    # whole_document|sections|resume, stored}. Nested for the same scalar-filter
+    # reason; tells "the model answered differently" from "the input changed".
+    if isinstance(extraction, dict) and extraction:
+        payload["extraction"] = dict(extraction)
     return payload
 
 
@@ -710,6 +739,7 @@ def persist_pipeline_output(
             reference_documents,
             identity=identity,
             regen_report=regen_report,
+            extraction=meta.get("extraction"),
         ))
 
         if existing_contract_id:
@@ -759,6 +789,22 @@ def persist_pipeline_output(
                 },
             )
             contract_id = existing_contract_id
+
+            # The Re-read route refuses a contract carrying rule sets added for
+            # other output templates (rule_scope.py), but it checks before a
+            # minutes-long read. One added while that read ran would be deleted
+            # below, so ask again here — the UPDATE above holds this contract's
+            # row, and an added set is written holding it too. Never true of a
+            # contract that has not had a set added.
+            import rule_scope
+            if rule_scope.tag_column_present(conn) and conn.execute(text(
+                    "SELECT 1 FROM validation_rule WHERE contract_id = :cid "
+                    "AND output_template_id IS NOT NULL LIMIT 1"),
+                    {"cid": existing_contract_id}).first() is not None:
+                raise ValueError(
+                    "rules were set up for another output template while this "
+                    "contract was being re-read; re-reading would remove them, "
+                    "so nothing has been changed")
 
             # Everything below re-inserts this contract's rules, clauses, terms
             # and routings, so the previous generation has to go first — without

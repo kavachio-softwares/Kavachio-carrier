@@ -46,9 +46,26 @@ def make_key(*parts) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def get(kind: str, key: str):
-    """Cached payload for (kind, key), or None on a miss / any failure."""
-    if not _enabled(kind) or not key:
+def model_scoped(parts: tuple, model: str | None, legacy_model: str | None = None) -> tuple:
+    """Key parts that also cover the MODEL that answers.
+
+    Models are env-switchable (gemini_service.model_for), and an answer from one
+    model must never be served after a switch to another. A key built while
+    ``model`` is still ``legacy_model`` — the model every existing entry of that
+    kind was stored under — is left exactly as it was, so switching nothing
+    invalidates nothing; any other model adds itself to the key.
+    """
+    if not model or (legacy_model is not None and model == legacy_model):
+        return tuple(parts)
+    return tuple(parts) + ({"model": model},)
+
+
+def get(kind: str, key: str, refresh: bool = False):
+    """Cached payload for (kind, key), or None on a miss / any failure.
+
+    ``refresh=True`` is a deliberate re-read: it reports a miss so the caller asks
+    the model again (and its put() replaces the stored answer)."""
+    if not _enabled(kind) or not key or refresh:
         return None
     try:
         from db import SessionLocal, AiResponseCache

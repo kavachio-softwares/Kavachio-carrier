@@ -28,6 +28,7 @@ const RESULT_FILTERS = [
   { v: "", label: "All Results" },
   { v: "clean", label: "Clean" },
   { v: "exceptions", label: "Needs Review" },
+  { v: "not_validated", label: "Not Validated" },
 ] as const;
 
 // The endpoint returns up to 100 runs in one shot (no server-side paging), so
@@ -65,6 +66,8 @@ export default function RecentRuns() {
   }, [mga]);
 
   const hasExc = (r: Run) => r.status !== "clean" && r.exception_count > 0;
+  // The checks never ran on this file — not clean, but no findings either.
+  const notValidated = (r: Run) => r.status === "not_validated";
 
   const iso = (d: Date | null) => (d ? d.toISOString() : "");
 
@@ -166,9 +169,10 @@ export default function RecentRuns() {
                       <td className="muted">{r.program_name ?? "—"}</td>
                       <td className="r">{(r.row_count ?? 0).toLocaleString()}</td>
                       <td>
-                        <span className={`badge ${hasExc(r) ? "b-crit" : "b-ok"}`}>
+                        <span className={`badge ${notValidated(r) ? "b-warn" : hasExc(r) ? "b-crit" : "b-ok"}`}>
                           <span className="d" />
-                          {hasExc(r) ? `${r.exception_count.toLocaleString()} exceptions` : "Clean"}
+                          {notValidated(r) ? "Not validated"
+                            : hasExc(r) ? `${r.exception_count.toLocaleString()} exceptions` : "Clean"}
                         </span>
                       </td>
                       <td className="muted">{fmtStamp(r.created_at, "")}</td>

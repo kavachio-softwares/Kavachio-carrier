@@ -1526,6 +1526,10 @@ class Pipeline(Base):
     # draft (never activated) | active (the one runs use) | superseded (replaced
     # by a newer active pipeline for the same carrier+program).
     status = Column(String, default="draft")
+    # pipeline.rule_scope — which of its contracts' rule sets this setup runs —
+    # is deliberately NOT mapped here: a mapped column is selected by every
+    # Pipeline query, and a database without migration 21 would fail them all.
+    # Read and written through rule_scope.pipeline_scope / write_pipeline_scope.
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -2000,6 +2004,12 @@ def init_db():
         _ensure_column(conn, inspector, "export_templates", "standard_meta", json_type)
         # The Bordereau Setup's broker level (NULL = a pre-broker setup).
         _ensure_column(conn, inspector, "pipeline", "broker_party_id", "INTEGER")
+        # Template-aware contract rules (see rule_scope.py). Both nullable with
+        # no backfill: a rule with no template belongs to its contract's
+        # original template, and a setup with no scope runs its own template's
+        # rules — so every existing rule and setup reads exactly as before.
+        _ensure_column(conn, inspector, "pipeline", "rule_scope", json_type)
+        _ensure_column(conn, inspector, "validation_rule", "output_template_id", "INTEGER")
         # Generated-output metadata (plan section 22). template_version is the
         # one that matters: it keeps a historical download pinned to the layout
         # it was actually written with.

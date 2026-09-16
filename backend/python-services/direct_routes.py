@@ -35,7 +35,9 @@ from sqlalchemy import text, func, or_
 import direct_lane as dl
 import direct_mapper as dm
 import direct_render as dr
+import rule_scope as _rule_scope_mod
 import missing_columns as mc
+import validation_outcome as vo
 import storage  # blob storage abstraction (Azure/Azurite; DB-blob fallback)
 from app_routes import _iso_utc, _parse_client_dt
 from db import (
@@ -537,6 +539,48 @@ def _column_types_from_structure(structure: dict) -> dict:
     return out
 
 
+def _confirmed_mapping(column_mapping: Optional[dict], decisions: Optional[dict],
+                       approved: bool, structure: dict) -> Optional[dict]:
+    """The part of a stored, not-yet-known format's mapping that may be handed
+    back to the proposer as ALREADY DECIDED.
+
+    The proposer treats whatever it is given as a person's decision — final,
+    recorded MANUALLY_CONFIRMED (semantic_mapping, rung 1). Handing it the whole
+    stored mapping of an unapproved format therefore turned the previous run's
+    unreviewed AI guesses into "confirmed by a person" on the next upload.
+
+    So only these pass:
+      · everything, when the format is approved;
+      · a rule the proposer never recorded a decision for, or whose source
+        differs from the one it recorded — a person put it there;
+      · a rule whose recorded decision is already MANUAL;
+      · anything but a `copy` rule — the proposer only ever writes copies.
+    An unapproved rule that is still exactly what the proposer suggested is
+    left out, and is proposed afresh. A MANUAL decision written by the old
+    behaviour cannot be told from a real one and keeps its standing."""
+    if not column_mapping:
+        return None
+    if approved:
+        return column_mapping
+    decisions = decisions or {}
+    out: dict = {}
+    for sheet, rules in column_mapping.items():
+        recorded = {d.get("field_key"): d for d in (decisions.get(sheet) or [])
+                    if isinstance(d, dict)}
+        key_of = {f["column_name"]: f["field_key"]
+                  for f in dm._output_fields_for_sheet(structure, sheet)}
+        kept = {}
+        for col, rule in (rules or {}).items():
+            d = recorded.get(key_of.get(col))
+            if (d is None or d.get("method") == dm.sm.MANUAL
+                    or not isinstance(rule, dict) or rule.get("kind") != "copy"
+                    or d.get("source") != rule.get("source")):
+                kept[col] = rule
+        if kept:
+            out[sheet] = kept
+    return out
+
+
 def _routing_input_sheets(routing: Optional[dict]) -> set[str]:
     """Input sheet names actually consumed by a routing (across all routes)."""
     names: set[str] = set()
@@ -746,10 +790,15 @@ async def direct_upload(
                 routing = dl.propose_sheet_routing(input_sheets, output_sheets)
                 # A previously-confirmed mapping for this format outranks
                 # everything the proposer finds — a re-run must never move a
-                # column somebody already fixed by hand.
+                # column somebody already fixed by hand. Only what a person
+                # confirmed counts, never the last run's unreviewed proposal
+                # (see _confirmed_mapping).
+                prior = (_confirmed_mapping(fmt.column_mapping, fmt.mapping_decisions,
+                                            bool(fmt.approved), structure)
+                         if fmt else None)
                 column_mapping, candidates, decisions = await run_in_threadpool(
                     dm.propose_column_mapping, cols_by_sheet, structure, routing,
-                    samples_by_sheet, (fmt.column_mapping if fmt else None), True)
+                    samples_by_sheet, prior, True, tenant_id=tid)
                 if fmt is None:
                     fmt = DirectFormat(
                         tenant_id=tid, name=name, fingerprint=fp,
@@ -888,6 +937,9 @@ class PipelineCreate(BaseModel):
     input_format_id: int
     output_template_id: int
     contracts: list[PipelineContractIn] = []
+    # Which of its contracts' rule sets this setup runs — see rule_scope.py.
+    # Omitted, the setup runs its own template's rules, as every setup did.
+    rule_scope: Optional[dict] = None
 
 
 class PipelineUpdate(BaseModel):
@@ -896,6 +948,9 @@ class PipelineUpdate(BaseModel):
     input_format_id: Optional[int] = None
     output_template_id: Optional[int] = None
     contracts: Optional[list[PipelineContractIn]] = None  # replaces the set when given
+    # Replaces the setup's rule choice when sent; an empty object clears it.
+    # Left out, the stored choice is kept.
+    rule_scope: Optional[dict] = None
 
 
 @router.get("/direct/format/{format_id}")
@@ -1361,6 +1416,7 @@ def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
             for pc in _pcs
         ],
         "reference_documents": _ref_docs,
+        "rule_scope": _rule_scope_mod.pipeline_scope(s, p.id),
         "ready": ready, "ready_reason": reason,
         "created_at": _iso_utc(p.created_at),
         "modified_at": _iso_utc(p.modified_at),
@@ -1857,6 +1913,7 @@ async def _render_landing(
     actor: Optional[str], extra_consts: dict, auto_ingest: bool = False,
     reuse_export_id: Optional[int] = None, pipeline_id: Optional[int] = None,
     check_only: bool = False, scope: Optional[dict] = None,
+    rule_scope_pipeline_id: Optional[int] = None,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -1884,6 +1941,16 @@ async def _render_landing(
         # contracts come from the PIPELINE when running against one; otherwise
         # (the /direct/render setup-preview path) they come from fmt, unchanged.
         pipe = s.get(Pipeline, pipeline_id) if pipeline_id else None
+        # Which of its contracts' rule sets the setup runs (rule_scope.py).
+        # None for the setup-preview path and for every setup that never chose.
+        # A Re-generate renders without its pipeline (the format decides the
+        # layout, as it always has) but must still run what that setup chose,
+        # so it names the pipeline for its rule choice alone.
+        run_rule_scope = _rule_scope_mod.pipeline_scope(s, pipe.id) if pipe else None
+        if pipe is None and rule_scope_pipeline_id:
+            _rs_pipe = s.get(Pipeline, rule_scope_pipeline_id)
+            if _rs_pipe is not None and _rs_pipe.tenant_id == rec.tenant_id:
+                run_rule_scope = _rule_scope_mod.pipeline_scope(s, _rs_pipe.id)
         if pipe:
             eff_output_template_id = pipe.output_template_id
             _pcs = _pipeline_contracts(s, pipe.id)
@@ -1982,6 +2049,7 @@ async def _render_landing(
         routing = fmt.sheet_routing or dl.propose_sheet_routing(
             list((rec.data or {}).get("sheets", {})), _output_sheet_names(structure))
         column_mapping = fmt.column_mapping
+        supplement_cfg = fmt.supplement or {}
         # Overlay any saved Fix/Approve corrections (raw capture stays untouched).
         landing_data = _apply_landing_corrections(s, landing_id, rec.data)
         # Corrections with no writable input cell are applied after projection.
@@ -2017,17 +2085,32 @@ async def _render_landing(
     # their own schedule); the deterministic date/amount TYPE checks run
     # regardless (they need only the output template's column types).
     exceptions: list[dict] = []
+    dv = None                  # run_validation's result, once it has returned
+    validation_error = None    # what stopped it, if something did
     try:
         rules: list[dict] = []
         if governing_ids:
+            import rule_scope
             with CanonicalSession() as cs:
                 rule_rows = cs.execute(
                     text("SELECT rule_id, contract_id, rule_engine, rule_name, "
-                         "severity, canonical_target, rule_spec, error_message "
+                         "severity, canonical_target, rule_spec, error_message, "
+                         f"{rule_scope.tag_select(cs)} "
                          "FROM validation_rule WHERE contract_id = ANY(:cids) "
-                         "AND rule_status != 'disabled'"),
+                         # Only rules cleared to run. A rule paused as
+                         # needs_review (e.g. a referral whose trigger
+                         # direction the generator could not confirm from the
+                         # contract) must not fire until a person confirms it —
+                         # 'active' only, not merely 'not disabled'.
+                         "AND rule_status = 'active'"),
                     {"cids": governing_ids}).mappings().all()
-                rules = [dict(r) for r in rule_rows]
+                # A contract can carry a rule set per output template; run the
+                # ones this setup runs. Untouched for every setup that made no
+                # choice and every contract with one set — see rule_scope.py.
+                rules = rule_scope.filter_rules(
+                    cs, [dict(r) for r in rule_rows],
+                    setup_template_id=eff_output_template_id,
+                    scope=run_rule_scope)
 
         # A rule is "schedule-scoped" when its clause explicitly names the
         # schedules it applies to (IR params scope_sheets/sheets, e.g.
@@ -2045,52 +2128,74 @@ async def _render_landing(
             return bool(params.get("scope_sheets") or params.get("sheets"))
         rule_scoped = {r.get("rule_id"): _rule_is_scoped(r) for r in rules}
 
-        schema_cols = {
-            sh.get("sheet_name", ""): [c.get("column_name")
-                                       for c in (sh.get("columns") or [])
-                                       if c.get("column_name")]
-            for sh in structure.get("sheets", [])}
-        column_types = _column_types_from_structure(structure)
+        # Every sheet's table keeps the full template column set (a fan-out
+        # rule must find its column on each sheet it reads), but a column the
+        # user switched off is not written (direct_render uses the same test),
+        # so it is neither type-checked nor counted as filled.
+        schema_cols = vo.template_schema_cols(structure)
+        _active = {str(sh).strip(): set(cols)
+                   for sh, cols in vo.active_schema_cols(structure).items()}
+        column_types = {sh: kinds for sh, kinds in (
+            (sh, {c: k for c, k in kinds.items() if c in _active.get(sh, ())})
+            for sh, kinds in _column_types_from_structure(structure).items()) if kinds}
         if rules or column_types:
             from duckdb_validation import run_validation
             dv = run_validation(blocks, rules, template_id=eff_output_template_id,
-                                schema_cols=schema_cols, column_types=column_types)
+                                schema_cols=schema_cols, column_types=column_types,
+                                # what the setup writes into — a rule reading a
+                                # column it leaves empty is not checked
+                                filled_cols=vo.filled_cols_from_mapping(column_mapping),
+                                inactive_cols=vo.inactive_cols(structure),
+                                tenant_id=tenant_id)
             exceptions = dv.get("exceptions", [])
+    except Exception as e:  # noqa: BLE001 — never block delivery on validation
+        # …but never call it clean either: the outcome below records it.
+        validation_error = e
+        log.warning("direct render validation skipped: %s", e)
 
-            # ── Feature 7 §7.1, per row ──────────────────────────────────
-            # Every version the file spans has just had its rules run over
-            # EVERY row, so a row is currently judged by versions that never
-            # governed it. Keep only the exceptions whose contract was in force
-            # on that row's own date. Filtering after the run rather than
-            # scoping each rule's SQL means the compiler and the engine are
-            # untouched — the multi-contract machinery that already serves
-            # per-schedule contracts does the work.
-            if asof_windows:
-                try:
-                    _rd = _asof_row_dates(blocks, *asof_cfg)
-                    exceptions, _dropped = _asof_filter_exceptions(
-                        exceptions, _rd, asof_windows)
-                    if _dropped:
-                        log.info(f"[AsOf] row-scoped: dropped {_dropped} exception(s) "
-                                 f"raised by a version that did not govern the row")
-                except Exception as _fx:  # noqa: BLE001 — fail-open: keep them all
-                    log.info(f"[AsOf] row scoping skipped ({_fx})")
+    # Everything below refines results the rules already returned. Each step
+    # fails on its own, so a problem in one keeps the findings instead of
+    # discarding them and storing the file as clean.
+    if dv is not None:
+        # ── Feature 7 §7.1, per row ──────────────────────────────────
+        # Every version the file spans has just had its rules run over
+        # EVERY row, so a row is currently judged by versions that never
+        # governed it. Keep only the exceptions whose contract was in force
+        # on that row's own date. Filtering after the run rather than
+        # scoping each rule's SQL means the compiler and the engine are
+        # untouched — the multi-contract machinery that already serves
+        # per-schedule contracts does the work.
+        if asof_windows:
+            try:
+                _rd = _asof_row_dates(blocks, *asof_cfg)
+                exceptions, _dropped = _asof_filter_exceptions(
+                    exceptions, _rd, asof_windows)
+                if _dropped:
+                    log.info(f"[AsOf] row-scoped: dropped {_dropped} exception(s) "
+                             f"raised by a version that did not govern the row")
+            except Exception as _fx:  # noqa: BLE001 — fail-open: keep them all
+                log.info(f"[AsOf] row scoping skipped ({_fx})")
 
-            # Label each row-level exception with the offending policy's number so
-            # the review UI shows a real policy id instead of "Dataset-level".
+        # Label each row-level exception with the offending policy's number so
+        # the review UI shows a real policy id instead of "Dataset-level".
+        try:
             from duckdb_validation import label_exceptions_with_policy
             label_exceptions_with_policy(exceptions, structure, blocks)
-            # Per-schedule isolation: unscoped rules fan out to every sheet that
-            # carries their columns (rule_compiler.compile_ir) — NOT to the contract
-            # they came from. So on a multi-schedule BDX whose schedules share the
-            # same column layout (e.g. RiskSmith Sch A/B/C), an unscoped rule from
-            # Schedule H's contract also fires on the other schedules. When the user
-            # has mapped sheets to contracts, keep an UNSCOPED rule's exceptions only
-            # on the sheet(s) its own contract governs. A SCOPED rule (its clause
-            # names the schedules, e.g. "G, H, I, J") is left alone — its SQL is
-            # already limited to those schedules. Type-check exceptions carry no
-            # contract_id, so they are never dropped. No-op unless sheet_contracts
-            # is set (single-contract runs unaffected).
+        except Exception as _lx:  # noqa: BLE001 — labels are cosmetic
+            log.warning("policy labelling skipped: %s", _lx)
+
+        # Per-schedule isolation: unscoped rules fan out to every sheet that
+        # carries their columns (rule_compiler.compile_ir) — NOT to the contract
+        # they came from. So on a multi-schedule BDX whose schedules share the
+        # same column layout (e.g. RiskSmith Sch A/B/C), an unscoped rule from
+        # Schedule H's contract also fires on the other schedules. When the user
+        # has mapped sheets to contracts, keep an UNSCOPED rule's exceptions only
+        # on the sheet(s) its own contract governs. A SCOPED rule (its clause
+        # names the schedules, e.g. "G, H, I, J") is left alone — its SQL is
+        # already limited to those schedules. Type-check exceptions carry no
+        # contract_id, so they are never dropped. No-op unless sheet_contracts
+        # is set (single-contract runs unaffected).
+        try:
             if sheet_contracts:
                 sheet_owner = {str(sh).strip(): int(cid)
                                for sh, cid in sheet_contracts.items() if cid}
@@ -2118,8 +2223,31 @@ async def _render_landing(
                     log.info("per-schedule scoping dropped %d out-of-scope "
                              "exception(s) across %d mapped sheet(s)",
                              dropped, len(sheet_owner))
-    except Exception as e:  # noqa: BLE001 — never block delivery on validation
-        log.warning("direct render validation skipped: %s", e)
+        except Exception as _sx:  # noqa: BLE001 — fail-open: keep them all
+            log.warning("per-schedule scoping skipped: %s", _sx)
+
+    # What the run actually checked decides its status, not merely whether the
+    # list came back empty — see validation_outcome. A not-validated run carries
+    # one critical entry saying so; rules that could not run are summed up in
+    # one informational entry that is shown but never counted.
+    projected_rows = sum(len(v) for v in projected.values())
+    stats = (dv or {}).get("stats")
+    status, status_reason = vo.outcome(
+        input_rows=vo.input_row_count(landing_data, supplement_cfg),
+        # the file's rows on the sheets the routing reads — tells a sheet
+        # mismatch from a filter that let nothing through
+        routed_rows=vo.routed_row_count(landing_data, supplement_cfg, routing),
+        projected_rows=projected_rows, error=validation_error,
+        stats=stats, exceptions=exceptions)
+    if status == vo.NOT_VALIDATED:
+        exceptions.insert(0, vo.not_validated_entry(status_reason))
+    not_checked = vo.not_checked_entry((dv or {}).get("unprocessable"),
+                                       (dv or {}).get("partially_checked"))
+    if not_checked:
+        exceptions.append(not_checked)
+    counted = vo.countable(exceptions)
+    # Only an entry with a row can be painted onto a cell.
+    cell_exceptions = [e for e in counted if e.get("row") is not None]
 
     from output_serializers import (
         serialize as _serialize_output, output_extension as _output_ext,
@@ -2132,10 +2260,10 @@ async def _render_landing(
             dr.render_output, structure, projected, template_blob)
         # Cell highlighting is Excel-only; CSV/XML/JSON carry exceptions in the
         # OutputExport record instead.
-        if exceptions:
+        if cell_exceptions:
             try:
                 from exporter import highlight_exceptions
-                output_bytes = highlight_exceptions(output_bytes, structure, exceptions)
+                output_bytes = highlight_exceptions(output_bytes, structure, cell_exceptions)
             except Exception as e:  # noqa: BLE001
                 log.warning("highlight skipped: %s", e)
         # LAST step on purpose: highlighting re-saves the workbook via openpyxl,
@@ -2164,7 +2292,7 @@ async def _render_landing(
         storage.store_or_keep, "exports", tenant_id, fname, output_bytes,
         _ct_for(fname))
 
-    sev_crit, sev_warn, sev_info = exception_severity_counts(exceptions)
+    sev_crit, sev_warn, sev_info = exception_severity_counts(counted)
     # Does the file we just wrote match the sample the recipient supplied?
     # Advisory only (plan section 15): a sample is optional, and a difference is
     # something for a person to look at, never a reason to withhold a delivery.
@@ -2185,10 +2313,10 @@ async def _render_landing(
                 template_name=template_name, filename=fname,
                 source_upload_id=None, policy_ids=None, generated_by=actor,
                 policy_count=sum(len(v) for v in projected.values()),
-                exception_count=len(exceptions), exceptions=exceptions,
+                exception_count=len(counted), exceptions=exceptions,
                 critical_count=sev_crit, warning_count=sev_warn,
                 info_count=sev_info,
-                status="has_exceptions" if exceptions else "clean",
+                status=status,
                 blob=exp_bytes, blob_ref=exp_ref,
                 # What this file was made from and for. template_version is the
                 # one that has to be right: a later edit forks the template, and
@@ -2208,12 +2336,12 @@ async def _render_landing(
             out.template_name = template_name
             out.filename = fname
             out.policy_count = sum(len(v) for v in projected.values())
-            out.exception_count = len(exceptions)
+            out.exception_count = len(counted)
             out.exceptions = exceptions
             out.critical_count = sev_crit
             out.warning_count = sev_warn
             out.info_count = sev_info
-            out.status = "has_exceptions" if exceptions else "clean"
+            out.status = status
             out.blob = exp_bytes
             out.blob_ref = exp_ref
             out.generated_by = actor or out.generated_by
@@ -2225,7 +2353,7 @@ async def _render_landing(
             action="direct_output_checked" if check_only else "direct_output_generated",
             target=f"direct:{template_name}",
             details={"filename": fname, "rows": out.policy_count,
-                     "exceptions": len(exceptions)}))
+                     "exceptions": len(counted), "status": status}))
         s.commit()
         s.refresh(out)
         export_id = out.id
@@ -2285,9 +2413,17 @@ async def _render_landing(
         "export_id": export_id,
         "filename": fname,
         "row_count": sum(len(v) for v in projected.values()),
-        "exception_count": len(exceptions),
+        "exception_count": len(counted),
         "exceptions": exceptions,
-        "status": "has_exceptions" if exceptions else "clean",
+        "status": status,
+        # Why a run is not_validated (None otherwise), and how many rows the
+        # checks actually ran over — None when there was nothing to check with.
+        "status_reason": status_reason,
+        "rows_total": (stats or {}).get("rows_total"),
+        "rows_validated": (stats or {}).get("rows_validated"),
+        "rows_excluded": (stats or {}).get("rows_excluded"),
+        "rules_not_checked": len((not_checked or {}).get("rules") or []),
+        "rules_partly_checked": len((not_checked or {}).get("partial") or []),
         "datamodel_mapped": datamodel_mapped,
         "datamodel_queued": datamodel_queued,
         "admin_task_id": admin_task_id,
@@ -2348,18 +2484,29 @@ async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None
         if _exp is None:
             raise HTTPException(404, "export not found")
         assert_can_read_export(s, principal, _exp)
+        export_pipeline_id = getattr(_exp, "pipeline_id", None)
     # Re-render IN PLACE so the export id/header stays stable across Re-generate.
     return await _render_landing(int(landing_id), None, None,
                                  (body.actor if body else None) or _principal_email(principal), {},
-                                 auto_ingest=False, reuse_export_id=export_id)
+                                 auto_ingest=False, reuse_export_id=export_id,
+                                 rule_scope_pipeline_id=export_pipeline_id)
 
 
 def _contract_clauses_by_field(contract_id: Optional[int],
-                               field_names: list[str]) -> dict[str, list[dict]]:
+                               field_names: list[str],
+                               template_id: Optional[int] = None,
+                               setup_rule_scope: Optional[dict] = None,
+                               ) -> dict[str, list[dict]]:
     """Index a contract's validation clauses by the OUTPUT field they govern, so
     the UI can show the clause that 'follows' whichever output field is chosen.
     A clause is matched to a field when the field name appears in the rule's
-    spec/target (the same vocabulary contract rules are written in)."""
+    spec/target (the same vocabulary contract rules are written in).
+
+    `template_id` is the template being shown: only the rules a setup on it
+    would run are listed (rule_scope.filter_rules), so a rule set added for a
+    different template never appears under this one's columns. Each clause
+    carries `rule_template_id` — the template of the set it was added for, or
+    None for the contract's own set."""
     out: dict[str, list[dict]] = {}
     if not contract_id or not field_names:
         return out
@@ -2376,12 +2523,18 @@ def _contract_clauses_by_field(contract_id: Optional[int],
     seen_sig: dict[str, set] = {}
     try:
         with CanonicalSession() as cs:
+            import rule_scope
             rows = cs.execute(
-                text("SELECT rule_id, rule_name, severity, canonical_target, "
+                text("SELECT rule_id, contract_id, rule_name, severity, canonical_target, "
                      "rule_spec, error_message, source_verbatim_text, "
-                     "source_page_number FROM validation_rule "
+                     f"source_page_number, {rule_scope.tag_select(cs)} "
+                     "FROM validation_rule "
                      "WHERE contract_id=:c AND rule_status != 'disabled'"),
                 {"c": contract_id}).mappings().all()
+            if template_id:
+                rows = rule_scope.filter_rules(
+                    cs, [dict(r) for r in rows], setup_template_id=template_id,
+                    scope=setup_rule_scope)
     except Exception as e:  # noqa: BLE001
         log.warning("contract clause lookup failed: %s", e)
         return out
@@ -2460,6 +2613,7 @@ def _contract_clauses_by_field(contract_id: Optional[int],
                 "page": r.get("source_page_number"),
                 "match": match, "score": score,
                 "scoped": scoped, "sql_sheets": sql_sheets,
+                "rule_template_id": r.get("rule_template_id"),
             })
     return out
 
@@ -2506,7 +2660,9 @@ def _unbound_setup_contract_id(program_id: Optional[int],
 
 
 def _attach_clauses(fields: list[dict], contract_id: Optional[int],
-                    sheet_contracts: Optional[dict]) -> None:
+                    sheet_contracts: Optional[dict],
+                    template_id: Optional[int] = None,
+                    setup_rule_scope: Optional[dict] = None) -> None:
     """Attach each (sheet, field) row's contract clauses IN PLACE, honouring the
     per-sheet contract governance:
 
@@ -2518,10 +2674,14 @@ def _attach_clauses(fields: list[dict], contract_id: Optional[int],
       the sheets its compiled SQL targets.
     """
     names = [f["field"] for f in fields]
+    # Only what a caller actually set, so a lookup that predates template-aware
+    # rules (and every stub of it) is called exactly as before.
+    scope_kw = {k: v for k, v in (("template_id", template_id),
+                                  ("setup_rule_scope", setup_rule_scope)) if v}
     mapped = {str(k).strip(): int(v)
               for k, v in (sheet_contracts or {}).items() if v}
     if not mapped:
-        clauses = _contract_clauses_by_field(contract_id, names)
+        clauses = _contract_clauses_by_field(contract_id, names, **scope_kw)
         for f in fields:
             f["clauses"] = clauses.get(f["field"], [])
         return
@@ -2531,7 +2691,8 @@ def _attach_clauses(fields: list[dict], contract_id: Optional[int],
     for cid in list(mapped.values()) + ([default_cid] if default_cid else []):
         if cid not in gov_cids:
             gov_cids.append(cid)
-    by_cid = {cid: _contract_clauses_by_field(cid, names) for cid in gov_cids}
+    by_cid = {cid: _contract_clauses_by_field(cid, names, **scope_kw)
+              for cid in gov_cids}
     for f in fields:
         sheet_key = str(f.get("sheet") or "").strip()
         own = mapped.get(sheet_key, default_cid)
@@ -2581,7 +2742,7 @@ def direct_output_fields(template_id: int, contract_id: Optional[int] = None,
             name = c.get("column_name")
             if name:
                 fields.append({"sheet": sh.get("sheet_name", ""), "field": name})
-    _attach_clauses(fields, contract_id, sheet_contracts)
+    _attach_clauses(fields, contract_id, sheet_contracts, template_id)
     return {"template_id": template_id, "contract_id": contract_id, "fields": fields}
 
 
@@ -2635,7 +2796,7 @@ def direct_format_editor(format_id: int,
             nm = c.get("column_name")
             if nm:
                 fields.append({"sheet": sh.get("sheet_name", ""), "field": nm})
-    _attach_clauses(fields, contract_id, sheet_contracts)
+    _attach_clauses(fields, contract_id, sheet_contracts, template_id)
 
     return {
         "format_id": format_id, "landing_id": landing_id, "known_format": True,
@@ -2684,6 +2845,18 @@ def _replace_pipeline_contracts(s, pipe: Pipeline, contracts: list) -> None:
         pos += 1
 
 
+def _store_rule_scope(s, pipeline_id: int, raw: dict) -> None:
+    """Save a setup's rule choice (rule_scope.py), inside the caller's
+    transaction. A choice that cannot be stored — the database has not had
+    migration 21 — is refused rather than silently dropped."""
+    try:
+        _rule_scope_mod.write_pipeline_scope(s, pipeline_id, raw)
+    except LookupError:
+        s.rollback()
+        raise HTTPException(409, "This setup's rule choices cannot be saved yet: "
+                                 "the database is missing migration 21.")
+
+
 @router.post("/pipelines")
 def pipeline_create(body: PipelineCreate, mga: Optional[str] = None,
                     principal: Principal = Depends(current_principal)):
@@ -2700,6 +2873,8 @@ def pipeline_create(body: PipelineCreate, mga: Optional[str] = None,
         s.add(pipe)
         s.flush()
         _replace_pipeline_contracts(s, pipe, body.contracts)
+        if body.rule_scope is not None:
+            _store_rule_scope(s, pipe.id, body.rule_scope)
         s.commit()
         s.refresh(pipe)
         return _pipeline_to_dict(s, pipe)
@@ -2842,6 +3017,8 @@ def pipeline_update(pipeline_id: int, body: PipelineUpdate,
             p.output_template_id = body.output_template_id
         if body.contracts is not None:
             _replace_pipeline_contracts(s, p, body.contracts)
+        if body.rule_scope is not None:
+            _store_rule_scope(s, p.id, body.rule_scope)
         p.modified_at = datetime.utcnow()
         s.commit()
         s.refresh(p)
@@ -2963,7 +3140,7 @@ def direct_runs(
     # two different sets of rules and should not see them mixed.
     contract_id: Optional[int] = None,
     q: Optional[str] = None,
-    result: Optional[str] = None,       # "clean" | "exceptions"
+    result: Optional[str] = None,       # "clean" | "exceptions" | "not_validated"
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     page: Optional[int] = Query(None, ge=1),
@@ -3026,9 +3203,14 @@ def direct_runs(
         if contract_id is not None:
             query = query.filter(OutputExport.contract_id == contract_id)
         if result == "clean":
-            query = query.filter(OutputExport.status == "clean")
+            query = query.filter(OutputExport.status == vo.CLEAN)
         elif result == "exceptions":
-            query = query.filter(OutputExport.status != "clean", OutputExport.exception_count > 0)
+            # A not-validated run carries a notice, not findings to review — it
+            # has its own filter below.
+            query = query.filter(OutputExport.status.notin_((vo.CLEAN, vo.NOT_VALIDATED)),
+                                 OutputExport.exception_count > 0)
+        elif result == vo.NOT_VALIDATED:
+            query = query.filter(OutputExport.status == vo.NOT_VALIDATED)
         if q and q.strip():
             ql = f"%{q.strip().lower()}%"
             query = query.filter(or_(

@@ -56,6 +56,7 @@ _MODEL_CEILINGS = {
     "gemini-2.5-flash": {"input": 1_000_000, "output": 65536},
     "gemini-2.5-flash-lite": {"input": 1_000_000, "output": 65536},
     "gemini-3.5-flash": {"input": 1_000_000, "output": 65536},
+    "gemini-2.5-pro": {"input": 1_000_000, "output": 65536},
 }
 
 
@@ -329,11 +330,28 @@ def _generate_with_retry(kwargs, label, est_tokens, gen_client=None):
 #                      Deliberately the smallest model that can answer a closed
 #                      yes/no about two short strings; the deterministic gates
 #                      around it do the load-bearing work.
-# Determinism comes from the compiler + temp 0 / seed, not from the model.
+# temp 0 + a seed make answers MOSTLY repeatable, not always: the same Call 1
+# request was measured returning two different clause sets for one PDF (41 vs 59).
+# A repeatable answer for identical input comes from ai_cache, keyed on the input.
 EXTRACTION_MODEL = os.getenv("KAVACHIO_EXTRACTION_MODEL", "gemini-2.5-flash")
 STAGE_B_MODEL = os.getenv("KAVACHIO_STAGEB_MODEL", "gemini-3.5-flash")
 SMALL_MODEL = os.getenv("KAVACHIO_SMALL_MODEL", "gemini-2.5-flash-lite")
 DETERMINISTIC_SEED = int(os.getenv("KAVACHIO_LLM_SEED", "7"))
+
+# The model every ai_cache entry of the pre-existing kinds (rule_intents,
+# formula_infer, generic_bind, var_topup) was stored under: those calls ran on
+# EXTRACTION_MODEL's default and no deployment overrode it. Kept as the literal
+# rather than the env-resolved constant, because a switch made through
+# KAVACHIO_EXTRACTION_MODEL must invalidate those entries too.
+LEGACY_CACHE_MODEL = "gemini-2.5-flash"
+
+
+def model_for(purpose: str, default: str) -> str:
+    """The model for one PURPOSE (e.g. "clause_extraction", "column_mapping"):
+    ``KAVACHIO_MODEL_<PURPOSE>`` when set, else ``default`` (normally one of the
+    tier constants above). Lets one call site move to a bigger model by config
+    without dragging every other caller of that tier along."""
+    return (os.getenv(f"KAVACHIO_MODEL_{purpose.upper()}") or "").strip() or default
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXPLICIT CONTEXT CACHING
@@ -620,6 +638,19 @@ def call_gemini(prompt, label="LLM", temperature=None, seed=None,
             f"output={output_tokens}  cached={cached_tokens}  "
             f"total={total_tokens}"
         )
+        # A reasoning trace cut off at its budget is the measured signature of a
+        # Call 1 answer that differed from a repeat of the same request, and it
+        # was only ever visible on the console.
+        if thinking_budget and thought_tokens and thought_tokens >= 0.98 * thinking_budget:
+            try:
+                import pipeline_log as plog
+                plog.log("LLM", "THINKING_CAPPED",
+                         f"{label}: {thought_tokens:,} of {thinking_budget:,} "
+                         f"thinking tokens ({_model})",
+                         "reasoning ran out of budget — answers like this were "
+                         "measured to vary between identical requests")
+            except Exception:
+                pass
 
     # ── Truncation detection ─────────────────────────────────────────────
     # A truncated answer sometimes still parses as valid JSON — the model closes

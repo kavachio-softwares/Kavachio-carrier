@@ -3198,15 +3198,52 @@ def _write_checks(s, c: Contract, tmpl: ExportTemplate) -> tuple[int, list, list
     import contract_rules as cr
     from app_routes import _template_fields_from_structure
 
-    fields = _template_fields_from_structure(tmpl.structure)
-    rules, unmapped = cr.map_limits_to_template(c.commercial_terms or {}, fields)
-
+    import rule_scope
     from db import engine as _engine
+
+    terms = c.commercial_terms or {}
+    fields = _template_fields_from_structure(tmpl.structure)
+    rules, unmapped = cr.map_limits_to_template(terms, fields)
+
+    rebind = True
     with _engine.begin() as conn:
-        written = cr.write_rules(
-            conn, contract_id=c.id, program_id=c.program_id,
-            tenant_id=c.tenant_id, rules=rules, template_id=tmpl.id)
-    c.output_template_id = tmpl.id
+        # Asked inside the write's own transaction, so a set added a moment
+        # ago is seen. None added — every contract until one is: all its rules
+        # replaced and the contract bound to `tmpl`, exactly as always.
+        added = rule_scope.added_set_templates(conn, c.id)
+        if not added:
+            written = cr.write_rules(
+                conn, contract_id=c.id, program_id=c.program_id,
+                tenant_id=c.tenant_id, rules=rules, template_id=tmpl.id)
+        else:
+            # Rule sets for several templates (rule_scope.py). A term that
+            # moved moves in EVERY set, each against its own template's
+            # columns; no set is created for a template the contract has
+            # none for, and the binding stays where it is.
+            rebind = False
+            bound = c.output_template_id
+            own = s.get(ExportTemplate, bound) if bound is not None else None
+            if own is not None:
+                rules, unmapped = cr.map_limits_to_template(
+                    terms, _template_fields_from_structure(own.structure))
+                written = cr.write_rules(
+                    conn, contract_id=c.id, program_id=c.program_id,
+                    tenant_id=c.tenant_id, rules=rules, template_id=own.id,
+                    set_scope={"family": sorted(
+                        rule_scope.families(s, [own.id])[own.id]), "tag": None})
+                tmpl = own
+            else:
+                written = 0
+            for t in s.query(ExportTemplate).filter(ExportTemplate.id.in_(added)).all():
+                t_rules, _ = cr.map_limits_to_template(
+                    terms, _template_fields_from_structure(t.structure))
+                cr.write_rules(
+                    conn, contract_id=c.id, program_id=c.program_id,
+                    tenant_id=c.tenant_id, rules=t_rules, template_id=t.id,
+                    set_scope={"family": sorted(
+                        rule_scope.families(s, [t.id])[t.id]), "tag": t.id})
+    if rebind:
+        c.output_template_id = tmpl.id
     s.commit()
     s.refresh(c)
     return written, rules, unmapped
@@ -3404,6 +3441,24 @@ async def generate_rules(contract_id: int,
                      "first.")
 
         template_id = output_template_id or c.output_template_id
+        # A re-read replaces the contract's rules AND its clauses wholesale
+        # (db_persister's existing_contract_id path). Rule sets added for other
+        # output templates were written from those clauses and point at them,
+        # so a re-read would take them with it — refused, and said so, rather
+        # than discarding checks somebody set up. Never true of a contract that
+        # has not had a set added (rule_scope.py).
+        import rule_scope
+        _added = rule_scope.added_set_templates(s, c.id)
+        if _added:
+            _names = [t.name for t in s.query(ExportTemplate)
+                      .filter(ExportTemplate.id.in_(_added)).all()]
+            raise HTTPException(409, {
+                "message": "This contract also has rules set up for other "
+                           "output templates (" + ", ".join(_names or map(str, _added))
+                           + "). Re-reading replaces every rule the contract "
+                           "has, and those would be lost with them, so it has "
+                           "not been re-read.",
+                "errors": {"rule_sets": ", ".join(map(str, _added))}})
         program_id = c.program_id
         tenant_id = c.tenant_id
         refs = [(d.filename, _doc_bytes(d)) for d in docs if d.kind == "reference"]

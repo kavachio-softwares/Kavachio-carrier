@@ -26,9 +26,20 @@ def _norm_field(name: str) -> str:
     form. Conservative enough not to merge genuinely different fields."""
     return re.sub(r"[^a-z0-9]+", " ", str(name).lower()).strip()
 
-def is_processing_date_column(name) -> bool:
+# Canonical-field words for a date recorded by the BOOKKEEPING, not on the risk.
+_RECORDING_ROLE_TOKENS = frozenset(("booking", "booked", "processing", "processed",
+                                    "issuance", "entry", "entered", "recorded"))
+
+
+def is_processing_date_column(name, canonical_field=None) -> bool:
     """True when a column NAME reports WHEN A TRANSACTION WAS RECORDED (booked /
     keyed / processed) rather than when it TOOK EFFECT on the risk.
+
+    `canonical_field`, when given, is a second way in: a column the template
+    parser tagged as a booking / processing / issuance DATE counts even when its
+    header uses neither word ("Policy issuance date" tagged
+    premium_transaction_booking_date). It can only ADD a column the name test
+    missed — an effective / expiry tag never counts.
 
     Matched by ROLE tokens, never by hard-coded column names: the column carries
     the transaction-date role ('transaction' + 'date') WITHOUT the
@@ -46,8 +57,14 @@ def is_processing_date_column(name) -> bool:
     ordinary bookkeeping.
     """
     ln = str(name or "").lower()
-    return ("transaction" in ln and "date" in ln
-            and "effective" not in ln and "expir" not in ln)
+    if ("transaction" in ln and "date" in ln
+            and "effective" not in ln and "expir" not in ln):
+        return True
+    if not canonical_field:
+        return False
+    toks = set(re.findall(r"[a-z0-9]+", str(canonical_field).lower()))
+    return ("date" in toks and bool(toks & _RECORDING_ROLE_TOKENS)
+            and not any(t.startswith(("effective", "expir")) for t in toks))
 
 
 class OutputSchema:

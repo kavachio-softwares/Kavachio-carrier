@@ -19,7 +19,14 @@ any OTHER row in the sheet contains. Feature extraction is vectorized with
 pandas (not a per-row Python loop) since a BDX upload routinely runs into the
 hundreds of thousands of rows.
 
-Entry point: classify_sheet_rows(records, cols).
+How blank a row is gets measured against the columns the setup can actually
+fill (`measure_cols`), not the template's full width. A 169-column template
+whose setup maps 27 writes nothing into the other 142 on ANY row, so counting
+them made every real transaction row read as 85% empty and excluded it. The
+measured set is fixed per sheet by the setup, never taken from other rows'
+values, so a row is still judged from its own cells.
+
+Entry point: classify_sheet_rows(records, cols, measure_cols=None).
 """
 from __future__ import annotations
 
@@ -64,18 +71,24 @@ def _to_numeric(s: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
-def _compute_features(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+def _compute_features(df: pd.DataFrame, cols: list[str],
+                      measure_cols: list[str] | None = None) -> pd.DataFrame:
     """One vectorized pass over the whole sheet → a per-row feature frame.
     No per-row Python loop — this is what keeps it fast at lakhs-of-rows scale.
     Every feature is computed from each row's OWN cells (plus the fixed column
-    headers) — never from other rows' values."""
+    headers) — never from other rows' values.
+
+    The filled/blank share and the numeric-only test read `measure_cols` (the
+    columns the setup fills; all of `cols` when not given). Wording and header
+    echoes are looked for in every column — a blank cell is neutral there."""
     text = df.astype(str)
     stripped = text.apply(lambda c: c.str.strip())
     blank = df.isna() | stripped.eq("") | stripped.apply(lambda c: c.str.lower().eq("none"))
 
-    n_cols = len(cols) or 1
-    filled_count = (~blank).sum(axis=1)
-    blank_pct = blank.sum(axis=1) / n_cols
+    measure = [c for c in dict.fromkeys(measure_cols or []) if c in df.columns] or list(cols)
+    n_cols = len(measure) or 1
+    filled_count = (~blank[measure]).sum(axis=1)
+    blank_pct = blank[measure].sum(axis=1) / n_cols
 
     # Text-pattern hit: any non-blank cell matches a summary/footer keyword.
     kw_hit = pd.DataFrame(False, index=df.index, columns=cols)
@@ -96,10 +109,10 @@ def _compute_features(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     # Numeric-only: every filled cell in the row parses as a bare number —
     # no name, no date, no code, no label anywhere. The signature of an
     # unlabelled totals row (see _NUMERIC_ONLY_BLANK_PCT).
-    numeric = pd.DataFrame(False, index=df.index, columns=cols)
-    for c in cols:
+    numeric = pd.DataFrame(False, index=df.index, columns=measure)
+    for c in measure:
         numeric[c] = _to_numeric(df[c]).notna()
-    numeric_count = (numeric & ~blank).sum(axis=1)
+    numeric_count = (numeric & ~blank[measure]).sum(axis=1)
     numeric_only = (filled_count > 0) & (numeric_count == filled_count)
 
     return pd.DataFrame({
@@ -147,16 +160,22 @@ def _classify(feat: pd.DataFrame) -> dict[int, dict]:
     return classified
 
 
-def classify_sheet_rows(records: list[dict], cols: list[str]) -> tuple[list[dict], list[dict]]:
+def classify_sheet_rows(records: list[dict], cols: list[str],
+                        measure_cols: list[str] | None = None,
+                        ) -> tuple[list[dict], list[dict]]:
     """Classify each record as DATA or non-data (BLANK/SUMMARY/HEADER_REPEAT).
     Returns (data_records, excluded) — excluded entries carry {"position",
     "category", "reason", "row"} for audit; data_records is the filtered list,
-    in original order, ready to load exactly as before."""
+    in original order, ready to load exactly as before.
+
+    `measure_cols` are the columns the setup fills (see _compute_features).
+    None or empty, or none of them in `cols`, measures every column, exactly as
+    before it existed."""
     if not records or not cols:
         return records, []
 
     df = pd.DataFrame(records, columns=cols)
-    feat = _compute_features(df, cols)
+    feat = _compute_features(df, cols, measure_cols)
     classified = _classify(feat)
 
     data_records: list[dict] = []

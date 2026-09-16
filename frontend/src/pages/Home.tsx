@@ -79,7 +79,11 @@ export default function Home() {
   }, [mga]);
 
   const fmt = (v: number | null | undefined) => (v == null ? "—" : v);
-  const runHasExc = (r: Run) => r.status === "has_exceptions" || r.exception_count > 0;
+  // A not-validated run is never clean: its checks did not run (it carries one
+  // notice entry, so exception_count > 0 already sends it to triage).
+  const runNotValidated = (r: Run) => r.status === "not_validated";
+  const runHasExc = (r: Run) =>
+    r.status === "has_exceptions" || runNotValidated(r) || r.exception_count > 0;
   // In download mode UploadExceptions loads by `download` id; the uploadId in the
   // path is only used for link-building, so 0 is a safe placeholder when absent.
   const goTriage = (r: Run) =>
@@ -256,9 +260,10 @@ export default function Home() {
                         <td className="muted">{r.template_name ?? "—"}</td>
                         <td className="muted">{r.policy_count.toLocaleString()}</td>
                         <td>
-                          <span className={`badge ${hasExc ? "b-crit" : "b-ok"}`}>
+                          <span className={`badge ${runNotValidated(r) ? "b-warn" : hasExc ? "b-crit" : "b-ok"}`}>
                             <span className="muted" />
-                            {hasExc ? `${r.exception_count.toLocaleString()} exceptions` : "Clean"}
+                            {runNotValidated(r) ? "Not validated"
+                              : hasExc ? `${r.exception_count.toLocaleString()} exceptions` : "Clean"}
                           </span>
                         </td>
                         <td className="muted">{fmtStamp(r.created_at, "")}</td>

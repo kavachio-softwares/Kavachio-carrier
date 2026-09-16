@@ -148,7 +148,14 @@ export default function UploadExceptions() {
   }
 
   const run        = data?.run ?? null;
-  const exceptions = data?.exceptions ?? [];
+  // Row-less notices about the run itself — its checks did not run, or some
+  // rules could not — are not findings a person can decide on, so they are
+  // shown above the rule cards instead of as cards.
+  const isNotice = (e: { error_class?: string | null; rule_id: number | null }) =>
+    e.error_class === "not_checked" || (e.error_class === "not_validated" && e.rule_id == null);
+  const notices    = (data?.exceptions ?? []).filter(isNotice);
+  const exceptions = (data?.exceptions ?? []).filter(e => !isNotice(e));
+  const notValidated = notices.some(n => n.error_class === "not_validated");
   const allGroups  = groupByRule(exceptions);
   const revSpec    = buildReverseSpec(data?.mapper_spec);
   const filteredGroups = groupByRule(
@@ -325,6 +332,22 @@ export default function UploadExceptions() {
           />
         )}
 
+        {!loading && notices.map((n, i) => (
+          <div key={`notice-${i}`} className="note warn" style={{ marginBottom: 18 }}>
+            {n.error_class === "not_validated" ? (
+              <><strong>Not validated.</strong> {n.error_message}</>
+            ) : (
+              <details>
+                <summary style={{ cursor: "pointer" }}>
+                  <strong>{n.rule_name ?? "Checks not run"}.</strong>{" "}
+                  {(n.error_message ?? "").split("\n").filter(Boolean).length} check(s) could not be run on this file — show which
+                </summary>
+                <div style={{ whiteSpace: "pre-line", marginTop: 8, fontSize: 12.5 }}>{n.error_message}</div>
+              </details>
+            )}
+          </div>
+        ))}
+
         {loading ? null : !data ? (
           err ? null : (
             <div className="card pad">
@@ -343,11 +366,15 @@ export default function UploadExceptions() {
             </button>
           </div>
         ) : exceptions.length === 0 ? (
+          notValidated ? null : (
           <div className="card">
             <div className="empty" style={{ color: "var(--p-ok-ink)" }}>
-              ✓ No exceptions — {downloadId ? "the generated output is clean." : "upload passed validation."}
+              {notices.length
+                ? "✓ No exceptions among the checks that ran."
+                : <>✓ No exceptions — {downloadId ? "the generated output is clean." : "upload passed validation."}</>}
             </div>
           </div>
+          )
         ) : (
           <>
             {/* ── tiles ── */}

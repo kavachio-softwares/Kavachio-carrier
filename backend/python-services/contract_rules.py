@@ -431,38 +431,67 @@ def _message(question: str, op: str, value: Any, column: str) -> str:
 
 def write_rules(conn, *, contract_id: int, program_id: int | None,
                 tenant_id: int | None, rules: list[dict],
-                template_id: int | None) -> int:
+                template_id: int | None, set_scope: dict | None = None) -> int:
     """Replace this contract's rules with the ones given. Returns how many.
 
     REPLACE, not append: mapping the same contract to the same template twice
     must leave one set of checks, not two that both fire on every row. The
     contract's clauses are untouched — they are what it SAYS, and this only
     rewrites what is CHECKED.
+
+    `set_scope` is for a contract that carries rule sets for more than one
+    output template (rule_scope.py); left out, this replaces every rule of the
+    contract, exactly as it always has. Given, it replaces one set only:
+      {"family": [ids], "tag": None} — the contract's own set: its untagged
+          rules and any tagged with a version of its template.
+      {"family": [ids], "tag": id}   — a set added for another template: only
+          that set's terms checks are replaced, and the new ones are tagged.
+          Its clause rules came from Bordereau Setup, not from these terms.
     """
     # 'custom' and 'input', because the table constrains both: the engine to
     # ajv | custom | global, and the stage to input | output | both. A
     # comparison against a bordereau column is a custom check run on the way
     # IN — which is also where every rule already in this table sits.
-    conn.execute(text("DELETE FROM rule_sql WHERE contract_id = :cid"),
-                 {"cid": contract_id})
-    conn.execute(text("DELETE FROM validation_rule WHERE contract_id = :cid"),
-                 {"cid": contract_id})
+    tag = (set_scope or {}).get("tag")
+    if set_scope is None:
+        conn.execute(text("DELETE FROM rule_sql WHERE contract_id = :cid"),
+                     {"cid": contract_id})
+        conn.execute(text("DELETE FROM validation_rule WHERE contract_id = :cid"),
+                     {"cid": contract_id})
+    else:
+        which = ("output_template_id = ANY(:fam) "
+                 "AND rule_spec->>'source' = 'contract_terms'"
+                 if tag is not None else
+                 "(output_template_id IS NULL OR output_template_id = ANY(:fam))")
+        params = {"cid": contract_id,
+                  "fam": [int(t) for t in set_scope.get("family") or []]}
+        # rule_sql first, while the rules it caches can still be found. Its
+        # rows live in the legacy rule_id column (see db_persister's writer).
+        conn.execute(text(
+            "DELETE FROM rule_sql WHERE rule_id IN (SELECT rule_id FROM "
+            f"validation_rule WHERE contract_id = :cid AND {which})"), params)
+        conn.execute(text(
+            f"DELETE FROM validation_rule WHERE contract_id = :cid AND {which}"),
+            params)
 
+    tag_col = ", output_template_id" if tag is not None else ""
+    tag_val = ", :output_template_id" if tag is not None else ""
     for r in rules:
         conn.execute(
-            text("""
+            text(f"""
                 INSERT INTO validation_rule
                     (tenant_id, contract_id, program_id, rule_engine,
                      rule_name, rule_description, validation_stage, severity,
                      canonical_target, rule_spec, error_message,
-                     generation_confidence, rule_status, created_by)
+                     generation_confidence, rule_status, created_by{tag_col})
                 VALUES
                     (:tenant_id, :contract_id, :program_id, 'custom',
                      :rule_name, :rule_description, 'input', :severity,
                      CAST(:canonical_target AS JSONB), CAST(:rule_spec AS JSONB),
-                     :error_message, :confidence, 'active', 'contract_terms')
+                     :error_message, :confidence, 'active', 'contract_terms'{tag_val})
             """),
             {
+                "output_template_id": tag,
                 "tenant_id": tenant_id,
                 "contract_id": contract_id,
                 "program_id": program_id,

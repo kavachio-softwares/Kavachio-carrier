@@ -220,3 +220,440 @@ TIMING run=1134   total 74.1s (1.2 min)
    Call 2 intents                72.3s  97.6%  #######################################
    (other / overlap)              1.8s
 ------------------------------------------------------------------------------------------------------------
+17:26:31 | run=83f9 | CACHE    | MISS      | rule_intents f647bc4cb317 | no stored answer for this exact input — model call required
+17:26:31 | run=83f9 | CACHE    | HIT       | rule_intents f647bc4cb317 | answer reused — this model call did NOT happen
+
+============================================================================================================
+RUN 30d1  started 2026-09-10 17:41:40  |  contract=tmpfaq70uez.pdf template_fields=0
+============================================================================================================
+
+============================================================================================================
+RUN 0e87  started 2026-09-10 17:42:25  |  contract=tmpmc_6en0g.pdf template_fields=0
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=0e87   total 83.9s (1.4 min)
+   Call 1 extraction             83.7s  99.7%  #######################################
+   PDF parse (no AI)              0.2s   0.3%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN 5052  started 2026-09-10 17:43:53  |  contract=tmp14kmtuby.pdf template_fields=0
+============================================================================================================
+17:43:53 | run=5052 | CACHE    | MISS      | rule_intents db89647f3fb5 | no stored answer for this exact input — model call required
+17:43:53 | run=5052 | CALL2    | ATTEMPT   | 41 clause(s) in ONE call | est answer ~16,337 of 45,875 tok budget (36%)
+17:44:36 | run=5052 | CALL2    | SPOTCHECK | re-asked 8 of 17 rejected clause(s) | longest first — length is what dilutes attention
+17:44:36 | run=5052 | CALL2    | OK        | single call accepted for all 41 clause(s) | spot-check found no false negatives
+------------------------------------------------------------------------------------------------------------
+TIMING run=5052   total 45.4s (0.8 min)
+   Call 2 intents                42.9s  94.4%  #####################################
+   (other / overlap)              2.5s
+------------------------------------------------------------------------------------------------------------
+17:48:36 | run=5052 | CACHE    | MISS      | rule_intents 4e241f6c38ac | no stored answer for this exact input — model call required
+17:48:36 | run=5052 | CALL2    | ATTEMPT   | 41 clause(s) in ONE call | est answer ~12,572 of 45,875 tok budget (27%)
+17:49:17 | run=5052 | CALL2    | SPOTCHECK | re-asked 8 of 19 rejected clause(s) | longest first — length is what dilutes attention
+17:49:17 | run=5052 | CALL2    | OK        | single call accepted for all 41 clause(s) | spot-check found no false negatives
+17:49:17 | run=5052 | CACHE    | HIT       | generic_bind 92320a5413e2 | answer reused — this model call did NOT happen
+17:49:17 | run=5052 | CALL3    | SKIPPED   | library bind for 49 rule(s) served from cache | answer depends only on (library rows, template fields) — no contract input, so it is reused rather than re-bought
+17:49:17 | run=5052 | CALL3    | ATTEMPT   | contract: 29 intent(s) in ONE call
+17:50:32 | run=5052 | CALL3    | OK        | contract: all 29 answered in ONE call | 5 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+17:50:52 | run=5052 | CACHE    | HIT       | formula_infer 2d6b1eade264 | answer reused — this model call did NOT happen
+17:50:52 | run=5052 | CACHE    | MISS      | var_topup 194086860666 | no stored answer for this exact input — model call required
+
+============================================================================================================
+RUN 0a7e  started 2026-09-11 12:12:59  |  contract=tmpwefj0hkz.pdf template_fields=0
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=0a7e   total 82.8s (1.4 min)
+   Call 1 extraction             82.6s  99.8%  #######################################
+   PDF parse (no AI)              0.2s   0.2%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN ce2e  started 2026-09-11 12:15:01  |  contract=tmpap5sk_vd.pdf template_fields=0
+============================================================================================================
+12:15:01 | run=ce2e | CACHE    | HIT       | rule_intents db89647f3fb5 | answer reused — this model call did NOT happen
+12:15:01 | run=ce2e | CALL2    | SKIPPED   | intents for 41 clause(s) served from cache | answer depends only on the clause texts, which have not changed — the template arriving later cannot alter it
+
+============================================================================================================
+RUN 2bc7  started 2026-09-11 12:22:16  |  contract=tmp1zxaqgjh.pdf template_fields=0
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=2bc7   total 89.4s (1.5 min)
+   Call 1 extraction             89.2s  99.7%  #######################################
+   PDF parse (no AI)              0.3s   0.3%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN c31b  started 2026-09-11 12:24:27  |  contract=tmpo8sas4ls.pdf template_fields=0
+============================================================================================================
+12:25:35 | run=c31b | CACHE    | MISS      | rule_intents 6d1a7b85b8cb | no stored answer for this exact input — model call required
+12:25:35 | run=c31b | CALL2    | ATTEMPT   | 44 clause(s) in ONE call | est answer ~19,300 of 45,875 tok budget (42%)
+12:26:28 | run=c31b | CALL2    | SPOTCHECK | re-asked 8 of 23 rejected clause(s) | longest first — length is what dilutes attention
+12:26:28 | run=c31b | CALL2    | DILUTED   | clause(s) [24] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+12:26:28 | run=c31b | CALL2    | SIZING    | 15 clause(s) -> batch size 15 | tokens allow 149; attention cap 200 (no observed failure to bisect; using measured-safe 200)
+12:26:28 | run=c31b | CALL2    | FALLBACK  | 15 item(s) -> 1 batch(es) of 15 | round 1/2; 29 of 44 already trusted (accepted, or re-checked by the spot-check)
+------------------------------------------------------------------------------------------------------------
+TIMING run=c31b   total 130.0s (2.2 min)
+   Call 1 extraction             68.1s  52.4%  ####################
+   Call 2 intents                59.8s  46.0%  ##################
+   PDF parse (no AI)              0.2s   0.2%  
+   (other / overlap)              1.8s
+------------------------------------------------------------------------------------------------------------
+14:44:49 | run=c31b | CACHE    | MISS      | rule_intents f1a397f7e1a2 | no stored answer for this exact input — model call required
+14:44:49 | run=c31b | CALL2    | ATTEMPT   | 9 clause(s) in ONE call | est answer ~2,835 of 45,875 tok budget (6%)
+14:45:09 | run=c31b | CALL2    | SPOTCHECK | re-asked 1 of 1 rejected clause(s) | longest first — length is what dilutes attention
+14:45:09 | run=c31b | CALL2    | OK        | single call accepted for all 9 clause(s) | spot-check found no false negatives
+14:45:09 | run=c31b | CACHE    | MISS      | generic_bind eb914a707f68 | no stored answer for this exact input — model call required
+14:45:09 | run=c31b | CALL3    | ATTEMPT   | contract: 19 intent(s) in ONE call
+14:45:54 | run=c31b | CALL3    | OK        | contract: all 19 answered in ONE call | 1 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+14:45:54 | run=c31b | CALL3    | ATTEMPT   | library: 49 intent(s) in ONE call
+14:47:36 | run=c31b | CALL3    | OK        | library: all 49 answered in ONE call | 29 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+14:47:36 | run=c31b | CALL3    | RETRY     | relaxed retry for 1 unmapped intent(s) | the strict pass left these unbound — re-asking with the reconsider prompt before they are routed to review
+14:47:47 | run=c31b | CALL3    | RECOVERED | 1 of 1 rescued by the relaxed retry | nothing left unbound
+14:47:47 | run=c31b | CACHE    | MISS      | formula_infer 666035ee7841 | no stored answer for this exact input — model call required
+14:48:39 | run=c31b | CACHE    | MISS      | var_topup 17ba45a62967 | no stored answer for this exact input — model call required
+
+============================================================================================================
+RUN e553  started 2026-09-11 15:51:45  |  contract=tmplm13cxa4.pdf template_fields=0
+============================================================================================================
+15:52:43 | run=e553 | CACHE    | MISS      | rule_intents ae844ad8a54c | no stored answer for this exact input — model call required
+15:52:43 | run=e553 | CALL2    | ATTEMPT   | 35 clause(s) in ONE call | est answer ~13,327 of 45,875 tok budget (29%)
+15:53:17 | run=e553 | CALL2    | SPOTCHECK | re-asked 8 of 17 rejected clause(s) | longest first — length is what dilutes attention
+15:53:17 | run=e553 | CALL2    | DILUTED   | clause(s) [33, 19] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+15:53:17 | run=e553 | CALL2    | SIZING    | 9 clause(s) -> batch size 9 | tokens allow 148; attention cap 200 (no observed failure to bisect; using measured-safe 200)
+15:53:17 | run=e553 | CALL2    | FALLBACK  | 9 item(s) -> 1 batch(es) of 9 | round 1/2; 26 of 35 already trusted (accepted, or re-checked by the spot-check)
+------------------------------------------------------------------------------------------------------------
+TIMING run=e553   total 98.5s (1.6 min)
+   Call 1 extraction             57.9s  58.7%  #######################
+   Call 2 intents                39.2s  39.7%  ###############
+   PDF parse (no AI)              0.2s   0.2%  
+   (other / overlap)              1.3s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN 7da7  started 2026-09-14 23:45:15  |  contract=tmp327pgpxl.pdf template_fields=0
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=7da7   total 107.2s (1.8 min)
+   Call 1 extraction            107.0s  99.8%  #######################################
+   PDF parse (no AI)              0.2s   0.2%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN 7c1b  started 2026-09-14 23:47:41  |  contract=tmp7rc0svpe.pdf template_fields=0
+============================================================================================================
+23:47:41 | run=7c1b | CACHE    | MISS      | rule_intents 946a535583cc | no stored answer for this exact input — model call required
+23:47:41 | run=7c1b | CALL2    | ATTEMPT   | 59 clause(s) in ONE call | est answer ~19,542 of 45,875 tok budget (43%)
+23:48:22 | run=7c1b | CALL2    | SPOTCHECK | re-asked 8 of 37 rejected clause(s) | longest first — length is what dilutes attention
+23:48:22 | run=7c1b | CALL2    | OK        | single call accepted for all 59 clause(s) | spot-check found no false negatives
+------------------------------------------------------------------------------------------------------------
+TIMING run=7c1b   total 42.8s (0.7 min)
+   Call 2 intents                41.4s  96.8%  ######################################
+   (other / overlap)              1.4s
+------------------------------------------------------------------------------------------------------------
+00:00:18 | run=7c1b | CACHE    | MISS      | rule_intents c3f194e82271 | no stored answer for this exact input — model call required
+00:00:18 | run=7c1b | CALL2    | ATTEMPT   | 59 clause(s) in ONE call | est answer ~14,157 of 45,875 tok budget (31%)
+00:01:01 | run=7c1b | CALL2    | SPOTCHECK | re-asked 8 of 38 rejected clause(s) | longest first — length is what dilutes attention
+00:01:01 | run=7c1b | CALL2    | OK        | single call accepted for all 59 clause(s) | spot-check found no false negatives
+00:01:02 | run=7c1b | CACHE    | HIT       | generic_bind 92320a5413e2 | answer reused — this model call did NOT happen
+00:01:02 | run=7c1b | CALL3    | SKIPPED   | library bind for 49 rule(s) served from cache | answer depends only on (library rows, template fields) — no contract input, so it is reused rather than re-bought
+00:01:02 | run=7c1b | CALL3    | ATTEMPT   | contract: 26 intent(s) in ONE call
+00:02:07 | run=7c1b | CALL3    | OK        | contract: all 26 answered in ONE call | 8 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+00:02:07 | run=7c1b | CALL3    | RETRY     | relaxed retry for 8 unmapped intent(s) | the strict pass left these unbound — re-asking with the reconsider prompt before they are routed to review
+00:02:51 | run=7c1b | CALL3    | RECOVERED | 3 of 8 rescued by the relaxed retry | 5 intent(s) still unbound — these become 'awaiting a column' clauses on the setup screen
+00:02:51 | run=7c1b | CACHE    | HIT       | formula_infer 2d6b1eade264 | answer reused — this model call did NOT happen
+00:02:51 | run=7c1b | CACHE    | MISS      | var_topup 9b8cc88dc70b | no stored answer for this exact input — model call required
+00:03:00 | run=7c1b | MAPPING  | ATTEMPT   | sheet 'Sheet 2': 87 field(s), none needed AI
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'AccountID' <- AccountID | candidates: AccountID [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Invoice #' <- Invoice # | candidates: Invoice # [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Policy No' <- Policy No | candidates: Policy No [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Insured' <- Insured | candidates: Insured [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Insured Street' <- Insured Street | candidates: Insured Street [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Insured City' <- Insured City | candidates: Insured City [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Insured State' <- Insured State | candidates: Insured State [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Insured Zip Code' <- Insured Zip Code | candidates: Insured Zip Code [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Insured County' <- Insured County | candidates: Insured County [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'PolicyInception' <- PolicyInception | candidates: PolicyInception [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'PolicyExpiration' <- PolicyExpiration | candidates: PolicyExpiration [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'New/Renewal' <- New/Renewal | candidates: New/Renewal [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'ExpiringPolicyNumber' <- ExpiringPolicyNumber | candidates: ExpiringPolicyNumber [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Transaction Type' <- Transaction Type | candidates: Transaction Type [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Division' <- Division | candidates: Division [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Carrier' <- Carrier | candidates: Carrier [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'UW' <- UW | candidates: UW [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Gross Premium' <- Gross Premium | candidates: Gross Premium [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Commission Rate' <- Commission Rate | candidates: Commission Rate [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Commission Amount' <- Commission Amount | candidates: Commission Amount [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Net Premium' <- Net Premium | candidates: Net Premium [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'TRIA PREM' <- TRIA PREM | candidates: TRIA PREM [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'TransactionDate' <- TransactionDate | candidates: TransactionDate [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'TransactionEffectiveDate' <- TransactionEffectiveDate | candidates: TransactionEffectiveDate [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'TransactionExpirationDate' <- TransactionExpirationDate | candidates: TransactionExpirationDate [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Risk State' <- Risk State | candidates: Risk State [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'State of Filing' <- State of Filing | candidates: State of Filing [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'BrokBranch' <- BrokBranch | candidates: BrokBranch [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Broker' <- Broker | candidates: Broker [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Surplus Lines Filing Broker' <- Surplus Lines Filing Broker | candidates: Surplus Lines Filing Broker [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Surplus Lines Broker Address' <- Surplus Lines Broker Address | candidates: Surplus Lines Broker Address [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Surplus Lines Broker City' <- Surplus Lines Broker City | candidates: Surplus Lines Broker City [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Surplus Lines Broker State' <- Surplus Lines Broker State | candidates: Surplus Lines Broker State [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Surplus Lines Broker Zip' <- Surplus Lines Broker Zip | candidates: Surplus Lines Broker Zip [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Surplus Lines Broker License' <- Surplus Lines Broker License | candidates: Surplus Lines Broker License [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'NJ Transaction No' <- NJ Transaction No | candidates: NJ Transaction No [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'LA SL Broker Phone No.' <- LA SL Broker Phone No. | candidates: LA SL Broker Phone No. [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Inception Prem' <- Inception Prem | candidates: Inception Prem [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Cumulative Prem' <- Cumulative Prem | candidates: Cumulative Prem [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Primary/Excess' <- Primary/Excess | candidates: Primary/Excess [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Endt No.' <- Endt No. | candidates: Endt No. [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Endt detail' <- Endt detail | candidates: Endt detail [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Cancel Reason' <- Cancel Reason | candidates: Cancel Reason [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Reporter Y/N' <- Reporter Y/N | candidates: Reporter Y/N [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'EKVCmated Annual Premium' <- EKVCmated Annual Premium | candidates: EKVCmated Annual Premium [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Perils Covered APD' <- Perils Covered APD | candidates: Perils Covered APD [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Perils Covered MTC' <- Perils Covered MTC | candidates: Perils Covered MTC [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Pol Occ Limit' <- Pol Occ Limit | candidates: Pol Occ Limit [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'APD  Unit Limit' <- APD  Unit Limit | candidates: APD  Unit Limit [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'APD per Occ / Terminal Limit' <- APD per Occ / Terminal Limit | candidates: APD per Occ / Terminal Limit [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'MTC per Vehicle Limit' <- MTC per Vehicle Limit | candidates: MTC per Vehicle Limit [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'MTC per occurrence' <- MTC per occurrence | candidates: MTC per occurrence [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Terminal Limit Scheduled' <- Terminal Limit Scheduled | candidates: Terminal Limit Scheduled [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Terminal Limit UnScheduled' <- Terminal Limit UnScheduled | candidates: Terminal Limit UnScheduled [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Attachment Point' <- Attachment Point | candidates: Attachment Point [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'APD Auditable (Y/N)' <- APD Auditable (Y/N) | candidates: APD Auditable (Y/N) [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'MTC AUDITABLE (Y/N)' <- MTC AUDITABLE (Y/N) | candidates: MTC AUDITABLE (Y/N) [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'APD Premium' <- APD Premium | candidates: APD Premium [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'APD Deductible' <- APD Deductible | candidates: APD Deductible [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'MTC Premium' <- MTC Premium | candidates: MTC Premium [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'MTC Deductible' <- MTC Deductible | candidates: MTC Deductible [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Basket Deductible' <- Basket Deductible | candidates: Basket Deductible [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Aggregate Deductible APD' <- Aggregate Deductible APD | candidates: Aggregate Deductible APD [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Aggregate Deductible MTC' <- Aggregate Deductible MTC | candidates: Aggregate Deductible MTC [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'BtotalPUnits' <- BtotalPUnits | candidates: BtotalPUnits [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'BtotalTrailers' <- BtotalTrailers | candidates: BtotalTrailers [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'BtotalTIV' <- BtotalTIV | candidates: BtotalTIV [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'BtotalRev' <- BtotalRev | candidates: BtotalRev [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'BtotalMileage' <- BtotalMileage | candidates: BtotalMileage [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Highest Value Unit' <- Highest Value Unit | candidates: Highest Value Unit [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'IPRM APD' <- IPRM APD | candidates: IPRM APD [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'IPRM MTC' <- IPRM MTC | candidates: IPRM MTC [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'THBBdxDate' <- THBBdxDate | candidates: THBBdxDate [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Faculative Re(Y/N)' <- Faculative Re(Y/N) | candidates: Faculative Re(Y/N) [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Reinsurer' <- Reinsurer | candidates: Reinsurer [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Reinsurer Cert %' <- Reinsurer Cert % | candidates: Reinsurer Cert % [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Reins Eff Date' <- Reins Eff Date | candidates: Reins Eff Date [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Reins Exp Date' <- Reins Exp Date | candidates: Reins Exp Date [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Quote Share or Excess' <- Quote Share or Excess | candidates: Quote Share or Excess [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'QS Reinsurers Participation%' <- QS Reinsurers Participation% | candidates: QS Reinsurers Participation% [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Participating Layer/TIV' <- Participating Layer/TIV | candidates: Participating Layer/TIV [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Reinsurance Limit' <- Reinsurance Limit | candidates: Reinsurance Limit [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Excess of' <- Excess of | candidates: Excess of [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Fac Coverage' <- Fac Coverage | candidates: Fac Coverage [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Perils Covered' <- Perils Covered | candidates: Perils Covered [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Fac Net Premium' <- Fac Net Premium | candidates: Fac Net Premium [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+00:03:00 | run=7c1b | MAPPING  | AUTO      | 'Carrier Net/Net Premium' <- Carrier Net/Net Premium | candidates: Carrier Net/Net Premium [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+
+============================================================================================================
+RUN 1b18  started 2026-09-15 09:35:27  |  contract=tmpk4c7iw79.pdf template_fields=0
+============================================================================================================
+09:36:20 | run=1b18 | CACHE    | MISS      | rule_intents cd5b1d003d42 | no stored answer for this exact input — model call required
+09:36:20 | run=1b18 | CALL2    | ATTEMPT   | 39 clause(s) in ONE call | est answer ~9,960 of 45,875 tok budget (22%)
+09:36:58 | run=1b18 | CALL2    | SPOTCHECK | re-asked 8 of 8 rejected clause(s) | longest first — length is what dilutes attention
+09:36:58 | run=1b18 | CALL2    | DILUTED   | clause(s) [30, 36] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+------------------------------------------------------------------------------------------------------------
+TIMING run=1b18   total 92.1s (1.5 min)
+   Call 1 extraction             52.4s  56.8%  ######################
+   Call 2 intents                37.8s  41.1%  ################
+   PDF parse (no AI)              0.2s   0.2%  
+   (other / overlap)              1.8s
+------------------------------------------------------------------------------------------------------------
+14:31:47 | run=2268 | CACHE    | MISS      | rule_intents 9c3c4382456f | no stored answer for this exact input — model call required
+14:31:47 | run=2268 | CALL2    | ATTEMPT   | 39 clause(s) in ONE call | est answer ~6,332 of 45,875 tok budget (14%)
+14:32:31 | run=2268 | CALL2    | SPOTCHECK | re-asked 8 of 8 rejected clause(s) | longest first — length is what dilutes attention
+14:32:31 | run=2268 | CALL2    | DILUTED   | clause(s) [6097, 6103] rule-bearing in a batch of 8 | the single call marked them not_rule_bearing — rules would have been lost
+14:32:31 | run=2268 | CACHE    | MISS      | generic_bind ad97318b3cdf | no stored answer for this exact input — model call required
+14:32:31 | run=2268 | CALL3    | ATTEMPT   | contract: 38 intent(s) in ONE call
+14:34:16 | run=2268 | CALL3    | OK        | contract: all 38 answered in ONE call | 2 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+14:34:16 | run=2268 | CALL3    | ATTEMPT   | library: 49 intent(s) in ONE call
+14:36:04 | run=2268 | CALL3    | OK        | library: all 49 answered in ONE call | 25 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+14:36:04 | run=2268 | CALL3    | RETRY     | relaxed retry for 2 unmapped intent(s) | the strict pass left these unbound — re-asking with the reconsider prompt before they are routed to review
+14:36:25 | run=2268 | CALL3    | RECOVERED | 2 of 2 rescued by the relaxed retry | nothing left unbound
+14:36:25 | run=2268 | CACHE    | MISS      | formula_infer ce1a849d4cff | no stored answer for this exact input — model call required
+14:36:45 | run=2268 | CACHE    | MISS      | var_topup 73aec6704908 | no stored answer for this exact input — model call required
+14:40:53 | run=3017 | MAPPING  | ATTEMPT   | sheet 'Lloyds v5.2 - US': 29 of 56 field(s) sent to AI in one call | AI ok
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Coverholder Name' <- Broker Name | candidates: Broker Name [SEMANTIC, name -, AI 90%] | name - | AI 90% | AI confirmed the same data at 90%
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Unique Market Reference (UMR)' <- Unique Market Reference (UMR) | candidates: Unique Market Reference (UMR) [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | NOT-INPUT | 'Reporting Period Start Date' <- - | candidates: none | name - | AI - | not taken from the bordereau
+14:40:53 | run=3017 | MAPPING  | NOT-INPUT | 'Reporting Period (End Date)' <- - | candidates: none | name - | AI - | not taken from the bordereau
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'Type of Insurance (Direct or Type or Reinsurance)' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Certificate Ref' <- Certificate Ref | candidates: Certificate Ref [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Insured Full Name, Last Name or Company Name' <- Insured Full Name, Last Name or Company Name | candidates: Insured Full Name, Last Name or Company Name [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Insured Country Sub-division: State, Province, Territory, Canton etc.' <- Insured Country Sub-division: State, Province, Territory, Canton etc. | candidates: Insured Country Sub-division: State, Province, Territory, Canton etc. [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Insured Country (see code list)' <- Insured Country (see code list) | candidates: Insured Country (see code list) [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Risk Inception Date' <- Risk Inception Date | candidates: Risk Inception Date [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Risk Expiry Date' <- Risk Expiry Date | candidates: Risk Expiry Date [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Location of risk - Country' <- Location of risk - Country | candidates: Location of risk - Country [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Location of Risk - Country Sub-division: State, Province, Territory, Canton etc.' <- Location of Risk - Country Sub-division: State, Province, Territory, Canton etc. | candidates: Location of Risk - Country Sub-division: State, Province, Territory, Canton etc. [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Transaction Type - Original Premium etc.' <- Transaction Type - Original Premium etc. | candidates: Transaction Type - Original Premium etc. [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Effective Date of Transaction' <- Effective Date of Transaction | candidates: Effective Date of Transaction [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Original Currency' <- Original Currency | candidates: Original Currency [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Gross premium paid this time' <- Gross premium paid this time | candidates: Gross premium paid this time [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Commission %' <- Commission % | candidates: Commission % [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Commission Amount' <- Commission Amount | candidates: Commission Amount [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Net Premium to London in original currency' <- Net Premium to London in original currency | candidates: Net Premium to London in original currency [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'Settlement Currency' <- - | candidates: Original Currency [SEMANTIC, name -, AI 80%] | name - | AI 80% | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Total gross written premium' <- Gross premium paid this time | candidates: Gross premium paid this time [SEMANTIC, name -, AI 95%] | name - | AI 95% | AI confirmed the same data at 95%
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Insured Address' <- Insured Address | candidates: Insured Address [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Insured Postcode, Zip Code or Similar' <- Insured Postcode, Zip Code or Similar | candidates: Insured Postcode, Zip Code or Similar [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Policy or Group Ref' <- Policy or Group Ref | candidates: Policy or Group Ref [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Sum Insured Currency (see code list)' <- Sum Insured Currency (see code list) | candidates: Sum Insured Currency (see code list) [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Sum Insured Amount' <- Sum Insured Amount | candidates: Sum Insured Amount [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'Brokerage % of gross premium' <- Brokerage % of gross premium | candidates: Brokerage % of gross premium [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'program name' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'program period inception date' <- - | candidates: Risk Inception Date [SEMANTIC, name -, AI 75%] | name - | AI 75% | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'program period expiry date' <- - | candidates: Risk Expiry Date [SEMANTIC, name -, AI 75%] | name - | AI 75% | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'covered product' <- Coverage / What Is Insured | candidates: Coverage / What Is Insured [SEMANTIC, name -, AI 95%] | name - | AI 95% | AI confirmed the same data at 95%
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'permitted territory' <- - | candidates: Location of risk - Country [SEMANTIC, name -, AI 70%] | name - | AI 70% | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'excluded territory' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'excluded risk type' <- Peril / Risk Type Excluded | candidates: Peril / Risk Type Excluded [SEMANTIC, name 93%, AI 98%] | name 93% | AI 98% | AI confirmed the same data at 98%
+14:40:53 | run=3017 | MAPPING  | VERIFY    | 'maximum sum insured per risk' <- Sum Insured Amount | candidates: Sum Insured Amount [SEMANTIC, name -, AI 85%] | name - | AI 85% | AI 85% — needs a person to confirm
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'maximum total premium for term' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'referral condition' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | VERIFY    | 'contract currency' <- Original Currency | candidates: Original Currency [SEMANTIC, name -, AI 85%] | name - | AI 85% | AI 85% — needs a person to confirm
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'carrier name' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'broker name' <- Broker Name | candidates: Broker Name [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'risk effective date' <- Risk Inception Date | candidates: Risk Inception Date [SEMANTIC, name -, AI 95%] | name - | AI 95% | AI confirmed the same data at 95%
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'permitted class of business' <- - | candidates: Coverage / What Is Insured [SEMANTIC, name -, AI 75%] | name - | AI 75% | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'permitted cover type' <- - | candidates: Coverage / What Is Insured [SEMANTIC, name -, AI 75%] | name - | AI 75% | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'permitted risk location country' <- Location of risk - Country | candidates: Location of risk - Country [SEMANTIC, name 93%, AI 98%] | name 93% | AI 98% | AI confirmed the same data at 98%
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'commission payable' <- Commission Amount | candidates: Commission Amount [SEMANTIC, name -, AI 95%] | name - | AI 95% | AI confirmed the same data at 95%
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'brokerage payable' <- Brokerage Amount | candidates: Brokerage Amount [SEMANTIC, name -, AI 95%] | name - | AI 95% | AI confirmed the same data at 95%
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'commission reporting' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'bordereau submission' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'bordereau checking' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'maximum total insured values per policy' <- Total Insured Value (TIV) | candidates: Total Insured Value (TIV) [SEMANTIC, name -, AI 90%] | name - | AI 90% | AI confirmed the same data at 90%
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'backdating coverage referral' <- - | candidates: Backdating Days [SEMANTIC, name -, AI 60%] | name - | AI 60% | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'administrator policy modelling fee cap' <- - | candidates: none | name - | AI - | no suitable mapping found
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'inspection fees' <- Inspection Fees | candidates: Inspection Fees [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | AUTO      | 'key employee name' <- Key Employee Name | candidates: Key Employee Name [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+14:40:53 | run=3017 | MAPPING  | UNMAPPED  | 'key employee change notification period' <- - | candidates: none | name - | AI - | no suitable mapping found
+
+============================================================================================================
+RUN 3a58  started 2026-09-15 23:31:57  |  contract=tmp5avkthho.pdf template_fields=0
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=3a58   total 90.7s (1.5 min)
+   Call 1 extraction             89.6s  98.8%  #######################################
+   PDF parse (no AI)              1.1s   1.2%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN 4330  started 2026-09-15 23:33:51  |  contract=tmp5e76pehh.pdf template_fields=0
+============================================================================================================
+23:33:51 | run=4330 | CACHE    | HIT       | rule_intents db89647f3fb5 | answer reused — this model call did NOT happen
+23:33:51 | run=4330 | CALL2    | SKIPPED   | intents for 41 clause(s) served from cache | answer depends only on the clause texts, which have not changed — the template arriving later cannot alter it
+
+============================================================================================================
+RUN 16c3  started 2026-09-15 23:36:10  |  contract=tmpwg5mqd8j.pdf template_fields=0
+============================================================================================================
+------------------------------------------------------------------------------------------------------------
+TIMING run=16c3   total 118.4s (2.0 min)
+   Call 1 extraction            117.8s  99.5%  #######################################
+   PDF parse (no AI)              0.6s   0.5%  
+   (other / overlap)              0.0s
+------------------------------------------------------------------------------------------------------------
+
+============================================================================================================
+RUN ccb7  started 2026-09-15 23:38:15  |  contract=tmp52vhqj4_.pdf template_fields=0
+============================================================================================================
+23:38:15 | run=ccb7 | CACHE    | HIT       | rule_intents 946a535583cc | answer reused — this model call did NOT happen
+23:38:15 | run=ccb7 | CALL2    | SKIPPED   | intents for 59 clause(s) served from cache | answer depends only on the clause texts, which have not changed — the template arriving later cannot alter it
+23:46:43 | run=ccb7 | CACHE    | MISS      | rule_intents e19371b3c33e | no stored answer for this exact input — model call required
+23:46:43 | run=ccb7 | CALL2    | ATTEMPT   | 59 clause(s) in ONE call | est answer ~14,157 of 45,875 tok budget (31%)
+23:47:26 | run=ccb7 | CALL2    | SPOTCHECK | re-asked 8 of 38 rejected clause(s) | longest first — length is what dilutes attention
+23:47:26 | run=ccb7 | CALL2    | OK        | single call accepted for all 59 clause(s) | spot-check found no false negatives
+23:47:26 | run=ccb7 | CACHE    | MISS      | generic_bind a6a251c4c256 | no stored answer for this exact input — model call required
+23:47:26 | run=ccb7 | CALL3    | ATTEMPT   | contract: 25 intent(s) in ONE call
+23:48:27 | run=ccb7 | CALL3    | OK        | contract: all 25 answered in ONE call | 5 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+23:48:27 | run=ccb7 | CALL3    | ATTEMPT   | library: 49 intent(s) in ONE call
+23:50:08 | run=ccb7 | CALL3    | OK        | library: all 49 answered in ONE call | 31 DECLINED (no matching column) — a valid verdict, NOT a reason to re-batch; they go to relaxed retry / review
+23:50:08 | run=ccb7 | CALL3    | RETRY     | relaxed retry for 5 unmapped intent(s) | the strict pass left these unbound — re-asking with the reconsider prompt before they are routed to review
+23:50:45 | run=ccb7 | CALL3    | RECOVERED | 4 of 5 rescued by the relaxed retry | 1 intent(s) still unbound — these become 'awaiting a column' clauses on the setup screen
+23:50:46 | run=ccb7 | CACHE    | MISS      | formula_infer 595be865f081 | no stored answer for this exact input — model call required
+23:51:02 | run=ccb7 | CACHE    | MISS      | var_topup 8eb133b02bfc | no stored answer for this exact input — model call required
+23:51:41 | run=ccb7 | MAPPING  | ATTEMPT   | sheet 'Lloyds v5.2 US - aug-13-Contrac': 65 of 71 field(s) sent to AI in one call | AI ok
+23:51:41 | run=ccb7 | MAPPING  | NOT-INPUT | 'Coverholder Name' <- - | candidates: none | name - | AI - | not taken from the bordereau
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Unique Market Reference (UMR)' <- - | candidates: Policy No [SEMANTIC, name -, AI 80%] | name - | AI 80% | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Reporting Period (End Date)' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | NOT-INPUT | 'Section No' <- - | candidates: none | name - | AI - | not taken from the bordereau
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Class of Business' <- - | candidates: Division [SEMANTIC, name -, AI 70%] | name - | AI 70% | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Type of Insurance (Direct or Type or Reinsurance)' <- Faculative Re(Y/N) | candidates: Faculative Re(Y/N) [SEMANTIC, name -, AI 90%] | name - | AI 90% | AI confirmed the same data at 90%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Certificate Ref' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Insured Full Name, Last Name or Company Name' <- Insured | candidates: Insured [SEMANTIC, name -, AI 100%] | name - | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Insured Country Sub-division: State, Province, Territory, Canton etc.' <- Insured State | candidates: Insured State [SEMANTIC, name -, AI 100%] | name - | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Insured Country (see code list)' <- - | candidates: Insured [SIMILAR, name 83%, AI -] | name 83% | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Risk Inception Date' <- PolicyInception | candidates: PolicyInception [SEMANTIC, name -, AI 95%] | name - | AI 95% | AI confirmed the same data at 95%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Risk Expiry Date' <- PolicyExpiration | candidates: PolicyExpiration [SEMANTIC, name -, AI 95%] | name - | AI 95% | AI confirmed the same data at 95%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Location of risk - Country' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Location of Risk - Country Sub-division: State, Province, Territory, Canton etc.' <- Risk State | candidates: Risk State [SEMANTIC, name -, AI 100%] | name - | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Transaction Type - Original Premium etc.' <- Transaction Type | candidates: Transaction Type [SEMANTIC, name 83%, AI 100%] | name 83% | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Effective Date of Transaction' <- TransactionEffectiveDate | candidates: TransactionEffectiveDate [SEMANTIC, name -, AI 100%] | name - | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Expiry Date of Transaction' <- TransactionExpirationDate | candidates: TransactionExpirationDate [SEMANTIC, name -, AI 100%] | name - | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Original Currency' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Gross premium paid this time' <- Gross Premium | candidates: Gross Premium [SEMANTIC, name 83%, AI 90%] | name 83% | AI 90% | AI confirmed the same data at 90%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Terrorism premium' <- TRIA PREM | candidates: TRIA PREM [SEMANTIC, name -, AI 90%] | name - | AI 90% | AI confirmed the same data at 90%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Commission %' <- Commission Rate | candidates: Commission Rate [ALIAS, name -, AI 100%] | name - | AI 100% | 'Commission Rate' is a known way of writing this field
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Commission Amount' <- Commission Amount | candidates: Commission Amount [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Net Premium to London in original currency' <- Net Premium | candidates: Net Premium [SEMANTIC, name -, AI 90%] | name - | AI 90% | AI confirmed the same data at 90%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Settlement Currency' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'State of Filing (see code list)' <- State of Filing | candidates: State of Filing [SEMANTIC, name 100%, AI 100%] | name 100% | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Surplus Lines Broker Name' <- Surplus Lines Filing Broker | candidates: Surplus Lines Filing Broker [SEMANTIC, name -, AI 100%] | name - | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | NOT-INPUT | 'Surplus Lines Broker Licence No' <- - | candidates: none | name - | AI - | not taken from the bordereau
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'New Jersey SLA No' <- NJ Transaction No | candidates: NJ Transaction No [SEMANTIC, name -, AI 90%] | name - | AI 90% | AI confirmed the same data at 90%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Surplus Lines Broker Address' <- Surplus Lines Broker Address | candidates: Surplus Lines Broker Address [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Surplus Lines Broker State' <- Surplus Lines Broker State | candidates: Surplus Lines Broker State [EXACT, name -, AI -] | name - | AI - | the file uses the same column name
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Surplus Lines Broker Zip Code' <- Surplus Lines Broker Zip | candidates: Surplus Lines Broker Zip [SEMANTIC, name 100%, AI 100%] | name 100% | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | VERIFY    | 'Total gross written premium' <- Cumulative Prem | candidates: Cumulative Prem [SEMANTIC, name -, AI 85%], Gross Premium [SIMILAR, name 83%, AI -] | name 83% | AI 85% | AI 85% — needs a person to confirm
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Insured Address' <- - | candidates: Insured Street [SEMANTIC, name -, AI 70%], Insured [SIMILAR, name 83%, AI -] | name 83% | AI 70% | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Insured Postcode, Zip Code or Similar' <- Insured Zip Code | candidates: Insured Zip Code [SEMANTIC, name 83%, AI 100%] | name 83% | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'Sum Insured Currency (see code list)' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'Sum Insured Amount' <- BtotalTIV | candidates: BtotalTIV [SEMANTIC, name -, AI 90%] | name - | AI 90% | AI confirmed the same data at 90%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'program schedule inception date' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'program description' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'writing company' <- Carrier | candidates: Carrier [SEMANTIC, name -, AI 100%] | name - | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'policy period' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'target segments' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'restricted segments' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'excluded classes of business' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | VERIFY    | 'maximum limits per policy' <- Pol Occ Limit | candidates: Pol Occ Limit [SEMANTIC, name -, AI 85%] | name - | AI 85% | AI 85% — needs a person to confirm
+23:51:41 | run=ccb7 | MAPPING  | VERIFY    | 'apd per auto limit' <- APD  Unit Limit | candidates: APD  Unit Limit [SEMANTIC, name -, AI 85%] | name - | AI 85% | AI 85% — needs a person to confirm
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'apd terminal limit' <- APD per Occ / Terminal Limit | candidates: APD per Occ / Terminal Limit [SEMANTIC, name 93%, AI 100%] | name 93% | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'mtc vehicle limit' <- MTC per Vehicle Limit | candidates: MTC per Vehicle Limit [SEMANTIC, name 100%, AI 100%] | name 100% | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'mtc per occurrence terminal limit' <- MTC per occurrence | candidates: MTC per occurrence [SEMANTIC, name 83%, AI 100%] | name 83% | AI 100% | AI confirmed the same data at 100%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'territory' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'ofac and sanctions clauses' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'portfolio parameters' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'percentage of total risk' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'policy fee' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'inspection fee' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'modeling fee' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'audit fee' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'fee per item limit' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | AUTO      | 'surplus lines broker identification' <- Surplus Lines Broker License | candidates: Surplus Lines Broker License [SEMANTIC, name -, AI 95%] | name - | AI 95% | AI confirmed the same data at 95%
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'program premium' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'gross policy fees' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'billing fees' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'filing fees' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'key employee name' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'underwriting capacity' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'binding authority' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'alex bonds binding authority' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'claims department contact email' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'claims department contact address' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'claims department contact name' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'underwriting guidelines reference' <- - | candidates: none | name - | AI - | no suitable mapping found
+23:51:41 | run=ccb7 | MAPPING  | UNMAPPED  | 'policy issuance paper type' <- - | candidates: none | name - | AI - | no suitable mapping found

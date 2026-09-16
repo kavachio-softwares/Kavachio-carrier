@@ -32,6 +32,7 @@ import os
 import re
 import json
 import uuid
+import hashlib
 from datetime import datetime, timezone
 
 
@@ -62,6 +63,7 @@ from contract_upload_services.constants import (
 from contract_upload_services.gemini_service import (
     call_gemini, DETERMINISTIC_SEED, OversizeError, should_chunk, would_truncate,
     estimate_tokens, model_ceilings, OUTPUT_RATIO, OUTPUT_SAFETY,
+    EXTRACTION_MODEL, LEGACY_CACHE_MODEL, model_for,
 )
 
 from contract_upload_services.prompt_builder import (
@@ -106,7 +108,7 @@ from contract_upload_services.output_schema import build_output_schema
 # never disagree. `column_tokens` is the single camelCase-aware name tokenizer
 # behind both (a Lloyd's-style "InsuredState" carries no separators at all).
 from contract_upload_services.uszips_reference import (
-    is_state_column, is_postal_column, column_tokens)
+    is_state_column, is_postal_column, column_tokens, squashed_name)
 
 
 def _looks_percent(field: dict) -> bool:
@@ -155,6 +157,28 @@ def _fin_entity_toks(n):
             if t not in _FIN_STOPWORDS}
 
 
+def _fin_match_ties(anchor_toks, candidates):
+    """Every DISTINCT candidate sharing the best (overlap, fewest-extra) score
+    against `anchor_toks`, in template order. More than one means the name match
+    cannot tell them apart (e.g. two bare "… gross premium" columns on a wide
+    standard template) — callers that emit a hard formula use this to stay out
+    rather than silently take the first."""
+    best, best_score = [], None
+    # One column spelled with different case/spacing on two sheets is one
+    # candidate, not a tie.
+    distinct = {}
+    for c in candidates or []:
+        distinct.setdefault(str(c).strip().lower(), c)
+    for c in distinct.values():
+        ctoks = _fin_entity_toks(c)
+        score = (len(anchor_toks & ctoks), -len(ctoks - anchor_toks))
+        if best_score is None or score > best_score:
+            best, best_score = [c], score
+        elif score == best_score:
+            best.append(c)
+    return best
+
+
 def _best_fin_match(anchor_toks, candidates):
     """The candidate whose entity tokens overlap `anchor_toks` the most, breaking
     ties toward the candidate with the FEWEST unexplained extra tokens (i.e. the
@@ -162,19 +186,8 @@ def _best_fin_match(anchor_toks, candidates):
     Terrorism Premium" when the anchor itself names no peril). Falls back to the
     single/first candidate when there is nothing to disambiguate (a template with
     only one premium column at all — the common single-schedule case)."""
-    if not candidates:
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    best, best_score = None, None
-    for c in candidates:
-        ctoks = _fin_entity_toks(c)
-        shared = len(anchor_toks & ctoks)
-        extra = len(ctoks - anchor_toks)
-        score = (shared, -extra)
-        if best_score is None or score > best_score:
-            best, best_score = c, score
-    return best
+    ties = _fin_match_ties(anchor_toks, candidates)
+    return ties[0] if ties else None
 
 
 # The financial CONCEPT a $/% column measures (kept distinct from the entity
@@ -193,10 +206,30 @@ def _rate_concept(name):
     return None
 
 
+# Name tokens of a SUB-national column. "state" is covered by is_state_column.
+_SUBNATIONAL_TOKENS = frozenset(("province", "provinces", "subdivision",
+                                 "subdivisions", "county", "counties"))
+
+
+def _is_subnational_column(name):
+    """True when a column holds a state / province / country SUB-DIVISION — which
+    standard headers still spell with the word "country" ("Insured Country
+    Sub-division: State, Province, Territory…", "Tax Jurisdiction: Country, State…").
+    US state codes collide with ISO country codes (IL, TN, AZ, CA, IN…), so such
+    a column must never stand in for a country. Judged by NAME only: the
+    canonical tag is model-assigned and not stable enough to remove a column on."""
+    return (is_state_column(name)
+            or bool(_SUBNATIONAL_TOKENS & set(column_tokens(name)))
+            or "subdivision" in squashed_name(name))
+
+
 def _is_country_column(name, by_name):
     """True when a column carries a COUNTRY value — by its own name tokens, or by
     the canonical field the template parser bound it to (so an oddly-named column
-    mapped to `insured_location_country` still counts)."""
+    mapped to `insured_location_country` still counts). Never a sub-national
+    column, whatever its header says (see _is_subnational_column)."""
+    if _is_subnational_column(name):
+        return False
     if {"country", "countries"} & set(column_tokens(name)):
         return True
     canon = ((by_name or {}).get(name) or {}).get("canonical_field")
@@ -333,10 +366,17 @@ def derive_formula_entries(synth_outputs, template_fields):
         cand_rate = _best_match(at, rate_all)
         if not cand_rate or cand_rate not in governed:
             continue
-        cand_base = _best_match(at, base_all)
-        if not cand_base:
+        base_ties = _fin_match_ties(at, base_all)
+        if not base_ties:
             continue
-        amount, rate, base = cand_amount, cand_rate, cand_base
+        if len(base_ties) > 1:
+            # Names can't pick the base: a wrong guess (a program total instead
+            # of the per-transaction premium) flags every endorsement row. Leave
+            # the amount ungoverned so the template's formula annotation decides.
+            print(f"  [derived-formula] {cand_amount!r}: skipped — ambiguous base "
+                  f"premium {base_ties!r}")
+            continue
+        amount, rate, base = cand_amount, cand_rate, base_ties[0]
         break
 
     if amount and rate and base:
@@ -379,7 +419,16 @@ def derive_formula_entries(synth_outputs, template_fields):
     if net_all and base and amount and (commission_derived or amount in governed):
         anchor = commission_base_entity if commission_base_entity is not None \
             else _fin_entity_toks(base)
-        net = _best_match(anchor, net_all)
+        net_ties = _fin_match_ties(anchor, net_all)
+        net = net_ties[0] if len(net_ties) == 1 else None
+        if not net:
+            # Same rule as the base: several equally-good Net Premium columns
+            # (original vs settlement currency, …) — let the annotation decide.
+            print(f"  [derived-formula] net premium: skipped — ambiguous target "
+                  f"{net_ties!r}")
+    else:
+        net = None
+    if net:
         ir = {
             "template": "cross_field_math",
             "params": {
@@ -443,9 +492,8 @@ def derive_formula_entries(synth_outputs, template_fields):
     # country's reference to validate against (US ZIP / Canadian FSA / UK outward
     # code) instead of accepting a match in any of them. Bound by shared entity
     # tokens exactly like the ZIP↔STATE pairing itself, so an "Insured Zip Code" is
-    # dispatched by "Insured Country" and never by a broker's country. `country_cols`
-    # is defined with the currency rules further down; compute it here too because
-    # the postal rules are emitted first.
+    # dispatched by "Insured Country" and never by a broker's country. The currency
+    # rules further down reuse this same list.
     _country_cols_for_postal = [n for n in names if _is_country_column(n, by_name)]
 
     def _country_for(col):
@@ -626,18 +674,15 @@ def derive_formula_entries(synth_outputs, template_fields):
             }],
         })
 
-    # CURRENCY ↔ COUNTRY consistency (data-quality). Same shape as ZIP↔STATE above:
-    # for every CURRENCY column, pair it with (1) the COUNTRY column sharing the
-    # most name tokens (same entity, e.g. "Original Currency"↔ nothing shared →
-    # falls through to (2)); and (2) when the currency is the RISK's own currency
-    # (no txn-party qualifier), every RISK-LOCATION country column — so "Original
-    # Currency" validates against "Insured Country" but never against a broker's
-    # or filing agent's country (those legitimately differ from the risk's
-    # currency). Reuses the risk-location/txn-party vocabulary defined above.
+    # CURRENCY ↔ COUNTRY consistency (data-quality). Each CURRENCY column is paired
+    # with ONE country column — never a cross product, which on a wide standard
+    # sheet multiplied a handful of currency and country columns into dozens of
+    # rules the contract never asked for. See _country_for_currency for the choice.
     # Word-boundary regex so "MTC per occurrence…" never matches (not "currenc").
     _CURRENCY_MARKER = re.compile(r"\bcurrenc(?:y|ies)\b", re.IGNORECASE)
-    country_cols = [n for n in names if "countr" in n.lower()]
-    risk_country_cols = [c for c in country_cols if _is_risk_location(c)]
+    # The same token test as the postal dispatch above — a substring "countr" also
+    # matched "Country Sub-division: State", pairing currencies with STATE codes.
+    country_cols = list(_country_cols_for_postal)
     seen_curr_pairs = set()
 
     def _emit_currency_rule(cyc, coc):
@@ -664,13 +709,14 @@ def derive_formula_entries(synth_outputs, template_fields):
             }],
         })
 
-    # SAMPLE-EVIDENCE gate: a "Currency"-named column qualifies only when its
-    # DATA looks like currency codes. Real bordereaux name AMOUNT columns
-    # "Net Payable Settlement Currency" (meaning: the net payable IN the
-    # settlement currency) — the word alone bound a currency-validity rule to
-    # amounts and flagged every row ("12276.6 is not a valid currency for
-    # UNITED KINGDOM"). A column with NO samples keeps the rule (no evidence
-    # against it); one code-looking sample is enough to keep it.
+    # SAMPLE-EVIDENCE gate: a "Currency"-named column qualifies only when it holds
+    # currency CODES. Real bordereaux name AMOUNT columns "Net Payable Settlement
+    # Currency" (meaning: the net payable IN the settlement currency) — the word
+    # alone bound a currency-validity rule to amounts and flagged every row
+    # ("12276.6 is not a valid currency for UNITED KINGDOM"). Samples decide when
+    # there are any (one code-looking sample is enough). A standard template has
+    # none, so the column's declared type, then its canonical field, then its name
+    # decide instead — a column that says nothing either way keeps the rule.
     _cur_sample_pool: dict = {}
     for _f in (template_fields or []):
         _n = _f.get("name")
@@ -678,35 +724,92 @@ def derive_formula_entries(synth_outputs, template_fields):
             if _n and str(_v).strip():
                 _cur_sample_pool.setdefault(_n, []).append(str(_v).strip())
     _CUR_CODE_RE = re.compile(r"^[A-Za-z]{3}$")
+    # Declared value types: a number type is an amount; only a code/enum type is
+    # evidence of a code. "string" is NOT — it is what a template column gets when
+    # nothing typed it, amounts included. ("currency" as a TYPE means a money
+    # amount, not a currency code.)
+    _AMOUNT_TYPES = {"decimal", "number", "numeric", "float", "double", "int",
+                     "integer", "currency", "money", "amount", "percent",
+                     "percentage"}
+    _CODE_TYPES = {"code", "enum"}
+    # Words that make "currency" a qualifier of an amount ("Premium in Original
+    # Currency") rather than the column's own subject.
+    _AMOUNT_WORDS = {"amount", "amounts", "premium", "premiums", "brokerage",
+                     "tax", "taxes", "fee", "fees", "commission", "commissions"}
+    # "… in Settlement Currency" / "… (Original Currency)": the currency the value
+    # is EXPRESSED in, i.e. an amount, whatever the amount itself is called.
+    _CURRENCY_QUALIFIER = re.compile(
+        r"\([^)]*\bcurrenc|\bin\s+(?:[a-z]+\s+){0,2}currenc", re.IGNORECASE)
 
     def _samples_look_like_currency_codes(col):
         vals = _cur_sample_pool.get(col)
-        if not vals:
+        if vals:
+            return any(_CUR_CODE_RE.match(v) for v in vals)
+        f = by_name.get(col) or {}
+        dtype = column_tokens(f.get("data_type") or f.get("field_format"))
+        if dtype and dtype[-1] in _CODE_TYPES:      # "code", "currency_code"
             return True
-        return any(_CUR_CODE_RE.match(v) for v in vals)
+        if set(dtype) & _AMOUNT_TYPES:
+            return False
+        canon = column_tokens(f.get("canonical_field"))
+        if canon:
+            if canon[-1] in ("currency", "currencies", "code"):
+                return True
+            if set(canon) & (_AMOUNT_WORDS | {"rate"}):
+                return False
+        toks = set(column_tokens(col))
+        # An explicit code list outranks the amount words: "Final Net Premium
+        # Settlement Currency (see code list)" holds the premium's currency CODE.
+        if "code" in toks:
+            return True
+        if _CURRENCY_QUALIFIER.search(col):
+            return False
+        return not (toks & _AMOUNT_WORDS)
+
+    # Name words that say nothing about WHOSE currency / country a column is.
+    _CURR_NOISE = {"currency", "currencies", "country", "countries", "see", "list",
+                   "iso", "in", "to", "for"}
+
+    def _country_for_currency(cyc):
+        """The ONE country column a currency column is checked against, or None.
+
+        Ranked, first match wins (deterministic — template order breaks ties, as
+        the column a template lists first is its primary one):
+          1. the country column sharing the most ENTITY words with the currency
+             column ("Broker Currency" ↔ "Broker Country");
+          2. for a currency with no transaction-party qualifier — by default the
+             RISK's own currency ("Original Currency") — the first risk-location
+             country column ("Insured Country"), never a broker's or filer's;
+          3. the only country column that belongs to no transaction party.
+        A transaction-party currency with no same-entity country gets none: its
+        party is domiciled wherever it is, which says nothing about the risk."""
+        if not country_cols:
+            return None
+        ct = _entity_toks(cyc) - _CURR_NOISE
+        best, best_score = None, 0
+        for coc in country_cols:            # strict > keeps the earliest on a tie
+            score = len(ct & (_entity_toks(coc) - _CURR_NOISE))
+            if score > best_score:
+                best, best_score = coc, score
+        if best:
+            return best
+        if any(t in cyc.lower() for t in _TXN_PARTY):
+            return None
+        risk = [c for c in country_cols if _is_risk_location(c)]
+        if risk:
+            return risk[0]
+        neutral = [c for c in country_cols
+                   if not any(t in c.lower() for t in _TXN_PARTY)]
+        return neutral[0] if len(neutral) == 1 else None
 
     for cyc in names:
         if not _CURRENCY_MARKER.search(cyc):
             continue
         if not _samples_look_like_currency_codes(cyc):
             continue    # an AMOUNT column that merely mentions "currency"
-        ct = _entity_toks(cyc)
-        best, best_score = None, 0
-        for coc in country_cols:
-            score = len(ct & _entity_toks(coc))
-            if score > best_score:
-                best, best_score = coc, score
-        if best and best_score >= 1:
-            _emit_currency_rule(cyc, best)
-        # Gate on "not txn-party" rather than requiring an explicit risk-location
-        # token ON the currency column itself (unlike the ZIP gate above): a premium
-        # currency column is very rarely named "Insured Currency" — it is usually
-        # just "Original Currency"/"Currency" with no entity qualifier at all, which
-        # by default means it's the RISK's own currency. Only an explicitly
-        # txn-party-qualified currency column (e.g. "Broker Currency") is excluded.
-        if not any(t in cyc.lower() for t in _TXN_PARTY):
-            for coc in risk_country_cols:
-                _emit_currency_rule(cyc, coc)
+        coc = _country_for_currency(cyc)
+        if coc:
+            _emit_currency_rule(cyc, coc)
     return entries
 
 
@@ -991,7 +1094,11 @@ def infer_formula_annotations(template_fields):
     # it. `catalog` is the literal prompt input, which makes it the exact and
     # complete key: two uploads building the same catalog would get the same
     # answer, and any rename / added column / changed sample rewrites it.
-    _key = ai_cache.make_key("formula_infer_v1", catalog)
+    # The model joins the key once it is no longer the one today's entries were
+    # stored under (ai_cache.model_scoped), so a model switch re-asks.
+    _model = EXTRACTION_MODEL
+    _key = ai_cache.make_key(*ai_cache.model_scoped(
+        ("formula_infer_v1", catalog), _model, LEGACY_CACHE_MODEL))
     _cached = ai_cache.get("formula_infer", _key)
     if _cached is not None:
         return dict(_cached)
@@ -1031,7 +1138,7 @@ COLUMNS:
     try:
         raw = call_gemini(prompt, label="FormulaInference", temperature=0,
                           seed=DETERMINISTIC_SEED, max_output_tokens=8192,
-                          thinking_budget=4096)
+                          thinking_budget=4096, model=_model)
         data = parse_llm_json(raw)
     except Exception as exc:
         print(f"[Formula AI] inference skipped ({exc})")
@@ -1830,7 +1937,8 @@ def fix_backdating_period_fields(synth_outputs, template_fields):
 
     Generic: the two columns are matched by ROLE tokens — an inception/coverage-start
     column, and a transaction date column that is the PROCESSING date (has
-    'transaction' + 'date' but not 'effective'/'expiration') — never hardcoded names.
+    'transaction' + 'date' but not 'effective'/'expiration', or — when no header
+    says so — a canonical booking/processing/issuance date) — never hardcoded names.
     Only period_duration rules whose clause/name is about *backdating* are touched
     (a policy-period or any other duration rule is left alone). No-op when the
     template lacks a clear inception or transaction-date column. Mutates the IR in
@@ -1852,6 +1960,14 @@ def fix_backdating_period_fields(synth_outputs, template_fields):
     # to keep that column OUT of an in-period date bound — see
     # output_schema.is_processing_date_column.
     txn_date = _find(is_processing_date_column)
+    if not txn_date:
+        # A header that names no transaction date can still be the booking date
+        # by its canonical tag. Only consulted when no NAME matched, so a template
+        # that already resolved keeps exactly the column it had.
+        txn_date = next(
+            (f.get("name") for f in (template_fields or []) if f.get("name")
+             and is_processing_date_column(f.get("name"), f.get("canonical_field"))),
+            None)
     if not inception or not txn_date:
         return 0
 
@@ -2863,6 +2979,27 @@ def derive_territory_exclusion_entries(synth_outputs, clauses, template_fields):
 # ANSWER only — the thinking budget is accounted for separately at each use site.
 _STAGE1_OUTPUT_RATIO = float(os.getenv("KAVACHIO_STAGE1_OUTPUT_RATIO", "2.5"))
 
+# Call 1's generation config. ONE definition, splatted into every Call 1 request
+# and into its cache key, so a stored answer can never be served for a request
+# with a different config than the one that produced it.
+_CALL1_CONFIG = {
+    "temperature":       0,
+    "seed":              DETERMINISTIC_SEED,
+    "thinking_budget":   int(os.getenv("KAVACHIO_CALL1_THINKING", "16384")),
+    "max_output_tokens": 65536,
+}
+# Bump when anything that shapes the stored payload changes; prompt text needs no
+# bump because the key hashes the prompt itself.
+_CLAUSE_EXTRACTION_KEY_VERSION = "clause_extraction_v1"
+
+
+def _extraction_has_clauses(section_extractions) -> bool:
+    """A Call 1 answer worth storing: every part parsed to an object and at least
+    one clause came back. The empty skeleton and a failed parse both fail this."""
+    parts = section_extractions or []
+    return (bool(parts) and all(isinstance(p, dict) for p in parts)
+            and any(p.get("clauses") for p in parts))
+
 
 def _generic_bind_key(lib_rules, template_fields):
     """Cache key for the generic-library → output-template binding.
@@ -2905,7 +3042,10 @@ def _generic_bind_key(lib_rules, template_fields):
          tuple(str(s) for s in (f.get("samples") or [])[:3]))
         for f in template_fields if f.get("name")
     )
-    return ai_cache.make_key("generic_bind_v1", rules_part, fields_part)
+    # Bound by Call 3, which runs on the default extraction model.
+    return ai_cache.make_key(*ai_cache.model_scoped(
+        ("generic_bind_v1", rules_part, fields_part), EXTRACTION_MODEL,
+        LEGACY_CACHE_MODEL))
 
 
 def _derive_pages_per_chunk(pdf_data, thinking_budget=16384, default=8):
@@ -2989,15 +3129,24 @@ class ValidationRuleGenerator:
         # run that is ~6 of ~12 model calls, bought to reproduce an answer
         # already paid for.
         #
-        # The key is the clause TEXTS alone: they are the entire input to the
-        # call, so a hit can only ever be this exact set of clauses. Re-reading
-        # the document mints new clause ids, so a re-upload misses and pays
-        # again — which is correct, the text may have changed.
-        _intent_key = ai_cache.make_key("rule_intents_v1", [
-            {"id": c.get("clause_id"), "text": c.get("text")}
+        # The key is what the call reads of each clause (type, title, text), in
+        # order — never the clause ids. Re-reading a document mints new ids, and
+        # keying on them made every re-upload of an unchanged contract re-ask and
+        # come back with different intents (so different rules). A changed text
+        # still misses. The stored verdicts are positional, so a hit is given
+        # THIS run's ids below.
+        # extract_rule_intents calls the default extraction model.
+        _intent_key = ai_cache.make_key(*ai_cache.model_scoped(("rule_intents_v2", [
+            {"type": c.get("clause_type"), "title": c.get("title"),
+             "text": c.get("text"),
+             "ref": c.get("source_reference_document")}
             for c in clauses_extracted
-        ])
+        ]), EXTRACTION_MODEL, LEGACY_CACHE_MODEL))
         classifications = ai_cache.get("rule_intents", _intent_key)
+        if isinstance(classifications, list) and len(classifications) == len(clauses_extracted):
+            classifications = [
+                {**v, "clause_id": c.get("clause_id")} if isinstance(v, dict) else v
+                for c, v in zip(clauses_extracted, classifications)]
         # Length is re-checked rather than trusted: `zip` below pairs verdicts to
         # clauses positionally, so a short list would silently leave the tail of
         # the contract unclassified instead of failing.
@@ -3011,8 +3160,14 @@ class ValidationRuleGenerator:
         if classifications is None:
             with plog.stage("Call 2 intents"):
                 classifications = extract_rule_intents(clauses_extracted)
-            ai_cache.put("rule_intents", _intent_key, classifications,
-                         tenant_id=tenant_id)
+            # A verdict the call failed to produce is re-asked next time, never
+            # stored: the key carries no clause ids, so a stored failure would be
+            # replayed on every re-upload of the same contract.
+            if not any(isinstance(v, dict) and (v.get("_error")
+                                                or v.get("reasoning") == "No result returned")
+                       for v in classifications or []):
+                ai_cache.put("rule_intents", _intent_key, classifications,
+                             tenant_id=tenant_id)
         else:
             print(f"[Call 2] reusing cached intents for "
                   f"{len(clauses_extracted)} clause(s) — no model call.")
@@ -3441,10 +3596,14 @@ class ValidationRuleGenerator:
         reference_documents=None,
         tenant_id=None,
         endorsements=None,
+        refresh_extraction=False,
     ):
         """
         Run Pipeline 1 + Pipeline 2 on the parsed PDF data and return a
         single hybrid output dict. Safe to JSON-serialize.
+
+        `refresh_extraction` re-reads the document with the model even when an
+        answer for this exact request is stored (see _extract_clauses).
 
         `endorsements` are documents that AMEND this contract and are in force
         alongside it. They are kept separate from `reference_documents` all the
@@ -3523,9 +3682,6 @@ class ValidationRuleGenerator:
         # one-element list, so the rest of the pipeline is unchanged.
         # -------------------------------------------------
 
-        section_extractions = []
-        external_references = []
-
         # -------------------------------------------------
         # RESUME PATH — reuse the cached extraction from the halted run instead
         # of calling the extraction LLM again. (Triggered by "Continue Anyway".)
@@ -3535,141 +3691,25 @@ class ValidationRuleGenerator:
         if cached is not None:
             section_extractions = cached.get("section_extractions", [])
             external_references = cached.get("external_references", [])
+            extraction_info = {**(cached.get("extraction") or {}), "path": "resume"}
             print(
                 f"\n[Pipeline 1] RESUMED from cached extraction "
                 f"(token={resume_token}) — skipping extraction LLM call.\n"
             )
 
         else:
-            # -------------------------------------------------
-            # PIPELINE 1.3 — WHOLE-DOCUMENT extraction (ONE call)
-            # The whole contract goes to the model in a single call so it reasons
-            # about the document as a COHERENT WHOLE — cross-page context,
-            # definitions that qualify later limits, and clauses that span a page
-            # break are all preserved. (Per-page chunking gave higher recall but
-            # stripped overall meaning.) The recall problem that motivated chunking
-            # was output-token TRUNCATION on long JSON, so we raise
-            # max_output_tokens and rely on the prompt's strict "emit EVERY clause"
-            # rule instead of fragmenting the document.
-            # _merge_section_extractions still handles a one-element list, so the
-            # rest of the pipeline is unchanged.
-            # -------------------------------------------------
-            pages = pdf_data.get("pages", [])
-            whole_doc = {
-                "section_type": "full_document",
-                "page_start":   pages[0]["page"] if pages else 0,
-                "page_end":     pages[-1]["page"] if pages else 0,
-                "text":         build_llm_context(pdf_data),
-            }
-            print(f"\n[Pipeline 1] extracting whole document in 1 call "
-                  f"({len(pages)} page(s)).")
-            if reference_documents:
-                print(
-                    f"[Pipeline 1] with {len(reference_documents)} reference "
-                    f"document(s): {[rd.get('name') for rd in reference_documents]}"
+            # A lost token (restart, another worker, a second click) lands here too.
+            # The route re-parses the re-sent file, so this builds the same request
+            # the halted run made and the clause_extraction cache serves its answer.
+            section_extractions, external_references, extraction_info = (
+                self._extract_clauses(
+                    pdf_data,
+                    reference_documents=reference_documents,
+                    endorsements=endorsements,
+                    tenant_id=tenant_id if tenant_id is not None else self.tenant_id,
+                    refresh=refresh_extraction,
                 )
-
-            if endorsements:
-                print(
-                    f"[Pipeline 1] with {len(endorsements)} active "
-                    f"endorsement(s): {[e.get('name') for e in endorsements]}"
-                )
-
-            ext_prompt = build_extraction_prompt(
-                whole_doc, reference_documents=reference_documents,
-                endorsements=endorsements,
             )
-
-            def _extract_by_section(reason):
-                """Graceful fallback: extract page-chunks and merge, instead of
-                returning an EMPTY skeleton (total loss). Accepts minor cross-page
-                context loss over losing every clause."""
-                # 8 pages, not 5: what chunking COSTS is cross-page context, so the
-                # fallback should chunk as little as possible. 8 pages x ~3,021
-                # answer tokens/page + 16,384 thinking = ~62% of the output ceiling,
-                # the largest chunk that still clears the safety margin.
-                _env_pages = os.getenv("KAVACHIO_SECTION_PAGES")
-                pages_per = (int(_env_pages) if _env_pages
-                             else _derive_pages_per_chunk(pdf_data))
-                chunks = split_pages_into_chunks(pdf_data, pages_per_chunk=pages_per)
-                print(f"[Pipeline 1] {reason} — extracting by section "
-                      f"({len(chunks)} chunk(s) of {pages_per} page(s)).")
-                added = 0
-                for sec in chunks:
-                    try:
-                        raw = call_gemini(
-                            build_extraction_prompt(
-                                sec, reference_documents=reference_documents,
-                                endorsements=endorsements),
-                            label=f"Pipeline1-Section-p{sec.get('page_start')}",
-                            max_output_tokens=65536, thinking_budget=16384,
-                            temperature=0, seed=DETERMINISTIC_SEED,
-                        )
-                        parsed_sec = parse_llm_json(raw)
-                        section_extractions.append(parsed_sec)
-                        added += 1
-                        if isinstance(parsed_sec, dict):
-                            external_references.extend(
-                                parsed_sec.get("external_references", []) or [])
-                    except Exception as se:
-                        print(f"[Pipeline 1] section p{sec.get('page_start')} "
-                              f"failed: {se}")
-                return added
-
-            # Pre-flight: gate on the OUTPUT budget, not the input ceiling. This
-            # call never fails on input (a whole contract is a few thousand tokens
-            # against a 1M ceiling) — it fails because the ANSWER did not fit. The
-            # contract text is the data; the answer runs ~_STAGE1_OUTPUT_RATIO x
-            # its size and shares max_output_tokens with the 16,384 thinking budget.
-            over, est, limit = would_truncate(whole_doc["text"], 16384,
-                                              ratio=_STAGE1_OUTPUT_RATIO)
-            if over:
-                if _extract_by_section(
-                        f"whole-doc answer ~{est} tok > output budget {limit}") == 0:
-                    section_extractions.append(
-                        {"program_metadata": {}, "commercial_terms": [], "clauses": []})
-            else:
-                try:
-                  with plog.stage("Call 1 extraction"):
-                    raw = call_gemini(
-                        ext_prompt,
-                        label="Pipeline1-FullDocument",
-                        max_output_tokens=65536,
-                        thinking_budget=16384,
-                        temperature=0,
-                        seed=DETERMINISTIC_SEED,
-                    )
-                    parsed = parse_llm_json(raw)
-                    # Completeness: valid JSON can still be a SHORT answer. Calls 2
-                    # and 3 detect this by checking which clause_ids came back;
-                    # Stage 1 has no such roster to check against, so use density as
-                    # the proxy — a contract page yielding under half a clause means
-                    # the model stopped early, and a thin extraction here silently
-                    # costs every downstream rule. Deliberately lenient so a
-                    # genuinely sparse document doesn't trigger a pointless re-run.
-                    n_cl = (len(parsed.get("clauses") or [])
-                            if isinstance(parsed, dict) else 0)
-                    if n_cl < max(1, len(pages) // 2):
-                        print(f"[Pipeline 1] only {n_cl} clause(s) from {len(pages)} "
-                              f"page(s) — re-extracting by section.")
-                        _extract_by_section("whole-doc extraction looked thin")
-                    else:
-                        section_extractions.append(parsed)
-                        if isinstance(parsed, dict):
-                            external_references.extend(
-                                parsed.get("external_references", []) or []
-                            )
-                except Exception as exc:
-                    # Oversize or a failed/truncated call → try sectioned extraction
-                    # BEFORE giving up with an empty skeleton (total loss).
-                    reason = ("oversize" if isinstance(exc, OversizeError)
-                              else f"full-document extraction failed: {exc}")
-                    if _extract_by_section(reason) == 0:
-                        section_extractions.append({
-                            "program_metadata": {},
-                            "commercial_terms": [],
-                            "clauses": [],
-                        })
 
         # -------------------------------------------------
         # PIPELINE 1.4 — Synthesize & dedup (moved BEFORE the halt gate so the
@@ -3740,6 +3780,7 @@ class ValidationRuleGenerator:
             _EXTRACTION_RESUME_CACHE[token] = {
                 "section_extractions": section_extractions,
                 "external_references": external_references,
+                "extraction": extraction_info,
             }
             print(
                 f"[Pipeline 1] HALTED — {len(external_references)} external "
@@ -3854,6 +3895,7 @@ class ValidationRuleGenerator:
                 external_references=external_references,
                 reference_documents=reference_documents,
                 template_fields=None,
+                extraction=extraction_info,
             )
 
 
@@ -3890,6 +3932,7 @@ class ValidationRuleGenerator:
             external_references=external_references,
             reference_documents=reference_documents,
             template_fields=template_fields,
+            extraction=extraction_info,
         )
 
         # # -------------------------------------------------
@@ -3904,6 +3947,230 @@ class ValidationRuleGenerator:
         # print(f"[Pipeline 2.6] saved final output → {final_path}")
 
         return final_output
+
+    # =====================================================
+    # PIPELINE 1.3 — Call 1: clause extraction
+    # =====================================================
+
+    def _extract_clauses(self, pdf_data, reference_documents=None,
+                         endorsements=None, tenant_id=None, refresh=False):
+        """The document's raw per-section extraction, from the model or from the
+        answer already stored for this exact request.
+
+        CACHED, because a repeat of this request is NOT guaranteed to repeat its
+        answer: temperature 0 and a fixed seed were measured returning two
+        different, individually stable clause sets (41 vs 59) for one PDF. The
+        first complete answer is stored under a key covering everything the model
+        was sent — the prompt(s) themselves (system prompt, document text,
+        reference documents, endorsements), the generation config, the model and
+        the tenant — so the same document reads the same way every time, and any
+        change to what is asked misses. `refresh=True` asks again and replaces it.
+
+        Only a COMPLETE answer is stored: parsed, with clauses, past the thin
+        check, and — on the page-chunk fallback — every chunk answered. A partial
+        or failed read is re-asked next time rather than frozen.
+
+        The merge, page assignment and reference filtering stay with the caller:
+        they are deterministic and run identically on a stored answer.
+
+        Returns (section_extractions, external_references, extraction_info), where
+        extraction_info is {model, prompt_sha256, cache, path, stored}.
+        """
+        section_extractions = []
+        external_references = []
+
+        # -------------------------------------------------
+        # PIPELINE 1.3 — WHOLE-DOCUMENT extraction (ONE call)
+        # The whole contract goes to the model in a single call so it reasons
+        # about the document as a COHERENT WHOLE — cross-page context,
+        # definitions that qualify later limits, and clauses that span a page
+        # break are all preserved. (Per-page chunking gave higher recall but
+        # stripped overall meaning.) The recall problem that motivated chunking
+        # was output-token TRUNCATION on long JSON, so we raise
+        # max_output_tokens and rely on the prompt's strict "emit EVERY clause"
+        # rule instead of fragmenting the document.
+        # _merge_section_extractions still handles a one-element list, so the
+        # rest of the pipeline is unchanged.
+        # -------------------------------------------------
+        pages = pdf_data.get("pages", [])
+        whole_doc = {
+            "section_type": "full_document",
+            "page_start":   pages[0]["page"] if pages else 0,
+            "page_end":     pages[-1]["page"] if pages else 0,
+            "text":         build_llm_context(pdf_data),
+        }
+        print(f"\n[Pipeline 1] extracting whole document in 1 call "
+              f"({len(pages)} page(s)).")
+        if reference_documents:
+            print(
+                f"[Pipeline 1] with {len(reference_documents)} reference "
+                f"document(s): {[rd.get('name') for rd in reference_documents]}"
+            )
+
+        if endorsements:
+            print(
+                f"[Pipeline 1] with {len(endorsements)} active "
+                f"endorsement(s): {[e.get('name') for e in endorsements]}"
+            )
+
+        ext_prompt = build_extraction_prompt(
+            whole_doc, reference_documents=reference_documents,
+            endorsements=endorsements,
+        )
+        # Resolved per call, so KAVACHIO_MODEL_CLAUSE_EXTRACTION moves Call 1 alone.
+        model = model_for("clause_extraction", EXTRACTION_MODEL)
+        thinking = _CALL1_CONFIG["thinking_budget"]
+
+        _plan = {}
+
+        def _section_prompts():
+            """(chunks, prompts) for the page-chunk fallback, built once."""
+            if not _plan:
+                # 8 pages, not 5: what chunking COSTS is cross-page context, so the
+                # fallback should chunk as little as possible. 8 pages x ~3,021
+                # answer tokens/page + 16,384 thinking = ~62% of the output ceiling,
+                # the largest chunk that still clears the safety margin.
+                _env_pages = os.getenv("KAVACHIO_SECTION_PAGES")
+                pages_per = (int(_env_pages) if _env_pages
+                             else _derive_pages_per_chunk(pdf_data, thinking))
+                chunks = split_pages_into_chunks(pdf_data, pages_per_chunk=pages_per)
+                _plan["pages_per"] = pages_per
+                _plan["chunks"] = chunks
+                _plan["prompts"] = [
+                    build_extraction_prompt(sec, reference_documents=reference_documents,
+                                            endorsements=endorsements)
+                    for sec in chunks]
+            return _plan["chunks"], _plan["prompts"]
+
+        state = {"path": None, "complete": False}
+
+        def _extract_by_section(reason):
+            """Graceful fallback: extract page-chunks and merge, instead of
+            returning an EMPTY skeleton (total loss). Accepts minor cross-page
+            context loss over losing every clause."""
+            chunks, prompts = _section_prompts()
+            print(f"[Pipeline 1] {reason} — extracting by section "
+                  f"({len(chunks)} chunk(s) of {_plan['pages_per']} page(s)).")
+            state["path"] = "sections"
+            added = 0
+            for sec, sec_prompt in zip(chunks, prompts):
+                try:
+                    raw = call_gemini(
+                        sec_prompt,
+                        label=f"Pipeline1-Section-p{sec.get('page_start')}",
+                        model=model, **_CALL1_CONFIG,
+                    )
+                    parsed_sec = parse_llm_json(raw)
+                    section_extractions.append(parsed_sec)
+                    added += 1
+                    if isinstance(parsed_sec, dict):
+                        external_references.extend(
+                            parsed_sec.get("external_references", []) or [])
+                except Exception as se:
+                    print(f"[Pipeline 1] section p{sec.get('page_start')} "
+                          f"failed: {se}")
+            # One lost chunk is a lost stretch of the contract: never stored.
+            state["complete"] = bool(chunks) and added == len(chunks)
+            return added
+
+        # Pre-flight: gate on the OUTPUT budget, not the input ceiling. This
+        # call never fails on input (a whole contract is a few thousand tokens
+        # against a 1M ceiling) — it fails because the ANSWER did not fit. The
+        # contract text is the data; the answer runs ~_STAGE1_OUTPUT_RATIO x
+        # its size and shares max_output_tokens with the thinking budget.
+        over, est, limit = would_truncate(whole_doc["text"], thinking, model=model,
+                                          ratio=_STAGE1_OUTPUT_RATIO)
+
+        # The key hashes the prompt(s) this input sends FIRST — the whole document,
+        # or the chunks when pre-flight already rules the whole document out. Both
+        # are fixed by the input; a fallback taken after a failed call is not, so
+        # it is recorded as the path rather than keyed on.
+        first_prompts = _section_prompts()[1] if over else [ext_prompt]
+        prompt_sha = hashlib.sha256(
+            "\n\x00\n".join(first_prompts).encode("utf-8")).hexdigest()
+        key = ai_cache.make_key(*ai_cache.model_scoped(
+            (_CLAUSE_EXTRACTION_KEY_VERSION, tenant_id, prompt_sha, _CALL1_CONFIG),
+            model))
+        info = {"model": model, "prompt_sha256": prompt_sha}
+
+        stored = ai_cache.get("clause_extraction", key, refresh=refresh)
+        if isinstance(stored, dict) and _extraction_has_clauses(
+                stored.get("section_extractions")):
+            n_parts = len(stored["section_extractions"])
+            print(f"[Pipeline 1] reusing the stored extraction for this exact "
+                  f"request ({n_parts} part(s)) — no model call.")
+            plog.log("CALL1", "SKIPPED",
+                     f"clauses served from cache ({stored.get('path')}, {model})",
+                     "same prompt, config, model and tenant as a complete earlier "
+                     "read — a re-ask could return a different clause set")
+            return (list(stored["section_extractions"]),
+                    list(stored.get("external_references") or []),
+                    {**info, "cache": "hit", "path": stored.get("path"),
+                     "stored": True})
+
+        if over:
+            if _extract_by_section(
+                    f"whole-doc answer ~{est} tok > output budget {limit}") == 0:
+                section_extractions.append(
+                    {"program_metadata": {}, "commercial_terms": [], "clauses": []})
+        else:
+            try:
+              with plog.stage("Call 1 extraction"):
+                raw = call_gemini(
+                    ext_prompt,
+                    label="Pipeline1-FullDocument",
+                    model=model, **_CALL1_CONFIG,
+                )
+                parsed = parse_llm_json(raw)
+                # Completeness: valid JSON can still be a SHORT answer. Calls 2
+                # and 3 detect this by checking which clause_ids came back;
+                # Stage 1 has no such roster to check against, so use density as
+                # the proxy — a contract page yielding under half a clause means
+                # the model stopped early, and a thin extraction here silently
+                # costs every downstream rule. Deliberately lenient so a
+                # genuinely sparse document doesn't trigger a pointless re-run.
+                n_cl = (len(parsed.get("clauses") or [])
+                        if isinstance(parsed, dict) else 0)
+                if n_cl < max(1, len(pages) // 2):
+                    print(f"[Pipeline 1] only {n_cl} clause(s) from {len(pages)} "
+                          f"page(s) — re-extracting by section.")
+                    _extract_by_section("whole-doc extraction looked thin")
+                else:
+                    section_extractions.append(parsed)
+                    state["path"], state["complete"] = "whole_document", True
+                    if isinstance(parsed, dict):
+                        external_references.extend(
+                            parsed.get("external_references", []) or []
+                        )
+            except Exception as exc:
+                # Oversize or a failed/truncated call → try sectioned extraction
+                # BEFORE giving up with an empty skeleton (total loss).
+                reason = ("oversize" if isinstance(exc, OversizeError)
+                          else f"full-document extraction failed: {exc}")
+                if _extract_by_section(reason) == 0:
+                    section_extractions.append({
+                        "program_metadata": {},
+                        "commercial_terms": [],
+                        "clauses": [],
+                    })
+
+        stored_now = bool(state["complete"]
+                          and _extraction_has_clauses(section_extractions))
+        if stored_now:
+            ai_cache.put("clause_extraction", key, {
+                "section_extractions": section_extractions,
+                "external_references": external_references,
+                "path": state["path"],
+            }, tenant_id=tenant_id)
+        else:
+            plog.log("CALL1", "NOT_CACHED",
+                     f"extraction via {state['path'] or 'nothing'} was incomplete",
+                     "a failed, partial or empty read is re-asked next time, "
+                     "never frozen")
+        return section_extractions, external_references, {
+            **info, "cache": "miss", "path": state["path"], "stored": stored_now,
+            **({"refresh": True} if refresh else {}),
+        }
 
     # =====================================================
     # PIPELINE 1.4 — Merge per-section extractions
@@ -4056,7 +4323,7 @@ class ValidationRuleGenerator:
         review_queue=None,
         control_register=None,
         external_references=None,
-        reference_documents=None, template_fields=None):
+        reference_documents=None, template_fields=None, extraction=None):
 
         review_queue = review_queue or []
         control_register = control_register or []
@@ -4112,6 +4379,9 @@ class ValidationRuleGenerator:
                 "template_field_names": sorted(
                     {f.get("name") for f in (template_fields or []) if f.get("name")}
                 ),
+                # How Call 1 produced these clauses ({model, prompt_sha256, cache,
+                # path, stored}) — persisted on the contract by db_persister.
+                "extraction": extraction,
 
                 "pipeline_1_summary": {
                     "clauses_extracted_count":  len(clauses_extracted),

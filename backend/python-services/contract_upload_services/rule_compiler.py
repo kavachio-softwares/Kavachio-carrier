@@ -243,6 +243,72 @@ def _empty(col: str) -> str:
 
 _CMP_OPS = {"<", "<=", ">", ">=", "=", "!=", "<>"}
 
+# The params where a comparison VALUE sits. The mapper sometimes writes a COLUMN
+# there ({"field": "Settlement Currency"} for "differs from the settlement
+# currency"), and quoting that as a literal compares every cell with the text
+# "{'field': ...}" — true on every row.
+_VALUE_SLOTS = ("value", "date")
+
+
+def _field_ref(value) -> str | None:
+    """The column a value slot names, when it holds a column reference rather
+    than a literal: a mapping with a string "field" and no "value" of its own."""
+    if (isinstance(value, dict) and "value" not in value
+            and isinstance(value.get("field"), str) and value["field"].strip()):
+        return value["field"]
+    return None
+
+
+def value_field_refs(params) -> list[str]:
+    """Every column named by a column reference in a VALUE slot of `params`, at
+    any depth (a condition, a condition list). The template catalog lists only
+    the field-typed params, so without this such a column is invisible to the
+    one-sheet check and to alias renaming even though the SQL reads it.
+
+    The row `scope` is not searched: like a scope's own columns, a column its
+    predicates compare against is pruned per sheet (_prune_scope_to_sheet), never
+    a reason the whole rule cannot compile."""
+    out: list[str] = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == "scope" and node is params:
+                    continue
+                ref = _field_ref(v) if k in _VALUE_SLOTS else None
+                if ref:
+                    if ref not in out:
+                        out.append(ref)
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(params)
+    return out
+
+
+def _cmp_columns(left: str, op: str, right: str, alias: str | None = None) -> str:
+    """Boolean SQL for `left <op> right` where BOTH sides are columns. Equality is
+    case- and space-insensitive like the literal form; ordinal ops are numeric.
+    NULL (neither true nor false) when either cell is blank, so a missing value on
+    one side can never trigger a condition, fail a target or put a row in scope.
+    `alias` qualifies both columns (the aliased enum query, see _scope_pred)."""
+    lc, rc = (f"{alias}.{_q(c)}" if alias else _q(c) for c in (left, right))
+    op = "<>" if op == "!=" else op
+    if op in ("=", "<>"):
+        return (f"(CASE WHEN TRIM({lc}) <> '' AND TRIM({rc}) <> '' "
+                f"THEN LOWER(TRIM({lc})) {op} LOWER(TRIM({rc})) END)")
+    ln, rn = numeric_expr(lc), numeric_expr(rc)
+    return f"(CASE WHEN {ln} IS NOT NULL AND {rn} IS NOT NULL THEN {ln} {op} {rn} END)"
+
+
+def _value_label(value) -> str:
+    """How a comparison value reads in a violation reason."""
+    ref = _field_ref(value)
+    return ref if ref else str(value)
+
 
 # ---------------------------------------------------------------------
 # Enum matching — normalize, then compare for EQUALITY. Normalization strips case
@@ -347,6 +413,20 @@ def _scope_pred(k, v, alias: str | None = None) -> str | None:
             forms = base + _flatten_variations(v.get("variation_values"))
             return _inlist(forms, negate=isinstance(v.get("excluded"), (list, tuple, set)))
         op = str(v.get("op", "=")).strip().lower()
+        # A COLUMN where the value belongs ({"op": "!=", "value": {"field": "Settlement
+        # Currency"}}): compare the two cells. Quoted as a literal it compared with
+        # the dict's text, and "<>" put every row in scope.
+        _dref, _vref = _field_ref(v.get("date")), _field_ref(v.get("value"))
+        if _dref or _vref:
+            cop = {"==": "=", "not": "<>"}.get(op, op)
+            if cop not in _CMP_OPS:
+                raise CompileError(f"scope on {k!r}: op {op!r} cannot compare with "
+                                   f"column {_dref or _vref!r}")
+            if _dref:
+                dl, dr = _date(k, alias), _date(_dref, alias)
+                return (f"({dl} IS NOT NULL AND {dr} IS NOT NULL AND "
+                        f"{dl} {'<>' if cop == '!=' else cop} {dr})")
+            return _cmp_columns(k, cop, _vref, alias)
         # DATE-operator scope: {"op": ">=", "date": "2024-01-15"} — a TEMPORAL
         # applicability window (e.g. "effective no later than Jan 15, 2024, use X
         # paper"). The date lives under a "date" key (not "value"), so without this
@@ -726,10 +806,11 @@ def _b_date_bound(sheet, p):
         raise CompileError(f"date_bound op must be one of {_CMP_OPS}")
     op = "<>" if op == "!=" else op
     d = _date(f)
-    lit = f"TRY_CAST({_lit(str(p['date']))} AS DATE)"
+    ref = _field_ref(p.get("date"))
+    lit = _date(ref) if ref else f"TRY_CAST({_lit(str(p['date']))} AS DATE)"
     where = _and(f"{d} IS NOT NULL AND {lit} IS NOT NULL AND NOT ({d} {op} {lit})",
                  _scope_clause(p.get("scope")))
-    return _select(sheet, f, f"{f} must be {op} {p['date']}", where, f)
+    return _select(sheet, f, f"{f} must be {op} {_value_label(p['date'])}", where, f)
 
 
 def _b_conditional_required(sheet, p):
@@ -741,9 +822,12 @@ def _b_conditional_required(sheet, p):
     if cop not in _CMP_OPS:
         raise CompileError(f"condition.op must be one of {_CMP_OPS}")
     cop = "<>" if cop == "!=" else cop
-    cond_sql = f"TRIM({_q(cf)}) {cop} {_lit(cv)}"
+    ref = _field_ref(cv)
+    cond_sql = (_cmp_columns(cf, cop, ref) if ref
+                else f"TRIM({_q(cf)}) {cop} {_lit(cv)}")
     where = f"({cond_sql}) AND {_empty(rf)}"
-    return _select(sheet, rf, f"{rf} required when {cf} {cop} {cv}", where, rf)
+    return _select(sheet, rf, f"{rf} required when {cf} {cop} {_value_label(cv)}",
+                   where, rf)
 
 
 
@@ -773,6 +857,10 @@ def _cmp_bool(field, op, value, variations=None, normalized=False) -> str:
     carrier than the IN-list can."""
     if op not in _CMP_OPS:
         raise CompileError(f"unsupported op {op!r}")
+    ref = _field_ref(value)
+    if ref:
+        # Another column, not a spelling: variations/normalization do not apply.
+        return _cmp_columns(field, op, ref)
     if op in ("=", "!=", "<>"):
         lhs = f"LOWER(TRIM({_q(field)}))"
         # variation_values may be a flat list or a {value: [spellings]} map;
@@ -832,7 +920,8 @@ def _b_conditional_value(sheet, p):
     target_ok = _cmp_bool(tf, top, tv, p.get("variation_values"), normalized=True)
     where = _and(_and(_present(cf), _present(tf)),
                  f"({cond_holds}) AND NOT ({target_ok})")
-    return _select(sheet, tf, f"when {cf} {cop} {cv}, {tf} must be {top} {tv}", where, tf)
+    return _select(sheet, tf, f"when {cf} {cop} {_value_label(cv)}, {tf} must be "
+                              f"{top} {_value_label(tv)}", where, tf)
 
 
 def _b_conditional_all(sheet, p):
@@ -852,9 +941,10 @@ def _b_conditional_all(sheet, p):
     present = _and(*[_present(c["field"]) for c in conds], _present(tf))
     target_ok = _cmp_bool(tf, top, tv, p.get("variation_values"), normalized=True)
     where = _and(present, f"({holds}) AND NOT ({target_ok})")
-    reason = ("when " + " and ".join(f"{c['field']} {c.get('op', '=')} {c.get('value')}"
-                                      for c in conds)
-              + f", {tf} must be {top} {tv}")
+    reason = ("when " + " and ".join(
+                  f"{c['field']} {c.get('op', '=')} {_value_label(c.get('value'))}"
+                  for c in conds)
+              + f", {tf} must be {top} {_value_label(tv)}")
     return _select(sheet, tf, reason, where, tf)
 
 
@@ -900,7 +990,17 @@ def _b_cross_field_math(sheet, p):
     op = p["operator"]
     if op not in ("+", "-", "*", "/"):
         raise CompileError("cross_field_math operator must be + - * /")
-    tol = float(p.get("tolerance_pct") or 0) / 100.0
+    # A formula bound WITHOUT a tolerance (a generic-library rule arrives with its
+    # operands only) gets the same default slack every derived formula is stamped
+    # with — validation_rule_generator.DEFAULT_CROSS_FIELD_TOLERANCE_PCT, mirrored
+    # through its env knob so compiling never imports the generator. Without it the
+    # band is 0% and every cent of rounding is a violation. An explicit value, 0
+    # included, is the rule's own percent band and is kept; the one-unit rounding
+    # floor below still applies on top of it.
+    tol_raw = p.get("tolerance_pct")
+    if tol_raw in (None, ""):
+        tol_raw = _os.getenv("KAVACHIO_DEFAULT_TOLERANCE_PCT", "1.0")
+    tol = float(tol_raw) / 100.0
     # Optional second band ("flag vs auto-reject"): a reported amount within
     # `tolerance_pct` of the formula is compliant; beyond `reject_pct` it is a hard
     # violation (the rule's own severity, e.g. Critical → block); the band BETWEEN
@@ -942,7 +1042,11 @@ def _b_cross_field_math(sheet, p):
     # itself is sized off the rounded expectation for the same reason.
     exp_r = _round(expected, p)
     dev = _abs_dev(nres, expected, p)
-    tol_expr = f"{repr(tol)} * ABS({exp_r})"
+    # Floor of ONE unit at that precision (a cent at 2 dp): a source system that
+    # rounds each amount on its own lands exactly one unit off the formula, and a
+    # %-band is narrower than that on small amounts (nothing at all at 0%).
+    dec = NUMERIC_MATCH_DECIMALS if p.get("decimals") is None else int(p["decimals"])
+    tol_expr = f"GREATEST({repr(tol)} * ABS({exp_r}), {repr(10.0 ** -dec)})"
     where = _and(f"{nonnull} AND {dev} > {tol_expr}",
                  _scope_clause(p.get("scope")))
     scope = p.get("scope")
@@ -1857,12 +1961,15 @@ def _prune_scope_to_sheet(params: dict, sheet: str, field_to_sheet: dict) -> dic
     if not isinstance(scope, dict) or not scope:
         return params
 
-    def _on_sheet(col) -> bool:
+    def _on_sheet(col, pred=None) -> bool:
         v = field_to_sheet.get(col)
         if v is None:
             return False
         sheets = v if isinstance(v, (list, tuple, set)) else [v]
-        return sheet in sheets
+        # …and so must a column the predicate compares against (see _scope_pred).
+        ref = (_field_ref(pred.get("value")) or _field_ref(pred.get("date"))
+               if isinstance(pred, dict) else None)
+        return sheet in sheets and (ref is None or _on_sheet(ref))
 
     pruned = {}
     for k, val in scope.items():
@@ -1871,12 +1978,12 @@ def _prune_scope_to_sheet(params: dict, sheet: str, field_to_sheet: dict) -> dic
             kept = []
             for d in members:
                 if isinstance(d, dict):
-                    dd = {kk: vv for kk, vv in d.items() if _on_sheet(kk)}
+                    dd = {kk: vv for kk, vv in d.items() if _on_sheet(kk, vv)}
                     if dd:
                         kept.append(dd)
             if kept:
                 pruned[k] = kept
-        elif _on_sheet(k):
+        elif _on_sheet(k, val):
             pruned[k] = val
     if set(pruned) == set(scope):
         return params
@@ -1886,6 +1993,22 @@ def _prune_scope_to_sheet(params: dict, sheet: str, field_to_sheet: dict) -> dic
     else:
         out.pop("scope", None)
     return out
+
+
+def _remap_value_refs(params, resolve):
+    """Copy of `params` with every value-slot column reference renamed through
+    `resolve` (see value_field_refs); remap_ir_fields covers the field params."""
+    def walk(node):
+        if isinstance(node, dict):
+            out = {}
+            for k, v in node.items():
+                ref = _field_ref(v) if k in _VALUE_SLOTS else None
+                out[k] = ({**v, "field": resolve(ref) or ref} if ref else walk(v))
+            return out
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+    return walk(params)
 
 
 def compile_ir(ir: dict, field_to_sheet: dict, default_sheet: str | None = None,
@@ -1918,6 +2041,9 @@ def compile_ir(ir: dict, field_to_sheet: dict, default_sheet: str | None = None,
     refs = spec["fields"](params)
     if not refs:
         raise CompileError("IR references no fields")
+    # A column written into a value slot is read by the SQL too, so it must be on
+    # the same sheet and follow that sheet's spelling like any other field.
+    refs = list(refs) + [r for r in value_field_refs(params) if r not in refs]
 
     aliases = aliases or {}
 
@@ -1936,8 +2062,9 @@ def compile_ir(ir: dict, field_to_sheet: dict, default_sheet: str | None = None,
         if not any(sheet in (aliases.get(f) or {}) for f in refs):
             return params
         from contract_upload_services.rule_ir import remap_ir_fields
-        local = remap_ir_fields(ir, lambda n: (aliases.get(n) or {}).get(sheet))
-        return local.get("params") or {}
+        resolve = lambda n: (aliases.get(n) or {}).get(sheet)  # noqa: E731
+        local = remap_ir_fields(ir, resolve).get("params") or {}
+        return _remap_value_refs(local, resolve)
 
     def _collapses_on(sheet) -> bool:
         """True when this sheet's aliases fold TWO OF THE RULE'S OWN fields onto

@@ -29,6 +29,18 @@ from openpyxl.cell.cell import MergedCell
 import output_template_fields as otf
 
 
+def _projected_columns(rows: list[dict]) -> list:
+    """The columns a sheet's projected rows carry — the ones the setup maps
+    (direct_lane.project_to_output writes exactly those keys). Used as the
+    measure for the summary-row test so a wide template's unmapped columns do
+    not make every row look sparse; fixed per sheet, never a row's values."""
+    seen: dict = {}
+    for r in rows or []:
+        for k in r:
+            seen.setdefault(k, None)
+    return list(seen)
+
+
 def to_validation_blocks(
     structure: dict, output_rows_by_sheet: dict[str, list[dict]]
 ) -> list[dict]:
@@ -172,13 +184,15 @@ def _render_with_template(
                     cell.value = None
 
         rows = output_rows_by_sheet.get(sheet_name, [])
+        names = [c.get("column_name") for c in cols if c.get("column_name")]
+        measure = _projected_columns(rows)
         out_row = data_start
         for row in rows:
             # A summary/totals row keeps the sample's summary style (its bold
             # is its own); a data row gets the data style. Judged from the
             # row's own values, same categories as row_classifier.
             row_is_summary = _is_non_data_row_values(
-                [row.get(c.get("column_name")) for c in cols if c.get("column_name")])
+                [row.get(n) for n in names], names, measure)
             for c in cols:
                 col_idx = c.get("column_index", 0) + 1
                 cell = ws.cell(row=out_row, column=col_idx)
@@ -272,8 +286,10 @@ def detect_summary_totals(structure: dict, projected: dict) -> dict:
             continue
         cols = [c.get("column_name") for c in (sh.get("columns") or [])
                 if c.get("column_name")]
+        measure = _projected_columns(rows)
         is_summary = [
-            _is_non_data_row_values([r.get(c) for c in cols]) for r in rows]
+            _is_non_data_row_values([r.get(c) for c in cols], cols, measure)
+            for r in rows]
         found: dict = {}
         for i, r in enumerate(rows):
             if not is_summary[i]:
@@ -493,8 +509,10 @@ def inject_summary_formulas(xlsx_bytes: bytes, structure: dict,
                         if c.get("column_name")]
             out_sections, cur = [], []
             out_summary_ris = set()
+            measure = _projected_columns(rows)     # same test as detect_summary_totals
             for ri, rrow in enumerate(rows):
-                if _is_non_data_row_values([rrow.get(c) for c in colnames]):
+                if _is_non_data_row_values([rrow.get(c) for c in colnames],
+                                           colnames, measure):
                     out_summary_ris.add(ri)
                     out_sections.append({"data": list(cur), "summary": ri})
                     cur = []

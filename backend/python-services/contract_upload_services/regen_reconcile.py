@@ -425,10 +425,19 @@ def dedupe_behavioural_twins(rules, report=None):
 
 def load_prior_rules(conn, contract_id):
     """The prior contract's persisted rules, shaped like the pipeline's rule
-    dicts so reconcile() can compare and the persister can re-insert them."""
+    dicts so reconcile() can compare and the persister can re-insert them.
+
+    The prior contract's OWN set only. A set added for another output template
+    (validation_rule.output_template_id set — see rule_scope.py) names that
+    template's columns; carried into the new version it would join the new
+    contract's own set and run against the wrong columns. No contract that has
+    not had a set added has such rules, so for all of them this is unchanged."""
     from sqlalchemy import text
+    import rule_scope
+    own_set_only = ("AND vr.output_template_id IS NULL"
+                    if rule_scope.tag_column_present(conn) else "")
     rows = conn.execute(
-        text("""
+        text(f"""
             SELECT vr.rule_id, vr.rule_engine, rcl.name AS rule_class,
                    vr.rule_name, vr.rule_description, vr.validation_stage,
                    vr.severity, vr.canonical_target, vr.rule_spec,
@@ -441,6 +450,7 @@ def load_prior_rules(conn, contract_id):
                    ON rcl.rule_class_id = vr.rule_class_id
             WHERE  vr.contract_id = :cid
               AND  vr.rule_status <> 'superseded'
+              {own_set_only}
         """),
         {"cid": contract_id},
     ).mappings().fetchall()

@@ -33,8 +33,8 @@ import datetime
 import pipeline_log as plog
 
 from contract_upload_services.gemini_service import (
-    call_gemini, DETERMINISTIC_SEED, STAGE_B_MODEL, plan_token_batches,
-    would_truncate,
+    call_gemini, DETERMINISTIC_SEED, STAGE_B_MODEL, EXTRACTION_MODEL,
+    plan_token_batches, would_truncate,
 )
 import os as _os
 import json as _json
@@ -76,6 +76,37 @@ _CALL3_RETRY_TEMP = float(os.getenv("KAVACHIO_CALL3_RETRY_TEMP", "0.4"))
 # every round fails, Call 3 can cost at most one big call plus this many retry
 # rounds — never an unbounded halving loop.
 _CALL3_FALLBACK_ROUNDS = int(os.getenv("KAVACHIO_CALL3_FALLBACK_ROUNDS", "3"))
+# Bump when the stored rule_bind payload changes shape; prompt edits need no bump
+# because the key hashes the prompt itself.
+_RULE_BIND_KEY_VERSION = "rule_bind_v2"
+
+
+def _rule_bind_key(prompt, config, model):
+    """ai_cache key for ONE contract-clause Call-3 batch.
+
+    Keyed on the prompt actually sent rather than on a list of its ingredients:
+    the prompt already carries every batch item (clause id, clause text, intent),
+    the rendered template-field block, and the forced / relaxed blocks — exactly
+    what the model reads and nothing it does not (canonical_field is deliberately
+    hidden from this prompt, and it changes run to run; keying on it would miss
+    forever). Plus the generation config and the model."""
+    import hashlib
+    import ai_cache
+    return ai_cache.make_key(*ai_cache.model_scoped(
+        (_RULE_BIND_KEY_VERSION,
+         hashlib.sha256(prompt.encode("utf-8")).hexdigest(), config),
+        model))
+
+
+def _batch_fully_answered(parsed, batch) -> bool:
+    """Every intent sent came back as a row (a declined intent is a row with
+    template null, which IS an answer). A truncated or partial batch is not."""
+    rows = parsed.get("results") if isinstance(parsed, dict) else None
+    if not isinstance(rows, list):
+        return False
+    got = {(r.get("clause_id"), r.get("intent_index"))
+           for r in rows if isinstance(r, dict)}
+    return all((it["clause_id"], it["intent_index"]) in got for it in batch)
 
 
 def _safe_parse(raw: str, label: str) -> dict | None:
@@ -405,6 +436,76 @@ def synthesize_rules_ir(clauses, classifications, template_fields=None, batch_si
 #            error_message, confidence, reason}.
 # =========================================================
 
+def _rule_bind_key_for(batch, template_fields, forced_field=None, relaxed=False,
+                       temperature=0, forced_fields=None):
+    """(key, ids) for one contract-clause batch.
+
+    The key hashes the prompt with every clause id replaced by its order in the
+    batch: ids are minted afresh each time a document is read, so a key over the
+    real ids made a re-upload of an unchanged contract miss and bind its clauses
+    anew. ``ids`` maps real id -> stand-in; rows are stored with stand-ins and a
+    hit is mapped back to this run's ids (_with_clause_ids)."""
+    ids = {}
+    for it in batch:
+        ids.setdefault(it["clause_id"], len(ids) + 1)
+    neutral = [{**it, "clause_id": ids[it["clause_id"]]} for it in batch]
+    prompt, config, _ = _bind_request(neutral, template_fields, forced_field,
+                                      relaxed=relaxed, temperature=temperature,
+                                      forced_fields=forced_fields)
+    return _rule_bind_key(prompt, config, EXTRACTION_MODEL), ids
+
+
+def _with_clause_ids(rows, ids):
+    """Copy of result rows with each clause_id translated through ``ids``; a row
+    naming a clause outside the batch is dropped (it can never be matched)."""
+    return [{**r, "clause_id": ids[r.get("clause_id")]} for r in rows
+            if isinstance(r, dict) and r.get("clause_id") in ids]
+
+
+def _bind_request(batch, template_fields, forced_field=None, relaxed=False,
+                  temperature=0, forced_fields=None):
+    """(prompt, config, is_generic) for one Call-3 batch. One builder for the batch
+    loop and for _store_bind_pass, so both address the same rule_bind entry."""
+    # A batch is generic-library-sourced when EVERY item carries a negative
+    # clause_id (see generic_rule_library._build_intents) — these calls are
+    # never mixed with contract-derived intents, so this is all-or-nothing.
+    is_generic = bool(batch) and all(it["clause_id"] < 0 for it in batch)
+    prompt = build_ir_mapping_prompt_batch(batch, template_fields, forced_field,
+                                           relaxed=relaxed,
+                                           forced_fields=forced_fields,
+                                           is_generic=is_generic)
+    config = {"temperature": temperature, "seed": DETERMINISTIC_SEED,
+              "max_output_tokens": 65536, "thinking_budget": 16384}
+    return prompt, config, is_generic
+
+
+def _store_bind_pass(items, mapped, template_fields, forced_field=None,
+                     forced_fields=None):
+    """Store a WHOLE mapping pass under its single call's rule_bind key, once every
+    intent in `items` has an answer in `mapped`.
+
+    For the pass whose one big call came back partial and whose fallback batches
+    answered the rest. The partial answer itself is never stored, so without this
+    the next run re-asked the big call, could drop a different set, and so sent
+    different fallback batches — the same clauses binding differently. Stored as
+    the rows the big call would have returned, so a hit reads like any other."""
+    if not items or any((it["clause_id"], it["intent_index"]) not in mapped
+                        for it in items):
+        return False
+    if bool(items) and all(it["clause_id"] < 0 for it in items):
+        return False            # library batches are memoized as generic_bind
+    rows = [{"clause_id": it["clause_id"], "intent_index": it["intent_index"],
+             **mapped[(it["clause_id"], it["intent_index"])]} for it in items]
+    try:
+        import ai_cache
+        key, ids = _rule_bind_key_for(items, template_fields, forced_field,
+                                      forced_fields=forced_fields)
+        ai_cache.put("rule_bind", key, _with_clause_ids(rows, ids))
+        return True
+    except Exception:
+        return False
+
+
 def _run_mapping_batches(items, template_fields, batch_size, forced_field=None,
                          relaxed=False, temperature=0, forced_fields=None):
     """Run Call-3 mapping over flattened intent `items` in batches; return
@@ -427,30 +528,56 @@ def _run_mapping_batches(items, template_fields, batch_size, forced_field=None,
     n_batches = len(batches)
     for b_num, batch in enumerate(batches, 1):
         parsed = None
-        # A batch is generic-library-sourced when EVERY item carries a negative
-        # clause_id (see generic_rule_library._build_intents) — these calls are
-        # never mixed with contract-derived intents, so this is all-or-nothing.
-        is_generic_batch = bool(batch) and all(it["clause_id"] < 0 for it in batch)
-        try:
-            raw = call_gemini(
-                build_ir_mapping_prompt_batch(batch, template_fields, forced_field,
-                                              relaxed=relaxed,
-                                              forced_fields=forced_fields,
-                                              is_generic=is_generic_batch),
-                label=f"Call3-Map{'-retry' if relaxed else ''}-{b_num}/{n_batches}",
-                temperature=temperature,
-                seed=DETERMINISTIC_SEED,
-                max_output_tokens=65536,
-                thinking_budget=16384,
-                # Everything before "USER:" is the ~49,000-char catalog + field list
-                # + instructions. Identical across all four prompt variants now that
-                # forced/relaxed/generic blocks sit at the tail.
-                cache_split="\nUSER:\n",
-            )
-            parsed = _safe_parse(raw, f"Call3-Map-{b_num}")
-        except Exception as exc:
-            print(f"[Call 3] batch {b_num}/{n_batches} failed ({exc}); "
-                  f"its intents route to review.")
+        prompt, config, is_generic_batch = _bind_request(
+            batch, template_fields, forced_field, relaxed=relaxed,
+            temperature=temperature, forced_fields=forced_fields)
+        # CACHED per contract-clause batch: the same clauses on the same template
+        # were measured binding differently run to run (temperature 0, 16k
+        # thinking), so only a stored answer makes "same rules every time" hold.
+        # Library batches are memoized one level up (generic_bind).
+        bind_key, bind_ids = None, None
+        if not is_generic_batch:
+            try:
+                import ai_cache
+                bind_key, bind_ids = _rule_bind_key_for(
+                    batch, template_fields, forced_field, relaxed=relaxed,
+                    temperature=temperature, forced_fields=forced_fields)
+                stored = ai_cache.get("rule_bind", bind_key)
+                if isinstance(stored, list):
+                    back = {v: k for k, v in bind_ids.items()}
+                    parsed = {"results": _with_clause_ids(stored, back)}
+                    plog.log("CALL3", "SKIPPED",
+                             f"batch {b_num}/{n_batches}: {len(batch)} intent(s) "
+                             f"served from cache",
+                             "identical prompt, config and model to a fully "
+                             "answered earlier batch")
+            except Exception:
+                bind_key = None
+        if parsed is None:
+            try:
+                raw = call_gemini(
+                    prompt,
+                    label=f"Call3-Map{'-retry' if relaxed else ''}-{b_num}/{n_batches}",
+                    model=EXTRACTION_MODEL,
+                    # Everything before "USER:" is the ~49,000-char catalog + field list
+                    # + instructions. Identical across all four prompt variants now that
+                    # forced/relaxed/generic blocks sit at the tail.
+                    cache_split="\nUSER:\n",
+                    **config,
+                )
+                parsed = _safe_parse(raw, f"Call3-Map-{b_num}")
+            except Exception as exc:
+                print(f"[Call 3] batch {b_num}/{n_batches} failed ({exc}); "
+                      f"its intents route to review.")
+            # Only a batch where every intent came back is stored; a failed or
+            # truncated one is re-asked next time instead of frozen.
+            if bind_key and _batch_fully_answered(parsed, batch):
+                try:
+                    import ai_cache
+                    ai_cache.put("rule_bind", bind_key,
+                                 _with_clause_ids(parsed["results"], bind_ids))
+                except Exception:
+                    pass
         if parsed:
             for r in parsed.get("results", []):
                 key = (r.get("clause_id"), r.get("intent_index"))
@@ -531,6 +658,13 @@ def _repoint_own_share_field(ir, intent, clause, template_fields):
     prefix = firsts.most_common(1)[0][0] if firsts else None
 
     chosen_core = _field_tokens(field) & set(_CORE_METRIC)
+    if not chosen_core:
+        # The chosen field names no metric this guard recognises (e.g. "percentage
+        # of total risk" — a %, not a limit/premium/fee amount), so there is no
+        # same-metric test to run below and the guard would otherwise degrade to
+        # "shortest own-share-looking column name". Leave the binding alone rather
+        # than guess a destination.
+        return ir
     candidates = []
     for f in (template_fields or []):
         nm = f.get("name") or ""
@@ -543,7 +677,7 @@ def _repoint_own_share_field(ir, intent, clause, template_fields):
             prefix is not None and nl.startswith(prefix))
         if not is_share:                            # must be an own-share col
             continue
-        if chosen_core and not (_field_tokens(nm) & chosen_core):  # same metric
+        if not (_field_tokens(nm) & chosen_core):    # same metric, always required
             continue
         candidates.append(nm)
 
@@ -886,6 +1020,10 @@ def map_intents_to_ir(clauses, intent_clfs, template_fields=None, batch_size=Non
             bad = _missing(bad)
             if not bad:
                 print(f"[Call 3] {label}: all intents recovered.")
+                # Freeze the recovered pass as the big call's answer, so the next
+                # run neither re-asks it nor re-draws the fallback batches.
+                _store_bind_pass(its, got, template_fields, forced_field,
+                                 forced_fields=forced_fields)
                 break
             if len(bad) >= before:
                 if size <= 1:

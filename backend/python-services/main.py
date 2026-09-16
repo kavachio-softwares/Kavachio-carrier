@@ -59,6 +59,8 @@ from mapper import (
     signature_multi,
 )
 import storage  # blob storage abstraction (Azure/Azurite; DB-blob fallback)
+import rule_scope  # which of a contract's rule sets belong to which template
+import validation_outcome as _vo  # what a validation run actually checked
 
 init_db()
 
@@ -1722,15 +1724,19 @@ def export_template_contract_mapping(template_id: int,
         with CanonicalSession() as cs:
             rows = cs.execute(
                 text(
-                    "SELECT rule_id, rule_engine, rule_name, rule_description, "
+                    "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                     "severity, canonical_target, rule_spec, error_message, "
-                    "source_verbatim_text, generation_confidence "
+                    f"source_verbatim_text, generation_confidence, {rule_scope.tag_select(cs)} "
                     "FROM validation_rule "
                     "WHERE contract_id = :cid AND rule_status != 'disabled' "
                     "ORDER BY severity, rule_name"
                 ),
                 {"cid": contract_id},
             ).mappings().all()
+            # The rules a setup on THIS template runs — a set added to the
+            # contract for another template is not this template's (rule_scope.py).
+            rows = rule_scope.filter_rules(cs, [dict(r) for r in rows],
+                                           setup_template_id=template_id)
 
             import json as _json
 
@@ -1797,14 +1803,16 @@ def export_template_build_rules(template_id: int,
     with CanonicalSession() as cs:
         rule_rows = cs.execute(
             text(
-                "SELECT rule_id, rule_engine, rule_name, rule_description, "
-                "severity, canonical_target, rule_spec, error_message "
+                "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
+                "severity, canonical_target, rule_spec, error_message, "
+                f"{rule_scope.tag_select(cs)} "
                 "FROM validation_rule "
                 "WHERE contract_id = :cid AND rule_status != 'disabled'"
             ),
             {"cid": active.id},
         ).mappings().all()
-        rules = [dict(r) for r in rule_rows]
+        rules = rule_scope.filter_rules(cs, [dict(r) for r in rule_rows],
+                                        setup_template_id=template_id)
 
     # Empty records per sheet + full column set from the template, so SQL can be
     # compiled and dry-run without any BDX data.
@@ -3249,15 +3257,16 @@ def export_validate(
     with CanonicalSession() as cs:
         rule_rows = cs.execute(
             text(
-                "SELECT rule_id, rule_engine, rule_name, rule_description, "
+                "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                 "severity, canonical_target, rule_spec, error_message, "
-                "source_verbatim_text, source_page_number "
+                f"source_verbatim_text, source_page_number, {rule_scope.tag_select(cs)} "
                 "FROM validation_rule "
                 "WHERE contract_id = :cid AND rule_status != 'disabled'"
             ),
             {"cid": active_contract_id},
         ).mappings().all()
-        contract_validation_rules = [dict(r) for r in rule_rows]
+        contract_validation_rules = rule_scope.filter_rules(
+            cs, [dict(r) for r in rule_rows], setup_template_id=template_id)
 
     if not contract_validation_rules:
         return empty
@@ -3276,6 +3285,7 @@ def export_validate(
 
     exceptions: list[dict] = []
     unprocessable: list[dict] = []
+    _dv, dv_error = None, None
     try:
         from duckdb_validation import run_validation as _duck_validate
         _dv = _duck_validate(
@@ -3284,6 +3294,10 @@ def export_validate(
             contract=tgt["active_contract_info"],
             template_id=template_id,
             schema_cols=schema_cols,
+            # A rule on a column this template never resolves is not checked,
+            # rather than run on empty cells (validation_outcome).
+            filled_cols=_vo.filled_cols_from_structure(structure),
+            inactive_cols=_vo.inactive_cols(structure),
         )
         exceptions = _dv["exceptions"]
         unprocessable = _dv["unprocessable"]
@@ -3292,7 +3306,14 @@ def export_validate(
         import traceback as _tb
         _tb.print_exc()
         print(f"[DuckDB validate-only] ERROR — skipped: {dv_exc}")
-        return empty
+        dv_error = dv_exc
+
+    # A crash, or rows that never reached a rule, is NOT "no exceptions": say so
+    # in the popup (and persist nothing for it — there is no row to attach to).
+    status, status_reason = _vo.outcome(
+        input_rows=0, projected_rows=sum(len(b.get("records") or []) for b in records),
+        error=dv_error, stats=(_dv or {}).get("stats"), exceptions=exceptions)
+    notice = [_vo.not_validated_entry(status_reason)] if status == _vo.NOT_VALIDATED else []
 
     # Shape each DuckDB exception into the frontend popup's CustomViolation.
     violations = [
@@ -3313,7 +3334,7 @@ def export_validate(
             "affectedRecords": None,
             "violationDetail": None,
         }
-        for e in exceptions
+        for e in notice + exceptions
     ]
     critical = sum(1 for v in violations if v["severity"] == "critical")
     warning = sum(1 for v in violations if v["severity"] in ("warning", "warn"))
@@ -3409,6 +3430,11 @@ def export_validate(
         "warning": warning,
         "violations": violations,
         "unprocessable_rules": unprocessable,
+        "status": status,
+        "status_reason": status_reason,
+        "rows_total": ((_dv or {}).get("stats") or {}).get("rows_total"),
+        "rows_validated": ((_dv or {}).get("stats") or {}).get("rows_validated"),
+        "rows_excluded": ((_dv or {}).get("stats") or {}).get("rows_excluded"),
     }
 
 
@@ -3491,15 +3517,16 @@ def export_generate(
         with CanonicalSession() as cs:
             rule_rows = cs.execute(
                 text(
-                    "SELECT rule_id, rule_engine, rule_name, rule_description, "
+                    "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                     "severity, canonical_target, rule_spec, error_message, "
-                    "source_verbatim_text, source_page_number "
+                    f"source_verbatim_text, source_page_number, {rule_scope.tag_select(cs)} "
                     "FROM validation_rule "
                     "WHERE contract_id = :cid AND rule_status != 'disabled'"
                 ),
                 {"cid": active_contract_id},
             ).mappings().all()
-            contract_validation_rules = [dict(r) for r in rule_rows]
+            contract_validation_rules = rule_scope.filter_rules(
+                cs, [dict(r) for r in rule_rows], setup_template_id=template_id)
 
     with CanonicalSession() as cs:
         policies = fetch_policies(cs, ids)
@@ -3552,6 +3579,7 @@ def export_generate(
         for sh in (structure.get("sheets") or [])
     }
     unprocessable: list[dict] = []
+    _dv, dv_error = None, None
     try:
         from duckdb_validation import run_validation as _duck_validate
         _dv = _duck_validate(
@@ -3560,21 +3588,42 @@ def export_generate(
             contract=active_contract_info,
             template_id=template_id,
             schema_cols=schema_cols,
+            # A rule on a column this template never resolves is not checked,
+            # rather than run on empty cells (validation_outcome).
+            filled_cols=_vo.filled_cols_from_structure(structure),
+            inactive_cols=_vo.inactive_cols(structure),
         )
         exceptions = _dv["exceptions"]
         unprocessable = _dv["unprocessable"]
+        print(f"[DuckDB validation] {_dv['stats']}")
+    except Exception as dv_exc:
+        # Never let validation failure block the export — but never store the
+        # file as clean either: the outcome below marks it not validated.
+        import traceback as _tb
+        _tb.print_exc()
+        print(f"[DuckDB validation] ERROR — skipped: {dv_exc}")
+        exceptions = []
+        dv_error = dv_exc
+    if _dv is not None:
         # Label each row-level exception with the offending policy's number (the
         # compiled SQL for value-set/range rules doesn't emit one), so the review
-        # UI shows a real policy id instead of "Dataset-level".
-        from duckdb_validation import label_exceptions_with_policy
-        label_exceptions_with_policy(exceptions, structure, records)
-        print(f"[DuckDB validation] {_dv['stats']}")
+        # UI shows a real policy id instead of "Dataset-level". Cosmetic, so a
+        # failure here keeps the findings.
+        try:
+            from duckdb_validation import label_exceptions_with_policy
+            label_exceptions_with_policy(exceptions, structure, records)
+        except Exception as _lx:
+            print(f"[DuckDB validation] policy labelling skipped: {_lx}")
         # A rule reaches `unprocessable` here only when its created query is
         # missing or FAILS TO RUN against the data — i.e. a clause that was
         # supposed to validate but didn't. Surface each one as a highlighted
         # "not validated" notice so the user knows the clause did not work
-        # (rather than silently assuming it passed).
+        # (rather than silently assuming it passed). A rule skipped only because
+        # the template leaves its column empty is not a clause that failed — it
+        # joins the one grouped, uncounted "not checked" entry instead.
         for u in unprocessable:
+            if u.get("kind") == "not_filled":
+                continue
             exceptions.append({
                 "severity": "warning",
                 "code": u.get("rule_name") or "not_validated",
@@ -3585,12 +3634,20 @@ def export_generate(
                 "message": f"This clause was NOT validated: {u.get('message')}",
                 "error_class": "not_validated",
             })
-    except Exception as dv_exc:
-        # Never let validation failure block the export.
-        import traceback as _tb
-        _tb.print_exc()
-        print(f"[DuckDB validation] ERROR — skipped: {dv_exc}")
-        exceptions = []
+
+    status, status_reason = _vo.outcome(
+        input_rows=0, projected_rows=sum(len(b.get("records") or []) for b in records),
+        error=dv_error, stats=(_dv or {}).get("stats"), exceptions=exceptions)
+    if status == _vo.NOT_VALIDATED:
+        exceptions.insert(0, _vo.not_validated_entry(status_reason))
+    _not_checked = _vo.not_checked_entry(
+        [u for u in unprocessable if u.get("kind") == "not_filled"],
+        (_dv or {}).get("partially_checked"))
+    if _not_checked:
+        exceptions.append(_not_checked)
+    counted = _vo.countable(exceptions)
+    # Only an entry with a row can be painted onto a cell.
+    cell_exceptions = [e for e in counted if e.get("row") is not None]
 
     from output_serializers import (
         serialize as _serialize_output, output_extension as _output_ext,
@@ -3605,9 +3662,9 @@ def export_generate(
         # are visible in the downloaded file. No-op (and never raises) when clean.
         # (Cell highlighting is Excel-only; CSV/XML/JSON carry exceptions in the
         # OutputExport record instead.)
-        if exceptions:
+        if cell_exceptions:
             from exporter import highlight_exceptions
-            output_bytes = highlight_exceptions(output_bytes, structure, exceptions)
+            output_bytes = highlight_exceptions(output_bytes, structure, cell_exceptions)
     else:
         output_bytes = _serialize_output(
             _sheets_from_blocks(structure, records), output_format)
@@ -3623,15 +3680,15 @@ def export_generate(
         content_type=_ct_for(fname),
     )
 
-    sev_crit, sev_warn, sev_info = exception_severity_counts(exceptions)
+    sev_crit, sev_warn, sev_info = exception_severity_counts(counted)
     with SessionLocal() as s:
         rec = OutputExport(
             tenant_id=template_tid, template_id=template_id, template_name=template_name,
             filename=fname, source_upload_id=upload_id, policy_ids=ids,
             generated_by=actor, policy_count=len(policies),
-            exception_count=len(exceptions), exceptions=exceptions,
+            exception_count=len(counted), exceptions=exceptions,
             critical_count=sev_crit, warning_count=sev_warn, info_count=sev_info,
-            status="has_exceptions" if exceptions else "clean",
+            status=status,
             blob=export_blob_bytes,
             blob_ref=export_blob_ref,
         )
@@ -3640,12 +3697,15 @@ def export_generate(
             tenant_id=template_tid, actor=actor, action="output_generated",
             target=f"export:{template_name}",
             details={"filename": fname, "policies": len(policies),
-                     "exceptions": len(exceptions)},
+                     "exceptions": len(counted), "status": status},
         ))
         s.commit()
         s.refresh(rec)
         out = _export_to_dict(rec, with_exceptions=True, mga=_tenant_name(s, rec.tenant_id))
         out["unprocessable_rules"] = unprocessable
+        out["status_reason"] = status_reason
+        for _k in ("rows_total", "rows_validated", "rows_excluded"):
+            out[_k] = ((_dv or {}).get("stats") or {}).get(_k)
         return out
 
 

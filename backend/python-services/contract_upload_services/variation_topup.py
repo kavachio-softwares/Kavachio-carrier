@@ -285,7 +285,12 @@ def prefill_variation_topups(synth_outputs, *, ai=None, minimum=None):
     # a list of [field, value, spellings] rows and rebuilt on read.
     try:
         import ai_cache
-        _key = ai_cache.make_key("var_topup_v1", requests, minimum)
+        from contract_upload_services.gemini_service import (
+            EXTRACTION_MODEL, LEGACY_CACHE_MODEL)
+        # `ai` defaults to call_gemini on the extraction model; the model joins the
+        # key only once it differs from the one today's entries were stored under.
+        _key = ai_cache.make_key(*ai_cache.model_scoped(
+            ("var_topup_v1", requests, minimum), EXTRACTION_MODEL, LEGACY_CACHE_MODEL))
         _hit = ai_cache.get("var_topup", _key)
     except Exception:
         _key, _hit = None, None

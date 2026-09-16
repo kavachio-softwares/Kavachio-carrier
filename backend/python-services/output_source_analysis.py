@@ -164,13 +164,20 @@ def _verdict(row: dict, d) -> dict:
 def cross_reference(fields: list[dict], input_cols: list[str],
                     samples: dict[str, list], *,
                     threshold: Optional[float] = None,
-                    use_model: bool = True) -> list[dict]:
+                    use_model: bool = True,
+                    tenant_id: Any = None,
+                    refresh: bool = False) -> list[dict]:
     """Answer, for every proposed field, "can the incoming file fill this?".
 
     Returns a NEW list — the inputs are not mutated — each entry the original
     field plus the mapping verdict. When there is no input file the verdict is
     simply "not checked", which is honest and leaves the standard's own
     mandatory flags doing all the deciding.
+
+    A field the model was asked about and never answered (the call failed, or
+    the reply left it out) is marked ``ai_unanswered``: that is "not checked"
+    too, never "the file does not carry it". `tenant_id` scopes the cached
+    model answers; `refresh` asks the model afresh instead of reusing them.
     """
     named = [f for f in (fields or []) if str(f.get("field") or "").strip()]
     if not input_cols:
@@ -193,13 +200,27 @@ def cross_reference(fields: list[dict], input_cols: list[str],
     # matched at run time were matched by the same reasoning.
     open_names = [r["field"] for r in out if not r["in_input"]]
     if use_model and open_names:
+        report: dict = {}
         try:
             from direct_mapper import model_column_candidates
-            proposals = model_column_candidates(open_names, cols, samples) or {}
+            proposals = model_column_candidates(open_names, cols, samples,
+                                                report=report,
+                                                tenant_id=tenant_id,
+                                                refresh=refresh) or {}
         except Exception as e:  # noqa: BLE001 — the deterministic answer stands
             log.warning("semantic candidates unavailable: %s", e)
             proposals = {}
+            report = {"status": "failed", "answered": []}
+        answered = set(report.get("answered") or [])
+        if report.get("status") in ("partial", "failed"):
+            log.warning("semantic candidates: AI %s — %d of %d field(s) not checked",
+                        report.get("status"), len(set(open_names) - answered),
+                        len(set(open_names)))
         for i, r in enumerate(out):
+            if r["in_input"]:
+                continue
+            if r["field"] not in answered:
+                out[i]["ai_unanswered"] = True
             proposal = proposals.get(r["field"])
             if not proposal:
                 continue
@@ -214,7 +235,8 @@ def cross_reference(fields: list[dict], input_cols: list[str],
 
 def fold_contract_fields(library: list[dict], contract_fields: list[dict], *,
                         use_model: bool = True,
-                        threshold: Optional[float] = None
+                        threshold: Optional[float] = None,
+                        tenant_id: Any = None, refresh: bool = False
                         ) -> tuple[list[dict], dict[str, dict]]:
     """Sort the contract's field list into "already published" and "new".
 
@@ -246,16 +268,72 @@ def fold_contract_fields(library: list[dict], contract_fields: list[dict], *,
     if not names:
         return rows, {}
     decided = cross_reference(rows, names, {}, threshold=threshold,
-                              use_model=use_model)
+                              use_model=use_model, tenant_id=tenant_id,
+                              refresh=refresh)
     extras: list[dict] = []
     folded: dict[str, dict] = {}
     for src, d in zip(rows, decided):
         hit = d.get("input_column") if d.get("in_input") else None
         if hit:
             folded.setdefault(str(hit).strip().lower(), src)
+        elif d.get("ai_unanswered"):
+            # Unanswered is not "no published column covers it": kept as its
+            # own column (the safe side, per above), and said so, so a person
+            # can look for a twin.
+            extras.append(dict(src, merge_unchecked=True))
         else:
             extras.append(src)
     return extras, folded
+
+
+def merge_fields(library: list[dict], contract_fields: list[dict],
+                 folded: Optional[dict[str, dict]] = None) -> list[dict]:
+    """Standard library + contract-specific, standard first, no duplicates.
+
+    `folded` comes from ``fold_contract_fields``: a contract requirement
+    that turned out to BE one of the published columns, keyed by that column's
+    name. It is stamped onto the standard's own row rather than added beside
+    it, so a field the contract merely worded differently ends up as one column
+    that the contract is on record as asking for.
+    """
+    folded = folded or {}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for f in library or []:
+        key = str(f.get("field", "")).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        row = {"field": f["field"], "required": bool(f.get("required")),
+               "source_field": None, "data_type": "string",
+               "origin": "standard",
+               "requirement": f.get("requirement"),
+               "reason": f.get("comments") or None}
+        c = folded.get(key)
+        if c:
+            row["also_in_contract"] = True
+            row["contract_reference"] = c.get("contract_reference")
+            if c.get("required"):
+                row["contract_required"] = True
+        out.append(row)
+    for f in contract_fields or []:
+        name = str(f.get("field") or f.get("display_name") or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        out.append({"field": name, "required": bool(f.get("required")),
+                    "source_field": f.get("source_field"),
+                    "data_type": f.get("data_type") or "string",
+                    "origin": f.get("origin") or "contract",
+                    "category": f.get("category"),
+                    # Kept so the review table can say WHY a field is there —
+                    # dropped before, which left the user with a bare list.
+                    "reason": f.get("reason"),
+                    "contract_reference": f.get("contract_reference"),
+                    # Carried so ``recommend`` can say a twin was never ruled out.
+                    **({"merge_unchecked": True} if f.get("merge_unchecked") else {})})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +375,13 @@ def recommend(fields: list[dict], *, checked_input: bool) -> list[dict]:
             reasons.append("your bordereau carries it")
         elif f.get("likely_in_input") and f.get("best_candidate"):
             reasons.append("your bordereau probably carries it")
+        elif checked_input and f.get("ai_unanswered"):
+            # Not checked is not absent: unticking a column nobody looked for
+            # is the costlier mistake (see include_confidence).
+            reasons.append("the AI did not answer for this column — check it manually")
+        if f.get("merge_unchecked"):
+            reasons.append("the AI did not answer whether a published column "
+                           "already covers it — check for a duplicate")
         f["recommended"] = bool(reasons)
         if reasons:
             f["recommend_reason"] = "; ".join(reasons)
@@ -329,6 +414,8 @@ def summarise(fields: list[dict], *, checked_input: bool) -> dict:
                              if str(f.get("origin") or "") in CONTRACT_ORIGINS),
         "matched_input": sum(1 for f in fields if f.get("in_input")),
         "likely_input": sum(1 for f in fields if f.get("likely_in_input")),
+        # Kept because the AI never answered for them, not because of a match.
+        "ai_unanswered": sum(1 for f in fields if f.get("ai_unanswered")),
         # Kept, mandatory, and nothing in the file can fill it. This is the
         # plan's unresolved-required report (section 10) asked one step earlier
         # — while the template can still be changed instead of the run failing.

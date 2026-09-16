@@ -32,7 +32,7 @@ class ContractExtractionService:
     def process_contract(self, file_path, output_dir=None, template_fields=None,
                          halt_on_external_references=False, resume_token=None,
                          reference_documents=None, tenant_id=None,
-                         endorsements=None):
+                         endorsements=None, refresh_extraction=False):
         """Extract contract data and generate validation rules.
 
         Args:
@@ -51,8 +51,10 @@ class ContractExtractionService:
                 {"halted_for_references": True, "external_references": [...],
                 "resume_token": ...} dict so the UI can prompt the user.
             resume_token: When set, resume a previously halted run from its cached
-                extraction — skips both the document parse and the extraction LLM
-                call (used by "Continue Anyway").
+                extraction — skips the extraction LLM call (used by "Continue
+                Anyway"). The re-sent file is still parsed, for page assignment.
+            refresh_extraction: Re-read the document with the model even when
+                this exact request already has a stored clause extraction.
             endorsements: Documents that AMEND this contract and are in force
                 alongside it, as [{"name", "text", "effective_from"}]. Deliberately
                 NOT folded into reference_documents: a reference resolves a clause
@@ -71,8 +73,21 @@ class ContractExtractionService:
         # -------------------------------------------------
 
         if resume_token:
-            print("\n[Process] RESUME — using cached extraction; skipping document parse.")
+            # The file is re-sent on "Continue Anyway", so parse it anyway: page
+            # assignment needs the real pages even when the resume token supplies
+            # the model's answer, and a token lost to a restart or another worker
+            # must rebuild the halted run's exact request (which the
+            # clause_extraction cache then answers) — never a prompt of empty text.
+            print("\n[Process] RESUME — re-parsing the re-sent file; the halted "
+                  "run's extraction is reused.")
             extracted_data = {"pages": []}
+            if file_path and os.path.isfile(file_path) and os.path.getsize(file_path):
+                try:
+                    with plog.stage("PDF parse (no AI)"):
+                        extracted_data = extract_document_data(file_path)
+                except Exception as exc:
+                    print(f"[Process] resume re-parse failed ({exc}); "
+                          f"continuing from the resume token alone.")
         else:
             print("\nExtracting document data...")
             # PDF parse + OCR. No model call — worth timing precisely because it is
@@ -103,6 +118,7 @@ class ContractExtractionService:
                 reference_documents=reference_documents,
                 tenant_id=tenant_id,
                 endorsements=endorsements,
+                refresh_extraction=refresh_extraction,
             )
         )
 

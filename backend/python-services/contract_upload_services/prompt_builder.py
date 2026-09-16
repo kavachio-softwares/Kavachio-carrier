@@ -764,7 +764,16 @@ def _coerce_number(value):
         return None
 
 
-def infer_value_kind(name: str, samples: list) -> str:
+# Declared template data types (lower-cased) the no-sample fallback trusts. A
+# "string" is absent on purpose: it is what an untyped column gets, amounts included.
+_DECLARED_DATE_TYPES = {"date", "datetime", "timestamp"}
+_DECLARED_PERCENT_TYPES = {"percent", "percentage"}
+_DECLARED_MONEY_TYPES = {"currency", "money", "amount"}
+_DECLARED_DECIMAL_TYPES = {"decimal", "number", "numeric", "float", "double"}
+_DECLARED_INTEGER_TYPES = {"int", "integer"}
+
+
+def infer_value_kind(name: str, samples: list, data_type=None) -> str:
     """Deterministically classify a column's VALUE KIND from its name + sample
     values, so the mapper can pick a field whose kind matches the intent's value
     (a money cap → money column, a percentage → percent column, etc.).
@@ -773,6 +782,11 @@ def infer_value_kind(name: str, samples: list) -> str:
     'date', 'text/code'. This is generic — it keys off symbols ($, %), numeric
     SCALE drawn from the samples, and the word 'date' in the name — never off any
     specific column name, so it stays correct for any template.
+
+    `data_type` (the template's declared type, when it has one) is read ONLY when
+    the column has no usable samples: a standard template built from a spec has
+    types but no data, and without it every such amount column fell to
+    'text/code', so limit clauses could not bind to their own limit columns.
     """
     nm = (name or "").lower()
     nums = [n for n in (_coerce_number(s) for s in (samples or [])) if n is not None]
@@ -783,6 +797,29 @@ def infer_value_kind(name: str, samples: list) -> str:
     # so sample values can't be trusted to look like dates.
     if any(w in nm for w in ("date", " dt", "inception", "expiry", "expiration")):
         return "date"
+
+    has_samples = any(str(s).strip() and str(s).strip().lower() not in ("nan", "none")
+                      for s in (samples or []) if s is not None)
+    if not has_samples:
+        declared = str(data_type or "").strip().lower()
+        if declared in _DECLARED_DATE_TYPES:
+            return "date"
+        if declared in _DECLARED_PERCENT_TYPES:
+            return "percentage (0–100)"
+        if declared in _DECLARED_MONEY_TYPES:
+            return "money"
+        if declared in _DECLARED_DECIMAL_TYPES:
+            # No scale to read: the name's % marks a rate, a rate-like word a plain
+            # number (exchange rate, multiplier), otherwise a declared decimal in
+            # a bordereau is an amount (premium, limit, fee, tax).
+            if has_pct:
+                return "percentage (0–100)"
+            if re.search(r"\b(rate|ratio|multiplier|factor|exchange|roe)\b",
+                         re.sub(r"[_\W]+|(?<=[a-z])(?=[A-Z])", " ", name or "").lower()):
+                return "number"
+            return "money"
+        if declared in _DECLARED_INTEGER_TYPES:
+            return "money" if has_money else "number"
 
     if nums:
         # Sample SCALE dominates the name: "100% policy Limit" holds millions, so
@@ -830,6 +867,10 @@ def dedup_template_fields(template_fields: list[dict]) -> list[dict]:
                 "required": f.get("required"),
             }
             merged[name] = cur
+        # Declared type rides along (only when some copy has one) so the deduped
+        # prompt block can still judge a sample-less column's kind.
+        if not cur.get("data_type") and f.get("data_type"):
+            cur["data_type"] = f.get("data_type")
         sh = f.get("sheet", "")
         if sh and sh not in cur["sheets"]:
             cur["sheets"].append(sh)
@@ -866,7 +907,7 @@ def _template_fields_block(template_fields: list[dict]) -> str:
         sheet = f.get("sheet", "")
         name  = f.get("name", "")
         samples = f.get("samples", [])
-        kind = infer_value_kind(name, samples)
+        kind = infer_value_kind(name, samples, f.get("data_type"))
         sample_str = f", samples: {samples[:3]}" if samples else ""
         # The column's internal data-model tag (canonical_field) is deliberately
         # NOT shown. Rule mapping keys off the RENDERED OUTPUT template — name,

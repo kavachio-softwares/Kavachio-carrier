@@ -354,9 +354,10 @@ def _existing_template_field_keys(synth_outputs):
 # validation_rule_generator) and the generic library overlap by construction:
 # both emit a baseline check per column, phrased differently ("Insured Zip Code
 # must be a valid postal code for Insured State" vs "Insured ZIP Code Must Be
-# Valid"). When both land on the SAME column the reviewer sees two
-# near-identical rules. The library rule wins: it is the tenant-editable,
-# business-facing catalogue entry.
+# Valid"). When both run the SAME check (template) on the SAME columns the
+# reviewer sees two near-identical rules. The library rule wins: it is the
+# tenant-editable, business-facing catalogue entry. A DIFFERENT check on the same
+# column is not a duplicate and both ship.
 #
 # NOTHING here is template-specific: the derived rules are generated from
 # whatever columns the template happens to have, so the set of templates/params
@@ -404,22 +405,42 @@ def _carry_dispatch_params(derived_ir, generic_irs) -> int:
     return moved
 
 
+def _same_check_key(ir):
+    """(template, validated column, other columns) — two rules are the same check
+    only when all three agree. A column alone is not enough: a library
+    pattern_check on a ZIP column only tests the value's shape, while a derived
+    zip_state_consistency on it also tests the ZIP against the row's state, so
+    the shape check must not displace it. The dispatch params are left out of the
+    column set because the library rule cannot carry them (they are moved onto
+    it instead — see _carry_dispatch_params)."""
+    from contract_upload_services.rule_ir import field_refs
+    col = _primary_column(ir)
+    if not col or not ir.get("template"):
+        return None
+    params = {k: v for k, v in (ir.get("params") or {}).items()
+              if k not in _DISPATCH_PARAMS}
+    refs = field_refs({"template": ir["template"], "params": params})
+    others = frozenset(r.strip().lower() for r in refs[1:] if isinstance(r, str))
+    return ir["template"], col, others - {col}
+
+
 def drop_derived_duplicates(synth_outputs, generic_entries):
-    """Remove auto-derived data-quality candidates whose validated column a
-    generic library rule also validates — so only the generic rule ships.
+    """Remove auto-derived data-quality candidates that a generic library rule
+    duplicates — same template on the same columns — so only the generic rule
+    ships. A different check on the same column keeps both.
 
     Mutates `synth_outputs` in place (entries emptied of all candidates are
     removed) and returns the number of derived candidates dropped. Only entries
     whose clause text starts with "[Derived rule]" are eligible — contract
     clauses and "[Derived formula]" arithmetic are never touched.
     """
-    generic_by_col = {}
+    generic_by_check = {}
     for entry in (generic_entries or []):
         for ir in (entry.get("candidates") or []):
-            col = _primary_column(ir)
-            if col:
-                generic_by_col.setdefault(col, []).append(ir)
-    if not generic_by_col:
+            key = _same_check_key(ir)
+            if key:
+                generic_by_check.setdefault(key, []).append(ir)
+    if not generic_by_check:
         return 0
 
     dropped = carried = 0
@@ -429,7 +450,7 @@ def drop_derived_duplicates(synth_outputs, generic_entries):
             continue
         keep = []
         for ir in (entry.get("candidates") or []):
-            twins = generic_by_col.get(_primary_column(ir))
+            twins = generic_by_check.get(_same_check_key(ir))
             if twins:
                 dropped += 1
                 carried += _carry_dispatch_params(ir, twins)
@@ -441,7 +462,7 @@ def drop_derived_duplicates(synth_outputs, generic_entries):
             synth_outputs.remove(entry)
     if dropped:
         print(f"[Generic] dropped {dropped} derived data-quality rule(s) already "
-              f"covered by a library rule on the same column (library wins"
+              f"covered by the same library check on the same column(s) (library wins"
               + (f"; carried {carried} reference-dispatch param(s) onto the "
                  f"surviving rule)." if carried else ")."))
     return dropped

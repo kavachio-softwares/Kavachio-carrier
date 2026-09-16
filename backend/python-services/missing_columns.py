@@ -36,6 +36,7 @@ from db import (
     Pipeline, PipelineContract, SessionLocal,
 )
 from exporter import is_reference_sheet
+import rule_scope
 
 log = logging.getLogger("bdx.missing_columns")
 
@@ -56,10 +57,9 @@ _MAX_FINDINGS = int(os.getenv("KAVACHIO_MISSING_COLS_MAX_FINDINGS", "25"))
 # JSON ends mid-string and the whole response is unusable), so this is sized well
 # above _MAX_FINDINGS × a full-length entry, and the schema + prompt below cap
 # entry length from the other side. Bigger is not better: every token is latency.
-_MAX_OUTPUT_TOKENS = int(os.getenv("KAVACHIO_MISSING_COLS_MAX_TOKENS", "6144"))
-# Per-entry prose limits, enforced in the schema AND asked for in the prompt.
-_MAX_REASON_CHARS = 160
-_MAX_QUOTE_CHARS = 180
+# 6144 was measured too small on a Lloyd's-width template (the answer hit
+# MAX_TOKENS every time, so the check never completed there).
+_MAX_OUTPUT_TOKENS = int(os.getenv("KAVACHIO_MISSING_COLS_MAX_TOKENS", "16384"))
 _SEED = int(os.getenv("KAVACHIO_LLM_SEED", "7"))
 
 # Clause types that actually describe WHAT MUST BE REPORTED get priority in the
@@ -77,25 +77,25 @@ _GENERIC_RULE_TEXT = re.compile(r"^\s*\[\s*generic\s+rule\s*\]", re.I)
 
 _SEVERITIES = ("required", "recommended")
 
-# The API enforces this shape, so the answer can't drift. The length caps are
-# what keep the response inside _MAX_OUTPUT_TOKENS — a truncated response is
-# unparseable JSON, i.e. a good answer thrown away.
+# The API enforces this shape, so the answer can't drift. No maxItems/maxLength:
+# with them the API rejects the schema outright ("too many states for serving")
+# and every call silently fell back to unstructured JSON. Entry length is asked
+# for in the prompt and capped again in _parse; the count is capped there too.
 _RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
         "missing_columns": {
             "type": "array",
-            "maxItems": _MAX_FINDINGS,
             "items": {
                 "type": "object",
                 "properties": {
-                    "column_name": {"type": "string", "maxLength": 80},
+                    "column_name": {"type": "string"},
                     "severity": {"type": "string", "enum": list(_SEVERITIES)},
-                    "reason": {"type": "string", "maxLength": _MAX_REASON_CHARS},
-                    "contract_reference": {"type": "string", "maxLength": _MAX_QUOTE_CHARS},
-                    "clause_id": {"type": "string", "maxLength": 8},
-                    "related_output_field": {"type": "string", "maxLength": 120},
-                    "sheet": {"type": "string", "maxLength": 120},
+                    "reason": {"type": "string"},
+                    "contract_reference": {"type": "string"},
+                    "clause_id": {"type": "string"},
+                    "related_output_field": {"type": "string"},
+                    "sheet": {"type": "string"},
                 },
                 "required": ["column_name", "severity", "reason"],
             },
@@ -202,7 +202,8 @@ def _unsourced_output_columns(fmt: Optional[DirectFormat],
     return out
 
 
-def _contract_evidence(s, contract_ids: list[int]) -> dict[str, list[dict]]:
+def _contract_evidence(s, contract_ids: list[int],
+                       pipe: Optional[Pipeline] = None) -> dict[str, list[dict]]:
     """What the contract says about what a bordereau must report — read from the
     extraction output, never from the PDF. Returns two DIFFERENT kinds of thing,
     and the difference is what makes a citation trustworthy:
@@ -264,11 +265,19 @@ def _contract_evidence(s, contract_ids: list[int]) -> dict[str, list[dict]]:
 
     try:
         rows = s.execute(
-            _q("SELECT rule_name, canonical_target, source_verbatim_text, "
-               "source_page_number FROM validation_rule "
+            _q("SELECT rule_id, contract_id, rule_name, canonical_target, "
+               "source_verbatim_text, source_page_number, "
+               f"{rule_scope.tag_select(s)} FROM validation_rule "
                "WHERE contract_id IN :cids AND rule_status <> 'disabled' "
                "ORDER BY rule_id"),
             {"cids": contract_ids}).mappings().all()
+        if pipe is not None:
+            # The setup's own rules only: a set added for another template
+            # governs that template's columns, not this bordereau's.
+            rows = rule_scope.filter_rules(
+                s, [dict(r) for r in rows],
+                setup_template_id=pipe.output_template_id,
+                scope=rule_scope.pipeline_scope(s, pipe.id))
         for r in rows[:_MAX_RULES]:
             target = r.get("canonical_target")
             if isinstance(target, str):
@@ -725,9 +734,8 @@ def _clean_findings(items: list[dict], bdx_cols: dict[str, list[str]],
         sev = str(item.get("severity") or "").strip().lower()
         related = str(item.get("related_output_field") or "").strip()
         sheet = str(item.get("sheet") or "").strip()
-        # Generous vs. the schema's own maxLength on purpose: call_gemini falls
-        # back to a schema-less call if the API rejects the schema, and then
-        # nothing but this caps what gets stored.
+        # The schema carries no length caps (see _RESPONSE_SCHEMA), so this is
+        # what caps what gets stored.
         quote = " ".join(str(item.get("contract_reference") or "").split())[:600]
         page, label = (_locate_quote(quote, str(item.get("clause_id") or ""), index)
                        if quote else (None, None))
@@ -837,13 +845,21 @@ def _mapped_rule_index(s, pipeline_id: int) -> tuple[set[str], set[str]]:
     if not contract_ids:
         return set(), set()
     try:
+        import rule_scope
         rows = s.execute(
-            text("SELECT r.canonical_target, r.rule_name, c.title AS clause_title "
+            text("SELECT r.rule_id, r.contract_id, r.canonical_target, r.rule_name, "
+                 f"c.title AS clause_title, {rule_scope.tag_select(s, 'r')} "
                  "FROM validation_rule r "
                  "LEFT JOIN clauses_extracted c ON c.clause_id = r.source_clause_id "
                  "WHERE r.contract_id IN :cids AND r.rule_status <> 'disabled'")
             .bindparams(bindparam("cids", expanding=True)),
             {"cids": contract_ids}).mappings().all()
+        # Only the rules this setup runs prove a column covered: a set written
+        # for another template names that template's columns (rule_scope.py).
+        rows = rule_scope.filter_rules(
+            s, [dict(r) for r in rows],
+            setup_template_id=pipe.output_template_id,
+            scope=rule_scope.pipeline_scope(s, pipe.id))
     except Exception as e:  # noqa: BLE001
         log.warning("mapped-rule index unavailable for pipeline %s: %s",
                     pipeline_id, e)
@@ -1090,7 +1106,7 @@ def _analyze_locked(pipeline_id: int, force: bool) -> dict:
             return {**existing, "ran": False,
                     "skipped_reason": "no contract attached to this setup"}
 
-        evidence = _contract_evidence(s, contract_ids)
+        evidence = _contract_evidence(s, contract_ids, pipe)
         # Quotable contract prose is what the check reasons FROM; rule-name
         # signals alone can't ground a finding, so that isn't enough to run on.
         if not evidence["quotable"]:

@@ -511,7 +511,40 @@ def resolve_sheet(
             existing_source=existing.get(col) or existing.get(f.get("field_key") or ""),
             semantic=semantic.get(col), threshold=threshold,
             review_floor=review_floor, similar=similar.get(col), ai=ai.get(col)))
+    _refuse_shared_source(out, out_fields)
     return out
+
+
+def _refuse_shared_source(decisions: list[Decision], out_fields: list[dict]) -> None:
+    """One input column taken automatically for several output columns that MEAN
+    different things (a commission amount also taken as the brokerage amount) is
+    right for one of them at most, and the copy that merely looks mapped lets a
+    formula check compare a column with itself. Keep the column whose name is the
+    input's own (or the one clearly most confident match) and send the rest to a
+    person with the reason. Columns sharing one meaning (the same net premium in
+    two currencies' columns) are left alone, as are confirmed choices."""
+    by_source: dict[str, list[tuple[Decision, dict]]] = {}
+    for d, f in zip(decisions, out_fields):
+        if d.status == AUTO_MAPPED and d.source:
+            by_source.setdefault(_norm(d.source), []).append((d, f))
+    for group in by_source.values():
+        meanings = {str(f.get("canonical_field") or f.get("field_key") or "").strip().lower()
+                    for _, f in group} - {""}
+        if len(group) < 2 or len(meanings) < 2:
+            continue
+        keep = [d for d, _ in group if d.method in (EXACT, NORMALIZED)]
+        if not keep:
+            top = max(d.confidence for d, _ in group)
+            best = [d for d, _ in group if d.confidence == top]
+            keep = best if len(best) == 1 else []
+        for d, _ in group:
+            if any(d is k for k in keep):
+                continue
+            others = ", ".join(o.display_name for o, _ in group if o is not d)
+            d.suggestion, d.source, d.status = d.source, None, REVIEW_REQUIRED
+            d.reason = (f"{d.reason} — " if d.reason else "") + (
+                f"the same input column is also taken for {others} — confirm "
+                f"which one it belongs to")
 
 
 def unresolved_required(decisions: list[Decision]) -> list[Decision]:
