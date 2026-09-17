@@ -172,8 +172,8 @@ export default function BordereauCalendar() {
         {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
         {msg && <div className="note" style={{ marginBottom: 16 }}>{msg}</div>}
 
-        {/* ---- the five headline counts ---------------------------------- */}
-        <div className="tiles five" style={{ marginBottom: 18 }}>
+        {/* ---- the four headline counts ---------------------------------- */}
+        <div className="tiles" style={{ marginBottom: 18 }}>
           <div className="tile">
             <div className="k">Due this month</div>
             <div className="v">{counts?.due ?? "—"}</div>
@@ -216,17 +216,6 @@ export default function BordereauCalendar() {
                 })()}
             </div>
           </div>
-          <div className="tile">
-            <div className="k">Sent onward</div>
-            <div className="v">{counts?.released ?? "—"}</div>
-            <div className="foot">
-              {(counts?.unsent_correction ?? 0) > 0
-                ? <span style={{ color: "var(--p-warn)" }}>
-                    {plural(counts!.unsent_correction, "correction")} not sent on
-                  </span>
-                : "of the files that arrived"}
-            </div>
-          </div>
         </div>
 
         {/* ---- one row per file somebody owes this month ------------------ */}
@@ -253,17 +242,17 @@ export default function BordereauCalendar() {
               <thead>
                 <tr>
                   <th>Programme</th><th>Broker</th><th>Period</th><th>Due by</th>
-                  <th>Turned up</th><th>How it went</th><th>Sent onward</th>
+                  <th>Turned up</th><th>How it went</th>
                   <th>Version</th><th></th>
                 </tr>
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td colSpan={9} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={8} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">Loading…</td></tr>
                 )}
                 {!loading && worstFirst.length === 0 && (
-                  <tr><td colSpan={9} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={8} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">
                     Nothing is due in this month.{" "}
                     <Link className="linkish" to="/programs">Set a programme's frequency →</Link>
@@ -283,7 +272,6 @@ export default function BordereauCalendar() {
                         <td className="muted">—</td>
                         <td className="muted">—</td>
                         <td><span className="badge b-mut"><span className="d" />Nothing is owed</span></td>
-                        <td className="muted">—</td>
                         <td className="muted">—</td>
                         <td>
                           <Link className="linkish" to={`/programs/${r.program_id}/brokers`}>
@@ -319,18 +307,6 @@ export default function BordereauCalendar() {
                           <div className="sub" style={{ marginTop: 3 }}>
                             chased {r.chase_count > 1 ? `${r.chase_count}×` : ""}{" "}
                             {fmtDay(r.chased_at)}
-                          </div>
-                        )}
-                      </td>
-                      <td className="mono">
-                        {r.released_at ? fmtDay(r.released_at)
-                          : <span className="muted">—</span>}
-                        {/* Something went, but not the file they would get now.
-                            The date alone would read as "done" on a period that
-                            was corrected after it was sent. */}
-                        {r.released_at && !r.latest_version_released && (
-                          <div className="sub" style={{ color: "var(--p-warn)" }}>
-                            correction not sent
                           </div>
                         )}
                       </td>

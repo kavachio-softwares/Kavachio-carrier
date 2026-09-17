@@ -735,7 +735,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 disabled={saving || brokerId === "" ||
                   programId === "" ||
                   (channel === "email" && !senderEmail.includes("@"))}>
-                {saving ? "Creating…" : "Create it"}</button>
+                {saving ? "Configuring…" : "Configure it"}</button>
             </>}
       </div>}>
       <div className="proto proto-embed">
@@ -821,12 +821,16 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 {creatable.map(c => (
                   <option key={c} value={c}>{CHANNEL_COPY[c].title}</option>))}
               </select>
+              {/* One sentence each, all three built the same way: who sends it,
+                  how it travels, and what we do when it gets here. Read down the
+                  dropdown they now compare cleanly instead of each describing
+                  itself in its own terms. */}
               <div className="hint">
                 {channel === "api"
-                  ? "Their software sends the file straight to ours and gets an answer back at once. Nobody logs in."
+                  ? "The broker's software sends the file straight to ours, with nobody signing in at either end."
                   : channel === "email"
-                  ? "They attach the spreadsheet to an email, the way most brokers already do. We take the attachments off the moment the email arrives."
-                  : "Their system writes the file into a folder of their own and we pick it up the moment it lands."}
+                  ? "The broker emails the file as an attachment, and we take it off the email the moment it arrives."
+                  : "The broker saves the file into a private folder we give them, and we collect it the moment it lands."}
               </div>
               {channel === "email" && !mailReady && (
                 <div className="hint" style={{ color: "var(--p-warn)" }}>

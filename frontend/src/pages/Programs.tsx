@@ -45,7 +45,7 @@ export default function Programs() {
         subtitle="One type of business you write — commercial motor, say — with your brokers and contracts underneath it."
         action={
           <Button onClick={() => nav("/programs/new")}>
-            <Plus size={15} /> Create Programme
+            <Plus size={15} /> Configure Program
           </Button>
         }
       />
@@ -73,7 +73,7 @@ export default function Programs() {
               </p>
               <div className="mt-4">
                 <Button onClick={() => nav("/programs/new")}>
-                  <Plus size={15} /> Create Programme
+                  <Plus size={15} /> Configure Program
                 </Button>
               </div>
             </div>

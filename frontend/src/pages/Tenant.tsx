@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, getDeduped } from "../api/client";
-import { currentMga, isTenantAdmin, setTenantBrand } from "../auth";
+import { currentMga, isKavachioAdmin, isTenantAdmin, setTenantBrand } from "../auth";
 import { fileToLogoDataUrl, initials } from "../branding";
 import CountryOptions from "../components/CountryOptions";
 
@@ -39,6 +39,13 @@ const ORG_TYPES: [string, string][] = [
 export default function TenantPage() {
   const mga = currentMga();
   const isAdmin = isTenantAdmin();
+  // What KIND of organisation this tenant is decides how the rest of the app
+  // treats it, so it is not the carrier's own to change — a carrier admin
+  // flipping itself to "Broker" would re-shape screens it still has to run.
+  // Kavachio sets it when the tenant is created and stays the only seat that
+  // can correct it; a carrier admin sees the value, read-only.
+  const canEditOrgType = isKavachioAdmin();
+  const lastRow = canEditOrgType ? undefined : { marginBottom: 0 };
   const [t, setT] = useState<Tenant | null>(null);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -96,8 +103,8 @@ export default function TenantPage() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Organization</h2>
-            <p>Your organization's identity, currency and address.</p>
+            <h2>Company</h2>
+            <p>Your company's identity, currency and address.</p>
           </div>
           {isAdmin && (
             <div className="actions">
@@ -113,14 +120,14 @@ export default function TenantPage() {
         <div className="grid g-2">
           {/* Identity */}
           <div className="card pad">
-            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>Organization Identity</h3>
+            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>Company Identity</h3>
             <div className="field">
-              <label>Organization Logo</label>
+              <label>Company Logo</label>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 {/* Preview on a dark swatch that mirrors the sidebar, so the
                     logo is shown exactly as it will appear there (no white box). */}
                 {t.logo
-                  ? <img src={t.logo} alt="Organization logo"
+                  ? <img src={t.logo} alt="Company logo"
                       style={{ width: 48, height: 48, borderRadius: 9, objectFit: "contain",
                                background: "#131a29", border: "1px solid rgba(255,255,255,.08)" }} />
                   : <div style={{ width: 48, height: 48, borderRadius: 9, display: "grid",
@@ -148,16 +155,19 @@ export default function TenantPage() {
               </span>
             </div>
             <div className="field">
-              <label>Organization Name</label>
+              <label>Company Name</label>
               <input value={t.legal_name ?? ""} disabled={!isAdmin}
                 onChange={e => patch("legal_name", e.target.value)} />
             </div>
+            {/* When the type row below is hidden this pair is the card's last
+                element, so it takes over the "no trailing margin" the type row
+                used to carry. */}
             <div className="row2">
-              <div className="field">
+              <div className="field" style={lastRow}>
                 <label>Account Code</label>
                 <input className="ro" value={t.mga} readOnly />
               </div>
-              <div className="field">
+              <div className="field" style={lastRow}>
                 <label>Base Currency</label>
                 <select value={t.currency ?? ""} disabled={!isAdmin}
                   onChange={e => patch("currency", e.target.value)}>
@@ -166,14 +176,21 @@ export default function TenantPage() {
                 </select>
               </div>
             </div>
-            <div className="field" style={{ marginBottom: 0 }}>
-              <label>Organization Type</label>
-              <select value={t.tenant_type ?? ""} disabled={!isAdmin}
-                onChange={e => patch("tenant_type", e.target.value)}>
-                <option value="">Select…</option>
-                {ORG_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-              </select>
-            </div>
+            {/* Not shown at all to a carrier admin. It was a disabled dropdown
+                for them, which raised the question it could not answer — a
+                locked control invites a click and then explains nothing. The
+                value is Kavachio's to set, so the row only exists for the seat
+                that can actually change it. */}
+            {canEditOrgType && (
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Company Type</label>
+                <select value={t.tenant_type ?? ""}
+                  onChange={e => patch("tenant_type", e.target.value)}>
+                  <option value="">Select…</option>
+                  {ORG_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              </div>
+            )}
           </div>
 
           {/* Address */}
@@ -216,7 +233,7 @@ export default function TenantPage() {
 
         {!isAdmin && (
           <div className="note" style={{ marginTop: 18, maxWidth: 560 }}>
-            Organization settings are read-only for your role. Ask a Tenant Admin to make changes.
+            Company settings are read-only for your role. Ask a Tenant Admin to make changes.
           </div>
         )}
       </div>

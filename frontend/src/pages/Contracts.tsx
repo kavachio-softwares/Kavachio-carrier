@@ -137,7 +137,7 @@ export default function Contracts() {
               <Upload size={14} /> Upload existing
             </button>
             <Link to="/contracts/new" className="btn pri">
-              <FilePlus2 size={14} /> Create Contract
+              <FilePlus2 size={14} /> Configure Contract
             </Link>
           </div>
         </div>
@@ -197,7 +197,7 @@ export default function Contracts() {
             <table>
               <thead>
                 <tr>
-                  <th>Contract</th><th>Counterparty</th><th>Programme</th>
+                  <th>Contract</th><th>Broker</th><th>Programme</th>
                   <th>Term</th><th>State</th><th>Documents</th>
                   {/* What is MEASURED, which is not what the contract says. A
                       contract can carry ten agreed limits and nought checks
@@ -222,9 +222,9 @@ export default function Contracts() {
                       </td>
                       <td>
                         {c.counterparty?.name ?? "—"}
-                        {c.counterparty && (
+                        {/* {c.counterparty && (
                           <div className="sub">{c.counterparty.party_type}</div>
-                        )}
+                        )} */}
                       </td>
                       <td>{c.programme?.name ?? "—"}</td>
                       <td className="mono">

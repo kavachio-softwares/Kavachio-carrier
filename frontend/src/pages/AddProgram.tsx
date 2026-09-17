@@ -1,5 +1,5 @@
 /**
- * Create Programme — and pick its brokers in the same step.
+ * Configure Program — and pick its brokers in the same step.
  *
  * Deliberately one screen, not two. A programme with no broker cannot hold a
  * contract, so creating one and "adding brokers later" just leaves you with
@@ -121,7 +121,7 @@ export default function AddProgram() {
   return (
     <>
       <PageHeader
-        title="Create Programme"
+        title="Configure Program"
         subtitle="Set up a new type of business, and choose which brokers will send you business for it."
         action={
           <div className="flex items-center gap-2">

@@ -70,6 +70,21 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // and is still reached from the bell, the deadline card, the dashboard
       // link and the deadline email — it is the only place a program with no
       // bordereau setup yet can have its schedule set.
+      //
+      // Files is the last step of the same day's work — what a broker sent and
+      // what has landed — so it sits here rather than in a section of its own.
+      // A one-item section spent a heading and a rule on a single link, and
+      // read as a separate area of the app when it is really where Process
+      // Bordereau's input comes from. Same `requires` either way, so nobody
+      // gains or loses sight of it by the move.
+      //
+      // ONE item, not two. "How Files Arrive" and "Files Received" were
+      // separate entries that each carried a button to the other, and nothing
+      // in the nav said which one you wanted on a Tuesday morning. They are two
+      // tabs on /files now: the inbox lands first because it is the daily work,
+      // and the ways in sit behind it because a route is set up once when a
+      // broker is onboarded and then rarely touched.
+      { to: "/files", label: "Files", icon: Inbox },
     ],
   },
   {
@@ -84,7 +99,7 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // and this tenant IS one — what a carrier manages is the brokers that
       // produce into its programmes. Brokers come straight after Programmes
       // because putting brokers on a programme is the next thing that happens.
-      { to: "/brokers", label: "Brokers", icon: Users2 },
+      { to: "/brokers", label: "Party", icon: Users2 },
       // Contracts sit between the programme/broker pair and the setup built on
       // them, which is where they sit in the work: a programme exists, brokers
       // go on it, contracts are raised against those pairs, and each contract
@@ -102,27 +117,10 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     ],
   },
   {
-    // How a broker's files reach us, and what has reached us so far — a
-    // different job from building the book above, so it keeps its own section
-    // rather than becoming a tail on Configure.
-    //
-    // ONE item, not two. "How Files Arrive" and "Files Received" were separate
-    // entries that each carried a button to the other, and nothing in the nav
-    // said which one you wanted on a Tuesday morning. They are two tabs on
-    // /files now: the inbox lands first because it is the daily work, and the
-    // ways in sit behind it because a route is set up once when a broker is
-    // onboarded and then rarely touched.
-    title: "Files",
-    requires: "carrier_admin",
-    items: [
-      { to: "/files", label: "Files", icon: Inbox },
-    ],
-  },
-  {
     title: "Admin",
     requires: "carrier_admin",
     items: [
-      { to: "/tenant", label: "Organization", icon: Building2 },
+      { to: "/tenant", label: "Company", icon: Building2 },
       // The old party directory. It is a directory to look things up in, not
       // part of building the book, so it sits with the other admin screens.
       { to: "/users", label: "Users & Roles", icon: UserCog },
@@ -277,7 +275,7 @@ export default function Layout() {
       </span>
       <span className="wscard-meta">
         <span className="wscard-name">{brand.legal_name}</span>
-        <span className="wscard-sub">Organization</span>
+        <span className="wscard-sub">Company</span>
       </span>
     </>
   ) : null;
@@ -323,7 +321,7 @@ export default function Layout() {
               Admins get the interactive card exactly as before. */}
           {!isKavachioAdmin() && brand?.legal_name && (
             canAccessPath("/tenant") ? (
-              <button type="button" className="wscard" title="Open Organization settings"
+              <button type="button" className="wscard" title="Open Company settings"
                 onClick={() => nav("/tenant")}>
                 {workspaceIdentity}
                 <ChevronRight className="wscard-go" size={15} strokeWidth={2} />

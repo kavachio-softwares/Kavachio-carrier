@@ -96,8 +96,8 @@ export default function Brokers() {
   return (
     <>
       <PageHeader
-        title="Brokers"
-        subtitle="The broker organisations that produce into your programmes."
+        title="Party"
+        subtitle="The party organisations that produce into your programmes."
         action={
           /* One action, whether or not the broker already has a login. Which
              of the two it is depends on facts about somebody else's book, and
@@ -109,7 +109,7 @@ export default function Brokers() {
               bg-navy px-3.5 py-2 text-sm font-medium text-white transition hover:bg-navy-dark
               hover:no-underline"
           >
-            <UserPlus size={15} /> Invite a broker
+            <UserPlus size={15} /> Invite a party
           </Link>
         }
       />
@@ -137,9 +137,9 @@ export default function Brokers() {
               <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2">
                 <Users2 size={20} className="text-ink-soft" />
               </div>
-              <p className="text-sm font-medium">No brokers yet</p>
+              <p className="text-sm font-medium">No parties yet</p>
               <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">
-                A broker is created by inviting its first admin — that person is
+                A party is created by inviting its first admin — that person is
                 what makes the organisation reachable.
               </p>
               <Link
@@ -147,7 +147,7 @@ export default function Brokers() {
                 className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-navy px-3.5 py-2
                   text-sm font-medium text-white transition hover:bg-navy-dark hover:no-underline"
               >
-                <UserPlus size={15} /> Invite a broker
+                <UserPlus size={15} /> Invite a party
               </Link>
             </div>
           </Card>
@@ -161,7 +161,7 @@ export default function Brokers() {
                 <Search size={14} className="shrink-0 text-ink-soft" />
                 <input
                   className="flex-1 bg-transparent text-sm outline-none"
-                  placeholder="Search brokers…"
+                  placeholder="Search parties…"
                   value={q}
                   onChange={e => setQ(e.target.value)}
                 />
@@ -169,7 +169,7 @@ export default function Brokers() {
               <span className="text-xs text-ink-muted">
                 {needle
                   ? `${total} match${total === 1 ? "" : "es"}`
-                  : `${total} broker${total === 1 ? "" : "s"}`}
+                  : `${total} part${total === 1 ? "y" : "ies"}`}
               </span>
             </div>
 
@@ -177,8 +177,8 @@ export default function Brokers() {
               <div className="mb-3 flex items-center gap-2 rounded-md bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
                 <Layers size={14} className="shrink-0" />
                 {stranded === 1
-                  ? "One broker is not on a programme yet, so it cannot produce anything."
-                  : `${stranded} brokers are not on a programme yet, so they cannot produce anything.`}
+                  ? "One party is not on a programme yet, so it cannot produce anything."
+                  : `${stranded} parties are not on a programme yet, so they cannot produce anything.`}
               </div>
             )}
 
@@ -186,7 +186,7 @@ export default function Brokers() {
               <table>
                 <thead>
                   <tr>
-                    <th>Broker</th>
+                    <th>Party</th>
                     <th>Status</th>
                     <th>Programmes</th>
                     <th>Contracts</th>
@@ -320,7 +320,7 @@ export default function Brokers() {
                   {shown.length === 0 && (
                     <tr>
                       <td colSpan={6} className="py-8 text-center text-sm text-ink-muted">
-                        No broker matches “{q}”.
+                        No party matches “{q}”.
                       </td>
                     </tr>
                   )}
@@ -333,7 +333,7 @@ export default function Brokers() {
                 border-t border-border pt-3 text-xs text-ink-muted">
                 <span>
                   {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)}
-                  {" of "}{total} broker{total === 1 ? "" : "s"}
+                  {" of "}{total} part{total === 1 ? "y" : "ies"}
                 </span>
                 <div className="flex items-center gap-2">
                   <Button variant="secondary" className="!px-2.5 !py-1 !text-xs"
@@ -350,8 +350,8 @@ export default function Brokers() {
             )}
 
             <p className="mt-3 border-t border-border pt-3 text-xs text-ink-muted">
-              Open a broker to see its contracts and people across every
-              programme. Put a broker on a programme from that programme's page.
+              Open a party to see its contracts and people across every
+              programme. Put a party on a programme from that programme's page.
             </p>
           </Card>
         )}

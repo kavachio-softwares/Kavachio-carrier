@@ -5,6 +5,8 @@ import { currentMga, getUser, userRole, ROLE_LABEL, type Role } from "../auth";
 import { fmtStamp } from "../utils/date";
 import { InfoTip } from "../components/InfoTip";
 import { getCalendar, type CalendarStatus } from "../api/calendar";
+import { getBrokersPaged, getHierarchy } from "../api/hierarchy";
+import { listContractsPaged } from "../api/contractRecord";
 
 type Stats = {
   uploads_today: number; uploads_total: number; open_bdx_cycles: number;
@@ -50,6 +52,17 @@ export default function Home() {
   const [runs, setRuns] = useState<Run[]>([]);
   // Group 3: deadline counts for the "Deadlines" tile (own submission calendar).
   const [calCounts, setCalCounts] = useState<Partial<Record<CalendarStatus, number>>>({});
+  // "How big is my book" — the two directory sizes, each read from the SAME
+  // endpoint its own screen reads. /dashboard/stats already carries a programme
+  // count (`open_bdx_cycles`) but it counts only app-managed ACTIVE ones, so a
+  // tile fed from it would disagree with the Programmes screen, which lists the
+  // tenant's programmes unfiltered. The broker directory is a union (on a
+  // programme + created here + invited + invitation still pending) that only
+  // /brokers assembles, so re-deriving it anywhere else would drift from the
+  // "N parties" the Party screen prints.
+  const [progCount, setProgCount] = useState<number | null>(null);
+  const [partyCount, setPartyCount] = useState<number | null>(null);
+  const [contractCount, setContractCount] = useState<number | null>(null);
 
   useEffect(() => {
     api.get<Stats>(`/dashboard/stats`, { params: { mga } }).then(r => setStats(r.data));
@@ -58,6 +71,28 @@ export default function Home() {
   useEffect(() => {
     getCalendar().then(c => setCalCounts(c.counts ?? {})).catch(() => setCalCounts({}));
   }, [mga]);
+
+  // Both directories are carrier-scoped. A broker seat carries no tenant, so
+  // these routes answer "no tenant bound to this user" for them — don't ask.
+  const carrierSeat = role === "carrier_admin" || role === "kavachio_admin";
+
+  useEffect(() => {
+    if (!carrierSeat) return;
+    getHierarchy()
+      .then(h => setProgCount(h.programmes?.length ?? 0))
+      .catch(() => setProgCount(null));
+    // page_size 1 because only `total` is wanted — it (and `stranded`) are
+    // counted over the whole directory server-side, not over the page, so the
+    // smallest possible page still yields the real figure.
+    getBrokersPaged({ page: 1, page_size: 1 })
+      .then(r => setPartyCount(r.total))
+      .catch(() => setPartyCount(null));
+    // Same trick, same reason: sent with no filters so `total` is the carrier's
+    // whole book — which is the unfiltered figure the Contracts screen prints.
+    listContractsPaged({ page: 1, page_size: 1 })
+      .then(r => setContractCount(r.total))
+      .catch(() => setContractCount(null));
+  }, [mga, carrierSeat]);
 
   // Can the operator actually work yet? That hinges on there being an approved
   // Bordereau Setup to process against (`bordereau_ready`) — NOT on the full
@@ -134,8 +169,58 @@ export default function Home() {
           </div>
         </div>
 
-        {/* KPI tiles — wired to /dashboard/stats (see API notes for the new fields) */}
+        {/* KPI tiles — wired to /dashboard/stats (see API notes for the new fields).
+
+            ONE grid for all of them, so every tile is the same width: four to a
+            row, which lands the book counts on the first row beside Active
+            Setups and the three operational tiles on the second. Two separate
+            grids sized the numbers differently row to row, which read as two
+            unrelated components rather than one panel. */}
         <div className="tiles" style={{ marginBottom: 18 }}>
+          {/* Active setups — falls back to open_bdx_cycles (active programs) until
+              the API exposes a dedicated active_setups count. */}
+          <div className="tile">
+            <div className="k">Active Setups</div>
+            <div className="v">{fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}</div>
+            {stats?.active_setup_carriers != null && (
+              <div className="foot">across {stats.active_setup_carriers} carriers</div>
+            )}
+          </div>
+
+          {/* How big the book is. Each links to the screen its figure was read
+              from, so the number on the tile and the number on that screen are
+              the same number rather than two close ones. */}
+          {carrierSeat && (
+            <>
+              <div className="tile">
+                <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  Programmes
+                  <InfoTip text="Every programme set up under this organization — one type of business you write, with its parties and contracts underneath it." />
+                </div>
+                <div className="v">{fmt(progCount)}</div>
+                <div className="foot"><Link className="linkish" to="/programs">View Programmes →</Link></div>
+              </div>
+
+              <div className="tile">
+                <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  Parties
+                  <InfoTip text="The party organisations that produce into your programmes — those already on one, plus any you have invited who have not answered yet." />
+                </div>
+                <div className="v">{fmt(partyCount)}</div>
+                <div className="foot"><Link className="linkish" to="/brokers">View Parties →</Link></div>
+              </div>
+
+              <div className="tile">
+                <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  Contracts
+                  <InfoTip text="Every contract held under this organization, across all of its programmes and parties — whatever stage each one has reached." />
+                </div>
+                <div className="v">{fmt(contractCount)}</div>
+                <div className="foot"><Link className="linkish" to="/contracts">View Contracts →</Link></div>
+              </div>
+            </>
+          )}
+
           {/* Exceptions to review */}
           <div className="tile alert">
             <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -171,17 +256,7 @@ export default function Home() {
             )}
           </div>
 
-          {/* Active setups — falls back to open_bdx_cycles (active programs) until
-              the API exposes a dedicated active_setups count. */}
-          <div className="tile">
-            <div className="k">Active Setups</div>
-            <div className="v">{fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}</div>
-            {stats?.active_setup_carriers != null && (
-              <div className="foot">across {stats.active_setup_carriers} carriers</div>
-            )}
-          </div>
-
-          {/* Role-specific 4th tile */}
+          {/* Role-specific last tile */}
           {role === "kavachio_admin" ? (
             <div className="tile">
               <div className="k">Mapping Tasks</div>
@@ -233,7 +308,6 @@ export default function Home() {
             );
           })()} */}
         </div>
-
 
         {/* Recent runs — latest 5 generated outputs. Full history: /runs */}
         <div className="card">
