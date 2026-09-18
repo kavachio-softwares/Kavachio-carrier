@@ -202,7 +202,7 @@ export default function TenantDetail() {
   if (!isAdmin) {
     return (
       <div className="proto"><div className="view full">
-        <div className="page-head"><div className="t"><h2>Broker</h2></div></div>
+        <div className="page-head"><div className="t"><h2>Carrier</h2></div></div>
         <div className="note warn" style={{ maxWidth: 560 }}>
           This screen is restricted to Kavachio platform admins.
         </div>
@@ -228,7 +228,7 @@ export default function TenantDetail() {
             <p className="mono">{subtitle}</p>
           </div>
           <div className="actions">
-            <button className="btn" onClick={() => nav("/tenants")}>← Brokers</button>
+            <button className="btn" onClick={() => nav("/tenants")}>← Carriers</button>
           </div>
         </div>
 

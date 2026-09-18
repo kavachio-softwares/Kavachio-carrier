@@ -5138,15 +5138,6 @@ def activity_list(mga: str, limit: int = 25, actions: Optional[str] = None,
 # aggregates ACROSS all tenants for the Kavachio admin. No tenant filter is
 # applied; access is gated to the kavachio_admin role server-side.
 
-def _norm_role(r: Optional[str]) -> str:
-    r = (r or "").lower()
-    if r == "kavachio_admin":
-        return "kavachio_admin"
-    if r in ("tenant_admin", "admin"):
-        return "tenant_admin"
-    return "tenant_user"        # ops / read_only / tenant_user / anything else
-
-
 def _iso_ts(dt: Any) -> Optional[str]:
     """Self-contained ISO-UTC serializer (stored timestamps are naive UTC).
     Avoids depending on a helper that may not be re-exported in every build."""
@@ -5248,14 +5239,29 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
         tenant_active = tenant_total - tenant_invited - tenant_inactive
 
         # --- Users (point-in-time; total, pending, by normalized role) ---
+        # One bucket per seat in VALID_ROLES, sorted by the same normalize_role
+        # the tokens use, so this donut can never disagree with /admin/users.
+        from auth_deps import VALID_ROLES, normalize_role
         urows = s.query(AppUser.role, AppUser.status, AppUser.tenant_id).all()
         users_total = len(urows)
         pending_invites = sum(1 for _r, st, _t in urows if (st or "") in ("invited", "pending"))
-        by_role = {"tenant_user": 0, "tenant_admin": 0, "kavachio_admin": 0}
+        by_role = {role: 0 for role in VALID_ROLES}
         users_by_tenant: dict = {}
         for r, _st, tid in urows:
-            by_role[_norm_role(r)] += 1
+            by_role[normalize_role(r)] += 1
             users_by_tenant[tid] = users_by_tenant.get(tid, 0) + 1
+
+        # --- Brokers & operators (point-in-time) ---
+        # Brokers = the broker_admin accounts, one per broker organisation; a
+        # broker a carrier only typed in (never invited) has no admin and is not
+        # counted. Operators = the seats broker admins added.
+        def _seat_counts(role: str) -> dict:
+            sts = [(st or "") for r, st, _t in urows if normalize_role(r) == role]
+            return {"total": len(sts),
+                    "active": sum(1 for st in sts if st == "active"),
+                    "invited": sum(1 for st in sts if st in ("invited", "pending"))}
+        brokers = _seat_counts("broker_admin")
+        operators = _seat_counts("operator")
 
         # --- Setups & programs (point-in-time) ---
         # "Active setups" = APPROVED direct-lane bordereau formats (one per
@@ -5393,7 +5399,9 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
             "tenants": {"total": tenant_total, "active": tenant_active,
                         "invited": int(tenant_invited),
                         "inactive": int(tenant_inactive)},
-            "users": {"total": users_total, "pending_invites": pending_invites,
+            "brokers": brokers,
+            "operators": operators,
+            "users":{"total": users_total, "pending_invites": pending_invites,
                       "by_role": by_role},
             "setups": {"active": int(active_setups), "tenants": int(setup_tenants)},
             "programs_active": int(programs_active),

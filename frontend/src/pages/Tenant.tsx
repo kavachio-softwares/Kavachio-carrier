@@ -159,22 +159,17 @@ export default function TenantPage() {
               <input value={t.legal_name ?? ""} disabled={!isAdmin}
                 onChange={e => patch("legal_name", e.target.value)} />
             </div>
-            {/* When the type row below is hidden this pair is the card's last
+            {/* When the type row below is hidden this is the card's last
                 element, so it takes over the "no trailing margin" the type row
-                used to carry. */}
-            <div className="row2">
-              <div className="field" style={lastRow}>
-                <label>Account Code</label>
-                <input className="ro" value={t.mga} readOnly />
-              </div>
-              <div className="field" style={lastRow}>
-                <label>Base Currency</label>
-                <select value={t.currency ?? ""} disabled={!isAdmin}
-                  onChange={e => patch("currency", e.target.value)}>
-                  <option value="">—</option>
-                  {CURRENCIES.map(([c, n]) => <option key={c} value={c}>{c} — {n}</option>)}
-                </select>
-              </div>
+                used to carry. The account code (tenant_code) is not shown: it
+                is an internal id the carrier can neither change nor use. */}
+            <div className="field" style={lastRow}>
+              <label>Base Currency</label>
+              <select value={t.currency ?? ""} disabled={!isAdmin}
+                onChange={e => patch("currency", e.target.value)}>
+                <option value="">—</option>
+                {CURRENCIES.map(([c, n]) => <option key={c} value={c}>{c} — {n}</option>)}
+              </select>
             </div>
             {/* Not shown at all to a carrier admin. It was a disabled dropdown
                 for them, which raised the question it could not answer — a

@@ -28,7 +28,7 @@
  * the broker's own admin adds them.
  */
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { currentMga, getTenantBrand } from "../auth";
 import { api } from "../api/client";
 import { InviteSentModal } from "../components/InviteSentModal";
@@ -44,10 +44,14 @@ export default function AddUser() {
   const mga = currentMga();
   const brand = getTenantBrand();
   const nav = useNavigate();
+  // Opened from Brokers → "Invite a party": that screen is about outside
+  // companies, so the form offers the broker only. Users & Roles still opens
+  // it with both, which is where a carrier colleague is added.
+  const brokerOnly = useSearchParams()[0].get("for") === "broker";
 
   // Which of the two acts this is. Asked first, because it changes what the
   // rest of the form even means.
-  const [kind, setKind] = useState<"carrier" | "broker">("carrier");
+  const [kind, setKind] = useState<"carrier" | "broker">(brokerOnly ? "broker" : "carrier");
 
   const [full_name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -115,7 +119,7 @@ export default function AddUser() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>{kind === "carrier" ? "Add a carrier" : "Invite a broker"}</h2>
+            <h2>{kind === "carrier" ? "Add a carrier user" : "Invite a broker"}</h2>
             <p>
               {kind === "carrier"
                 ? "A colleague at your organisation. They do the carrier's work "
@@ -125,7 +129,9 @@ export default function AddUser() {
             </p>
           </div>
           <div className="actions">
-            <button className="btn" onClick={() => nav("/users")}>← Users &amp; Roles</button>
+            {brokerOnly
+              ? <button className="btn" onClick={() => nav("/brokers")}>← Brokers</button>
+              : <button className="btn" onClick={() => nav("/users")}>← Users &amp; Roles</button>}
             <button className="btn pri" onClick={send} disabled={busy || !canSend}
               title={canSend ? undefined : created ? "Invite already sent"
                 : (kind === "broker" && !brokerName.trim()) ? "Name the broker first"
@@ -150,10 +156,12 @@ export default function AddUser() {
             This is the only place either one is added.
           </div>
           <div className="segpick">
-            <button type="button" className={kind === "carrier" ? "on" : ""}
-                    onClick={() => setKind("carrier")} disabled={!!created}>
-              A carrier — a colleague here
-            </button>
+            {!brokerOnly && (
+              <button type="button" className={kind === "carrier" ? "on" : ""}
+                      onClick={() => setKind("carrier")} disabled={!!created}>
+                A carrier user — a colleague here
+              </button>
+            )}
             <button type="button" className={kind === "broker" ? "on" : ""}
                     onClick={() => setKind("broker")} disabled={!!created}>
               A broker — an outside company
@@ -266,7 +274,7 @@ export default function AddUser() {
 
       {created && (
         <InviteSentModal
-          title={kind === "carrier" ? "Carrier added" : "Broker invited"}
+          title={kind === "carrier" ? "Carrier user added" : "Broker invited"}
           message={kind === "carrier"
             ? `${created.name} can set a password and sign in for ${created.org}.`
             : created.org}

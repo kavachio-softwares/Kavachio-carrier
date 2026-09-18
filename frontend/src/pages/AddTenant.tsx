@@ -95,20 +95,12 @@ export default function AddTenant() {
                 placeholder="e.g. Northgate Mutual Insurance Co"
                 onChange={e => set("name", e.target.value)} />
             </div>
-            <div className="field">
+            <div className="field" style={{ marginBottom: 0 }}>
               <label>Base currency</label>
               <select value={f.currency} onChange={e => set("currency", e.target.value)}>
                 {CURRENCIES.map(([v, l]) => <option key={v} value={v}>{v} — {l}</option>)}
               </select>
               <div className="hint">The currency this carrier reports in.</div>
-            </div>
-            <div className="field" style={{ marginBottom: 0 }}>
-              <label>Organisation type</label>
-              <input className="ro" value="Carrier" readOnly />
-              <div className="hint">
-                Fixed. Brokers are not set up here — a carrier adds its own
-                brokers on its own programmes.
-              </div>
             </div>
           </div>
 

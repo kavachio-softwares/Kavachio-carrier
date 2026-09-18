@@ -323,7 +323,7 @@ export default function Users() {
                           <span className="d" />
                           {u.org_kind === "broker"
                             ? (ROLE_LABEL[role] ?? role)
-                            : u.is_owner ? "Carrier Admin" : "Carrier"}
+                            : u.is_owner ? "Carrier Admin" : "Carrier User"}
                         </span>
                       </td>
                       <td className="l">
@@ -508,7 +508,7 @@ export default function Users() {
               <div className="sub" style={{ marginTop: 10 }}>
                 They become the one person accountable for it: the only one who
                 can add or remove carriers and brokers, and the only one who can
-                transfer the role again. <b>You become a carrier</b> — you keep
+                transfer the role again. <b>You become a carrier user</b> — you keep
                 working on contracts, programmes and bordereaux, but no longer
                 manage people. If you are leaving, they remove you afterwards.
               </div>

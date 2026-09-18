@@ -167,7 +167,7 @@ export default function Tenants() {
               <thead>
                 <tr>
                   <th>Carrier</th><th>Programmes</th><th>Brokers</th>
-                  <th>Users</th><th>Status</th><th></th>
+                  <th>Status</th><th></th>
                 </tr>
               </thead>
               <tbody>
@@ -186,7 +186,6 @@ export default function Tenants() {
                           until its own admin signs in and builds it. */}
                       <td>{t.programmes ?? 0}</td>
                       <td>{t.brokers ?? 0}</td>
-                      <td>{t.users}</td>
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="r">
                         <span className="linkish" onClick={() => nav(`/tenants/${encodeURIComponent(t.mga)}`)}>View</span>
