@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, CalendarDays, Send, X } from "lucide-react";
 import {
-  chase, getBoard, getVersions, releasePeriod,
+  chase, getBoard, getVersions,
   type BoardResponse, type BoardRow, type BrokerContact,
   type CalendarStatus, type SubmissionVersionRow,
 } from "../api/calendar";
@@ -64,8 +64,6 @@ function fmtMonth(key?: string | null): string {
   return new Date(y, m - 1, 1).toLocaleDateString("en-GB",
     { month: "long", year: "numeric" });
 }
-
-const todayISO = () => new Date().toISOString().slice(0, 10);
 
 // Rows per page in the programme list — the same size Users & Roles pages at.
 const PAGE_SIZE = 10;
@@ -379,7 +377,7 @@ export default function BordereauCalendar() {
                         ? sch.frequency_label
                         : <span className="badge b-warn"><span className="d" />Not set</span>}
                     </td>
-                    <td className="l">{sch.due_rule}</td>
+                    <td>{sch.due_rule}</td>
                     <td className="mono">{fmtFull(sch.next_due)}</td>
                     {/* Why the deadlines stop where they do. Without this the
                         list just runs out and the reader has to guess whether
@@ -405,8 +403,7 @@ export default function BordereauCalendar() {
       </div>
 
       {openRow && (
-        <VersionPanel row={openRow} onClose={() => setOpenRow(null)}
-          onChanged={() => load(month)} />
+        <VersionPanel row={openRow} onClose={() => setOpenRow(null)} />
       )}
 
       {chasing && (
@@ -424,15 +421,11 @@ export default function BordereauCalendar() {
 // statement about a specific version — "Munich Re got the corrected file on the
 // 3rd" — and the row cannot express which one without the chain beside it.
 // ---------------------------------------------------------------------------
-function VersionPanel({ row, onClose, onChanged }: {
-  row: BoardRow; onClose: () => void; onChanged: () => void;
+function VersionPanel({ row, onClose }: {
+  row: BoardRow; onClose: () => void;
 }) {
   const [versions, setVersions] = useState<SubmissionVersionRow[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [form, setForm] = useState({
-    released_on: todayISO(), released_to: "", release_ref: "",
-  });
 
   const reload = useCallback(async () => {
     setErr(null);
@@ -443,22 +436,6 @@ function VersionPanel({ row, onClose, onChanged }: {
   }, [row.id]);
 
   useEffect(() => { reload(); }, [reload]);
-
-  async function save() {
-    setBusy(true); setErr(null);
-    try {
-      await releasePeriod(row.id, {
-        released_on: form.released_on || undefined,
-        released_to: form.released_to.trim() || undefined,
-        release_ref: form.release_ref.trim() || undefined,
-      });
-      await reload();
-      onChanged();
-      setForm(f => ({ ...f, released_to: "", release_ref: "" }));
-    } catch (e: any) {
-      setErr(e?.response?.data?.detail ?? "Could not record the release.");
-    } finally { setBusy(false); }
-  }
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(16,20,28,.45)",
@@ -482,6 +459,10 @@ function VersionPanel({ row, onClose, onChanged }: {
           <h4 style={{ margin: "0 0 10px", fontSize: 13 }}>
             Every file sent for this period
           </h4>
+          <p className="muted" style={{ fontSize: 12.5, margin: "0 0 12px" }}>
+            The newest one is the file that counts — the earlier ones are kept
+            so a correction can be told apart from the original.
+          </p>
           {versions === null && <p className="muted" style={{ fontSize: 13 }}>Loading…</p>}
           {versions?.length === 0 && (
             <div className="note">Nothing has been submitted for this period yet.</div>
@@ -510,48 +491,13 @@ function VersionPanel({ row, onClose, onChanged }: {
               {v.source_filename && (
                 <div className="sub" style={{ marginBottom: 4 }}>{v.source_filename}</div>
               )}
-              <div className="sub">
-                {v.released_at
-                  ? <>Sent onward {fmtFull(v.released_at)}
-                    {v.released_to && <> to <b>{v.released_to}</b></>}
-                    {v.release_ref && <> · ref {v.release_ref}</>}</>
-                  : "Not sent onward yet"}
-              </div>
             </div>
           ))}
 
-          {/* Recording a release. Producing a file and sending it are separate
-              acts, which is why this is a deliberate entry and not something
-              the system infers from the file existing. */}
-          {(versions?.length ?? 0) > 0 && (
-            <>
-              <h4 style={{ margin: "18px 0 10px", fontSize: 13 }}>
-                Record that you sent it on
-              </h4>
-              <p className="muted" style={{ fontSize: 12.5, margin: "0 0 12px" }}>
-                Attaches to the newest version — that is the file the recipient
-                would have got.
-              </p>
-              <div className="field">
-                <label>Who received it</label>
-                <input value={form.released_to} placeholder="e.g. Munich Re"
-                  onChange={e => setForm(f => ({ ...f, released_to: e.target.value }))} />
-              </div>
-              <div className="field">
-                <label>When</label>
-                <input type="date" value={form.released_on}
-                  onChange={e => setForm(f => ({ ...f, released_on: e.target.value }))} />
-              </div>
-              <div className="field">
-                <label>Their reference <span className="sub">optional</span></label>
-                <input value={form.release_ref} placeholder="if they give you one"
-                  onChange={e => setForm(f => ({ ...f, release_ref: e.target.value }))} />
-              </div>
-              <button className="btn pri" onClick={save} disabled={busy}>
-                <Send size={13} /> {busy ? "Saving…" : "Record the send"}
-              </button>
-            </>
-          )}
+          {/* Sending a bordereau onward is not built, so there is nothing
+              here to record against. The release fields stay on the version
+              row and the API still accepts them — when the send exists, this
+              panel gets the other half back. */}
         </div>
       </div>
     </div>
