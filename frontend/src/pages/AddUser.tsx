@@ -1,9 +1,12 @@
 /**
  * Add someone — a CARRIER at this organisation, or a BROKER outside it.
  *
- * Two different acts behind one door, because both answer "who else works on
- * this" and both are the carrier admin's alone. What separates them is who the
- * person belongs to:
+ * Two different acts sharing one form, each reached from its OWN door: Users &
+ * Roles opens it for a carrier colleague, the Party screen opens it with
+ * ?for=broker for a broker. Neither door offers the other's act. Users &
+ * Roles used to offer both, which put a second front door on brokers — a thing
+ * the Party screen owns — and left people unsure which button was the right
+ * one. What separates the two acts is who the person belongs to:
  *
  *   Carrier   a colleague HERE. They join this organisation and do the
  *             carrier's work — contracts, programmes, bordereaux — and they do
@@ -44,14 +47,13 @@ export default function AddUser() {
   const mga = currentMga();
   const brand = getTenantBrand();
   const nav = useNavigate();
-  // Opened from Brokers → "Invite a party": that screen is about outside
-  // companies, so the form offers the broker only. Users & Roles still opens
-  // it with both, which is where a carrier colleague is added.
-  const brokerOnly = useSearchParams()[0].get("for") === "broker";
-
-  // Which of the two acts this is. Asked first, because it changes what the
-  // rest of the form even means.
-  const [kind, setKind] = useState<"carrier" | "broker">(brokerOnly ? "broker" : "carrier");
+  // Which door opened the form decides the act outright. Party → "Invite a
+  // party" passes ?for=broker; Users & Roles passes nothing and means a carrier
+  // colleague. With exactly one act per door there is nothing left to choose
+  // on the form, so there is no toggle.
+  const [params] = useSearchParams();
+  const brokerOnly = params.get("for") === "broker";
+  const kind: "carrier" | "broker" = brokerOnly ? "broker" : "carrier";
 
   const [full_name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -123,7 +125,8 @@ export default function AddUser() {
             <p>
               {kind === "carrier"
                 ? "A colleague at your organisation. They do the carrier's work "
-                  + "— contracts, programmes and bordereaux."
+                  + "— contracts, programmes and bordereaux — but do not add or "
+                  + "remove people; only you do."
                 : "Name the broker and the person who will run it — both are "
                   + "created together."}
             </p>
@@ -146,36 +149,6 @@ export default function AddUser() {
             {err}
           </div>
         )}
-
-        {/* Asked first, because it changes what the rest of the form means:
-            a carrier joins the organisation you are already in, a broker
-            arrives with a company that has to be created around them. */}
-        <div className="card pad" style={{ marginBottom: 18 }}>
-          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Who are you adding?</h3>
-          <div className="hint" style={{ marginBottom: 12 }}>
-            This is the only place either one is added.
-          </div>
-          <div className="segpick">
-            {!brokerOnly && (
-              <button type="button" className={kind === "carrier" ? "on" : ""}
-                      onClick={() => setKind("carrier")} disabled={!!created}>
-                A carrier user — a colleague here
-              </button>
-            )}
-            <button type="button" className={kind === "broker" ? "on" : ""}
-                    onClick={() => setKind("broker")} disabled={!!created}>
-              A broker — an outside company
-            </button>
-          </div>
-          <div className="hint" style={{ marginTop: 10 }}>
-            {kind === "carrier"
-              ? "They join " + (brand?.legal_name || "your organisation")
-                + " and work on its contracts, programmes and bordereaux. They "
-                + "do not add or remove people — only you do."
-              : "They join the BROKER, not you. The same broker produces for "
-                + "several carriers, so it cannot belong to one."}
-          </div>
-        </div>
 
         <div className="grid g-2">
           {/* Person */}

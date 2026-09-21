@@ -30,7 +30,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft, ChevronDown, ChevronRight, FileText, Plus, Layers, Search,
-  Upload, Users2,
+  Upload, UserPlus, Users2,
 } from "lucide-react";
 import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
@@ -45,6 +45,8 @@ import { BrokerOnboarding } from "../components/BrokerOnboarding";
 import { api } from "../api/client";
 import AddContractModal from "../components/AddContractModal";
 import { currentMga } from "../auth";
+import { InviteBrokerModal } from "../components/InviteBrokerModal";
+import { InviteSentModal } from "../components/InviteSentModal";
 
 /** Rows per page. Ten keeps the table a screenful, so the pager is reached by
  *  looking down rather than by scrolling. */
@@ -140,6 +142,10 @@ export default function ProgramBrokers() {
   const [page, setPage] = useState(1);
   // Which rows are opened out, by broker id.
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // Inviting a broker who is not on the platform yet, without leaving the
+  // programme — the same dialog Configure Program uses.
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [sent, setSent] = useState<{ message: string; email: string; note: string } | null>(null);
 
   const load = useCallback(() => {
     getHierarchy()
@@ -195,6 +201,9 @@ export default function ProgramBrokers() {
         ? "That broker was put back on this programme — their earlier contracts are live again."
         : "Broker added to this programme.");
       setAdding("");
+      // Open their row: the contract is the next thing to do for them, and
+      // its Upload / Raise buttons live there.
+      setExpanded(s => new Set(s).add(Number(adding)));
       load();
     } catch (e: any) {
       setErr(e?.response?.data?.detail ?? "Could not add that broker.");
@@ -212,6 +221,31 @@ export default function ProgramBrokers() {
     } catch (e: any) {
       setErr(e?.response?.data?.detail ?? "Could not remove that broker.");
     } finally { setBusy(false); }
+  }
+
+  // After an invite: whoever is new on the broker list is the one just
+  // invited, so they go straight onto this programme and their row opens on
+  // the contract step. The invite returns no id (it must not reveal whether
+  // the address was already known), hence reading "new" off the list. A
+  // broker who already works with another carrier is not on the list until
+  // they accept, so nothing is added for them yet — the note says so.
+  async function onInvited(message: string, email: string) {
+    const before = new Set(all.map(b => b.id));
+    let note = "Once they accept, put them on this programme using the bar above.";
+    try {
+      const fresh = await getBrokers();
+      setAll(fresh);
+      const added = fresh.filter(b => !before.has(b.id));
+      if (added.length) {
+        for (const b of added) await addProgrammeBroker(pid, b.id);
+        setExpanded(s => new Set([...s, ...added.map(b => b.id)]));
+        setFilter("all"); setQ("");
+        note = `${added.map(b => b.legal_name).join(", ")} ${added.length === 1 ? "is" : "are"} `
+          + "now on this programme. Next, add their contract from their row.";
+        load();
+      }
+    } catch { /* the invite itself went through; the bar above can still add them */ }
+    setSent({ message, email, note });
   }
 
   function toggleRow(id: number) {
@@ -326,15 +360,16 @@ export default function ProgramBrokers() {
             <Button className="!px-4" onClick={add} disabled={!adding || busy}>
               <Plus size={14} /> Add
             </Button>
+            <Button variant="secondary" className="!px-4" onClick={() => setInviteOpen(true)}>
+              <UserPlus size={14} /> Add New Broker
+            </Button>
           </div>
           <p className="mt-2.5 text-xs leading-relaxed text-ink-muted">
             {all.length === 0
-              ? <>You hold no brokers yet. A broker is created by inviting its
-                  first admin, from <b className="font-medium">Brokers</b> —
-                  then it can be put on this programme.</>
-              : <>Only brokers you already hold are listed. To bring a new one on
-                  board, invite it from{" "}
-                  <b className="font-medium">Brokers</b>.</>}
+              ? <>You hold no brokers yet. Use <b className="font-medium">Add New
+                  Broker</b> to invite one — they go straight onto this programme.</>
+              : <>Only brokers you already hold are listed. For one who is not,
+                  use <b className="font-medium">Add New Broker</b>.</>}
           </p>
         </Card>
 
@@ -346,8 +381,8 @@ export default function ProgramBrokers() {
               </div>
               <p className="text-sm font-medium">No brokers on this programme yet</p>
               <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">
-                So it cannot hold a contract. Put at least one on it using the
-                bar above.
+                So it cannot hold a contract. Put one on it using the bar above,
+                or invite a new one with Add New Broker.
               </p>
             </div>
           </Card>
@@ -644,7 +679,10 @@ export default function ProgramBrokers() {
                                             <button
                                               className="group flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left
                                                 text-sm transition hover:bg-surface-2"
-                                              onClick={() => nav(`/programs/${prog.id}/contracts/${c.id}`)}
+                                              // The contract's own page — status, review, signing and,
+                                              // once in force, Set up bordereau. The same page
+                                              // the Contracts list opens.
+                                              onClick={() => nav(`/contracts/${c.id}`)}
                                             >
                                               <FileText size={14} className="shrink-0 text-ink-soft" />
                                               <span className="min-w-0 flex-1 truncate group-hover:text-navy">
@@ -660,15 +698,19 @@ export default function ProgramBrokers() {
                                         // The upload dialog, over this page — the
                                         // contracts they already hold are listed
                                         // just above, so there is no need to leave.
-                                        <button
-                                          type="button"
-                                          onClick={() => openUpload(b)}
-                                          className="flex w-full items-center gap-1.5 border-t border-dashed border-border
-                                            bg-surface-2/40 px-3.5 py-2.5 text-left text-[12.5px] font-medium
-                                            text-ink-muted transition hover:bg-surface-2 hover:text-navy"
-                                        >
-                                          <Plus size={13} /> Add another contract
-                                        </button>
+                                        <div className="flex items-center gap-4 border-t border-dashed border-border
+                                          bg-surface-2/40 px-3.5 py-2.5 text-[12.5px] font-medium text-ink-muted">
+                                          <span>Add another contract:</span>
+                                          <button type="button" onClick={() => openUpload(b)}
+                                            className="inline-flex items-center gap-1.5 transition hover:text-navy">
+                                            <Upload size={13} /> Upload
+                                          </button>
+                                          <Link
+                                            to={`/contracts/new?program_id=${prog.id}&broker_party_id=${b.id}`}
+                                            className="inline-flex items-center gap-1.5 text-ink-muted transition hover:text-navy hover:no-underline">
+                                            <Plus size={13} /> Raise
+                                          </Link>
+                                        </div>
                                       )}
                                     </div>
                                   )}
@@ -725,6 +767,20 @@ export default function ProgramBrokers() {
             programmes={[{ id: prog.id, name: prog.name, status: prog.status }]}
             // The new contract belongs under this broker's row — re-read it.
             onAdded={() => load()} />
+        )}
+
+        <InviteBrokerModal open={inviteOpen} onClose={() => setInviteOpen(false)}
+          onInvited={onInvited} />
+
+        {sent && (
+          <InviteSentModal
+            title="Broker invited"
+            message={sent.message}
+            email={sent.email}
+            note={sent.note}
+            doneLabel="Continue"
+            onDone={() => setSent(null)}
+          />
         )}
       </PageBody>
     </>

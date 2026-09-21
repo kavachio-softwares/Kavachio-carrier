@@ -24,13 +24,14 @@
 // /intake/arrivals to the inbox — so every link already sent to a broker, and
 // every link in an email, still lands somewhere sensible.
 import { useCallback, useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Server } from "lucide-react";
 import { watchArrivals } from "../api/intake";
 import InboxTab from "./FilesReceived";
 import WaysInTab, { AddRouteModal } from "./FilesArrive";
 
 export default function Files() {
+  const nav = useNavigate();
   // The panel lives in the URL so it is linkable and survives a reload —
   // Brokers reaches "give this broker a way in" with /files?panel=ways.
   const [params, setParams] = useSearchParams();
@@ -103,6 +104,9 @@ export default function Files() {
               and what happened to it.</p>
           </div>
           <div className="actions">
+            {/* Files has no sidebar entry — it is opened from the Dashboard's
+                Incoming Files card — so the way back is here. */}
+            <button className="btn" onClick={() => nav("/home")}>← Dashboard</button>
             <button className="btn" aria-expanded={panelOpen} aria-controls="ways-panel"
               onClick={() => setPanel(true)}
               title="Where your brokers send their spreadsheets">

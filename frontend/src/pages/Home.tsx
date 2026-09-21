@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, downloadFile } from "../api/client";
-import { currentMga, getUser, userRole, ROLE_LABEL, type Role } from "../auth";
+import { currentMga, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
+import { canAccessPath } from "../access";
 import { fmtStamp } from "../utils/date";
 import { InfoTip } from "../components/InfoTip";
 import { getCalendar, type CalendarStatus } from "../api/calendar";
 import { getBrokersPaged, getHierarchy } from "../api/hierarchy";
 import { listContractsPaged } from "../api/contractRecord";
+import { listArrivals, type Arrival } from "../api/intake";
+import { Badge, CAME_IN_BY, state as arrivalState } from "./FilesReceived";
 
 type Stats = {
   uploads_today: number; uploads_total: number; open_bdx_cycles: number;
@@ -63,6 +66,11 @@ export default function Home() {
   const [progCount, setProgCount] = useState<number | null>(null);
   const [partyCount, setPartyCount] = useState<number | null>(null);
   const [contractCount, setContractCount] = useState<number | null>(null);
+  // Files no longer has a sidebar entry — the dashboard is its way in. A short
+  // snapshot of the latest arrivals; the counts, filters and decisions all
+  // stay on /files, so they are not repeated here.
+  const FILES_PAGE = 5;
+  const [arrivals, setArrivals] = useState<Arrival[] | null>(null);
 
   useEffect(() => {
     api.get<Stats>(`/dashboard/stats`, { params: { mga } }).then(r => setStats(r.data));
@@ -93,6 +101,16 @@ export default function Home() {
       .then(r => setContractCount(r.total))
       .catch(() => setContractCount(null));
   }, [mga, carrierSeat]);
+
+  // /files is carrier-only (ROUTE_ACCESS), so only a carrier seat that can open
+  // it gets the card — anyone else would be shown links that bounce them back.
+  const showFiles = canAccessPath("/files") && !isKavachioAdmin();
+  useEffect(() => {
+    if (!showFiles) return;
+    listArrivals(FILES_PAGE)
+      .then(r => setArrivals(r.rows))
+      .catch(() => setArrivals([]));
+  }, [mga, showFiles]);
 
   // Can the operator actually work yet? That hinges on there being an approved
   // Bordereau Setup to process against (`bordereau_ready`) — NOT on the full
@@ -308,6 +326,59 @@ export default function Home() {
             );
           })()} */}
         </div>
+
+        {/* Incoming files — the latest arrivals, above Recent Runs because a
+            file is what a run starts from. Every row and link opens /files,
+            where the counts, filters and release/discard decisions live. */}
+        {showFiles && (
+          <div className="card" style={{ marginBottom: 18 }}>
+            <div className="card-h">
+              <h3>Incoming Files</h3>
+              <span className="sub">Latest spreadsheets your brokers have sent, whichever way they came in.</span>
+              <div className="right" style={{ display: "flex", gap: 14 }}>
+                <Link className="linkish" to="/files?panel=ways">Ways in →</Link>
+                <Link className="linkish" to="/files">View All Files →</Link>
+              </div>
+            </div>
+            {arrivals === null ? (
+              <div className="empty">Loading files…</div>
+            ) : arrivals.length === 0 ? (
+              <div className="empty">
+                No files received yet — <Link className="linkish" to="/files?panel=ways">set up a way in for your brokers →</Link>
+              </div>
+            ) : (
+              <div className="tbl-wrap">
+                <table>
+                  <thead><tr><th className="l">File</th><th>Broker</th><th>Programme</th><th>Came In By</th><th>Received</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {arrivals.map(a => {
+                      const st = arrivalState(a);
+                      return (
+                        <tr key={a.arrival_id} style={{ cursor: "pointer" }} onClick={() => nav("/files")}>
+                          <td className="l"><b>{a.filename}</b></td>
+                          <td className="muted">{a.broker_name ?? "unknown sender"}</td>
+                          {/* Null for a broker-wide route: the broker is known,
+                              the programme is not. */}
+                          <td className="muted">{a.program_name ?? "—"}</td>
+                          <td>{a.channel
+                            ? <Badge tone={CAME_IN_BY[a.channel].tone}>{CAME_IN_BY[a.channel].label}</Badge>
+                            : <span className="muted">—</span>}</td>
+                          <td className="muted">{fmtStamp(a.received_at, "")}</td>
+                          <td>
+                            {st === "ok"
+                              ? <Badge tone="ok">{a.bdx_upload_id ? "Processed" : "Waiting to be run"}</Badge>
+                              : st === "held" ? <Badge tone="warn">Held</Badge>
+                              : <Badge tone="crit">Turned away</Badge>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Recent runs — latest 5 generated outputs. Full history: /runs */}
         <div className="card">

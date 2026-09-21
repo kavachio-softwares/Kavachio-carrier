@@ -38,7 +38,21 @@
 .proto-side .shield{width:34px;height:34px;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(7,114,130,.45))}
 .proto-side img.shield{width:48px;height:48px;margin:-7px;object-fit:contain}
 .proto-side .brand h1{font-family:var(--p-disp);font-size:20px;letter-spacing:.2px;color:var(--p-side-bright);margin:0;font-weight:700;line-height:1}
-.proto-side .brand .tag{font-size:10px;color:var(--p-side-dim);letter-spacing:1.6px;text-transform:uppercase;margin-top:4px;font-weight:600}
+/* The wordmark block fills what the shield leaves, and is a size container so
+   the tagline can scale to it. "BORDEREAU MANAGEMENT" is two characters longer
+   than the old "Platform" and, at a fixed 10px with 1.6px tracking, wrapped
+   onto a second line. Size and tracking are now both a share of the width
+   available, so the line fits whatever that width is and never breaks.
+   The plain px values come first as the fallback: a browser without container
+   units drops the min() lines and keeps them. nowrap + ellipsis is only a
+   safety net — at these ratios the text lands at ~94% of the width. */
+.proto-side .brand>div{flex:1;min-width:0;container-type:inline-size}
+.proto-side .brand .tag{
+  font-size:9.5px;font-size:min(10px,5.3cqi);
+  letter-spacing:.9px;letter-spacing:min(1.6px,.45cqi);
+  color:var(--p-side-dim);text-transform:uppercase;margin-top:4px;font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
 
 .proto-side .wscard{display:flex;align-items:center;gap:11px;width:calc(100% - 24px);margin:13px 12px 0;padding:9px 10px;border:0;border-radius:12px;text-align:left;cursor:pointer;font:inherit;color:inherit;background:rgba(255,255,255,.045);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),inset 0 1px 0 rgba(255,255,255,.05),0 1px 2px rgba(0,0,0,.28);transition:background .13s,box-shadow .13s}
 .proto-side .wscard:hover{background:rgba(255,255,255,.075);box-shadow:inset 0 0 0 1px rgba(3,162,166,.45),0 4px 12px -4px rgba(0,0,0,.4)}

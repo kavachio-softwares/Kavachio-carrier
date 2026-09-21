@@ -22,7 +22,15 @@ export function InviteSentModal({
   doneLabel?: string;
   onDone: () => void;
 }) {
+  // Its colours, card and button all come from the .proto design tokens
+  // (--p-surface, --p-ink, .proto .btn), which only exist inside a .proto
+  // container. Rendered from a page that is not one — Configure Program — it
+  // lost every one of them and drew as a see-through card with a bare-text
+  // button. Carrying its own scope makes it look the same wherever it is
+  // used; proto-embed drops .proto's page background, and the overlay is
+  // position:fixed, so the wrapper itself takes up no space.
   return (
+    <div className="proto proto-embed">
     <div className="proto-modal-overlay">
       <div className="proto-modal tenant-success" onClick={e => e.stopPropagation()}>
         <div className="ts-icon">
@@ -47,6 +55,7 @@ export function InviteSentModal({
         {note && <p className="ts-sub">{note}</p>}
         <button className="btn pri ts-done" onClick={onDone}>{doneLabel}</button>
       </div>
+    </div>
     </div>
   );
 }

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, Inbox, CalendarDays,
+  FileCheck, CalendarDays,
 } from "lucide-react";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
@@ -84,7 +84,11 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // tabs on /files now: the inbox lands first because it is the daily work,
       // and the ways in sit behind it because a route is set up once when a
       // broker is onboarded and then rarely touched.
-      { to: "/files", label: "Files", icon: Inbox },
+      //
+      // Hidden from the sidebar for now: Files is reached from the Dashboard's
+      // "Incoming Files" card instead. The /files route and its access rule
+      // are unchanged — only the nav entry is commented out.
+      // { to: "/files", label: "Files", icon: Inbox },
     ],
   },
   {
@@ -177,12 +181,18 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Setups entry at all, so for them it rolls up under Carriers.
   if (under("/outputs")) return isKavachioAdmin() ? "/tenants" : "/direct/setups";
 
-  // /intake and /intake/arrivals redirect to /files; keep the item lit while
-  // the redirect resolves.
-  if (under("/intake") || under("/files")) return "/files";
+  // Files has no sidebar entry — it is opened from the Dashboard — so /files
+  // (and /intake, which redirects there) keeps Dashboard lit.
+  if (under("/intake") || under("/files")) return "/home";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";
+  // Inviting a broker uses the Users & Roles form, but is never reached from
+  // Users & Roles — that screen invites colleagues only. It is Party's "Invite
+  // a party", so Party stays lit. (Configure Program's "Add Broker" invites in
+  // a dialog on its own screen and never comes here.)
+  if (pathname === "/users/new" && new URLSearchParams(search).get("for") === "broker")
+    return "/brokers";
   if (under("/users")) return "/users";
   if (under("/rule-library")) return "/rule-library";
 
@@ -311,7 +321,7 @@ export default function Layout() {
             <img className="shield" src="/kavachio_sidebar_logo.png" alt="Kavachio" />
             <div>
               <h1>Kavachio</h1>
-              <div className="tag">Bordereau Platform</div>
+              <div className="tag">Bordereau Management</div>
             </div>
           </div>
 

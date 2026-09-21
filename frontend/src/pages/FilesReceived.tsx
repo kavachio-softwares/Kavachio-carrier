@@ -27,11 +27,11 @@ import { Pagination } from "../components/Pagination";
 // Each door gets a name and a tone, as in the carrier-centric design: email is
 // the one with a reply path so it reads as info, an upload was done by a person
 // so it reads as ok, and the two machine doors are quiet greys.
-const CAME_IN_BY: Record<Channel, { label: string; tone: "ok" | "info" | "mut" }> = {
-  upload: { label: "Uploaded", tone: "ok" },
-  email: { label: "Emailed", tone: "info" },
-  sftp: { label: "Server folder", tone: "mut" },
-  api: { label: "Sent by machine", tone: "mut" },
+export const CAME_IN_BY: Record<Channel, { label: string; tone: "ok" | "info" | "mut" }> = {
+  upload: { label: "Manual upload", tone: "ok" },
+  email: { label: "Email", tone: "info" },
+  sftp: { label: "Secure folder (SFTP)", tone: "mut" },
+  api: { label: "System connection (API)", tone: "mut" },
   cloud_folder: { label: "Shared folder", tone: "mut" },
 };
 
@@ -47,7 +47,7 @@ const WAY_IN_ORDER: Channel[] = ["upload", "email", "sftp", "api"];
 // read the whole fetched set, so moving the page to the server would quietly
 // turn each of them into a fact about ten rows. This changes what is DRAWN and
 // nothing else.
-const PAGE_SIZE = 25;
+const PAGE_SIZE = 10;   // same page size as the other lists (Contracts, Parties…)
 
 // The checks in the order land_file() runs them. That order is the whole point:
 // it stops at the FIRST failure, so a file that fails check three has passed one
@@ -107,7 +107,7 @@ type Filter = "" | "today" | "ok" | "held" | "away";
 type Sort = "queue" | "new" | "old";
 type Range = "all" | "30" | "90" | "month";
 
-function state(a: Arrival): Exclude<Filter, "" | "today"> {
+export function state(a: Arrival): Exclude<Filter, "" | "today"> {
   return a.outcome === "accepted" ? "ok" : isHeld(a) ? "held" : "away";
 }
 
@@ -122,7 +122,7 @@ function isWaiting(a: Arrival): boolean {
   return state(a) === "held" && !a.resolution;
 }
 
-function Badge({ tone, children }:
+export function Badge({ tone, children }:
   { tone: "ok" | "warn" | "crit" | "mut" | "info"; children: React.ReactNode }) {
   return <span className={`badge b-${tone}`}><span className="d" />{children}</span>;
 }
@@ -534,7 +534,7 @@ export default function InboxTab({ onWaitingCount, active, refreshKey, liveTick 
                 one state where somebody genuinely does not know — not in a grey
                 slab above the title on every visit. */}
             <p style={{ margin: "0 auto", fontSize: 12.5, maxWidth: 430, lineHeight: 1.6 }}>
-              Emailed, uploaded, dropped on a server or sent by a machine — every spreadsheet
+              By email, manual upload, secure folder (SFTP) or system connection (API) — every spreadsheet
               that reaches you ends up here, in the order it arrived, and gets the same checks
               whichever way it came. Set a broker up on <b>Ways in</b> first.
             </p>
@@ -624,11 +624,11 @@ export default function InboxTab({ onWaitingCount, active, refreshKey, liveTick 
             </table>
           </div>
         )}
-        {shown.length > PAGE_SIZE && (
-          <Pagination
-            page={current} pageCount={pageCount} pageSize={PAGE_SIZE}
-            totalItems={shown.length} onPageChange={setPage} noun="files" />
-        )}
+        {/* Always drawn, like every other paginated list — the "X–Y of Z"
+            bar is how the other screens read, even on a single page. */}
+        <Pagination
+          page={current} pageCount={pageCount} pageSize={PAGE_SIZE}
+          totalItems={shown.length} onPageChange={setPage} noun="files" />
         <div className="note" style={{
           margin: 0, border: 0, borderTop: "1px solid var(--p-border)", borderRadius: 0,
         }}>

@@ -38,7 +38,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
-  AlertTriangle, ArrowLeft, Check, Clock, ExternalLink, Globe, Move, PenLine,
+  AlertTriangle, ArrowLeft, ArrowRight, Check, Clock, ExternalLink, Globe, Move, PenLine,
 } from "lucide-react";
 import { fmtDate } from "../utils/date";
 import {
@@ -713,10 +713,24 @@ export default function ContractSignature() {
 
           <div style={{ padding: "16px 20px" }}>
             {rec.lifecycle === "active" ? (
-              <div className="note ok" style={{ marginBottom: 14 }}>
-                <b>Both sides have signed and this contract is in force.</b>{" "}
-                Its checks run on every bordereau from here. To change it now,
-                endorse it — a running contract is not edited.
+              <div className="note ok" style={{
+                marginBottom: 14, display: "flex", gap: 14, flexWrap: "wrap",
+                alignItems: "center", justifyContent: "space-between",
+              }}>
+                <div style={{ maxWidth: "60ch" }}>
+                  <b>Both sides have signed and this contract is in force.</b>{" "}
+                  Its checks run on every bordereau from here. To change it now,
+                  endorse it — a running contract is not edited.
+                </div>
+                {/* The carrier's next step, straight from the last signature:
+                    setup for this programme × broker, both pre-chosen. */}
+                {!isBrokerSeat() && rec.programme && rec.counterparty && (
+                  <Link className="btn pri"
+                    to={`/direct/setup?program_id=${rec.programme.id}`
+                      + `&broker_party_id=${rec.counterparty.id}`}>
+                    Set up bordereau <ArrowRight size={13} />
+                  </Link>
+                )}
               </div>
             ) : rec.unsigned_sides.length === 0 ? (
               <div className="note warn" style={{ marginBottom: 14 }}>

@@ -25,11 +25,18 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Sk } from "../components/ui/Skeleton";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
+import { Pagination } from "../components/Pagination";
+
+/** Rows per page — the same ten the other lists show. Paged client-side: the
+ *  programmes arrive in one payload with the hierarchy, so no request is saved
+ *  by asking the server for a page. */
+const PAGE_SIZE = 10;
 
 export default function Programs() {
   const nav = useNavigate();
   const [rows, setRows] = useState<HierarchyProgramme[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
 
   useEffect(() => {
     getHierarchy().then(h => setRows(h.programmes))
@@ -37,6 +44,11 @@ export default function Programs() {
   }, []);
 
   const needBrokers = (rows ?? []).filter(p => p.broker_count === 0).length;
+  const total = rows?.length ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // Clamped, so a list that shrinks never strands you on an empty page.
+  const pageNow = Math.min(page, pageCount);
+  const pageRows = (rows ?? []).slice((pageNow - 1) * PAGE_SIZE, pageNow * PAGE_SIZE);
 
   return (
     <>
@@ -106,7 +118,7 @@ export default function Programs() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map(p => (
+                  {pageRows.map(p => (
                     <tr
                       key={p.id}
                       className="group cursor-pointer"
@@ -176,6 +188,15 @@ export default function Programs() {
                 </tbody>
               </table>
             </div>
+
+            {/* The shared pager is styled by the .proto tokens; proto-embed
+                brings them in without .proto's page background. */}
+            {pageCount > 1 && (
+              <div className="proto proto-embed -mx-5">
+                <Pagination page={pageNow} pageCount={pageCount} pageSize={PAGE_SIZE}
+                  totalItems={total} onPageChange={setPage} noun="programmes" />
+              </div>
+            )}
 
             <p className="mt-3 border-t border-border pt-3 text-xs text-ink-muted">
               Open a programme to manage the brokers on it. Contracts belong to a

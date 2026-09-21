@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { clearAuth, currentMga, getUser, normalizeRole } from "../auth";
 import { fmtDateTime } from "../utils/date";
@@ -400,9 +400,9 @@ export default function Users() {
         </div>
 
         <div className="note" style={{ marginTop: 14, maxWidth: 560 }}>
-          Bringing a broker on board? Invite their admin above — the broker
-          organisation is created with the invitation. Put them on a programme
-          from Programmes; until then they cannot produce.
+          Bringing a broker on board? Invite them from the <Link className="linkish" to="/brokers">Party</Link> screen —
+          the broker organisation is created with the invitation. Put them on a
+          programme from Programmes; until then they cannot produce.
         </div>
       </div>
 

@@ -28,23 +28,23 @@ import { Modal } from "../components/ui/Modal";
 // data — the backend has no opinion on what "the old-fashioned way" means.
 const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }> = {
   upload: {
-    title: "Someone uploads it", sub: "they sign in and drag the file in",
+    title: "Manual upload", sub: "someone signs in and uploads the file",
     hint: "Process Bordereau screen",
   },
   email: {
-    title: "They email it", sub: "the file comes in as an attachment",
+    title: "Email", sub: "the broker emails the file to their own address",
     hint: "an address you give the broker",
   },
   sftp: {
-    title: "They drop it on a server", sub: "the old-fashioned way, and still the most reliable",
+    title: "Secure folder (SFTP)", sub: "the broker uploads the file to a secure folder",
     hint: "a folder of their own",
   },
   api: {
-    title: "Their system sends it by itself", sub: "no person involved — one computer talking to another",
+    title: "System connection (API)", sub: "the broker's system sends the file automatically",
     hint: "POST /v1/bordereaux",
   },
   cloud_folder: {
-    title: "We watch a shared folder", sub: "they save the file where they always have",
+    title: "Shared folder", sub: "the broker saves the file in a folder we watch",
     hint: "S3 · SharePoint · Google Drive",
   },
 };
@@ -52,7 +52,7 @@ const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }
 // A mark per channel, so four groups that are otherwise four identical grey
 // rows can be told apart by shape. The tones deliberately match CAME_IN_BY on
 // the Inbox tab: the same way in is the same colour on both tabs, which is what
-// makes "Server folder" on a row and "They drop it on a server" here read as
+// makes "Secure folder (SFTP)" on a row and the same heading here read as
 // one thing rather than two.
 const CHANNEL_MARK: Record<Channel, { Icon: React.ElementType; tone: string }> = {
   upload: { Icon: Upload, tone: "ok" },

@@ -128,8 +128,8 @@ export default function BordereauCalendar() {
     const res = await chase(rows.map(r => r.id), note);
     setErr(null);
     setMsg(res.chased === 0
-      ? "Nothing was chased — those files are no longer late."
-      : `Reminder recorded against ${plural(res.chased, "late file")}.`);
+      ? "Nothing to follow up — those files are no longer late."
+      : `Follow-up recorded for ${plural(res.chased, "late file")}.`);
     await load(month);
   }
 
@@ -164,7 +164,7 @@ export default function BordereauCalendar() {
               disabled={overdue.length === 0}
               title={overdue.length === 0 ? "Nothing is late" : ""}>
               {overdue.length === 0 ? "Nothing is late"
-                : `Chase what is late (${overdue.length})`}
+                : `Follow up on late files (${overdue.length})`}
             </button>
           </div>
         </div>
@@ -305,7 +305,7 @@ export default function BordereauCalendar() {
                           {detail ?? m.label}</span>
                         {r.chase_count > 0 && (
                           <div className="sub" style={{ marginTop: 3 }}>
-                            chased {r.chase_count > 1 ? `${r.chase_count}×` : ""}{" "}
+                            followed up {r.chase_count > 1 ? `${r.chase_count}×` : ""}{" "}
                             {fmtDay(r.chased_at)}
                           </div>
                         )}
@@ -328,7 +328,7 @@ export default function BordereauCalendar() {
                         {r.status === "overdue" && (
                           <span className="linkish" style={{ marginLeft: 8 }}
                             onClick={() => setChasing([r])}>
-                            Chase them →
+                            Follow up →
                           </span>
                         )}
                       </td>
@@ -611,7 +611,7 @@ function ChaseModal({ rows, onClose, onConfirm }: {
       await onConfirm(rows, note.trim());
       onClose();
     } catch (e: any) {
-      setErr(e?.response?.data?.detail ?? "Could not record the chase.");
+      setErr(e?.response?.data?.detail ?? "Could not record the follow-up.");
       setBusy(false);
     }
   }
@@ -627,8 +627,8 @@ function ChaseModal({ rows, onClose, onConfirm }: {
         onClick={e => e.stopPropagation()}>
         <div className="card-h">
           <h3>{single
-            ? `Chase ${rows[0].broker_name ?? "this broker"}`
-            : "Chase everything that is late"}</h3>
+            ? `Follow up with ${rows[0].broker_name ?? "this broker"}`
+            : "Follow up on all late files"}</h3>
           <div className="right">
             <span className="linkish" onClick={onClose}
               role="button" aria-label="Close"><X size={14} /></span>
@@ -684,7 +684,7 @@ function ChaseModal({ rows, onClose, onConfirm }: {
               </div>
               {rows[0].chase_count > 0 && (
                 <div className="kv">
-                  <span className="k">Already chased</span>
+                  <span className="k">Already followed up</span>
                   <span className="v">
                     {rows[0].chase_count === 1 ? "once" : `${rows[0].chase_count} times`}
                     {rows[0].chased_at && `, last on ${fmtFull(rows[0].chased_at)}`}
@@ -712,7 +712,7 @@ function ChaseModal({ rows, onClose, onConfirm }: {
                 ? <><b>{unreachable[0]}</b> has nobody on record to contact.</>
                 : <><b>{unreachable.length} of these brokers</b> have nobody on
                   record to contact: {unreachable.join(", ")}.</>}{" "}
-              The chase is still recorded against the period, but you will have to
+              The follow-up is still recorded against the period, but you will have to
               reach them yourself.
             </div>
           )}
@@ -721,7 +721,7 @@ function ChaseModal({ rows, onClose, onConfirm }: {
             <label>Anything to add?</label>
             <input value={note} onChange={e => setNote(e.target.value)}
               placeholder="Optional — e.g. we need this before month end" />
-            <div className="hint">Kept with the chase, so what you asked for is
+            <div className="hint">Kept with the follow-up, so what you asked for is
               readable later.</div>
           </div>
 

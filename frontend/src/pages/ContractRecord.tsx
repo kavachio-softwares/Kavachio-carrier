@@ -20,7 +20,7 @@ import {
   Eye, FileText, History, MessagesSquare, Paperclip, PenLine, Plus, RefreshCw,
   Send, ShieldCheck, Trash2, Upload, XCircle,
 } from "lucide-react";
-import { currentMga, getTenantBrand } from "../auth";
+import { currentMga, getTenantBrand, isBrokerSeat } from "../auth";
 import { SignaturePlacer, signerTargets }
   from "../components/SignaturePlacer";
 import { InfoTip } from "../components/InfoTip";
@@ -1115,6 +1115,35 @@ export default function ContractRecord() {
                   ? ` on ${fmtDate(rec.executed_date)}` : ""}. The carrier places
                 it and puts it in force — <b>placement is not built in Kavachio
                 yet</b>, so for now it goes straight to in force.
+              </div>
+            )}
+            {/* In force is where a raised contract's flow picks up again:
+                both sides have signed, so the carrier's next job is the
+                bordereau setup for this programme × broker. Setup reads both
+                from the link, so it opens with them already chosen. Carrier
+                only — a broker does not set up bordereaux. */}
+            {rec.lifecycle === "active" && !isBrokerSeat()
+              && rec.programme && rec.counterparty && (
+              <div className="note" style={{
+                marginTop: 12, display: "flex", gap: 14, flexWrap: "wrap",
+                alignItems: "center", justifyContent: "space-between",
+                background: "var(--p-primary-soft)", borderColor: "#BFE0E4",
+              }}>
+                <div>
+                  <b style={{ color: "var(--p-primary-h)" }}>
+                    Contract is in force. Next: set up this broker's bordereaux.
+                  </b>
+                  <div style={{ marginTop: 4 }}>
+                    Programme <b>{rec.programme.name}</b> · Broker{" "}
+                    <b>{rec.counterparty.name}</b>. Setup opens with these
+                    already chosen.
+                  </div>
+                </div>
+                <Link className="btn pri"
+                  to={`/direct/setup?program_id=${rec.programme.id}`
+                    + `&broker_party_id=${rec.counterparty.id}`}>
+                  Set up bordereau <ArrowRight size={13} />
+                </Link>
               </div>
             )}
             {rec.renews_contract_id && (
