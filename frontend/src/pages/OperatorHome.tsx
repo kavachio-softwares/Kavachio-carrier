@@ -13,8 +13,25 @@
  */
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { getOperatorHome, type OperatorHome as Home, type OperatorRun } from "../api/broker";
-import { fmtDateTime } from "../utils/date";
+import {
+  getBrokerInsights, getOperatorHome,
+  type BrokerInsights, type OperatorHome as Home, type OperatorRun,
+} from "../api/broker";
+import { Activity, AlertCircle, Clock, FileSpreadsheet, Timer, Upload } from "lucide-react";
+import { ResolvedTrend, RunTrend } from "../components/BrokerCharts";
+import { InfoTip } from "../components/InfoTip";
+import { ChartCard, LinkCard, StatCard } from "../components/StatCard";
+
+/** The window both charts describe. */
+const DAYS = 30;
+
+/** Seconds as the unit a person would say it in. */
+function duration(sec: number | null): string {
+  if (sec == null) return "—";
+  if (sec < 60) return `${sec.toFixed(1)} sec`;
+  if (sec < 3600) return `${(sec / 60).toFixed(1)} min`;
+  return `${(sec / 3600).toFixed(1)} hrs`;
+}
 
 /** The exception screen a run opens on — the same one Process Bordereau uses. */
 const reviewPath = (r: OperatorRun) =>
@@ -29,14 +46,21 @@ export default function OperatorHome() {
     getOperatorHome().then(setD).catch(() => setErr("Could not load your dashboard."));
   }, []);
 
+  const [ins, setIns] = useState<BrokerInsights | null>(null);
+  useEffect(() => {
+    getBrokerInsights(DAYS).then(setIns).catch(() => setIns(null));
+  }, []);
+
   const head = (
     <div className="page-head">
       <div className="t">
         <h2>Dashboard</h2>
         <p>
-          {d ? `${d.broker.name} — what needs doing today, and the spreadsheets you ran most recently.`
-             : "What needs doing today."}
+          {d ? `${d.broker.name} — your files, and what needs fixing.` : "Your files, and what needs fixing."}
         </p>
+      </div>
+      <div className="actions">
+        <Link className="btn pri" to="/broker/bordereau">＋ Process Bordereau</Link>
       </div>
     </div>
   );
@@ -63,122 +87,49 @@ export default function OperatorHome() {
       <div className="view full">
         {head}
 
-        <div className="tiles" style={{ marginBottom: 18 }}>
-          <div className={`tile${c.exceptions > 0 ? " alert" : ""}`}>
-            <div className="k">Exceptions to review</div>
-            <div className="v">{c.exceptions}</div>
-            <div className="foot">
-              {c.exceptions > 0
-                ? <>
-                    in {c.exception_runs} {c.exception_runs === 1 ? "run" : "runs"}
-                    {firstToReview && <>{" · "}
-                      <Link className="linkish" to={reviewPath(firstToReview)}>Review →</Link></>}
-                  </>
-                : "rows that failed a check"}
-            </div>
-          </div>
-          <div className="tile">
-            <div className="k">Runs</div>
-            <div className="v">{c.runs}</div>
-            <div className="foot">files run for your broker, by your team or the carrier</div>
-          </div>
-          <div className="tile">
-            <div className="k">Setups you can use</div>
-            <div className="v">{c.setups}</div>
-            <div className="foot">built by your broker admin</div>
-          </div>
-          <div className="tile">
-            <div className="k">Programmes</div>
-            <div className="v">{c.programmes}</div>
-            <div className="foot">{carrierNames}</div>
-          </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 20, marginBottom: 24 }}>
+          <StatCard title="Exceptions to Review" value={c.exceptions} icon={AlertCircle}
+                    tone={c.exceptions > 0 ? "alert" : undefined}
+                    subtitle={c.exceptions > 0
+                      ? `In ${c.exception_runs} ${c.exception_runs === 1 ? "run" : "runs"}`
+                      : "Nothing to fix"} />
+          <StatCard title="My Files Uploaded" value={d.my_uploads_this_week} icon={Upload}
+                    subtitle="This week" />
+          <StatCard title="Team Runs This Week" value={ins ? ins.totals.runs_this_week : "—"}
+                    icon={Activity} subtitle={`${c.runs} in total`} />
+          <StatCard title="Avg Turnaround Time" value={duration(d.avg_turnaround_sec)}
+                    icon={Timer} subtitle="Per file, last 30 days" />
         </div>
 
-        {/* Why there is nothing to do, and whose job the next step is. An
-            operator cannot unblock either of these themselves, so saying
-            "no runs yet" alone would leave them stuck. */}
-        {d.blocked_on === "no-programme" && (
-          <div className="card pad" style={{ maxWidth: 640 }}>
-            <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>Nothing to run yet</h3>
-            <p className="muted" style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
-              Your broker has not been put on a carrier's programme yet. Until a
-              carrier does that, there is no work to do here — and it is not
-              something you or your broker admin can do from this side.
+        {d.blocked_on && d.recent_runs.length === 0 && (
+          <div className="card" style={{ padding: 24, marginBottom: 24 }}>
+            <p style={{ margin: 0, color: "var(--p-muted)" }}>
+              {d.blocked_on === "no-programme"
+                ? "Nothing to run yet — your broker has not been put on a carrier's programme."
+                : `Nothing to run yet — ${carrierNames} has not built a bordereau setup for your programme.`}
             </p>
           </div>
         )}
 
-        {d.blocked_on === "no-setup" && (
-          <div className="card pad" style={{ maxWidth: 640 }}>
-            <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>Nothing to run yet</h3>
-            <p className="muted" style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
-              You are on {c.programmes === 1 ? "a programme" : `${c.programmes} programmes`} for{" "}
-              {carrierNames}, but no bordereau setup has been built yet. A setup
-              is what tells Kavachio how to read your spreadsheet, and the
-              CARRIER builds it — it is what defines a valid file, so it is
-              theirs to decide. Nobody on your side can unblock this; ask your
-              carrier contact.
-            </p>
+        {d.recent_runs.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
+            <ChartCard title="Bordereau Status"
+              info={<InfoTip text={`Your team's files over the last ${DAYS} days, by result: clean, flagged with exceptions, or not checked yet.`} />}>
+              {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} />}
+            </ChartCard>
+            <ChartCard title="Exceptions Resolved"
+              info={<InfoTip text={`Exceptions your team put right each day over the last ${DAYS} days.`} />}>
+              {!ins ? <div className="muted">Loading…</div> : <ResolvedTrend data={ins.runs_by_day} />}
+            </ChartCard>
           </div>
         )}
 
-        {/* Shown whenever there are runs — a run the carrier made for this
-            broker is there to be reviewed even before a setup of the
-            broker's own is in place. */}
-        {(d.blocked_on === null || d.recent_runs.length > 0) && (
-          <div className="card">
-            <div className="card-h">
-              <h3>Recent runs</h3>
-              <span className="muted" style={{ fontSize: 12 }}>
-                files run for your broker, by your team or the carrier
-              </span>
-            </div>
-            {d.recent_runs.length === 0 ? (
-              <div className="empty">
-                No runs yet — process a bordereau and it will appear here.
-                <div style={{ marginTop: 12 }}>
-                  <Link className="btn pri" to="/broker/bordereau">Process a bordereau</Link>
-                </div>
-              </div>
-            ) : (
-              <div className="tbl-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>File</th><th>Programme</th><th>Contract</th>
-                      <th>Sent by</th><th>Rows</th><th>Result</th><th>When</th><th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {d.recent_runs.map(r => (
-                      <tr key={r.export_id}>
-                        <td><b>{r.filename}</b></td>
-                        <td>{r.programme ?? "—"}</td>
-                        <td className="muted">{r.contract ?? "—"}</td>
-                        <td>{r.sent_by === "carrier" ? "The carrier" : "Your team"}</td>
-                        <td>{r.rows ?? "—"}</td>
-                        <td>
-                          {r.exception_count > 0
-                            ? <span className="badge b-warn"><span className="d" />
-                                {r.exception_count} {r.exception_count === 1 ? "exception" : "exceptions"}</span>
-                            : r.status === "not_validated"
-                              ? <span className="badge"><span className="d" />Not checked</span>
-                              : <span className="badge b-ok"><span className="d" />Clean</span>}
-                        </td>
-                        <td className="muted">{fmtDateTime(r.created_at)}</td>
-                        <td>
-                          <button className="btn sm" onClick={() => nav(reviewPath(r))}>
-                            {r.exception_count > 0 ? "Review →" : "Open →"}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
+          <LinkCard title="Setups Ready" value={c.setups} label="to run files against"
+                    icon={FileSpreadsheet} onClick={() => nav("/broker/bordereau")} />
+          <LinkCard title="Recent File Submissions" value={c.runs} label="files run" dark
+                    icon={Clock} onClick={() => nav("/broker/runs")} />
+        </div>
       </div>
     </div>
   );

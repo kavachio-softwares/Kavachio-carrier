@@ -10,6 +10,9 @@ import AddTenant from "./pages/AddTenant";
 import AdminUsers from "./pages/AdminUsers";
 import BrokerDashboard from "./pages/BrokerDashboard";
 import OperatorHome from "./pages/OperatorHome";
+import BrokerRuns from "./pages/BrokerRuns";
+import TeamActivity from "./pages/TeamActivity";
+import FilesByCarrier from "./pages/FilesByCarrier";
 import BrokerContracts from "./pages/BrokerContracts";
 import BrokerInvitations from "./pages/BrokerInvitations";
 import BrokerBordereau from "./pages/BrokerBordereau";
@@ -147,6 +150,9 @@ export default function App() {
             submits, and an operator is the seat added to do exactly this. */}
         <Route path="/broker/bordereau" element={<BrokerBordereau />} />
         <Route path="/broker/users" element={<BrokerUsers />} />   {/* The broker staffs itself */}
+        <Route path="/broker/runs" element={<BrokerRuns />} />
+        <Route path="/broker/team-activity" element={<TeamActivity />} />
+        <Route path="/broker/files-by-carrier" element={<FilesByCarrier />} />
         <Route path="/admin/users" element={<AdminUsers />} />   {/* Everyone on the platform, read-only */}
         <Route path="/tenants" element={<Tenants />} />    {/* Tenants directory (Kavachio platform admin) */}
         <Route path="/tenants/new" element={<AddTenant />} />

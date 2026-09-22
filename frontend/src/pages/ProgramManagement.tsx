@@ -46,7 +46,7 @@ const STAGE_COLOR: Record<string, string> = {
 const FALLBACK = [C.blue, C.purple, C.info, C.slate, C.warn, C.ok];
 
 // Program Book page size. 10 to match every other page-level list (Carriers,
-// Users & Roles, Tenants, Recent Runs) — ProgramCalendar's 12 is the odd one out
+// Users & Roles, Tenants, Recent File Submissions) — ProgramCalendar's 12 is the odd one out
 // and it is an embedded component, not a page.
 //
 // Client-side on purpose: the endpoint is one aggregate call whose KPI cards and

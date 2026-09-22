@@ -12,6 +12,7 @@ import { listContractsPaged } from "../api/contractRecord";
 import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
+import { StatCard } from "../components/StatCard";
 
 
 type Stats = {
@@ -51,50 +52,6 @@ const SUBTITLE: Record<Role, string> = {
   broker_admin: "Your contracts and the files you have sent.",
   operator: "The files you have sent, and anything that needs fixing.",
 };
-
-const StatCard = ({ title, value, icon: Icon, trend, subtitle, tone, onClick }: any) => (
-  <div
-    style={{
-      backgroundColor: "var(--p-surface)",
-      border: tone === "alert" ? "1px solid var(--p-crit)" : "1px solid var(--p-border-2)",
-      borderRadius: 16, padding: "16px", display: "flex", flexDirection: "column", gap: 10,
-      boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05)",
-      cursor: onClick ? "pointer" : "default",
-      transition: "transform 0.2s, box-shadow 0.2s"
-    }}
-    onClick={onClick}
-    onMouseOver={onClick ? (e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgb(0 0 0 / 0.1)"; } : undefined}
-    onMouseOut={onClick ? (e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05)"; } : undefined}
-  >
-    <div style={{
-      width: 36, height: 36, borderRadius: 10,
-      background: tone === "alert" ? "#fef2f2" : "#f0fdfa",
-      display: "flex", alignItems: "center", justifyContent: "center",
-      color: tone === "alert" ? "#ef4444" : "#0d9488"
-    }}>
-      <Icon size={18} strokeWidth={2.5} />
-    </div>
-    <div>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-        <div style={{ fontSize: 26, fontWeight: 700, color: "var(--p-text)", lineHeight: 1 }}>
-          {value}
-        </div>
-        {trend && (
-          <div style={{
-            fontSize: 13, fontWeight: 600,
-            color: trend.startsWith("-") || tone === "alert" ? "#ef4444" : "#10b981",
-            background: trend.startsWith("-") || tone === "alert" ? "#fef2f2" : "#ecfdf5",
-            padding: "4px 8px", borderRadius: 6
-          }}>
-            {trend}
-          </div>
-        )}
-      </div>
-      <div style={{ color: "var(--p-text)", fontSize: 15, fontWeight: 500 }}>{title}</div>
-      {subtitle && <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 2 }}>{subtitle}</div>}
-    </div>
-  </div>
-);
 
 export default function Home() {
   const mga = currentMga();
@@ -296,7 +253,7 @@ export default function Home() {
 
           <StatCard
             title="Exceptions to Review" value={fmt(stats?.pending_exceptions)}
-            icon={AlertCircle} tone="alert" onClick={openTriage} subtitle="Alert"
+            icon={AlertCircle} tone="alert" subtitle="Alert"
           />
 
           <StatCard title="Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} trend="+12%" />
@@ -434,7 +391,7 @@ export default function Home() {
                 <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
                 </div>
-                <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Recent Runs</h3>
+                <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Recent File Submissions</h3>
               </div>
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 <span style={{ fontSize: 32, fontWeight: 600, color: "white" }}>{runs.length}</span>

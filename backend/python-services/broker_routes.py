@@ -526,6 +526,27 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 if state == "active":
                     live += 1
 
+        # Signatures on this broker's own contracts: signed by everyone
+        # (completed), and waiting on this broker's signature. Terms still to
+        # agree come before signing, so they are counted apart.
+        signatures_completed = 0
+        if prog_ids and rows:
+            from db import EsignEnvelope
+            signatures_completed = (s.query(func.count(EsignEnvelope.id))
+                .filter(EsignEnvelope.contract_id.in_([c.id for c in rows]),
+                        EsignEnvelope.status == "completed").scalar() or 0)
+        terms_to_agree = sum(1 for w in on_me if w["lifecycle"] == "in_review")
+
+        agency_exceptions = 0
+        if prog_ids:
+            from db import OutputExport
+            import validation_outcome as vo
+            agency_exceptions = s.query(func.coalesce(func.sum(OutputExport.exception_count), 0)).filter(
+                OutputExport.broker_party_id == bid,
+                OutputExport.program_id.in_(prog_ids),
+                OutputExport.status == vo.HAS_EXCEPTIONS
+            ).scalar() or 0
+
         # "Users" tile — this broker's OWN people: its admins and its users
         # (operators), invited ones included. Not narrowed by carrier: a broker
         # has one team whichever carrier it is producing for. Removed people
@@ -545,6 +566,10 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 "users": sum(n for _st, n in user_rows),
                 "users_invited": sum(n for st, n in user_rows
                                      if st in ("invited", "pending")),
+                "agency_exceptions": int(agency_exceptions),
+                "signatures_pending": len(on_me) - terms_to_agree,
+                "signatures_completed": int(signatures_completed),
+                "terms_to_agree": terms_to_agree,
             },
             # The queue only this broker can move.
             "waiting_on_me": on_me,
@@ -740,14 +765,37 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
         # Not every upload on the programme: programmes are shared, and
         # counting by programme alone showed other brokers' files.
         runs, exceptions, exception_runs = 0, 0, 0
+        my_uploads_week, turnaround_sec = 0, None
         recent: list[dict] = []
         if prog_ids:
-            from db import OutputExport
+            from db import LandingRecord, OutputExport
             import validation_outcome as vo
             mine = s.query(OutputExport).filter(
                 OutputExport.broker_party_id == bid,
                 OutputExport.program_id.in_(prog_ids))
             runs = mine.count()
+
+            # Files THIS person sent through Process Bordereau. Runs made
+            # before the uploader was recorded have no user and are not
+            # guessed at, so this counts from the day recording began.
+            week_ago = dt.datetime.utcnow() - dt.timedelta(days=7)
+            my_uploads_week = mine.filter(
+                OutputExport.generated_by_user_id == p.user_id,
+                OutputExport.created_at >= week_ago).count()
+
+            # File received (landing written) to output ready (export written)
+            # — the same measure the carrier's own turnaround tile uses, over
+            # the broker's runs in the last 30 days.
+            month_ago = dt.datetime.utcnow() - dt.timedelta(days=30)
+            turnaround_sec = (s.query(func.avg(
+                    func.extract("epoch", OutputExport.created_at)
+                    - func.extract("epoch", LandingRecord.created_at)))
+                .join(LandingRecord, LandingRecord.output_export_id == OutputExport.id)
+                .filter(OutputExport.broker_party_id == bid,
+                        OutputExport.program_id.in_(prog_ids),
+                        OutputExport.created_at >= month_ago,
+                        OutputExport.created_at >= LandingRecord.created_at)
+                .scalar())
             # Counted the way the carrier's own "Exceptions to review" tile
             # counts them, so both sides read the same number for a run.
             exceptions, exception_runs = s.query(
@@ -756,29 +804,7 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
             ).filter(OutputExport.broker_party_id == bid,
                      OutputExport.program_id.in_(prog_ids),
                      OutputExport.status == vo.HAS_EXCEPTIONS).one()
-            latest = mine.order_by(OutputExport.id.desc()).limit(10).all()
-            prog_names = {pid: name for pid, name in s.query(Program.id, Program.name)
-                          .filter(Program.id.in_({e.program_id for e in latest})).all()}
-            cids = {e.contract_id for e in latest if e.contract_id}
-            contract_names = ({cid: (name or fname) for cid, name, fname in
-                               s.query(Contract.id, Contract.name, Contract.filename)
-                               .filter(Contract.id.in_(cids)).all()} if cids else {})
-            from app_routes import _iso_utc
-            recent = [{
-                "export_id": e.id,
-                "filename": e.filename,
-                "programme": prog_names.get(e.program_id),
-                "contract": contract_names.get(e.contract_id),
-                "rows": e.policy_count,
-                "exception_count": e.exception_count or 0,
-                "status": e.status,
-                # Who put it through: a run through the broker's own lane is
-                # recorded as the broker company; anything else the carrier
-                # ran for them.
-                "sent_by": ("broker" if (e.generated_by or "").startswith("broker:")
-                            else "carrier"),
-                "created_at": _iso_utc(e.created_at),
-            } for e in latest]
+            recent = _run_rows(s, mine.order_by(OutputExport.id.desc()).limit(10).all())
 
         return {
             "broker": {"id": bid, "name": me.legal_name if me else "—"},
@@ -790,6 +816,10 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
                 "exceptions": int(exceptions),
                 "exception_runs": int(exception_runs),
             },
+            "my_uploads_this_week": int(my_uploads_week),
+            # Seconds; None when there is no run to measure in the last 30 days.
+            "avg_turnaround_sec": (round(float(turnaround_sec), 1)
+                                   if turnaround_sec is not None else None),
             # Newest first — the broker's own runs and the ones the carrier
             # ran for it, the same list for every one of the broker's users.
             "recent_runs": recent,
@@ -802,3 +832,306 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
                 else None
             ),
         }
+
+
+# --- the same activity, shaped for charts -----------------------------------
+
+
+@router.get("/broker/insights")
+def broker_insights(days: int = Query(30, ge=7, le=90),
+                    p: Principal = Depends(current_principal)):
+    """This broker's activity over a window, for the two dashboard charts.
+
+    Both broker screens read this one endpoint. The admin asks "who is doing
+    the work and which carrier is it for"; the user asks "how did our runs go".
+    Same rows, different cuts — one query set, so the two screens cannot drift
+    into quoting different numbers for the same week.
+
+    EVERY COUNT IS BROKER-WIDE, NEVER PER PERSON. `output_exports` records the
+    broker a run was made FOR (`broker_party_id`) and never the person who sent
+    it: a broker-lane run stamps `generated_by = "broker:<id>"`, the company.
+    So there is no honest per-user file count to return, and the screens say
+    "your team" rather than implying a personal total. This is deliberate, not
+    a gap to fill later — the carrier must not be able to see which of a
+    broker's people did what.
+
+    The one thing that IS attributable to a person is a decision on an
+    exception: `exception_decision_log` takes the decider from the login, and
+    `decided_by_broker_party_id` is that person's own broker. That is what
+    `by_person` counts, and why it counts decisions rather than files. It goes
+    to the broker ADMIN only — the team roster is already admin-only, and a
+    per-colleague league table is not an operator's business.
+
+    Days with nothing in them are returned as zeros rather than skipped, so a
+    quiet day reads as a quiet day instead of collapsing the axis.
+    """
+    from db import ExceptionDecisionLog, OutputExport
+    import validation_outcome as vo
+
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        links = _links(s, bid)
+        prog_ids = [l.program_id for l in links]
+
+        # utcnow, because that is what every writer here stores. The column is
+        # timestamptz on a server in Asia/Kolkata, so comparing against a local
+        # "now" would silently drop the last 5.5 hours of rows.
+        today = dt.datetime.utcnow().date()
+        day_list = [today - dt.timedelta(days=i) for i in range(days - 1, -1, -1)]
+        since = dt.datetime.combine(day_list[0], dt.time.min)
+        week_since = dt.datetime.utcnow() - dt.timedelta(days=7)
+
+        runs: dict[str, dict] = {}
+        resolved: dict[str, int] = {}
+        by_carrier: list[dict] = []
+        carriers_total = 0
+        by_person: Optional[list[dict]] = None
+        runs_week = 0
+
+        if prog_ids:
+            scope = and_(OutputExport.broker_party_id == bid,
+                         OutputExport.program_id.in_(prog_ids))
+
+            for d, status, n in (
+                s.query(func.date(OutputExport.created_at),
+                        OutputExport.status, func.count(OutputExport.id))
+                 .filter(scope, OutputExport.created_at >= since)
+                 .group_by(func.date(OutputExport.created_at),
+                           OutputExport.status).all()
+            ):
+                cell = runs.setdefault(
+                    str(d), {"clean": 0, "flagged": 0, "not_checked": 0})
+                # Three outcomes, kept apart. A file nobody checked is not a
+                # clean one — folding it into either colour would report work
+                # that never happened.
+                if status == vo.HAS_EXCEPTIONS:
+                    cell["flagged"] += n
+                elif status == vo.CLEAN:
+                    cell["clean"] += n
+                else:
+                    cell["not_checked"] += n
+
+            runs_week = (s.query(func.count(OutputExport.id))
+                          .filter(scope, OutputExport.created_at >= week_since)
+                          .scalar() or 0)
+
+            # Which carrier the work was for — computed by _carrier_ranking below.
+            by_carrier, carriers_total = _carrier_ranking(s, bid, prog_ids, links, since, limit=5)
+
+        # Resolved-over-time is NOT gated on prog_ids: a decision is logged
+        # against the broker who made it, and it stays true even after the
+        # carrier takes that broker off the programme.
+        for d, n in (
+            s.query(func.date(ExceptionDecisionLog.decided_at),
+                    func.count(ExceptionDecisionLog.id))
+             .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
+                     ExceptionDecisionLog.decided_at >= since,
+                     ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss")))
+             .group_by(func.date(ExceptionDecisionLog.decided_at)).all()
+        ):
+            resolved[str(d)] = resolved.get(str(d), 0) + n
+
+        people_total = None
+        if p.role == "broker_admin":
+            # The top of the team only. A broker can have hundreds of people;
+            # the dashboard draws a handful, and "View all" pages through the
+            # rest from /broker/insights/people rather than shipping every
+            # row on every load.
+            by_person, people_total = _team_ranking(s, bid, since, limit=5)
+
+        return {
+            "days": days,
+            # Oldest → newest, every day present, each one labelled with its
+            # own date so the screen never has to infer which day a bar is.
+            "runs_by_day": [
+                {"date": str(d),
+                 **runs.get(str(d), {"clean": 0, "flagged": 0, "not_checked": 0}),
+                 "resolved": resolved.get(str(d), 0)}
+                for d in day_list
+            ],
+            "by_carrier": by_carrier,
+            "carriers_total": carriers_total,
+            "by_person": by_person,
+            "people_total": people_total,
+            "totals": {
+                "runs_this_week": int(runs_week),
+                "runs_in_window": sum(
+                    c["clean"] + c["flagged"] + c["not_checked"]
+                    for c in runs.values()),
+                "resolved_in_window": sum(resolved.values()),
+            },
+        }
+
+
+def _run_rows(s, exports) -> list[dict]:
+    """The run rows both the dashboard and the run history show."""
+    from app_routes import _iso_utc
+    prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
+                   .filter(Program.id.in_({e.program_id for e in exports})).all()}
+                  if exports else {})
+    cids = {e.contract_id for e in exports if e.contract_id}
+    contract_names = ({cid: (name or fname) for cid, name, fname in
+                       s.query(Contract.id, Contract.name, Contract.filename)
+                       .filter(Contract.id.in_(cids)).all()} if cids else {})
+    return [{
+        "export_id": e.id,
+        "filename": e.filename,
+        "programme": prog_names.get(e.program_id),
+        "contract": contract_names.get(e.contract_id),
+        "rows": e.policy_count,
+        "exception_count": e.exception_count or 0,
+        "status": e.status,
+        # A run through the broker's own lane is recorded as the broker
+        # company; anything else the carrier ran for them.
+        "sent_by": ("broker" if (e.generated_by or "").startswith("broker:")
+                    else "carrier"),
+        "created_at": _iso_utc(e.created_at),
+    } for e in exports]
+
+
+def _team_ranking(s, bid: int, since, q: Optional[str] = None,
+                  offset: int = 0, limit: int = 10):
+    """The broker's whole team ranked by exceptions put right since `since`.
+
+    Counted and ranked in the database, so it costs the same for five people
+    as for five thousand. The rank is the TEAM rank, taken before any search,
+    so someone found by name keeps their real place rather than becoming #1
+    of the results. Ties share a rank; everyone who resolved nothing shares
+    the last one.
+    """
+    from auth_deps import normalize_role
+    from db import ExceptionDecisionLog
+    counts = (s.query(ExceptionDecisionLog.decided_by_user_id.label("uid"),
+                      func.count(ExceptionDecisionLog.id).label("n"))
+               .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
+                       ExceptionDecisionLog.decided_at >= since,
+                       ExceptionDecisionLog.decided_by_user_id.isnot(None),
+                       ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss")))
+               .group_by(ExceptionDecisionLog.decided_by_user_id)
+               .subquery())
+    n = func.coalesce(counts.c.n, 0)
+    ranked = (s.query(AppUser.id.label("id"),
+                      AppUser.full_name.label("full_name"),
+                      AppUser.email.label("email"),
+                      AppUser.role.label("role"),
+                      n.label("resolved"),
+                      func.rank().over(order_by=n.desc()).label("rank"))
+               .outerjoin(counts, counts.c.uid == AppUser.id)
+               .filter(AppUser.broker_party_id == bid)
+               .subquery())
+    rows = s.query(ranked)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        rows = rows.filter(or_(ranked.c.full_name.ilike(like),
+                               ranked.c.email.ilike(like)))
+    total = rows.count()
+    page = (rows.order_by(ranked.c.rank,
+                          func.lower(func.coalesce(ranked.c.full_name, ranked.c.email)),
+                          ranked.c.id)
+                .offset(offset).limit(limit).all())
+    return [{"id": r.id,
+             "name": r.full_name or r.email or f"User {r.id}",
+             "role": normalize_role(r.role),
+             "resolved": int(r.resolved),
+             "rank": int(r.rank)} for r in page], total
+
+
+def _carrier_ranking(s, bid: int, prog_ids: list[int], links, since,
+                     q: Optional[str] = None, offset: int = 0, limit: int = 10):
+    """Every carrier this broker is linked to, ranked by files run since
+    `since`. A carrier with no runs this window still appears at the bottom,
+    the same way a quiet team member still appears in `_team_ranking` — a
+    broker's carrier count is small enough that this is one pass in Python,
+    not a query worth pushing into SQL.
+    """
+    from db import OutputExport
+    carrier_ids = sorted({l.tenant_id for l in links if l.tenant_id})
+    tally: dict[int, int] = {cid: 0 for cid in carrier_ids}
+    if prog_ids:
+        carrier_of = {l.program_id: l.tenant_id for l in links}
+        scope = and_(OutputExport.broker_party_id == bid,
+                     OutputExport.program_id.in_(prog_ids))
+        for pid, n in (s.query(OutputExport.program_id, func.count(OutputExport.id))
+                        .filter(scope, OutputExport.created_at >= since)
+                        .group_by(OutputExport.program_id).all()):
+            cid = carrier_of.get(pid)
+            if cid in tally:
+                tally[cid] += n
+    names = {t.id: (t.legal_name or t.tenant_name)
+             for t in s.query(Tenant).filter(Tenant.id.in_(carrier_ids or [0])).all()}
+    ranked = sorted(
+        ({"id": cid, "name": names.get(cid, "—"), "runs": n} for cid, n in tally.items()),
+        key=lambda r: (-r["runs"], r["name"].lower()))
+    rank, last = 0, None
+    for i, r in enumerate(ranked):
+        if r["runs"] != last:
+            rank, last = i + 1, r["runs"]
+        r["rank"] = rank
+    if q and q.strip():
+        needle = q.strip().lower()
+        ranked = [r for r in ranked if needle in r["name"].lower()]
+    total = len(ranked)
+    return ranked[offset:offset + limit], total
+
+
+@router.get("/broker/insights/carriers")
+def broker_insights_carriers(days: int = Query(30, ge=7, le=90),
+                             page: int = Query(1, ge=1),
+                             page_size: int = Query(25, ge=1, le=100),
+                             q: Optional[str] = Query(None, max_length=100),
+                             p: Principal = Depends(current_principal)):
+    """Every carrier this broker works with, ranked by files run, a page at a
+    time, with a name search. Broker admin only, like the dashboard card it
+    opens from.
+    """
+    with SessionLocal() as s:
+        bid = _broker_admin(s, p)
+        links = _links(s, bid)
+        prog_ids = [l.program_id for l in links]
+        today = dt.datetime.utcnow().date()
+        since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+        items, total = _carrier_ranking(s, bid, prog_ids, links, since, q=q,
+                                        offset=(page - 1) * page_size, limit=page_size)
+        return {"items": items, "total": total}
+
+
+@router.get("/broker/insights/people")
+def broker_insights_people(days: int = Query(30, ge=7, le=90),
+                           page: int = Query(1, ge=1),
+                           page_size: int = Query(25, ge=1, le=100),
+                           q: Optional[str] = Query(None, max_length=100),
+                           p: Principal = Depends(current_principal)):
+    """Every person on the team, ranked, a page at a time, with a name search.
+
+    Broker admin only, like the dashboard card it opens from.
+    """
+    with SessionLocal() as s:
+        bid = _broker_admin(s, p)
+        today = dt.datetime.utcnow().date()
+        since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+        items, total = _team_ranking(s, bid, since, q=q,
+                                     offset=(page - 1) * page_size, limit=page_size)
+        return {"items": items, "total": total}
+
+
+@router.get("/broker/runs")
+def broker_runs(page: int = Query(1, ge=1),
+                page_size: int = Query(20, ge=1, le=100),
+                p: Principal = Depends(current_principal)):
+    """Every run made for this broker, newest first, a page at a time.
+
+    Same scope as the dashboard's recent runs: this broker's runs on the
+    programmes it is still on, whether its own team or the carrier sent them.
+    """
+    from db import OutputExport
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        prog_ids = [l.program_id for l in _links(s, bid)]
+        if not prog_ids:
+            return {"items": [], "total": 0}
+        q = s.query(OutputExport).filter(OutputExport.broker_party_id == bid,
+                                         OutputExport.program_id.in_(prog_ids))
+        total = q.count()
+        rows = (q.order_by(OutputExport.id.desc())
+                 .offset((page - 1) * page_size).limit(page_size).all())
+        return {"items": _run_rows(s, rows), "total": total}

@@ -58,7 +58,15 @@ export type BrokerDashboard = {
     programmes: number; carriers: number;
     /** This broker's own people — its admins and its users (operators),
      *  invited ones included. One team, whichever carrier is selected. */
-    users?: number; users_invited?: number;
+    users: number;
+    users_invited: number;
+    agency_exceptions: number;
+    /** Contracts waiting on this broker's signature. */
+    signatures_pending: number;
+    /** Contracts signed by everyone. */
+    signatures_completed: number;
+    /** Contracts whose terms this broker still has to agree (before signing). */
+    terms_to_agree: number;
   };
   /** There is no "waiting on the carrier" queue any more: the carrier's
    *  approval gate, and the broker-side upload that fed it, are both gone. A
@@ -157,10 +165,17 @@ export type OperatorHome = {
   broker: { id: number; name: string };
   carriers: { id: number; name: string }[];
   counts: {
-    programmes: number; setups: number; runs: number; exceptions: number;
+    programmes: number;
+    setups: number; runs: number; exceptions: number;
     /** Runs that have those exceptions. */
     exception_runs: number;
   };
+  /** Files THIS person sent through Process Bordereau in the last 7 days.
+   *  Counts from the day the uploader started being recorded. */
+  my_uploads_this_week: number;
+  /** File received → output ready, averaged over the broker's runs in the
+   *  last 30 days. Seconds; null when there is nothing to measure. */
+  avg_turnaround_sec: number | null;
   /** Newest first: the broker's own runs AND the ones the carrier ran for it —
    *  the same list for every one of the broker's users. */
   recent_runs: OperatorRun[];
@@ -184,6 +199,74 @@ export type OperatorRun = {
 
 export const getOperatorHome = () =>
   api.get<OperatorHome>("/broker/operator-home").then(r => r.data);
+
+// --- the same activity, shaped for charts ------------------------------------
+// One endpoint behind both broker dashboards, so the admin's "this week" and
+// the user's "this week" can never quote different numbers.
+
+/** One day. Every day in the window is present, zeros included, so a quiet
+ *  day reads as quiet rather than closing the gap. */
+export type BrokerInsightDay = {
+  date: string;
+  clean: number; flagged: number;
+  /** A file nobody has checked yet — neither clean nor flagged. */
+  not_checked: number;
+  resolved: number;
+};
+
+/** A person on the broker's own team; `resolved` counts decisions on
+ *  exceptions. `rank` is their place in the whole team (ties share one). */
+export type BrokerInsightPerson = {
+  id: number; name: string;
+  role: "broker_admin" | "operator";
+  resolved: number;
+  rank: number;
+};
+
+/** A carrier ranked by files run; `rank` is its place among ALL the broker's
+ *  carriers (ties share one), taken before any search. */
+export type BrokerInsightCarrier = { id: number; name: string; runs: number; rank: number };
+
+export type BrokerInsights = {
+  days: number;
+  runs_by_day: BrokerInsightDay[];
+  /** Top 5 only — `carriers_total` is the whole count; "View all" opens
+   *  /broker/files-by-carrier for the rest. */
+  by_carrier: BrokerInsightCarrier[];
+  carriers_total: number;
+  /** Top 5 only, broker admin only — null for an operator, whose colleagues'
+   *  tallies are not their business. "View all" opens /broker/team-activity. */
+  by_person: BrokerInsightPerson[] | null;
+  /** How many people the team has — `by_person` is only the top of it. */
+  people_total: number | null;
+  totals: {
+    runs_this_week: number;
+    runs_in_window: number;
+    resolved_in_window: number;
+  };
+};
+
+export const getBrokerInsights = (days = 30) =>
+  api.get<BrokerInsights>("/broker/insights", { params: { days } })
+     .then(r => r.data);
+
+/** The whole team, ranked, one page at a time, searchable by name or email. */
+export const getTeamRanking = (opts: { days: number; page: number; pageSize: number; q?: string }) =>
+  api.get<{ items: BrokerInsightPerson[]; total: number }>("/broker/insights/people", {
+    params: { days: opts.days, page: opts.page, page_size: opts.pageSize, q: opts.q || undefined },
+  }).then(r => r.data);
+
+/** Every carrier the broker works with, ranked, one page at a time, searchable by name. */
+export const getCarrierRanking = (opts: { days: number; page: number; pageSize: number; q?: string }) =>
+  api.get<{ items: BrokerInsightCarrier[]; total: number }>("/broker/insights/carriers", {
+    params: { days: opts.days, page: opts.page, page_size: opts.pageSize, q: opts.q || undefined },
+  }).then(r => r.data);
+
+/** Every run made for this broker, newest first, one page at a time. */
+export const getBrokerRunHistory = (page: number, pageSize: number) =>
+  api.get<{ items: OperatorRun[]; total: number }>("/broker/runs", {
+    params: { page, page_size: pageSize },
+  }).then(r => r.data);
 
 
 /** A carrier asking this broker to work with them.

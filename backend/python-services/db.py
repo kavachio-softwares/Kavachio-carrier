@@ -323,6 +323,11 @@ class OutputExport(Base):
     source_upload_id = Column(Integer, nullable=True)
     policy_ids = Column(JSON, nullable=True)          # canonical policy_ids exported
     generated_by = Column(String, nullable=True)      # actor email
+    # The login that ran the file. `generated_by` above names the broker
+    # COMPANY on a broker-lane run, which is what the carrier is shown; this is
+    # the person, for the broker's own "files I uploaded" count. Never serve it
+    # to a carrier seat. NULL on every run made before it existed.
+    generated_by_user_id = Column(Integer, nullable=True, index=True)
     policy_count = Column(Integer, default=0)
     exception_count = Column(Integer, default=0)
     exceptions = _payload(Column(JSON, nullable=True))          # [{severity, code, sheet, row, field, message}]
@@ -2057,6 +2062,7 @@ def init_db():
         _ensure_column(conn, inspector, "output_exports", "program_id", "INTEGER")
         _ensure_column(conn, inspector, "output_exports", "broker_party_id", "INTEGER")
         _ensure_column(conn, inspector, "output_exports", "contract_id", "INTEGER")
+        _ensure_column(conn, inspector, "output_exports", "generated_by_user_id", "INTEGER")
         _ensure_column(conn, inspector, "output_exports", "output_format", "VARCHAR")
         _ensure_column(conn, inspector, "output_exports", "sample_comparison", json_type)
         _ensure_column(conn, inspector, "tenant", "onboarding_skipped", "BOOLEAN DEFAULT FALSE")

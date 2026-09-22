@@ -8,17 +8,25 @@
  * gone, so nothing a broker adds sits waiting for an answer.
  */
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
-  getBrokerDashboard, getBrokerInvitations, acceptBrokerInvitation,
-  declineBrokerInvitation,
-  type BrokerDashboard as Dash, type BrokerInvitation,
+  getBrokerDashboard, getBrokerInsights, getBrokerInvitations,
+  acceptBrokerInvitation, declineBrokerInvitation,
+  type BrokerDashboard as Dash, type BrokerInsights, type BrokerInvitation,
 } from "../api/broker";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { fmtDate } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
+import { Activity, AlertCircle, Building2, Clock, FileCheck2, PenLine, Users } from "lucide-react";
+import { RankedBars, RunTrend } from "../components/BrokerCharts";
+import { InfoTip } from "../components/InfoTip";
+import { ChartCard, LinkCard, StatCard } from "../components/StatCard";
+
+/** The window both charts and the weekly tile describe. */
+const DAYS = 30;
 
 export default function BrokerDashboard() {
+  const nav = useNavigate();
   const [d, setD] = useState<Dash | null>(null);
   const [err, setErr] = useState<string | null>(null);
   // The carrier this broker is working on, chosen in the sidebar. Every count
@@ -57,6 +65,12 @@ export default function BrokerDashboard() {
       .catch(() => setErr("Could not load your dashboard."));
   }, [carrierId]);
 
+  const [ins, setIns] = useState<BrokerInsights | null>(null);
+  const [waitingOpen, setWaitingOpen] = useState(false);
+  useEffect(() => {
+    getBrokerInsights(DAYS).then(setIns).catch(() => setIns(null));
+  }, []);
+
   if (err) return (
     <div className="proto"><div className="view full">
       <div className="page-head"><div className="t"><h2>Dashboard</h2></div></div>
@@ -71,19 +85,9 @@ export default function BrokerDashboard() {
   );
 
   const c = d.counts;
-  // Your own team — not narrowed by the carrier switch, because a broker has
-  // one team whichever carrier it produces for.
-  const usersTile = (
-    <div className="tile">
-      <div className="k">Users</div>
-      <div className="v">{c.users ?? "—"}</div>
-      <div className="foot">
-        {!!c.users_invited && <span>{c.users_invited} not signed up yet · </span>}
-        <Link className="linkish" to="/broker/users">Users &amp; Roles →</Link>
-      </div>
-    </div>
-  );
-  const carrierNames = d.carriers.map(x => x.name).join(", ");
+  const grid = (cols: number) => ({
+    display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 20, marginBottom: 24,
+  });
 
   return (
     <div className="proto">
@@ -91,176 +95,173 @@ export default function BrokerDashboard() {
         <div className="page-head">
           <div className="t">
             <h2>Dashboard</h2>
-            <p>
-              {d.broker.name} — the programmes you send business to, and
-              anything that is holding you up.
-            </p>
+            <p>{d.broker.name} — your team, your carriers, and what needs you today.</p>
+          </div>
+          <div className="actions">
+            <Link className="btn pri" to="/broker/users">＋ Add a user</Link>
           </div>
         </div>
 
-        {/* Nothing assigned yet is a real state, not an error. Say who fixes it. */}
-        {/* Above the no-programmes branch on purpose. A broker who has only
-            been invited has no programmes yet — that is precisely the state
-            this is for, and inside that branch they would never see it. */}
-        {note && (
-          <div className="note ok" style={{ marginBottom: 16 }}>{note}</div>
-        )}
+        {note && <div className="note ok" style={{ marginBottom: 16 }}>{note}</div>}
 
+        {/* Until a carrier invitation is answered nothing else about that
+            carrier exists, so it sits above everything. */}
         {!!invites?.length && (
-          <div className="card" style={{ marginBottom: 18 }}>
+          <div className="card" style={{ marginBottom: 24 }}>
             <div className="card-h">
               <h3>
                 {invites.length === 1
                   ? "A carrier wants to work with you"
                   : `${invites.length} carriers want to work with you`}
               </h3>
-              <span className="sub">nothing happens until you answer</span>
             </div>
-            <div style={{ padding: "14px 20px" }}>
+            <div style={{ padding: "8px 20px 14px" }}>
               {invites.map(iv => (
                 <div className="kv" key={iv.id}>
                   <span className="k">
                     <b style={{ color: "var(--p-ink)" }}>{iv.carrier}</b>
                     <div className="sub">
-                      {iv.programme
-                        ? `Invited you on to ${iv.programme}`
-                        : "Invited you to work with them"}
+                      {iv.programme ? `Invited you on to ${iv.programme}` : "Invited you to work with them"}
                       {iv.invited_at && <> · {fmtDate(iv.invited_at)}</>}
                     </div>
                   </span>
                   <span style={{ display: "flex", gap: 8 }}>
-                    <button className="btn sm" type="button"
-                            disabled={answering === iv.id}
-                            onClick={() => answer(iv.id, false)}>
-                      Decline
-                    </button>
-                    <button className="btn sm pri" type="button"
-                            disabled={answering === iv.id}
+                    <button className="btn sm" type="button" disabled={answering === iv.id}
+                            onClick={() => answer(iv.id, false)}>Decline</button>
+                    <button className="btn sm pri" type="button" disabled={answering === iv.id}
                             onClick={() => answer(iv.id, true)}>
                       {answering === iv.id ? "…" : "Accept"}
                     </button>
                   </span>
                 </div>
               ))}
-              <div className="hint" style={{ marginTop: 10 }}>
-                Accepting lets them put you on their programmes. It shows
-                them nothing about the other carriers you work with.
-              </div>
             </div>
           </div>
         )}
+
+        <div style={grid(3)}>
+          <StatCard title="Carriers" value={c.carriers} icon={Building2}
+                    subtitle={`${c.programmes} ${c.programmes === 1 ? "programme" : "programmes"}`} />
+          <StatCard title="Active Contracts" value={c.live_contracts} icon={FileCheck2}
+                    subtitle="In force" />
+          <StatCard title="Pending Signatures" value={c.signatures_pending} icon={PenLine}
+                    tone={c.waiting_on_me > 0 ? "alert" : undefined}
+                    onClick={c.waiting_on_me > 0 ? () => setWaitingOpen(true) : undefined}
+                    subtitle={`${c.signatures_completed} completed`
+                      + (c.terms_to_agree ? ` · ${c.terms_to_agree} to agree` : "")} />
+          <StatCard title="Exceptions to Review" value={c.agency_exceptions} icon={AlertCircle}
+                    tone={c.agency_exceptions > 0 ? "alert" : undefined}
+                    subtitle="Across your team" />
+          <StatCard title="Files Run This Week" value={ins ? ins.totals.runs_this_week : "—"}
+                    icon={Activity} subtitle="By your team and carriers" />
+          <StatCard title="Team Members" value={c.users} icon={Users}
+                    onClick={() => nav("/broker/users")}
+                    subtitle={c.users_invited ? `${c.users_invited} not signed up yet` : "All signed up"} />
+        </div>
 
         {c.programmes === 0 ? (
-          <>
-          {/* The team exists before any programme does — a broker staffs
-              itself first — so its count shows here too. */}
-          <div className="tiles" style={{ marginBottom: 18 }}>{usersTile}</div>
-          <div className="card pad" style={{ maxWidth: 620 }}>
-            <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>No programmes yet</h3>
-            <p className="muted" style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
+          <div className="card" style={{ padding: 24 }}>
+            <p style={{ margin: 0, color: "var(--p-muted)" }}>
               {invites?.length
-                ? "Accept the invitation above and that carrier can start "
-                  + "putting you on their programmes."
-                : "A carrier has to put you on one of their programmes before "
-                  + "you can send anything. Until they do, there is nothing "
-                  + "for you to set up — this is not something you can do from "
-                  + "your side."}
+                ? "Accept an invitation above and that carrier can put you on their programmes."
+                : "No programmes yet — a carrier has to put you on one before your team can send files."}
             </p>
           </div>
-          </>
         ) : (
           <>
-            {/* Three cards, each about something the broker admin handles:
-                contracts waiting on them, the carriers they work with, and
-                their team. Files and contract lists belong to other screens. */}
-            <div className="tiles three" style={{ marginBottom: 18 }}>
-              {/* Your queue first. It is the one nobody else can move, and it
-                  was the one this dashboard never showed. */}
-              <div className={`tile${c.waiting_on_me > 0 ? " alert" : ""}`}>
-                <div className="k">Waiting on you</div>
-                <div className="v">{c.waiting_on_me}</div>
-                <div className="foot">terms to read, or a signature to give</div>
-              </div>
-              <div className="tile">
-                <div className="k">{c.carriers === 1 ? "Carrier" : "Carriers"}</div>
-                <div className="v">{c.carriers}</div>
-                <div className="foot">{carrierNames || "—"}</div>
-              </div>
-              {usersTile}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
+              <ChartCard title="Bordereau Status"
+                info={<InfoTip text={`Your team's files over the last ${DAYS} days, by result: clean, flagged with exceptions, or not checked yet.`} />}>
+                {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} />}
+              </ChartCard>
+              <ChartCard title="Team Activity"
+                info={<InfoTip text={`Exceptions each person on your team put right in the last ${DAYS} days. Showing the top 5 — open the full list for everyone.`} />}>
+                {!ins ? <div className="muted">Loading…</div> : (
+                  <RankedBars unit="put right" cap={5}
+                    total={ins.people_total}
+                    onViewAll={() => nav("/broker/team-activity")}
+                    empty="No one on your team yet."
+                    rows={(ins.by_person ?? []).map(u => ({
+                      id: u.id, name: u.name, value: u.resolved,
+                      note: u.role === "broker_admin" ? "admin" : undefined,
+                    }))} />
+                )}
+              </ChartCard>
             </div>
 
-            {/* The broker's only queue. A negotiation that does not announce
-                itself is one nobody answers. */}
-            {d.waiting_on_me.length === 0 ? (
-              <div className="card pad">
-                <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-                  Nothing is waiting on you. When a carrier sends you a
-                  contract to agree or sign, it appears here.
-                </p>
-              </div>
-            ) : (
-              <div className="card" style={{ marginBottom: 18 }}>
-                <div className="card-h">
-                  <h3>Waiting on you</h3>
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    nothing moves on these until you answer
-                  </span>
-                </div>
-                <div className="tbl-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Contract</th><th>Programme</th><th>Carrier</th>
-                        <th>What to do</th><th></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {d.waiting_on_me.map(w => (
-                        <tr key={w.id}>
-                          <td>
-                            <Link to={`/contracts/${w.id}`}><b>{w.name}</b></Link>
-                          </td>
-                          <td>{w.programme}</td>
-                          <td>{w.carrier}</td>
-                          <td className="muted">{w.what}</td>
-                          <td>
-                            {/* A contract waiting on the broker's SIGNATURE
-                                gets the signing page itself, not the record.
-                                By the time it reaches this queue the carrier
-                                has already signed — that is what put it here —
-                                so the next thing to happen is the broker
-                                signing, and one click short of it is one click
-                                too many. Everything else still opens the
-                                contract, because reading it IS the job. */}
-                            {(w.lifecycle === "agreed" || w.lifecycle === "signed") ? (
-                              <a className="btn sm pri"
-                                 href={inAppSigningUrl(w.id)}
-                                 target="_blank" rel="noreferrer">
-                                Sign it →
-                              </a>
-                            ) : (
-                              <Link className="btn sm pri" to={`/contracts/${w.id}`}>
-                                Open →
-                              </Link>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            <div className="note" style={{ marginTop: 16 }}>
-              <b>You do not create carriers or programmes.</b> The carrier puts you
-              on a programme, and everything you can reach follows from that.
-              Contracts to agree or sign appear under <b>Waiting on you</b>; your
-              team sends the files.
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
+              <ChartCard title="Files by Carrier"
+                info={<InfoTip text={`Files run for each carrier in the last ${DAYS} days. Showing the top 5 — open the full list for every carrier.`} />}>
+                {!ins ? <div className="muted">Loading…</div> : (
+                  <RankedBars unit="files" cap={5}
+                    total={ins.carriers_total}
+                    onViewAll={() => nav("/broker/files-by-carrier")}
+                    empty="No files run in this period."
+                    rows={ins.by_carrier.map(x => ({ id: x.id, name: x.name, value: x.runs }))} />
+                )}
+              </ChartCard>
+              <LinkCard title="Recent File Submissions" dark icon={Clock}
+                        value={ins ? ins.totals.runs_in_window : "—"}
+                        label={`files run in ${DAYS} days`}
+                        onClick={() => nav("/broker/runs")} />
             </div>
           </>
         )}
+        <WaitingDrawer open={waitingOpen} items={d.waiting_on_me}
+                       onClose={() => setWaitingOpen(false)} />
       </div>
     </div>
+  );
+}
+
+/** The contracts behind the Pending Signatures tile, with the step to take. */
+function WaitingDrawer({ open, items, onClose }: {
+  open: boolean; items: Dash["waiting_on_me"]; onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+  return (
+    <>
+      <div className={`scrim${open ? " on" : ""}`} onClick={onClose} />
+      <aside className={`drawer${open ? " on" : ""}`} aria-hidden={!open}>
+        <div className="drawer-h">
+          <div>
+            <h4>Pending Signatures</h4>
+            <div className="ref">Contracts waiting on you</div>
+          </div>
+          <button type="button" className="closeb" aria-label="Close" onClick={onClose}>×</button>
+        </div>
+        <div className="drawer-b" style={{ padding: 0 }}>
+          <div className="tbl-wrap">
+            <table>
+              <tbody>
+                {items.map(w => (
+                  <tr key={w.id}>
+                    <td>
+                      <Link to={`/contracts/${w.id}`}><b>{w.name}</b></Link>
+                      <div className="muted" style={{ fontSize: 12 }}>{w.carrier} · {w.programme}</div>
+                    </td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      {/* The carrier has already signed by the time it waits
+                          on the broker's signature, so go straight to signing. */}
+                      {(w.lifecycle === "agreed" || w.lifecycle === "signed") ? (
+                        <a className="btn sm pri" href={inAppSigningUrl(w.id)}
+                           target="_blank" rel="noreferrer">Sign →</a>
+                      ) : (
+                        <Link className="btn sm pri" to={`/contracts/${w.id}`}>Agree terms →</Link>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </aside>
+    </>
   );
 }

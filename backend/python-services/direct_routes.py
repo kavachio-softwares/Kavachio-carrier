@@ -1944,6 +1944,7 @@ async def _render_landing(
     reuse_export_id: Optional[int] = None, pipeline_id: Optional[int] = None,
     check_only: bool = False, scope: Optional[dict] = None,
     rule_scope_pipeline_id: Optional[int] = None,
+    run_by_user_id: Optional[int] = None,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -2363,6 +2364,9 @@ async def _render_landing(
                 tenant_id=tenant_id, template_id=out_template_id,
                 template_name=template_name, filename=fname,
                 source_upload_id=None, policy_ids=None, generated_by=actor,
+                # Set on a new export only: a re-render further down keeps the
+                # person who originally sent the file.
+                generated_by_user_id=run_by_user_id,
                 policy_count=sum(len(v) for v in projected.values()),
                 exception_count=len(counted), exceptions=exceptions,
                 critical_count=sev_crit, warning_count=sev_warn,
@@ -3584,7 +3588,8 @@ async def direct_run(
         result = await _render_landing(
             landing_id, governing,
             filename, actor or mga, {}, auto_ingest=not check_only,
-            pipeline_id=pipeline_id, check_only=check_only, scope=run_scope)
+            pipeline_id=pipeline_id, check_only=check_only, scope=run_scope,
+            run_by_user_id=principal.user_id)
         result["format_drift"] = drift
         if supp_stats is not None:
             result["supplement"] = supp_stats

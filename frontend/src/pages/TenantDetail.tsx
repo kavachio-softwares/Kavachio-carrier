@@ -245,7 +245,7 @@ export default function TenantDetail() {
             Programs &amp; Contracts
           </button>
           <button className={tab === "runs" ? "on" : ""} onClick={() => setTab("runs")}>
-            Recent Runs ({runTotal})
+            Recent File Submissions ({runTotal})
           </button>
         </div>
 
