@@ -11,7 +11,7 @@
  * mandatory in one place and optional in the other. That is why the create form
  * is built from a response rather than from a hardcoded array.
  */
-import { api } from "./client";
+import { api, downloadFile } from "./client";
 import type { TermSpec } from "../utils/term";
 
 /** How the server renders one input. `kind` says what to draw, not how to store. */
@@ -596,14 +596,10 @@ export const getDraftPageImage = async (
 export async function downloadContractPdf(
   id: number, name?: string | null,
 ): Promise<void> {
-  const r = await api.get(`/contracts/${id}/contract.pdf`,
-                          { responseType: "blob" });
-  const url = URL.createObjectURL(r.data as Blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${(name || "contract").trim()}.pdf`;
-  a.click();
-  URL.revokeObjectURL(url);
+  // Once both sides have signed, the server sends the SIGNED copy and names it
+  // "… (signed).pdf" — downloadFile keeps the server's name when it has one.
+  await downloadFile(`/contracts/${id}/contract.pdf`,
+                     `${(name || "contract").trim()}.pdf`);
 }
 
 /** Who a contract of this type may be written with. Narrowed to the programme

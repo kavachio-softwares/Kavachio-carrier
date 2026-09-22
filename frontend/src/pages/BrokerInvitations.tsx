@@ -25,7 +25,7 @@ import {
 import { setBrokerCarrierId } from "../brokerCarrier";
 import { fmtDate } from "../utils/date";
 import KavachioLogo from "../components/KavachioLogo";
-import { isBrokerSeat } from "../auth";
+import { isBrokerSeat, userRole } from "../auth";
 import { landingPath } from "../access";
 
 export default function BrokerInvitations() {
@@ -37,7 +37,9 @@ export default function BrokerInvitations() {
   // the seat check lives here instead. A carrier admin following this URL
   // would otherwise meet a 403 from an endpoint that is not theirs, which
   // reads as breakage rather than as "not your screen".
-  const notABroker = !isBrokerSeat();
+  // Answering one is the broker ADMIN's act; a broker user is sent to their
+  // own landing screen like anyone else it is not for.
+  const notABroker = !isBrokerSeat() || userRole() !== "broker_admin";
 
   const [rows, setRows] = useState<BrokerInvitation[] | null>(null);
   const [busy, setBusy] = useState(false);

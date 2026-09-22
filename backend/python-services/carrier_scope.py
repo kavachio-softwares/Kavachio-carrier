@@ -58,6 +58,25 @@ def carrier_ids_for_broker(s, broker_party_id: int) -> set[int]:
     return {r[0] for r in rows if r[0] is not None}
 
 
+def broker_programme_ids(s, p: Principal, carrier_id: int) -> set[int]:
+    """The programmes of `carrier_id` that carry this broker seat's ACTIVE
+    program_broker row — the only ones a broker may see there. Empty for a
+    seat with no broker."""
+    bid = broker_party_id_of(s, p)
+    if bid is None:
+        return set()
+    # Joined through the programme (whose carrier is always set), not
+    # program_broker.tenant_id, which legacy rows may lack — resolve_broker
+    # accepts those too.
+    rows = (s.query(ProgramBroker.program_id)
+              .join(Program, Program.id == ProgramBroker.program_id)
+              .filter(ProgramBroker.broker_party_id == bid,
+                      Program.tenant_id == carrier_id,
+                      func.coalesce(ProgramBroker.status, "active") == "active")
+              .all())
+    return {r[0] for r in rows}
+
+
 def resolve_carrier(s, p: Principal, carrier_id: int) -> int:
     """Validate that `p` may act for `carrier_id`; return it as a tenant_id."""
     if p.is_platform_admin:
@@ -170,8 +189,34 @@ def resolve_contract(s, p: Principal, carrier_id: int, program_id: int,
     return c
 
 
-def resolve_policy(cs, contract_id: int, policy_id: int) -> dict:
-    """A policy row, checked to hang off this contract. Reads the canonical
+def policy_sender_filter(t, scope: "CarrierScope"):
+    """Which of a contract's policies this scope may read, by who SENT them.
+
+    A contract does not say whose a policy is: one the carrier holds for the
+    whole programme collects every broker's policies. The sender the loader
+    records (canonical.POLICY_SUBMITTER_COL) does:
+      broker seat   only the policies its own runs loaded. A policy with no
+                    sender recorded is nobody's to show a broker.
+      carrier seat  the policies of the broker the path names, plus those with
+                    no sender recorded — the carrier owns them all anyway.
+    Returns a where-clause, or None for "no narrowing".
+    """
+    from sqlalchemy import false, or_
+    from canonical import POLICY_SUBMITTER_COL
+    col = t.c.get(POLICY_SUBMITTER_COL)
+    if scope.principal.is_broker:
+        if col is None or scope.broker_party_id is None:
+            return false()
+        return col == scope.broker_party_id
+    if col is None or scope.broker_party_id is None:
+        return None
+    return or_(col == scope.broker_party_id, col.is_(None))
+
+
+def resolve_policy(cs, contract_id: int, policy_id: int,
+                   scope: Optional["CarrierScope"] = None) -> dict:
+    """A policy row, checked to hang off this contract — and, given the scope,
+    to be one this scope may read (policy_sender_filter). Reads the canonical
     warehouse (policy is not an ops ORM entity)."""
     from sqlalchemy import select
     from canonical import CANONICAL_TABLES
@@ -179,6 +224,10 @@ def resolve_policy(cs, contract_id: int, policy_id: int) -> dict:
     stmt = select(t).where(t.c.policy_id == policy_id)
     if "is_current_version" in t.c:
         stmt = stmt.where(t.c.is_current_version.isnot(False))
+    if scope is not None:
+        sender = policy_sender_filter(t, scope)
+        if sender is not None:
+            stmt = stmt.where(sender)
     row = cs.execute(stmt).mappings().first()
     if row is None or row.get("policy_contract_id") != contract_id:
         raise HTTPException(404, _NOT_FOUND)
@@ -237,7 +286,7 @@ def policy_scope(policy_id: int = Path(..., ge=1),
                  scope: CarrierScope = Depends(contract_scope)) -> CarrierScope:
     from db import CanonicalSession
     with CanonicalSession() as cs:
-        resolve_policy(cs, scope.contract_id, policy_id)
+        resolve_policy(cs, scope.contract_id, policy_id, scope)
     return CarrierScope(**{**scope.__dict__, "policy_id": policy_id})
 
 

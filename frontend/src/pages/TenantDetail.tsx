@@ -14,7 +14,9 @@ type TenantRow = {
   legal_name?: string | null; currency?: string | null;
   created_at?: string | null; modified_at?: string | null;
 };
-type U = { id: number; email: string; full_name: string; role: string; status: string; last_login_at?: string | null };
+type U = { id: number; email: string; full_name: string; role: string; status: string; last_login_at?: string | null;
+  /** The organisation's owner — its Carrier Admin. Every other carrier_admin row is a Carrier User. */
+  is_owner?: boolean };
 type Program = { id: number; name: string; product_line?: string | null; status?: string | null };
 type Contract = {
   id: number; filename?: string | null; status?: string | null;
@@ -53,7 +55,7 @@ const CURRENCIES: [string, string][] = [
 const ROLE_LABEL: Record<string, string> = {
   carrier_admin: "Carrier Admin",
   broker_admin: "Broker Admin",
-  operator: "Operator",
+  operator: "Broker User",
 };
 
 // Single source of truth for a user's status bucket — used by both the
@@ -342,7 +344,9 @@ export default function TenantDetail() {
                       <tr key={u.id}>
                         <td><b>{u.full_name}</b><div className="sub">{u.email}</div></td>
                         <td><span className={`badge ${role === "carrier_admin" ? "b-info" : "b-mut"}`}>
-                          <span className="d" />{ROLE_LABEL[role] ?? role}</span></td>
+                          <span className="d" />
+                          {role === "carrier_admin" && !u.is_owner ? "Carrier User" : (ROLE_LABEL[role] ?? role)}
+                          </span></td>
                         <td><span className={`badge ${us.cls}`}><span className="d" />{us.label}</span></td>
                         <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       </tr>

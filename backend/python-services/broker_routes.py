@@ -173,6 +173,11 @@ def broker_invitations(p: Principal = Depends(current_principal)):
     """
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
+        # Only the broker admin answers them (_open_invitation), so only the
+        # broker admin is shown them — a list with buttons that always fail
+        # would be worse than none.
+        if p.role != "broker_admin":
+            return []
         me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
         emails = {(me.email or "").lower()} if me else set()
         rows = (s.query(BrokerInvitation)
@@ -202,21 +207,41 @@ class InvitationAnswer(BaseModel):
     note: Optional[str] = None
 
 
+def _open_invitation(s, p: Principal, invitation_id: int):
+    """The pending invitation this broker may answer, and its broker id.
+
+    Answering one decides who the whole COMPANY works with, so it is the broker
+    admin's act — an operator works inside the relationships the admin agreed.
+
+    Open to them means exactly what GET /broker/invitations lists: addressed to
+    their broker, or to their own email. An invitation with no broker recorded
+    (party_id NULL) is theirs only by email — before, it was open to ANY broker
+    seat that guessed its id, which let one broker accept (or kill) an
+    invitation meant for somebody else and land on that carrier's programme.
+
+    404 rather than 403: an invitation addressed to somebody else is not this
+    broker's to know about.
+    """
+    if p.role != "broker_admin":
+        raise HTTPException(403, "only your broker admin can answer a carrier's invitation")
+    bid = _broker_party_id(s, p)
+    me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
+    inv = s.get(BrokerInvitation, invitation_id)
+    mine_by_email = bool(me and me.email and inv and inv.email
+                         and inv.email.lower() == me.email.lower())
+    if (not inv or inv.status != "pending"
+            or not (inv.party_id == bid or mine_by_email)):
+        raise HTTPException(404, "that invitation is not open to you")
+    return inv, bid
+
+
 @router.post("/broker/invitations/{invitation_id}/accept")
 def broker_invitation_accept(invitation_id: int,
                              body: InvitationAnswer = InvitationAnswer(),
                              p: Principal = Depends(current_principal)):
     """Agree to produce on that carrier's programme. This writes the link."""
     with SessionLocal() as s:
-        bid = _broker_party_id(s, p)
-        me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
-        inv = s.get(BrokerInvitation, invitation_id)
-        # 404 rather than 403: an invitation addressed to somebody else is not
-        # this broker's to know about.
-        if (not inv or inv.status != "pending"
-                or (inv.party_id not in (None, bid)
-                    and (inv.email or "").lower() != (me.email or "").lower())):
-            raise HTTPException(404, "that invitation is not open to you")
+        inv, bid = _open_invitation(s, p, invitation_id)
         _accept_invitation(s, inv, bid, "broker")
         inv.note = (body.note or "").strip() or None
         tenant = s.query(Tenant).filter(Tenant.id == inv.tenant_id).first()
@@ -242,13 +267,7 @@ def broker_invitation_decline(invitation_id: int,
     which is a fact about the invitation THEY sent, not about this broker's
     other business."""
     with SessionLocal() as s:
-        bid = _broker_party_id(s, p)
-        me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
-        inv = s.get(BrokerInvitation, invitation_id)
-        if (not inv or inv.status != "pending"
-                or (inv.party_id not in (None, bid)
-                    and (inv.email or "").lower() != (me.email or "").lower())):
-            raise HTTPException(404, "that invitation is not open to you")
+        inv, bid = _open_invitation(s, p, invitation_id)
         inv.status = "declined"
         inv.answered_at = dt.datetime.now(dt.timezone.utc)
         inv.party_id = bid
@@ -507,6 +526,14 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 if state == "active":
                     live += 1
 
+        # "Users" tile — this broker's OWN people: its admins and its users
+        # (operators), invited ones included. Not narrowed by carrier: a broker
+        # has one team whichever carrier it is producing for. Removed people
+        # are deleted outright here, so every row still counts.
+        user_rows = (s.query(AppUser.status, func.count(AppUser.id))
+                       .filter(AppUser.broker_party_id == bid)
+                       .group_by(AppUser.status).all())
+
         return {
             "broker": {"id": bid, "name": me.legal_name if me else "—"},
             "carriers": [{"id": i, "name": carriers.get(i, "—")} for i in carrier_ids],
@@ -515,6 +542,9 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 "live_contracts": live,
                 "programmes": len(links),
                 "carriers": len(carrier_ids),
+                "users": sum(n for _st, n in user_rows),
+                "users_invited": sum(n for st, n in user_rows
+                                     if st in ("invited", "pending")),
             },
             # The queue only this broker can move.
             "waiting_on_me": on_me,
@@ -703,12 +733,16 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
                 "WHERE program_id = ANY(:pids) AND COALESCE(approved,0) = 1"),
                 {"pids": prog_ids}).scalar() or 0
 
-        # Runs and their exceptions, from the same programmes.
+        # Runs made FOR THIS BROKER — every one its team sent, whichever of
+        # them sent it, so all of the broker's users see the same number. Not
+        # every upload on the programme: programmes are shared, and counting
+        # by programme alone showed other brokers' (and the carrier's) files.
         runs, exceptions = 0, 0
         if prog_ids:
             runs = s.execute(_text(
-                "SELECT count(*) FROM upload u "
-                "WHERE u.program_id = ANY(:pids)"), {"pids": prog_ids}).scalar() or 0
+                "SELECT count(*) FROM output_exports oe "
+                "WHERE oe.broker_party_id = :bid AND oe.program_id = ANY(:pids)"),
+                {"bid": bid, "pids": prog_ids}).scalar() or 0
 
         return {
             "broker": {"id": bid, "name": me.legal_name if me else "—"},

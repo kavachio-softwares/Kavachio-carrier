@@ -543,6 +543,18 @@ def mark_received(session, program_id: int, received_on: Optional[date] = None,
     """
     received_on = received_on or datetime.utcnow().date()
 
+    # Re-rendering an export in place must not look like a correction. The same
+    # generated file arriving twice is one submission, not two. Asked BEFORE a
+    # period is picked, and of the export alone: when the file's name says no
+    # period, the pick falls back to the oldest one still open — and after the
+    # first recording that is the NEXT period, so a Re-generate used to tick a
+    # second deadline with the same file.
+    if export_id is not None:
+        dupe = (session.query(SubmissionVersion)
+                .filter(SubmissionVersion.received_export_id == export_id).first())
+        if dupe is not None:
+            return None
+
     label, source = resolve_period_label(
         session, program_id, explicit=period, covering_date=covering_date,
         source_filename=source_filename)
@@ -553,15 +565,6 @@ def mark_received(session, program_id: int, received_on: Optional[date] = None,
                             received_on=received_on)
     if target is None:
         return None
-
-    # Re-rendering an export in place must not look like a correction. The same
-    # generated file arriving twice is one submission, not two.
-    if export_id is not None:
-        dupe = (session.query(SubmissionVersion)
-                .filter(SubmissionVersion.expected_id == target.id,
-                        SubmissionVersion.received_export_id == export_id).first())
-        if dupe is not None:
-            return None
 
     last = (session.query(SubmissionVersion)
             .filter(SubmissionVersion.expected_id == target.id)
@@ -890,8 +893,9 @@ def _latest_release_state(session, expected_ids) -> dict:
 
 # Who at a broker would be told a file is late. There is no contact record for a
 # broker anywhere in the platform — party_contact exists but nothing populates it —
-# so the only real answer is the broker's own user accounts. An admin is preferred
-# over an operator: chasing is a management conversation, not a task assignment.
+# so the only real answer is the broker's own ADMIN accounts (broker_contacts
+# never returns its operators: they are not the carrier's to see). The operator
+# rank below is kept only so an older row sorts sensibly if one ever gets in.
 _CONTACT_ROLE_RANK = {"broker_admin": 0, "operator": 1}
 
 # An INVITED user counts. They are the address the carrier chose when they set the
@@ -916,8 +920,13 @@ def broker_contacts(session, broker_ids) -> dict:
     if not ids:
         return {}
     out: dict = {}
+    # The broker's ADMINS only. This goes to the carrier's calendar board, and
+    # the broker's own users (operators) are never shown to the carrier — the
+    # admin is the person a carrier chases anyway.
+    from auth_deps import db_role_values
     rows = (session.query(AppUser)
             .filter(AppUser.broker_party_id.in_(ids),
+                    AppUser.role.in_(db_role_values("broker_admin")),
                     or_(AppUser.status.is_(None),
                         AppUser.status.in_(_CONTACT_STATUSES)))
             .all())

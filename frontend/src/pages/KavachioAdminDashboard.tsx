@@ -67,6 +67,10 @@ type Platform = {
   tenants: { total: number; active: number; invited: number; inactive: number };
   brokers: { total: number; active: number; invited: number };
   operators: { total: number; active: number; invited: number };
+  carrier_users?: { total: number; active: number; invited: number };
+  // The same counts Users & Roles shows (one backend function feeds both).
+  people?: { total: number; kavachio: number; carrier_users: number; broker_users: number;
+             operators: number; never_signed_in: number; carriers: number; brokers: number };
   users: { total: number; pending_invites: number;
            by_role: { carrier_admin: number; broker_admin: number; operator: number; kavachio_admin: number } };
   setups: { active: number; tenants: number };
@@ -277,20 +281,29 @@ export default function KavachioAdminDashboard() {
   const cleanRate = d ? (d.runs.clean_rate ?? (d.runs as any).clean_rate_30d ?? null) : null;
   const resolvedCount = d ? (d.mapping_queue.resolved_window ?? (d.mapping_queue as any).resolved_30d ?? 0) : 0;
 
+  // ROW 1 — WHO IS ON THE PLATFORM. The same tiles, numbers and words as
+  // Users & Roles, from the same backend count, so the two screens always agree.
+  const p = d?.people;
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  const people = p ? [
+    { k: "Users", v: p.total, col: C.blue,
+      foot: p.never_signed_in > 0
+        ? `${p.never_signed_in} ${p.never_signed_in === 1 ? "has" : "have"} not signed in yet`
+        : "all have signed in",
+      info: "Everyone who can sign in to Kavachio, at every carrier and broker." },
+    { k: "People at carriers", v: p.carrier_users, col: C.info,
+      foot: `across ${plural(p.carriers, "carrier", "carriers")}`,
+      info: "Everyone at the carrier companies — each carrier's admin and the people they added." },
+    { k: "People at brokers", v: p.broker_users, col: C.purple,
+      foot: `across ${plural(p.brokers, "broker", "brokers")}`,
+      info: "Everyone at the broker companies — each broker's admin and the broker users they added." },
+    { k: "Broker Users", v: p.operators, col: C.warn,
+      foot: "added by their broker admins",
+      info: "People at the broker companies who send the files. Their broker admin adds them." },
+  ] : [];
+
+  // ROW 2 — WHAT IS HAPPENING on the platform.
   const tiles = d ? [
-    { k: "Carriers", v: d.tenants.total, foot: `${d.tenants.active} Active · ${d.tenants.invited} Invited`, col: C.blue,
-      info: "Every carrier on the platform. "
-        + "“Active” have signed in and are using Kavachio; “Invited” have been created but nobody has signed up yet." },
-    { k: "Brokers", v: d.brokers?.total ?? 0,
-      foot: `${d.brokers?.active ?? 0} Active · ${d.brokers?.invited ?? 0} Invited`,
-      col: C.purple,
-      info: "Broker Admin accounts on the platform, one per broker organization. "
-        + "“Active” have signed in; “Invited” have an invite they haven’t accepted yet." },
-    { k: "Operators", v: d.operators?.total ?? 0,
-      foot: `${d.operators?.active ?? 0} Active · ${d.operators?.invited ?? 0} Invited`,
-      col: C.info,
-      info: "Operator accounts — the users broker admins add to process bordereaux. "
-        + "“Active” have signed in; “Invited” have an invite they haven’t accepted yet." },
     { k: "Programs", v: d.programs_active, foot: "Active BDX Cycles", col: C.ok,
       info: "Programs currently active across all carriers — each is a book of business under a carrier "
         + "that bordereaux are processed against." },
@@ -344,7 +357,22 @@ export default function KavachioAdminDashboard() {
           // Keyed on `range` so switching the date filter replays the whole
           // entrance sequence instead of numbers silently swapping in place.
           <div key={range}>
-            {/* KPI tiles */}
+            {/* Row 1 — who is on the platform */}
+            <div className="tiles" style={{ marginBottom: 18 }}>
+              {people.map((t, i) => (
+                <div className="tile kd-in" key={t.k}
+                  style={{ position: "relative", overflow: "hidden", ...stagger(i) }}>
+                  <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: t.col }} />
+                  <div className="k" style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                    {t.k}<InfoTip text={t.info} />
+                  </div>
+                  <div className="v"><CountUp value={t.v} /></div>
+                  <div className="foot" style={{ color: C.muted }}>{t.foot}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Row 2 — what is happening */}
             <div className="tiles three" style={{ marginBottom: 18 }}>
               {tiles.map((t, i) => (
                 <div className="tile kd-in" key={i}
@@ -389,8 +417,9 @@ export default function KavachioAdminDashboard() {
               </div>
             </div>
 
-            {/* Row: top tenants + users by role + mapping queue */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18, marginBottom: 18 }}>
+            {/* Row: top carriers + mapping queue. (The old "Users by Role" chart
+                is gone — row 1 already says who is on the platform.) */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
               <div className="kd-in" style={{ ...card, ...stagger(2, 60, 340) }}>
                 {cardHead("Top Carriers by Volume", `Runs · ${rangeMeta.short}`,
                   "The busiest carriers in this date range, ranked by how many bordereaux "
@@ -415,19 +444,6 @@ export default function KavachioAdminDashboard() {
                       </div>
                     );
                   })}
-              </div>
-              <div className="kd-in" style={{ ...card, ...stagger(3, 60, 340) }}>
-                {cardHead("Users by Role", undefined,
-                  "All user accounts split by role. Carrier Admins run a carrier; "
-                  + "Broker Admins run a broker organization and add its users; "
-                  + "Operators are broker users who process bordereaux; "
-                  + "Kavachio Admins are platform staff.")}
-                <Donut unit="users" total={d.users.total} segments={[
-                  { label: "Carrier Admins", value: d.users.by_role.carrier_admin ?? 0, color: C.blue },
-                  { label: "Broker Admins", value: d.users.by_role.broker_admin ?? 0, color: C.purple },
-                  { label: "Operators", value: d.users.by_role.operator ?? 0, color: C.info },
-                  { label: "Kavachio Admins", value: d.users.by_role.kavachio_admin ?? 0, color: C.ink },
-                ]} />
               </div>
               <div className="kd-in" style={{ ...card, ...stagger(4, 60, 340) }}>
                 {cardHead("Data Mapping Queue", "Ops Health",

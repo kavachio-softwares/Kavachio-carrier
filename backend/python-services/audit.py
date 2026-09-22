@@ -56,6 +56,29 @@ def actor_email(user_id: int | None) -> str | None:
     _email_cache[user_id] = email
     return email
 
+def actor_for(principal) -> str | None:
+    """The actor to record for ``principal`` on rows the CARRIER reads.
+
+    A broker seat is recorded as its broker company, ``broker:<party id>`` —
+    the same label a run submitted through the broker's lane carries. The
+    carrier deals with the broker company and never sees the broker's own
+    users, so their emails do not belong in the carrier's activity. Everyone
+    else is recorded by email, as before. Best-effort, like actor_email.
+    """
+    if principal is None:
+        return None
+    if getattr(principal, "is_broker", False):
+        try:
+            from auth_deps import resolve_broker_party_id
+            with SessionLocal() as s:
+                bid = resolve_broker_party_id(s, principal)
+            if bid is not None:
+                return f"broker:{bid}"
+        except Exception as e:  # noqa: BLE001
+            log.warning("audit: broker actor lookup failed for %s: %s",
+                        principal.user_id, e)
+    return actor_email(principal.user_id)
+
 # ---------------------------------------------------------------------------
 # writers
 # ---------------------------------------------------------------------------

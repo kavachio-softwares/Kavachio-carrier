@@ -8,7 +8,7 @@
  * gone, so nothing a broker adds sits waiting for an answer.
  */
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import {
   getBrokerDashboard, getBrokerInvitations, acceptBrokerInvitation,
   declineBrokerInvitation,
@@ -19,7 +19,6 @@ import { fmtDate } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
 
 export default function BrokerDashboard() {
-  const nav = useNavigate();
   const [d, setD] = useState<Dash | null>(null);
   const [err, setErr] = useState<string | null>(null);
   // The carrier this broker is working on, chosen in the sidebar. Every count
@@ -72,6 +71,18 @@ export default function BrokerDashboard() {
   );
 
   const c = d.counts;
+  // Your own team — not narrowed by the carrier switch, because a broker has
+  // one team whichever carrier it produces for.
+  const usersTile = (
+    <div className="tile">
+      <div className="k">Users</div>
+      <div className="v">{c.users ?? "—"}</div>
+      <div className="foot">
+        {!!c.users_invited && <span>{c.users_invited} not signed up yet · </span>}
+        <Link className="linkish" to="/broker/users">Users &amp; Roles →</Link>
+      </div>
+    </div>
+  );
   const carrierNames = d.carriers.map(x => x.name).join(", ");
 
   return (
@@ -140,6 +151,10 @@ export default function BrokerDashboard() {
         )}
 
         {c.programmes === 0 ? (
+          <>
+          {/* The team exists before any programme does — a broker staffs
+              itself first — so its count shows here too. */}
+          <div className="tiles" style={{ marginBottom: 18 }}>{usersTile}</div>
           <div className="card pad" style={{ maxWidth: 620 }}>
             <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>No programmes yet</h3>
             <p className="muted" style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
@@ -152,9 +167,13 @@ export default function BrokerDashboard() {
                   + "your side."}
             </p>
           </div>
+          </>
         ) : (
           <>
-            <div className="tiles" style={{ marginBottom: 18 }}>
+            {/* Three cards, each about something the broker admin handles:
+                contracts waiting on them, the carriers they work with, and
+                their team. Files and contract lists belong to other screens. */}
+            <div className="tiles three" style={{ marginBottom: 18 }}>
               {/* Your queue first. It is the one nobody else can move, and it
                   was the one this dashboard never showed. */}
               <div className={`tile${c.waiting_on_me > 0 ? " alert" : ""}`}>
@@ -163,20 +182,11 @@ export default function BrokerDashboard() {
                 <div className="foot">terms to read, or a signature to give</div>
               </div>
               <div className="tile">
-                <div className="k">Live contracts</div>
-                <div className="v">{c.live_contracts}</div>
-                <div className="foot">in force — ready to set up</div>
-              </div>
-              <div className="tile">
-                <div className="k">Programmes you're on</div>
-                <div className="v">{c.programmes}</div>
-                <div className="foot">given to you by the carrier</div>
-              </div>
-              <div className="tile">
                 <div className="k">{c.carriers === 1 ? "Carrier" : "Carriers"}</div>
                 <div className="v">{c.carriers}</div>
                 <div className="foot">{carrierNames || "—"}</div>
               </div>
+              {usersTile}
             </div>
 
             {/* The broker's only queue. A negotiation that does not announce
@@ -184,10 +194,8 @@ export default function BrokerDashboard() {
             {d.waiting_on_me.length === 0 ? (
               <div className="card pad">
                 <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-                  Nothing is waiting on you. Your contracts are on{" "}
-                  <span className="linkish" onClick={() => nav("/broker/contracts")}>
-                    My Contracts
-                  </span>.
+                  Nothing is waiting on you. When a carrier sends you a
+                  contract to agree or sign, it appears here.
                 </p>
               </div>
             ) : (
@@ -246,11 +254,9 @@ export default function BrokerDashboard() {
 
             <div className="note" style={{ marginTop: 16 }}>
               <b>You do not create carriers or programmes.</b> The carrier puts you
-              on a programme, and everything you can reach follows from that. Your
-              contracts are on{" "}
-              <span className="linkish" onClick={() => nav("/broker/contracts")}>
-                My Contracts
-              </span>.
+              on a programme, and everything you can reach follows from that.
+              Contracts to agree or sign appear under <b>Waiting on you</b>; your
+              team sends the files.
             </div>
           </>
         )}

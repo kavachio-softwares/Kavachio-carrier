@@ -222,10 +222,14 @@ def list_routes(mga: Optional[str] = None,
         # offered as a suggestion the screen fills in and the user can overwrite,
         # never as a value taken on trust. Active first: an unaccepted invite is
         # not evidence of a working mailbox.
+        # The broker's ADMINS only: its users (operators) belong to the broker
+        # alone and are never shown to the carrier.
         broker_emails: dict[str, list] = {}
         if broker_ids:
+            from auth_deps import db_role_values
             for u in (s.query(AppUser)
-                      .filter(AppUser.broker_party_id.in_(list(broker_ids)))
+                      .filter(AppUser.broker_party_id.in_(list(broker_ids)),
+                              AppUser.role.in_(db_role_values("broker_admin")))
                       .all()):
                 if not u.email:
                     continue

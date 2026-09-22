@@ -48,7 +48,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import String, func, or_
+from sqlalchemy import String, false, func, or_
 from sqlalchemy import text as sa_text
 
 import contract_types as ct
@@ -621,6 +621,25 @@ def _open_change_request(s, c: Contract) -> Optional[dict]:
     }
 
 
+def _speaks_for_broker(p: Principal | None) -> bool:
+    """May this seat commit its broker company to a contract?
+
+    Agreeing terms, pushing back on them and signing are the broker ADMIN's.
+    A broker user (operator) sends the files and sorts out their errors; the
+    contract is the company's word, so the person who gives it is the one who
+    runs the company's seat here.
+    """
+    return bool(p and p.is_broker and p.role == "broker_admin")
+
+
+def _assert_speaks_for_broker(p: Principal, what: str) -> None:
+    """Refuse a broker USER an act that commits the broker company."""
+    if p.is_broker and not _speaks_for_broker(p):
+        raise HTTPException(
+            403, f"only your broker admin can {what} — broker users send the "
+                 f"files, the admin agrees and signs the contract")
+
+
 def _allowed_actions(c: Contract, missing: list[str],
                      p: Principal | None = None,
                      unsigned: list[str] | None = None,
@@ -641,6 +660,8 @@ def _allowed_actions(c: Contract, missing: list[str],
     blocked = bool(missing)
     is_broker = bool(p and p.is_broker)
     is_carrier = bool(p and not p.is_broker)
+    # The broker side's answers and signature are its admin's alone.
+    broker_voice = _speaks_for_broker(p)
     unsigned = ["carrier", "counterparty"] if unsigned is None else unsigned
     my_side = "counterparty" if is_broker else "carrier"
 
@@ -678,13 +699,13 @@ def _allowed_actions(c: Contract, missing: list[str],
         # is not "no review was needed", it is ignoring one that was asked for.
         "skip_review": is_carrier and state == "draft" and not blocked,
         # Broker's two answers. Never both sides' — this is their turn.
-        "request_changes": is_broker and state in ("in_review", "agreed"),
-        "accept_terms": is_broker and state == "in_review" and not blocked,
+        "request_changes": broker_voice and state in ("in_review", "agreed"),
+        "accept_terms": broker_voice and state == "in_review" and not blocked,
         # Sign and return it. The broker's last act — after this the contract is
         # the carrier's to place and put in force. Not until the carrier has
         # signed, though: the broker signs a document that already carries the
         # other signature, which is the same order the signing round keeps.
-        "submit_signed": (is_broker and state == "agreed"
+        "submit_signed": (broker_voice and state == "agreed"
                           and "carrier" not in unsigned),
 
         # Signing is what puts a contract in force, so this is only ever the
@@ -707,6 +728,7 @@ def _allowed_actions(c: Contract, missing: list[str],
         "sign": (state in ("draft", "agreed", "signed")
                  and my_side in unsigned
                  and (not is_broker or "carrier" not in unsigned)
+                 and (not is_broker or broker_voice)
                  and has_wording and bool(p)),
         # The carrier entering a signature made on paper or through a provider.
         # The only way a reinsurance contract is ever signed on both sides,
@@ -798,11 +820,17 @@ def counterparties(party_type: str = Query(..., description="broker | reinsurer"
                    p: Principal = Depends(current_principal)):
     """Who this carrier may write a contract WITH, for the type being raised.
 
+    Carrier-side only. A broker seat carries no tenant, so every scope below
+    would fall away and it could list the brokers on ANY carrier's programme;
+    it never raises a contract, so it is simply refused.
+
     For a broker the list is narrowed to the programme, because a broker that is
     not on the programme cannot hold a contract on it — offering them and
     refusing on save would be a worse way to say the same thing. A reinsurer has
     no such gate: it does not produce business into the programme.
     """
+    if p.is_broker:
+        raise HTTPException(403, "insufficient role")
     with SessionLocal() as s:
         tid = (p.tenant_id if not p.is_platform_admin
                else (s.get(Program, program_id).tenant_id if program_id else None))
@@ -867,7 +895,12 @@ def list_contracts(
     with SessionLocal() as s:
         query = s.query(Contract)
         if p.is_broker:
-            query = query.filter(Contract.broker_party_id == p.broker_party_id)
+            # The broker's party from the DATABASE, never the token claim: the
+            # claim is None in real requests, and `== None` renders as IS NULL
+            # — every carrier-held contract on the platform instead of this
+            # broker's own (see auth_deps.resolve_broker_party_id).
+            bid = resolve_broker_party_id(s, p)
+            query = query.filter(Contract.broker_party_id == bid if bid else false())
         else:
             tid = resolve_tenant_id(s, p)
             query = query.filter(Contract.tenant_id == tid)
@@ -1953,6 +1986,7 @@ def request_changes(contract_id: int, body: ChangeRequest,
         raise HTTPException(
             403, "the broker answers a review — the carrier revises and "
                  "re-sends instead")
+    _assert_speaks_for_broker(p, "ask for changes to a contract")
     named = [ch for ch in body.changes
              if (ch.field or "").strip() and (ch.proposed or "").strip()]
     if not (body.note or "").strip() and not named:
@@ -2005,6 +2039,7 @@ def accept_terms(contract_id: int, body: ReviewRequest = ReviewRequest(),
         raise HTTPException(
             403, "the broker is the one who agrees to the terms — the carrier "
                  "wrote them")
+    _assert_speaks_for_broker(p, "agree a contract's terms")
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
         docs = s.query(ContractDocument).filter(
@@ -2060,6 +2095,7 @@ def submit_signed(contract_id: int, body: SignedSubmission = SignedSubmission(),
         raise HTTPException(
             403, "the broker signs and returns the contract — the carrier "
                  "receives it")
+    _assert_speaks_for_broker(p, "sign a contract")
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
 
@@ -2326,6 +2362,18 @@ def _live_signing_round(s, contract_id: int):
             .first())
 
 
+def _signed_envelope(s, contract_id: int):
+    """The most recent COMPLETED e-signing round on this contract — everybody
+    signed, and its current PDF carries every signature — or None."""
+    from db import EsignEnvelope
+    return (s.query(EsignEnvelope)
+            .filter(EsignEnvelope.contract_id == contract_id,
+                    EsignEnvelope.status == "completed")
+            .order_by(EsignEnvelope.completed_at.desc().nullslast(),
+                      EsignEnvelope.id.desc())
+            .first())
+
+
 class SignatureIn(BaseModel):
     """One signature. `side` is only accepted from a carrier recording the
     other party's — everybody else signs for their own side and cannot say
@@ -2391,6 +2439,7 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
 
         # ── whose side ──
         if p.is_broker:
+            _assert_speaks_for_broker(p, "sign a contract")
             if body.recorded:
                 raise HTTPException(
                     403, "only the carrier records a signature made outside "
@@ -2899,6 +2948,20 @@ def download_contract_pdf(contract_id: int,
     """
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
+
+        # Once both sides have signed in Kavachio, THE contract is the copy they
+        # signed — with their signatures on it — not a fresh composition that
+        # has none. It is frozen as at signing, as an executed contract should
+        # be; a later change goes through its own round.
+        signed = _signed_envelope(s, c.id)
+        if signed is not None:
+            import esign_routes
+            data = esign_routes._pdf_bytes(signed)
+            fname = f"{(c.name or 'contract').strip()} (signed).pdf"
+            return Response(content=data, media_type="application/pdf",
+                            headers={"Content-Disposition":
+                                     _content_disposition(fname)})
+
         data = compose_contract_pdf(s, c)
 
         # The state is in the filename because this file outlives the screen it

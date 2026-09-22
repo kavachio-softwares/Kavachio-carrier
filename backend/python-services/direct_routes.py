@@ -190,6 +190,13 @@ def assert_tenant_owns(principal: Principal, tenant_id: Optional[int]) -> None:
     admins bypass). 404 not 403, so ids in other tenants can't be probed."""
     if principal.is_platform_admin:
         return
+    # No tenant on the caller (a broker seat) matches NOTHING here. Compared
+    # as-is, None == None let every broker seat through on any row that has no
+    # tenant — global parties, legacy contracts. A broker reaches carrier rows
+    # only through the carrier_scope chain, whose acting principal carries
+    # the carrier's real tenant.
+    if principal.tenant_id is None:
+        raise HTTPException(404, "not found")
     if tenant_id != principal.tenant_id:
         raise HTTPException(404, "not found")
 
@@ -1063,7 +1070,8 @@ def direct_landing_get(landing_id: int, principal: Principal = Depends(current_p
 
 
 @router.post("/direct/landing/{landing_id}/load-datamodel")
-def direct_landing_load_datamodel(landing_id: int, background_tasks: BackgroundTasks):
+def direct_landing_load_datamodel(landing_id: int, background_tasks: BackgroundTasks,
+                                  principal: Principal = Depends(current_principal)):
     """Additive DATA-LANE trigger — push one landing into the canonical data model
     when (and only when) its format's input→data-model mapping is already done.
 
@@ -1079,6 +1087,10 @@ def direct_landing_load_datamodel(landing_id: int, background_tasks: BackgroundT
         rec = s.get(LandingRecord, landing_id)
         if not rec:
             raise HTTPException(404, "landing record not found")
+        # It had no sign-in at all: anyone could push any carrier's (or
+        # broker's) landing into the data model. Same owner check as reading
+        # the landing (the route above).
+        assert_tenant_owns(principal, rec.tenant_id)
         fmt = s.get(DirectFormat, rec.format_id) if rec.format_id else None
         mapping_ready = bool(fmt and fmt.datamodel_mapped and fmt.datamodel_mapper_id)
         status = rec.datamodel_status
@@ -1746,6 +1758,24 @@ def _principal_email(principal) -> Optional[str]:
         return None
 
 
+def _actor_label(principal, requested: Optional[str] = None) -> Optional[str]:
+    """Who to record as having done something, on rows the CARRIER reads.
+
+    A broker seat is recorded as its broker company (audit.actor_for), the way
+    a run submitted through the broker's lane already is. Anyone else is
+    recorded as they always were — the name they asked to be recorded under,
+    else their email. A broker seat's ``requested`` name is ignored: it would
+    put whatever they typed on the carrier's rows.
+    """
+    if principal is not None and getattr(principal, "is_broker", False):
+        try:
+            from audit import actor_for
+            return actor_for(principal)
+        except Exception:  # noqa: BLE001 — never raises into the request
+            return None
+    return requested or _principal_email(principal)
+
+
 def _principal_name(principal) -> Optional[str]:
     """The acting user's display name, for anything a PERSON reads.
 
@@ -1947,19 +1977,39 @@ async def _render_landing(
         # layout, as it always has) but must still run what that setup chose,
         # so it names the pipeline for its rule choice alone.
         run_rule_scope = _rule_scope_mod.pipeline_scope(s, pipe.id) if pipe else None
+        _rs_pipe = None
         if pipe is None and rule_scope_pipeline_id:
             _rs_pipe = s.get(Pipeline, rule_scope_pipeline_id)
             if _rs_pipe is not None and _rs_pipe.tenant_id == rec.tenant_id:
                 run_rule_scope = _rule_scope_mod.pipeline_scope(s, _rs_pipe.id)
+            else:
+                _rs_pipe = None
+        # WHOSE CONTRACTS govern: the setup's. A Re-generate names its setup
+        # (above) for the same reason it names it for the rule choice — the
+        # input format is SHARED by every setup with the same layout and output
+        # template, and each setup build re-points the format's contracts at
+        # its own. Reading them off the format re-checked one broker's file
+        # against whichever setup was built last, which may be another
+        # broker's contract. The layout still comes from the format.
+        contracts_pipe = pipe or _rs_pipe
         if pipe:
             eff_output_template_id = pipe.output_template_id
-            _pcs = _pipeline_contracts(s, pipe.id)
+        else:
+            eff_output_template_id = fmt.output_template_id
+        if contracts_pipe:
+            _pcs = _pipeline_contracts(s, contracts_pipe.id)
             sheet_contracts = {pc.sheet_key: pc.contract_id
                                for pc in _pcs if pc.sheet_key}
             fallback_contract_id = next(
                 (pc.contract_id for pc in _pcs if not pc.sheet_key), None)
+        elif rule_scope_pipeline_id:
+            # A Re-generate whose setup has since been deleted. The contract
+            # the export itself records (passed in as contract_id) governs
+            # alone: the format's pins belong to whichever setup was built
+            # last, not to the one this file was made by.
+            sheet_contracts = {}
+            fallback_contract_id = None
         else:
-            eff_output_template_id = fmt.output_template_id
             sheet_contracts = fmt.sheet_contracts or {}
             fallback_contract_id = fmt.contract_id
         # The template here is always the SETUP's own — see this module's
@@ -1989,7 +2039,8 @@ async def _render_landing(
         try:
             sheet_contracts, eff_contract_id, asof_note, asof_extra_ids = (
                 _apply_asof_contracts(
-                    s, rec.data, pipe, fmt, sheet_contracts, eff_contract_id))
+                    s, rec.data, contracts_pipe, fmt, sheet_contracts,
+                    eff_contract_id))
             if asof_note:
                 log.info(f"[AsOf] {asof_note}")
         except Exception as _asof_exc:  # noqa: BLE001 — fail-open by design
@@ -2012,7 +2063,7 @@ async def _render_landing(
         # when that contract isn't itself pinned elsewhere (otherwise the sheet
         # has no governing contract and isn't contract-validated).
         asof_windows = {}
-        asof_cfg = [_AsofCfg(x) for x in (pipe, fmt) if x is not None]
+        asof_cfg = [_AsofCfg(x) for x in (contracts_pipe, fmt) if x is not None]
         try:
             if asof_extra_ids:
                 asof_windows = _asof_contract_windows(s, governing_ids)
@@ -2374,8 +2425,24 @@ async def _render_landing(
                 # Best-effort: the calendar is a side-feature and must never break
                 # delivery, so any failure here is swallowed.
                 try:
-                    fmt = s.get(DirectFormat, lr.format_id) if lr.format_id else None
-                    if fmt is not None and fmt.program_id is not None:
+                    # WHICH programme: the one this run was made for. The input
+                    # format is shared by every setup with the same layout and
+                    # output template, so its programme is whichever setup was
+                    # built first — ticking that one marked another programme's
+                    # deadline (possibly another broker's) and left this one
+                    # overdue. The run's own programme first, then its setup's
+                    # (the export records it, so a Re-generate — which renders
+                    # without its pipeline — still finds it), and the format's
+                    # only for a run that had neither.
+                    cal_program_id = out.program_id
+                    _cal_pipe_id = pipeline_id or out.pipeline_id
+                    if cal_program_id is None and _cal_pipe_id:
+                        _cal_pipe = s.get(Pipeline, _cal_pipe_id)
+                        cal_program_id = _cal_pipe.program_id if _cal_pipe else None
+                    if cal_program_id is None and lr.format_id:
+                        fmt = s.get(DirectFormat, lr.format_id)
+                        cal_program_id = fmt.program_id if fmt else None
+                    if cal_program_id is not None:
                         from submission_calendar_service import mark_received
                         # WHICH period, and WHOSE. The uploaded file's name is
                         # the only statement of the period we have here, and it
@@ -2384,7 +2451,7 @@ async def _render_landing(
                         # name says nothing, mark_received falls back to the
                         # oldest open period and records that it guessed.
                         if mark_received(
-                                s, fmt.program_id, export_id=export_id,
+                                s, cal_program_id, export_id=export_id,
                                 broker_party_id=out.broker_party_id,
                                 source_filename=lr.source_filename) is not None:
                             s.commit()
@@ -2485,9 +2552,15 @@ async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None
             raise HTTPException(404, "export not found")
         assert_can_read_export(s, principal, _exp)
         export_pipeline_id = getattr(_exp, "pipeline_id", None)
+        # The contract this export was made under. Re-generate measures the
+        # file against THAT, as the first run did — never against whatever the
+        # shared input format was last pointed at by another setup's build.
+        export_contract_id = getattr(_exp, "contract_id", None)
+        actor = _actor_label(principal,
+                             requested=(body.actor if body else None))
     # Re-render IN PLACE so the export id/header stays stable across Re-generate.
-    return await _render_landing(int(landing_id), None, None,
-                                 (body.actor if body else None) or _principal_email(principal), {},
+    return await _render_landing(int(landing_id), export_contract_id, None,
+                                 actor, {},
                                  auto_ingest=False, reuse_export_id=export_id,
                                  rule_scope_pipeline_id=export_pipeline_id)
 
@@ -2716,12 +2789,25 @@ def direct_output_fields(template_id: int, contract_id: Optional[int] = None,
     clause along. Pass `format_id` to honour the setup's sheet↔contract mapping:
     each sheet's fields then only show clauses from the contract that governs
     that sheet (scoped clauses show on the schedules they name)."""
+    # Setup screens only — the carrier's. A broker seat has no tenant, so the
+    # checks below could not scope it; it never builds a setup, so it is refused.
+    if principal.is_broker:
+        raise HTTPException(403, "insufficient role")
     sheet_contracts = None
     program_id = None
     with SessionLocal() as s:
         tpl = s.get(ExportTemplate, template_id)
-        if not tpl:
+        # 404 on another carrier's template or contract, exactly as on a
+        # missing one: this returns contract clauses verbatim, so an id from
+        # somewhere else must not read them. Platform-wide templates (no
+        # tenant) stay open to every carrier.
+        if not tpl or (not principal.is_platform_admin
+                       and tpl.tenant_id not in (None, principal.tenant_id)):
             raise HTTPException(404, "output template not found")
+        if contract_id and not principal.is_platform_admin:
+            c = s.get(Contract, contract_id)
+            if not c or c.tenant_id not in (None, principal.tenant_id):
+                raise HTTPException(404, "contract not found")
         structure = _load_structure(tpl)
         if format_id:
             fmt = s.get(DirectFormat, format_id)
@@ -3194,7 +3280,13 @@ def direct_runs(
         if ids:
             query = query.filter(DirectFormat.carrier_party_id.in_(ids))
         if program_id is not None:
-            query = query.filter(DirectFormat.program_id == program_id)
+            # The programme the RUN was made for (stamped on the export), not
+            # the shared format's: one approved format serves every programme
+            # with the same layout, so filtering on it hid runs made on the
+            # others. The format's programme is only the fallback for exports
+            # written before output_exports.program_id existed.
+            query = query.filter(func.coalesce(OutputExport.program_id,
+                                               DirectFormat.program_id) == program_id)
         # Filtered on the EXPORT, not the format: the format is the shared
         # setup, while output_exports.broker_party_id is the scope the run was
         # actually made for (stamped by _render_landing from run_scope).
@@ -3888,6 +3980,30 @@ def _ingest_landing_background(landing_id: int, actor: Optional[str] = None) -> 
         log.warning("auto data-model ingest failed for landing %s: %s", landing_id, e)
 
 
+def _landing_run_context(s, rec: LandingRecord) -> dict:
+    """What the run that produced this landing was made FOR — its programme,
+    broker and contract — for the data-model load (ingester.ingest_record).
+
+    Read off the run's export, which records exactly that scope. The programme
+    falls back to the run's setup, and — for a run made before setups existed,
+    whose format was looked up BY programme — to the format's. Keys the run
+    did not have are left out; an empty dict loads exactly as before.
+    """
+    exp = s.get(OutputExport, rec.output_export_id) if rec.output_export_id else None
+    if exp is None:
+        return {}
+    program_id = exp.program_id
+    if program_id is None and exp.pipeline_id:
+        pipe = s.get(Pipeline, exp.pipeline_id)
+        program_id = pipe.program_id if pipe else None
+    if program_id is None and not exp.pipeline_id and rec.format_id:
+        fmt = s.get(DirectFormat, rec.format_id)
+        program_id = fmt.program_id if fmt else None
+    ctx = {"program_id": program_id, "broker_party_id": exp.broker_party_id,
+           "contract_id": exp.contract_id}
+    return {k: v for k, v in ctx.items() if v is not None}
+
+
 def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
                       actor: Optional[str] = None) -> int:
     """Reconstruct DataFrames from a landing record and load them into the
@@ -3899,6 +4015,10 @@ def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
         data = rec.data or {}
         tenant_mga = mga or _tenant_name(s, rec.tenant_id)
         rec_tenant_id = rec.tenant_id
+        # Whose policies these are and which contract they were checked
+        # against: the loaded policies are bound to that contract and record
+        # that broker as their sender, so a broker only ever reads its own.
+        run_ctx = _landing_run_context(s, rec)
 
     sheets_dict: dict[str, pd.DataFrame] = {}
     for name, sheet in (data.get("sheets") or {}).items():
@@ -3925,7 +4045,7 @@ def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
         for record in records:
             try:
                 with cs.begin_nested():
-                    ingest_record(cs, tenant_mga, record)
+                    ingest_record(cs, tenant_mga, record, run=run_ctx)
                 loaded += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("ingest_record failed during backfill: %s", e)

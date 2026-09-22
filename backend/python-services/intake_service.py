@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 import intake_required_fields as required_fields
 import intake_safety as safety
@@ -343,9 +343,19 @@ def _check_not_duplicate(session, tenant_id: int, sha: str,
              .order_by(FileArrival.id.desc()).first())
     if prior is None:
         return None
-    when = prior.received_at.strftime("%d %b %Y") if prior.received_at else "earlier"
-    return (f"Held — exactly the same file we already loaded on {when}. "
-            f"Loading it again would count the premium twice.")
+    # The file is still held whoever sent the first copy — two brokers
+    # delivering identical bytes is as likely to double-count premium as one
+    # broker sending twice. But the WHEN belongs to whoever sent it: this
+    # message goes back to the sender, and another broker's load date is not
+    # theirs to learn.
+    sender = route.broker_party_id if route is not None else None
+    if sender is not None and prior.matched_broker_party_id == sender:
+        when = (prior.received_at.strftime("%d %b %Y")
+                if prior.received_at else "earlier")
+        return (f"Held — exactly the same file we already loaded on {when}. "
+                f"Loading it again would count the premium twice.")
+    return ("Held — exactly the same file has already been loaded. Loading it "
+            "again would count the premium twice.")
 
 
 def _check_has_rows(rows: Optional[int]) -> Optional[str]:
@@ -364,17 +374,27 @@ def _check_live_contract(session, route: Optional[IntakeRoute]) -> Optional[str]
     """
     if route is None or route.broker_party_id is None:
         return None            # already refused by the sender check
-    from db import Contract, ProgramBroker
+    from db import Contract, Program, ProgramBroker
     # Eligibility, not currency: the question is "does this broker hold an
     # APPROVED contract on the programme", not "which version is newest". Since
     # currency stopped being stored, `status == 'active'` would no longer narrow
     # anything here — and narrowing by date would be wrong, because a file may
     # legitimately arrive for a period whose contract has since expired.
+    #
+    # WHOSE contract: this broker's own, or one the carrier holds for the whole
+    # programme (broker NULL — the same rule the programme's contract list
+    # uses). Another broker's contract on a shared programme says nothing about
+    # this broker, and neither does a contract at a different carrier: the
+    # programme must be this route's carrier's.
     from contract_upload_services.contract_asof import NON_GOVERNING_STATUSES
     q = (session.query(Contract.id)
          .join(ProgramBroker, ProgramBroker.program_id == Contract.program_id)
+         .join(Program, Program.id == Contract.program_id)
          .filter(ProgramBroker.broker_party_id == route.broker_party_id,
                  ProgramBroker.status == "active",
+                 Program.tenant_id == route.tenant_id,
+                 or_(Contract.broker_party_id == route.broker_party_id,
+                     Contract.broker_party_id.is_(None)),
                  func.coalesce(Contract.status, "").notin_(NON_GOVERNING_STATUSES)))
     # When the route names its programme (10.2), check THAT programme's
     # contract rather than "any contract this broker holds anywhere" — which is

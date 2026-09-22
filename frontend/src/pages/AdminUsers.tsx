@@ -32,7 +32,7 @@ const ROLE_LABEL: Record<string, string> = {
   kavachio_admin: "Kavachio Admin",
   carrier_admin: "Carrier Admin",
   broker_admin: "Broker Admin",
-  operator: "Operator",
+  operator: "Broker User",
 };
 const STATUS_LABEL: Record<string, string> = {
   active: "Active", invited: "Invited", inactive: "Inactive",
@@ -106,11 +106,11 @@ export default function AdminUsers() {
                 : "all have signed in"} />
             <Tile k="Kavachio Admin" v={c.kavachio}
               foot={c.kavachio === 1 ? "the only Kavachio account" : "Kavachio accounts"} />
-            <Tile k="Carrier users" v={c.carrier_users}
+            <Tile k="People at carriers" v={c.carrier_users}
               foot={`across ${c.carriers} ${c.carriers === 1 ? "carrier" : "carriers"}`} />
-            <Tile k="Broker users" v={c.broker_users}
+            <Tile k="People at brokers" v={c.broker_users}
               foot={`across ${c.brokers} ${c.brokers === 1 ? "broker" : "brokers"}`} />
-            <Tile k="Operators" v={c.operators} foot="added by their brokers" />
+            <Tile k="Broker Users" v={c.operators} foot="added by their broker admins" />
           </div>
         )}
 

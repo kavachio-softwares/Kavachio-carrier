@@ -173,7 +173,7 @@ export const ROLE_LABEL: Record<Role, string> = {
   kavachio_admin: "Kavachio Admin",
   carrier_admin:  "Carrier Admin",
   broker_admin:   "Broker Admin",
-  operator:       "Operator",
+  operator:       "Broker User",
 };
 
 // --- refresh-token expiry → automatic logout ---------------------------------

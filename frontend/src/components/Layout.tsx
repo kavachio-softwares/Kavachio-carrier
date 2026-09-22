@@ -4,6 +4,7 @@ import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
   FileCheck, CalendarDays,
 } from "lucide-react";
+import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
 import { BrokerCarrierSwitch } from "./BrokerCarrierSwitch";
@@ -236,8 +237,9 @@ export default function Layout() {
   useEffect(() => {
     if (!mga || mga === "default" || isKavachioAdmin()) return;
     let cancelled = false;
-    getDeduped<{ legal_name?: string | null; logo?: string | null }>(`/tenants/${mga}`)
-      .then(r => { if (!cancelled) setTenantBrand({ mga, legal_name: r.data?.legal_name, logo: r.data?.logo ?? null }); })
+    getDeduped<{ legal_name?: string | null; logo?: string | null; owner_user_id?: number | null }>(`/tenants/${mga}`)
+      .then(r => { if (!cancelled) setTenantBrand({ mga, legal_name: r.data?.legal_name, logo: r.data?.logo ?? null,
+                                                    owner_user_id: r.data?.owner_user_id ?? null }); })
       .catch(() => { /* sidebar just falls back to the Kavachio mark */ });
     return () => { cancelled = true; };
   }, [mga]);
@@ -272,7 +274,11 @@ export default function Layout() {
     : GROUPS
         .map(g => ({ ...g, items: g.items.filter(i => canAccessPath(i.to)) }))
         .filter(g => g.items.length > 0);
-  const roleLabel = user ? ROLE_LABEL[normalizeRole(user.role)] : "";
+  // Everyone at a carrier holds the carrier_admin DB role; only the owner is
+  // the Carrier Admin. The rest are Carrier Users (see hooks/useCarrierSeat).
+  const seat = useCarrierSeat();
+  const roleLabel = !user ? ""
+    : seat === "user" ? "Carrier User" : ROLE_LABEL[normalizeRole(user.role)];
   // The workspace card's contents — shared by its interactive (admin) and
   // static (Operator) forms below.
   const workspaceIdentity = brand?.legal_name ? (

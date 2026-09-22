@@ -88,6 +88,10 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Let the browser read a download's filename: without this, a cross-origin
+    # response hides Content-Disposition and every file saves under the name
+    # the screen guessed (a signed contract would lose its "(signed)").
+    expose_headers=["Content-Disposition"],
     # Cache preflight (OPTIONS) responses for an hour so the browser doesn't
     # re-preflight every cross-origin call — without this the network tab shows
     # 2 entries (OPTIONS + real request) for nearly every api call on the

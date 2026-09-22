@@ -216,7 +216,9 @@ export default function BrokerDetail() {
             })()}
           </Card>
 
-          <Card title="Their team" className="md:col-span-2">
+          {/* Only the person who runs the broker company. Its own users belong
+              to the broker and are never shown to the carrier. */}
+          <Card title="Broker admin" className="md:col-span-2">
             {/* The onboarding badge sits here rather than by the title because
                 this is where it comes from — it is derived from the very list
                 underneath it, so the two can never appear to disagree. */}
@@ -234,7 +236,7 @@ export default function BrokerDetail() {
             </div>
             {b.users.length === 0 ? (
               <p className="text-sm text-ink-muted">
-                Nobody from this broker has a login yet.
+                This broker company has no admin with a login yet.
               </p>
             ) : (
               <ul className="space-y-2.5">
@@ -246,7 +248,7 @@ export default function BrokerDetail() {
                       <div className="text-xs text-ink-muted truncate">{u.email}</div>
                     </div>
                     <span className="rounded bg-surface-2 px-2 py-0.5 text-xs">
-                      {u.role === "broker_admin" ? "Broker Admin" : "Operator"}
+                      {u.role === "broker_admin" ? "Broker Admin" : "Broker User"}
                     </span>
                     <span className={`text-xs ${u.status === "active" ? "text-success" : "text-warn"}`}>
                       {u.status === "active" ? "Active" : "Invited"}

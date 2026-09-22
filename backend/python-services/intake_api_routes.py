@@ -182,9 +182,16 @@ async def receive_bordereau(
     with SessionLocal() as s:
         # A retry after a timeout is the NORMAL case for a cron job: hand back
         # the original receipt rather than loading the same month twice.
+        #
+        # A key is the SENDER's, so it is looked up on this key's way in (its
+        # route, which belongs to one broker) — the same scope the receipt
+        # lookup below uses. Scoped to the carrier alone, two brokers who both
+        # name their keys after the period ("bdx-2026-07") would collide: the
+        # second one's file refused, or handed the first one's receipt.
         if idempotency_key:
             prior = (s.query(FileArrival)
                      .filter(FileArrival.tenant_id == p.tenant_id,
+                             FileArrival.route_id == p.route_id,
                              FileArrival.idempotency_key == idempotency_key)
                      .first())
             if prior is not None:
@@ -224,20 +231,36 @@ async def receive_bordereau(
                        retryable=True) from exc
 
         # The SAME function the SFTP poller calls. Same six checks, same row.
-        arrival = svc.land_file(
-            s, tenant_id=p.tenant_id, filename=fname, file_bytes=data,
-            route=route, claimed_sender=f"api:{p.credential_id}",
-            idempotency_key=idempotency_key, blob_ref=blob_ref)
+        # Inside the try: land_file FLUSHES the row, so the database's
+        # idempotency rule fires there, before the commit is ever reached.
         try:
+            arrival = svc.land_file(
+                s, tenant_id=p.tenant_id, filename=fname, file_bytes=data,
+                route=route, claimed_sender=f"api:{p.credential_id}",
+                idempotency_key=idempotency_key, blob_ref=blob_ref)
             s.commit()
         except IntegrityError:
             # Two identical POSTs racing each other — the DB arbitrated, so
             # re-read whichever won and hand back its receipt.
             s.rollback()
+            if not idempotency_key:
+                raise              # not a key race: nothing to hand back
             prior = (s.query(FileArrival)
                      .filter(FileArrival.tenant_id == p.tenant_id,
+                             FileArrival.route_id == p.route_id,
                              FileArrival.idempotency_key == idempotency_key).first())
             if prior is None:
+                if (s.query(FileArrival.id)
+                        .filter(FileArrival.tenant_id == p.tenant_id,
+                                FileArrival.idempotency_key == idempotency_key)
+                        .first()):
+                    # The key clashed with ANOTHER way in's: this database
+                    # still has the per-carrier rule that migration 23
+                    # replaces. Refused like a reused key, without naming the
+                    # other submission.
+                    raise _err(409, "idempotency_key_reused",
+                               "That Idempotency-Key is already in use. "
+                               "Generate a new one for each submission.")
                 raise
             return JSONResponse(status_code=200,
                                 content=_receipt(s, prior, base, replayed=True))

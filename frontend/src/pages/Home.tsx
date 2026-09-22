@@ -8,11 +8,18 @@ import { InfoTip } from "../components/InfoTip";
 import { getCalendar, type CalendarStatus } from "../api/calendar";
 import { getBrokersPaged, getHierarchy } from "../api/hierarchy";
 import { listContractsPaged } from "../api/contractRecord";
+import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { listArrivals, type Arrival } from "../api/intake";
 import { Badge, CAME_IN_BY, state as arrivalState } from "./FilesReceived";
 
 type Stats = {
   uploads_today: number; uploads_total: number; open_bdx_cycles: number;
+  // This organisation's carrier users (not the carrier admin themselves),
+  // invited ones included. Never the brokers' people.
+  // Sent to the carrier admin only; null for a carrier user.
+  users_total?: number | null; users_invited?: number | null;
+  // Sent to a carrier user only: the broker companies THEY invited.
+  my_brokers?: number | null; my_brokers_pending?: number | null;
   parties_in_directory: number; pending_exceptions: number;
   ai_cache_hit_rate: number | null;
   // --- extended fields for the prototype KPIs (optional until the API adds them) ---
@@ -46,6 +53,8 @@ export default function Home() {
   const nav = useNavigate();
   const user = getUser();
   const role = userRole() ?? "operator";
+  // Same role, two seats at a carrier: only the owner is the Carrier Admin.
+  const seat = useCarrierSeat();
   const [stats, setStats] = useState<Stats | null>(null);
   // Whether this tenant still needs first-time setup (carrier + Bordereau).
   const [needsSetup, setNeedsSetup] = useState(false);
@@ -83,6 +92,9 @@ export default function Home() {
   // Both directories are carrier-scoped. A broker seat carries no tenant, so
   // these routes answer "no tenant bound to this user" for them — don't ask.
   const carrierSeat = role === "carrier_admin" || role === "kavachio_admin";
+  // Process Bordereau follows the route rules (access.ts), so its button and
+  // links show exactly to the seats that may open it.
+  const canProcess = canAccessPath("/direct");
 
   useEffect(() => {
     if (!carrierSeat) return;
@@ -92,7 +104,9 @@ export default function Home() {
     // page_size 1 because only `total` is wanted — it (and `stranded`) are
     // counted over the whole directory server-side, not over the page, so the
     // smallest possible page still yields the real figure.
-    getBrokersPaged({ page: 1, page_size: 1 })
+    // `mine`: the same list the Party screen shows — for a carrier user, the
+    // broker companies they invited.
+    getBrokersPaged({ page: 1, page_size: 1, mine: true })
       .then(r => setPartyCount(r.total))
       .catch(() => setPartyCount(null));
     // Same trick, same reason: sent with no filters so `total` is the carrier's
@@ -182,9 +196,11 @@ export default function Home() {
             <h2>Dashboard</h2>
             <p>{SUBTITLE[role]}</p>
           </div>
-          <div className="actions">
-            <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>
-          </div>
+          {canProcess && (
+            <div className="actions">
+              <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>
+            </div>
+          )}
         </div>
 
         {/* KPI tiles — wired to /dashboard/stats (see API notes for the new fields).
@@ -222,7 +238,9 @@ export default function Home() {
               <div className="tile">
                 <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   Parties
-                  <InfoTip text="The party organisations that produce into your programmes — those already on one, plus any you have invited who have not answered yet." />
+                  <InfoTip text={seat === "user"
+                    ? "The broker companies you invited — those already on a programme, plus any who have not answered yet."
+                    : "The party organisations that produce into your programmes — those already on one, plus any you have invited who have not answered yet."} />
                 </div>
                 <div className="v">{fmt(partyCount)}</div>
                 <div className="foot"><Link className="linkish" to="/brokers">View Parties →</Link></div>
@@ -236,6 +254,36 @@ export default function Home() {
                 <div className="v">{fmt(contractCount)}</div>
                 <div className="foot"><Link className="linkish" to="/contracts">View Contracts →</Link></div>
               </div>
+
+              {/* Placed here so the eight tiles fill two rows of four. Which
+                  count it shows depends on the seat: the carrier admin sees
+                  the carrier users they added; a carrier user sees the broker
+                  companies they invited, and no count of their colleagues. */}
+              {stats?.my_brokers != null ? (
+                <div className="tile">
+                  <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    Your Broker Companies
+                    <InfoTip text="The broker companies you invited, including any that have not accepted yet." />
+                  </div>
+                  <div className="v">{fmt(stats.my_brokers)}</div>
+                  <div className="foot">
+                    {!!stats.my_brokers_pending && <span>{stats.my_brokers_pending} not accepted yet · </span>}
+                    <Link className="linkish" to="/users">Users &amp; Roles →</Link>
+                  </div>
+                </div>
+              ) : (
+                <div className="tile">
+                  <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    Carrier Users
+                    <InfoTip text="The colleagues you added to your team, including anyone invited who has not set a password yet." />
+                  </div>
+                  <div className="v">{fmt(stats?.users_total)}</div>
+                  <div className="foot">
+                    {!!stats?.users_invited && <span>{stats.users_invited} not signed up yet · </span>}
+                    <Link className="linkish" to="/users">Users &amp; Roles →</Link>
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -386,12 +434,15 @@ export default function Home() {
             <h3>Recent Runs</h3>
             <span className="sub">View your most recently processed bordereaux.</span>
             <div className="right" style={{ display: "flex", gap: 14 }}>
-              <Link className="linkish" to="/direct">Process Bordereau →</Link>
+              {canProcess && <Link className="linkish" to="/direct">Process Bordereau →</Link>}
               <Link className="linkish" to="/runs?from=home">View All →</Link>
             </div>
           </div>
           {runs.length === 0 ? (
-            <div className="empty">No runs yet — process a Bordereaux and it will appear here.</div>
+            <div className="empty">
+              {canProcess ? "No runs yet — process a Bordereaux and it will appear here."
+                          : "No runs yet — they appear here once your brokers send files."}
+            </div>
           ) : (
             <div className="tbl-wrap">
               <table>
@@ -431,7 +482,7 @@ export default function Home() {
           {runs.length >= RUNS_PAGE && (
             <div style={{ padding: "10px 20px", borderTop: "1px solid var(--p-border)" }}>
               <Link className="linkish" to="/runs?from=home" style={{ fontSize: 12.5 }}>
-                View All Process Bordereaux →
+                View All Runs →
               </Link>
             </div>
           )}
@@ -439,7 +490,7 @@ export default function Home() {
 
         {user && (
           <div className="muted" style={{ fontSize: 11.5, marginTop: 18 }}>
-            Signed in as {user.full_name} · {ROLE_LABEL[role]}
+            Signed in as {user.full_name} · {seat === "user" ? "Carrier User" : ROLE_LABEL[role]}
           </div>
         )}
       </div>

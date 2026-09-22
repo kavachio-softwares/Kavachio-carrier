@@ -56,6 +56,9 @@ export type BrokerDashboard = {
      *  approved. */
     live_contracts: number;
     programmes: number; carriers: number;
+    /** This broker's own people — its admins and its users (operators),
+     *  invited ones included. One team, whichever carrier is selected. */
+    users?: number; users_invited?: number;
   };
   /** There is no "waiting on the carrier" queue any more: the carrier's
    *  approval gate, and the broker-side upload that fed it, are both gone. A

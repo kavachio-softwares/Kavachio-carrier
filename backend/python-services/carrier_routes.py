@@ -34,7 +34,7 @@ import app_routes as _app
 import hierarchy_routes as _hier
 from auth_deps import Principal, current_principal, require_role
 from carrier_scope import (
-    CarrierScope, broker_party_id_of, carrier_ids_for_broker, carrier_scope,
+    CarrierScope, broker_party_id_of, broker_programme_ids, carrier_ids_for_broker, carrier_scope,
     contract_scope, program_scope, broker_scope, policy_scope,
 )
 from db import SessionLocal, Tenant
@@ -85,12 +85,25 @@ def carrier_get(scope: CarrierScope = Depends(carrier_scope)):
 
 @router.get(_C + "/programs")
 def programs_list(scope: CarrierScope = Depends(carrier_scope)):
-    return _app.programs_list(mga=scope.mga, principal=scope.acting)
+    rows = _app.programs_list(mga=scope.mga, principal=scope.acting)
+    # A broker seat sees only the programmes that carry ITS program_broker row
+    # (the rule at the top of carrier_scope). The carrier's other programmes —
+    # including ones only another broker is on — are none of its business.
+    if scope.principal.is_broker:
+        with SessionLocal() as s:
+            mine = broker_programme_ids(s, scope.principal, scope.carrier_id)
+        rows = [r for r in rows if r.get("id") in mine]
+    return rows
 
 
+# Programme WRITES are the carrier's. The delegated handlers are called
+# directly, so their own Depends never run; without this guard a broker seat,
+# holding the carrier-pinned `acting` principal, could create programmes or
+# rewrite one it shares with other brokers (and with it their calendar).
 @router.post(_C + "/programs")
 def programs_create(body: _app.ProgramBody,
-                    scope: CarrierScope = Depends(carrier_scope)):
+                    scope: CarrierScope = Depends(carrier_scope),
+                    _guard: Principal = Depends(require_role("carrier_admin"))):
     return _app.programs_create(mga=scope.mga, body=body, principal=scope.acting)
 
 
@@ -101,7 +114,8 @@ def program_get(scope: CarrierScope = Depends(program_scope)):
 
 @router.put(_P)
 def program_update(body: _app.ProgramBody,
-                   scope: CarrierScope = Depends(program_scope)):
+                   scope: CarrierScope = Depends(program_scope),
+                   _guard: Principal = Depends(require_role("carrier_admin"))):
     return _app.programs_update(program_id=scope.program_id, body=body,
                                 principal=scope.acting)
 
@@ -114,7 +128,8 @@ def program_schedule_get(scope: CarrierScope = Depends(program_scope)):
 
 @router.put(_P + "/schedule")
 def program_schedule_put(body: _app.ScheduleBody,
-                         scope: CarrierScope = Depends(program_scope)):
+                         scope: CarrierScope = Depends(program_scope),
+                         _guard: Principal = Depends(require_role("carrier_admin"))):
     return _app.program_schedule_put(program_id=scope.program_id, body=body,
                                      principal=scope.acting)
 
@@ -126,8 +141,15 @@ def program_schedule_put(body: _app.ScheduleBody,
 
 @router.get(_P + "/brokers")
 def programme_brokers(scope: CarrierScope = Depends(program_scope)):
-    return _hier.programme_brokers(program_id=scope.program_id,
+    rows = _hier.programme_brokers(program_id=scope.program_id,
                                    principal=scope.acting)
+    # A broker seat sees its OWN row only — not which other brokers share the
+    # programme, nor what they hold on it.
+    if scope.principal.is_broker:
+        with SessionLocal() as s:
+            own = broker_party_id_of(s, scope.principal)
+        rows = [r for r in rows if own is not None and r.get("id") == own]
+    return rows
 
 
 @router.post(_P + "/brokers")
@@ -183,8 +205,10 @@ async def broker_contract_upload(
     enable_reference_halt: bool = Form(default=False),
     upload_token: Optional[str] = Form(default=None),
     scope: CarrierScope = Depends(broker_scope),
+    _guard: Principal = Depends(require_role("carrier_admin")),
 ):
-    """Upload a contract for this programme, filed under this broker.
+    """Upload a contract for this programme, filed under this broker. The
+    carrier's act — a broker seat is refused by the guard.
 
     This was "the broker uploads a contract and waits for the carrier to
     approve it". There is no approval gate any more, and no broker-side upload
@@ -233,8 +257,11 @@ async def broker_bordereau_setup(
     resume_token: Optional[str] = Form(default=None),
     reference_files: Optional[list[UploadFile]] = File(default=None),
     scope: CarrierScope = Depends(broker_scope),
+    _guard: Principal = Depends(require_role("carrier_admin")),
 ):
-    """Step 5 — bordereau setup for this broker on this programme.
+    """Step 5 — bordereau setup for this broker on this programme. The
+    carrier's to build (setup stays with the carrier); a broker seat is
+    refused by the guard.
 
     Combined output-template + contract upload: the Output Template is resolved
     first (it is the semantic bridge), then the contract is processed with that
@@ -257,16 +284,22 @@ def contract_policies(limit: int = Query(default=50, le=500),
     """The policies written under this contract — the last link of the chain.
 
     Reads the canonical warehouse directly (policy is not an ops ORM entity)
-    and returns only the CURRENT SCD-2 version of each row.
+    and returns only the CURRENT SCD-2 version of each row — and only the ones
+    this scope may read: a broker sees the policies it sent, never another
+    broker's under a shared contract (carrier_scope.policy_sender_filter).
     """
     from sqlalchemy import select, func as _f
     from canonical import CANONICAL_TABLES
+    from carrier_scope import policy_sender_filter
     from db import CanonicalSession
     t = CANONICAL_TABLES["policy"]
+    sender = policy_sender_filter(t, scope)
 
     def _current(stmt):
         if "is_current_version" in t.c:
             stmt = stmt.where(t.c.is_current_version.isnot(False))
+        if sender is not None:
+            stmt = stmt.where(sender)
         return stmt
 
     with CanonicalSession() as cs:

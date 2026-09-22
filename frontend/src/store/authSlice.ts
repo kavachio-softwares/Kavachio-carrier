@@ -16,7 +16,13 @@ export type User = {
   tenant_id?: number | null;
 };
 
-export type TenantBrand = { mga: string; legal_name?: string | null; logo?: string | null };
+export type TenantBrand = {
+  mga: string; legal_name?: string | null; logo?: string | null;
+  /** The carrier admin's user id. It decides which of the two carrier seats
+   *  the signed-in person holds (see hooks/useCarrierSeat). `undefined` until
+   *  the organisation has been fetched; `null` for one with no owner recorded. */
+  owner_user_id?: number | null;
+};
 
 export type AuthState = {
   user: User | null;
@@ -69,7 +75,10 @@ const authSlice = createSlice({
       state.accessToken = action.payload;
     },
     tenantBrandSet(state, action: PayloadAction<TenantBrand>) {
-      state.tenantBrand = action.payload;
+      // Merged, not replaced, for the same organisation: a caller pushing a new
+      // logo or name must not wipe the owner the sidebar fetch recorded.
+      const prev = state.tenantBrand?.mga === action.payload.mga ? state.tenantBrand : null;
+      state.tenantBrand = { ...prev, ...action.payload };
     },
     /** Logout / expired session: drop everything. */
     authCleared() {

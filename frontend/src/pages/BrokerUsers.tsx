@@ -21,7 +21,7 @@ import { InviteSentModal } from "../components/InviteSentModal";
 
 const ROLE_LABEL: Record<string, string> = {
   broker_admin: "Broker Admin",
-  operator: "Operator",
+  operator: "Broker User",
 };
 
 function statusBadge(s: string): { cls: string; label: string } {
@@ -129,13 +129,14 @@ export default function BrokerUsers() {
           <div className="t">
             <h2>Users &amp; Roles</h2>
             <p>
-              Your team at {team.broker.name}. An <b>Operator</b> can run
-              spreadsheets and sort out the errors they raise. Everything else
-              stays with you.
+              Your team at {team.broker.name}. A <b>Broker User</b> sends your
+              bordereau files and sorts out the errors they raise. Everything
+              else stays with you. All your broker users work on the same
+              files, runs and deadlines — what one sends, the others see.
             </p>
           </div>
           <div className="actions">
-            <button className="btn pri" onClick={openInvite}>＋ Add Operator</button>
+            <button className="btn pri" onClick={openInvite}>＋ Add Broker User</button>
           </div>
         </div>
 
@@ -202,8 +203,8 @@ export default function BrokerUsers() {
         </div>
 
         <div className="note" style={{ marginTop: 16, maxWidth: 720 }}>
-          An operator only sees what they need to run a file: what is due, the run
-          screen, and the errors to sort out. They never see a contract, a setup
+          A broker user only sees what they need to run a file: what is due, the
+          run screen, and the errors to sort out. They never see a contract, a setup
           or the carrier's business — so a new starter can be useful on day one
           without being able to change anything that was agreed.
         </div>
@@ -214,7 +215,7 @@ export default function BrokerUsers() {
         <div className="proto-modal-overlay" onClick={closeInvite}>
           <div className="proto-modal" onClick={e => e.stopPropagation()}>
             <div className="m-h">
-              <h3>Add an operator to {team.broker.name}</h3>
+              <h3>Add a broker user to {team.broker.name}</h3>
               <button className="x" onClick={closeInvite} aria-label="Close">×</button>
             </div>
             <div className="m-b">
@@ -230,7 +231,7 @@ export default function BrokerUsers() {
                 <div className="hint">The sign-up link is sent here. It lasts 7 days.</div>
               </div>
               <div className="note" style={{ marginBottom: 0 }}>
-                They join as an <b>Operator</b>: three pages — what is due, the run
+                They join as a <b>Broker User</b>: three pages — what is due, the run
                 screen, and the errors to sort out. No contracts, no setup, and
                 nothing of the carrier's. Another admin can only be added by the
                 carrier, the same way you were.
@@ -255,7 +256,7 @@ export default function BrokerUsers() {
           title="Invitation sent"
           message={`${sent.name} can now set a password and sign in.`}
           email={sent.email}
-          note="They arrive as an Operator. The link expires in 7 days."
+          note="They arrive as a Broker User. The link expires in 7 days."
           onDone={() => setSent(null)}
         />
       )}

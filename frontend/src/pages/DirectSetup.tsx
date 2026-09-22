@@ -668,7 +668,7 @@ export default function DirectSetup() {
     setBusy(true); setErr(null); setMsg(null);
     try {
       await api.post(`/pipelines/${pipelineId}/activate`);
-      setMsg("Setup activated — Operator can now process bordereaux for this carrier + program.");
+      setMsg("Setup activated — bordereaux can now be processed for this carrier + program.");
       refreshExisting();
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
   }
@@ -1488,7 +1488,7 @@ export default function DirectSetup() {
                 approved — so there is nobody for this setup to be for until one
                 is on the programme. Put a broker on it from the{" "}
                 <button type="button" className="underline font-medium"
-                  onClick={() => navigate("/users/new")}>Users &amp; Roles</button>{" "}
+                  onClick={() => navigate("/brokers")}>Brokers</button>{" "}
                 screen and the uploads below open up. A programme that already
                 has a saved setup is not held shut this way — those predate the
                 broker level and stay editable.

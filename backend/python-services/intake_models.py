@@ -102,8 +102,9 @@ class FileArrival(Base):
     # Feature 10.2 — the reference a partner quotes back at us. Never hand out
     # arrival_id: a sequential integer lets anyone count other people's traffic.
     public_ref = Column(Text, nullable=True)
-    # Set by an API caller; unique per tenant, so a retrying cron job gets the
-    # original receipt back instead of loading the same month twice.
+    # Set by an API caller; unique per way in (tenant + route, migration 23),
+    # so a retrying cron job gets the original receipt back instead of loading
+    # the same month twice, and two brokers' keys never collide.
     idempotency_key = Column(Text, nullable=True)
     blob_ref = Column(Text, nullable=True)
     # ── Feature 12.3 — what a PERSON decided ────────────────────────────────

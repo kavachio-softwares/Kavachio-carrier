@@ -117,6 +117,24 @@ for _t_name, _t in CANONICAL_TABLES.items():
         _TENANT_COL[_t_name] = "tenant_id"
 
 
+# ---------------------------------------------------------------------------
+# Which broker SENT a policy.
+#
+# policy_contract_broker_party_id says whose contract a policy sits under, and
+# a contract the carrier holds for a whole programme has no broker — so on a
+# programme shared by several brokers it could not tell their policies apart,
+# and one broker could read another's. This records the broker whose
+# bordereau run loaded the policy. Lineage, an OPERATIONAL fact rather than
+# model content (like tenant_id above), so it is appended here and is never a
+# mapping target. db.init_db adds it to an existing table the way it adds
+# every canonical column the table lacks; migrations/24 does the same by hand.
+# ---------------------------------------------------------------------------
+POLICY_SUBMITTER_COL = "policy_submitting_broker_party_id"
+_POLICY = CANONICAL_TABLES.get("policy")
+if _POLICY is not None and POLICY_SUBMITTER_COL not in _POLICY.c:
+    _POLICY.append_column(Column(POLICY_SUBMITTER_COL, Integer, nullable=True))
+
+
 def tenant_col(table_name: str) -> str | None:
     """Name of the column that scopes `table_name` to a tenant."""
     return _TENANT_COL.get(table_name)

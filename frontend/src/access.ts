@@ -57,11 +57,13 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // No rule for /invitations: it is routed OUTSIDE the app shell (see App.tsx)
   // so RequireAccess never sees it, and a rule here would be config that looks
   // like a guard and enforces nothing. The seat check lives in the component.
-  { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
-  // Both broker seats, unlike the rest of this block. Running the bordereau IS
-  // the operator's job — the seat exists for it — and an admin does it too, so
-  // this is the one broker screen that is not the admin's alone.
-  { pattern: "/broker/bordereau", requires: "operator", only: ["broker_admin", "operator"] },
+  // My Contracts: closed. The broker admin still agrees and signs contracts,
+  // but reaches each one from "Waiting on you" on their dashboard; an operator
+  // never sees a contract at all.
+  { pattern: "/broker/contracts", requires: "broker_admin", only: [] },
+  // Running the bordereau is the operator's job — the seat exists for it — and
+  // it is theirs alone: the broker admin staffs the team and signs contracts.
+  { pattern: "/broker/bordereau", requires: "operator", only: ["operator"] },
   // The broker staffs itself here. An operator is a seat inside that team, not
   // a manager of it, so this one is the admin's alone — the database says the
   // same thing (only a broker admin may create an operator).

@@ -45,6 +45,7 @@ from db import (
 from auth_deps import current_principal, require_role, Principal, resolve_broker_party_id
 from app_routes import (
     resolve_tenant_id, assert_tenant_owns, _iso_utc, PRODUCER_PARTY_TYPES,
+    _carrier_seat, _my_broker_party_ids,
 )
 
 router = APIRouter()
@@ -287,6 +288,7 @@ def programme_broker_remove(program_id: int, broker_party_id: int,
 def broker_directory(q: Optional[str] = None,
                      page: Optional[int] = Query(None, ge=1),
                      page_size: Optional[int] = Query(None, ge=1, le=200),
+                     mine: bool = Query(False),
                      principal: Principal = Depends(current_principal)):
     """Every broker this carrier works with, and how far each one reaches.
 
@@ -302,6 +304,14 @@ def broker_directory(q: Optional[str] = None,
     `stranded` counts brokers on NO programme across the whole directory, not
     the page: the Brokers screen states it above the table as a fact about the
     book, and a count that shrank as you paged would be a different sentence.
+
+    `mine` is the Party screen's view (and its dashboard tile's). A carrier
+    USER's Party list is the broker companies they invited themselves — the
+    same reach their Users & Roles and dashboard already have
+    (app_routes._my_broker_party_ids). The carrier admin's reach is the whole
+    company, so for them it changes nothing. The programme pickers leave it
+    off: which broker goes on a programme is company business, and a
+    colleague's broker must stay assignable.
     """
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal)
@@ -354,6 +364,10 @@ def broker_directory(q: Optional[str] = None,
             by_broker[party.id] = {**_broker_dict(party), "programmes": [],
                                    "contract_count": 0, "user_count": 0}
 
+        if mine and _carrier_seat(s, principal) == "user":
+            reach = _my_broker_party_ids(s, principal, tid)
+            by_broker = {pid: d for pid, d in by_broker.items() if pid in reach}
+
         # THE SAME BROKER READS DIFFERENTLY TO DIFFERENT CARRIERS, and that is
         # the point: one who accepted carrier A and has not answered carrier B
         # is active on A's screen and invited on B's. The status is the
@@ -361,8 +375,12 @@ def broker_directory(q: Optional[str] = None,
         for pid, d in by_broker.items():
             inv = pending_by_party.get(pid)
             d["relationship"] = "invited" if inv else "active"
+            # by_user_id: who sent it. Only that carrier user — or the carrier
+            # admin, who oversees them all — may resend or withdraw it, so the
+            # screen offers those links to them alone.
             d["invitation"] = ({"id": inv.id, "email": inv.email,
-                                "invited_at": _iso_utc(inv.created_at)}
+                                "invited_at": _iso_utc(inv.created_at),
+                                "by_user_id": inv.by_user_id}
                                if inv else None)
 
         # An invitation with no party is not listed. Inviting a NEW broker
@@ -405,9 +423,14 @@ def broker_directory(q: Optional[str] = None,
                 .filter(Contract.tenant_id == tid, Contract.broker_party_id == pid)
                 .scalar() or 0
             )
+            # Admins only: how many people the broker has is the broker's own
+            # business, so the carrier is never told (the screen no longer
+            # shows a people column at all).
+            from auth_deps import db_role_values
             d["user_count"] = (
                 s.query(func.count(AppUser.id))
-                .filter(AppUser.broker_party_id == pid).scalar() or 0
+                .filter(AppUser.broker_party_id == pid,
+                        AppUser.role.in_(db_role_values("broker_admin"))).scalar() or 0
             )
 
         if page is not None:
@@ -620,7 +643,8 @@ def broker_create(body: NewBrokerBody,
 @router.post("/broker-invitations/{invitation_id}/resend")
 def broker_invitation_resend(invitation_id: int,
                              principal: Principal = Depends(require_role("carrier_admin"))):
-    from app_routes import _make_invite_link, _send_invite_email
+    from app_routes import (_make_invite_link, _send_invite_email,
+                            _send_carrier_invite_email)
     """Send an outstanding invitation again.
 
     The way out of a dead end. Inviting twice is refused — one invitation per
@@ -638,6 +662,11 @@ def broker_invitation_resend(invitation_id: int,
         tid = resolve_tenant_id(s, principal)
         inv = s.get(BrokerInvitation, invitation_id)
         if not inv or inv.tenant_id != tid:
+            raise HTTPException(404, "invitation not found")
+        # A carrier user chases or calls off only the invitations they sent;
+        # another carrier user's broker is not theirs. The carrier admin
+        # oversees every invitation the company has out.
+        if _carrier_seat(s, principal) == "user" and inv.by_user_id != principal.user_id:
             raise HTTPException(404, "invitation not found")
         if inv.status != "pending":
             raise HTTPException(409, {
@@ -680,6 +709,11 @@ def broker_invitation_revoke(invitation_id: int,
         inv = s.get(BrokerInvitation, invitation_id)
         if not inv or inv.tenant_id != tid:
             raise HTTPException(404, "invitation not found")
+        # A carrier user chases or calls off only the invitations they sent;
+        # another carrier user's broker is not theirs. The carrier admin
+        # oversees every invitation the company has out.
+        if _carrier_seat(s, principal) == "user" and inv.by_user_id != principal.user_id:
+            raise HTTPException(404, "invitation not found")
         if inv.status != "pending":
             raise HTTPException(409, {
                 "message": f"That invitation was already {inv.status}, so "
@@ -710,9 +744,13 @@ def broker_detail(broker_party_id: int, principal: Principal = Depends(current_p
             .order_by(Program.name)
             .all()
         )
+        # The broker's ADMIN only. Its users (operators) belong to the broker
+        # alone — the carrier never sees them, here or anywhere else.
+        from auth_deps import db_role_values
         users = (
             s.query(AppUser)
-            .filter(AppUser.broker_party_id == broker_party_id)
+            .filter(AppUser.broker_party_id == broker_party_id,
+                    AppUser.role.in_(db_role_values("broker_admin")))
             .order_by(AppUser.full_name)
             .all()
         )
@@ -727,7 +765,7 @@ def broker_detail(broker_party_id: int, principal: Principal = Depends(current_p
             # the screen shows ten. See broker_contracts below, which filters
             # and pages them in SQL.
             #
-            # Their people, but never their password/reset columns.
+            # Their admin, but never their password/reset columns.
             "users": [
                 {"id": u.id, "full_name": u.full_name, "email": u.email,
                  "role": u.role, "status": u.status,
@@ -844,9 +882,29 @@ def contract_approval_history(contract_id: int,
             .order_by(ContractApproval.acted_at.asc())
             .all()
         )
+        from auth_deps import normalize_role
+        _company: dict[int, Optional[str]] = {}
+
+        def _acted_by(u):
+            if u is None:
+                return None
+            # The carrier deals with the broker COMPANY and never sees its
+            # broker users. A row written by one (possible before only the
+            # broker admin could answer a review) is shown to a carrier seat
+            # under the company's name, never the person's.
+            if (not principal.is_broker and u.broker_party_id is not None
+                    and normalize_role(u.role) == "operator"):
+                bid = u.broker_party_id
+                if bid not in _company:
+                    party = s.get(Party, bid)
+                    _company[bid] = party.legal_name if party else None
+                return {"id": None, "full_name": _company[bid] or "The broker",
+                        "email": None}
+            return {"id": u.id, "full_name": u.full_name, "email": u.email}
+
         return [
             {"action": a.action, "note": a.note, "acted_at": _iso_utc(a.acted_at),
-             "acted_by": {"id": u.id, "full_name": u.full_name, "email": u.email} if u else None,
+             "acted_by": _acted_by(u),
              # The counter-proposal, when this row is one. Carried here because
              # this endpoint IS the negotiation thread: a change request without
              # the terms it named is half the story.

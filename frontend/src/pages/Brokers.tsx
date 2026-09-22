@@ -40,6 +40,8 @@ import {
 import { fmtDate } from "../utils/date";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useServerList } from "../hooks/useServerList";
+import { seesAllBrokers, useCarrierSeat } from "../hooks/useCarrierSeat";
+import { getUser } from "../auth";
 
 /** How many programme chips a row shows before it says "+N more". Enough for
  *  the common case, few enough that one busy broker cannot make its row tall. */
@@ -56,13 +58,22 @@ export default function Brokers() {
   // Debounced because the search runs on the SERVER now — an undebounced box
   // would be one request per keystroke.
   const dq = useDebouncedValue(q, 300);
+  // A carrier user's list is the broker companies THEY invited; the carrier
+  // admin's is the whole company's (the server decides — `mine` below). An
+  // invitation is chased or called off only by the carrier user who sent it,
+  // or by the carrier admin, who oversees them all (the server refuses anyone
+  // else).
+  const seat = useCarrierSeat();
+  const me = getUser();
+  const mayChase = (byUserId?: number | null) =>
+    seesAllBrokers(seat) || (!!me?.id && byUserId === me.id);
 
   const {
     items: shown, total, page, pageCount, loading, setPage, extra,
     reload: load,
   } = useServerList<BrokerSummary, { stranded?: number }>(
     (pg, size) => getBrokersPaged({
-      q: dq.trim() || undefined, page: pg, page_size: size,
+      q: dq.trim() || undefined, page: pg, page_size: size, mine: true,
     }).catch(e => {
       setErr(e?.response?.data?.detail || "Could not load brokers");
       throw e;
@@ -97,7 +108,9 @@ export default function Brokers() {
     <>
       <PageHeader
         title="Party"
-        subtitle="The party organisations that produce into your programmes."
+        subtitle={seat === "user"
+          ? "The broker companies you invited, and how far each one reaches."
+          : "The party organisations that produce into your programmes."}
         action={
           /* One action, whether or not the broker already has a login. Which
              of the two it is depends on facts about somebody else's book, and
@@ -190,7 +203,6 @@ export default function Brokers() {
                     <th>Status</th>
                     <th>Programmes</th>
                     <th>Contracts</th>
-                    <th>Users</th>
                     <th />
                   </tr>
                 </thead>
@@ -223,6 +235,7 @@ export default function Brokers() {
                                   Invited {b.invitation.email}
                                   {b.invitation.invited_at
                                     && <> on {fmtDate(b.invitation.invited_at)}</>}
+                                  {mayChase(b.invitation.by_user_id) && <>
                                   {" · "}
                                   <button
                                     type="button"
@@ -239,6 +252,7 @@ export default function Brokers() {
                                   >
                                     Withdraw
                                   </button>
+                                  </>}
                                 </div>
                               ) : b.dba_name ? (
                                 <div className="truncate text-xs text-ink-muted">{b.dba_name}</div>
@@ -299,14 +313,6 @@ export default function Brokers() {
                           </span>
                         </td>
 
-                        <td>
-                          <span className={`inline-flex items-center gap-1.5 ${
-                            b.user_count === 0 ? "text-ink-soft" : "text-ink"}`}>
-                            <Users2 size={13} className="text-ink-soft" />
-                            <span className="font-medium tabular-nums">{b.user_count}</span>
-                          </span>
-                        </td>
-
                         <td className="w-10">
                           <ChevronRight
                             size={16}
@@ -319,7 +325,7 @@ export default function Brokers() {
 
                   {shown.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="py-8 text-center text-sm text-ink-muted">
+                      <td colSpan={5} className="py-8 text-center text-sm text-ink-muted">
                         No party matches “{q}”.
                       </td>
                     </tr>

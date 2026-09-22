@@ -1,21 +1,20 @@
 /**
- * Add someone — a CARRIER at this organisation, or a BROKER outside it.
+ * Add someone — a CARRIER USER at this organisation, or a BROKER outside it.
  *
- * Two different acts sharing one form, each reached from its OWN door: Users &
- * Roles opens it for a carrier colleague, the Party screen opens it with
- * ?for=broker for a broker. Neither door offers the other's act. Users &
- * Roles used to offer both, which put a second front door on brokers — a thing
- * the Party screen owns — and left people unsure which button was the right
- * one. What separates the two acts is who the person belongs to:
+ * Two different acts behind one door, because both answer "who else works on
+ * this". Which ones a person gets depends on their carrier seat
+ * (hooks/useCarrierSeat; the API enforces the same rule):
  *
- *   Carrier   a colleague HERE. They join this organisation and do the
- *             carrier's work — contracts, programmes, bordereaux — and they do
- *             not manage people. Only the carrier admin does that, and there
- *             is one of those per organisation (the owner pointer on `tenant`;
- *             see migration 18).
+ *   Carrier   a colleague HERE, added by the CARRIER ADMIN only. They join
+ *   user      this organisation and do the carrier's work — contracts,
+ *             programmes, bordereaux — and they bring brokers in too. They do
+ *             not add carrier users; only the carrier admin does that, and
+ *             there is one of those per organisation (the owner pointer on
+ *             `tenant`; see migration 18).
  *
- *   Broker    the first person at a BROKER, an outside company. They join the
- *             broker and no carrier at all, because the same broker produces
+ *   Broker    the BROKER ADMIN — the first person at a broker, an outside
+ *             company — invited by the carrier admin or any carrier user. They
+ *             join the broker and no carrier at all, because the same broker produces
  *             for several carriers and cannot be pinned to one. The broker
  *             organisation does not exist yet, so this creates it in the same
  *             step — there is no "pick an existing broker" because every
@@ -36,6 +35,7 @@ import { currentMga, getTenantBrand } from "../auth";
 import { api } from "../api/client";
 import { InviteSentModal } from "../components/InviteSentModal";
 import { inviteBroker } from "../api/hierarchy";
+import { addsCarrierUsers, invitesBrokers, useCarrierSeat } from "../hooks/useCarrierSeat";
 
 // The four kinds of organisation that can produce business. A broker is the
 // usual one; the others occupy the same slot on the same terms.
@@ -47,13 +47,22 @@ export default function AddUser() {
   const mga = currentMga();
   const brand = getTenantBrand();
   const nav = useNavigate();
-  // Which door opened the form decides the act outright. Party → "Invite a
-  // party" passes ?for=broker; Users & Roles passes nothing and means a carrier
-  // colleague. With exactly one act per door there is nothing left to choose
-  // on the form, so there is no toggle.
-  const [params] = useSearchParams();
-  const brokerOnly = params.get("for") === "broker";
-  const kind: "carrier" | "broker" = brokerOnly ? "broker" : "carrier";
+  // Opened from Brokers → "Invite a party" (and the other "invite a broker"
+  // links): that is about outside companies, so the form offers the broker only.
+  const brokerOnly = useSearchParams()[0].get("for") === "broker";
+
+  // Which of the two acts this person may do at all. Every carrier seat
+  // invites brokers; only the carrier admin (and Kavachio staff, or an
+  // organisation with no owner recorded) also adds carrier users, and so gets
+  // a choice.
+  const seat = useCarrierSeat();
+  const canCarrier = addsCarrierUsers(seat);
+  const canBroker = invitesBrokers(seat);
+  // Which of the two acts this is. Asked first when there is a choice, because
+  // it changes what the rest of the form even means.
+  const [picked, setKind] = useState<"carrier" | "broker">(brokerOnly ? "broker" : "carrier");
+  const kind: "carrier" | "broker" =
+    canCarrier && canBroker ? picked : canBroker ? "broker" : "carrier";
 
   const [full_name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -116,6 +125,11 @@ export default function AddUser() {
     } finally { setBusy(false); }
   }
 
+  if (seat === null) {
+    // The organisation (and so which seat this is) has not loaded yet.
+    return <div className="proto"><div className="view full"><div className="empty">Loading…</div></div></div>;
+  }
+
   return (
     <div className="proto">
       <div className="view full">
@@ -124,15 +138,15 @@ export default function AddUser() {
             <h2>{kind === "carrier" ? "Add a carrier user" : "Invite a broker"}</h2>
             <p>
               {kind === "carrier"
-                ? "A colleague at your organisation. They do the carrier's work "
-                  + "— contracts, programmes and bordereaux — but do not add or "
-                  + "remove people; only you do."
-                : "Name the broker and the person who will run it — both are "
-                  + "created together."}
+                ? "A colleague at your organisation. They do the same daily "
+                  + "work as you — contracts, programmes, files and inviting "
+                  + "broker companies — but only you add or remove carrier users."
+                : "Name the broker company and its broker admin — the person "
+                  + "who runs it. Both are created together."}
             </p>
           </div>
           <div className="actions">
-            {brokerOnly
+            {brokerOnly || kind === "broker"
               ? <button className="btn" onClick={() => nav("/brokers")}>← Brokers</button>
               : <button className="btn" onClick={() => nav("/users")}>← Users &amp; Roles</button>}
             <button className="btn pri" onClick={send} disabled={busy || !canSend}
@@ -149,6 +163,42 @@ export default function AddUser() {
             {err}
           </div>
         )}
+
+        {/* Asked first, because it changes what the rest of the form means:
+            a carrier joins the organisation you are already in, a broker
+            arrives with a company that has to be created around them. */}
+        <div className="card pad" style={{ marginBottom: 18 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Who are you adding?</h3>
+          {/* A choice only for someone who may do both. Everyone else has one
+              kind of person to add, so the card just says which. */}
+          {canCarrier && canBroker && !brokerOnly ? (
+            <div className="segpick" style={{ marginTop: 12 }}>
+              <button type="button" className={kind === "carrier" ? "on" : ""}
+                      onClick={() => setKind("carrier")} disabled={!!created}>
+                A carrier user — a colleague here
+              </button>
+              <button type="button" className={kind === "broker" ? "on" : ""}
+                      onClick={() => setKind("broker")} disabled={!!created}>
+                A broker — an outside company
+              </button>
+            </div>
+          ) : (
+            <div style={{ marginTop: 8, fontWeight: 600 }}>
+              {kind === "carrier" ? "A carrier user — a colleague here"
+                                  : "A broker — an outside company"}
+            </div>
+          )}
+          <div className="hint" style={{ marginTop: 10 }}>
+            {kind === "carrier"
+              ? "They join " + (brand?.legal_name || "your organisation")
+                + " and work on its contracts, programmes and bordereaux, and "
+                + "they invite your brokers. They do not add or remove carrier "
+                + "users — only you do."
+              : "You invite its broker admin — the person who runs the broker "
+                + "company. They add their own broker users. The company can "
+                + "work with other carriers too, so it does not belong to you."}
+          </div>
+        </div>
 
         <div className="grid g-2">
           {/* Person */}
@@ -185,27 +235,30 @@ export default function AddUser() {
               <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>What they can do</h3>
               <div className="kv">
                 <span className="k">
-                  <b style={{ color: "var(--p-ink)" }}>Contracts, programmes, bordereaux</b>
+                  <b style={{ color: "var(--p-ink)" }}>Do the daily work</b>
                   <div className="sub">
-                    The carrier's work. They can raise contracts, run files and
-                    see everything this organisation holds.
+                    Create contracts, send files and see everything your company has.
                   </div>
                 </span>
               </div>
               <div className="kv">
                 <span className="k">
-                  <b style={{ color: "var(--p-ink)" }}>Not people</b>
+                  <b style={{ color: "var(--p-ink)" }}>Invite broker companies</b>
                   <div className="sub">
-                    They cannot add or remove anyone. One person per
-                    organisation does that — the carrier admin — and that is
-                    you. If you are leaving, hand the role over from Users
-                    &amp; Roles first; it is what lets somebody remove you.
+                    They invite the broker companies you work with. Each company
+                    adds its own staff.
                   </div>
                 </span>
               </div>
+              <div className="kv">
+                <span className="k">
+                  <b style={{ color: "var(--p-ink)" }}>Can&rsquo;t add or remove team members</b>
+                  <div className="sub">Only you can do that.</div>
+                </span>
+              </div>
               <div className="note" style={{ marginBottom: 0 }}>
-                They get an email inviting them to set a password. Until they
-                accept, they show as <b>Invited</b> and cannot sign in.
+                We&rsquo;ll email them a link to set their password. They can sign
+                in once it&rsquo;s set.
               </div>
             </div>
           ) : (
@@ -226,8 +279,8 @@ export default function AddUser() {
 
 
             <div className="hint" style={{ marginBottom: 12 }}>
-              Operators are not here on purpose: they belong to the broker, and
-              the broker&rsquo;s own admin adds them.
+              Broker users are not here on purpose: they belong to the broker,
+              and the broker&rsquo;s own admin adds them.
             </div>
 
             <div className="note" style={{ marginBottom: 0 }}>
@@ -253,8 +306,8 @@ export default function AddUser() {
             : created.org}
           email={created.email}
           note={kind === "carrier"
-            ? "They can work on everything this organisation holds. Adding and "
-              + "removing people stays with you."
+            ? "They can work on everything this organisation holds and invite "
+              + "your brokers. Adding and removing carrier users stays with you."
             : "They appear on your Brokers list once they accept."}
           onDone={() => nav(kind === "carrier" ? "/users" : "/brokers")}
         />

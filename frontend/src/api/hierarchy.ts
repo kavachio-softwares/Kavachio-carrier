@@ -52,7 +52,10 @@ export type BrokerSummary = {
    *  same broker is `active` to one carrier and `invited` to another who is
    *  still waiting for an answer. */
   relationship?: "active" | "invited";
-  invitation?: { id: number; email: string; invited_at: string | null } | null;
+  /** by_user_id: the carrier user who sent it — the only one who may resend
+   *  or withdraw it. */
+  invitation?: { id: number; email: string; invited_at: string | null;
+                 by_user_id?: number | null } | null;
 };
 
 export const resendBrokerInvitation = (id: number) =>
@@ -113,7 +116,9 @@ export type ApprovalEvent = {
         | "review_skipped";
   note: string | null;
   acted_at: string | null;
-  acted_by: { id: number; full_name: string; email: string } | null;
+  /** A broker user's row is shown to the carrier as the broker company:
+   *  id and email are then null. */
+  acted_by: { id: number | null; full_name: string; email: string | null } | null;
   /** The terms named by a change request. Empty for every other action. */
   proposed_changes: Array<{
     field: string; current?: string | null;
@@ -137,6 +142,10 @@ export const getBrokers = () =>
  *  this page — the screen states it above the table as a fact about the book. */
 export const getBrokersPaged = (params: {
   q?: string; page: number; page_size: number;
+  /** The Party screen's view: a carrier user gets only the broker companies
+   *  they invited. No effect for the carrier admin, whose reach is the whole
+   *  company. The programme pickers (getBrokers) leave it off. */
+  mine?: boolean;
 }) =>
   api.get<{ items: BrokerSummary[]; total: number; stranded: number }>(
     "/brokers", { params }).then(r => r.data);

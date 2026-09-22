@@ -659,6 +659,25 @@ def test_a_second_file_for_a_period_is_a_corrected_version():
     assert svc._version_label(e) == "Corrected once"
 
 
+def test_a_regenerated_export_never_ticks_a_second_period():
+    # Re-generate renders the SAME export again. With no period in the file's
+    # name the pick falls back to the oldest open period — which, once the
+    # first recording has closed it, is the next one. The export must still
+    # count once.
+    import db, submission_calendar_service as svc
+    s = _mem_session()
+    p = _seed_monthly(s)
+    first = svc.mark_received(s, p.id, received_on=date(2026, 3, 9), export_id=5,
+                              source_filename="bordereau.xlsx")
+    assert first is not None
+    s.commit()
+    again = svc.mark_received(s, p.id, received_on=date(2026, 3, 9), export_id=5,
+                              source_filename="bordereau.xlsx")
+    assert again is None
+    assert s.query(db.SubmissionVersion).filter(
+        db.SubmissionVersion.received_export_id == 5).count() == 1
+
+
 def test_a_correction_never_repaints_a_missed_deadline():
     # The verdict belongs to the file that met or missed the date. A correction
     # sent three weeks later must not turn "late" into "on time".
@@ -904,7 +923,8 @@ def test_healing_is_a_no_op_once_done_and_when_there_are_no_brokers():
 
 def test_the_board_says_who_would_be_chased():
     # There is no contact record for a broker anywhere in the platform, so the
-    # only real answer is the broker's own user accounts — admin first.
+    # only real answer is the broker's own ADMIN accounts. Its users
+    # (operators) are the broker's alone and never shown to the carrier.
     import db, submission_calendar_service as svc
     s = _mem_session()
     p, brokers, _ = _seed_with_brokers(s, n=2)
@@ -916,9 +936,9 @@ def test_the_board_says_who_would_be_chased():
 
     board = svc.calendar_board(s, 1, month="2026-02", today=date(2026, 3, 1))
     by_broker = {r["broker_party_id"]: r for r in board["rows"]}
-    # The admin is offered first: chasing is a management conversation.
+    # The admin is offered; the operator is not the carrier's to see.
     assert [c["email"] for c in by_broker[brokers[0].id]["contacts"]] \
-        == ["boss@corvin.com", "ops@corvin.com"]
+        == ["boss@corvin.com"]
     # A broker with no account at all comes back empty, so the screen can say
     # "we do not know who to tell" rather than inventing somebody.
     assert by_broker[brokers[1].id]["contacts"] == []

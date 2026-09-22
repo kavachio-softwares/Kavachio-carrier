@@ -1,16 +1,13 @@
 import { useEffect, useState } from "react";
-import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
 import { useNavigate } from "react-router-dom";
 import {
   CheckCircle2, Sparkles, ArrowRight, Building2, Users2, Layers,
-  SlidersHorizontal,
 } from "lucide-react";
 import { api, getDeduped } from "../api/client";
 import { currentMga, getUser, setTenantBrand } from "../auth";
 import { fileToLogoDataUrl, initials } from "../branding";
 import Button from "../components/ui/Button";
 import { Field, Select, TextInput } from "../components/ui/Field";
-import { InfoTip } from "../components/InfoTip";
 import CountryOptions from "../components/CountryOptions";
 
 type Status = {
@@ -25,7 +22,6 @@ type Tenant = {
 const CURRENCIES = [
   "USD", "EUR", "GBP", "CAD", "AUD", "INR", "JPY", "CHF", "SGD", "AED",
 ];
-type Programme = { id: number; name: string; bdx_frequency?: string | null };
 
 const TENANT_TYPES = ["carrier"];
 // One list for the whole app — see constants/frequency.ts for why.
@@ -43,24 +39,16 @@ export default function Welcome() {
   // Step 1 — tenant ----------------------------------------------------------
   const [tenant, setTenant] = useState<Tenant | null>(null);
 
-  // Step 2 — programmes ------------------------------------------------------
-  // A programme is the carrier's own book. Brokers are a relationship rather
-  // than part of setting yourself up, so they are added later from the Brokers
-  // screen — where the link to a programme is made.
-  const [programmes, setProgrammes] = useState<Programme[]>([]);
-  const [newProgramme, setNewProgramme] = useState<{
-    name: string; bdx_frequency: string;
-  }>({ name: "", bdx_frequency: "monthly" });
-
+  // No programme step. Programmes have their own screen, and the carrier admin
+  // may set them up there or leave them to carrier users, so they do not hold
+  // the wizard open (the finish panel points to them instead).
   async function reload() {
-    const [s, t, pr] = await Promise.all([
+    const [s, t] = await Promise.all([
       api.get<Status>(`/onboarding/status`, { params: { mga } }),
       getDeduped<Tenant>(`/tenants/${mga}`),
-      api.get<Programme[]>(`/programs`, { params: { mga } }),
     ]);
     setStatus(s.data);
     setTenant({ ...t.data, tenant_type: t.data?.tenant_type || "carrier" });
-    setProgrammes(pr.data ?? []);
   }
   useEffect(() => { void reload(); }, [mga]);
 
@@ -68,17 +56,11 @@ export default function Welcome() {
     setTenant(prev => prev ? { ...prev, [k]: v } : { [k]: v } as Tenant);
   }
 
-  const tenantDone     = !!status?.tenant_ready;
-  // Tolerate a backend that predates `programs_ready` by falling back to the
-  // long-standing has_program key.
-  const programmesDone = !!(status?.programs_ready ?? status?.has_program);
-  const allDone        = tenantDone && programmesDone;
+  const tenantDone = !!status?.tenant_ready;
+  const allDone    = tenantDone;
 
-  // The "active" step is the first not-yet-done one. The user can always skip.
-  const activeStep = !status ? 1
-    : !tenantDone ? 1
-    : !programmesDone ? 2
-    : 3;
+  // The one step is always open. The user can always skip.
+  const activeStep = 1;
 
   // --- actions -------------------------------------------------------------
 
@@ -102,7 +84,7 @@ export default function Welcome() {
       // Push the new logo/name to the sidebar co-brand immediately.
       setTenantBrand({ mga, legal_name: tenant?.legal_name, logo: tenant?.logo ?? null });
       await reload();
-      setToast("Organization saved — moving to step 2.");
+      setToast("Organization saved.");
       setTimeout(() => setToast(null), 3000);
     } catch (e: any) {
       const detail = e?.response?.data?.detail;
@@ -110,27 +92,6 @@ export default function Welcome() {
         : detail?.message ?? e?.message ?? "Save failed.");
     } finally { setBusy(false); }
   }
-
-  async function addProgramme() {
-    if (!newProgramme.name.trim()) return;
-    setErr(null); setBusy(true);
-    try {
-      await api.post<Programme>(`/programs`,
-        {
-          name: newProgramme.name.trim(),
-          bdx_frequency: newProgramme.bdx_frequency,
-          status: "active",
-        },
-        { params: { mga } });
-      setNewProgramme({ name: "", bdx_frequency: "monthly" });
-      await reload();
-      setToast("Programme created.");
-      setTimeout(() => setToast(null), 3000);
-    } catch (e: any) {
-      setErr(e?.response?.data?.detail ?? "Could not create the programme.");
-    } finally { setBusy(false); }
-  }
-
 
   // --- render --------------------------------------------------------------
 
@@ -149,8 +110,8 @@ export default function Welcome() {
             Welcome, {user?.full_name?.split(" ")[0] ?? "there"} 👋
           </h1>
           <p className="text-ink-muted mt-2">
-            Two quick steps to set up your workspace. You can skip and do
-            these later from the sidebar.
+            One quick step to set up your workspace. You can skip it and do it
+            later from Company in the sidebar.
           </p>
         </header>
 
@@ -279,48 +240,6 @@ export default function Welcome() {
           )}
         </Step>
 
-        <Spacer />
-
-        {/* Step 2 — Programme. The carrier's book is divided into programmes,
-            and every broker and contract below hangs off one, so it comes
-            before the broker rather than after it. */}
-        <Step n={2} title="Programme" done={programmesDone}
-          locked={activeStep < 2}
-          hint="Create your first programme — the book a broker will produce into.">
-          {programmesDone ? (
-            <p className="text-sm text-emerald-700 flex items-center gap-2">
-              <CheckCircle2 size={16} />
-              {programmes.length} programme{programmes.length === 1 ? "" : "s"} created
-              {programmes.length ? ` — ${programmes.map(p => p.name).join(", ")}` : ""}.
-            </p>
-          ) : (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Programme name *">
-                  <TextInput value={newProgramme.name}
-                    onChange={e => setNewProgramme({ ...newProgramme, name: e.target.value })}
-                    placeholder="e.g. Coastal Property" />
-                </Field>
-                <Field label="Bordereau frequency">
-                  <Select value={newProgramme.bdx_frequency}
-                    onChange={e => setNewProgramme({ ...newProgramme, bdx_frequency: e.target.value })}>
-                    {PROGRAMME_FREQUENCIES.map(f =>
-                      <option key={f.value} value={f.value}>{f.label}</option>)}
-                  </Select>
-                </Field>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <Button onClick={addProgramme}
-                  disabled={busy || !newProgramme.name.trim()}>
-                  <Layers size={14} /> + Add Programme
-                </Button>
-                <InfoTip text="How often you expect a bordereau on this programme. You can change it later, and set exact due dates from the programme's calendar." />
-              </div>
-            </div>
-          )}
-        </Step>
-
 
         {/* Finished — what exists now, and what the carrier does next. This
             replaces the old jump straight into Bordereau Setup: that screen
@@ -330,10 +249,9 @@ export default function Welcome() {
             <Spacer />
             <FinishPanel
               carrier={tenant?.legal_name || mga}
-              programmes={programmes}
-              onBrokers={() => nav("/users/new")}
+              onProgramme={() => nav("/programs/new")}
+              onCarrierUsers={() => nav("/users/new")}
               onDashboard={() => nav("/home")}
-              onBordereau={() => nav("/direct/setup")}
             />
           </>
         )}
@@ -347,7 +265,7 @@ export default function Welcome() {
           </button>
           {/* Once everything is done the finish panel carries the primary
               action, so this duplicate CTA would only compete with it. */}
-          {!allDone && tenantDone && programmesDone && (
+          {!allDone && tenantDone && (
             <Button onClick={() => nav("/home")}>
               <Sparkles size={14} /> Go to Dashboard
             </Button>
@@ -358,41 +276,39 @@ export default function Welcome() {
   );
 }
 
-/** The end of onboarding: what the carrier has set up, then the one thing to
- *  do next. Adding brokers is that next thing rather than a step above,
- *  because a broker is a relationship with another firm — it exists when
- *  there is one, not because a wizard demanded a name. */
-function FinishPanel({ carrier, programmes, onBrokers, onDashboard, onBordereau }: {
+/** The end of onboarding: what the carrier has set up, then what to do next.
+ *  The carrier admin can do all of it themselves, or add carrier users to
+ *  share the work. A broker is a relationship with another firm — it exists
+ *  when there is one, not because a wizard demanded a name — so inviting one
+ *  is a next step, not a wizard step. */
+function FinishPanel({ carrier, onProgramme, onCarrierUsers, onDashboard }: {
   carrier: string;
-  programmes: Programme[];
-  onBrokers: () => void;
+  onProgramme: () => void;
+  onCarrierUsers: () => void;
   onDashboard: () => void;
-  onBordereau: () => void;
 }) {
   const rows: { label: string; value: string }[] = [
     { label: "Carrier", value: carrier },
-    {
-      label: programmes.length === 1 ? "Programme" : "Programmes",
-      value: programmes.map(p => p.name).join(", ") || "—",
-    },
   ];
 
+  // In plain words, for someone who has never seen the product: what they do
+  // next, alone or with the carrier users they add.
   const next: { title: string; body: string }[] = [
     {
-      title: "Add the brokers you work with",
-      body: "Putting a broker on a programme is what lets them produce into it. Do that from the Brokers screen, when the relationship is real.",
+      title: "Set up programmes and invite broker companies",
+      body: "You invite each company's broker admin, and they add their own staff.",
     },
     {
-      title: "Invite the broker's admin",
-      body: "They get their own login and can upload the contract for your programme.",
+      title: "Add carrier users, if you want help",
+      body: "Colleagues who can do the same daily work. Only you add or remove them.",
     },
     {
-      title: "Approve the contract when it arrives",
-      body: "A contract a broker uploads waits for you. Approving it is what makes it live.",
+      title: "Send contracts to the brokers",
+      body: "A contract starts once both sides have signed it.",
     },
     {
-      title: "Set up the bordereau mapping",
-      body: "Once a contract is live, map their columns to your output layout.",
+      title: "Files arrive from the brokers",
+      body: "Each file is checked against the rules in your Rule Library.",
     },
   ];
 
@@ -406,7 +322,7 @@ function FinishPanel({ carrier, programmes, onBrokers, onDashboard, onBordereau 
         <div>
           <h2 className="text-base font-semibold text-white">Your workspace is ready</h2>
           <p className="text-sm text-white/80 mt-0.5">
-            Your organization and your first programme are set up. Here is what you have.
+            Your organization is set up. Here is what happens next.
           </p>
         </div>
       </div>
@@ -444,16 +360,16 @@ function FinishPanel({ carrier, programmes, onBrokers, onDashboard, onBordereau 
         </div>
 
         <div className="flex flex-wrap items-center gap-4 pt-1">
-          <Button onClick={onBrokers}>
-            <Users2 size={14} /> Add your brokers <ArrowRight size={14} />
+          <Button onClick={onProgramme}>
+            <Layers size={14} /> Set up a programme <ArrowRight size={14} />
           </Button>
+          <button onClick={onCarrierUsers}
+            className="inline-flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink">
+            <Users2 size={13} /> Add carrier users
+          </button>
           <button onClick={onDashboard}
             className="inline-flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink">
             <Sparkles size={13} /> Go to Dashboard
-          </button>
-          <button onClick={onBordereau}
-            className="inline-flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink">
-            <SlidersHorizontal size={13} /> Set up bordereau mapping
           </button>
         </div>
       </div>

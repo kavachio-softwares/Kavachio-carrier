@@ -327,7 +327,7 @@ export default function BordereauSetupEdit() {
       // Activating never navigates the user away — it stays on this page with a
       // success message and reloads, so nothing can bounce them to onboarding.
       setMsg(activate
-        ? "Setup activated — Operator can now process bordereaux for this carrier + program. Any previous setup was superseded."
+        ? "Setup activated — bordereaux can now be processed for this carrier + program. Any previous setup was superseded."
         : "Saved.");
       await load();
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }

@@ -44,7 +44,7 @@ from fastapi import (
     APIRouter, Depends, Header, HTTPException, Query, Request, Response,
 )
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, func, or_, text
+from sqlalchemy import and_, desc, func, or_, text
 
 import esign_email
 import esign_otp
@@ -1125,6 +1125,12 @@ def signing_session(contract_id: int, request: Request,
     token is deliberately NOT put in the address bar by the page that receives
     it: it never needs to be, so it never becomes something to forward.
     """
+    # The broker company's signature is its admin's to give. A broker user
+    # (operator) opening the round would also re-point the broker's signer at
+    # themselves and retire the admin's emailed link, so they are refused
+    # before anything is looked at.
+    import contract_routes
+    contract_routes._assert_speaks_for_broker(p, "sign a contract")
     with SessionLocal() as s:
         c = _contract_for_signing(s, p, contract_id)
         key = _my_party_key(s, p)
@@ -1199,7 +1205,10 @@ def contract_round(contract_id: int, p: Principal = Depends(current_principal)):
         rec = _my_recipient(env, key, getattr(s.get(AppUser, p.user_id),
                                               "email", None))
         turn = _next_recipient(sorted(env.recipients, key=lambda r: r.order_no))
-        mine = bool(rec and turn and turn.id == rec.id
+        # A broker user never signs for the company — same rule as the
+        # signing-session door, so the button and the endpoint agree.
+        may_sign = not p.is_broker or contract_routes._speaks_for_broker(p)
+        mine = bool(may_sign and rec and turn and turn.id == rec.id
                     and env.status not in ("completed", "declined", "voided"))
         return {
             "envelope_id": env.id,
@@ -1211,7 +1220,9 @@ def contract_round(contract_id: int, p: Principal = Depends(current_principal)):
             "waiting_on": (turn.side if turn else None),
             "waiting_on_name": (turn.org or turn.name) if turn else None,
             "why": (None if mine else
-                    ("everybody has signed" if turn is None else
+                    ("only your broker admin can sign for your company"
+                     if not may_sign else
+                     "everybody has signed" if turn is None else
                      f"waiting on {turn.org or turn.name}")),
         }
 
@@ -1252,12 +1263,19 @@ def signer_lookup(contract_id: int,
                             note="That is not an email address yet.")
     with SessionLocal() as s:
         c = _contract_for_signing(s, p, contract_id)
+        # This carrier's people, and the broker's ADMINS — never the broker's
+        # own users (operators), who are not the carrier's to see. And no
+        # branch for a side the contract does not have: `== None` would render
+        # as IS NULL and match accounts all over the platform.
+        sides = [AppUser.tenant_id == c.tenant_id] if c.tenant_id is not None else []
+        if c.broker_party_id is not None:
+            sides.append(and_(AppUser.broker_party_id == c.broker_party_id,
+                              AppUser.role.in_(db_role_values("broker_admin"))))
         u = (s.query(AppUser)
              .filter(func.lower(AppUser.email) == want,
                      AppUser.status != "disabled",
-                     or_(AppUser.tenant_id == c.tenant_id,
-                         AppUser.broker_party_id == c.broker_party_id))
-             .order_by(AppUser.id).first())
+                     or_(*sides))
+             .order_by(AppUser.id).first()) if sides else None
         if not u:
             return SignerLookup(
                 email=email, known=False,

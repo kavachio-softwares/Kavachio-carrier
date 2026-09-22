@@ -1,19 +1,21 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
-import { clearAuth, currentMga, getUser, normalizeRole } from "../auth";
+import { clearAuth, currentMga, getUser, normalizeRole, setTenantBrand } from "../auth";
 import { fmtDateTime } from "../utils/date";
 import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { InviteSentModal } from "../components/InviteSentModal";
+import { addsCarrierUsers, invitesBrokers, useCarrierSeat } from "../hooks/useCarrierSeat";
 
 type U = {
   id: number; email: string; full_name: string;
   role: string; status: string; mga: string;
   last_login_at?: string | null;
-  /** Broker people appear here too now — this says which organisation. */
+  /** Broker ADMINS appear here too (never the brokers' own users) — this says
+   *  which organisation. */
   broker_party_id?: number | null;
   org_name?: string | null;
   org_kind?: "carrier" | "broker";
@@ -28,20 +30,21 @@ type U = {
 const ROLE_LABEL: Record<string, string> = {
   carrier_admin: "Carrier Admin",
   broker_admin: "Broker Admin",
-  operator: "Operator",
+  operator: "Broker User",
 };
 
 // What each seat can actually do — the reason anyone reads this table.
-// Only the carrier admin adds or removes people; a carrier does the work.
+// Both carrier seats do the work and invite brokers; only the carrier admin
+// adds and removes carrier users.
 const CARRIER_CAN_DO = {
-  admin: "Everything, plus adding and removing carriers and brokers",
-  member: "Contracts, programmes and bordereaux — not people",
+  admin: "Everything, plus adding and removing carrier users",
+  member: "Contracts, programmes, bordereaux and inviting brokers",
 };
 
 const ROLE_CAN_DO: Record<string, string> = {
   carrier_admin: "Everything you can, including approving contracts",
-  broker_admin: "Their contracts and file setups; adds their own staff",
-  operator: "Processing and exceptions only",
+  broker_admin: "Agrees and signs their contracts; adds their own broker users",
+  operator: "Sends files and sorts out their errors",
 };
 
 // Single source of truth for a user's displayed status bucket — used by both
@@ -104,13 +107,23 @@ export default function Users() {
   const adminCount = extra?.total_admins ?? 0;
   const ownerId = extra?.owner_user_id ?? null;
   const iAmOwner = !!me?.id && ownerId === me.id;
+  // What is yours to act on: carrier users are the carrier admin's alone; a
+  // broker admin is anyone's who has that broker on their list (the server
+  // sends a carrier user only the brokers they invited). Same rule on the server.
+  const seat = useCarrierSeat();
+
+  /** May act on this row — resend, reset, remove. Your own row always. */
+  function mayManage(u: U) {
+    if (u.id === me?.id) return true;
+    return u.org_kind === "broker" ? invitesBrokers(seat) : addsCarrierUsers(seat);
+  }
 
   function canRemove(u: U) {
     // Leaving is allowed — you do not need somebody else's permission to close
     // your own account. What is NOT allowed is walking out as the carrier
     // admin, because that leaves the organisation accountable to nobody.
     if (u.is_owner) return false;               // hand the role on first
-    if (normalizeRole(u.role) === "operator") return false;  // the broker's seat, not yours
+    if (!mayManage(u)) return false;            // the other seat's person
     if (normalizeRole(u.role) === "carrier_admin" && adminCount <= 1) return false; // can't remove last admin
     return true;
   }
@@ -119,13 +132,15 @@ export default function Users() {
    *  server enforces every one of these; this only explains it in place. */
   function whyNotRemovable(u: U): string {
     if (u.is_owner && u.id === me?.id)
-      return "You are the carrier admin. Make another carrier the carrier "
+      return "You are the carrier admin. Make a carrier user the carrier "
            + "admin first — then you can remove your own account.";
     if (u.is_owner)
-      return "This is the carrier admin. Transfer the role to another carrier "
+      return "This is the carrier admin. Transfer the role to a carrier user "
            + "first — then they can be removed.";
-    if (normalizeRole(u.role) === "operator")
-      return "Operators are removed by their own broker admin.";
+    if (!mayManage(u))
+      return u.org_kind === "broker"
+        ? "Broker admins are managed by the carrier people who invited them."
+        : "Only the carrier admin removes carrier users.";
     return "This is the only admin — add another before removing this one.";
   }
 
@@ -155,8 +170,11 @@ export default function Users() {
     if (!xferTarget) return;
     setXferBusy(true); setXferErr(null);
     try {
-      const { data } = await api.post<{ message?: string }>(
+      const { data } = await api.post<{ message?: string; owner_user_id?: number }>(
         `/tenants/${mga}/transfer-ownership`, { email: xferTarget.email });
+      // Your seat just changed with it — you are a carrier user now — so every
+      // screen reading useCarrierSeat has to see the new owner, not the cached one.
+      setTenantBrand({ mga, owner_user_id: data?.owner_user_id ?? xferTarget.id });
       setMsg({ kind: "ok",
                text: data?.message ?? `${xferTarget.email} now owns this organisation.` });
       setXferTarget(null);
@@ -244,12 +262,24 @@ export default function Users() {
         <div className="page-head">
           <div className="t">
             <h2>Users &amp; Roles</h2>
+            {/* Each carrier seat sees only the people it manages — the server
+                sends nothing else. */}
             <p>
-              Everyone who signs in on your side — your own team, and the admins at the brokers who send you files.
+              {seat === "admin" ? "Your team, and the admins of the broker companies you work with."
+               : seat === "user" ? "The broker companies you invited, shown by the person who runs each one."
+               : "Everyone who signs in on your side — your own team, and the admins at the brokers who send you files."}
             </p>
           </div>
+          {/* Every carrier seat brings in brokers; only the carrier admin also
+              adds carrier users. The server refuses anything else either way. */}
           <div className="actions">
-            <button className="btn pri" onClick={() => nav("/users/new")}>＋ Invite User</button>
+            {addsCarrierUsers(seat) && (
+              <button className="btn pri" onClick={() => nav("/users/new")}>＋ Add Carrier User</button>
+            )}
+            {invitesBrokers(seat) && (
+              <button className={`btn${addsCarrierUsers(seat) ? "" : " pri"}`}
+                      onClick={() => nav("/users/new?for=broker")}>＋ Invite a Broker</button>
+            )}
           </div>
         </div>
 
@@ -271,11 +301,15 @@ export default function Users() {
           <ListFilterBar
             search={{ value: q, onChange: setQ, placeholder: "Search name or email…" }}
             selects={[
-              {
+              // A carrier user's list holds one kind of person (broker admins),
+              // so a role filter would have nothing to choose between.
+              ...(seat === "user" ? [] : [{
                 key: "role", ariaLabel: "Filter by role", value: roleFilter, onChange: setRoleFilter,
+                // Operators never appear on this list, so they are not a filter.
                 options: [{ value: "", label: "All Roles" },
-                  ...Object.entries(ROLE_LABEL).map(([value, label]) => ({ value, label }))],
-              },
+                  ...Object.entries(ROLE_LABEL).filter(([value]) => value !== "operator")
+                    .map(([value, label]) => ({ value, label }))],
+              }]),
               {
                 key: "status", ariaLabel: "Filter by status", value: statusFilter, onChange: setStatusFilter,
                 options: [{ value: "", label: "All Statuses" },
@@ -334,7 +368,9 @@ export default function Users() {
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">
-                        {invited ? (
+                        {/* Resend / reset only on rows that are yours to act
+                            on — the server answers 403 on the others. */}
+                        {mayManage(u) && (invited ? (
                           <span className="linkish" onClick={() => resend(u)}>
                             Resend Invite
                           </span>
@@ -342,8 +378,8 @@ export default function Users() {
                           <span className="linkish" onClick={() => resetPassword(u)}>
                             Reset Password
                           </span>
-                        )}
-                        {" · "}
+                        ))}
+                        {mayManage(u) && " · "}
                         {/* When removal isn't allowed the element carries NO click
                             handler at all — it's inert, not a link that silently
                             does nothing — and aria-disabled drives the styling
@@ -390,7 +426,11 @@ export default function Users() {
                 })}
               </tbody>
             </table>
-            {totalItems === 0 && !filtersActive && <div className="empty">No users yet.</div>}
+            {totalItems === 0 && !filtersActive && (
+              <div className="empty">
+                {seat === "user" ? "You have not invited any broker companies yet." : "No users yet."}
+              </div>
+            )}
             {totalItems === 0 && filtersActive && <div className="empty">No users match the filters.</div>}
           </div>
           {totalItems > 0 && (
@@ -400,9 +440,9 @@ export default function Users() {
         </div>
 
         <div className="note" style={{ marginTop: 14, maxWidth: 560 }}>
-          Bringing a broker on board? Invite them from the <Link className="linkish" to="/brokers">Party</Link> screen —
-          the broker organisation is created with the invitation. Put them on a
-          programme from Programmes; until then they cannot produce.
+          Bringing a broker company on board? Invite it above. Put it on a
+          programme from Programmes — until then it cannot send you files.
+          Each broker company adds its own staff, so they do not appear here.
         </div>
       </div>
 
@@ -469,10 +509,9 @@ export default function Users() {
                   remove yourself yet — it would leave the organisation
                   accountable to nobody.
                   <div className="sub" style={{ marginTop: 10 }}>
-                    Make another <b>active</b> carrier the carrier admin using{" "}
-                    <b>Make carrier admin</b> on their row. You become an
-                    ordinary carrier, and can then remove your own account from
-                    here.
+                    Make an <b>active</b> carrier user the carrier admin using{" "}
+                    <b>Make carrier admin</b> on their row. You become a carrier
+                    user, and can then remove your own account from here.
                   </div>
                 </>
               ) : (
@@ -480,7 +519,7 @@ export default function Users() {
                   <b>{blocked.full_name || blocked.email}</b> is this
                   organisation&rsquo;s carrier admin, so they cannot be removed.
                   <div className="sub" style={{ marginTop: 10 }}>
-                    Only they can hand the role on. Once another carrier holds
+                    Only they can hand the role on. Once a carrier user holds
                     it, they can be removed like anyone else.
                   </div>
                 </>
@@ -507,10 +546,11 @@ export default function Users() {
               ({xferTarget.email}) the carrier admin of this organisation?
               <div className="sub" style={{ marginTop: 10 }}>
                 They become the one person accountable for it: the only one who
-                can add or remove carriers and brokers, and the only one who can
+                can add or remove carrier users, and the only one who can
                 transfer the role again. <b>You become a carrier user</b> — you keep
-                working on contracts, programmes and bordereaux, but no longer
-                manage people. If you are leaving, they remove you afterwards.
+                working on contracts, programmes and bordereaux and can invite
+                brokers, but no longer add or remove carrier users. If you are
+                leaving, they remove you afterwards.
               </div>
               {xferErr && (
                 <div style={{ marginTop: 10, color: "var(--p-crit)" }}>{xferErr}</div>

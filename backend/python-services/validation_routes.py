@@ -23,7 +23,7 @@ from sqlalchemy import text
 
 from db import SessionLocal
 from app_routes import resolve_tenant_id, assert_tenant_owns
-from auth_deps import current_principal, Principal
+from auth_deps import current_principal, Principal, resolve_broker_party_id
 
 log = logging.getLogger("bdx.validation")
 router = APIRouter()
@@ -1379,6 +1379,13 @@ def decide_exceptions(body: DecideRequest,
     tid_filter = None if principal.is_platform_admin else principal.tenant_id
     updated, skipped = 0, []
     with SessionLocal() as s:
+        # A BROKER seat has no tenant, so the tenant pin above is None for it —
+        # which used to mean "any tenant". Pin it to its own broker instead: an
+        # exception is theirs only if it came from a run made for their broker
+        # (output_exports.broker_party_id), whichever of their users ran it.
+        # -1 matches nothing, for a broker seat with no broker bound.
+        bid_filter = ((resolve_broker_party_id(s, principal) or -1)
+                      if principal.is_broker else None)
         for d in body.decisions:
             status = _DECISION_STATUS.get((d.kind or "").lower())
             if not status:
@@ -1395,6 +1402,15 @@ def decide_exceptions(body: DecideRequest,
                            modified_at         = now()
                      WHERE exception_id = :eid
                        AND (:tid IS NULL OR tenant_id = :tid)
+                       AND (CAST(:bid AS INTEGER) IS NULL
+                            OR upload_id IN (
+                                SELECT oe.source_upload_id FROM output_exports oe
+                                 WHERE oe.broker_party_id = :bid)
+                            OR validation_run_id IN (
+                                SELECT vr.run_id FROM validation_run vr
+                                  JOIN output_exports oe
+                                    ON oe.source_upload_id = vr.bdx_upload_id
+                                 WHERE oe.broker_party_id = :bid))
                     """
                 ),
                 {
@@ -1403,6 +1419,7 @@ def decide_exceptions(body: DecideRequest,
                     "user": body.user_id,
                     "eid": d.exception_id,
                     "tid": tid_filter,
+                    "bid": bid_filter,
                 },
             )
             if res.rowcount:
@@ -1411,8 +1428,8 @@ def decide_exceptions(body: DecideRequest,
                 skipped.append({"exception_id": d.exception_id, "reason": "not found"})
         s.commit()
     try:
-        from audit import log_activity, actor_email
-        log_activity(principal.tenant_id, actor_email(principal.user_id), "exception_decided",
+        from audit import log_activity, actor_for
+        log_activity(principal.tenant_id, actor_for(principal), "exception_decided",
                      target=f"exceptions:{updated}",
                      details={"updated": updated, "skipped": len(skipped),
                               "kinds": sorted({(d.kind or '').lower() for d in body.decisions})})
@@ -1564,8 +1581,8 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
         if landing is not None:
             _res = _decide_direct_lane(s, int(landing), body)
             try:
-                from audit import log_activity, actor_email
-                log_activity(exp["tenant_id"], actor_email(principal.user_id), "exception_decided",
+                from audit import log_activity, actor_for
+                log_activity(exp["tenant_id"], actor_for(principal), "exception_decided",
                              target=f"export:{export_id}",
                              details={"updated": _res.get("updated"), "skipped": len(_res.get("skipped") or []), "lane": "direct"})
             except Exception:
@@ -1645,8 +1662,8 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
             contractId=None, edits=edits, apply=True), principal)
 
     try:
-        from audit import log_activity, actor_email
-        log_activity(exp["tenant_id"], actor_email(principal.user_id), "exception_decided",
+        from audit import log_activity, actor_for
+        log_activity(exp["tenant_id"], actor_for(principal), "exception_decided",
                      target=f"export:{export_id}",
                      details={"updated": updated, "skipped": len(skipped), "lane": "canonical"})
     except Exception:  # noqa: BLE001
