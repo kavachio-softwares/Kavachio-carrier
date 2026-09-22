@@ -17,6 +17,7 @@
  * green = approved, blue = fixed, amber = dismissed, red = still pending.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import DecidedBy from "./DecidedBy";
 import { Check, Wrench, Hand, X } from "lucide-react";
 import { streamNdjson } from "../api/client";
 import { useRowWindow, WINDOW_MIN_ROWS } from "../hooks/useRowWindow";
@@ -325,6 +326,7 @@ function ExcDetail({ e, saving, onDecide }: {
           </span>
         )}
       </div>
+      {saved && <DecidedBy by={e.decided_by} at={e.decided_at} />}
 
       {/* What the rule requires, in plain English. `compact` drops the
           collapsible and the how-to-fix — the popover is only 360px wide and

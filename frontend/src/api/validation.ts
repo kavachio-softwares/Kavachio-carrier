@@ -128,6 +128,10 @@ export type StoredException = {
   status: string | null;
   /** Reviewer's saved reason/note (set by /api/validate/exceptions/decide). */
   resolution_note?: string | null;
+  /** Who made the saved decision, in the words this viewer may see — a
+   *  broker user reads as their broker company to the carrier. */
+  decided_by?: string | null;
+  decided_at?: string | null;
   /** Backend-derived recommended value (expected_value → rule_spec → null). */
   recommendation?: string | null;
   /** Structured allowed values for an enum rule — each is one choice. Preferred
@@ -244,6 +248,8 @@ export type OutputException = {
   /** Present once a decision has been saved for this output exception. */
   exception_id?: number | null; status?: string | null;
   resolution_note?: string | null;
+  decided_by?: string | null;
+  decided_at?: string | null;
   /** Plain-English explanation of the rule (backend-derived, additive). */
   explanation?: RuleExplanation | null;
   /** See StoredException.check_kind / root_cause. */
@@ -277,6 +283,8 @@ export function outputExcToStored(x: OutputException, i: number): StoredExceptio
     actual_value: x.actual_value ?? null,
     status: x.status ?? "open",
     resolution_note: x.resolution_note ?? null,
+    decided_by: x.decided_by ?? null,
+    decided_at: x.decided_at ?? null,
     created_at: null,
     policy_number: x.policy_number ?? null,
     external_policy_number: null,

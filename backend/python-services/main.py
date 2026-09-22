@@ -2784,18 +2784,35 @@ def _field_of(e: dict):
     return c if c is not None else e.get("field")
 
 
-def _attach_direct_lane_decisions(excs: list, landing_id: int) -> list:
+def _decider_labels(viewer, user_ids) -> dict:
+    """{user_id: the words THIS viewer may see for who decided} — see
+    decision_log.Labeller: a broker user reads as their company to the carrier.
+    Empty without a viewer, and never allowed to break the exception list."""
+    if viewer is None:
+        return {}
+    try:
+        import decision_log
+        with SessionLocal() as s:
+            lab = decision_log.Labeller(s, viewer)
+            return {u: lab.label(u) for u in {x for x in user_ids if x is not None}}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _attach_direct_lane_decisions(excs: list, landing_id: int, viewer=None) -> list:
     """Attach decisions for a DIRECT-LANE export from landing_correction, keyed by
     (output_sheet, output_row, output_field) — no canonical policy involved."""
     try:
         with SessionLocal() as s:
             rows = s.execute(
                 text("SELECT output_sheet, output_row, output_field, kind, reason, "
-                     "new_value FROM landing_correction WHERE landing_id = :l"),
+                     "new_value, decided_by, decided_at FROM landing_correction "
+                     "WHERE landing_id = :l"),
                 {"l": landing_id},
             ).mappings().all()
     except Exception:
         return excs
+    labels = _decider_labels(viewer, [x["decided_by"] for x in rows])
     by_key = {(x["output_sheet"], x["output_row"], x["output_field"]): x for x in rows}
     if not by_key:
         return excs
@@ -2816,11 +2833,13 @@ def _attach_direct_lane_decisions(excs: list, landing_id: int) -> list:
             e = dict(e)
             e["status"] = _KIND_STATUS.get(hit["kind"], "resolved")
             e["resolution_note"] = hit["reason"]
+            e["decided_by"] = labels.get(hit["decided_by"])
+            e["decided_at"] = _iso_utc(hit["decided_at"])
         out.append(e)
     return out
 
 
-def _attach_decisions(excs: list, r: OutputExport) -> list:
+def _attach_decisions(excs: list, r: OutputExport, viewer=None) -> list:
     """Attach any saved decision (status + resolution_note) to stored output-stage
     exceptions, so the review screen shows the reviewer's Approve/Fix/Dismiss/Reject
     state across refreshes.
@@ -2840,7 +2859,7 @@ def _attach_decisions(excs: list, r: OutputExport) -> list:
     except Exception:
         landing_id = None
     if landing_id is not None:
-        return _attach_direct_lane_decisions(excs, int(landing_id))
+        return _attach_direct_lane_decisions(excs, int(landing_id), viewer)
 
     pns = [e["policy_number"] for e in excs
            if isinstance(e, dict) and e.get("policy_number")]
@@ -2856,7 +2875,8 @@ def _attach_decisions(excs: list, r: OutputExport) -> list:
                 return excs
             drows = cs.execute(
                 text("SELECT exception_id, rule_id, source_entity_id, field_path, "
-                     "status, resolution_note FROM validation_exception "
+                     "status, resolution_note, resolved_by_user_id, resolved_at "
+                     "FROM validation_exception "
                      "WHERE source_entity_id = ANY(:pids) ORDER BY exception_id"),
                 {"pids": pids},
             ).mappings().all()
@@ -2864,6 +2884,7 @@ def _attach_decisions(excs: list, r: OutputExport) -> list:
         return excs
     by_key = {(x["rule_id"], x["source_entity_id"], x["field_path"]): x
               for x in drows}
+    labels = _decider_labels(viewer, [x["resolved_by_user_id"] for x in drows])
     out = []
     for e in excs:
         if not isinstance(e, dict):
@@ -2877,12 +2898,14 @@ def _attach_decisions(excs: list, r: OutputExport) -> list:
             e["exception_id"] = row["exception_id"]
             e["status"] = row["status"]
             e["resolution_note"] = row["resolution_note"]
+            e["decided_by"] = labels.get(row["resolved_by_user_id"])
+            e["decided_at"] = _iso_utc(row["resolved_at"])
         out.append(e)
     return out
 
 
 def _export_to_dict(r: OutputExport, with_exceptions: bool = False,
-                    mga: Optional[str] = None) -> dict:
+                    mga: Optional[str] = None, viewer=None) -> dict:
     d = {
         "id": r.id, "mga": mga, "tenant_id": r.tenant_id, "template_id": r.template_id,
         "template_name": r.template_name, "filename": r.filename,
@@ -2910,7 +2933,7 @@ def _export_to_dict(r: OutputExport, with_exceptions: bool = False,
     }
     if with_exceptions:
         excs = _attach_recommendations(r.exceptions or [])
-        d["exceptions"] = _attach_decisions(excs, r)
+        d["exceptions"] = _attach_decisions(excs, r, viewer)
     return d
 
 
@@ -3749,7 +3772,8 @@ def export_download_get(export_id: int,
         # Not assert_tenant_owns: a BROKER seat has no tenant, so that guard
         # 404s them out of the exceptions for a run they made themselves.
         assert_can_read_export(s, principal, r)
-        return _export_to_dict(r, with_exceptions=True, mga=_tenant_name(s, r.tenant_id))
+        return _export_to_dict(r, with_exceptions=True, mga=_tenant_name(s, r.tenant_id),
+                               viewer=principal)
 
 
 @app.get("/export/downloads/{export_id}/file")

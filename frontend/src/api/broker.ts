@@ -156,9 +156,30 @@ export const removeBrokerUser = (userId: number) =>
 export type OperatorHome = {
   broker: { id: number; name: string };
   carriers: { id: number; name: string }[];
-  counts: { programmes: number; setups: number; runs: number; exceptions: number };
+  counts: {
+    programmes: number; setups: number; runs: number; exceptions: number;
+    /** Runs that have those exceptions. */
+    exception_runs: number;
+  };
+  /** Newest first: the broker's own runs AND the ones the carrier ran for it —
+   *  the same list for every one of the broker's users. */
+  recent_runs: OperatorRun[];
   /** Which step is missing, so the screen can say whose job the next one is. */
   blocked_on: "no-programme" | "no-setup" | null;
+};
+
+export type OperatorRun = {
+  export_id: number;
+  filename: string;
+  programme: string | null;
+  contract: string | null;
+  rows: number | null;
+  exception_count: number;
+  status: string | null;
+  /** "broker" — sent through the broker's own lane; "carrier" — the carrier
+   *  ran it for this broker. */
+  sent_by: "broker" | "carrier";
+  created_at: string | null;
 };
 
 export const getOperatorHome = () =>

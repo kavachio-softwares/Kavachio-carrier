@@ -734,15 +734,51 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
                 {"pids": prog_ids}).scalar() or 0
 
         # Runs made FOR THIS BROKER — every one its team sent, whichever of
-        # them sent it, so all of the broker's users see the same number. Not
-        # every upload on the programme: programmes are shared, and counting
-        # by programme alone showed other brokers' (and the carrier's) files.
-        runs, exceptions = 0, 0
+        # them sent it, and every one the CARRIER ran for it (a carrier's
+        # Process Bordereau with this broker picked stamps the same column).
+        # All of the broker's users see the same runs and the same exceptions.
+        # Not every upload on the programme: programmes are shared, and
+        # counting by programme alone showed other brokers' files.
+        runs, exceptions, exception_runs = 0, 0, 0
+        recent: list[dict] = []
         if prog_ids:
-            runs = s.execute(_text(
-                "SELECT count(*) FROM output_exports oe "
-                "WHERE oe.broker_party_id = :bid AND oe.program_id = ANY(:pids)"),
-                {"bid": bid, "pids": prog_ids}).scalar() or 0
+            from db import OutputExport
+            import validation_outcome as vo
+            mine = s.query(OutputExport).filter(
+                OutputExport.broker_party_id == bid,
+                OutputExport.program_id.in_(prog_ids))
+            runs = mine.count()
+            # Counted the way the carrier's own "Exceptions to review" tile
+            # counts them, so both sides read the same number for a run.
+            exceptions, exception_runs = s.query(
+                func.coalesce(func.sum(OutputExport.exception_count), 0),
+                func.count(OutputExport.id),
+            ).filter(OutputExport.broker_party_id == bid,
+                     OutputExport.program_id.in_(prog_ids),
+                     OutputExport.status == vo.HAS_EXCEPTIONS).one()
+            latest = mine.order_by(OutputExport.id.desc()).limit(10).all()
+            prog_names = {pid: name for pid, name in s.query(Program.id, Program.name)
+                          .filter(Program.id.in_({e.program_id for e in latest})).all()}
+            cids = {e.contract_id for e in latest if e.contract_id}
+            contract_names = ({cid: (name or fname) for cid, name, fname in
+                               s.query(Contract.id, Contract.name, Contract.filename)
+                               .filter(Contract.id.in_(cids)).all()} if cids else {})
+            from app_routes import _iso_utc
+            recent = [{
+                "export_id": e.id,
+                "filename": e.filename,
+                "programme": prog_names.get(e.program_id),
+                "contract": contract_names.get(e.contract_id),
+                "rows": e.policy_count,
+                "exception_count": e.exception_count or 0,
+                "status": e.status,
+                # Who put it through: a run through the broker's own lane is
+                # recorded as the broker company; anything else the carrier
+                # ran for them.
+                "sent_by": ("broker" if (e.generated_by or "").startswith("broker:")
+                            else "carrier"),
+                "created_at": _iso_utc(e.created_at),
+            } for e in latest]
 
         return {
             "broker": {"id": bid, "name": me.legal_name if me else "—"},
@@ -752,7 +788,11 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
                 "setups": int(setups),
                 "runs": int(runs),
                 "exceptions": int(exceptions),
+                "exception_runs": int(exception_runs),
             },
+            # Newest first — the broker's own runs and the ones the carrier
+            # ran for it, the same list for every one of the broker's users.
+            "recent_runs": recent,
             # Why the screen is empty, said in the API rather than guessed at
             # in the UI: the operator cannot run anything until a setup exists,
             # and only their broker admin can build one.

@@ -13,6 +13,7 @@
  * live in local state, and "Save decisions" is a stub (logs the payload).
  */
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import DecidedBy from "./DecidedBy";
 import { Link } from "react-router-dom";
 import { Check, Wrench, Hand, Ban, ChevronDown, ChevronRight, ArrowLeft, Table2 } from "lucide-react";
 import { api } from "../api/client";
@@ -1264,6 +1265,7 @@ export default function ExceptionDecisionTable({
                   <td className="px-3 py-2 text-ink-muted max-w-[260px]">{e.error_message ?? "—"}</td>
                   <td className="px-3 py-2">
                     <DecisionCell e={e} decision={d} onChange={nd => setDecision(e.exception_id, nd)} />
+                    <DecidedBy by={e.decided_by} at={e.decided_at} />
                   </td>
                   <td className="px-3 py-2"><span className={`font-mono ${out.tone}`}>{out.text}</span></td>
                 </tr>

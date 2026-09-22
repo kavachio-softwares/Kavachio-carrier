@@ -12,10 +12,16 @@
  * looks like a fault.
  */
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { getOperatorHome, type OperatorHome as Home } from "../api/broker";
+import { Link, useNavigate } from "react-router-dom";
+import { getOperatorHome, type OperatorHome as Home, type OperatorRun } from "../api/broker";
+import { fmtDateTime } from "../utils/date";
+
+/** The exception screen a run opens on — the same one Process Bordereau uses. */
+const reviewPath = (r: OperatorRun) =>
+  `/uploads/${r.export_id}/exceptions?download=${r.export_id}&from=broker`;
 
 export default function OperatorHome() {
+  const nav = useNavigate();
   const [d, setD] = useState<Home | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -48,6 +54,9 @@ export default function OperatorHome() {
 
   const c = d.counts;
   const carrierNames = d.carriers.map(x => x.name).join(", ") || "—";
+  // The newest run that still has something to look at — where the
+  // exceptions tile takes you.
+  const firstToReview = d.recent_runs.find(r => r.exception_count > 0);
 
   return (
     <div className="proto">
@@ -58,12 +67,20 @@ export default function OperatorHome() {
           <div className={`tile${c.exceptions > 0 ? " alert" : ""}`}>
             <div className="k">Exceptions to review</div>
             <div className="v">{c.exceptions}</div>
-            <div className="foot">rows that failed a check</div>
+            <div className="foot">
+              {c.exceptions > 0
+                ? <>
+                    in {c.exception_runs} {c.exception_runs === 1 ? "run" : "runs"}
+                    {firstToReview && <>{" · "}
+                      <Link className="linkish" to={reviewPath(firstToReview)}>Review →</Link></>}
+                  </>
+                : "rows that failed a check"}
+            </div>
           </div>
           <div className="tile">
             <div className="k">Runs</div>
             <div className="v">{c.runs}</div>
-            <div className="foot">files you have put through</div>
+            <div className="foot">files run for your broker, by your team or the carrier</div>
           </div>
           <div className="tile">
             <div className="k">Setups you can use</div>
@@ -105,20 +122,61 @@ export default function OperatorHome() {
           </div>
         )}
 
-        {d.blocked_on === null && (
+        {/* Shown whenever there are runs — a run the carrier made for this
+            broker is there to be reviewed even before a setup of the
+            broker's own is in place. */}
+        {(d.blocked_on === null || d.recent_runs.length > 0) && (
           <div className="card">
             <div className="card-h">
               <h3>Recent runs</h3>
               <span className="muted" style={{ fontSize: 12 }}>
-                the spreadsheets you ran most recently
+                files run for your broker, by your team or the carrier
               </span>
             </div>
-            <div className="empty">
-              No runs yet — process a bordereau and it will appear here.
-              <div style={{ marginTop: 12 }}>
-                <Link className="btn pri" to="/broker/bordereau">Process a bordereau</Link>
+            {d.recent_runs.length === 0 ? (
+              <div className="empty">
+                No runs yet — process a bordereau and it will appear here.
+                <div style={{ marginTop: 12 }}>
+                  <Link className="btn pri" to="/broker/bordereau">Process a bordereau</Link>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="tbl-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>File</th><th>Programme</th><th>Contract</th>
+                      <th>Sent by</th><th>Rows</th><th>Result</th><th>When</th><th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.recent_runs.map(r => (
+                      <tr key={r.export_id}>
+                        <td><b>{r.filename}</b></td>
+                        <td>{r.programme ?? "—"}</td>
+                        <td className="muted">{r.contract ?? "—"}</td>
+                        <td>{r.sent_by === "carrier" ? "The carrier" : "Your team"}</td>
+                        <td>{r.rows ?? "—"}</td>
+                        <td>
+                          {r.exception_count > 0
+                            ? <span className="badge b-warn"><span className="d" />
+                                {r.exception_count} {r.exception_count === 1 ? "exception" : "exceptions"}</span>
+                            : r.status === "not_validated"
+                              ? <span className="badge"><span className="d" />Not checked</span>
+                              : <span className="badge b-ok"><span className="d" />Clean</span>}
+                        </td>
+                        <td className="muted">{fmtDateTime(r.created_at)}</td>
+                        <td>
+                          <button className="btn sm" onClick={() => nav(reviewPath(r))}>
+                            {r.exception_count > 0 ? "Review →" : "Open →"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </div>

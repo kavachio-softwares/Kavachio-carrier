@@ -1386,6 +1386,10 @@ def decide_exceptions(body: DecideRequest,
         # -1 matches nothing, for a broker seat with no broker bound.
         bid_filter = ((resolve_broker_party_id(s, principal) or -1)
                       if principal.is_broker else None)
+        # WHO decided comes from the login, never from body.user_id — a value
+        # the browser sends is a claim, and the audit trail is not a claim.
+        import decision_log
+        who = decision_log.decider(s, principal)
         for d in body.decisions:
             status = _DECISION_STATUS.get((d.kind or "").lower())
             if not status:
@@ -1416,7 +1420,7 @@ def decide_exceptions(body: DecideRequest,
                 {
                     "status": status,
                     "note": _decision_note(d.kind, d.value, d.reason),
-                    "user": body.user_id,
+                    "user": principal.user_id,
                     "eid": d.exception_id,
                     "tid": tid_filter,
                     "bid": bid_filter,
@@ -1424,6 +1428,11 @@ def decide_exceptions(body: DecideRequest,
             )
             if res.rowcount:
                 updated += res.rowcount
+                decision_log.record(
+                    s, who, lane="upload", kind=d.kind,
+                    tenant_id=principal.tenant_id, exception_id=d.exception_id,
+                    broker_party_id=bid_filter if bid_filter != -1 else None,
+                    new_value=d.value, reason=d.reason)
             else:
                 skipped.append({"exception_id": d.exception_id, "reason": "not found"})
         s.commit()
@@ -1464,7 +1473,8 @@ class ExportDecideRequest(BaseModel):
     apply: bool = True
 
 
-def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest) -> dict:
+def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest,
+                        principal: Principal, exp=None) -> dict:
     """Persist decisions for a DIRECT-LANE export (output projected from
     landing_record.data, not canonical). Each decision is upserted into
     landing_correction keyed by (landing_id, sheet, row, field); Fix/Approve with
@@ -1492,7 +1502,11 @@ def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest) -> dict:
     column_mapping = _as_dict(fmt and fmt["column_mapping"])
     landing_data = _as_dict(rec["data"])
     tenant_id = rec["tenant_id"]
-    decided_by = str(body.user_id) if body.user_id is not None else None
+    # From the login, never body.user_id (see decide_exceptions).
+    import decision_log
+    who = decision_log.decider(s, principal)
+    decided_by = str(principal.user_id)
+    exp = exp or {}
 
     updated, skipped = 0, []
     for d in body.decisions:
@@ -1542,6 +1556,13 @@ def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest) -> dict:
              "reason": note, "ish": in_sheet, "iidx": in_idx, "scol": source_col,
              "old": old_val, "new": new_val, "by": decided_by},
         )
+        decision_log.record(
+            s, who, lane="direct", kind=kind, tenant_id=exp.get("tenant_id") or tenant_id,
+            export_id=exp.get("id"), landing_id=landing_id,
+            program_id=exp.get("program_id"), broker_party_id=exp.get("broker_party_id"),
+            rule_id=d.rule_id, policy_number=d.policy_number, sheet=d.sheet,
+            row=d.row, field=d.field, old_value=old_val,
+            new_value=new_val if new_val is not None else d.value, reason=d.reason)
         updated += 1
     s.commit()
     return {"ok": True, "updated": updated, "skipped": skipped,
@@ -1579,7 +1600,7 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
                  "ORDER BY id DESC LIMIT 1"), {"id": export_id},
         ).scalar()
         if landing is not None:
-            _res = _decide_direct_lane(s, int(landing), body)
+            _res = _decide_direct_lane(s, int(landing), body, principal, exp)
             try:
                 from audit import log_activity, actor_for
                 log_activity(exp["tenant_id"], actor_for(principal), "exception_decided",
@@ -1597,6 +1618,8 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
             s, upload_id=upload_id, policy_ids=exp["policy_ids"],
             policy_numbers=[d.policy_number for d in body.decisions])
 
+        import decision_log
+        who = decision_log.decider(s, principal)
         updated, skipped, edits = 0, [], []
         for d in body.decisions:
             status = _DECISION_STATUS.get((d.kind or "").lower())
@@ -1633,7 +1656,7 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
                          " :note, :u, now(), now(), now()) RETURNING exception_id"),
                     {"t": row_tenant, "r": d.rule_id, "p": pid, "f": d.field,
                      "av": d.actual_value, "st": status, "note": note,
-                     "u": body.user_id},
+                     "u": principal.user_id},
                 ).scalar()
             else:
                 s.execute(
@@ -1641,8 +1664,14 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
                          "resolution_note = :note, resolved_by_user_id = :u, "
                          "resolved_at = now(), modified_at = now() "
                          "WHERE exception_id = :e"),
-                    {"st": status, "note": note, "u": body.user_id, "e": eid},
+                    {"st": status, "note": note, "u": principal.user_id, "e": eid},
                 )
+            decision_log.record(
+                s, who, lane="canonical", kind=d.kind, tenant_id=exp["tenant_id"],
+                export_id=exp["id"], exception_id=eid, program_id=exp["program_id"],
+                broker_party_id=exp["broker_party_id"], rule_id=d.rule_id,
+                policy_number=d.policy_number, field=d.field,
+                old_value=d.actual_value, new_value=d.value, reason=d.reason)
             updated += 1
             # Fix/Approve with a concrete value → queue a canonical write-back.
             if (d.kind or "").lower() in ("fix", "approve") \

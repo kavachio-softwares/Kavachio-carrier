@@ -1481,6 +1481,44 @@ class LandingCorrection(Base):
     )
 
 
+class ExceptionDecisionLog(Base):
+    """Every decision anyone made on an exception, in order — APPEND-ONLY.
+
+    landing_correction keeps only the LATEST decision per cell (it is the
+    override the renderer applies), and validation_exception only the latest
+    resolution. Neither can answer "who decided this, and who decided before
+    them". This can: one row per decision as it was saved, never updated or
+    deleted by the app.
+
+    The decider is taken from the LOGIN (the request's principal), never from
+    anything the browser sends. `decided_by_broker_party_id` is the decider's
+    own broker when a broker seat decided — which broker user fixed a row on a
+    run the carrier made for their broker is exactly what this records.
+    """
+    __tablename__ = "exception_decision_log"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, index=True, nullable=True)      # the run's carrier
+    export_id = Column(Integer, index=True, nullable=True)      # output_exports.id
+    landing_id = Column(Integer, index=True, nullable=True)     # direct lane
+    exception_id = Column(Integer, nullable=True)               # canonical lane
+    program_id = Column(Integer, nullable=True)                 # the run's scope
+    broker_party_id = Column(Integer, index=True, nullable=True)
+    lane = Column(String, nullable=False)                       # direct | canonical | upload
+    decided_by_user_id = Column(Integer, index=True, nullable=True)
+    decided_by_role = Column(String, nullable=True)
+    decided_by_broker_party_id = Column(Integer, nullable=True)
+    kind = Column(String, nullable=False)                       # approve | fix | dismiss | reject
+    rule_id = Column(Integer, nullable=True)
+    policy_number = Column(String, nullable=True)
+    sheet = Column(String, nullable=True)
+    row = Column(Integer, nullable=True)
+    field = Column(String, nullable=True)
+    old_value = Column(Text, nullable=True)
+    new_value = Column(Text, nullable=True)
+    reason = Column(Text, nullable=True)
+    decided_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class AdminMappingTask(Base):
     """A queued, one-time request for an admin to map a brand-new input format
     to the 850-field data model. Raised off the delivery critical path; the
