@@ -5442,7 +5442,13 @@ def _platform_open_exceptions(s, since: datetime, carrier: Optional[int] = None,
 
     A CURRENT file is the export a landing still points at (Process Bordereau —
     a re-run moves the pointer to the new export), or the newest export of an
-    upload (the canonical lane). Superseded runs are history, not work."""
+    upload (the canonical lane). Superseded runs are history, not work.
+
+    The period (`since`) decides WHICH files: open exceptions are counted on
+    current files run in the period, so every card under the dashboard's period
+    filter answers for the same files. "Put right" is activity: decisions made
+    in the period, on any current file — a file run last month and fixed
+    yesterday was put right yesterday."""
     from main import _attach_decisions
     from db import LandingRecord, exception_severity_counts
 
@@ -5471,9 +5477,11 @@ def _platform_open_exceptions(s, since: datetime, carrier: Optional[int] = None,
         r = s.get(OutputExport, eid)
         if r is None:
             continue
-        carriers_seen.add(r.tenant_id)
-        if r.broker_party_id:
-            brokers_seen.add(r.broker_party_id)
+        in_period = r.created_at is not None and _naive(r.created_at) >= since
+        if in_period:
+            carriers_seen.add(r.tenant_id)
+            if r.broker_party_id:
+                brokers_seen.add(r.broker_party_id)
         excs = [e for e in _attach_decisions(r.exceptions or [], r)
                 if isinstance(e, dict)
                 and e.get("error_class") != "not_checked"
@@ -5482,6 +5490,8 @@ def _platform_open_exceptions(s, since: datetime, carrier: Optional[int] = None,
         for e in excs:
             kind = _decision_kind(e)
             if kind is None:
+                if not in_period:
+                    continue
                 open_items.append(e)
                 by_carrier[r.tenant_id] = by_carrier.get(r.tenant_id, 0) + 1
                 if r.broker_party_id:
@@ -5504,10 +5514,34 @@ def _platform_open_exceptions(s, since: datetime, carrier: Optional[int] = None,
     }
 
 
+
+def _tz_name(tz: Optional[str]) -> str:
+    """The viewer's IANA time zone (e.g. "Asia/Kolkata"), or UTC when it is
+    missing or not one Python knows — never an error for a bad string."""
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(tz)
+            return tz
+        except Exception:  # noqa: BLE001
+            pass
+    return "UTC"
+
+
+def _local_day(col, tzname: str):
+    """The calendar day a naive-UTC timestamp falls on in `tzname`.
+
+    output_exports.created_at is written with utcnow() into a column without a
+    zone, so it is read as UTC first and then moved to the viewer's zone. The
+    chart and the carrier page's date filter must agree on what "7 Sep" means:
+    a file run at 02:00 in India is 20:30 the day before in UTC."""
+    return func.date(func.timezone(tzname, func.timezone("UTC", col)))
+
 @router.get("/dashboard/platform")
 def platform_dashboard(window: str = Query("30d", alias="range"),
                        carrier: Optional[int] = Query(None),
                        broker: Optional[int] = Query(None),
+                       tz: Optional[str] = Query(None),
                        _p: Principal = Depends(require_role("kavachio_admin"))):
     """Cross-tenant platform overview for the Kavachio admin dashboard.
     Aggregates every tenant (no tenant filter). Platform-admin only.
@@ -5517,6 +5551,11 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
     1d / 7d / 30d (default) / 90d / ytd / 12m / all. Point-in-time counts
     (tenants, users, setups, programs) are NOT windowed.
 
+    The period also decides the bordereau-work cards: open exceptions are those
+    on files run in it, overdue = deadlines that fell due in it, awaiting
+    signature = contracts sent for signing in it, and the mapping queue's waiting
+    / in-progress = tasks raised in it. "All time" is the whole backlog.
+
     `carrier` (tenant id) and `broker` (broker party id) narrow the bordereau
     work — runs, exceptions, overdue files, signatures, the carriers table and
     the mapping queue — to one carrier and/or one broker. Who is on the
@@ -5524,7 +5563,12 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
     question, and the screen shows it above the filters for that reason."""
     days = _range_days(window)
     now = datetime.utcnow()
-    today = now.date()
+    # Days on the chart are the VIEWER's days (`tz`), so a bar and the files
+    # listed for it (/dashboard/platform/runs) and the carrier page's date
+    # filter all mean the same "7 Sep".
+    tzname = _tz_name(tz)
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(tzname)).date()
     dstart = now - timedelta(days=days)          # window start
     dprev = now - timedelta(days=2 * days)       # prior window start (for the delta)
     def _oe(q):
@@ -5622,17 +5666,17 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
 
         # --- Daily series over the window: total + runs-with-exceptions ---
         tot_rows = {str(d): c for d, c in _oe(s.query(
-            func.date(OutputExport.created_at), func.count(OutputExport.id)))
+            _local_day(OutputExport.created_at, tzname), func.count(OutputExport.id)))
             .filter(OutputExport.created_at >= dstart)
-            .group_by(func.date(OutputExport.created_at)).all()}
+            .group_by(_local_day(OutputExport.created_at, tzname)).all()}
         exc_rows = {str(d): c for d, c in _oe(s.query(
-            func.date(OutputExport.created_at), func.count(OutputExport.id)))
+            _local_day(OutputExport.created_at, tzname), func.count(OutputExport.id)))
             .filter(OutputExport.created_at >= dstart, OutputExport.status == "has_exceptions")
-            .group_by(func.date(OutputExport.created_at)).all()}
+            .group_by(_local_day(OutputExport.created_at, tzname)).all()}
         nv_rows = {str(d): c for d, c in _oe(s.query(
-            func.date(OutputExport.created_at), func.count(OutputExport.id)))
+            _local_day(OutputExport.created_at, tzname), func.count(OutputExport.id)))
             .filter(OutputExport.created_at >= dstart, OutputExport.status == "not_validated")
-            .group_by(func.date(OutputExport.created_at)).all()}
+            .group_by(_local_day(OutputExport.created_at, tzname)).all()}
         series = []
         for i in range(days - 1, -1, -1):
             k = str(today - timedelta(days=i))
@@ -5710,15 +5754,18 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
         seats["carrier_companies"] = tenant_total
         seats["broker_companies"] = len(broker_companies)
 
-        # --- Open exceptions (point-in-time; put right = in the window) ---
+        # --- Open exceptions on files run in the period (put right = decided in it) ---
         ox = _platform_open_exceptions(s, dstart, carrier, broker)
 
         # --- Overdue bordereaux, straight off the submission calendar ---
         # Same test as the carrier's Program Management screen: 'overdue' is
         # past due and not received ('late' is its retired spelling).
+        # Only deadlines that fell due in the period, counted in the viewer's
+        # days like the chart ("7 days" = today and the six days before).
         oq = s.query(ExpectedSubmission.tenant_id, ExpectedSubmission.broker_party_id,
                      func.count(ExpectedSubmission.id)).filter(
-            ExpectedSubmission.status.in_(("overdue", "late")))
+            ExpectedSubmission.status.in_(("overdue", "late")),
+            ExpectedSubmission.due_date >= today - timedelta(days=days - 1))
         if carrier:
             oq = oq.filter(ExpectedSubmission.tenant_id == carrier)
         if broker:
@@ -5733,8 +5780,12 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
 
         # --- Contracts sent for signature and not yet signed by everyone ---
         week_ago = now - timedelta(days=7)
+        # Sent in the period. The envelope times carry a zone, so the window
+        # start is given one too (a naive value would be read as India time).
         eq = s.query(EsignEnvelope.sent_at, EsignEnvelope.created_at).filter(
-            EsignEnvelope.status.in_(("sent", "in_progress")))
+            EsignEnvelope.status.in_(("sent", "in_progress")),
+            func.coalesce(EsignEnvelope.sent_at, EsignEnvelope.created_at)
+            >= dstart.replace(tzinfo=timezone.utc))
         if carrier:
             eq = eq.filter(EsignEnvelope.tenant_id == carrier)
         if broker:
@@ -5800,12 +5851,15 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
         # --- Data-model mapping queue (Kavachio ops workload) ---
         def _mq(q):
             return q.filter(AdminMappingTask.tenant_id == carrier) if carrier else q
+        # Waiting / in progress = raised in the period and not finished yet;
+        # Finished (below) = finished in the period. created_at is naive UTC.
+        raised = AdminMappingTask.created_at >= dstart
         q_open = _mq(s.query(func.count(AdminMappingTask.id))).filter(
-            AdminMappingTask.status == "open").scalar() or 0
+            AdminMappingTask.status == "open", raised).scalar() or 0
         oldest_open = _mq(s.query(func.min(AdminMappingTask.created_at))).filter(
-            AdminMappingTask.status == "open").scalar()
+            AdminMappingTask.status == "open", raised).scalar()
         q_prog = _mq(s.query(func.count(AdminMappingTask.id))).filter(
-            AdminMappingTask.status == "in_progress").scalar() or 0
+            AdminMappingTask.status == "in_progress", raised).scalar() or 0
         q_done = _mq(s.query(func.count(AdminMappingTask.id))).filter(
             AdminMappingTask.status == "done",
             AdminMappingTask.resolved_at.isnot(None),
@@ -5841,16 +5895,34 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
             "brokers_clear": len(ox["brokers_seen"] - {k for k, v in ox["by_broker"].items() if v}),
         }
 
+        # The broker dropdown. Every broker company (it has an admin) plus any
+        # broker with a run; with a carrier chosen, only the ones that carrier
+        # works with — its accepted relationships, its programmes' brokers, and
+        # any broker that has sent it a file.
+        broker_opts = broker_companies | {
+            b for (b,) in s.query(func.distinct(OutputExport.broker_party_id))
+            .filter(OutputExport.broker_party_id.isnot(None)).all()}
+        if carrier:
+            from db import carrier_broker_ids
+            works_with = carrier_broker_ids(s, carrier)
+            works_with |= {b for (b,) in s.query(ProgramBroker.broker_party_id)
+                           .filter(ProgramBroker.tenant_id == carrier).all()}
+            works_with |= {b for (b,) in s.query(func.distinct(OutputExport.broker_party_id))
+                           .filter(OutputExport.tenant_id == carrier,
+                                   OutputExport.broker_party_id.isnot(None)).all()}
+            broker_opts &= works_with
+        missing = broker_opts - set(pname)
+        if missing:
+            pname.update({p.id: (p.legal_name or p.dba_name or "—")
+                          for p in s.query(Party).filter(Party.id.in_(missing)).all()})
+
         return {
             "range": window, "range_days": days,
             "filters": {"carrier": carrier, "broker": broker},
             "filter_options": {
                 "carriers": sorted(({"id": t.id, "name": tname.get(t.id) or "—"} for t in tenants),
                                    key=lambda r: r["name"].lower()),
-                "brokers": sorted(({"id": b, "name": pname.get(b, "—")}
-                                   for b in (broker_companies | {
-                                       b for (b,) in s.query(func.distinct(OutputExport.broker_party_id))
-                                       .filter(OutputExport.broker_party_id.isnot(None)).all()})),
+                "brokers": sorted(({"id": b, "name": pname.get(b, "—")} for b in broker_opts),
                                   key=lambda r: r["name"].lower()),
             },
             "seats": seats,
@@ -5885,6 +5957,92 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
                               "avg_turnaround_hours": avg_turnaround,
                               "oldest_open_days": ((now - _naive(oldest_open)).days
                                                    if oldest_open else None)},
+        }
+
+
+
+@router.get("/dashboard/platform/runs")
+def platform_runs_on_day(day: date = Query(..., description="YYYY-MM-DD, in `tz`"),
+                         tz: Optional[str] = Query(None),
+                         carrier: Optional[int] = Query(None),
+                         broker: Optional[int] = Query(None),
+                         _p: Principal = Depends(require_role("kavachio_admin"))):
+    """Every run on one day of the Runs per Day chart — the files behind a bar.
+
+    Counted exactly as the chart counts them (same day, same scope, same three
+    outcomes), so the list always adds up to the bar. That includes runs a
+    later "Fix & re-run" replaced: the chart still counts them, so they are
+    listed here too, marked `current: false`; the carrier's own Recent File
+    Submissions lists only the run each file points at now."""
+    from db import LandingRecord
+    tzname = _tz_name(tz)
+    with SessionLocal() as s:
+        q = (s.query(OutputExport.id, OutputExport.tenant_id, OutputExport.broker_party_id,
+                     OutputExport.program_id, OutputExport.status,
+                     OutputExport.exception_count, OutputExport.filename,
+                     OutputExport.source_upload_id, OutputExport.created_at)
+             .filter(_local_day(OutputExport.created_at, tzname) == day))
+        if carrier:
+            q = q.filter(OutputExport.tenant_id == carrier)
+        if broker:
+            q = q.filter(OutputExport.broker_party_id == broker)
+        rows = q.order_by(OutputExport.created_at, OutputExport.id).all()
+        ids = [r.id for r in rows]
+
+        # The file a run was made from. A landing points at its CURRENT run, so
+        # a run nothing points at any more was replaced by a re-run (Process
+        # Bordereau); on the upload lane the newest export of an upload is the
+        # current one.
+        files: dict = {}
+        for eid, fname in (s.query(LandingRecord.output_export_id, LandingRecord.source_filename)
+                           .filter(LandingRecord.output_export_id.in_(ids or [-1])).all()):
+            if fname:
+                files.setdefault(eid, set()).add(fname)
+        uploads = {r.source_upload_id for r in rows if r.source_upload_id}
+        newest = ({u: m for u, m in s.query(OutputExport.source_upload_id, func.max(OutputExport.id))
+                   .filter(OutputExport.source_upload_id.in_(uploads))
+                   .group_by(OutputExport.source_upload_id).all()} if uploads else {})
+
+        tenants = {t.id: t for t in s.query(Tenant).filter(
+            Tenant.id.in_({r.tenant_id for r in rows} or {-1})).all()}
+        brokers = {p.id: (p.legal_name or p.dba_name or "—") for p in s.query(Party).filter(
+            Party.id.in_({r.broker_party_id for r in rows if r.broker_party_id} or {-1})).all()}
+        progs = dict(s.query(Program.id, Program.name).filter(
+            Program.id.in_({r.program_id for r in rows if r.program_id} or {-1})).all())
+
+        def _tname(tid):
+            t = tenants.get(tid)
+            return (t.legal_name or (t.tenant_name or "").title()) if t else "—"
+
+        items, per_carrier = [], {}
+        for r in rows:
+            # The chart's own split: has_exceptions = flagged, not_validated =
+            # not checked, anything else counts as clean.
+            result = ("flagged" if r.status == "has_exceptions"
+                      else "not_checked" if r.status == "not_validated" else "clean")
+            current = (r.id in files) if not r.source_upload_id else (newest.get(r.source_upload_id) == r.id)
+            items.append({
+                "export_id": r.id, "source_upload_id": r.source_upload_id,
+                "run_at": _iso_utc(r.created_at), "result": result,
+                "exceptions": int(r.exception_count or 0), "current": bool(current),
+                "file": ", ".join(sorted(files.get(r.id, ()))) or r.filename or f"Run #{r.id}",
+                "programme": progs.get(r.program_id),
+                "carrier": {"id": r.tenant_id, "name": _tname(r.tenant_id),
+                            "code": tenants[r.tenant_id].tenant_name if r.tenant_id in tenants else None},
+                "broker": ({"id": r.broker_party_id, "name": brokers.get(r.broker_party_id, "—")}
+                           if r.broker_party_id else None),
+            })
+            c = per_carrier.setdefault(r.tenant_id, {"id": r.tenant_id, "name": _tname(r.tenant_id),
+                                                     "code": items[-1]["carrier"]["code"], "runs": 0})
+            c["runs"] += 1
+
+        return {
+            "day": str(day), "tz": tzname, "items": items,
+            "totals": {"runs": len(items),
+                       "clean": sum(1 for x in items if x["result"] == "clean"),
+                       "flagged": sum(1 for x in items if x["result"] == "flagged"),
+                       "not_checked": sum(1 for x in items if x["result"] == "not_checked")},
+            "carriers": sorted(per_carrier.values(), key=lambda c: (-c["runs"], c["name"])),
         }
 
 

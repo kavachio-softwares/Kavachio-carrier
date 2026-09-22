@@ -24,8 +24,8 @@ import { ChartCard, StatCard } from "../components/StatCard";
 // Date-range presets (value → label). `range` is passed to the API, which
 // windows every time-based metric.
 const RANGES: { value: string; label: string }[] = [
-  { value: "1d",  label: "Today" },
-  { value: "7d",  label: "7 days" },
+  { value: "1d", label: "Today" },
+  { value: "7d", label: "7 days" },
   { value: "30d", label: "30 days" },
   { value: "90d", label: "90 days" },
   { value: "ytd", label: "This year" },
@@ -44,10 +44,14 @@ type Platform = {
   range: string; range_days: number;
   filters: { carrier: number | null; broker: number | null };
   filter_options: { carriers: Named[]; brokers: Named[] };
-  seats: { carrier_admins: Seat; carrier_users: Seat; broker_admins: Seat; broker_users: Seat;
-           carrier_companies: number; broker_companies: number };
-  runs: { window_count: number; prev_count: number; delta_pct: number | null;
-          clean_rate: number | null; clean_count: number };
+  seats: {
+    carrier_admins: Seat; carrier_users: Seat; broker_admins: Seat; broker_users: Seat;
+    carrier_companies: number; broker_companies: number
+  };
+  runs: {
+    window_count: number; prev_count: number; delta_pct: number | null;
+    clean_rate: number | null; clean_count: number
+  };
   runs_series: { date: string; total: number; exceptions: number; not_validated?: number }[];
   open_exceptions: {
     total: number; critical: number; warning: number; info: number; waiting_over_7d: number;
@@ -57,14 +61,27 @@ type Platform = {
   };
   overdue: { total: number; brokers: number; carriers: number };
   signatures: { awaiting: number; over_7d: number };
-  tenants_table: { tenant_id: number; code: string; name: string; users: number; brokers: number;
-                   programs: number; runs: number; clean_pct: number | null;
-                   open_exceptions: number; overdue: number; status: string }[];
-  mapping_queue: { open: number; in_progress: number; resolved_window: number;
-                   oldest_open_days: number | null };
+  tenants_table: {
+    tenant_id: number; code: string; name: string; users: number; brokers: number;
+    programs: number; runs: number; clean_pct: number | null;
+    open_exceptions: number; overdue: number; status: string
+  }[];
+  mapping_queue: {
+    open: number; in_progress: number; resolved_window: number;
+    oldest_open_days: number | null
+  };
 };
 
 const nf = (n: number | null | undefined) => (n == null ? "—" : n.toLocaleString());
+/** The viewer's zone, so a bar's "7 Sep" is the 7 Sep they see everywhere else. */
+const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; }
+                    catch { return "UTC"; } })();
+/** "2026-09-07" → "Mon 7 Sep 2026", read as a calendar day (no zone shift). */
+function longDay(iso: string) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-GB", {
+    weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+}
 const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 0);
 const plural = (n: number, one: string, many: string) => `${nf(n)} ${n === 1 ? one : many}`;
 
@@ -79,10 +96,14 @@ function statusBadge(s: string) {
 /** Small uppercase heading over a group of tiles. */
 function Section({ title, right }: { title: string; right?: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline",
-                  margin: "0 0 10px" }}>
-      <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em",
-                    textTransform: "uppercase", color: "var(--p-faint)" }}>{title}</div>
+    <div style={{
+      display: "flex", justifyContent: "space-between", alignItems: "baseline",
+      margin: "0 0 10px"
+    }}>
+      <div style={{
+        fontSize: 12, fontWeight: 700, letterSpacing: ".08em",
+        textTransform: "uppercase", color: "var(--p-faint)"
+      }}>{title}</div>
       {right}
     </div>
   );
@@ -93,11 +114,15 @@ function SignedUp({ s }: { s: Seat }) {
   return (
     <div>
       <div style={{ height: 6, borderRadius: 3, background: "#EEF1F5", overflow: "hidden" }}>
-        <div style={{ height: "100%", borderRadius: 3, background: HUE,
-                      width: `${pct(s.signed_up, s.total)}%` }} />
+        <div style={{
+          height: "100%", borderRadius: 3, background: HUE,
+          width: `${pct(s.signed_up, s.total)}%`
+        }} />
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12,
-                    color: "var(--p-muted)", marginTop: 6 }}>
+      <div style={{
+        display: "flex", justifyContent: "space-between", fontSize: 12,
+        color: "var(--p-muted)", marginTop: 6
+      }}>
         <span>{nf(s.signed_up)} signed up</span>
         {s.not_signed_up > 0
           ? <span><b style={{ color: "#A55F08" }}>{nf(s.not_signed_up)}</b> not signed up yet</span>
@@ -110,11 +135,125 @@ function SignedUp({ s }: { s: Seat }) {
 /** A small number-over-label block (put-right split, mapping queue). */
 function Chip({ v, k }: { v: number | string; k: string }) {
   return (
-    <div style={{ flex: 1, background: "var(--p-surface-2, #F6F8FB)", borderRadius: 10,
-                  padding: "9px 11px", minWidth: 0 }}>
+    <div style={{
+      flex: 1, background: "var(--p-surface-2, #F6F8FB)", borderRadius: 10,
+      padding: "9px 11px", minWidth: 0
+    }}>
       <div style={{ fontSize: 18, fontWeight: 700, color: "var(--p-text)" }}>{v}</div>
       <div style={{ fontSize: 12, color: "var(--p-muted)" }}>{k}</div>
     </div>
+  );
+}
+
+type DayRun = {
+  export_id: number; source_upload_id: number | null; run_at: string | null;
+  result: "clean" | "flagged" | "not_checked"; exceptions: number; current: boolean;
+  file: string; programme: string | null;
+  carrier: { id: number; name: string; code: string | null };
+  broker: { id: number; name: string } | null;
+};
+type DayRuns = {
+  day: string; items: DayRun[];
+  totals: { runs: number; clean: number; flagged: number; not_checked: number };
+  carriers: { id: number; name: string; code: string | null; runs: number }[];
+};
+
+/** The files behind one bar of Runs per Day — every carrier's, in the
+ *  dashboard's current carrier/broker scope, counted exactly as the bar is. */
+function DayPanel({ day, carrier, broker, onClose }: {
+  day: string | null; carrier: number | ""; broker: number | ""; onClose: () => void;
+}) {
+  const [data, setData] = useState<DayRuns | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    if (!day) return;
+    setData(null); setErr(null);
+    api.get<DayRuns>("/dashboard/platform/runs", {
+      params: { day, tz: TZ, carrier: carrier || undefined, broker: broker || undefined },
+    }).then(a => setData(a.data)).catch(() => setErr("Could not load the files for this day."));
+  }, [day, carrier, broker]);
+  useEffect(() => {
+    if (!day) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [day, onClose]);
+
+  const open = !!day;
+  const t = data?.totals;
+  const result = (x: DayRun) => {
+    if (!x.current) return <span className="badge b-mut">Replaced by a re-run</span>;
+    if (x.result === "clean") return <span className="badge b-ok"><span className="d" />Clean</span>;
+    if (x.result === "not_checked") return <span className="badge b-mut">Not checked</span>;
+    return <span className="badge b-warn"><span className="d" />{nf(x.exceptions)} exception{x.exceptions === 1 ? "" : "s"}</span>;
+  };
+  // The app's tables centre their cells; a list of files reads down the left edge.
+  const L: React.CSSProperties = { textAlign: "left" };
+  const triage = (x: DayRun) =>
+    `/uploads/${x.source_upload_id ?? x.export_id}/exceptions?download=${x.export_id}&from=admin`;
+
+  return (
+    <>
+      <div className={`scrim${open ? " on" : ""}`} onClick={onClose} />
+      <aside className={`drawer wide${open ? " on" : ""}`} aria-hidden={!open}>
+        <div className="drawer-h">
+          <div>
+            <h4>Files processed on {day ? longDay(day) : ""}</h4>
+            <div style={{ fontSize: 12.5, color: "var(--p-muted)" }}>
+              {t ? <>{plural(t.runs, "run", "runs")} · <b style={{ color: "var(--p-ok)" }}>{nf(t.clean)} clean</b>
+                {" · "}<b style={{ color: "var(--p-warn)" }}>{nf(t.flagged)} flagged</b>
+                {t.not_checked > 0 && <> · {nf(t.not_checked)} not checked</>}</> : "\u00a0"}
+            </div>
+          </div>
+          <button type="button" className="closeb" aria-label="Close" onClick={onClose}>×</button>
+        </div>
+        <div className="drawer-b" style={{ padding: 0 }}>
+          {err && <div className="note warn" style={{ margin: 16 }}>{err}</div>}
+          {!data && !err && <div className="muted" style={{ padding: 20 }}>Loading…</div>}
+          {data && data.items.length === 0 && <div className="empty" style={{ padding: 20 }}>No files were processed on this day.</div>}
+          {data && data.items.length > 0 && (
+            <div className="tbl-wrap">
+              <table>
+                <thead><tr>{["Time", "Carrier ← Broker · File", "Result"].map(h =>
+                  <th key={h} style={L}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {data.items.map(x => (
+                    <tr key={x.export_id} style={x.current ? undefined : { opacity: 0.6 }}>
+                      <td className="muted" style={{ ...L, whiteSpace: "nowrap", fontSize: 12.5 }}>
+                        {x.run_at ? new Date(x.run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</td>
+                      <td style={L}>
+                        <div><b>{x.carrier.name}</b>{x.broker && <span className="muted"> ← {x.broker.name}</span>}</div>
+                        <div className="mono" style={{ fontSize: 12, wordBreak: "break-all" }}>{x.file}</div>
+                        {x.programme && <div className="muted" style={{ fontSize: 12 }}>{x.programme}</div>}
+                      </td>
+                      <td style={{ ...L, whiteSpace: "nowrap" }}>
+                        {result(x)}
+                        {/* A replaced run is history: its problems are worked on the
+                            re-run that replaced it, which is listed as its own row. */}
+                        {x.result === "flagged" && x.current && (
+                          <div style={{ marginTop: 6 }}>
+                            <Link className="linkish" style={{ fontSize: 12.5 }} to={triage(x)}>See exceptions →</Link>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+        {data && data.carriers.some(c => c.code) && (
+          <div className="drawer-f">
+            {data.carriers.filter(c => c.code).map(c => (
+              <Link key={c.id} className="btn sm" to={`/tenants/${c.code}?tab=runs&from=${data.day}&to=${data.day}`}>
+                Open {c.name}'s files for this day →
+              </Link>
+            ))}
+          </div>
+        )}
+      </aside>
+    </>
   );
 }
 
@@ -126,13 +265,20 @@ export default function KavachioAdminDashboard() {
   const [d, setD] = useState<Platform | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [day, setDay] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
     api.get<Platform>("/dashboard/platform", {
-      params: { range, carrier: carrier || undefined, broker: broker || undefined },
+      params: { range, carrier: carrier || undefined, broker: broker || undefined, tz: TZ },
     })
-      .then(a => { setD(a.data); setErr(null); })
+      .then(a => {
+        setD(a.data); setErr(null);
+        // The broker list follows the chosen carrier. A broker picked earlier
+        // that this carrier does not work with would only zero every card, so
+        // it drops back to "All brokers" (which reloads once more).
+        if (broker && !a.data.filter_options.brokers.some(b => b.id === broker)) setBroker("");
+      })
       .catch(() => setErr("Could not load platform metrics."))
       .finally(() => setLoading(false));
   };
@@ -140,7 +286,7 @@ export default function KavachioAdminDashboard() {
 
   const periodWords = range === "all" ? "all time"
     : range === "ytd" ? "this year"
-    : range === "1d" ? "today" : `the last ${d?.range_days ?? ""} days`;
+      : range === "1d" ? "today" : `the last ${d?.range_days ?? ""} days`;
 
   const grid = (min: number): React.CSSProperties => ({
     display: "grid", gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`,
@@ -169,7 +315,7 @@ export default function KavachioAdminDashboard() {
       <div className="proto"><div className="view full">
         {head}
         {err ? <div className="note warn" style={{ maxWidth: 560 }}>{err}</div>
-             : <div className="muted">Loading…</div>}
+          : <div className="muted">Loading…</div>}
       </div></div>
     );
   }
@@ -183,21 +329,18 @@ export default function KavachioAdminDashboard() {
   // Runs per day, in the three outcomes the broker dashboards already use.
   const trend = d.runs_series.map(p => {
     const nc = p.not_validated ?? 0;
-    return { date: p.date, clean: Math.max(0, p.total - p.exceptions - nc),
-             flagged: p.exceptions, not_checked: nc };
+    return {
+      date: p.date, clean: Math.max(0, p.total - p.exceptions - nc),
+      flagged: p.exceptions, not_checked: nc
+    };
   });
 
   const sevRows = [
     { k: "Critical", sub: "Stops the file going out.", v: ox.critical, c: SEV.critical },
-    { k: "Warning",  sub: "Should be checked.",        v: ox.warning,  c: SEV.warning },
-    { k: "Info",     sub: "For awareness only.",       v: ox.info,     c: SEV.info },
+    { k: "Warning", sub: "Should be checked.", v: ox.warning, c: SEV.warning },
+    { k: "Info", sub: "For awareness only.", v: ox.info, c: SEV.info },
   ];
   const pr = ox.put_right;
-
-  // Totals row for the carriers table: over every carrier in scope, not only
-  // the eight drawn.
-  const tbl = d.tenants_table;
-  const sum = (f: (t: Platform["tenants_table"][number]) => number) => tbl.reduce((a, t) => a + f(t), 0);
 
   return (
     <div className="proto">
@@ -260,26 +403,31 @@ export default function KavachioAdminDashboard() {
             value={d.runs.clean_rate == null ? "—" : `${d.runs.clean_rate}%`}
             subtitle={`${nf(d.runs.clean_count)} of ${nf(d.runs.window_count)} runs`} />
           <StatCard title="Open Exceptions" value={nf(ox.total)} icon={AlertTriangle}
+            info="Still waiting on files run in this period. Pick All time for the whole backlog."
             tone={ox.critical > 0 ? "alert" : undefined}
             subtitle={ox.total ? `across ${plural(brokersWithOpen, "broker", "brokers")}` : "nothing waiting"} />
           <StatCard title="Overdue Bordereaux" value={nf(d.overdue.total)} icon={CalendarX}
+            info="Bordereaux that fell due in this period and still have not arrived. Pick All time for every missed deadline."
             subtitle={d.overdue.total ? `from ${plural(d.overdue.brokers, "broker", "brokers")}` : "nothing overdue"} />
           <StatCard title="Awaiting Signature" value={nf(d.signatures.awaiting)} icon={PenLine}
+            info="Contracts sent for signing in this period and not yet signed by everyone."
             subtitle={d.signatures.over_7d
               ? `${nf(d.signatures.over_7d)} waiting over 7 days` : "contracts out for signing"} />
         </div>
 
         {/* ===== Runs per day + open exceptions by severity ===== */}
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0,2fr) minmax(0,1fr)", gap: 18, marginBottom: 18 }}>
-          <ChartCard title="Runs per Day"
+          <ChartCard title="Runs Overview (Daily)"
             info={<InfoTip text={"Bordereaux processed per day. Clean = passed every check; "
-              + "flagged = at least one exception was raised; not checked = the checks could not run."} />}>
-            <RunTrend data={trend} />
+              + "flagged = at least one exception was raised; not checked = the checks could not run. "
+              + "Click a day to see its files."} />}>
+            <RunTrend data={trend} onDayClick={setDay} />
           </ChartCard>
 
           <ChartCard title="Open Exceptions by Severity"
-            info={<InfoTip text={"Exceptions still waiting on each file's latest run, counted the way the "
-              + "Exception Triage screen counts them."} />}>
+            info={<InfoTip text={"Exceptions still waiting on files run in this period (each file's latest "
+              + "run), counted the way the Exception Triage screen counts them. \"Put right\" = decisions made "
+              + "in this period. Pick All time for the whole backlog."} />}>
             {ox.total === 0 ? <div className="empty">Nothing is waiting to be reviewed.</div> : (
               <>
                 <div style={{ display: "flex", gap: 2, height: 14, marginBottom: 10 }}>
@@ -304,8 +452,10 @@ export default function KavachioAdminDashboard() {
               </>
             )}
             <div style={{ borderTop: "1px solid var(--p-border)", margin: "12px 0 10px" }} />
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline",
-                          fontSize: 13, color: "var(--p-muted)" }}>
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "baseline",
+              fontSize: 13, color: "var(--p-muted)"
+            }}>
               <span>Put right in {periodWords}</span>
               <b style={{ fontSize: 16, color: "var(--p-text)" }}>{nf(pr.total)}</b>
             </div>
@@ -326,7 +476,7 @@ export default function KavachioAdminDashboard() {
         {/* ===== Where the open exceptions are + the Kavachio team's own queue ===== */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18, marginBottom: 18 }}>
           <ChartCard title="Exceptions by Carrier"
-            info={<InfoTip text="Open exceptions at each carrier, most first. A carrier opens its Recent File Submissions." />}>
+            info={<InfoTip text="Open exceptions on files run in this period, per carrier, most first. A carrier opens its Recent File Submissions." />}>
             <RankedBars cap={6} unit="open"
               rows={ox.by_carrier.map(r => ({ id: r.id, name: r.name, value: r.open }))}
               empty="Nothing is open at any carrier."
@@ -338,7 +488,7 @@ export default function KavachioAdminDashboard() {
             )}
           </ChartCard>
           <ChartCard title="Exceptions by Broker"
-            info={<InfoTip text="Open exceptions on each broker's files, most first — across every carrier they send to." />}>
+            info={<InfoTip text="Open exceptions on files run in this period, per broker, most first — across every carrier they send to." />}>
             <RankedBars cap={6} unit="open"
               rows={ox.by_broker.map(r => ({ id: r.id, name: r.name, value: r.open }))}
               empty="Nothing is open for any broker." />
@@ -350,14 +500,17 @@ export default function KavachioAdminDashboard() {
           </ChartCard>
           <ChartCard title="Data Mapping Queue"
             info={<InfoTip text={"Work for the Kavachio team: a file layout nobody has seen before waits here "
-              + "until its columns are mapped. Until then that layout cannot be processed automatically."} />}>
+              + "until its columns are mapped. Until then that layout cannot be processed automatically. "
+              + "Waiting / in progress = raised in this period; finished = finished in it."} />}>
             <div style={{ display: "flex", gap: 8 }}>
               <Chip v={nf(d.mapping_queue.open)} k="Waiting" />
               <Chip v={nf(d.mapping_queue.in_progress)} k="In progress" />
               <Chip v={nf(d.mapping_queue.resolved_window)} k="Finished" />
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
-                          marginTop: "auto", paddingTop: 14, fontSize: 12.5, color: "var(--p-muted)" }}>
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              marginTop: "auto", paddingTop: 14, fontSize: 12.5, color: "var(--p-muted)"
+            }}>
               <span>{d.mapping_queue.oldest_open_days == null ? "Nothing waiting"
                 : `Oldest waiting: ${plural(d.mapping_queue.oldest_open_days, "day", "days")}`}</span>
               <Link className="linkish" to="/admin/mapping-tasks">Open the queue →</Link>
@@ -365,63 +518,7 @@ export default function KavachioAdminDashboard() {
           </ChartCard>
         </div>
 
-        {/* ===== Carriers overview (full width: nine columns need the room) ===== */}
-        <div>
-          <div className="card" style={{ padding: "24px 20px" }}>
-            <div className="card-h" style={{ marginBottom: 14, display: "flex",
-                                             justifyContent: "space-between", alignItems: "center" }}>
-              <h3 style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                Carriers Overview
-                <InfoTip text={"Per carrier, busiest first. Users = the carrier's own people; Brokers = broker "
-                  + "companies it works with; Programmes = live programmes; Runs and Clean are for the chosen "
-                  + "period; Open and Overdue are as of now."} />
-              </h3>
-              <Link className="linkish" to="/tenants">View all carriers →</Link>
-            </div>
-            {tbl.length === 0 ? <div className="empty">No carriers match these filters.</div> : (
-              <div className="tbl-wrap">
-                <table>
-                  <thead><tr>
-                    <th>Carrier</th><th className="r">Users</th><th className="r">Brokers</th>
-                    <th className="r">Programmes</th><th className="r">Runs</th><th className="r">Clean</th>
-                    <th className="r">Open</th><th className="r">Overdue</th><th>Status</th>
-                  </tr></thead>
-                  <tbody>
-                    {tbl.slice(0, 8).map(t => (
-                      <tr key={t.tenant_id}>
-                        <td style={{ whiteSpace: "nowrap" }}><Link to={`/tenants/${t.code}`}><b>{t.name}</b></Link></td>
-                        <td className="r">{nf(t.users)}</td>
-                        <td className="r">{nf(t.brokers)}</td>
-                        <td className="r">{nf(t.programs)}</td>
-                        <td className="r"><b>{nf(t.runs)}</b></td>
-                        <td className="r">{t.clean_pct == null ? "—" : `${t.clean_pct}%`}</td>
-                        <td className="r">{nf(t.open_exceptions)}</td>
-                        <td className="r" style={t.overdue ? { color: "var(--p-crit)", fontWeight: 600 } : undefined}>
-                          {nf(t.overdue)}</td>
-                        <td>{statusBadge(t.status)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  {tbl.length > 1 && (
-                    <tfoot><tr style={{ fontWeight: 700 }}>
-                      <td>All {plural(tbl.length, "carrier", "carriers")}</td>
-                      <td className="r">{nf(sum(t => t.users))}</td>
-                      <td className="r">{nf(sum(t => t.brokers))}</td>
-                      <td className="r">{nf(sum(t => t.programs))}</td>
-                      <td className="r">{nf(sum(t => t.runs))}</td>
-                      <td className="r">{d.runs.clean_rate == null ? "—" : `${d.runs.clean_rate}%`}</td>
-                      <td className="r">{nf(sum(t => t.open_exceptions))}</td>
-                      <td className="r">{nf(sum(t => t.overdue))}</td>
-                      <td />
-                    </tr></tfoot>
-                  )}
-                </table>
-              </div>
-            )}
-          </div>
-
-
-        </div>
+        <DayPanel day={day} carrier={carrier} broker={broker} onClose={() => setDay(null)} />
       </div>
     </div>
   );

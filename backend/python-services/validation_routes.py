@@ -391,6 +391,9 @@ def _resolve_contract_latest(s, template_id: int, tenant_id) -> Optional[int]:
 
 @router.post("/api/validate")
 def validate(body: ValidateBody, principal: Principal = Depends(current_principal)):
+    # Re-validating writes a new run of the file — the carrier's or broker's call.
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
     engines = body.engines or ["global", "custom", "ajv"]
     stage = body.stage or "input"
 
@@ -895,6 +898,8 @@ def save_fields(body: FieldsSaveBody,
     new SCD-2 version per affected record — several edits on the same row become a
     SINGLE new version. Returns per-edit status; writes nothing if any edit would
     introduce a new validation exception."""
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
     from scd2_sql import (
         resolve_field, pick_target_row, find_target_in_upload, coerce_value,
         build_scd2_sql, physical_columns, missing_scd_columns, pk_is_identity_always,
@@ -1371,6 +1376,8 @@ def decide_exceptions(body: DecideRequest,
     """Persist Approve/Fix/Dismiss/Reject decisions onto validation_exception rows.
 
     Returns {ok, updated, skipped}. Unknown kinds are skipped (never raises)."""
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
     # Tenant scoping (by-id / IDOR-prone): a regular user may only decide
     # exceptions belonging to their own tenant; the UPDATE is pinned to the
     # token tenant so another tenant's exception_id simply matches no row (it is
@@ -1576,6 +1583,8 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
 
     Idempotent: re-deciding the same (rule, policy, field) updates its row instead
     of adding another. Returns {ok, updated, skipped, writeback}."""
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
     with SessionLocal() as s:
         exp = s.execute(
             text("SELECT id, tenant_id, template_id, source_upload_id, policy_ids, "

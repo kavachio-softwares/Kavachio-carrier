@@ -7,7 +7,7 @@ import {
 import { groupByRule, exportCSV, buildReverseSpec, tallyDecisions } from "../components/ExceptionCards";
 import RuleExplanationBlock, { hasExplanation } from "../components/RuleExplanation";
 import { downloadFile } from "../api/client";
-import { isBrokerSeat } from "../auth";
+import { isBrokerSeat, isKavachioAdmin } from "../auth";
 import { CheckCircle2 } from "lucide-react";
 import { LoadingOverlay } from "../components/Busy";
 import BdxInlineReview from "../components/BdxInlineReview";
@@ -27,6 +27,11 @@ export default function UploadExceptions() {
   // Carries the sidebar-highlight context (Dashboard vs Process Bordereau)
   // through to the per-rule review sub-screen.
   const fromParam = params.get("from");
+  // Kavachio staff read every file but amend none — deciding, correcting and
+  // Fix & Validate belong to the carrier and the file's brokers. The API
+  // refuses them too (carrier_scope.assert_can_amend); this keeps the screen
+  // from offering what would only fail.
+  const viewOnly = isKavachioAdmin();
   const navigate = useNavigate();
   // Set when the reviewer comes back from a rule's Decisions screen having
   // recorded decisions — we prompt them that Approved/Fixed values are NOT in
@@ -67,6 +72,7 @@ export default function UploadExceptions() {
   const back = (() => {
     if (fromParam === "broker") return { to: "/broker/bordereau", label: "Process Bordereau" };
     if (fromParam === "home") return { to: "/home", label: "Dashboard" };
+    if (fromParam === "admin") return { to: "/admin/dashboard", label: "Dashboard" };
     if (fromParam === "direct") return { to: "/direct", label: "Process Bordereau" };
     return isBrokerSeat()
       ? { to: "/broker/bordereau", label: "Process Bordereau" }
@@ -239,11 +245,13 @@ export default function UploadExceptions() {
               </button>
             )}
             {downloadId ? (
-              <button className="btn pri" onClick={regenerate} disabled={regenerating || loading || !data}>
+              <button className="btn pri" onClick={regenerate} disabled={viewOnly || regenerating || loading || !data}
+                title={viewOnly ? "View only — only the carrier and its brokers can fix or re-validate this file." : undefined}>
                 Fix &amp; Validate
               </button>
             ) : (
-              <button className="btn pri" onClick={revalidate} disabled={revalidating || loading || !data}>
+              <button className="btn pri" onClick={revalidate} disabled={viewOnly || revalidating || loading || !data}
+                title={viewOnly ? "View only — only the carrier and its brokers can fix or re-validate this file." : undefined}>
                 Fix &amp; Validate
               </button>
             )}
@@ -315,6 +323,12 @@ export default function UploadExceptions() {
             <p className="text-[15px] font-medium text-ink leading-relaxed">{msg}</p>
           </div>
         </Modal>
+        {viewOnly && (
+          <div className="note" style={{ marginBottom: 18 }}>
+            <b>View only.</b> You can open every rule and the BDX, but only the carrier and its
+            brokers can approve, fix, dismiss or re-validate this file.
+          </div>
+        )}
         {err && <div className="note warn" style={{ marginBottom: 18 }}>{err}</div>}
 
         {/* In-page BDX review — the whole generated workbook with each flagged
@@ -322,6 +336,7 @@ export default function UploadExceptions() {
             place. Additional to the rule-card flow below, which is unchanged. */}
         {bdxOpen && downloadId && data && (
           <BdxInlineReview
+            readOnly={viewOnly}
             exportId={downloadId}
             exceptions={exceptions}
             onSaved={n => {
@@ -386,8 +401,8 @@ export default function UploadExceptions() {
               <div className="tile"><div className="k">Open</div><div className="v">{open}</div></div>
             </div>
 
-            {/* ── how to resolve ── */}
-            <div className="card" style={{ marginTop: 18, marginBottom: 18 }}>
+            {/* ── how to resolve ── (steps a view-only reader cannot take) */}
+            {!viewOnly && <div className="card" style={{ marginTop: 18, marginBottom: 18 }}>
               <div className="card-h"><h3>How to resolve</h3></div>
               <div className="grid g-3" style={{ padding: "16px 20px" }}>
                 {[
@@ -412,7 +427,7 @@ export default function UploadExceptions() {
                   </div>
                 ))}
               </div>
-            </div>
+            </div>}
 
             {/* ── search ── */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
@@ -447,7 +462,7 @@ export default function UploadExceptions() {
                         <span className={`badge ${SEV_BADGE[g.severity] ?? "b-info"}`}>
                           <span className="d" />{SEV_LABEL[g.severity] ?? g.severity} · {g.count} {g.count === 1 ? "policy" : "policies"}
                         </span>
-                        <span className="linkish">Review →</span>
+                        <span className="linkish">{viewOnly ? "View →" : "Review →"}</span>
                       </div>
                     </div>
                     <div style={{ padding: "0 20px 14px" }}>

@@ -328,7 +328,7 @@ export default function Home() {
               <InfoTip text="Distribution of open exceptions by severity." />
             </div>
             {stats?.pending_exceptions ? (
-              <div style={{ width: "100%", height: 260 }}>
+              <div style={{ width: "100%", height: 260, position: "relative" }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
@@ -346,7 +346,7 @@ export default function Home() {
                         ))
                       }
                     </Pie>
-                    <Tooltip 
+                    <Tooltip
                       formatter={(value) => [`${value} exceptions`, 'Count']}
                       contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)" }}
                       itemStyle={{ color: "#0f172a", fontWeight: 600 }}
@@ -354,6 +354,15 @@ export default function Home() {
                     <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: 13, color: "#64748b" }} />
                   </PieChart>
                 </ResponsiveContainer>
+                <div style={{
+                  position: "absolute", left: "50%", top: "45%", transform: "translate(-50%, -50%)",
+                  textAlign: "center", pointerEvents: "none",
+                }}>
+                  <div style={{ fontSize: 30, fontWeight: 700, color: "#0f172a", lineHeight: 1 }}>
+                    {fmt(stats.pending_exceptions)}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "#64748b", marginTop: 2 }}>Open</div>
+                </div>
               </div>
             ) : (
               <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--p-faint)", fontSize: 15, fontWeight: 500 }}>

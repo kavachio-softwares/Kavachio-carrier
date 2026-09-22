@@ -287,9 +287,11 @@ function place(r: DOMRect, w = 360, estH = 400): Pos {
 
 // ─── one exception's detail + actions inside the cell popover ────────────────
 
-function ExcDetail({ e, saving, onDecide }: {
+function ExcDetail({ e, saving, onDecide, readOnly = false }: {
   e: StoredException;
   saving: boolean;
+  /** Show the exception and its decision, but no Approve / Fix / Dismiss. */
+  readOnly?: boolean;
   onDecide: (e: StoredException, kind: "approve" | "fix" | "dismiss", value?: string | null) => void;
 }) {
   const [mode, setMode] = useState<null | "fix" | "approve-enum">(null);
@@ -371,7 +373,7 @@ function ExcDetail({ e, saving, onDecide }: {
       </div>
 
       {/* actions */}
-      {mode === null && (
+      {mode === null && !readOnly && (
         <div className="flex items-center gap-2 mt-3">
           <button
             onClick={startApprove}
@@ -559,8 +561,10 @@ function mergeSheetPages(prev: Map<string, SheetState>, activeSheet: string, raw
   return next;
 }
 
-export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose }: {
+export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose, readOnly = false }: {
   exportId: string;
+  /** Kavachio staff: the whole workbook and every flagged cell, no decisions. */
+  readOnly?: boolean;
   exceptions: StoredException[];
   /** Called after a successful save so the parent can reload exceptions. */
   onSaved: (saved: number) => void;
@@ -1099,7 +1103,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                       }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                           <span>{String(h ?? "").trim() || `Column ${ci + 1}`}</span>
-                          {pend > 0 && (
+                          {pend > 0 && !readOnly && (
                             <button
                               onClick={ev => {
                                 ev.stopPropagation();
@@ -1289,12 +1293,13 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                    maxHeight: cellPop.pos.maxH }}>
           {popExcs.map((e, i) => (
             <div key={e.exception_id} className={i > 0 ? "mt-3 pt-3 border-t border-border" : ""}>
-              <ExcDetail e={e} saving={saving} onDecide={onDecide} />
+              <ExcDetail e={e} saving={saving} onDecide={onDecide} readOnly={readOnly} />
             </div>
           ))}
           {saveErr && <p className="text-[11px] text-danger mt-2">{saveErr}</p>}
           <p className="text-[10px] text-ink-soft mt-2">
-            Saved immediately — the corrected value reaches the output on Fix &amp; Validate.
+            {readOnly ? "View only — the carrier and its brokers make these decisions."
+                      : <>Saved immediately — the corrected value reaches the output on Fix &amp; Validate.</>}
           </p>
         </div>
       )}

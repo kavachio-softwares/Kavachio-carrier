@@ -1358,3 +1358,9 @@
 .proto .party-count.zero{color:var(--p-faint);font-weight:500}
 .proto .party-chev{color:var(--p-border-2);transition:transform .12s,color .12s}
 .proto .party-row:hover .party-chev{color:var(--p-primary);transform:translateX(2px)}
+
+/* Charts take keyboard focus (recharts' accessibility layer). Keep the ring for
+   keyboard users, but a mouse click on a clickable chart should not leave a
+   box drawn around it. */
+.proto .recharts-wrapper:focus:not(:focus-visible),
+.proto .recharts-wrapper :focus:not(:focus-visible){outline:none}

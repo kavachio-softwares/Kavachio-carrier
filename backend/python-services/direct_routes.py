@@ -2539,6 +2539,8 @@ async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None
     """Re-generate a DIRECT-LANE export's output BDX with saved Fix/Approve
     corrections applied. Produces a NEW output_exports (the landing's corrections
     persist across renders, since they're keyed by landing, not export)."""
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
     with SessionLocal() as s:
         lr = s.execute(
             text("SELECT id, tenant_id FROM landing_record WHERE output_export_id = :e "

@@ -292,6 +292,21 @@ def policy_scope(policy_id: int = Path(..., ge=1),
 
 # --- reading one generated export, from either side --------------------------
 
+def assert_can_amend(principal: Principal) -> None:
+    """Changing a file's exceptions — deciding them (Approve / Fix / Dismiss),
+    correcting a value, or running Fix & Validate — is the work of the carrier
+    and the brokers on that file. Kavachio staff can open and read every file
+    (assert_can_read_export lets them), but amend none: a change made from the
+    platform would be an edit to a carrier's bordereau that neither side made.
+
+    Call it BEFORE any read-scope check, so the answer is the same 403 whatever
+    the file — it is about who is asking, not which file."""
+    if principal.is_platform_admin:
+        raise HTTPException(
+            403, "Kavachio can view exceptions but not change them. Only the "
+                 "carrier and its brokers can review, fix or re-validate a file.")
+
+
 def assert_can_read_export(s, p: Principal, export_row) -> None:
     """May this principal see this generated output?
 

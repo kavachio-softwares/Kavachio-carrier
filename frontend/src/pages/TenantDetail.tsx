@@ -99,9 +99,9 @@ export default function TenantDetail() {
     () => (params.get("tab") === "runs" ? "runs" : "details"));
   const setTab = (next: "details" | "users" | "pc" | "runs") => {
     setTabState(next);
-    if (params.has("tab")) {
+    if (params.has("tab") || params.has("from") || params.has("to")) {
       const p = new URLSearchParams(params);
-      p.delete("tab");
+      ["tab", "from", "to"].forEach(k => p.delete(k));
       setParams(p, { replace: true });
     }
   };
@@ -122,8 +122,11 @@ export default function TenantDetail() {
   const userDq = useDebouncedValue(userQ, 300);
   // Recent runs tab filters.
   const [runQ, setRunQ] = useState("");
-  const [runDateFrom, setRunDateFrom] = useState("");
-  const [runDateTo, setRunDateTo] = useState("");
+  // Pre-filled from the address when a link asks for particular days — the
+  // platform dashboard's "files on this day" panel sends ?from=&to=.
+  const dayParam = (k: string) => (/^\d{4}-\d{2}-\d{2}$/.test(params.get(k) ?? "") ? params.get(k)! : "");
+  const [runDateFrom, setRunDateFrom] = useState(() => dayParam("from"));
+  const [runDateTo, setRunDateTo] = useState(() => dayParam("to"));
   const runDq = useDebouncedValue(runQ, 300);
 
   useEffect(() => {

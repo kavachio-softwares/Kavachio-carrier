@@ -173,15 +173,25 @@ function FullList({ rows, unit, linkTo }: { rows: Row[]; unit: string; linkTo?: 
 
 /** Runs a day, split by how each one came out. Stacked, because the three
  *  outcomes are parts of that day's total rather than competing series. */
-export function RunTrend({ data }: {
+export function RunTrend({ data, onDayClick }: {
   data: { date: string; clean: number; flagged: number; not_checked: number }[];
+  /** When given, clicking anywhere in a day's column reports that day. */
+  onDayClick?: (date: string) => void;
 }) {
   const any = data.some(d => d.clean + d.flagged + d.not_checked > 0);
   if (!any) return <div className="empty">No files have been run in this period.</div>;
   return (
     <div style={{ width: "100%", height: 260 }}>
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+        <BarChart data={data} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}
+          style={onDayClick ? { cursor: "pointer" } : undefined}
+          onClick={onDayClick ? (st: any) => {
+            // The whole column is the target, not just the painted bar, so a
+            // day with one small run is as easy to hit as a busy one.
+            const i = Number(st?.activeIndex);
+            const day = Number.isInteger(i) && data[i] ? data[i].date : st?.activeLabel;
+            if (day) onDayClick(String(day));
+          } : undefined}>
           <CartesianGrid vertical={false} stroke={GRID} />
           <XAxis dataKey="date" tickFormatter={shortDay} interval={tickEvery(data.length)}
                  axisLine={false} tickLine={false} tick={axisTick} />
