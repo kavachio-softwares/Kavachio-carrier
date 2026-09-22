@@ -94,7 +94,7 @@ function statusBadge(s: string) {
 }
 
 /** Small uppercase heading over a group of tiles. */
-function Section({ title, right }: { title: string; right?: React.ReactNode }) {
+function Section({ title, right }: { title: React.ReactNode; right?: React.ReactNode }) {
   return (
     <div style={{
       display: "flex", justifyContent: "space-between", alignItems: "baseline",
@@ -367,7 +367,21 @@ export default function KavachioAdminDashboard() {
         </div>
 
         {/* ===== Bordereau work — one filter row scopes everything below ===== */}
-        <Section title={`Bordereau work · ${periodWords}`} />
+        <Section title={
+          <div style={{ display: "flex", alignItems: "center", gap: 10, textTransform: "none", letterSpacing: "normal" }}>
+            <span style={{ textTransform: "uppercase", letterSpacing: ".08em" }}>Bordereau work</span>
+            <span style={{
+              background: "var(--p-surface-2, #EEF1F5)",
+              color: "var(--p-text)",
+              padding: "4px 10px",
+              borderRadius: 14,
+              fontSize: 11,
+              fontWeight: 600,
+            }}>
+              {periodWords}
+            </span>
+          </div>
+        } />
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 16 }}>
           <div className="seg">
             {RANGES.map(r => (
