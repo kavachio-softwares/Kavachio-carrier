@@ -101,7 +101,9 @@ export default function Programs() {
                   <tr>
                     <th>Programme</th>
                     <th>How far it's got</th>
-                    <th />
+                    {/* Named for what the button is: the one thing that moves
+                        this programme along the steps beside it. */}
+                    <th className="text-right">Next step</th>
                   </tr>
                 </thead>
                 <tbody>

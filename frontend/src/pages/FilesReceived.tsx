@@ -149,16 +149,36 @@ function actionLabel(a: Arrival): string {
   return st === "held" ? "Decide →" : st === "away" ? "Why →" : "Open →";
 }
 
-/** The line under the filename: what happened, in the fewest words that are
- *  still true. The full sentence is in the drawer. */
+// A few words for each check a file can stop at, in the order of CHECKS. The
+// backend's full sentence is kept for the tooltip and the drawer.
+const SHORT_REASON = [
+  "Too large, or empty", "Not a spreadsheet", "Unsafe file",
+  "Sender not recognised", "Already loaded", "Failed the security scan",
+  "Could not be opened", "No rows in it", "Columns missing", "No live contract",
+];
+
+/** The line under the filename: what happened, in a few words. The full
+ *  sentence is the line's tooltip, and is in the drawer. */
 function subline(a: Arrival): string {
   // A decision is the most recent true thing about the file, so it wins over
   // the reason that made somebody decide.
-  if (a.resolution === "released") return "released by hand — waiting to be run";
-  if (a.resolution === "discarded") return "discarded";
-  if (a.outcome === "accepted") return a.bdx_upload_id ? "" : "waiting to be run";
-  return (a.turned_away_reason ?? "").replace(/^Held — /, "");
+  if (a.resolution === "released") return "Released by hand — waiting to be run";
+  if (a.resolution === "discarded") return "Discarded";
+  if (a.outcome === "accepted") return a.bdx_upload_id ? "" : "Waiting to be run";
+  const reason = fullReason(a);
+  const i = failedCheck(reason);
+  if (i === 8) {
+    const n = reason.match(/missing (\d+) column/i)?.[1];
+    if (n) return `${n} columns missing`;
+    if (/none of the columns/i.test(reason)) return "Wrong file — none of the columns match";
+  }
+  if (i >= 0) return SHORT_REASON[i];
+  // Nothing matched: the first sentence, cut short.
+  const first = reason.split(/(?<=\.)\s/)[0];
+  return first.length > 60 ? first.slice(0, 57).trimEnd() + "…" : first;
 }
+
+const fullReason = (a: Arrival) => (a.turned_away_reason ?? "").replace(/^Held — /, "");
 
 export default function InboxTab({ onWaitingCount, active, refreshKey, liveTick = 0 }: {
   /** Reported up so a caller can carry the count. */
@@ -590,9 +610,9 @@ export default function InboxTab({ onWaitingCount, active, refreshKey, liveTick 
                           {isWaiting(a) && waitDays(a) > 0 &&
                             <span className="aged">{waitDays(a)}d waiting</span>}
                         </div>
-                        {/* Capped, because a refusal reason is a whole
-                            sentence and the full one is in the drawer. */}
-                        {sub && <div className="sub" style={{ maxWidth: 330 }}>{sub}</div>}
+                        {/* A few words; the whole sentence is the tooltip
+                            and is in the drawer. */}
+                        {sub && <div className="sub" title={fullReason(a) || undefined}>{sub}</div>}
                       </td>
                       {/* The way in is a badge, not plain text: it is the one
                           thing on the row that is a fixed set of five, and it
@@ -739,12 +759,6 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
             <div className="kv"><span className="k">Size · rows</span>
               <span className="v mono">{bytes(arrival.file_size_bytes)}
                 {" · "}{rowsOf(arrival.row_count)} rows</span></div>
-            {/* How a resend gets spotted — the duplicate check is a comparison
-                of exactly this. */}
-            <div className="kv"><span className="k">Fingerprint</span>
-              <span className="v mono" style={{ fontSize: 11 }}>
-                {arrival.file_hash_sha256
-                  ? `${arrival.file_hash_sha256.slice(0, 12)}…` : "—"}</span></div>
             {arrival.sender_notified_at && (
               <div className="kv"><span className="k">Sender told</span>
                 <span className="v">{arrival.sender_notified_via ?? "Told"}{" "}

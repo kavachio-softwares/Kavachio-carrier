@@ -4,6 +4,7 @@ import {
   AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, CheckCircle2, ChevronDown,
   ChevronRight, FileSpreadsheet, FileText, Save, Trash2,
 } from "lucide-react";
+import { SetupTabs, SheetChips, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { api } from "../api/client";
 import { currentMga, isTenantAdmin } from "../auth";
 import { fmtStamp } from "../utils/date";
@@ -84,7 +85,8 @@ export default function BordereauSetupEdit() {
   const [extra, setExtra] = useState<Record<string, MappingRule>>({});
   const [rowSheet, setRowSheet] = useState<Record<string, string>>({});
   const [conflict, setConflict] = useState<{ sheet: string; col: string; field: string; other: string } | null>(null);
-  const [collapsedSheets, setCollapsedSheets] = useState<Set<string>>(new Set());
+  // Field mapping shows one input sheet at a time; this is the one picked.
+  const [activeSheet, setActiveSheet] = useState("");
 
   // per-schedule contract bindings + the setup's fallback/default contract
   const [sheetContracts, setSheetContracts] = useState<Record<string, number | "">>({});
@@ -112,7 +114,7 @@ export default function BordereauSetupEdit() {
           api.get(`/direct/format/${p.input_format_id}`),
         ]);
         setEditor(ed);
-        setCollapsedSheets(new Set(ed.input_sheets));
+        setActiveSheet(prev => ed.input_sheets.includes(prev) ? prev : (ed.input_sheets[0] ?? ""));
         const { sel: seededSel, extra: seededExtra } = seedFromColumnMapping(ed.column_mapping);
         setSel(seededSel); setExtra(seededExtra); setRowSheet({});
         setSheetContracts((fmt?.sheet_contracts as Record<string, number>) || {});
@@ -267,8 +269,12 @@ export default function BordereauSetupEdit() {
       return n;
     });
   }
-  function toggleSheetCollapse(s: string) {
-    setCollapsedSheets(prev => { const n = new Set(prev); n.has(s) ? n.delete(s) : n.add(s); return n; });
+  // Output columns still unfilled across the output sheets one input sheet
+  // feeds — the amber count on its chip.
+  function unsourcedFor(inputSheet: string): number {
+    if (!editor) return 0;
+    return outputsForInput(editor.sheet_routing, inputSheet)
+      .reduce((n, o) => n + unmappedOutputs(o).length, 0);
   }
 
   async function saveSheetContracts() {
@@ -391,6 +397,19 @@ export default function BordereauSetupEdit() {
     );
   };
 
+  // ── the tabs ── the same as the read-only view's, less "Needs attention":
+  // its fixes are made here on Setup & documents and Field mapping.
+  const tabs: SetupTab[] = [
+    { key: "overview", label: "Setup & documents",
+      ...(refDocs.missing.length ? { count: refDocs.missing.length, warn: true } : {}) },
+    { key: "mapping", label: "Field mapping",
+      ...(unsourcedFields.length ? { count: unsourcedFields.length, warn: true } : {}) },
+    { key: "contracts", label: "Contracts & rules", count: ruleCount },
+    ...(pipeline?.program_id != null
+      ? [{ key: "calendar" as const, label: "Submission calendar" }] : []),
+  ];
+  const [tab, setTab] = useSetupTab(tabs);
+
   if (loading) {
     return (
       <>
@@ -416,19 +435,29 @@ export default function BordereauSetupEdit() {
   }
 
   return (
-    <>
+    // Full screen height, so the action bar below can sit at the bottom of the
+    // screen on every tab. `sticky bottom-0` alone only holds once the page is
+    // taller than the screen; on a short tab (Contracts & rules, Submission
+    // calendar) the bar sat halfway up, right under the content.
+    <div className="flex min-h-screen flex-col">
       <PageHeader title={setupName}
         subtitle={`${STATUS_LABEL[pipeline.status]} · Last Modified ${fmtStamp(pipeline.modified_at)}`}
         action={
-          <Button variant="secondary" onClick={() => navigate(backTo)}>
+          <Button variant="secondary" onClick={() => navigate(
+            // Back to the setup's own view: on the same tab.
+            backTo.startsWith("/direct/setups/") ? `${backTo}?tab=${tab}` : backTo)}>
             <ArrowLeft size={15} /> {backLabel}
           </Button>
         } />
-      <PageBody>
+      {/* PageBody's own spacing, as a flex column so the bar can take mt-auto. */}
+      <div className="flex flex-1 flex-col gap-5 px-8 py-6">
         {err && <Banner kind="error"><AlertTriangle size={15} /> {err}</Banner>}
         {msg && <Banner kind="ok"><CheckCircle2 size={15} /> {msg}</Banner>}
 
-        {/* 1) Bordereau Setup — identity + contracts list, with expand-to-detail */}
+        <SetupTabs tabs={tabs} current={tab} onChange={setTab} />
+
+        {/* ── Setup & documents ── */}
+        {tab === "overview" && (
         <Card title={<span className="flex items-center gap-2">
           <FileText size={16} className="text-navy" /> Bordereau Setup</span>}>
           <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -437,7 +466,19 @@ export default function BordereauSetupEdit() {
               ? "bg-emerald-100 text-emerald-700" : "bg-surface-2 text-ink-muted"}`}>
               {STATUS_LABEL[pipeline.status]}
             </span>
-
+          </div>
+          <div className="mb-4 grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
+            {([
+              ["Carrier", pipeline.carrier_name],
+              ["Program", pipeline.program_name],
+              ["Input Template", pipeline.input_format_name],
+              ["Output Template", pipeline.output_template_name],
+            ] as const).map(([k, v]) => (
+              <div key={k}>
+                <div className="mb-1 text-[11px] uppercase text-ink-muted">{k}</div>
+                <div className="truncate font-medium">{v ?? "—"}</div>
+              </div>
+            ))}
           </div>
 
           {/* Documents the contract defers rules to that were never supplied —
@@ -450,11 +491,18 @@ export default function BordereauSetupEdit() {
               provide — above the contracts on purpose: it is read BEFORE the
               contract it was judged against. Self-loading from the stored
               check, so opening this page costs no model call. */}
-          <MissingColumnsNote pipelineId={pipeline.id} refreshKey={noteKey} className="mb-4" />
+          <MissingColumnsNote pipelineId={pipeline.id} refreshKey={noteKey} />
+        </Card>
+        )}
 
-          <div className="text-sm font-semibold mb-2">
-            Contracts <span className="text-xs font-normal text-ink-muted">({pipeline.contracts.length})</span>
-          </div>
+        {/* ── Contracts & rules ── each contract expands to its terms, rules
+            and clause routing, editable. */}
+        {tab === "contracts" && (
+        <Card title={<span className="flex items-center gap-2">
+          <FileText size={16} className="text-navy" /> Contracts
+          <span className="text-xs font-normal text-ink-muted">({pipeline.contracts.length})</span>
+          <span className="text-xs font-normal text-ink-muted">· {ruleCount} rule(s) across {fieldsWithClauses} output column(s)</span>
+        </span>}>
           <div className="space-y-2">
             {pipeline.contracts.length === 0 && (
               <div className="text-sm text-ink-muted">No contracts bound to this setup yet.</div>
@@ -472,6 +520,7 @@ export default function BordereauSetupEdit() {
             })}
           </div>
         </Card>
+        )}
 
         {/* 2) Submission Calendar — when this setup's bordereaux are due.
             Placed here, directly under the setup identity, rather than at the
@@ -480,21 +529,21 @@ export default function BordereauSetupEdit() {
             it. The carrier and program come from the pipeline, so unlike the
             standalone My Calendar page there is nothing to select — offering a
             picker here would let the section contradict the setup it is in. */}
-        {pipeline.program_id != null && (
+        {tab === "calendar" && pipeline.program_id != null && (
           <Card title={<span className="flex items-center gap-2">
             <CalendarDays size={16} className="text-navy" /> Submission Calendar</span>}>
             <ProgramCalendar
               programId={pipeline.program_id}
               programName={pipeline.program_name}
               carrierName={pipeline.carrier_name}
-              collapsible
               /* Editor only. This page configures the schedule; reading the
                  periods belongs on My Calendar and Program Management. */
               showPeriods={false} />
           </Card>
         )}
 
-        {/* 3) Sheet Mapping — which input feeds each output sheet, and which contract validates it */}
+        {/* ── Field mapping ── sheet → contract, then one input sheet at a time. */}
+        {tab === "mapping" && (<>
         {editor && editor.output_sheets.length > 0 && contracts.length > 0 && (
           <Card title={<span className="flex items-center gap-2">
             <FileSpreadsheet size={16} className="text-navy" /> Sheet Mapping</span>}
@@ -584,20 +633,21 @@ export default function BordereauSetupEdit() {
         {editor && editor.input_sheets.length > 0 && (
           <div className="mt-3 flex flex-col justify-between gap-3 rounded-md border border-border bg-white p-3">
             <h1 className="font-semibold">Field Mapping &amp; Validation Rules</h1>
-            {editor.input_sheets.map(inputSheet => {
+            <SheetChips sheets={editor.input_sheets}
+              current={editor.input_sheets.includes(activeSheet) ? activeSheet : editor.input_sheets[0]}
+              onPick={setActiveSheet} unsourced={unsourcedFor} />
+            {editor.input_sheets
+              .filter(s => s === (editor.input_sheets.includes(activeSheet) ? activeSheet : editor.input_sheets[0]))
+              .map(inputSheet => {
               const outs = outputsForInput(editor.sheet_routing, inputSheet);
               const inputCols = editor.input_columns[inputSheet] ?? [];
               const multi = outs.length > 1;
               const sheetUnsourced = outs.reduce((n, o) => n + unmappedOutputs(o).length, 0);
-              const collapsed = collapsedSheets.has(inputSheet);
               return (
                 <Card key={inputSheet}
-                  title={<button type="button" onClick={() => toggleSheetCollapse(inputSheet)}
-                    className="flex items-center gap-2 text-left hover:text-navy transition">
-                    {collapsed ? <ChevronRight size={16} className="shrink-0 text-ink-muted" />
-                      : <ChevronDown size={16} className="shrink-0 text-ink-muted" />}
+                  title={<span className="flex items-center gap-2">
                     <FileSpreadsheet size={16} className="text-navy" /> {inputSheet}
-                  </button>}
+                  </span>}
                   action={sheetUnsourced > 0
                     ? <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2.5 py-1 bg-amber-50 text-amber-700">
                         <AlertTriangle size={12} /> {sheetUnsourced} Unsourced</span>
@@ -605,14 +655,7 @@ export default function BordereauSetupEdit() {
                       ? <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2.5 py-1 bg-emerald-50 text-emerald-700">
                           <CheckCircle2 size={12} /> All Sourced</span>
                       : undefined}>
-                  {collapsed ? (
-                    <p className="text-xs text-ink-muted">
-                      {outs.length === 0
-                        ? "Not mapped to any output sheet yet."
-                        : <>Maps to <span className="font-medium text-ink">{outs.join(", ")}</span> ·{" "}
-                            {inputCols.length} input column{inputCols.length === 1 ? "" : "s"}. Expand to edit.</>}
-                    </p>
-                  ) : outs.length === 0 ? (
+                  {outs.length === 0 ? (
                     <p className="text-sm text-ink-muted">
                       This input sheet isn't mapped to any output sheet.
                     </p>
@@ -735,9 +778,10 @@ export default function BordereauSetupEdit() {
             sheet above, otherwise they'll be blank in the output.
           </Banner>
         )}
+        </>)}
 
 
-        <div className="sticky bottom-0 z-30 -mx-8 mt-2 px-8 py-3 bg-white/95 backdrop-blur
+        <div className="sticky bottom-0 z-30 -mx-8 -mb-6 mt-auto px-8 py-3 bg-white/95 backdrop-blur
           border-t border-border shadow-[0_-1px_8px_rgba(17,24,39,0.06)]">
           <div className="flex flex-wrap items-center gap-2">
             {/* <span className={`inline-flex items-center gap-1 text-[11px] rounded-full px-2.5 py-1 mr-1 font-medium ${
@@ -756,13 +800,14 @@ export default function BordereauSetupEdit() {
               </Button>
             )}
             {unsourcedFields.length > 0 && (
-              <span className="inline-flex items-center gap-1 text-xs text-amber-600 ml-auto">
-                <AlertTriangle size={13} /> {unsourcedFields.length} Field(s) Unsourced
-              </span>
+              <button type="button" onClick={() => setTab("mapping")}
+                className="ml-auto inline-flex items-center gap-1 text-xs text-amber-600 hover:underline">
+                <AlertTriangle size={13} /> {unsourcedFields.length} Field(s) Unsourced · show me
+              </button>
             )}
           </div>
         </div>
-      </PageBody>
-    </>
+      </div>
+    </div>
   );
 }

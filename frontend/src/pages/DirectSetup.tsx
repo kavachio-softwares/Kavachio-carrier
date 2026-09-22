@@ -10,6 +10,7 @@ import {
 import { api, downloadFile, downloadErrorText } from "../api/client";
 import { currentMga, isTenantAdmin } from "../auth";
 import { PageBody, PageHeader } from "../components/Layout";
+import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
@@ -374,6 +375,9 @@ export default function DirectSetup() {
   // Applied once the programme list is in (a programme cannot be selected
   // before it is listed), and only while nothing has been picked by hand.
   const [params, setParams] = useSearchParams();
+  // Read once, before the link's params are consumed below: arrived from the
+  // Configure Program flow, so its stepper is shown above this screen.
+  const [fromFlow] = useState(() => params.get(FLOW_PARAM) === "1");
   useEffect(() => {
     if (!programs.length) return;
     const wanted = Number(params.get("program_id") || 0);
@@ -1354,6 +1358,7 @@ export default function DirectSetup() {
       <PageHeader title="Bordereau Setup"
         subtitle="Done once per carrier and programme, so every later bordereau is just an upload." />
       <PageBody>
+        {fromFlow && <ProgrammeFlowBar programId={programId === "" ? null : Number(programId)} at={4} />}
         {err && <Banner kind="error"><AlertTriangle size={15} /> {err}</Banner>}
 
         <Modal open={multiTableModal != null} size="xl"

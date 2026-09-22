@@ -322,7 +322,7 @@ export default function AddProgram() {
   const setupBroker = withContract.find(b => onProg(b.id)?.setup_status !== "active") ?? withContract[0];
   const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
   const setupUrl = (brokerId: number) =>
-    `/direct/setup?program_id=${programId}&broker_party_id=${brokerId}`;
+    `/direct/setup?program_id=${programId}&broker_party_id=${brokerId}&flow=1`;
   const steps: FlowStep[] = [
     {
       key: "programme", label: "Configure program",
@@ -659,7 +659,7 @@ export default function AddProgram() {
                           className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-2">
                           <Upload size={13} /> Upload contract
                         </button>
-                        <Link to={`/contracts/new?program_id=${programId}&broker_party_id=${b.id}`}
+                        <Link to={`/contracts/new?program_id=${programId}&broker_party_id=${b.id}&flow=1`}
                           className="inline-flex items-center gap-1.5 rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark hover:no-underline">
                           <Plus size={13} /> Raise a contract
                         </Link>

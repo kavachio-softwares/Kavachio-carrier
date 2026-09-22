@@ -23,7 +23,6 @@ import {
   type ContractRecord, type Lifecycle,
 } from "../api/contractRecord";
 import { fmtDate } from "../utils/date";
-import { describeChecks } from "../utils/contractChecks";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useServerList } from "../hooks/useServerList";
 import { ListFilterBar } from "../components/ListFilterBar";
@@ -201,12 +200,10 @@ export default function Contracts() {
               <thead>
                 <tr>
                   <th>Contract</th><th>Broker</th><th>Programme</th>
-                  <th>Term</th><th>State</th><th>Documents</th>
-                  {/* What is MEASURED, which is not what the contract says. A
-                      contract can carry ten agreed limits and nought checks
-                      until it is bound to the bordereau template it reports
-                      into — and nothing on this screen used to say so. */}
-                  <th>Checks</th>
+                  <th>Term</th><th>State</th>
+                  {/* Documents and Checks were taken off this list; both are
+                      still on the contract's own page. A missing document is
+                      still flagged in the warning above the table. */}
                 </tr>
               </thead>
               <tbody>
@@ -241,24 +238,6 @@ export default function Contracts() {
                         </span>
                         <div className="sub">{st.note}</div>
                       </td>
-                      <td>
-                        {c.has_wording
-                          ? <span className="muted">Wording on file</span>
-                          : <span className="faint">No wording yet</span>}
-                        {c.endorsement_count > 0 && (
-                          <div className="sub">
-                            +{c.endorsement_count} endorsement
-                            {c.endorsement_count === 1 ? "" : "s"}
-                          </div>
-                        )}
-                        {c.missing_references.length > 0 && (
-                          <div className="sub" style={{ color: "var(--p-warn-ink)" }}>
-                            {c.missing_references.length} document
-                            {c.missing_references.length === 1 ? "" : "s"} missing
-                          </div>
-                        )}
-                      </td>
-                      <td><Checks c={c} /></td>
                     </tr>
                   );
                 })}
@@ -287,41 +266,5 @@ export default function Contracts() {
         // The new contract belongs in the list — re-read it.
         onAdded={() => reload()} />
     </div>
-  );
-}
-
-/**
- * How much of one contract is actually measured on a file.
- *
- * The gap this exists to close: a carrier writes a contract with ten limits on
- * it, every one of them stated in the wording and shown on the record, and not
- * one of them is checked against anything, because a check is a comparison
- * against a bordereau column and nothing had ever bound the two together. The
- * count was invisible, so the contract looked finished.
- *
- * A contract read out of a PDF gets its rules from its clauses instead, and has
- * no agreed limits at all, so it says where its rules came from.
- *
- * The words come from describeChecks, which the contract page uses too.
- *
- * Read-only. There used to be a "Bind checks" / "Re-bind" button here; it was
- * taken off this screen.
- */
-function Checks({ c }: { c: ContractRecord }) {
-  const w = describeChecks(c.checks);
-  if (w.none) {
-    // Helper text off for now (see contractChecks.ts) — w.detail is "".
-    return <span className="faint">None</span>;
-  }
-  return (
-    <>
-      <span className={`badge ${w.ok ? "b-ok" : "b-warn"}`}
-        title={w.sources && w.sources !== w.detail ? w.sources : undefined}>
-        <span className="d" />
-        {w.badge}
-      </span>
-      {/* Helper line off for now (see contractChecks.ts) — w.detail is "". */}
-      {!!w.detail && <div className="sub">{w.detail}</div>}
-    </>
   );
 }

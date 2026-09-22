@@ -3,7 +3,7 @@
 // trail: one card across the full width, "STEP n" over the step's name, › between steps, the
 // current step on a soft brand fill. Where a step stands ("2 brokers") and, for
 // a step you cannot reach yet, what unlocks it, are in the tooltip.
-import { Fragment } from "react";
+import { Fragment, type ReactNode } from "react";
 import { Check, ChevronRight } from "lucide-react";
 
 export type FlowStep = {
@@ -21,10 +21,16 @@ export type FlowStep = {
   onClick: () => void;
 };
 
-export function FlowStepper({ steps, label }: { steps: FlowStep[]; label: string }) {
+/** `children`, when given, is drawn inside the same card under the steps —
+ *  the steps of whatever the current step is made of (a contract's own four
+ *  steps, under "Contracts"), so there is one stepper on screen, not two. */
+export function FlowStepper({ steps, label, children }: {
+  steps: FlowStep[]; label: string; children?: ReactNode;
+}) {
   return (
     <nav aria-label={label}
-      className="mb-5 flex w-full flex-wrap items-center gap-px rounded-lg border border-border bg-surface p-[5px] shadow-sm">
+      className="mb-5 w-full rounded-lg border border-border bg-surface p-[5px] shadow-sm">
+      <div className="flex w-full flex-wrap items-center gap-px">
       {steps.map((s, i) => {
         const done = s.state === "done";
         const current = s.open ?? s.state === "current";
@@ -62,6 +68,48 @@ export function FlowStepper({ steps, label }: { steps: FlowStep[]; label: string
           </Fragment>
         );
       })}
+      </div>
+      {children}
     </nav>
+  );
+}
+
+export type SubStep = { key: string; label: string };
+
+/** The smaller row inside a step: dots, not numbered circles, so it reads as
+ *  part of the step above it rather than as a second stepper. */
+export function SubSteps({ caption, steps, current, furthest, onPick }: {
+  caption: string;
+  steps: readonly SubStep[];
+  current: number;
+  /** The furthest sub-step reached; everything before it shows as done. */
+  furthest: number;
+  onPick: (i: number) => void;
+}) {
+  return (
+    <div className="mx-[5px] mb-0.5 mt-1.5 flex flex-wrap items-center gap-1 rounded-md border border-border bg-surface-2 px-2.5 py-2"
+      aria-label={caption}>
+      <span className="mr-2 whitespace-nowrap text-[11px] font-bold text-navy">{caption}:</span>
+      {steps.map((s, i) => {
+        const on = i === current;
+        const done = !on && (i < furthest || i < current);
+        return (
+          <Fragment key={s.key}>
+            {i > 0 && <span aria-hidden className="px-0.5 text-[13px] text-ink-soft">›</span>}
+            <button type="button" onClick={() => !on && onPick(i)}
+              aria-current={on ? "step" : undefined}
+              title={on ? undefined : `Go to ${s.label}`}
+              className={`inline-flex items-center gap-[7px] rounded-md px-2.5 py-1 text-[12.5px] font-semibold transition-colors
+                ${on ? "bg-navy/10 text-navy" : done ? "text-ink hover:bg-surface" : "text-ink-muted hover:bg-surface"}
+                focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-navy`}>
+              <span aria-hidden className={`h-[9px] w-[9px] shrink-0 rounded-full border-2
+                ${on ? "border-navy bg-navy ring-[3px] ring-navy/20"
+                  : done ? "border-success bg-success" : "border-border bg-transparent"}`} />
+              {s.label}
+            </button>
+          </Fragment>
+        );
+      })}
+    </div>
   );
 }

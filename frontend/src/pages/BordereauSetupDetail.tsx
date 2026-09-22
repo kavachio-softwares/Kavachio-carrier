@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, ChevronDown, ChevronRight,
   FileSpreadsheet, FileText, FileUp, Info, Pencil, ShieldCheck,
 } from "lucide-react";
+import { SetupTabs, SheetChips, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
 import { fmtStamp } from "../utils/date";
@@ -76,7 +77,8 @@ export default function BordereauSetupDetail() {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Field mapping shows one input sheet at a time; this is the one picked.
+  const [activeSheet, setActiveSheet] = useState("");
 
   // contract expand-to-detail (rules/terms/clause routing) — a contract's own
   // rules stay editable here even though the sheet/field mapping is read-only,
@@ -102,10 +104,9 @@ export default function BordereauSetupDetail() {
         if (r.data.input_format_id) {
           const e = await api.get<EditorResp>(`/direct/format/${r.data.input_format_id}/editor`);
           setEditor(e.data);
-          // Every sheet starts collapsed — same reasoning as the builder: a
-          // setup can have many sheets, showing them all open at once makes
-          // the page unusably long.
-          setCollapsed(new Set(e.data.input_sheets));
+          // One sheet at a time (chips pick it) — a setup can have many
+          // sheets, and all of them open at once made the page unusably long.
+          setActiveSheet(e.data.input_sheets[0] ?? "");
         }
         if (r.data.program_id != null) {
           const cs = await api.get<Contract[]>(`/programs/${r.data.program_id}/contracts`);
@@ -195,14 +196,36 @@ export default function BordereauSetupDetail() {
   function outFieldsFor(sheet: string): string[] {
     return (editor?.fields ?? []).filter(f => f.sheet === sheet).map(f => f.field);
   }
-  function toggle(sheet: string) {
-    setCollapsed(prev => { const n = new Set(prev); n.has(sheet) ? n.delete(sheet) : n.add(sheet); return n; });
+  // Output columns still unfilled across the output sheets one input sheet
+  // feeds — the amber count on its chip.
+  function unsourcedFor(inputSheet: string): number {
+    if (!editor) return 0;
+    return outputsForInput(editor.sheet_routing, inputSheet).reduce((n, outSheet) => {
+      const used = new Set(
+        Object.entries(sel).filter(([k]) => k.startsWith(`${outSheet}||`)).map(([, v]) => v));
+      return n + outFieldsFor(outSheet).filter(f => !used.has(f)).length;
+    }, 0);
   }
 
   const setupName = pipeline
     ? [pipeline.carrier_name, pipeline.program_name].filter(Boolean).join(" — ")
       || pipeline.name
     : "";
+
+  // ── the tabs ── one per section of what used to be one long page.
+  const tabs: SetupTab[] = [
+    { key: "overview", label: "Overview" },
+    { key: "mapping", label: "Field mapping",
+      ...(unsourcedFields.length ? { count: unsourcedFields.length, warn: true } : {}) },
+    { key: "contracts", label: "Contracts & rules", count: ruleCount },
+    { key: "attention", label: "Needs attention",
+      ...(refDocs.missing.length ? { count: refDocs.missing.length, warn: true } : {}) },
+    ...(pipeline?.program_id != null
+      ? [{ key: "calendar" as const, label: "Submission calendar" }] : []),
+  ];
+  const [tab, setTab] = useSetupTab(tabs);
+  // Edit has no "Needs attention" tab — its fixes are made on Field mapping.
+  const editTab = tab === "attention" ? "mapping" : tab;
 
   return (
     <>
@@ -223,7 +246,7 @@ export default function BordereauSetupDetail() {
                 <ShieldCheck size={15} /> Activate Setup
               </Button>
             )}
-            <Button onClick={() => nav(`/direct/setups/${id}/edit?back=${encodeURIComponent(`/direct/setups/${id}`)}`)}>
+            <Button onClick={() => nav(`/direct/setups/${id}/edit?back=${encodeURIComponent(`/direct/setups/${id}`)}&tab=${editTab}`)}>
               <Pencil size={15} /> Edit
             </Button>
           </div>
@@ -231,10 +254,6 @@ export default function BordereauSetupDetail() {
       <PageBody>
         {activateMsg && <Banner kind="ok"><ShieldCheck size={15} /> {activateMsg}</Banner>}
         {activateErr && <Banner kind="error"><AlertTriangle size={15} /> {activateErr}</Banner>}
-        <Banner kind="info">
-          <Info size={15} /> This is a read-only view — changes can only be made from Bordereau Setup.
-        </Banner>
-
         {err && <Banner kind="error"><AlertTriangle size={15} /> {err}</Banner>}
 
         {loading ? (
@@ -243,109 +262,197 @@ export default function BordereauSetupDetail() {
           </div></Card>
         ) : pipeline && (
           <>
-            <Card title={<span className="flex items-center gap-2">
-              <ShieldCheck size={16} className="text-navy" /> Setup Overview</span>}>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                <div>
-                  <div className="text-[11px] uppercase text-ink-muted mb-1">Carrier</div>
-                  <div className="font-medium">{pipeline.carrier_name ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase text-ink-muted mb-1">Program</div>
-                  <div className="font-medium">{pipeline.program_name ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase text-ink-muted mb-1">Status</div>
-                  <span className={`inline-flex text-[11px] rounded-full px-2 py-0.5 font-medium ${STATUS_TONE[pipeline.status]}`}>
-                    {STATUS_LABEL[pipeline.status]}
-                  </span>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase text-ink-muted mb-1">Created</div>
-                  <div className="font-medium">{fmtStamp(pipeline.created_at)}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase text-ink-muted mb-1">Input Template</div>
-                  <div className="font-medium flex items-center gap-1.5">
-                    <FileUp size={13} className="text-ink-soft shrink-0" />
-                    <span className="truncate">{pipeline.input_format_name ?? "— None —"}</span>
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase text-ink-muted mb-1">Output Template</div>
-                  <div className="font-medium flex items-center gap-1.5">
-                    <FileSpreadsheet size={13} className="text-ink-soft shrink-0" />
-                    <span className="truncate">{pipeline.output_template_name ?? "— None —"}</span>
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase text-ink-muted mb-1">Contract Rules</div>
-                  <div className="font-medium">{ruleCount} Rule(s) Across {fieldsWithClauses} Field(s)</div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase text-ink-muted mb-1">Supplementary Data</div>
-                  <div className="font-medium">{pipeline.has_supplement ? "Attached" : "None"}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase text-ink-muted mb-1">Reference Documents</div>
-                  <div className="font-medium">
-                    {refDocs.missing.length > 0
-                      ? <span className="text-amber-700">{refDocs.missing.length} Not Provided</span>
-                      : refDocs.provided.length > 0
-                        ? `${refDocs.provided.length} Attached`
-                        : "None"}
-                  </div>
-                </div>
-              </div>
+            <SetupTabs tabs={tabs} current={tab} onChange={setTab} />
 
-              <MissingReferenceDocsNote refDocs={refDocs} className="mt-4"
-                showSources={pipeline.contracts.length > 1} />
-
-              {refDocs.provided.length > 0 && (
-                <p className="mt-3 text-[12px] text-ink-muted">
-                  Reference document{refDocs.provided.length > 1 ? "s" : ""} used:{" "}
-                  <span className="text-ink">{refDocs.provided.join(", ")}</span>
+            {tab === "overview" && (
+              <>
+                <p className="mb-3 flex items-center gap-2 rounded-md bg-surface-2 px-3 py-2 text-[12.5px] text-ink-muted">
+                  <Info size={14} className="shrink-0" /> Read-only. Press Edit to change anything.
                 </p>
-              )}
+                <Card title={<span className="flex items-center gap-2">
+                  <ShieldCheck size={16} className="text-navy" /> Setup Overview</span>}>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1">Carrier</div>
+                      <div className="font-medium">{pipeline.carrier_name ?? "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1">Program</div>
+                      <div className="font-medium">{pipeline.program_name ?? "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1">Status</div>
+                      <span className={`inline-flex text-[11px] rounded-full px-2 py-0.5 font-medium ${STATUS_TONE[pipeline.status]}`}>
+                        {STATUS_LABEL[pipeline.status]}
+                      </span>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1">Created</div>
+                      <div className="font-medium">{fmtStamp(pipeline.created_at)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1">Input Template</div>
+                      <div className="font-medium flex items-center gap-1.5">
+                        <FileUp size={13} className="text-ink-soft shrink-0" />
+                        <span className="truncate">{pipeline.input_format_name ?? "— None —"}</span>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1">Output Template</div>
+                      <div className="font-medium flex items-center gap-1.5">
+                        <FileSpreadsheet size={13} className="text-ink-soft shrink-0" />
+                        <span className="truncate">{pipeline.output_template_name ?? "— None —"}</span>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1">Contract Rules</div>
+                      <div className="font-medium">{ruleCount} Rule(s) Across {fieldsWithClauses} Field(s)</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1">Supplementary Data</div>
+                      <div className="font-medium">{pipeline.has_supplement ? "Attached" : "None"}</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1">Reference Documents</div>
+                      <div className="font-medium">
+                        {refDocs.missing.length > 0
+                          ? <span className="text-amber-700">{refDocs.missing.length} Not Provided</span>
+                          : refDocs.provided.length > 0
+                            ? `${refDocs.provided.length} Attached`
+                            : "None"}
+                      </div>
+                    </div>
+                  </div>
+                  {refDocs.provided.length > 0 && (
+                    <p className="mt-3 text-[12px] text-ink-muted">
+                      Reference document{refDocs.provided.length > 1 ? "s" : ""} used:{" "}
+                      <span className="text-ink">{refDocs.provided.join(", ")}</span>
+                    </p>
+                  )}
+                </Card>
 
-            </Card>
-
-            {/* Submission Calendar — when this setup's bordereaux are due. Shown
-                here for the same reason the edit page shows it: someone arriving
-                from a deadline reminder should not have to scroll past hundreds
-                of mapping rows to find the schedule. Read-only, like the rest of
-                this page — the schedule is changed from Bordereau Setup, so a
-                deadline only ever moves in one place. */}
-            {pipeline.program_id != null && (
-              <Card title={<span className="flex items-center gap-2">
-                <CalendarDays size={16} className="text-navy" /> Submission Calendar</span>}>
-                <ProgramCalendar
-                  programId={pipeline.program_id}
-                  programName={pipeline.program_name}
-                  carrierName={pipeline.carrier_name}
-                  collapsible readOnly defaultCollapsed
-                  /* Schedule only — the period list is read on My Calendar and
-                     Program Management, matching the edit page. */
-                  showPeriods={false} />
-              </Card>
+                {/* Where to go next — each tile opens the tab it counts. */}
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  <JumpTile n={fieldsWithClauses} label="fields with a contract rule"
+                    onClick={() => setTab("mapping")} />
+                  <JumpTile n={ruleCount} label={`rules from ${pipeline.contracts.length} contract${pipeline.contracts.length === 1 ? "" : "s"}`}
+                    onClick={() => setTab("contracts")} />
+                  <JumpTile n={unsourcedFields.length + refDocs.missing.length}
+                    label="things to look at" warn={unsourcedFields.length + refDocs.missing.length > 0}
+                    onClick={() => setTab(refDocs.missing.length ? "attention" : "mapping")} />
+                </div>
+              </>
             )}
 
-            {/* What the contract asks for that this setup's bordereau doesn't
-                provide. Sits between the overview and the contracts on purpose:
-                it's read AFTER "what this setup is" and BEFORE the contract it
-                was judged against. Self-loading from the stored check — reading
-                it costs nothing, and a setup built before this check existed
-                runs it once on its first visit. */}
-            <MissingColumnsNote pipelineId={pipeline.id} refreshKey={noteKey}
-              defaultCollapsed />
+            {tab === "mapping" && (
+              !pipeline.input_format_id ? (
+                <Banner kind="warn">
+                  <AlertTriangle size={15} /> This setup has no input template yet — open it in Bordereau
+                  Setup to finish mapping it.
+                </Banner>
+              ) : editor && editor.input_sheets.length === 0 ? (
+                <Banner kind="warn"><AlertTriangle size={15} /> No input sheets found for this setup yet.</Banner>
+              ) : editor && (() => {
+                const inputSheet = editor.input_sheets.includes(activeSheet)
+                  ? activeSheet : editor.input_sheets[0];
+                const outs = outputsForInput(editor.sheet_routing, inputSheet);
+                const inputCols = editor.input_columns[inputSheet] ?? [];
+                return (
+                  <Card title={<span className="flex items-center gap-2">
+                    <FileSpreadsheet size={16} className="text-navy" /> {inputSheet}</span>}
+                    action={<span className="text-xs text-ink-muted">
+                      {outs.length ? <>Maps to <span className="font-medium text-ink">{outs.join(", ")}</span></> : null}
+                    </span>}>
+                    <SheetChips sheets={editor.input_sheets} current={inputSheet}
+                      onPick={setActiveSheet} unsourced={unsourcedFor} />
+                    {outs.length === 0 ? (
+                      <p className="text-sm text-ink-muted">This input sheet isn't mapped to any output sheet.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <div className="min-w-[640px] rounded-lg border border-border overflow-hidden">
+                          <div className="grid grid-cols-[1.1fr_26px_1.2fr_1.4fr] gap-3.5 px-4 py-2 bg-surface-2 text-[10px] font-bold uppercase tracking-wide text-ink-muted">
+                            <div>Input Column</div><div /><div>Output Column</div><div>Contract Clause &amp; Rule</div>
+                          </div>
+                          {inputCols.map(col => {
+                            const assignment = assignmentFor(sel, outs, col);
+                            const clauses = assignment
+                              ? clauseByField[sheetFieldKey(assignment.sheet, assignment.field)] : undefined;
+                            return (
+                              <div key={col}
+                                className="grid grid-cols-[1.1fr_26px_1.2fr_1.4fr] gap-3.5 items-start px-4 py-3 border-b border-border last:border-b-0">
+                                <div className="pt-1.5 font-mono text-xs text-ink">{col}</div>
+                                <div className="pt-1 text-center text-ink-soft"><ArrowRight size={13} className="inline" /></div>
+                                <div className="pt-1 text-sm">
+                                  {assignment ? (
+                                    <>
+                                      {assignment.field}
+                                      {outs.length > 1 && (
+                                        <div className="text-[11px] text-ink-muted mt-0.5">On {assignment.sheet}</div>
+                                      )}
+                                    </>
+                                  ) : <span className="text-ink-soft">— Not Mapped —</span>}
+                                </div>
+                                <div className="flex flex-col gap-1.5">
+                                  {clauses && clauses.length > 0
+                                    ? clauses.map(cl => (
+                                        <div key={cl.rule_id}
+                                          className="rounded-md border border-navy/15 bg-navy/[0.04] px-2.5 py-2 text-[11.5px] leading-snug text-ink">
+                                          {cl.text}
+                                        </div>))
+                                    : assignment
+                                      ? <span className="text-xs text-ink-soft pt-1.5">No contract rule for this field.</span>
+                                      : <span className="text-xs text-ink-soft/70 pt-1.5">—</span>}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
 
-            {/* Contracts — same expand-to-detail (terms, rules, clause routing) the
-                builder itself shows; a contract's own rules stay editable here even
-                though the sheet/field mapping below is read-only. */}
-            <Card title={<span className="flex items-center gap-2">
-              <FileText size={16} className="text-navy" /> Contracts
-              <span className="text-xs font-normal text-ink-muted">({pipeline.contracts.length})</span>
-            </span>}>
+                        {outs.map(outSheet => {
+                          const used = new Set(
+                            Object.entries(sel).filter(([k]) => k.startsWith(`${outSheet}||`)).map(([, v]) => v));
+                          const unmapped = outFieldsFor(outSheet).filter(f => !used.has(f));
+                          if (unmapped.length === 0) return null;
+                          return (
+                            <div key={outSheet} className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 overflow-hidden">
+                              <div className="flex items-center gap-1.5 text-sm font-medium px-4 py-2.5 border-b border-amber-200 text-amber-800">
+                                <AlertTriangle size={14} /> Not Sourced From This Sheet
+                                {outs.length > 1 && <span className="font-mono text-xs">· {outSheet}</span>}
+                              </div>
+                              <div className="divide-y divide-amber-200/70">
+                                {unmapped.map(f => {
+                                  const rule = extra[sheetFieldKey(outSheet, f)];
+                                  return (
+                                    <div key={f} className="flex items-center gap-2 text-sm px-4 py-2.5">
+                                      <span className="w-56 truncate font-medium">{f}</span>
+                                      <span className="text-ink-muted text-xs">
+                                        {rule?.kind === "const" ? `Constant: ${rule.value || "(Blank)"}`
+                                          : rule?.kind === "source_sheet" ? "Source Tab Name"
+                                          : "Left Blank"}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </Card>
+                );
+              })()
+            )}
+
+            {tab === "contracts" && (
+              /* Same expand-to-detail (terms, rules, clause routing) the builder
+                 itself shows; a contract's own rules stay editable here even
+                 though the sheet/field mapping is read-only. */
+              <Card title={<span className="flex items-center gap-2">
+                <FileText size={16} className="text-navy" /> Contracts
+                <span className="text-xs font-normal text-ink-muted">({pipeline.contracts.length})</span>
+                <span className="text-xs font-normal text-ink-muted">· {ruleCount} rule(s) across {fieldsWithClauses} field(s)</span>
+              </span>}>
               <div className="space-y-2">
                 {pipeline.contracts.length === 0 && (
                   <div className="text-sm text-ink-muted">No contracts attached.</div>
@@ -387,111 +494,42 @@ export default function BordereauSetupDetail() {
                   );
                 })}
               </div>
-            </Card>
+              </Card>
+            )}
 
-            {!pipeline.input_format_id ? (
-              <Banner kind="warn">
-                <AlertTriangle size={15} /> This setup has no input template yet — open it in Bordereau
-                Setup to finish mapping it.
-              </Banner>
-            ) : editor && editor.input_sheets.length === 0 ? (
-              <Banner kind="warn"><AlertTriangle size={15} /> No input sheets found for this setup yet.</Banner>
-            ) : editor && editor.input_sheets.map(inputSheet => {
-              const outs = outputsForInput(editor.sheet_routing, inputSheet);
-              const inputCols = editor.input_columns[inputSheet] ?? [];
-              const isCollapsed = collapsed.has(inputSheet);
-              return (
-                <Card key={inputSheet}
-                  title={<button type="button" onClick={() => toggle(inputSheet)}
-                    className="flex items-center gap-2 text-left hover:text-navy transition">
-                    {isCollapsed ? <ChevronRight size={16} className="shrink-0 text-ink-muted" />
-                      : <ChevronDown size={16} className="shrink-0 text-ink-muted" />}
-                    <FileSpreadsheet size={16} className="text-navy" /> {inputSheet}
-                  </button>}>
-                  {isCollapsed ? (
-                    <p className="text-xs text-ink-muted">
-                      {outs.length === 0
-                        ? "Not mapped to any output sheet."
-                        : <>Maps to <span className="font-medium text-ink">{outs.join(", ")}</span> ·{" "}
-                            {inputCols.length} input column{inputCols.length === 1 ? "" : "s"}. Expand to view.</>}
-                    </p>
-                  ) : outs.length === 0 ? (
-                    <p className="text-sm text-ink-muted">This input sheet isn't mapped to any output sheet.</p>
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <div className="min-w-[640px] rounded-lg border border-border overflow-hidden">
-                        <div className="grid grid-cols-[1.1fr_26px_1.2fr_1.4fr] gap-3.5 px-4 py-2 bg-surface-2 text-[10px] font-bold uppercase tracking-wide text-ink-muted">
-                          <div>Input Column</div><div /><div>Output Column</div><div>Contract Clause &amp; Rule</div>
-                        </div>
-                        {inputCols.map(col => {
-                          const assignment = assignmentFor(sel, outs, col);
-                          const clauses = assignment
-                            ? clauseByField[sheetFieldKey(assignment.sheet, assignment.field)] : undefined;
-                          return (
-                            <div key={col}
-                              className="grid grid-cols-[1.1fr_26px_1.2fr_1.4fr] gap-3.5 items-start px-4 py-3 border-b border-border last:border-b-0">
-                              <div className="pt-1.5 font-mono text-xs text-ink">{col}</div>
-                              <div className="pt-1 text-center text-ink-soft"><ArrowRight size={13} className="inline" /></div>
-                              <div className="pt-1 text-sm">
-                                {assignment ? (
-                                  <>
-                                    {assignment.field}
-                                    {outs.length > 1 && (
-                                      <div className="text-[11px] text-ink-muted mt-0.5">On {assignment.sheet}</div>
-                                    )}
-                                  </>
-                                ) : <span className="text-ink-soft">— Not Mapped —</span>}
-                              </div>
-                              <div className="flex flex-col gap-1.5">
-                                {clauses && clauses.length > 0
-                                  ? clauses.map(cl => (
-                                      <div key={cl.rule_id}
-                                        className="rounded-md border border-navy/15 bg-navy/[0.04] px-2.5 py-2 text-[11.5px] leading-snug text-ink">
-                                        {cl.text}
-                                      </div>))
-                                  : assignment
-                                    ? <span className="text-xs text-ink-soft pt-1.5">No contract rule for this field.</span>
-                                    : <span className="text-xs text-ink-soft/70 pt-1.5">—</span>}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
+            {tab === "attention" && (
+              <>
+                {/* What the contract asks for that this setup cannot check yet:
+                    documents it defers to that were never supplied, and clauses
+                    with no column to check. Each is fixed from Edit. */}
+                <MissingReferenceDocsNote refDocs={refDocs} className="mb-4"
+                  showSources={pipeline.contracts.length > 1} />
+                <MissingColumnsNote pipelineId={pipeline.id} refreshKey={noteKey} />
+                <div className="mt-4 flex justify-end">
+                  <Button variant="secondary"
+                    onClick={() => nav(`/direct/setups/${id}/edit?back=${encodeURIComponent(`/direct/setups/${id}`)}&tab=mapping`)}>
+                    <Pencil size={14} /> Fix these in Edit
+                  </Button>
+                </div>
+              </>
+            )}
 
-                      {outs.map(outSheet => {
-                        const used = new Set(
-                          Object.entries(sel).filter(([k]) => k.startsWith(`${outSheet}||`)).map(([, v]) => v));
-                        const unmapped = outFieldsFor(outSheet).filter(f => !used.has(f));
-                        if (unmapped.length === 0) return null;
-                        return (
-                          <div key={outSheet} className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 overflow-hidden">
-                            <div className="flex items-center gap-1.5 text-sm font-medium px-4 py-2.5 border-b border-amber-200 text-amber-800">
-                              <AlertTriangle size={14} /> Not Sourced From This Sheet
-                              {outs.length > 1 && <span className="font-mono text-xs">· {outSheet}</span>}
-                            </div>
-                            <div className="divide-y divide-amber-200/70">
-                              {unmapped.map(f => {
-                                const rule = extra[sheetFieldKey(outSheet, f)];
-                                return (
-                                  <div key={f} className="flex items-center gap-2 text-sm px-4 py-2.5">
-                                    <span className="w-56 truncate font-medium">{f}</span>
-                                    <span className="text-ink-muted text-xs">
-                                      {rule?.kind === "const" ? `Constant: ${rule.value || "(Blank)"}`
-                                        : rule?.kind === "source_sheet" ? "Source Tab Name"
-                                        : "Left Blank"}
-                                    </span>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </Card>
-              );
-            })}
+            {tab === "calendar" && pipeline.program_id != null && (
+              /* When this setup's bordereaux are due. Read-only, like the rest of
+                 this page — the schedule is changed from Edit, so a deadline only
+                 ever moves in one place. */
+              <Card title={<span className="flex items-center gap-2">
+                <CalendarDays size={16} className="text-navy" /> Submission Calendar</span>}>
+                <ProgramCalendar
+                  programId={pipeline.program_id}
+                  programName={pipeline.program_name}
+                  carrierName={pipeline.carrier_name}
+                  readOnly
+                  /* Schedule only — the period list is read on My Calendar and
+                     Program Management, matching the edit page. */
+                  showPeriods={false} />
+              </Card>
+            )}
           </>
         )}
       </PageBody>
@@ -532,5 +570,19 @@ export default function BordereauSetupDetail() {
         </div>
       </Modal>
     </>
+  );
+}
+
+/** A count on the Overview that opens the tab it counts. */
+function JumpTile({ n, label, warn, onClick }: {
+  n: number; label: ReactNode; warn?: boolean; onClick: () => void;
+}) {
+  return (
+    <button type="button" onClick={onClick}
+      className="grid gap-0.5 rounded-lg border border-border bg-white px-4 py-3 text-left transition-colors hover:border-navy
+                 focus-visible:outline focus-visible:outline-2 focus-visible:outline-navy">
+      <span className={`text-xl font-bold tabular-nums ${warn ? "text-amber-600" : "text-ink"}`}>{n}</span>
+      <span className="text-xs text-ink-muted">{label} →</span>
+    </button>
   );
 }

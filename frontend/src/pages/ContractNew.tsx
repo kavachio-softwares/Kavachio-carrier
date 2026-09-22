@@ -31,6 +31,8 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Check, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import AddContractModal from "../components/AddContractModal";
+import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
+import { SubSteps } from "../components/FlowStepper";
 import { InfoTip } from "../components/InfoTip";
 import { WordingEditor } from "../components/WordingEditor";
 import { SignaturePlacer, signerTargets }
@@ -90,6 +92,8 @@ const KINDS = [
 export default function ContractNew() {
   const nav = useNavigate();
   const [params] = useSearchParams();
+  // Read once: arrived from the Configure Program flow.
+  const [fromFlow] = useState(() => params.get(FLOW_PARAM) === "1");
 
   const [step, setStep] = useState(0);
   const [furthest, setFurthest] = useState(0);
@@ -879,11 +883,23 @@ export default function ContractNew() {
 
 
   const active = sections?.[activeSection];
+  // Named in the nested step row: "Contract for Test Org".
+  const flowBroker = counterparties?.find(c => String(c.id) === String(brokerId))?.name;
 
   return (
     <div className="proto">
       <div className="view full">
-        {kind !== "endorse" && (
+        {/* Opened from Configure Program: ONE stepper — the programme's
+            set-up, with this contract's four steps nested under Contracts.
+            Anywhere else, the contract's own trail, as before. */}
+        {fromFlow && kind !== "endorse" ? (
+          <ProgrammeFlowBar programId={Number(programId) || null} at={3}>
+            <SubSteps
+              caption={flowBroker ? `Contract for ${flowBroker}` : "This contract"}
+              steps={STEPS} current={step} furthest={furthest} onPick={i => go(i)} />
+          </ProgrammeFlowBar>
+        ) : (
+        kind !== "endorse" && (
         <div className="trail">
           {STEPS.map((s, i) => (
             <span key={s.key} style={{ display: "contents" }}>
@@ -909,7 +925,7 @@ export default function ContractNew() {
             </span>
           ))}
         </div>
-        )}
+        ))}
 
         {/* ══ STEP 1 · TERMS ══ */}
         {step === 0 && (
