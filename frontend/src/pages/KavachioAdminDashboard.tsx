@@ -1,251 +1,72 @@
-// Kavachio platform-admin dashboard — cross-tenant health & activity.
-// Data: GET /dashboard/platform?range=<preset> (aggregates).
-// Both are kavachio_admin-only and sum across ALL tenants (no `mga`).
-// Charts are hand-rolled inline SVG so we add no charting dependency.
-import { useEffect, useRef, useState } from "react";
+// Kavachio platform-admin dashboard — every carrier and broker in one place.
+// Data: GET /dashboard/platform?range=&carrier=&broker= (kavachio_admin only).
+//
+// Two halves, in this order on purpose:
+//   1. Who is on Kavachio — the four seats. Point-in-time and never narrowed,
+//      so it sits ABOVE the filter row: a filter only ever scopes the cards
+//      below it.
+//   2. Bordereau work — runs, open exceptions, overdue files, signatures, the
+//      carriers table and the mapping queue, all scoped by period / carrier /
+//      broker from the one filter row.
+// Open exceptions are counted the way Exception Triage counts them (decisions
+// matched to each current file), so every number here equals the screen it
+// leads to. Layout follows figma design/kavachio_admin_dashboard_v2.jpg.
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import {
+  AlertTriangle, Briefcase, Building2, CalendarX, CheckCircle2, PenLine, User, Users, Zap,
+} from "lucide-react";
 import { api } from "../api/client";
 import { InfoTip } from "../components/InfoTip";
+import { RankedBars, RunTrend } from "../components/BrokerCharts";
+import { ChartCard, StatCard } from "../components/StatCard";
 
-// ---- motion helpers ----
-// All entrance motion is CSS (see the `kd-*` block in proto.css); only the
-// number count-up and the donut sweep need JS. Both no-op under
-// prefers-reduced-motion so the page just renders at its final state.
-const reducedMotion = () =>
-  typeof window !== "undefined" &&
-  window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-
-/** Animated stagger delay for the i-th item, as an inline CSS var. */
-const stagger = (i: number, step = 60, base = 0): React.CSSProperties =>
-  ({ ["--kd-d" as any]: `${base + i * step}ms` });
-
-/** Counts from 0 up to `value` on mount (ease-out), then holds. */
-function useCountUp(value: number, ms = 900) {
-  const [n, setN] = useState(() => (reducedMotion() ? value : 0));
-  const raf = useRef<number>();
-  useEffect(() => {
-    if (reducedMotion()) { setN(value); return; }
-    let start: number | null = null;
-    const tick = (t: number) => {
-      if (start == null) start = t;
-      const p = Math.min(1, (t - start) / ms);
-      setN(Math.round(value * (1 - Math.pow(1 - p, 3))));   // easeOutCubic
-      if (p < 1) raf.current = requestAnimationFrame(tick);
-    };
-    raf.current = requestAnimationFrame(tick);
-    return () => { if (raf.current) cancelAnimationFrame(raf.current); };
-  }, [value, ms]);
-  return n;
-}
-
-function CountUp({ value }: { value: number | null | undefined }) {
-  const n = useCountUp(value ?? 0);
-  return <>{value == null ? "—" : n.toLocaleString()}</>;
-}
-
-// ---- palette (aligned with proto.css tokens) ----
-const C = {
-  ink: "#0E1320", muted: "#566071", faint: "#8B93A2", line: "#E5E8EE",
-  blue: "#3149C6", ok: "#0E9F6E", warn: "#C77A12", crit: "#D32F45",
-  info: "#17A2B8", purple: "#7C5CFC", slate: "#5B6B85",
-};
-
-// Date-range presets shown in the filter (value → label). `range` is passed to
-// the API, which windows every time-based metric.
-const RANGES: { value: string; label: string; short: string }[] = [
-  { value: "1d",  label: "Today",         short: "today" },
-  { value: "7d",  label: "Last 7 Days",   short: "7d" },
-  { value: "30d", label: "Last 30 Days",  short: "30d" },
-  { value: "90d", label: "Last 90 Days",  short: "90d" },
-  { value: "ytd", label: "This Year",     short: "YTD" },
-  { value: "12m", label: "Last 12 Months", short: "12m" },
-  { value: "all", label: "All Time",      short: "all" },
+// Date-range presets (value → label). `range` is passed to the API, which
+// windows every time-based metric.
+const RANGES: { value: string; label: string }[] = [
+  { value: "1d",  label: "Today" },
+  { value: "7d",  label: "7 days" },
+  { value: "30d", label: "30 days" },
+  { value: "90d", label: "90 days" },
+  { value: "ytd", label: "This year" },
+  { value: "all", label: "All time" },
 ];
+
+// Severity colours — validated as a set with the dataviz palette checker
+// (red / amber / blue all pass, including colour-blind separation).
+const SEV = { critical: "#D32F45", warning: "#C77A12", info: "#3F6FD1" };
+const HUE = "#0B8FA0";            // the chart teal used for single-hue bars
+
+type Seat = { total: number; signed_up: number; not_signed_up: number };
+type Named = { id: number; name: string };
 
 type Platform = {
   range: string; range_days: number;
-  tenants: { total: number; active: number; invited: number; inactive: number };
-  brokers: { total: number; active: number; invited: number };
-  operators: { total: number; active: number; invited: number };
-  carrier_users?: { total: number; active: number; invited: number };
-  // The same counts Users & Roles shows (one backend function feeds both).
-  people?: { total: number; kavachio: number; carrier_users: number; broker_users: number;
-             operators: number; never_signed_in: number; carriers: number; brokers: number };
-  users: { total: number; pending_invites: number;
-           by_role: { carrier_admin: number; broker_admin: number; operator: number; kavachio_admin: number } };
-  setups: { active: number; tenants: number };
-  programs_active: number;
-  runs: { window_count: number; prev_count: number; delta_pct: number | null; clean_rate: number | null };
-  runs_series: { date: string; total: number; exceptions: number }[];
-  exceptions_by_severity: { critical: number; warning: number; info: number };
-  top_tenants: { name: string; code: string; runs: number }[];
-  tenants_table: { code: string; name: string; users: number; setups: number;
-                   runs: number; clean_pct: number | null; status: string }[];
+  filters: { carrier: number | null; broker: number | null };
+  filter_options: { carriers: Named[]; brokers: Named[] };
+  seats: { carrier_admins: Seat; carrier_users: Seat; broker_admins: Seat; broker_users: Seat;
+           carrier_companies: number; broker_companies: number };
+  runs: { window_count: number; prev_count: number; delta_pct: number | null;
+          clean_rate: number | null; clean_count: number };
+  runs_series: { date: string; total: number; exceptions: number; not_validated?: number }[];
+  open_exceptions: {
+    total: number; critical: number; warning: number; info: number; waiting_over_7d: number;
+    put_right: { fixed: number; approved: number; dismissed: number; rejected: number; total: number };
+    by_carrier: (Named & { open: number })[]; by_broker: (Named & { open: number })[];
+    carriers_clear: number; brokers_clear: number;
+  };
+  overdue: { total: number; brokers: number; carriers: number };
+  signatures: { awaiting: number; over_7d: number };
+  tenants_table: { tenant_id: number; code: string; name: string; users: number; brokers: number;
+                   programs: number; runs: number; clean_pct: number | null;
+                   open_exceptions: number; overdue: number; status: string }[];
   mapping_queue: { open: number; in_progress: number; resolved_window: number;
-                   dismissed: number; avg_turnaround_hours: number | null };
+                   oldest_open_days: number | null };
 };
 
 const nf = (n: number | null | undefined) => (n == null ? "—" : n.toLocaleString());
-
-// ---------- SVG area chart: full-width, live interactive hover ----------
-function AreaChart({ series }: { series: Platform["runs_series"] }) {
-  // preserveAspectRatio="none" stretches to full width; vector-effect keeps
-  // stroke widths crisp despite the non-uniform scale.
-  const W = 1000, H = 230, padL = 34, padB = 24, padT = 12, padR = 10;
-  const pw = W - padL - padR, ph = H - padT - padB;
-  const max = Math.max(1, ...series.map(d => d.total));
-  const n = Math.max(1, series.length - 1);
-  const x = (i: number) => padL + (pw * i) / n;
-  const y = (v: number) => padT + ph - (ph * v) / max;
-  const line = (key: "total" | "exceptions") =>
-    series.map((d, i) => `${i ? "L" : "M"} ${x(i).toFixed(1)},${y(d[key]).toFixed(1)}`).join(" ");
-  const area = (key: "total" | "exceptions") =>
-    `M ${padL},${padT + ph} ` +
-    series.map((d, i) => `L ${x(i).toFixed(1)},${y(d[key]).toFixed(1)}`).join(" ") +
-    ` L ${padL + pw},${padT + ph} Z`;
-  const ticks = [0, 0.25, 0.5, 0.75, 1];
-  const everyN = Math.ceil(series.length / 8);
-
-  // Live hover: map the cursor's x within the plot area to the nearest day and
-  // drive a crosshair + floating tooltip from React state (instant, no OS delay).
-  const [hi, setHi] = useState<number | null>(null);
-  const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const fx = (e.clientX - rect.left) / rect.width;         // 0..1 across container
-    const frac = Math.min(1, Math.max(0, (fx - padL / W) / (pw / W)));
-    setHi(Math.round(frac * n));
-  };
-  const hp = hi != null ? series[hi] : null;
-  const leftPct = hi != null ? (x(hi) / W) * 100 : 0;
-  // keep the tooltip inside the card near the edges
-  const tipTransform = leftPct < 14 ? "translateX(0)"
-    : leftPct > 86 ? "translateX(-100%)" : "translateX(-50%)";
-
-  return (
-    <div style={{ position: "relative" }} onMouseLeave={() => setHi(null)} onMouseMove={onMove}>
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none"
-        style={{ display: "block", cursor: "crosshair" }}>
-        <defs>
-          <linearGradient id="adC" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor={C.blue} stopOpacity="0.28" />
-            <stop offset="1" stopColor={C.blue} stopOpacity="0.02" />
-          </linearGradient>
-          <linearGradient id="adE" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor={C.warn} stopOpacity="0.35" />
-            <stop offset="1" stopColor={C.warn} stopOpacity="0.03" />
-          </linearGradient>
-        </defs>
-        {ticks.map((t, i) => {
-          const yy = padT + ph - ph * t;
-          return <g key={i}>
-            <line x1={padL} y1={yy} x2={padL + pw} y2={yy} stroke={C.line} strokeWidth="1"
-              vectorEffect="non-scaling-stroke" />
-            <text x={padL - 6} y={yy + 3} fontSize="10" fill={C.faint} textAnchor="end"
-              vectorEffect="non-scaling-stroke">{Math.round(max * t)}</text>
-          </g>;
-        })}
-        <path className="kd-area" d={area("total")} fill="url(#adC)" />
-        <path className="kd-line" pathLength={1} d={line("total")} fill="none" stroke={C.blue}
-          strokeWidth="2" vectorEffect="non-scaling-stroke" />
-        <path className="kd-area" d={area("exceptions")} fill="url(#adE)" />
-        <path className="kd-line" pathLength={1} style={stagger(1, 120)} d={line("exceptions")}
-          fill="none" stroke={C.warn} strokeWidth="1.6" vectorEffect="non-scaling-stroke" />
-        {/* crosshair at the hovered day */}
-        {hi != null && (
-          <line x1={x(hi)} y1={padT} x2={x(hi)} y2={padT + ph} stroke={C.slate}
-            strokeWidth="1" strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />
-        )}
-        {/* x labels */}
-        {series.map((d, i) => (i % everyN === 0 || i === series.length - 1) ? (
-          <text key={i} x={x(i)} y={H - 7} fontSize="10" fill={C.faint} textAnchor="middle"
-            vectorEffect="non-scaling-stroke">{d.date.slice(5)}</text>) : null)}
-      </svg>
-      {/* dots on the two series at the hovered day (HTML so they stay round) */}
-      {hp && [{ v: hp.total, c: C.blue }, { v: hp.exceptions, c: C.warn }].map((p, i) => (
-        <span key={i} style={{
-          position: "absolute", left: `${leftPct}%`, top: `${(y(p.v) / H) * 100}%`,
-          width: 8, height: 8, borderRadius: 4, background: "#fff", border: `2px solid ${p.c}`,
-          transform: "translate(-50%,-50%)", pointerEvents: "none",
-        }} />
-      ))}
-      {/* floating tooltip */}
-      {hp && (
-        <div style={{
-          position: "absolute", left: `${leftPct}%`, top: 4, transform: tipTransform,
-          pointerEvents: "none", background: "#fff", border: `1px solid ${C.line}`,
-          borderRadius: 8, boxShadow: "0 6px 20px rgba(14,19,32,.14)", padding: "8px 11px",
-          fontSize: 11.5, whiteSpace: "nowrap", zIndex: 5,
-        }}>
-          <div style={{ fontWeight: 700, color: C.ink, marginBottom: 4 }}>{hp.date}</div>
-          <Row c={C.slate} k="Total" v={hp.total} />
-          <Row c={C.blue} k="Clean" v={hp.total - hp.exceptions} />
-          <Row c={C.warn} k="Exceptions" v={hp.exceptions} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Row({ c, k, v }: { c: string; k: string; v: number }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 7, lineHeight: 1.6 }}>
-      <span style={{ width: 8, height: 8, borderRadius: 2, background: c }} />
-      <span style={{ color: C.muted, flex: 1 }}>{k}</span>
-      <span style={{ color: C.ink, fontWeight: 700 }}>{v.toLocaleString()}</span>
-    </div>
-  );
-}
-
-function Donut({ segments, total, unit }: {
-  segments: { label: string; value: number; color: string }[]; total: number; unit: string;
-}) {
-  const R = 62, SW = 22, cx = 80, cy = 90, Cc = 2 * Math.PI * R;
-  let off = 0;
-  const sum = segments.reduce((a, s) => a + s.value, 0) || 1;
-  // Arcs start collapsed and sweep out to their real length one frame after
-  // mount (the CSS transition on .kd-arc does the work).
-  const [swept, setSwept] = useState(() => reducedMotion());
-  useEffect(() => {
-    if (reducedMotion()) return;
-    const t = requestAnimationFrame(() => setSwept(true));
-    return () => cancelAnimationFrame(t);
-  }, []);
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
-      <svg width="160" height="180" viewBox="0 0 160 180">
-        <circle cx={cx} cy={cy} r={R} fill="none" stroke="#F0F2F7" strokeWidth={SW} />
-        {segments.map((s, i) => {
-          const len = (Cc * s.value) / sum;
-          const el = (
-            <circle key={i} className="kd-arc" cx={cx} cy={cy} r={R} fill="none" stroke={s.color}
-              strokeWidth={SW}
-              strokeDasharray={swept ? `${len} ${Cc - len}` : `0 ${Cc}`} strokeDashoffset={-off}
-              transform={`rotate(-90 ${cx} ${cy})`}
-              style={{ cursor: "pointer", transitionDelay: `${i * 140}ms` }}>
-              <title>{`${s.label}: ${s.value.toLocaleString()} (${Math.round((s.value / sum) * 100)}%)`}</title>
-            </circle>
-          );
-          off += len; return el;
-        })}
-        <text x={cx} y={cy - 2} fontSize="26" fontWeight="800" fill={C.ink} textAnchor="middle">
-          <CountUp value={total} /></text>
-        <text x={cx} y={cy + 18} fontSize="11" fill={C.muted} textAnchor="middle">{unit}</text>
-      </svg>
-      <div style={{ flex: 1 }}>
-        {segments.map((s, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0" }}
-            title={`${s.label}: ${s.value.toLocaleString()} (${Math.round((s.value / sum) * 100)}%)`}>
-            <span style={{ width: 12, height: 12, borderRadius: 3, background: s.color }} />
-            <span style={{ fontSize: 13, color: C.ink, fontWeight: 600, flex: 1 }}>{s.label}</span>
-            <span style={{ fontSize: 13, color: C.ink, fontWeight: 700 }}>{nf(s.value)}</span>
-            <span style={{ fontSize: 11, color: C.faint, width: 34, textAlign: "right" }}>
-              {Math.round((s.value / sum) * 100)}%</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 0);
+const plural = (n: number, one: string, many: string) => `${nf(n)} ${n === 1 ? one : many}`;
 
 function statusBadge(s: string) {
   const map: Record<string, [string, string]> = {
@@ -255,273 +76,353 @@ function statusBadge(s: string) {
   return <span className={`badge ${cls}`}>{label}</span>;
 }
 
-// ---------- page ----------
-export default function KavachioAdminDashboard() {
-  const [range, setRange] = useState("30d");
-  const [d, setD] = useState<Platform | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const load = (rng: string) => {
-    setLoading(true);
-    api.get<Platform>("/dashboard/platform", { params: { range: rng } })
-      .then(a => { setD(a.data); setErr(null); })
-      .catch(() => setErr("Could not load platform metrics."))
-      .finally(() => setLoading(false));
-  };
-  useEffect(() => { load(range); }, [range]);
-
-  const rangeMeta = RANGES.find(r => r.value === range) ?? RANGES[2];
-
-  // Tolerate the pre-merge backend shape: the monolith rename (window_count /
-  // clean_rate / resolved_window) may not be deployed to the running service
-  // yet, so fall back to the old field names. Keeps the live app from breaking
-  // before the backend change is merged & rebuilt.
-  const runsCount = d ? (d.runs.window_count ?? (d.runs as any).last_7d ?? 0) : 0;
-  const cleanRate = d ? (d.runs.clean_rate ?? (d.runs as any).clean_rate_30d ?? null) : null;
-  const resolvedCount = d ? (d.mapping_queue.resolved_window ?? (d.mapping_queue as any).resolved_30d ?? 0) : 0;
-
-  // ROW 1 — WHO IS ON THE PLATFORM. The same tiles, numbers and words as
-  // Users & Roles, from the same backend count, so the two screens always agree.
-  const p = d?.people;
-  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-  const people = p ? [
-    { k: "Users", v: p.total, col: C.blue,
-      foot: p.never_signed_in > 0
-        ? `${p.never_signed_in} ${p.never_signed_in === 1 ? "has" : "have"} not signed in yet`
-        : "all have signed in",
-      info: "Everyone who can sign in to Kavachio, at every carrier and broker." },
-    { k: "People at carriers", v: p.carrier_users, col: C.info,
-      foot: `across ${plural(p.carriers, "carrier", "carriers")}`,
-      info: "Everyone at the carrier companies — each carrier's admin and the people they added." },
-    { k: "People at brokers", v: p.broker_users, col: C.purple,
-      foot: `across ${plural(p.brokers, "broker", "brokers")}`,
-      info: "Everyone at the broker companies — each broker's admin and the broker users they added." },
-    { k: "Broker Users", v: p.operators, col: C.warn,
-      foot: "added by their broker admins",
-      info: "People at the broker companies who send the files. Their broker admin adds them." },
-  ] : [];
-
-  // ROW 2 — WHAT IS HAPPENING on the platform.
-  const tiles = d ? [
-    { k: "Programs", v: d.programs_active, foot: "Active BDX Cycles", col: C.ok,
-      info: "Programs currently active across all carriers — each is a book of business under a carrier "
-        + "that bordereaux are processed against." },
-    { k: `Runs · ${rangeMeta.short}`, v: runsCount,
-      foot: d.runs.delta_pct == null ? "vs prior period"
-        : `${d.runs.delta_pct >= 0 ? "▲" : "▼"} ${Math.abs(d.runs.delta_pct)}% vs prior`,
-      col: C.ink, up: (d.runs.delta_pct ?? 0) >= 0,
-      info: `Bordereaux processed in the selected date range (${rangeMeta.label.toLowerCase()}). `
-        + "The change compares this range with the immediately preceding one of the same length." },
-    { k: "Remaining Bordereau Setup", v: d.mapping_queue.open,
-      foot: `Awaiting Review · ${d.mapping_queue.in_progress} in Progress`, col: C.warn,
-      info: "Data-mapping tasks still needing Kavachio staff to map a new file layout to the data model. "
-        + "“Awaiting Review” haven’t been picked up; “In Progress” are being worked on." },
-  ] : [];
-
-  const card: React.CSSProperties = {
-    background: "#fff", border: `1px solid ${C.line}`, borderRadius: 14, padding: 18,
-  };
-  // `info` adds an ⓘ next to the card title explaining what the card shows.
-  const cardHead = (title: string, sub?: string, info?: string) => (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-      <div style={{ fontSize: 15, fontWeight: 700, color: C.ink, display: "flex", alignItems: "center", gap: 5 }}>
-        {title}{info && <InfoTip text={info} />}
-      </div>
-      {sub && <div style={{ fontSize: 12, color: C.faint, fontWeight: 500 }}>{sub}</div>}
+/** Small uppercase heading over a group of tiles. */
+function Section({ title, right }: { title: string; right?: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline",
+                  margin: "0 0 10px" }}>
+      <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em",
+                    textTransform: "uppercase", color: "var(--p-faint)" }}>{title}</div>
+      {right}
     </div>
   );
+}
 
+/** How many of a seat have accepted their invitation — a bar plus the words. */
+function SignedUp({ s }: { s: Seat }) {
   return (
-    <div className="proto">
-      <div className="view full">
-        <div className="page-head">
-          <div className="t">
-            <h2>Dashboard</h2>
-            <p>Cross-Carrier health &amp; activity · showing <b>{rangeMeta.label.toLowerCase()}</b>.</p>
-          </div>
-          <div className="actions" style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            {/* Date-range filter */}
-            <select value={range} onChange={e => setRange(e.target.value)}
-              style={{ border: `1px solid ${C.line}`, borderRadius: 9, padding: "8px 12px",
-                       fontSize: 13, fontWeight: 600, color: C.ink, background: "#fff", cursor: "pointer" }}>
-              {RANGES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
-            </select>
-            <button className="btn" onClick={() => load(range)} disabled={loading}>↻ Refresh</button>
-          </div>
-        </div>
-
-        {err && <div className="card" style={{ padding: 16, color: C.crit }}>{err}</div>}
-
-        {d && (
-          // Keyed on `range` so switching the date filter replays the whole
-          // entrance sequence instead of numbers silently swapping in place.
-          <div key={range}>
-            {/* Row 1 — who is on the platform */}
-            <div className="tiles" style={{ marginBottom: 18 }}>
-              {people.map((t, i) => (
-                <div className="tile kd-in" key={t.k}
-                  style={{ position: "relative", overflow: "hidden", ...stagger(i) }}>
-                  <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: t.col }} />
-                  <div className="k" style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                    {t.k}<InfoTip text={t.info} />
-                  </div>
-                  <div className="v"><CountUp value={t.v} /></div>
-                  <div className="foot" style={{ color: C.muted }}>{t.foot}</div>
-                </div>
-              ))}
-            </div>
-
-            {/* Row 2 — what is happening */}
-            <div className="tiles three" style={{ marginBottom: 18 }}>
-              {tiles.map((t, i) => (
-                <div className="tile kd-in" key={i}
-                  style={{ position: "relative", overflow: "hidden", ...stagger(i) }}>
-                  <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: t.col }} />
-                  <div className="k" style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                    {t.k}{(t as any).info && <InfoTip text={(t as any).info} />}
-                  </div>
-                  <div className="v"><CountUp value={t.v} /></div>
-                  <div className="foot" style={{ color: (t as any).up === true ? C.ok : C.muted }}>{t.foot}</div>
-                </div>
-              ))}
-            </div>
-
-            {/* Row: activity area + severity donut */}
-            <div style={{ display: "grid", gridTemplateColumns: "1.7fr 1fr", gap: 18, marginBottom: 18 }}>
-              <div className="kd-in" style={{ ...card, ...stagger(0, 0, 340) }}>
-                {cardHead("Activity — Runs Per Day", `Clean vs exceptions · ${rangeMeta.label.toLowerCase()}`,
-                  "Bordereaux processed per day across all carriers. Blue = the output passed every "
-                  + "contract rule; amber = at least one exception was raised. “Clean rate” is the share "
-                  + "of runs in this range that passed with no exceptions.")}
-                <div style={{ display: "flex", gap: 16, marginBottom: 4 }}>
-                  <Legend color={C.blue} label="Clean" />
-                  <Legend color={C.warn} label="With Exceptions" />
-                  {cleanRate != null &&
-                    <span style={{ marginLeft: "auto", fontSize: 12, color: C.muted }}>
-                      Clean rate <b style={{ color: C.ok }}>{cleanRate}%</b></span>}
-                </div>
-                <AreaChart series={d.runs_series} />
-              </div>
-              <div className="kd-in" style={{ ...card, ...stagger(1, 60, 340) }}>
-                {cardHead("Exceptions by Severity", rangeMeta.label,
-                  "Every validation exception raised in this date range, split by severity. "
-                  + "Critical blocks submission and must be resolved; Warning should be reviewed; "
-                  + "Info is advisory only.")}
-                <Donut unit="exceptions"
-                  total={d.exceptions_by_severity.critical + d.exceptions_by_severity.warning}
-                  segments={[
-                    { label: "Critical", value: d.exceptions_by_severity.critical, color: C.crit },
-                    { label: "Warning", value: d.exceptions_by_severity.warning, color: C.warn },
-                  ]} />
-              </div>
-            </div>
-
-            {/* Row: top carriers + mapping queue. (The old "Users by Role" chart
-                is gone — row 1 already says who is on the platform.) */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
-              <div className="kd-in" style={{ ...card, ...stagger(2, 60, 340) }}>
-                {cardHead("Top Carriers by Volume", `Runs · ${rangeMeta.short}`,
-                  "The busiest carriers in this date range, ranked by how many bordereaux "
-                  + "were processed for them. The bar is relative to the top carrier.")}
-                {d.top_tenants.length === 0 ? <div className="empty">No runs in this period.</div> :
-                  d.top_tenants.map((t, i) => {
-                    const max = Math.max(1, ...d.top_tenants.map(x => x.runs));
-                    const pct = (t.runs / max) * 100;
-                    const col = [C.blue, C.purple, C.info, C.ok, C.warn, C.slate][i % 6];
-                    return (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, margin: "9px 0" }}
-                        title={`${t.name} — ${t.runs} runs`}>
-                        <span style={{ width: 88, fontSize: 12.5, color: C.ink, fontWeight: 600,
-                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
-                        <div style={{ flex: 1, height: 20, background: "#F0F2F7", borderRadius: 6 }}>
-                          <div className="kd-bar" style={{
-                            ["--kd-w" as any]: `${pct}%`, height: "100%", background: col,
-                            borderRadius: 6, ["--kd-d" as any]: `${520 + i * 70}ms`,
-                          }} />
-                        </div>
-                        <span style={{ width: 26, fontSize: 12, fontWeight: 700, color: C.ink, textAlign: "right" }}>{t.runs}</span>
-                      </div>
-                    );
-                  })}
-              </div>
-              <div className="kd-in" style={{ ...card, ...stagger(4, 60, 340) }}>
-                {cardHead("Data Mapping Queue", "Ops Health",
-                  "Work for Kavachio staff: when a broker uploads a file layout we haven't seen, a task "
-                  + "is raised to map its columns to the data model. Until it's done, that layout can't "
-                  + "be processed automatically.")}
-                {[
-                  ["Awaiting Review", d.mapping_queue.open, C.warn],
-                  ["In Progress", d.mapping_queue.in_progress, C.blue],
-                  [`Resolved · ${rangeMeta.short}`, resolvedCount, C.ok],
-                  // ["Dismissed", d.mapping_queue.dismissed, C.slate],
-                ].map(([label, val, col], i) => (
-                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, margin: "8px 0" }}>
-                    <span className="kd-chip" style={{ width: 30, height: 30, borderRadius: 15,
-                      background: `${col}22`, color: col as string, fontWeight: 800, fontSize: 13,
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      ...stagger(i, 80, 620) }}>{val as number}</span>
-                    <span style={{ fontSize: 13, color: C.ink, fontWeight: 600 }}>{label as string}</span>
-                  </div>
-                ))}
-                <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 10, paddingTop: 10,
-                  display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 12.5, color: C.muted, display: "flex", alignItems: "center", gap: 4 }}>
-                    Avg Turnaround
-                    <InfoTip text={`Average time from a mapping task being opened to being marked done, for tasks resolved in the selected date range (${rangeMeta.short}).`} />
-                  </span>
-                  <span style={{ fontSize: 14, fontWeight: 800, color: C.ink }}>
-                    {d.mapping_queue.avg_turnaround_hours == null ? "—" : `${d.mapping_queue.avg_turnaround_hours} hrs`}</span>
-                </div>
-                <div style={{ marginTop: 8 }}>
-                  <Link className="linkish" to="/admin/mapping-tasks">Open the Queue →</Link>
-                </div>
-              </div>
-            </div>
-
-            {/* Tenants overview (full width) */}
-            <div className="kd-in" style={{ ...card, ...stagger(5, 60, 340) }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-                <div style={{ fontSize: 15, fontWeight: 700, color: C.ink, display: "flex", alignItems: "center", gap: 5 }}>
-                  Carriers Overview
-                  <InfoTip text={"Per-carrier summary for the selected range. Users = the carrier's own "
-                    + "accounts (its brokers' users are not included); Setups = bordereau setups; Runs = bordereaux processed; "
-                    + "Clean % = share of those runs that passed with no exceptions."} />
-                  <span style={{ fontSize: 12, color: C.faint, fontWeight: 500 }}> · Top 8 by Volume</span></div>
-                <Link className="linkish" to="/tenants">View All →</Link>
-              </div>
-              <div className="tbl-wrap">
-                <table>
-                  <thead><tr>
-                    <th>Carrier</th><th className="r">Users</th><th className="r">Setups</th>
-                    <th className="r">Runs · {rangeMeta.short}</th><th className="r">Clean %</th><th>Status</th>
-                  </tr></thead>
-                  <tbody>
-                    {d.tenants_table.slice(0, 8).map((t, i) => (
-                      <tr key={i} className="kd-tr" style={stagger(i, 45, 720)}>
-                        <td><b>{t.name}</b><span className="muted" style={{ marginLeft: 6 }}>{t.code}</span></td>
-                        <td className="r">{t.users}</td>
-                        <td className="r">{t.setups}</td>
-                        <td className="r"><b>{t.runs}</b></td>
-                        <td className="r">{t.clean_pct == null ? "—" : `${t.clean_pct}%`}</td>
-                        <td>{statusBadge(t.status)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
+    <div>
+      <div style={{ height: 6, borderRadius: 3, background: "#EEF1F5", overflow: "hidden" }}>
+        <div style={{ height: "100%", borderRadius: 3, background: HUE,
+                      width: `${pct(s.signed_up, s.total)}%` }} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12,
+                    color: "var(--p-muted)", marginTop: 6 }}>
+        <span>{nf(s.signed_up)} signed up</span>
+        {s.not_signed_up > 0
+          ? <span><b style={{ color: "#A55F08" }}>{nf(s.not_signed_up)}</b> not signed up yet</span>
+          : <span>all signed up</span>}
       </div>
     </div>
   );
 }
 
-function Legend({ color, label }: { color: string; label: string }) {
+/** A small number-over-label block (put-right split, mapping queue). */
+function Chip({ v, k }: { v: number | string; k: string }) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: C.muted }}>
-      <span style={{ width: 11, height: 11, borderRadius: 3, background: color }} />{label}
-    </span>
+    <div style={{ flex: 1, background: "var(--p-surface-2, #F6F8FB)", borderRadius: 10,
+                  padding: "9px 11px", minWidth: 0 }}>
+      <div style={{ fontSize: 18, fontWeight: 700, color: "var(--p-text)" }}>{v}</div>
+      <div style={{ fontSize: 12, color: "var(--p-muted)" }}>{k}</div>
+    </div>
+  );
+}
+
+// ---------- page ----------
+export default function KavachioAdminDashboard() {
+  const [range, setRange] = useState("30d");
+  const [carrier, setCarrier] = useState<number | "">("");
+  const [broker, setBroker] = useState<number | "">("");
+  const [d, setD] = useState<Platform | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    api.get<Platform>("/dashboard/platform", {
+      params: { range, carrier: carrier || undefined, broker: broker || undefined },
+    })
+      .then(a => { setD(a.data); setErr(null); })
+      .catch(() => setErr("Could not load platform metrics."))
+      .finally(() => setLoading(false));
+  };
+  useEffect(load, [range, carrier, broker]);
+
+  const periodWords = range === "all" ? "all time"
+    : range === "ytd" ? "this year"
+    : range === "1d" ? "today" : `the last ${d?.range_days ?? ""} days`;
+
+  const grid = (min: number): React.CSSProperties => ({
+    display: "grid", gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`,
+    gap: 18, marginBottom: 24,
+  });
+
+  const selectStyle: React.CSSProperties = {
+    border: "1px solid var(--p-border-2)", borderRadius: 9, padding: "7px 10px", fontSize: 13,
+    fontWeight: 500, color: "var(--p-text)", background: "var(--p-surface)", maxWidth: 220,
+  };
+
+  const head = (
+    <div className="page-head">
+      <div className="t">
+        <h2>Dashboard</h2>
+        {/* <p>Every carrier and broker on Kavachio, in one place.</p> */}
+      </div>
+      <div className="actions">
+        <button className="btn" onClick={load} disabled={loading}>↻ Refresh</button>
+      </div>
+    </div>
+  );
+
+  if (!d) {
+    return (
+      <div className="proto"><div className="view full">
+        {head}
+        {err ? <div className="note warn" style={{ maxWidth: 560 }}>{err}</div>
+             : <div className="muted">Loading…</div>}
+      </div></div>
+    );
+  }
+
+  const st = d.seats;
+  const ox = d.open_exceptions;
+  const brokersWithOpen = ox.by_broker.length;
+  const codeOf: Record<number, string> = Object.fromEntries(
+    d.tenants_table.map(t => [t.tenant_id, t.code]));
+
+  // Runs per day, in the three outcomes the broker dashboards already use.
+  const trend = d.runs_series.map(p => {
+    const nc = p.not_validated ?? 0;
+    return { date: p.date, clean: Math.max(0, p.total - p.exceptions - nc),
+             flagged: p.exceptions, not_checked: nc };
+  });
+
+  const sevRows = [
+    { k: "Critical", sub: "Stops the file going out.", v: ox.critical, c: SEV.critical },
+    { k: "Warning",  sub: "Should be checked.",        v: ox.warning,  c: SEV.warning },
+    { k: "Info",     sub: "For awareness only.",       v: ox.info,     c: SEV.info },
+  ];
+  const pr = ox.put_right;
+
+  // Totals row for the carriers table: over every carrier in scope, not only
+  // the eight drawn.
+  const tbl = d.tenants_table;
+  const sum = (f: (t: Platform["tenants_table"][number]) => number) => tbl.reduce((a, t) => a + f(t), 0);
+
+  return (
+    <div className="proto">
+      <div className="view full">
+        {head}
+        {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
+
+        {/* ===== Who is on Kavachio (never filtered) ===== */}
+        <Section title=""
+          right={<Link className="linkish" to="/admin/users">Open Users &amp; Roles →</Link>} />
+        <div style={grid(220)}>
+          <StatCard title="Carrier Admins" value={nf(st.carrier_admins.total)} icon={Building2}
+            info={`Across ${plural(st.carrier_companies, "carrier company", "carrier companies")} — one admin per carrier.`}
+            footer={<SignedUp s={st.carrier_admins} />} />
+          <StatCard title="Carrier Users" value={nf(st.carrier_users.total)} icon={Users}
+            info="Added by their carrier admins."
+            footer={<SignedUp s={st.carrier_users} />} />
+          <StatCard title="Broker Admins" value={nf(st.broker_admins.total)} icon={Briefcase}
+            info={`Across ${plural(st.broker_companies, "broker company", "broker companies")} — one admin per broker.`}
+            footer={<SignedUp s={st.broker_admins} />} />
+          <StatCard title="Broker Users" value={nf(st.broker_users.total)} icon={User}
+            info="Added by their broker admins."
+            footer={<SignedUp s={st.broker_users} />} />
+        </div>
+
+        {/* ===== Bordereau work — one filter row scopes everything below ===== */}
+        <Section title={`Bordereau work · ${periodWords}`} />
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <div className="seg">
+            {RANGES.map(r => (
+              <button key={r.value} type="button" className={r.value === range ? "on" : ""}
+                onClick={() => setRange(r.value)}>{r.label}</button>
+            ))}
+          </div>
+          <select value={carrier} onChange={e => setCarrier(e.target.value ? Number(e.target.value) : "")}
+            aria-label="Carrier" style={selectStyle}>
+            <option value="">All carriers</option>
+            {d.filter_options.carriers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <select value={broker} onChange={e => setBroker(e.target.value ? Number(e.target.value) : "")}
+            aria-label="Broker" style={selectStyle}>
+            <option value="">All brokers</option>
+            {d.filter_options.brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+          {(carrier || broker) && (
+            <button type="button" className="linkish"
+              style={{ background: "none", border: 0, cursor: "pointer", fontSize: 13 }}
+              onClick={() => { setCarrier(""); setBroker(""); }}>Clear</button>
+          )}
+          {loading && <span className="muted" style={{ fontSize: 12.5 }}>Updating…</span>}
+        </div>
+
+        <div style={grid(185)}>
+          <StatCard title="Files Processed" value={nf(d.runs.window_count)} icon={Zap}
+            trend={d.runs.delta_pct == null ? undefined
+              : `${d.runs.delta_pct >= 0 ? "+" : ""}${d.runs.delta_pct}%`}
+            subtitle={d.runs.delta_pct == null ? "no runs the period before"
+              : `vs ${nf(d.runs.prev_count)} the period before`} />
+          <StatCard title="Clean Runs" icon={CheckCircle2}
+            value={d.runs.clean_rate == null ? "—" : `${d.runs.clean_rate}%`}
+            subtitle={`${nf(d.runs.clean_count)} of ${nf(d.runs.window_count)} runs`} />
+          <StatCard title="Open Exceptions" value={nf(ox.total)} icon={AlertTriangle}
+            tone={ox.critical > 0 ? "alert" : undefined}
+            subtitle={ox.total ? `across ${plural(brokersWithOpen, "broker", "brokers")}` : "nothing waiting"} />
+          <StatCard title="Overdue Bordereaux" value={nf(d.overdue.total)} icon={CalendarX}
+            subtitle={d.overdue.total ? `from ${plural(d.overdue.brokers, "broker", "brokers")}` : "nothing overdue"} />
+          <StatCard title="Awaiting Signature" value={nf(d.signatures.awaiting)} icon={PenLine}
+            subtitle={d.signatures.over_7d
+              ? `${nf(d.signatures.over_7d)} waiting over 7 days` : "contracts out for signing"} />
+        </div>
+
+        {/* ===== Runs per day + open exceptions by severity ===== */}
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,2fr) minmax(0,1fr)", gap: 18, marginBottom: 18 }}>
+          <ChartCard title="Runs per Day"
+            info={<InfoTip text={"Bordereaux processed per day. Clean = passed every check; "
+              + "flagged = at least one exception was raised; not checked = the checks could not run."} />}>
+            <RunTrend data={trend} />
+          </ChartCard>
+
+          <ChartCard title="Open Exceptions by Severity"
+            info={<InfoTip text={"Exceptions still waiting on each file's latest run, counted the way the "
+              + "Exception Triage screen counts them."} />}>
+            {ox.total === 0 ? <div className="empty">Nothing is waiting to be reviewed.</div> : (
+              <>
+                <div style={{ display: "flex", gap: 2, height: 14, marginBottom: 10 }}>
+                  {sevRows.filter(r => r.v > 0).map((r, i, a) => (
+                    <span key={r.k} title={`${r.k}: ${nf(r.v)}`} style={{
+                      width: `${(r.v / ox.total) * 100}%`, background: r.c,
+                      borderRadius: `${i === 0 ? 4 : 0}px ${i === a.length - 1 ? 4 : 0}px ${i === a.length - 1 ? 4 : 0}px ${i === 0 ? 4 : 0}px`,
+                    }} />
+                  ))}
+                </div>
+                {sevRows.map(r => (
+                  <div key={r.k} style={{ display: "flex", alignItems: "center", gap: 9, padding: "6px 0" }}>
+                    <span style={{ width: 11, height: 11, borderRadius: 3, background: r.c, flex: "none" }} />
+                    <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+                      {r.k}<InfoTip text={r.sub} />
+                    </div>
+                    <span style={{ marginLeft: "auto", fontSize: 13, fontWeight: 700 }}>{nf(r.v)}</span>
+                    <span style={{ width: 36, textAlign: "right", fontSize: 12, color: "var(--p-faint)" }}>
+                      {pct(r.v, ox.total)}%</span>
+                  </div>
+                ))}
+              </>
+            )}
+            <div style={{ borderTop: "1px solid var(--p-border)", margin: "12px 0 10px" }} />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline",
+                          fontSize: 13, color: "var(--p-muted)" }}>
+              <span>Put right in {periodWords}</span>
+              <b style={{ fontSize: 16, color: "var(--p-text)" }}>{nf(pr.total)}</b>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <Chip v={nf(pr.fixed)} k="Fixed" />
+              <Chip v={nf(pr.approved)} k="Approved as is" />
+              <Chip v={nf(pr.dismissed)} k="Dismissed" />
+              {pr.rejected > 0 && <Chip v={nf(pr.rejected)} k="Rejected" />}
+            </div>
+            {ox.waiting_over_7d > 0 && (
+              <div style={{ fontSize: 12.5, color: "var(--p-muted)", marginTop: 12 }}>
+                <b style={{ color: "var(--p-text)" }}>{nf(ox.waiting_over_7d)}</b> have waited longer than 7 days
+              </div>
+            )}
+          </ChartCard>
+        </div>
+
+        {/* ===== Where the open exceptions are + the Kavachio team's own queue ===== */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18, marginBottom: 18 }}>
+          <ChartCard title="Exceptions by Carrier"
+            info={<InfoTip text="Open exceptions at each carrier, most first. A carrier opens its Recent File Submissions." />}>
+            <RankedBars cap={6} unit="open"
+              rows={ox.by_carrier.map(r => ({ id: r.id, name: r.name, value: r.open }))}
+              empty="Nothing is open at any carrier."
+              linkTo={r => codeOf[r.id] ? `/tenants/${codeOf[r.id]}?tab=runs` : "/tenants"} />
+            {ox.carriers_clear > 0 && (
+              <div className="muted" style={{ fontSize: 12.5, marginTop: 12 }}>
+                {plural(ox.carriers_clear, "other carrier has", "other carriers have")} files with nothing open.
+              </div>
+            )}
+          </ChartCard>
+          <ChartCard title="Exceptions by Broker"
+            info={<InfoTip text="Open exceptions on each broker's files, most first — across every carrier they send to." />}>
+            <RankedBars cap={6} unit="open"
+              rows={ox.by_broker.map(r => ({ id: r.id, name: r.name, value: r.open }))}
+              empty="Nothing is open for any broker." />
+            {ox.brokers_clear > 0 && (
+              <div className="muted" style={{ fontSize: 12.5, marginTop: 12 }}>
+                {plural(ox.brokers_clear, "other broker has", "other brokers have")} files with nothing open.
+              </div>
+            )}
+          </ChartCard>
+          <ChartCard title="Data Mapping Queue"
+            info={<InfoTip text={"Work for the Kavachio team: a file layout nobody has seen before waits here "
+              + "until its columns are mapped. Until then that layout cannot be processed automatically."} />}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Chip v={nf(d.mapping_queue.open)} k="Waiting" />
+              <Chip v={nf(d.mapping_queue.in_progress)} k="In progress" />
+              <Chip v={nf(d.mapping_queue.resolved_window)} k="Finished" />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                          marginTop: "auto", paddingTop: 14, fontSize: 12.5, color: "var(--p-muted)" }}>
+              <span>{d.mapping_queue.oldest_open_days == null ? "Nothing waiting"
+                : `Oldest waiting: ${plural(d.mapping_queue.oldest_open_days, "day", "days")}`}</span>
+              <Link className="linkish" to="/admin/mapping-tasks">Open the queue →</Link>
+            </div>
+          </ChartCard>
+        </div>
+
+        {/* ===== Carriers overview (full width: nine columns need the room) ===== */}
+        <div>
+          <div className="card" style={{ padding: "24px 20px" }}>
+            <div className="card-h" style={{ marginBottom: 14, display: "flex",
+                                             justifyContent: "space-between", alignItems: "center" }}>
+              <h3 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                Carriers Overview
+                <InfoTip text={"Per carrier, busiest first. Users = the carrier's own people; Brokers = broker "
+                  + "companies it works with; Programmes = live programmes; Runs and Clean are for the chosen "
+                  + "period; Open and Overdue are as of now."} />
+              </h3>
+              <Link className="linkish" to="/tenants">View all carriers →</Link>
+            </div>
+            {tbl.length === 0 ? <div className="empty">No carriers match these filters.</div> : (
+              <div className="tbl-wrap">
+                <table>
+                  <thead><tr>
+                    <th>Carrier</th><th className="r">Users</th><th className="r">Brokers</th>
+                    <th className="r">Programmes</th><th className="r">Runs</th><th className="r">Clean</th>
+                    <th className="r">Open</th><th className="r">Overdue</th><th>Status</th>
+                  </tr></thead>
+                  <tbody>
+                    {tbl.slice(0, 8).map(t => (
+                      <tr key={t.tenant_id}>
+                        <td style={{ whiteSpace: "nowrap" }}><Link to={`/tenants/${t.code}`}><b>{t.name}</b></Link></td>
+                        <td className="r">{nf(t.users)}</td>
+                        <td className="r">{nf(t.brokers)}</td>
+                        <td className="r">{nf(t.programs)}</td>
+                        <td className="r"><b>{nf(t.runs)}</b></td>
+                        <td className="r">{t.clean_pct == null ? "—" : `${t.clean_pct}%`}</td>
+                        <td className="r">{nf(t.open_exceptions)}</td>
+                        <td className="r" style={t.overdue ? { color: "var(--p-crit)", fontWeight: 600 } : undefined}>
+                          {nf(t.overdue)}</td>
+                        <td>{statusBadge(t.status)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  {tbl.length > 1 && (
+                    <tfoot><tr style={{ fontWeight: 700 }}>
+                      <td>All {plural(tbl.length, "carrier", "carriers")}</td>
+                      <td className="r">{nf(sum(t => t.users))}</td>
+                      <td className="r">{nf(sum(t => t.brokers))}</td>
+                      <td className="r">{nf(sum(t => t.programs))}</td>
+                      <td className="r">{nf(sum(t => t.runs))}</td>
+                      <td className="r">{d.runs.clean_rate == null ? "—" : `${d.runs.clean_rate}%`}</td>
+                      <td className="r">{nf(sum(t => t.open_exceptions))}</td>
+                      <td className="r">{nf(sum(t => t.overdue))}</td>
+                      <td />
+                    </tr></tfoot>
+                  )}
+                </table>
+              </div>
+            )}
+          </div>
+
+
+        </div>
+      </div>
+    </div>
   );
 }

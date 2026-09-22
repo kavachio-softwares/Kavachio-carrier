@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
 import { ChevronRight, type LucideIcon } from "lucide-react";
+import { InfoTip } from "./InfoTip";
 
 /** The dashboard KPI tile — one look across the carrier and broker dashboards. */
-export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onClick }: {
+export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onClick, footer, info }: {
   title: string;
   value: string | number;
   icon: LucideIcon;
@@ -10,6 +11,10 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
   subtitle?: string;
   tone?: "alert";
   onClick?: () => void;
+  /** Anything that belongs under the numbers — e.g. a signed-up bar. */
+  footer?: ReactNode;
+  /** Explanation kept behind an "i" next to the title instead of on the tile. */
+  info?: string;
 }) {
   const alert = tone === "alert";
   return (
@@ -50,9 +55,13 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
             </div>
           )}
         </div>
-        <div style={{ color: "var(--p-text)", fontSize: 15, fontWeight: 500 }}>{title}</div>
+        <div style={{ color: "var(--p-text)", fontSize: 15, fontWeight: 500,
+                      display: "flex", alignItems: "center", gap: 5 }}>
+          {title}{info && <InfoTip text={info} />}
+        </div>
         {subtitle && <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 2 }}>{subtitle}</div>}
       </div>
+      {footer}
     </div>
   );
 }

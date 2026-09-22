@@ -5390,8 +5390,124 @@ def _range_days(rng: str) -> int:
     return 30
 
 
+# What a decision on an exception did, in the Exception Triage screen's own
+# words. Mirrors /dashboard/broker-performance exactly (a bare "resolved" with
+# no recognisable note stays OPEN there, so it stays open here too).
+_PUT_RIGHT_KINDS = ("fixed", "approved", "dismissed", "rejected")
+
+
+def _decision_kind(e: dict) -> Optional[str]:
+    st = str(e.get("status") or "").lower()
+    if st in _PUT_RIGHT_KINDS:
+        return st
+    if st == "resolved":
+        note = str(e.get("resolution_note") or "").strip().lower()
+        for k in _PUT_RIGHT_KINDS:
+            if note.startswith(k):
+                return k
+    return None
+
+
+def _naive(dt: Optional[datetime]) -> Optional[datetime]:
+    """UTC without a zone. Some tables store aware times, others naive UTC
+    (utcnow), and Python refuses to compare the two."""
+    if dt is not None and dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _naive_utc(iso: Optional[str]) -> Optional[datetime]:
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def _platform_open_exceptions(s, since: datetime, carrier: Optional[int] = None,
+                              broker: Optional[int] = None) -> dict:
+    """Open exceptions on every CURRENT file, counted the way Exception Triage
+    counts them — decisions matched to the file's exceptions as they are now,
+    notices left out — so a number here always equals the screen it opens.
+
+    Why not sum output_exports.exception_count (what the carrier Home does):
+    that is every exception ever RAISED. Nothing is subtracted when someone
+    fixes, approves or dismisses one, and a "Fix & re-run" writes a new export
+    while the old one keeps its count, so the same problem is counted twice.
+    And why not count exception_decision_log rows: a decision can sit on a rule
+    that is no longer an exception on the regenerated file (see the Broker
+    Performance card), which reads as "fixed" when nothing on the file changed.
+
+    A CURRENT file is the export a landing still points at (Process Bordereau —
+    a re-run moves the pointer to the new export), or the newest export of an
+    upload (the canonical lane). Superseded runs are history, not work."""
+    from main import _attach_decisions
+    from db import LandingRecord, exception_severity_counts
+
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    current = {i for (i,) in s.query(LandingRecord.output_export_id)
+               .filter(LandingRecord.output_export_id.isnot(None)).distinct().all()}
+    current |= {i for (i,) in s.query(func.max(OutputExport.id))
+                .filter(OutputExport.source_upload_id.isnot(None))
+                .group_by(OutputExport.source_upload_id).all()}
+    q = s.query(OutputExport.id).filter(OutputExport.status == "has_exceptions",
+                                        OutputExport.id.in_(current or {-1}))
+    if carrier:
+        q = q.filter(OutputExport.tenant_id == carrier)
+    if broker:
+        q = q.filter(OutputExport.broker_party_id == broker)
+
+    open_items: list = []
+    by_carrier: dict = {}
+    by_broker: dict = {}
+    put_right = {k: 0 for k in _PUT_RIGHT_KINDS}
+    waiting = 0
+    carriers_seen: set = set()
+    brokers_seen: set = set()
+    # One export at a time: the exceptions column can be megabytes per row.
+    for (eid,) in q.order_by(OutputExport.id).all():
+        r = s.get(OutputExport, eid)
+        if r is None:
+            continue
+        carriers_seen.add(r.tenant_id)
+        if r.broker_party_id:
+            brokers_seen.add(r.broker_party_id)
+        excs = [e for e in _attach_decisions(r.exceptions or [], r)
+                if isinstance(e, dict)
+                and e.get("error_class") != "not_checked"
+                and not (e.get("error_class") == "not_validated"
+                         and e.get("rule_id") is None)]
+        for e in excs:
+            kind = _decision_kind(e)
+            if kind is None:
+                open_items.append(e)
+                by_carrier[r.tenant_id] = by_carrier.get(r.tenant_id, 0) + 1
+                if r.broker_party_id:
+                    by_broker[r.broker_party_id] = by_broker.get(r.broker_party_id, 0) + 1
+                if r.created_at and _naive(r.created_at) < week_ago:
+                    waiting += 1
+            else:
+                at = _naive_utc(e.get("decided_at"))
+                if at is not None and at >= since:
+                    put_right[kind] += 1
+        s.expunge(r)
+
+    crit, warn, info = exception_severity_counts(open_items)
+    return {
+        "total": len(open_items), "critical": crit, "warning": warn, "info": info,
+        "waiting_over_7d": waiting,
+        "put_right": {**put_right, "total": sum(put_right.values())},
+        "by_carrier": by_carrier, "by_broker": by_broker,
+        "carriers_seen": carriers_seen, "brokers_seen": brokers_seen,
+    }
+
+
 @router.get("/dashboard/platform")
 def platform_dashboard(window: str = Query("30d", alias="range"),
+                       carrier: Optional[int] = Query(None),
+                       broker: Optional[int] = Query(None),
                        _p: Principal = Depends(require_role("kavachio_admin"))):
     """Cross-tenant platform overview for the Kavachio admin dashboard.
     Aggregates every tenant (no tenant filter). Platform-admin only.
@@ -5399,12 +5515,26 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
     `range` selects the time window that drives every time-based metric
     (runs, series, severity, per-tenant volume, mapping resolutions):
     1d / 7d / 30d (default) / 90d / ytd / 12m / all. Point-in-time counts
-    (tenants, users, setups, programs) are NOT windowed."""
+    (tenants, users, setups, programs) are NOT windowed.
+
+    `carrier` (tenant id) and `broker` (broker party id) narrow the bordereau
+    work — runs, exceptions, overdue files, signatures, the carriers table and
+    the mapping queue — to one carrier and/or one broker. Who is on the
+    platform (`people`, `seats`) is never narrowed: it answers a different
+    question, and the screen shows it above the filters for that reason."""
     days = _range_days(window)
     now = datetime.utcnow()
     today = now.date()
     dstart = now - timedelta(days=days)          # window start
     dprev = now - timedelta(days=2 * days)       # prior window start (for the delta)
+    def _oe(q):
+        """The bordereau-work scope: one carrier and/or one broker."""
+        if carrier:
+            q = q.filter(OutputExport.tenant_id == carrier)
+        if broker:
+            q = q.filter(OutputExport.broker_party_id == broker)
+        return q
+
     with SessionLocal() as s:
         # --- Tenants (point-in-time) ---
         # Derived status mirrors the /tenants list EXACTLY so the two screens
@@ -5482,25 +5612,25 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
             func.lower(Program.status) == "active").scalar() or 0
 
         # --- Runs in window vs prior equal window (for the delta) ---
-        runs_win = s.query(func.count(OutputExport.id)).filter(
+        runs_win = _oe(s.query(func.count(OutputExport.id))).filter(
             OutputExport.created_at >= dstart).scalar() or 0
-        runs_prev = s.query(func.count(OutputExport.id)).filter(
+        runs_prev = _oe(s.query(func.count(OutputExport.id))).filter(
             OutputExport.created_at >= dprev, OutputExport.created_at < dstart).scalar() or 0
         runs_delta_pct = None
         if runs_prev:
             runs_delta_pct = round((runs_win - runs_prev) * 100.0 / runs_prev)
 
         # --- Daily series over the window: total + runs-with-exceptions ---
-        tot_rows = {str(d): c for d, c in s.query(
-            func.date(OutputExport.created_at), func.count(OutputExport.id))
+        tot_rows = {str(d): c for d, c in _oe(s.query(
+            func.date(OutputExport.created_at), func.count(OutputExport.id)))
             .filter(OutputExport.created_at >= dstart)
             .group_by(func.date(OutputExport.created_at)).all()}
-        exc_rows = {str(d): c for d, c in s.query(
-            func.date(OutputExport.created_at), func.count(OutputExport.id))
+        exc_rows = {str(d): c for d, c in _oe(s.query(
+            func.date(OutputExport.created_at), func.count(OutputExport.id)))
             .filter(OutputExport.created_at >= dstart, OutputExport.status == "has_exceptions")
             .group_by(func.date(OutputExport.created_at)).all()}
-        nv_rows = {str(d): c for d, c in s.query(
-            func.date(OutputExport.created_at), func.count(OutputExport.id))
+        nv_rows = {str(d): c for d, c in _oe(s.query(
+            func.date(OutputExport.created_at), func.count(OutputExport.id)))
             .filter(OutputExport.created_at >= dstart, OutputExport.status == "not_validated")
             .group_by(func.date(OutputExport.created_at)).all()}
         series = []
@@ -5516,25 +5646,25 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
         # backfilled by init_db) so the donut covers the WHOLE selected range —
         # not the old recent-25-runs snapshot, which showed identical numbers
         # for 7d and 30d whenever the newest 25 exception runs were recent.
-        sev_crit, sev_warn, sev_info = s.query(
+        sev_crit, sev_warn, sev_info = _oe(s.query(
             func.coalesce(func.sum(OutputExport.critical_count), 0),
             func.coalesce(func.sum(OutputExport.warning_count), 0),
             func.coalesce(func.sum(OutputExport.info_count), 0),
-        ).filter(OutputExport.created_at >= dstart,
+        )).filter(OutputExport.created_at >= dstart,
                  OutputExport.status == "has_exceptions").one()
         sev = {"critical": int(sev_crit), "warning": int(sev_warn),
                "info": int(sev_info)}
 
         # --- Runs per tenant (window) + clean rate ---
-        total_by_tenant = dict(s.query(OutputExport.tenant_id, func.count(OutputExport.id))
+        total_by_tenant = dict(_oe(s.query(OutputExport.tenant_id, func.count(OutputExport.id)))
                                .filter(OutputExport.created_at >= dstart)
                                .group_by(OutputExport.tenant_id).all())
-        exc_by_tenant = dict(s.query(OutputExport.tenant_id, func.count(OutputExport.id))
+        exc_by_tenant = dict(_oe(s.query(OutputExport.tenant_id, func.count(OutputExport.id)))
                              .filter(OutputExport.created_at >= dstart,
                                      OutputExport.status == "has_exceptions")
                              .group_by(OutputExport.tenant_id).all())
         # A run that was never validated is not a clean run.
-        nv_by_tenant = dict(s.query(OutputExport.tenant_id, func.count(OutputExport.id))
+        nv_by_tenant = dict(_oe(s.query(OutputExport.tenant_id, func.count(OutputExport.id)))
                             .filter(OutputExport.created_at >= dstart,
                                     OutputExport.status == "not_validated")
                             .group_by(OutputExport.tenant_id).all())
@@ -5550,18 +5680,104 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
                "runs": int(c or 0)} for tid, c in total_by_tenant.items()]),
             key=lambda r: r["runs"], reverse=True)[:6]
 
+        # --- Who holds each seat (point-in-time, never narrowed) ---
+        # Split so the four tiles add back up to Users & Roles: carrier admins
+        # + carrier users = "People at carriers" there, broker admins + broker
+        # users = "People at brokers". A carrier admin is the organisation's
+        # owner; everyone else at a carrier (same DB role) is a carrier user.
+        # "Not signed up yet" = invited and not yet accepted.
+        owner_ids = {t.owner_user_id for t in tenants if t.owner_user_id}
+        seat_rows: dict = {"carrier_admins": [], "carrier_users": [],
+                           "broker_admins": [], "broker_users": []}
+        broker_companies: set = set()
+        for uid, r, st, tid, bid in s.query(AppUser.id, AppUser.role, AppUser.status,
+                                            AppUser.tenant_id, AppUser.broker_party_id).all():
+            nr = normalize_role(r)
+            if nr == "carrier_admin":
+                seat_rows["carrier_admins" if uid in owner_ids else "carrier_users"].append(st)
+            elif nr == "broker_admin":
+                seat_rows["broker_admins"].append(st)
+                if bid:
+                    broker_companies.add(bid)
+            elif nr == "operator":
+                seat_rows["broker_users"].append(st)
+
+        def _seat(sts: list) -> dict:
+            waiting = sum(1 for st in sts if (st or "") in ("invited", "pending"))
+            return {"total": len(sts), "signed_up": len(sts) - waiting,
+                    "not_signed_up": waiting}
+        seats = {k: _seat(v) for k, v in seat_rows.items()}
+        seats["carrier_companies"] = tenant_total
+        seats["broker_companies"] = len(broker_companies)
+
+        # --- Open exceptions (point-in-time; put right = in the window) ---
+        ox = _platform_open_exceptions(s, dstart, carrier, broker)
+
+        # --- Overdue bordereaux, straight off the submission calendar ---
+        # Same test as the carrier's Program Management screen: 'overdue' is
+        # past due and not received ('late' is its retired spelling).
+        oq = s.query(ExpectedSubmission.tenant_id, ExpectedSubmission.broker_party_id,
+                     func.count(ExpectedSubmission.id)).filter(
+            ExpectedSubmission.status.in_(("overdue", "late")))
+        if carrier:
+            oq = oq.filter(ExpectedSubmission.tenant_id == carrier)
+        if broker:
+            oq = oq.filter(ExpectedSubmission.broker_party_id == broker)
+        overdue_by_tenant: dict = {}
+        overdue_brokers: set = set()
+        for otid, obid, cnt in oq.group_by(ExpectedSubmission.tenant_id,
+                                           ExpectedSubmission.broker_party_id).all():
+            overdue_by_tenant[otid] = overdue_by_tenant.get(otid, 0) + int(cnt or 0)
+            if obid:
+                overdue_brokers.add(obid)
+
+        # --- Contracts sent for signature and not yet signed by everyone ---
+        week_ago = now - timedelta(days=7)
+        eq = s.query(EsignEnvelope.sent_at, EsignEnvelope.created_at).filter(
+            EsignEnvelope.status.in_(("sent", "in_progress")))
+        if carrier:
+            eq = eq.filter(EsignEnvelope.tenant_id == carrier)
+        if broker:
+            eq = eq.filter(EsignEnvelope.broker_party_id == broker)
+        env = eq.all()
+        signatures = {"awaiting": len(env),
+                      "over_7d": sum(1 for sent, made in env
+                                     if (sent or made) and _naive(sent or made) < week_ago)}
+
+        # --- Per-carrier: broker companies it works with, live programmes ---
+        from db import CarrierBroker
+        brokers_by_tenant = dict(s.query(CarrierBroker.tenant_id,
+                                         func.count(func.distinct(CarrierBroker.party_id)))
+                                 .filter(CarrierBroker.status == "active")
+                                 .group_by(CarrierBroker.tenant_id).all())
+        programs_by_tenant = dict(s.query(Program.tenant_id, func.count(Program.id)).filter(
+            Program.is_app_managed.is_(True),
+            func.lower(Program.status) == "active").group_by(Program.tenant_id).all())
+        # With a broker chosen, the table lists the carriers that broker works
+        # with (or has files at), each showing that broker's share only.
+        broker_tenants: Optional[set] = None
+        if broker:
+            broker_tenants = {t for (t,) in s.query(CarrierBroker.tenant_id).filter(
+                CarrierBroker.party_id == broker, CarrierBroker.status == "active").all()}
+            broker_tenants |= {t for (t,) in s.query(func.distinct(OutputExport.tenant_id))
+                               .filter(OutputExport.broker_party_id == broker).all()}
+
         # --- Per-tenant overview table (all tenants, busiest first) ---
-        pending_by_tenant = dict(s.query(AppUser.tenant_id, func.count(AppUser.id))
-                                 .filter(AppUser.status.in_(("invited", "pending")))
-                                 .group_by(AppUser.tenant_id).all())
         table = []
         for t in tenants:
+            if carrier and t.id != carrier:
+                continue
+            if broker_tenants is not None and t.id not in broker_tenants:
+                continue
             runs = int(total_by_tenant.get(t.id, 0) or 0)
             exc = (int(exc_by_tenant.get(t.id, 0) or 0)
                    + int(nv_by_tenant.get(t.id, 0) or 0))
+            # The same rule as the Carriers tile above (and the /tenants list):
+            # "invited" only while nobody there has signed in yet. A carrier
+            # with live users and runs is active even with an invite pending.
             if not t.is_active:
                 status = "inactive"
-            elif int(pending_by_tenant.get(t.id, 0) or 0) > 0:
+            elif t.id in pending_tids and t.id not in active_user_tids:
                 status = "invited"
             else:
                 status = "active"
@@ -5573,21 +5789,30 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
                 "runs": runs,
                 "clean_pct": (round((runs - exc) * 100.0 / runs) if runs else None),
                 "status": status,
+                "tenant_id": t.id,
+                "brokers": int(brokers_by_tenant.get(t.id, 0) or 0),
+                "programs": int(programs_by_tenant.get(t.id, 0) or 0),
+                "open_exceptions": int(ox["by_carrier"].get(t.id, 0)),
+                "overdue": int(overdue_by_tenant.get(t.id, 0)),
             })
         table.sort(key=lambda r: (r["runs"], r["users"]), reverse=True)
 
         # --- Data-model mapping queue (Kavachio ops workload) ---
-        q_open = s.query(func.count(AdminMappingTask.id)).filter(
+        def _mq(q):
+            return q.filter(AdminMappingTask.tenant_id == carrier) if carrier else q
+        q_open = _mq(s.query(func.count(AdminMappingTask.id))).filter(
             AdminMappingTask.status == "open").scalar() or 0
-        q_prog = s.query(func.count(AdminMappingTask.id)).filter(
+        oldest_open = _mq(s.query(func.min(AdminMappingTask.created_at))).filter(
+            AdminMappingTask.status == "open").scalar()
+        q_prog = _mq(s.query(func.count(AdminMappingTask.id))).filter(
             AdminMappingTask.status == "in_progress").scalar() or 0
-        q_done = s.query(func.count(AdminMappingTask.id)).filter(
+        q_done = _mq(s.query(func.count(AdminMappingTask.id))).filter(
             AdminMappingTask.status == "done",
             AdminMappingTask.resolved_at.isnot(None),
             AdminMappingTask.resolved_at >= dstart).scalar() or 0
-        q_dismissed = s.query(func.count(AdminMappingTask.id)).filter(
+        q_dismissed = _mq(s.query(func.count(AdminMappingTask.id))).filter(
             AdminMappingTask.status == "dismissed").scalar() or 0
-        done_rows = s.query(AdminMappingTask.created_at, AdminMappingTask.resolved_at).filter(
+        done_rows = _mq(s.query(AdminMappingTask.created_at, AdminMappingTask.resolved_at)).filter(
             AdminMappingTask.status == "done",
             AdminMappingTask.resolved_at.isnot(None),
             AdminMappingTask.resolved_at >= dstart).all()
@@ -5595,8 +5820,45 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
                for r in done_rows if r.created_at and r.resolved_at]
         avg_turnaround = round(sum(hrs) / len(hrs), 1) if hrs else None
 
+        # Names for the two ranked lists and the filter dropdowns.
+        want_parties = set(ox["by_broker"]) | broker_companies | {
+            b for (b,) in s.query(func.distinct(OutputExport.broker_party_id))
+            .filter(OutputExport.broker_party_id.isnot(None)).all()}
+        pname = {p.id: (p.legal_name or p.dba_name or "—") for p in
+                 s.query(Party).filter(Party.id.in_(want_parties or {-1})).all()}
+        open_ex = {
+            "total": ox["total"], "critical": ox["critical"],
+            "warning": ox["warning"], "info": ox["info"],
+            "waiting_over_7d": ox["waiting_over_7d"], "put_right": ox["put_right"],
+            "by_carrier": sorted(({"id": k, "name": tname.get(k, "—"), "open": v}
+                                  for k, v in ox["by_carrier"].items() if v),
+                                 key=lambda r: -r["open"]),
+            "by_broker": sorted(({"id": k, "name": pname.get(k, "—"), "open": v}
+                                 for k, v in ox["by_broker"].items() if v),
+                                key=lambda r: -r["open"]),
+            # Carriers / brokers with current files but nothing left open.
+            "carriers_clear": len(ox["carriers_seen"] - {k for k, v in ox["by_carrier"].items() if v}),
+            "brokers_clear": len(ox["brokers_seen"] - {k for k, v in ox["by_broker"].items() if v}),
+        }
+
         return {
             "range": window, "range_days": days,
+            "filters": {"carrier": carrier, "broker": broker},
+            "filter_options": {
+                "carriers": sorted(({"id": t.id, "name": tname.get(t.id) or "—"} for t in tenants),
+                                   key=lambda r: r["name"].lower()),
+                "brokers": sorted(({"id": b, "name": pname.get(b, "—")}
+                                   for b in (broker_companies | {
+                                       b for (b,) in s.query(func.distinct(OutputExport.broker_party_id))
+                                       .filter(OutputExport.broker_party_id.isnot(None)).all()})),
+                                  key=lambda r: r["name"].lower()),
+            },
+            "seats": seats,
+            "open_exceptions": open_ex,
+            "overdue": {"total": sum(overdue_by_tenant.values()),
+                        "brokers": len(overdue_brokers),
+                        "carriers": sum(1 for v in overdue_by_tenant.values() if v)},
+            "signatures": signatures,
             "tenants": {"total": tenant_total, "active": tenant_active,
                         "invited": int(tenant_invited),
                         "inactive": int(tenant_inactive)},
@@ -5611,14 +5873,18 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
             "programs_active": int(programs_active),
             "runs": {"window_count": int(runs_win), "prev_count": int(runs_prev),
                      "delta_pct": runs_delta_pct, "clean_rate": clean_rate,
-                     "not_validated_count": nv_win_total},
+                     "not_validated_count": nv_win_total,
+                     "clean_count": runs_win_total - exc_win_total - nv_win_total,
+                     "exceptions_count": exc_win_total},
             "runs_series": series,
             "exceptions_by_severity": sev,
             "top_tenants": top_tenants,
             "tenants_table": table,
             "mapping_queue": {"open": int(q_open), "in_progress": int(q_prog),
                               "resolved_window": int(q_done), "dismissed": int(q_dismissed),
-                              "avg_turnaround_hours": avg_turnaround},
+                              "avg_turnaround_hours": avg_turnaround,
+                              "oldest_open_days": ((now - _naive(oldest_open)).days
+                                                   if oldest_open else None)},
         }
 
 

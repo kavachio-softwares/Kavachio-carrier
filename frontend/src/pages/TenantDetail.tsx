@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { isKavachioAdmin, normalizeRole } from "../auth";
 import { fmtDateTime, localDayStart, localDayEnd } from "../utils/date";
@@ -90,7 +90,21 @@ export default function TenantDetail() {
   const [programs, setPrograms] = useState<Program[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [templates, setTemplates] = useState<OutTemplate[]>([]);
-  const [tab, setTab] = useState<"details" | "users" | "pc" | "runs">("details");
+  // `?tab=runs` opens straight on Recent File Submissions — the dashboard's
+  // "Exceptions by Carrier" links here to show that carrier's flagged files.
+  // Dropped from the address as soon as another tab is picked, so a refresh
+  // stays where the user actually is.
+  const [params, setParams] = useSearchParams();
+  const [tab, setTabState] = useState<"details" | "users" | "pc" | "runs">(
+    () => (params.get("tab") === "runs" ? "runs" : "details"));
+  const setTab = (next: "details" | "users" | "pc" | "runs") => {
+    setTabState(next);
+    if (params.has("tab")) {
+      const p = new URLSearchParams(params);
+      p.delete("tab");
+      setParams(p, { replace: true });
+    }
+  };
   // Org Details tab — an editable copy of the tenant's own fields, seeded from
   // `t` and PUT back on save.
   const [form, setForm] = useState<{ legal_name: string; tenant_type: string; currency: string } | null>(null);
