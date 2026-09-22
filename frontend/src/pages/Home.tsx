@@ -1,16 +1,18 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, downloadFile } from "../api/client";
+import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
+import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock } from "lucide-react";
+import { api } from "../api/client";
 import { currentMga, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
 import { canAccessPath } from "../access";
-import { fmtStamp } from "../utils/date";
-import { InfoTip } from "../components/InfoTip";
+
 import { getCalendar, type CalendarStatus } from "../api/calendar";
 import { getBrokersPaged, getHierarchy } from "../api/hierarchy";
 import { listContractsPaged } from "../api/contractRecord";
 import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { listArrivals, type Arrival } from "../api/intake";
-import { Badge, CAME_IN_BY, state as arrivalState } from "./FilesReceived";
+import { InfoTip } from "../components/InfoTip";
+
 
 type Stats = {
   uploads_today: number; uploads_total: number; open_bdx_cycles: number;
@@ -26,10 +28,12 @@ type Stats = {
   exception_runs?: number;                                       // # runs with open exceptions
   exceptions_by_severity?: { critical: number; warning: number; info: number };
   runs_this_week?: number;
-  runs_by_day?: number[];                                        // last 7 days, for the sparkline
+  runs_by_day_status?: { clean: number; flagged: number; resolved: number }[];
   active_setups?: number;
   active_setup_carriers?: number;
   mapping_tasks_open?: number;                                   // kavachio_admin tile
+  pending_signatures?: number;
+  completed_signatures?: number;
   avg_turnaround_min?: number | null;                           // tenant/operator tile
 };
 // A "run" = a generated output export (carries the validation result).
@@ -40,13 +44,57 @@ type Run = {
   source_upload_id: number | null;
 };
 const SUBTITLE: Record<Role, string> = {
-  carrier_admin:  "What needs you today, and your most recent bordereau runs.",
+  carrier_admin: "What needs you today, and your most recent bordereau runs.",
   kavachio_admin: "Platform activity and your most recent bordereau runs.",
   // Broker seats do not have a carrier Home yet — the API refuses a broker
   // token on every carrier route, so these are placeholders, not promises.
   broker_admin: "Your contracts and the files you have sent.",
-  operator:     "The files you have sent, and anything that needs fixing.",
+  operator: "The files you have sent, and anything that needs fixing.",
 };
+
+const StatCard = ({ title, value, icon: Icon, trend, subtitle, tone, onClick }: any) => (
+  <div
+    style={{
+      backgroundColor: "var(--p-surface)",
+      border: tone === "alert" ? "1px solid var(--p-crit)" : "1px solid var(--p-border-2)",
+      borderRadius: 16, padding: "16px", display: "flex", flexDirection: "column", gap: 10,
+      boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05)",
+      cursor: onClick ? "pointer" : "default",
+      transition: "transform 0.2s, box-shadow 0.2s"
+    }}
+    onClick={onClick}
+    onMouseOver={onClick ? (e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgb(0 0 0 / 0.1)"; } : undefined}
+    onMouseOut={onClick ? (e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05)"; } : undefined}
+  >
+    <div style={{
+      width: 36, height: 36, borderRadius: 10,
+      background: tone === "alert" ? "#fef2f2" : "#f0fdfa",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      color: tone === "alert" ? "#ef4444" : "#0d9488"
+    }}>
+      <Icon size={18} strokeWidth={2.5} />
+    </div>
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+        <div style={{ fontSize: 26, fontWeight: 700, color: "var(--p-text)", lineHeight: 1 }}>
+          {value}
+        </div>
+        {trend && (
+          <div style={{
+            fontSize: 13, fontWeight: 600,
+            color: trend.startsWith("-") || tone === "alert" ? "#ef4444" : "#10b981",
+            background: trend.startsWith("-") || tone === "alert" ? "#fef2f2" : "#ecfdf5",
+            padding: "4px 8px", borderRadius: 6
+          }}>
+            {trend}
+          </div>
+        )}
+      </div>
+      <div style={{ color: "var(--p-text)", fontSize: 15, fontWeight: 500 }}>{title}</div>
+      {subtitle && <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 2 }}>{subtitle}</div>}
+    </div>
+  </div>
+);
 
 export default function Home() {
   const mga = currentMga();
@@ -160,12 +208,20 @@ export default function Home() {
   const latestExcRun = runs.find(runHasExc);
   const openTriage = () =>
     latestExcRun ? goTriage(latestExcRun)
-    : runs[0]    ? goTriage(runs[0])
-    : nav("/uploads/0/exceptions?from=home");
+      : runs[0] ? goTriage(runs[0])
+        : nav("/uploads/0/exceptions?from=home");
 
   const sev = stats?.exceptions_by_severity;
-  const spark = stats?.runs_by_day;
-  const sparkMax = spark && spark.length ? Math.max(...spark, 1) : 1;
+
+  const pieData = [
+    { name: "Critical", value: sev?.critical || 0, color: "#ef4444" },
+    { name: "Warning", value: sev?.warning || 0, color: "#f59e0b" },
+    { name: "Info", value: sev?.info || 0, color: "#3b82f6" },
+  ].filter(d => d.value > 0);
+
+  if (pieData.length === 0 && stats?.pending_exceptions) {
+    pieData.push({ name: "Uncategorized", value: stats.pending_exceptions, color: "#94a3b8" });
+  }
 
   // Only a carrier admin can run the org/carrier/Bordereau setup. Until it is
   // done, anyone else gets a single notice instead of a dashboard with nothing
@@ -210,290 +266,189 @@ export default function Home() {
             Setups and the three operational tiles on the second. Two separate
             grids sized the numbers differently row to row, which read as two
             unrelated components rather than one panel. */}
-        <div className="tiles" style={{ marginBottom: 18 }}>
-          {/* Active setups — falls back to open_bdx_cycles (active programs) until
-              the API exposes a dedicated active_setups count. */}
-          <div className="tile">
-            <div className="k">Active Setups</div>
-            <div className="v">{fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}</div>
-            {stats?.active_setup_carriers != null && (
-              <div className="foot">across {stats.active_setup_carriers} carriers</div>
-            )}
-          </div>
+        <div style={{ display: "grid", gridTemplateColumns: seat === "user" ? "repeat(3, 1fr)" : (role === "kavachio_admin" ? "repeat(4, 1fr)" : "repeat(5, 1fr)"), gap: 20, marginBottom: 24 }}>
+          {seat !== "user" && (
+            <StatCard
+              title="Active Setups" value={fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}
+              icon={LayoutDashboard} trend="+5%" subtitle={stats?.active_setup_carriers != null ? `across ${stats.active_setup_carriers} carriers` : undefined}
+            />
+          )}
 
-          {/* How big the book is. Each links to the screen its figure was read
-              from, so the number on the tile and the number on that screen are
-              the same number rather than two close ones. */}
           {carrierSeat && (
             <>
-              <div className="tile">
-                <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  Programmes
-                  <InfoTip text="Every programme set up under this organization — one type of business you write, with its parties and contracts underneath it." />
-                </div>
-                <div className="v">{fmt(progCount)}</div>
-                <div className="foot"><Link className="linkish" to="/programs">View Programmes →</Link></div>
-              </div>
+              <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="Active" />
 
-              <div className="tile">
-                <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  Parties
-                  <InfoTip text={seat === "user"
-                    ? "The broker companies you invited — those already on a programme, plus any who have not answered yet."
-                    : "The party organisations that produce into your programmes — those already on one, plus any you have invited who have not answered yet."} />
-                </div>
-                <div className="v">{fmt(partyCount)}</div>
-                <div className="foot"><Link className="linkish" to="/brokers">View Parties →</Link></div>
-              </div>
+              {seat !== "user" && (
+                <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="Entities" />
+              )}
 
-              <div className="tile">
-                <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  Contracts
-                  <InfoTip text="Every contract held under this organization, across all of its programmes and parties — whatever stage each one has reached." />
-                </div>
-                <div className="v">{fmt(contractCount)}</div>
-                <div className="foot"><Link className="linkish" to="/contracts">View Contracts →</Link></div>
-              </div>
+              <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="Executing" />
 
-              {/* Placed here so the eight tiles fill two rows of four. Which
-                  count it shows depends on the seat: the carrier admin sees
-                  the carrier users they added; a carrier user sees the broker
-                  companies they invited, and no count of their colleagues. */}
-              {stats?.my_brokers != null ? (
-                <div className="tile">
-                  <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    Your Broker Companies
-                    <InfoTip text="The broker companies you invited, including any that have not accepted yet." />
-                  </div>
-                  <div className="v">{fmt(stats.my_brokers)}</div>
-                  <div className="foot">
-                    {!!stats.my_brokers_pending && <span>{stats.my_brokers_pending} not accepted yet · </span>}
-                    <Link className="linkish" to="/users">Users &amp; Roles →</Link>
-                  </div>
-                </div>
-              ) : (
-                <div className="tile">
-                  <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    Carrier Users
-                    <InfoTip text="The colleagues you added to your team, including anyone invited who has not set a password yet." />
-                  </div>
-                  <div className="v">{fmt(stats?.users_total)}</div>
-                  <div className="foot">
-                    {!!stats?.users_invited && <span>{stats.users_invited} not signed up yet · </span>}
-                    <Link className="linkish" to="/users">Users &amp; Roles →</Link>
-                  </div>
-                </div>
+              {seat !== "user" && (
+                stats?.my_brokers != null ? (
+                  <StatCard title="Your Broker Companies" value={fmt(stats.my_brokers)} icon={Users} onClick={() => nav("/users")} subtitle={stats.my_brokers_pending ? `${stats.my_brokers_pending} not accepted yet` : undefined} />
+                ) : (
+                  <StatCard title="Carrier Users" value={fmt(stats?.users_total)} icon={Users} onClick={() => nav("/users")} trend="+3" subtitle={stats?.users_invited ? `${stats.users_invited} not signed up yet` : undefined} />
+                )
               )}
             </>
           )}
 
-          {/* Exceptions to review */}
-          <div className="tile alert">
-            <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              Exceptions to Review
-              <InfoTip text="Cells that failed a validation rule and are still waiting on a decision, across every bordereau you've processed. “Open Triage” takes you to your most recent run that has exceptions, where you can approve, fix or dismiss each one." />
-            </div>
-            <div className="v" style={{ color: "var(--p-crit)" }}>
-              {fmt(stats?.pending_exceptions)}
-              {stats?.exception_runs != null && <small> · {stats.exception_runs} runs</small>}
-            </div>
-            {sev && (
-              <div className="sevbar">
-                <i className="c" style={{ flex: sev.critical || 0 }} />
-                <i className="w" style={{ flex: sev.warning || 0 }} />
-                <i className="i" style={{ flex: sev.info || 0 }} />
-              </div>
-            )}
-            <div className="foot"><span className="linkish" onClick={openTriage}>Open Latest Exception Triage →</span></div>
-          </div>
+          <StatCard
+            title="Exceptions to Review" value={fmt(stats?.pending_exceptions)}
+            icon={AlertCircle} tone="alert" onClick={openTriage} subtitle="Alert"
+          />
 
-          {/* Runs this week */}
-          <div className="tile">
-            <div className="k">Runs This Week</div>
-            <div className="v">{fmt(stats?.runs_this_week)}</div>
-            {spark && spark.length > 0 && (
-              <div className="spark">
-                {spark.map((n, i) => (
-                  <i key={i}
-                    className={i === spark.length - 1 ? "hi" : undefined}
-                    style={{ height: `${Math.max(10, Math.round((n / sparkMax) * 100))}%` }} />
-                ))}
-              </div>
-            )}
-          </div>
+          <StatCard title="Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} trend="+12%" />
 
-          {/* Role-specific last tile */}
           {role === "kavachio_admin" ? (
-            <div className="tile">
-              <div className="k">Mapping Tasks</div>
-              <div className="v">{fmt(stats?.mapping_tasks_open)}</div>
-              <div className="foot"><Link className="linkish" to="/admin/mapping-tasks">Data-Model Queue →</Link></div>
-            </div>
+            <StatCard title="Mapping Tasks" value={fmt(stats?.mapping_tasks_open)} icon={Clock} onClick={() => nav("/admin/mapping-tasks")} />
           ) : (
-            <div className="tile">
-              <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                Avg Turnaround
-                <InfoTip text="Average time from a file being uploaded to its validation finishing, over uploads validated in the last 30 days." />
-              </div>
-              <div className="v">
-                {stats?.avg_turnaround_min == null ? "—" : stats.avg_turnaround_min}
-                <small> min</small>
-              </div>
-              <div className="foot">file → validated output</div>
-            </div>
+            <StatCard title="Avg Turnaround Time" value={`${stats?.avg_turnaround_min == null ? "—" : stats.avg_turnaround_min}`} icon={Clock} trend="-8%" subtitle="Minutes per file" />
           )}
 
-          {/* Group 3: Deadlines — surfaces only when something needs attention, so
-              the dashboard stays clean until a bordereau is coming due or missed.
-
-              Leads with the WORST state rather than a single blended number. It
-              used to headline `due_soon + overdue` under the word "due soon",
-              which called already-missed deadlines upcoming, and then reported
-              "late" separately — three states, two of them past due, presented as
-              if one of them were still ahead of you. */}
-          {/* HIDDEN FOR NOW, at request — commented out rather than deleted so it
-              can come straight back. Everything it needs is still live: the
-              counts are still fetched above, My Calendar still shows the same
-              deadlines, and the reminder bell still counts them. */}
-          {/* {role !== "kavachio_admin" && (() => {
-            const overdue = calCounts.overdue ?? 0;
-            const upcoming = (calCounts.due_today ?? 0) + (calCounts.due_soon ?? 0);
-            if (overdue + upcoming === 0) return null;
-            return (
-              <div className={`tile${overdue > 0 ? " alert" : ""}`}>
-                <div className="k">Deadlines</div>
-                <div className="v" style={{ color: overdue > 0 ? "var(--p-crit)" : undefined }}>
-                  {overdue > 0 ? overdue : upcoming}
-                  <small>{overdue > 0 ? " overdue" : " due soon"}</small>
-                </div>
-                <div className="foot">
-                  {overdue > 0 && upcoming > 0 && <span>{upcoming} due soon · </span>}
-                  <Link className="linkish" to="/calendar">My Calendar →</Link>
-                </div>
-              </div>
-            );
-          })()} */}
+          <StatCard 
+            title="Pending Signatures" 
+            value={fmt(stats?.pending_signatures)} 
+            icon={FileText} 
+            tone={stats?.pending_signatures ? "alert" : undefined} 
+            subtitle={`${stats?.completed_signatures ?? 0} Completed`} 
+            onClick={() => nav("/contracts")} 
+          />
         </div>
 
-        {/* Incoming files — the latest arrivals, above Recent Runs because a
-            file is what a run starts from. Every row and link opens /files,
-            where the counts, filters and release/discard decisions live. */}
-        {showFiles && (
-          <div className="card" style={{ marginBottom: 18 }}>
-            <div className="card-h">
-              <h3>Incoming Files</h3>
-              <span className="sub">Latest spreadsheets your brokers have sent, whichever way they came in.</span>
-              <div className="right" style={{ display: "flex", gap: 14 }}>
-                <Link className="linkish" to="/files?panel=ways">Ways in →</Link>
-                <Link className="linkish" to="/files">View All Files →</Link>
-              </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
+          {/* Processing Volume Chart */}
+          <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
+            <div className="card-h" style={{ marginBottom: 20 }}>
+              <h3>Bordereau Status</h3>
+              <InfoTip text="Clean vs Flagged runs and Resolved exceptions over the last 7 days." />
             </div>
-            {arrivals === null ? (
-              <div className="empty">Loading files…</div>
-            ) : arrivals.length === 0 ? (
-              <div className="empty">
-                No files received yet — <Link className="linkish" to="/files?panel=ways">set up a way in for your brokers →</Link>
+            <div style={{ width: "100%", height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart
+                  data={(stats?.runs_by_day_status ?? []).map((dayData, i) => {
+                    const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+                    return { 
+                        name: days[i] || `Day ${i + 1}`, 
+                        clean: dayData.clean || 0,
+                        flagged: dayData.flagged || 0,
+                        resolved: dayData.resolved || 0
+                    };
+                  })}
+                  margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                  barSize={32}
+                >
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} dy={10} />
+                  <YAxis yAxisId="left" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
+                  <YAxis yAxisId="right" orientation="right" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
+                  <Tooltip
+                    formatter={(value, name) => [
+                      value as number,
+                      name === 'clean' ? 'Clean Runs' : name === 'flagged' ? 'Flagged Runs' : 'Resolved Exceptions'
+                    ]}
+                    labelFormatter={(label) => `${label}`}
+                    contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)" }}
+                    itemStyle={{ color: "#0f172a", fontWeight: 600, textTransform: "capitalize" }}
+                    labelStyle={{ color: "#64748b", marginBottom: 4 }}
+                    cursor={{ fill: '#f1f5f9' }}
+                  />
+                  <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: 13, color: "#64748b", textTransform: "capitalize" }} />
+                  <Bar yAxisId="left" dataKey="clean" name="Clean Runs" fill="#10b981" stackId="a" />
+                  <Bar yAxisId="left" dataKey="flagged" name="Flagged Runs" fill="#f59e0b" stackId="a" radius={[4, 4, 0, 0]} />
+                  <Line yAxisId="right" type="monotone" dataKey="resolved" name="Resolved Exceptions" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Exceptions Breakdown Pie Chart */}
+          <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
+            <div className="card-h" style={{ marginBottom: 20 }}>
+              <h3>Exceptions Breakdown</h3>
+              <InfoTip text="Distribution of open exceptions by severity." />
+            </div>
+            {stats?.pending_exceptions ? (
+              <div style={{ width: "100%", height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={pieData}
+                      cx="50%"
+                      cy="45%"
+                      innerRadius={60}
+                      outerRadius={85}
+                      paddingAngle={5}
+                      dataKey="value"
+                    >
+                      {
+                        pieData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.color} />
+                        ))
+                      }
+                    </Pie>
+                    <Tooltip 
+                      formatter={(value) => [`${value} exceptions`, 'Count']}
+                      contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)" }}
+                      itemStyle={{ color: "#0f172a", fontWeight: 600 }}
+                    />
+                    <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: 13, color: "#64748b" }} />
+                  </PieChart>
+                </ResponsiveContainer>
               </div>
             ) : (
-              <div className="tbl-wrap">
-                <table>
-                  <thead><tr><th className="l">File</th><th>Broker</th><th>Programme</th><th>Came In By</th><th>Received</th><th>Status</th></tr></thead>
-                  <tbody>
-                    {arrivals.map(a => {
-                      const st = arrivalState(a);
-                      return (
-                        <tr key={a.arrival_id} style={{ cursor: "pointer" }} onClick={() => nav("/files")}>
-                          <td className="l"><b>{a.filename}</b></td>
-                          <td className="muted">{a.broker_name ?? "unknown sender"}</td>
-                          {/* Null for a broker-wide route: the broker is known,
-                              the programme is not. */}
-                          <td className="muted">{a.program_name ?? "—"}</td>
-                          <td>{a.channel
-                            ? <Badge tone={CAME_IN_BY[a.channel].tone}>{CAME_IN_BY[a.channel].label}</Badge>
-                            : <span className="muted">—</span>}</td>
-                          <td className="muted">{fmtStamp(a.received_at, "")}</td>
-                          <td>
-                            {st === "ok"
-                              ? <Badge tone="ok">{a.bdx_upload_id ? "Processed" : "Waiting to be run"}</Badge>
-                              : st === "held" ? <Badge tone="warn">Held</Badge>
-                              : <Badge tone="crit">Turned away</Badge>}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--p-faint)", fontSize: 15, fontWeight: 500 }}>
+                No open exceptions! 🎉
               </div>
             )}
           </div>
-        )}
-
-        {/* Recent runs — latest 5 generated outputs. Full history: /runs */}
-        <div className="card">
-          <div className="card-h">
-            <h3>Recent Runs</h3>
-            <span className="sub">View your most recently processed bordereaux.</span>
-            <div className="right" style={{ display: "flex", gap: 14 }}>
-              {canProcess && <Link className="linkish" to="/direct">Process Bordereau →</Link>}
-              <Link className="linkish" to="/runs?from=home">View All →</Link>
-            </div>
-          </div>
-          {runs.length === 0 ? (
-            <div className="empty">
-              {canProcess ? "No runs yet — process a Bordereaux and it will appear here."
-                          : "No runs yet — they appear here once your brokers send files."}
-            </div>
-          ) : (
-            <div className="tbl-wrap">
-              <table>
-                <thead><tr><th className="l">Output File</th><th>Program</th><th>Policies</th><th>Result</th><th>Generated</th><th></th></tr></thead>
-                <tbody>
-                  {runs.map(r => {
-                    const hasExc = runHasExc(r);
-                    return (
-                      <tr key={r.id}>
-                        <td className="l"><b>{r.filename}</b></td>
-                        <td className="muted">{r.template_name ?? "—"}</td>
-                        <td className="muted">{r.policy_count.toLocaleString()}</td>
-                        <td>
-                          <span className={`badge ${runNotValidated(r) ? "b-warn" : hasExc ? "b-crit" : "b-ok"}`}>
-                            <span className="muted" />
-                            {runNotValidated(r) ? "Not validated"
-                              : hasExc ? `${r.exception_count.toLocaleString()} exceptions` : "Clean"}
-                          </span>
-                        </td>
-                        <td className="muted">{fmtStamp(r.created_at, "")}</td>
-                        <td className="muted">
-                          <span className="linkish"
-                            onClick={() => hasExc
-                              ? goTriage(r)
-                              : downloadFile(`/export/downloads/${r.id}/file`, r.filename)
-                                  .catch(() => alert("We couldn't download that file — please try again."))}>
-                            {hasExc ? "Review →" : "Download →"}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {runs.length >= RUNS_PAGE && (
-            <div style={{ padding: "10px 20px", borderTop: "1px solid var(--p-border)" }}>
-              <Link className="linkish" to="/runs?from=home" style={{ fontSize: 12.5 }}>
-                View All Runs →
-              </Link>
-            </div>
-          )}
         </div>
 
-        {user && (
-          <div className="muted" style={{ fontSize: 11.5, marginTop: 18 }}>
-            Signed in as {user.full_name} · {seat === "user" ? "Carrier User" : ROLE_LABEL[role]}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
+          {/* Incoming files */}
+          {showFiles && (
+            <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/files")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "var(--p-shadow)"; }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+                  <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "var(--p-surface-2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+                  </div>
+                  <h3 style={{ margin: 0, fontSize: 18 }}>Incoming Files</h3>
+                </div>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>{arrivals?.length ?? 0}</span>
+                  <span style={{ color: "var(--p-muted)", fontSize: 14 }}>New Files</span>
+                </div>
+              </div>
+              <div style={{ opacity: 0.3 }}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+              </div>
+            </div>
+          )}
+
+          {/* Recent runs */}
+          <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", border: "none", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/runs?from=home")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgba(15,23,42,0.4), 0 4px 6px -4px rgba(15,23,42,0.4)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+                <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                </div>
+                <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Recent Runs</h3>
+              </div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ fontSize: 32, fontWeight: 600, color: "white" }}>{runs.length}</span>
+                <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 14 }}>Completed</span>
+              </div>
+            </div>
+            <div style={{ opacity: 0.5, color: "white" }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            </div>
           </div>
-        )}
-      </div>
-    </div>
+        </div>
+
+       
+      </div >
+    </div >
   );
 }

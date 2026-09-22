@@ -20,7 +20,7 @@ from db import (
     GenericRuleSpecification, Mapper, OutputExport, Party, PartyContact, Program,
     ProgramBroker,
     SessionLocal, Tenant, Upload, SheetBinding, ReferenceDocument, SubmissionSchedule,
-    ExpectedSubmission,
+    ExpectedSubmission, ExceptionDecisionLog, EsignEnvelope,
 )
 from sqlalchemy import exists
 from sqlalchemy.exc import IntegrityError
@@ -4634,22 +4634,54 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         # validation result — matches the dashboard's "Recent runs" table.
         # "Runs this week" tile + a 7-day daily series (oldest → newest) for the spark.
         week_rows = s.query(
-            func.date(OutputExport.created_at), func.count(OutputExport.id)
+            func.date(OutputExport.created_at), OutputExport.status, func.count(OutputExport.id)
         ).filter(
             OutputExport.tenant_id == tid,
             OutputExport.created_at >= week_ago,
-        ).group_by(func.date(OutputExport.created_at)).all()
-        by_date = {str(d): c for d, c in week_rows}
-        runs_by_day = [by_date.get(str(today - timedelta(days=i)), 0)
-                       for i in range(6, -1, -1)]
-        runs_this_week = sum(runs_by_day)
+        ).group_by(func.date(OutputExport.created_at), OutputExport.status).all()
+        
+        runs_this_week = 0
+        by_date = {}
+        for d, status, c in week_rows:
+            d_str = str(d)
+            runs_this_week += c
+            if d_str not in by_date:
+                by_date[d_str] = {"clean": 0, "flagged": 0, "resolved": 0}
+            
+            if status == "clean":
+                by_date[d_str]["clean"] += c
+            else:
+                by_date[d_str]["flagged"] += c
+                
+        resolved_rows = s.query(
+            func.date(ExceptionDecisionLog.decided_at), func.count(ExceptionDecisionLog.id)
+        ).filter(
+            ExceptionDecisionLog.tenant_id == tid,
+            ExceptionDecisionLog.decided_at >= week_ago,
+            ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss"))
+        ).group_by(func.date(ExceptionDecisionLog.decided_at)).all()
+        
+        for d, c in resolved_rows:
+            d_str = str(d)
+            if d_str not in by_date:
+                by_date[d_str] = {"clean": 0, "flagged": 0, "resolved": 0}
+            by_date[d_str]["resolved"] += c
+
+        runs_by_day_status = []
+        for i in range(6, -1, -1):
+            d_str = str(today - timedelta(days=i))
+            day_data = by_date.get(d_str, {"clean": 0, "flagged": 0, "resolved": 0})
+            runs_by_day_status.append(day_data)
 
         # "Exceptions to review" tile — real exception totals across generated
         # outputs (replaces the previous hardcoded 0). Counts every flagged
         # exception; per-exception resolution state is not yet subtracted.
-        exc_sum, exc_runs = s.query(
+        exc_sum, exc_runs, sev_crit, sev_warn, sev_info = s.query(
             func.coalesce(func.sum(OutputExport.exception_count), 0),
             func.count(OutputExport.id),
+            func.coalesce(func.sum(OutputExport.critical_count), 0),
+            func.coalesce(func.sum(OutputExport.warning_count), 0),
+            func.coalesce(func.sum(OutputExport.info_count), 0),
         ).filter(
             OutputExport.tenant_id == tid,
             OutputExport.status == "has_exceptions",
@@ -4665,6 +4697,17 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         mapping_tasks_open = s.query(AdminMappingTask).filter(
             AdminMappingTask.tenant_id == tid,
             AdminMappingTask.status.in_(("open", "in_progress")),
+        ).count()
+
+        # "Pending Signatures" count
+        pending_signatures = s.query(EsignEnvelope).filter(
+            EsignEnvelope.tenant_id == tid,
+            EsignEnvelope.status.in_(("sent", "in_progress")),
+        ).count()
+
+        completed_signatures = s.query(EsignEnvelope).filter(
+            EsignEnvelope.tenant_id == tid,
+            EsignEnvelope.status == "completed",
         ).count()
 
         # "Avg Turnaround" tile (tenant/operator) — average wall-clock time from a
@@ -4764,12 +4807,19 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             "active_setup_carriers": int(active_setup_carriers),
             "parties_in_directory": parties,
             "pending_exceptions": int(exc_sum or 0),
+            "exceptions_by_severity": {
+                "critical": int(sev_crit or 0),
+                "warning": int(sev_warn or 0),
+                "info": int(sev_info or 0),
+            },
             "exception_runs": int(exc_runs or 0),
             "not_validated_runs": int(not_validated_runs),
             "ai_cache_hit_rate": None,
             "runs_this_week": runs_this_week,
-            "runs_by_day": runs_by_day,
+            "runs_by_day_status": runs_by_day_status,
             "mapping_tasks_open": mapping_tasks_open,
+            "pending_signatures": pending_signatures,
+            "completed_signatures": completed_signatures,
             "avg_turnaround_min": round(avg_turnaround_min, 1) if avg_turnaround_min is not None else None,
         }
 
