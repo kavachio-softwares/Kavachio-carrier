@@ -20,6 +20,7 @@
  * rather than eyeballed.
  */
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -70,12 +71,15 @@ type Row = { id: number; name: string; value: number; note?: string };
  * the end of its track, so a zero reads as a zero rather than a missing bar;
  * rows past the cap are one click away in a list that holds any number.
  */
-export function RankedBars({ rows, cap = 8, unit, empty, total, onViewAll }: {
+export function RankedBars({ rows, cap = 8, unit, empty, total, onViewAll, linkTo }: {
   rows: Row[]; cap?: number; unit: string; empty: string;
   /** The full count when `rows` is only the top of a longer list the server
    *  holds; "View all" then calls `onViewAll` instead of opening `rows`. */
   total?: number | null;
   onViewAll?: () => void;
+  /** When given, each row opens the detail behind its own number — e.g. a
+   *  person's count is a total; this is how a reader reaches WHICH ones. */
+  linkTo?: (row: Row) => string;
 }) {
   const [all, setAll] = useState(false);
   const ranked = [...rows].sort((a, b) => b.value - a.value || a.name.localeCompare(b.name));
@@ -89,26 +93,37 @@ export function RankedBars({ rows, cap = 8, unit, empty, total, onViewAll }: {
   return (
     <div>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {shown.map(r => (
-          <div key={r.id} title={`${r.name}: ${r.value} ${unit}`}
-               style={{ display: "grid", gridTemplateColumns: "140px 1fr 40px",
-                        alignItems: "center", gap: 12 }}>
-            <span style={{ fontSize: 13, color: "var(--p-ink)", overflow: "hidden",
-                           textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {r.name}
-              {r.note && <span style={{ color: "var(--p-faint)" }}> · {r.note}</span>}
-            </span>
-            <span style={{ height: 10, borderRadius: 5, background: "#F0F2F6", overflow: "hidden" }}>
-              <span style={{ display: "block", height: "100%", borderRadius: 5, background: HUE,
-                             width: `${(r.value / max) * 100}%` }} />
-            </span>
-            <span style={{ fontSize: 13, fontWeight: 600, textAlign: "right",
-                           fontVariantNumeric: "tabular-nums",
-                           color: r.value ? "var(--p-ink)" : "var(--p-faint)" }}>
-              {r.value}
-            </span>
-          </div>
-        ))}
+        {shown.map(r => {
+          const row = (
+            <div style={{ display: "grid", gridTemplateColumns: "140px 1fr 40px",
+                          alignItems: "center", gap: 12 }}>
+              <span style={{ fontSize: 13, color: "var(--p-ink)", overflow: "hidden",
+                             textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {r.name}
+                {r.note && <span style={{ color: "var(--p-faint)" }}> · {r.note}</span>}
+              </span>
+              <span style={{ height: 10, borderRadius: 5, background: "#F0F2F6", overflow: "hidden" }}>
+                <span style={{ display: "block", height: "100%", borderRadius: 5, background: HUE,
+                               width: `${(r.value / max) * 100}%` }} />
+              </span>
+              <span style={{ fontSize: 13, fontWeight: 600, textAlign: "right",
+                             fontVariantNumeric: "tabular-nums",
+                             color: r.value ? "var(--p-ink)" : "var(--p-faint)" }}>
+                {r.value}
+              </span>
+            </div>
+          );
+          return linkTo ? (
+            <Link key={r.id} to={linkTo(r)}
+                  title={`${r.name}: ${r.value} ${unit} — see which ones`}
+                  style={{ color: "inherit", textDecoration: "none" }}
+                  className="rb-row">
+              {row}
+            </Link>
+          ) : (
+            <div key={r.id} title={`${r.name}: ${r.value} ${unit}`}>{row}</div>
+          );
+        })}
       </div>
       {more > 0 && (
         <div style={{ textAlign: "right", marginTop: 14 }}>
@@ -119,7 +134,7 @@ export function RankedBars({ rows, cap = 8, unit, empty, total, onViewAll }: {
           </button>
         </div>
       )}
-      {all && <FullList rows={ranked} unit={unit} />}
+      {all && <FullList rows={ranked} unit={unit} linkTo={linkTo} />}
     </div>
   );
 }
@@ -127,7 +142,7 @@ export function RankedBars({ rows, cap = 8, unit, empty, total, onViewAll }: {
 /** Every row, however many there are — the chart shows the top of the list,
  *  this is the whole of it, and the readable form for anyone the chart's
  *  shapes do not serve. It scrolls rather than stretching the card. */
-function FullList({ rows, unit }: { rows: Row[]; unit: string }) {
+function FullList({ rows, unit, linkTo }: { rows: Row[]; unit: string; linkTo?: (row: Row) => string }) {
   return (
     <div className="tbl-wrap" style={{ marginTop: 10, maxHeight: 280, overflowY: "auto" }}>
       <table>
@@ -139,7 +154,9 @@ function FullList({ rows, unit }: { rows: Row[]; unit: string }) {
             <tr key={r.id}>
               <td className="muted">{i + 1}</td>
               <td>
-                {r.name}
+                {linkTo ? (
+                  <Link to={linkTo(r)}>{r.name}</Link>
+                ) : r.name}
                 {r.note && <span className="muted" style={{ fontSize: 12 }}> · {r.note}</span>}
               </td>
               <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums",

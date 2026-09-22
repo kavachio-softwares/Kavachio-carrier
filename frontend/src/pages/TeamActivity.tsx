@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { Search } from "lucide-react";
 import { getTeamRanking, type BrokerInsightPerson } from "../api/broker";
 import { Pagination } from "../components/Pagination";
@@ -69,12 +70,16 @@ export default function TeamActivity() {
                       <tr key={u.id}>
                         <td className="muted">{u.rank}</td>
                         <td>
-                          {u.name}
+                          <Link to={`/broker/team-activity/${u.id}`}>{u.name}</Link>
                           {u.role === "broker_admin" && <span className="muted" style={{ fontSize: 12 }}> · admin</span>}
                         </td>
-                        <td style={{ textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums",
-                                     color: u.resolved ? undefined : "var(--p-faint)" }}>
-                          {u.resolved}
+                        <td style={{ textAlign: "right" }}>
+                          {u.resolved > 0 ? (
+                            <Link className="btn sm" to={`/broker/team-activity/${u.id}`}>{u.resolved} →</Link>
+                          ) : (
+                            <span style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums",
+                                          color: "var(--p-faint)" }}>0</span>
+                          )}
                         </td>
                       </tr>
                     ))}

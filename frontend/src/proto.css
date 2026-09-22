@@ -194,6 +194,9 @@
 /* ---------------- dashboard: tiles ---------------- */
 .proto .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
 @media(max-width:1000px){.proto .tiles{grid-template-columns:1fr 1fr}}
+/* A ranked-bar row that opens the detail behind its own number. */
+.proto .rb-row{display:block;border-radius:8px;padding:2px 6px;margin:-2px -6px}
+.proto .rb-row:hover{background:var(--p-surface-2)}
 /* 5-up KPI row (Platform Dashboard) — keeps all five tiles on one line on wide
    screens, then steps down. Needs its own media rules: `.tiles.five` outranks
    the `.tiles` ones above regardless of viewport. */

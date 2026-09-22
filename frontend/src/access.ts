@@ -73,6 +73,7 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // The rest of the dashboard's Team Activity / Files by Carrier cards —
   // broker admin only, same as the cards themselves.
   { pattern: "/broker/team-activity", requires: "broker_admin", only: ["broker_admin"] },
+  { pattern: "/broker/team-activity/:userId", requires: "broker_admin", only: ["broker_admin"] },
   { pattern: "/broker/files-by-carrier", requires: "broker_admin", only: ["broker_admin"] },
 
   // --- Carrier screens -----------------------------------------------------

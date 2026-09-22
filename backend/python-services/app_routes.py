@@ -4824,6 +4824,91 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         }
 
 
+@router.get("/dashboard/broker-performance")
+def dashboard_broker_performance(mga: str,
+                                 days: int = Query(30, ge=7, le=90),
+                                 limit: int = Query(5, ge=1, le=20),
+                                 principal: Principal = Depends(current_principal)):
+    """How each broker company is working, and how far its issues have been
+    resolved — the most recently active `limit` brokers in this seat's reach.
+
+    Reach is the Party screen's: a carrier user sees the brokers THEY invited,
+    the carrier admin (and Kavachio) every broker the carrier works with.
+
+    Per broker:
+      runs / clean / flagged / not_checked
+                   the files run for this carrier in the last `days`
+      latest       the broker's most recent file WITH issues, counted exactly
+                   as its Exception Triage screen counts them (same decision
+                   matching, same notices left out), so the bar and the screen
+                   it opens always agree: issues = resolved + open.
+    """
+    since = datetime.utcnow() - timedelta(days=days)   # stored times are utcnow
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        reach = _brokers_in_reach(s, principal, tid)
+        if not reach:
+            return {"days": days, "items": [], "active_total": 0}
+
+        exports = (s.query(OutputExport.id, OutputExport.broker_party_id,
+                           OutputExport.status, OutputExport.created_at)
+                   .filter(OutputExport.tenant_id == tid,
+                           OutputExport.broker_party_id.in_(reach),
+                           OutputExport.created_at >= since)
+                   .order_by(OutputExport.created_at.desc(), OutputExport.id.desc())
+                   .all())
+        per: dict[int, dict] = {}
+        for eid, bid, status, created in exports:          # newest first
+            b = per.setdefault(bid, {"clean": 0, "flagged": 0, "not_checked": 0,
+                                     "last_run_at": created, "latest_export_id": None})
+            if status == "clean":
+                b["clean"] += 1
+            elif status == "has_exceptions":
+                b["flagged"] += 1
+                if b["latest_export_id"] is None:
+                    b["latest_export_id"] = eid
+            else:
+                b["not_checked"] += 1
+
+        ranked = sorted(per.items(), key=lambda kv: kv[1]["last_run_at"] or since,
+                        reverse=True)[:limit]
+        names = {p.id: (p.legal_name or p.dba_name or "—") for p in
+                 s.query(Party).filter(Party.id.in_([bid for bid, _ in ranked] or [0])).all()}
+
+        from main import _attach_decisions   # the triage screen's own matching
+        resolved_kinds = {"approved", "fixed", "dismissed", "rejected"}
+
+        def _tally(export_id):
+            r = s.get(OutputExport, export_id)
+            excs = [e for e in _attach_decisions(r.exceptions or [], r)
+                    if isinstance(e, dict)
+                    and e.get("error_class") != "not_checked"
+                    and not (e.get("error_class") == "not_validated"
+                             and e.get("rule_id") is None)]
+            done = 0
+            for e in excs:
+                st = str(e.get("status") or "").lower()
+                note = str(e.get("resolution_note") or "").strip().lower()
+                if st in resolved_kinds or (st == "resolved" and note.startswith(
+                        ("fixed", "approved", "dismissed", "rejected"))):
+                    done += 1
+            return {"export_id": r.id, "source_upload_id": r.source_upload_id,
+                    "issues": len(excs), "resolved": done, "open": len(excs) - done,
+                    "run_at": _iso_utc(r.created_at)}
+
+        items = []
+        for bid, b in ranked:
+            items.append({
+                "id": bid, "name": names.get(bid, "—"),
+                "runs": b["clean"] + b["flagged"] + b["not_checked"],
+                "clean": b["clean"], "flagged": b["flagged"],
+                "not_checked": b["not_checked"],
+                "last_run_at": _iso_utc(b["last_run_at"]),
+                "latest": _tally(b["latest_export_id"]) if b["latest_export_id"] else None,
+            })
+        return {"days": days, "items": items, "active_total": len(per)}
+
+
 # ---- Program Management — the CARRIER-scoped oversight dashboard ----------
 # Answers a different question from /dashboard/stats. That one is operational
 # ("what did I process today" — runs, exceptions, turnaround). This one is

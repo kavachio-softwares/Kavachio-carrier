@@ -937,7 +937,8 @@ def broker_insights(days: int = Query(30, ge=7, le=90),
             # the dashboard draws a handful, and "View all" pages through the
             # rest from /broker/insights/people rather than shipping every
             # row on every load.
-            by_person, people_total = _team_ranking(s, bid, since, limit=5)
+            by_person, people_total = _team_ranking(
+                s, bid, since, limit=5, exclude_user_id=p.user_id)
 
         return {
             "days": days,
@@ -990,7 +991,8 @@ def _run_rows(s, exports) -> list[dict]:
 
 
 def _team_ranking(s, bid: int, since, q: Optional[str] = None,
-                  offset: int = 0, limit: int = 10):
+                  offset: int = 0, limit: int = 10,
+                  exclude_user_id: Optional[int] = None):
     """The broker's whole team ranked by exceptions put right since `since`.
 
     Counted and ranked in the database, so it costs the same for five people
@@ -998,6 +1000,12 @@ def _team_ranking(s, bid: int, since, q: Optional[str] = None,
     so someone found by name keeps their real place rather than becoming #1
     of the results. Ties share a rank; everyone who resolved nothing shares
     the last one.
+
+    `exclude_user_id` drops the VIEWER from their own team list — the admin
+    is not someone they are keeping tabs on, and seeing your own name in a
+    ranking of your team reads as a bug even when it isn't one. It is applied
+    before ranking, so a colleague's rank is never shifted by the admin's own
+    row being present or absent.
     """
     from auth_deps import normalize_role
     from db import ExceptionDecisionLog
@@ -1010,15 +1018,17 @@ def _team_ranking(s, bid: int, since, q: Optional[str] = None,
                .group_by(ExceptionDecisionLog.decided_by_user_id)
                .subquery())
     n = func.coalesce(counts.c.n, 0)
-    ranked = (s.query(AppUser.id.label("id"),
-                      AppUser.full_name.label("full_name"),
-                      AppUser.email.label("email"),
-                      AppUser.role.label("role"),
-                      n.label("resolved"),
-                      func.rank().over(order_by=n.desc()).label("rank"))
-               .outerjoin(counts, counts.c.uid == AppUser.id)
-               .filter(AppUser.broker_party_id == bid)
-               .subquery())
+    base = s.query(AppUser.id.label("id"),
+                   AppUser.full_name.label("full_name"),
+                   AppUser.email.label("email"),
+                   AppUser.role.label("role"),
+                   n.label("resolved"),
+                   func.rank().over(order_by=n.desc()).label("rank")) \
+             .outerjoin(counts, counts.c.uid == AppUser.id) \
+             .filter(AppUser.broker_party_id == bid)
+    if exclude_user_id is not None:
+        base = base.filter(AppUser.id != exclude_user_id)
+    ranked = base.subquery()
     rows = s.query(ranked)
     if q and q.strip():
         like = f"%{q.strip()}%"
@@ -1095,6 +1105,74 @@ def broker_insights_carriers(days: int = Query(30, ge=7, le=90),
         return {"items": items, "total": total}
 
 
+@router.get("/broker/insights/people/{user_id}/decisions")
+def broker_person_decisions(user_id: int, days: int = Query(30, ge=7, le=90),
+                            page: int = Query(1, ge=1),
+                            page_size: int = Query(25, ge=1, le=100),
+                            p: Principal = Depends(current_principal)):
+    """WHICH exceptions this person put right — the count on Team Activity is
+    only the headline; this is the receipt behind it.
+
+    Broker admin only, and naturally scoped to THIS broker even though
+    `user_id` is caller-supplied: every row is filtered on
+    `decided_by_broker_party_id == bid`, so a colleague's id from a DIFFERENT
+    broker returns nothing rather than leaking their name into a page that
+    was never theirs to open — there is no separate ownership check to forget.
+    """
+    from db import ExceptionDecisionLog, OutputExport
+    with SessionLocal() as s:
+        bid = _broker_admin(s, p)
+        today = dt.datetime.utcnow().date()
+        since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+        q = (s.query(ExceptionDecisionLog)
+              .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
+                      ExceptionDecisionLog.decided_by_user_id == user_id,
+                      ExceptionDecisionLog.decided_at >= since,
+                      ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss"))))
+        total = q.count()
+        rows = (q.order_by(ExceptionDecisionLog.decided_at.desc())
+                 .offset((page - 1) * page_size).limit(page_size).all())
+
+        eids = {r.export_id for r in rows if r.export_id}
+        exports = ({e.id: e for e in s.query(OutputExport)
+                    .filter(OutputExport.id.in_(eids)).all()} if eids else {})
+        pids = {e.program_id for e in exports.values() if e.program_id}
+        prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
+                       .filter(Program.id.in_(pids)).all()} if pids else {})
+
+        from app_routes import _iso_utc
+
+        def _row(r):
+            exp = exports.get(r.export_id)
+            return {
+                "id": r.id,
+                "kind": r.kind,
+                "policy_number": r.policy_number,
+                "sheet": r.sheet,
+                "row": r.row,
+                "field": r.field,
+                "old_value": r.old_value,
+                "new_value": r.new_value,
+                "reason": r.reason,
+                "decided_at": _iso_utc(r.decided_at),
+                "export_id": r.export_id,
+                "filename": exp.filename if exp else None,
+                "programme": prog_names.get(exp.program_id) if exp else None,
+            }
+
+        # Same bid filter as the decisions query, for the same reason: a
+        # user id from another broker gets no name here either.
+        person = (s.query(AppUser)
+                   .filter(AppUser.id == user_id, AppUser.broker_party_id == bid)
+                   .first())
+        return {
+            "person": {"id": user_id,
+                       "name": (person.full_name or person.email) if person else None},
+            "items": [_row(r) for r in rows],
+            "total": total,
+        }
+
+
 @router.get("/broker/insights/people")
 def broker_insights_people(days: int = Query(30, ge=7, le=90),
                            page: int = Query(1, ge=1),
@@ -1110,7 +1188,8 @@ def broker_insights_people(days: int = Query(30, ge=7, le=90),
         today = dt.datetime.utcnow().date()
         since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
         items, total = _team_ranking(s, bid, since, q=q,
-                                     offset=(page - 1) * page_size, limit=page_size)
+                                     offset=(page - 1) * page_size, limit=page_size,
+                                     exclude_user_id=p.user_id)
         return {"items": items, "total": total}
 
 

@@ -180,6 +180,7 @@ export default function BrokerDashboard() {
                   <RankedBars unit="put right" cap={5}
                     total={ins.people_total}
                     onViewAll={() => nav("/broker/team-activity")}
+                    linkTo={r => `/broker/team-activity/${r.id}`}
                     empty="No one on your team yet."
                     rows={(ins.by_person ?? []).map(u => ({
                       id: u.id, name: u.name, value: u.resolved,

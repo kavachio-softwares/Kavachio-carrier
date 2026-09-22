@@ -12,6 +12,7 @@ import BrokerDashboard from "./pages/BrokerDashboard";
 import OperatorHome from "./pages/OperatorHome";
 import BrokerRuns from "./pages/BrokerRuns";
 import TeamActivity from "./pages/TeamActivity";
+import PersonActivity from "./pages/PersonActivity";
 import FilesByCarrier from "./pages/FilesByCarrier";
 import BrokerContracts from "./pages/BrokerContracts";
 import BrokerInvitations from "./pages/BrokerInvitations";
@@ -152,6 +153,7 @@ export default function App() {
         <Route path="/broker/users" element={<BrokerUsers />} />   {/* The broker staffs itself */}
         <Route path="/broker/runs" element={<BrokerRuns />} />
         <Route path="/broker/team-activity" element={<TeamActivity />} />
+        <Route path="/broker/team-activity/:userId" element={<PersonActivity />} />
         <Route path="/broker/files-by-carrier" element={<FilesByCarrier />} />
         <Route path="/admin/users" element={<AdminUsers />} />   {/* Everyone on the platform, read-only */}
         <Route path="/tenants" element={<Tenants />} />    {/* Tenants directory (Kavachio platform admin) */}

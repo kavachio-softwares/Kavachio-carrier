@@ -262,6 +262,34 @@ export const getCarrierRanking = (opts: { days: number; page: number; pageSize: 
     params: { days: opts.days, page: opts.page, page_size: opts.pageSize, q: opts.q || undefined },
   }).then(r => r.data);
 
+/** One decision behind a Team Activity count — a single row someone fixed,
+ *  approved or dismissed. */
+export type PersonDecision = {
+  id: number;
+  kind: string;
+  policy_number: string | null;
+  sheet: string | null;
+  row: number | null;
+  field: string | null;
+  old_value: string | null;
+  new_value: string | null;
+  reason: string | null;
+  decided_at: string | null;
+  /** The file this exception belongs to; open it via the same exceptions
+   *  screen Process Bordereau uses (`/uploads/${export_id}/exceptions`). */
+  export_id: number | null;
+  filename: string | null;
+  programme: string | null;
+};
+
+/** WHICH exceptions a person put right, newest first, a page at a time —
+ *  the detail behind their Team Activity count. */
+export const getPersonDecisions = (userId: number, opts: { days: number; page: number; pageSize: number }) =>
+  api.get<{ person: { id: number; name: string | null }; items: PersonDecision[]; total: number }>(
+    `/broker/insights/people/${userId}/decisions`,
+    { params: { days: opts.days, page: opts.page, page_size: opts.pageSize } },
+  ).then(r => r.data);
+
 /** Every run made for this broker, newest first, one page at a time. */
 export const getBrokerRunHistory = (page: number, pageSize: number) =>
   api.get<{ items: OperatorRun[]; total: number }>("/broker/runs", {

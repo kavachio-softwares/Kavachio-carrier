@@ -13,6 +13,7 @@ import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
 import { StatCard } from "../components/StatCard";
+import BrokerPerformance from "../components/BrokerPerformance";
 
 
 type Stats = {
@@ -361,6 +362,14 @@ export default function Home() {
             )}
           </div>
         </div>
+
+        {/* How each broker company is working and putting its issues right —
+            the five most recently active, within this seat's reach. */}
+        {carrierSeat && (
+          <div style={{ marginBottom: 24 }}>
+            <BrokerPerformance mga={mga} mine={seat === "user"} />
+          </div>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
           {/* Incoming files */}
