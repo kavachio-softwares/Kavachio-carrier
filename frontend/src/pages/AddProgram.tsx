@@ -1,6 +1,16 @@
 /**
  * Configure Program — the whole setup as one flow on one screen:
- *   1. the programme, 2. its brokers, 3. their contracts.
+ *   1. the programme, 2. its brokers, 3. their contracts, 4. each broker's
+ *   Bordereau Setup (built on its own screen, reached from step 4 here).
+ *
+ * The same screen picks up an existing programme at /programs/:id/setup?stage=N
+ * — the Programmes list sends every row and every pill there, so the stepper
+ * is on screen whichever step you arrive at.
+ *
+ * A stepper across the top shows the four steps and where you are. One
+ * section is on screen at a time; saving a section moves on to the next, and
+ * any step already reached can be clicked to go back to it. A step that cannot
+ * be reached yet is shown disabled, its tooltip saying what unlocks it.
  *
  * Step 1 saves the programme on its own ("Configure Program", under the
  * Programme card). Step 2, the broker list, unlocks only once that exists —
@@ -27,15 +37,19 @@
  *
  * The carrier is not asked for. You are signed in as it.
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
-import { Link, useNavigate } from "react-router-dom";
-import { Plus, Upload, UserPlus } from "lucide-react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { FileText, Plus, Upload, UserPlus } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
 import { PageBody, PageHeader } from "../components/Layout";
+import { FlowStepper, type FlowStep } from "../components/FlowStepper";
 import { Card } from "../components/ui/Card";
-import { addProgrammeBroker, getBrokers, type BrokerSummary } from "../api/hierarchy";
+import {
+  addProgrammeBroker, getBrokers, getHierarchy,
+  type BrokerSummary, type HierarchyBroker, type HierarchyProgramme,
+} from "../api/hierarchy";
 import { OnboardingBadge } from "../components/OnboardingBadge";
 import { InviteBrokerModal } from "../components/InviteBrokerModal";
 import { InviteSentModal } from "../components/InviteSentModal";
@@ -69,9 +83,22 @@ function Step({ n, children }: { n: number; children: ReactNode }) {
   );
 }
 
+// Contracts that have ended no longer count as the broker's contract. Null
+// lifecycle is a contract raised before the lifecycle existed — in force.
+const ENDED = new Set(["expired", "terminated", "superseded"]);
+const openContracts = (b?: HierarchyBroker) =>
+  (b?.contracts ?? []).filter(c => !ENDED.has(c.lifecycle ?? ""));
+const isLive = (lifecycle?: string | null) => lifecycle == null || lifecycle === "active";
+
 export default function AddProgram() {
   const mga = currentMga();
   const nav = useNavigate();
+  // /programs/:programId/setup?stage=N picks the flow up for a programme that
+  // already exists — the Programmes list sends each row here, at the step it
+  // is stuck on. /programs/new starts a new one.
+  const params = useParams();
+  const [search] = useSearchParams();
+  const resumeId = params.programId ? Number(params.programId) : null;
 
   const [name, setName] = useState("");
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -139,17 +166,45 @@ export default function AddProgram() {
   // Set when the open upload dialog has actually saved a contract. Its Done
   // button then carries on to Bordereau Setup instead of just closing.
   const [contractSaved, setContractSaved] = useState(false);
-  // Bumped after a successful Assign; the effect scrolls step 3 into view once
-  // it has rendered (it only exists after the first broker is assigned).
-  const [jumpToContracts, setJumpToContracts] = useState(0);
-  const contractsRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (jumpToContracts) contractsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [jumpToContracts]);
+  // Which section is on screen. The stepper at the top moves between them; each
+  // section also moves on to the next by itself once it is saved.
+  const [stage, setStage] = useState<1 | 2 | 3 | 4>(1);
+  // The programme as saved: its brokers, their contracts and setups. Read once
+  // it exists, and again after each thing done here, so steps 3 and 4 show
+  // what is really on it — including contracts raised on other screens.
+  const [prog, setProg] = useState<HierarchyProgramme | null>(null);
 
   useEffect(() => {
     getBrokers().then(setBrokers).catch(() => setBrokers([]));
   }, []);
+
+  const reload = useCallback(async (id: number) => {
+    try {
+      const h = await getHierarchy();
+      const p = h.programmes.find(x => x.id === id) ?? null;
+      setProg(p);
+      return p;
+    } catch { return null; }
+  }, []);
+
+  // Picking up an existing programme: fill step 1 from it (locked, as after a
+  // save), mark its brokers assigned, and open the step asked for.
+  useEffect(() => {
+    if (resumeId == null) return;
+    reload(resumeId).then(p => {
+      if (!p) { setErr("Could not find that programme."); return; }
+      setName(p.name);
+      setSegment(p.business_segment ?? "");
+      setProductLine(p.product_line ?? "");
+      if (p.bdx_frequency) setFrequency(p.bdx_frequency);
+      setStatus(p.status ?? "active");
+      setProgramId(p.id);
+      setAssigned(new Set(p.brokers.filter(b => b.link_status === "active").map(b => b.id)));
+      const want = Number(search.get("stage"));
+      setStage(want >= 1 && want <= 4 ? (want as 1 | 2 | 3 | 4) : 2);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeId]);
 
   function toggle(id: number) {
     if (assigned.has(id)) return;
@@ -173,6 +228,7 @@ export default function AddProgram() {
         status,
       }, { params: { mga } });
       setProgramId(data.id);
+      setStage(2);
     } catch (e: any) {
       setErr(e?.response?.data?.detail ?? "Could not configure the programme.");
     } finally { setConfiguring(false); }
@@ -211,7 +267,10 @@ export default function AddProgram() {
       nav(`/programs/${programId}/brokers`);
       return;
     }
-    if (await assignPicked()) setJumpToContracts(j => j + 1);
+    if (await assignPicked()) {
+      setStage(3);
+      if (programId != null) reload(programId);
+    }
   }
 
   // After an invite: reload the list and tick whoever is new on it. The
@@ -248,11 +307,72 @@ export default function AddProgram() {
   // Brokers now on the programme, in list order, for step 3.
   const assignedBrokers = (brokers ?? []).filter(b => assigned.has(b.id));
 
+  // ── the stepper ────────────────────────────────────────────────────────────
+  // Per broker: the contracts on this programme (the saved ones, or what was
+  // uploaded here before the reload came back) and the setup built from them.
+  const onProg = (id: number) => prog?.brokers.find(b => b.id === id);
+  const contractsOf = (id: number) =>
+    Math.max(openContracts(onProg(id)).length, uploaded[id] ?? 0);
+  const withContract = assignedBrokers.filter(b => contractsOf(b.id) > 0);
+  const withSetup = withContract.filter(b => onProg(b.id)?.setup_status === "active");
+  const contractsDone = assignedBrokers.length > 0 && withContract.length === assignedBrokers.length;
+  const setupDone = contractsDone && withSetup.length === withContract.length;
+  // Where "Bordereau setup" leads from the step-3 button: the first broker with
+  // a contract but no setup in use.
+  const setupBroker = withContract.find(b => onProg(b.id)?.setup_status !== "active") ?? withContract[0];
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const setupUrl = (brokerId: number) =>
+    `/direct/setup?program_id=${programId}&broker_party_id=${brokerId}`;
+  const steps: FlowStep[] = [
+    {
+      key: "programme", label: "Configure program",
+      sub: locked ? name.trim() : "Name and how often it reports",
+      state: locked ? "done" : "current", enabled: true,
+      onClick: () => setStage(1),
+    },
+    {
+      key: "brokers", label: "Assign brokers",
+      sub: assigned.size > 0 ? plural(assigned.size, "broker") + " assigned"
+        : locked ? "Who sends you files" : "After the programme is saved",
+      state: assigned.size > 0 ? "done" : "todo",
+      enabled: locked,
+      title: locked ? undefined : "Configure the programme first",
+      onClick: () => setStage(2),
+    },
+    {
+      key: "contracts", label: "Contracts",
+      sub: contractsDone ? "Every broker has a contract"
+        : assigned.size > 0 ? `${withContract.length} of ${assigned.size} brokers have a contract`
+        : "After brokers are assigned",
+      state: contractsDone ? "done" : "todo",
+      enabled: locked && assigned.size > 0,
+      title: assigned.size > 0 ? undefined : "Assign at least one broker first",
+      onClick: () => setStage(3),
+    },
+    {
+      key: "setup", label: "Bordereau setup",
+      sub: setupDone ? "Every broker's setup is in use"
+        : withContract.length > 0 ? `${withSetup.length} of ${withContract.length} setups ready`
+        : "After a contract is added",
+      state: setupDone ? "done" : "todo",
+      enabled: locked && withContract.length > 0,
+      title: withContract.length > 0 ? undefined : "Add a contract first — a setup is built from it",
+      onClick: () => setStage(4),
+    },
+  ];
+  // Whichever section is open is the current step, unless it is already done.
+  steps.forEach((st, i) => {
+    st.open = i + 1 === stage;
+    if (st.open && st.state !== "done") st.state = "current";
+  });
+
   return (
     <>
       <PageHeader
         title="Configure Program"
-        subtitle="Set up a new type of business, choose which brokers send you business for it, and add their contracts."
+        subtitle={resumeId != null
+          ? `${name || "This programme"} — carry on from where it got to.`
+          : "Set up a new type of business, choose which brokers send you business for it, and add their contracts."}
         action={
           /* The save lives under each step now, where the step is — a single
              top-right button used to do both at once and is no longer needed. */
@@ -267,7 +387,9 @@ export default function AddProgram() {
           </div>
         )}
 
-        <div className="grid gap-5 md:grid-cols-2">
+        <FlowStepper steps={steps} label="Configure program steps" />
+
+        {stage === 1 && (
           <Card title={<Step n={1}>Programme</Step>}>
             {/* Locked once saved: this form only ever CREATES, so editing a
                 field after step 1 would change nothing — and look as if it had. */}
@@ -296,6 +418,8 @@ export default function AddProgram() {
                         }}>
                         {segments.length === 0 && <option value="">Loading…</option>}
                         {segments.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                        {segment && !segments.some(s => s.name === segment) &&
+                          <option value={segment}>{segment}</option>}
                         <option value={ADD_SEGMENT}>+ Add a segment…</option>
                       </select>
                     ) : (
@@ -363,13 +487,22 @@ export default function AddProgram() {
                   {configuring ? "Configuring…" : "Configure Program"}
                 </button>
               ) : (
-                <p className="text-sm font-medium text-ok">
-                  Programme configured — now assign its brokers.
-                </p>
+                <div className="flex w-full items-center justify-between gap-3">
+                  <p className="text-sm font-medium text-ok">
+                    {resumeId != null ? "Programme configured." : "Programme configured — now assign its brokers."}
+                  </p>
+                  <button
+                    className="shrink-0 rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark"
+                    onClick={() => setStage(2)}>
+                    Next: Assign brokers →
+                  </button>
+                </div>
               )}
             </div>
           </Card>
+        )}
 
+        {stage === 2 && (
           <Card title={<Step n={2}>Assign brokers</Step>}
             action={
               <button type="button"
@@ -462,7 +595,7 @@ export default function AddProgram() {
                   {pending > 0
                     ? `${pending} broker${pending === 1 ? "" : "s"} will be put on this programme.`
                     : assigned.size > 0
-                    ? `${assigned.size} broker${assigned.size === 1 ? "" : "s"} assigned — add their contracts below.`
+                    ? `${assigned.size} broker${assigned.size === 1 ? "" : "s"} assigned — add their contracts next.`
                     : "No brokers picked — the programme will start empty."}
                 </p>
                 {/* Once everything ticked is on the programme, step 3 below is
@@ -474,13 +607,20 @@ export default function AddProgram() {
                     {assigning ? "Assigning…" : finishLabel}
                   </button>
                 )}
+                {pending === 0 && assigned.size > 0 && (
+                  <button
+                    className="shrink-0 rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark"
+                    onClick={() => setStage(3)}>
+                    Next: Add contracts →
+                  </button>
+                )}
               </div>
             )}
           </Card>
-        </div>
+        )}
 
-        {assigned.size > 0 && programId != null && (
-          <div ref={contractsRef} className="mt-5 scroll-mt-4">
+        {stage === 3 && assigned.size > 0 && programId != null && (
+          <div>
             <Card title={<Step n={3}>Add contracts</Step>}>
               <p className="mb-3 text-xs leading-relaxed text-ink-muted">
                 A contract is what each broker's bordereaux are checked against.{" "}
@@ -490,19 +630,31 @@ export default function AddProgram() {
 
               <div className="space-y-1.5">
                 {assignedBrokers.map(b => {
-                  const n = uploaded[b.id] ?? 0;
+                  const n = contractsOf(b.id);
+                  // The one to open: in force if there is one, else in progress.
+                  const mine = openContracts(onProg(b.id));
+                  const shown = mine.find(c => isLive(c.lifecycle)) ?? mine[0];
+                  const live = !!shown && isLive(shown.lifecycle);
                   return (
                     <div key={b.id}
                       className="flex flex-wrap items-center gap-3 rounded border border-border px-3 py-2.5">
                       <span className="min-w-0 flex-1">
                         <span className="block text-sm font-medium">{b.legal_name}</span>
-                        <span className={`block text-xs ${n ? "text-ok" : "text-ink-muted"}`}>
-                          {n ? `${n} contract${n === 1 ? "" : "s"} uploaded`
-                             : "No contract on this programme yet"}
+                        <span className={`block text-xs ${!n ? "text-ink-muted" : live || !shown ? "text-ok" : "text-warn"}`}>
+                          {!n ? "No contract on this programme yet"
+                            : !shown ? `${plural(n, "contract")} uploaded`
+                            : live ? `${plural(n, "contract")} · in force`
+                            : `${plural(n, "contract")} · not signed yet (${(shown.lifecycle ?? "").replace(/_/g, " ")})`}
                         </span>
                       </span>
                       <OnboardingBadge status={b.onboarding_status} />
                       <div className="flex shrink-0 items-center gap-2">
+                        {shown && (
+                          <Link to={`/contracts/${shown.id}`}
+                            className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium text-ink hover:bg-surface-2 hover:no-underline">
+                            <FileText size={13} /> Open the contract
+                          </Link>
+                        )}
                         <button type="button" onClick={() => { setContractSaved(false); setUploadFor(b); }}
                           className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-2">
                           <Upload size={13} /> Upload contract
@@ -521,14 +673,82 @@ export default function AddProgram() {
                 <p className="text-xs text-ink-muted">
                   You can add more brokers and contracts later from the programme's own page.
                 </p>
-                <button type="button"
-                  className="shrink-0 rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
-                  onClick={() => nav(`/programs/${programId}/brokers`)}>
-                  Go to programme →
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button type="button"
+                    className="rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
+                    onClick={() => nav(`/programs/${programId}/brokers`)}>
+                    Go to programme →
+                  </button>
+                  {setupBroker && (
+                    <button type="button"
+                      className="rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark"
+                      onClick={() => setStage(4)}>
+                      Next: Bordereau setup →
+                    </button>
+                  )}
+                </div>
               </div>
             </Card>
           </div>
+        )}
+
+        {stage === 4 && programId != null && (
+          <Card title={<Step n={4}>Bordereau setup</Step>}>
+            <p className="mb-3 text-xs leading-relaxed text-ink-muted">
+              A setup says what each broker's file must look like, built from their
+              contract. A broker's file can be checked once their setup is in use.
+            </p>
+            <div className="space-y-1.5">
+              {assignedBrokers.map(b => {
+                const hasContract = contractsOf(b.id) > 0;
+                const setup = onProg(b.id)?.setup_status ?? null;
+                return (
+                  <div key={b.id}
+                    className="flex flex-wrap items-center gap-3 rounded border border-border px-3 py-2.5">
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium">{b.legal_name}</span>
+                      <span className={`block text-xs ${setup === "active" ? "text-ok"
+                        : hasContract ? "text-warn" : "text-ink-muted"}`}>
+                        {setup === "active" ? "Setup in use — their files can be checked"
+                          : setup === "draft" ? "Setup started, not finished yet"
+                          : hasContract ? "No setup yet, so their file can't be checked"
+                          : "Needs a contract first"}
+                      </span>
+                    </span>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {setup === "active" ? (
+                        <Link to={`/direct/setups?program_id=${programId}`}
+                          className="inline-flex items-center rounded border border-border px-3 py-1.5 text-xs font-medium text-ink hover:bg-surface-2 hover:no-underline">
+                          View setup
+                        </Link>
+                      ) : hasContract ? (
+                        <button type="button" onClick={() => nav(setupUrl(b.id))}
+                          className="inline-flex items-center rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark">
+                          {setup === "draft" ? "Finish the setup" : "Bordereau Setup"}
+                        </button>
+                      ) : (
+                        <button type="button" onClick={() => setStage(3)}
+                          className="inline-flex items-center rounded border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-2">
+                          Add a contract
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-4">
+              <p className={`text-xs ${setupDone ? "text-ok" : "text-ink-muted"}`}>
+                {setupDone ? "Everything is in place — files for this programme can be checked."
+                  : "You can come back to this from the Programmes list at any time."}
+              </p>
+              <button type="button"
+                className="shrink-0 rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
+                onClick={() => nav("/programs")}>
+                Back to Programmes
+              </button>
+            </div>
+          </Card>
         )}
 
         {/* Step 4, reached from here. Once a contract is saved this broker has
@@ -540,15 +760,20 @@ export default function AddProgram() {
           <AddContractModal
             open
             onClose={() => {
-              if (contractSaved)
-                nav(`/direct/setup?program_id=${programId}&broker_party_id=${uploadFor.id}`);
-              else setUploadFor(null);
+              // Saved: carry on to step 4 once every broker has a contract;
+              // otherwise stay on step 3 for the next one.
+              if (contractSaved) {
+                const allHave = assignedBrokers.every(b => b.id === uploadFor.id || contractsOf(b.id) > 0);
+                if (allHave) setStage(4);
+              }
+              setUploadFor(null);
             }}
             broker={uploadFor}
             programmes={[{ id: programId, name: name.trim(), status }]}
             onAdded={() => {
               setUploaded(u => ({ ...u, [uploadFor.id]: (u[uploadFor.id] ?? 0) + 1 }));
               setContractSaved(true);
+              reload(programId);
             }} />
         )}
 

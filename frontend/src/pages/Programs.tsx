@@ -19,13 +19,15 @@
 import { useEffect, useState } from "react";
 import { frequencyLabel } from "../constants/frequency";
 import { Link, useNavigate } from "react-router-dom";
-import { Layers, ChevronRight, FileText, Users2, Plus, ArrowRight } from "lucide-react";
+import { Layers, ChevronRight, Plus } from "lucide-react";
 import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Sk } from "../components/ui/Skeleton";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import { Pagination } from "../components/Pagination";
+import { ProgrammeStepper, flowUrl, nextStep } from "../components/ProgrammeStepper";
+import { fmtDate } from "../utils/date";
 
 /** Rows per page — the same ten the other lists show. Paged client-side: the
  *  programmes arrive in one payload with the hierarchy, so no request is saved
@@ -43,7 +45,6 @@ export default function Programs() {
       .catch(() => setErr("Could not load your programmes."));
   }, []);
 
-  const needBrokers = (rows ?? []).filter(p => p.broker_count === 0).length;
   const total = rows?.length ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   // Clamped, so a list that shrinks never strands you on an empty page.
@@ -94,97 +95,67 @@ export default function Programs() {
 
         {rows && rows.length > 0 && (
           <Card>
-            {/* The one thing worth saying about the whole list, said once above
-                it rather than repeated as a footnote nobody connects to a row. */}
-            {needBrokers > 0 && (
-              <div className="mb-3 flex items-center gap-2 rounded-md bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
-                <Users2 size={14} className="shrink-0" />
-                {needBrokers === 1
-                  ? "One programme has no broker on it yet, so it cannot hold a contract."
-                  : `${needBrokers} programmes have no broker on them yet, so they cannot hold a contract.`}
-              </div>
-            )}
-
             <div className="overflow-x-auto">
               <table>
                 <thead>
                   <tr>
                     <th>Programme</th>
-                    <th>Segment</th>
-                    <th>Reporting</th>
-                    <th>Brokers</th>
-                    <th>Contracts</th>
+                    <th>How far it's got</th>
                     <th />
                   </tr>
                 </thead>
                 <tbody>
-                  {pageRows.map(p => (
+                  {pageRows.map(p => {
+                    // Clicking the row opens the Configure Program flow at the
+                    // step this programme is up to; a finished one at its last.
+                    const next = nextStep(p);
+                    // Segment and product line are long free text; they live in
+                    // the name's tooltip rather than a column that wraps the row.
+                    const about = [p.business_segment, p.product_line].filter(Boolean).join(" · ");
+                    return (
                     <tr
                       key={p.id}
                       className="group cursor-pointer"
-                      onClick={() => nav(`/programs/${p.id}/brokers`)}
+                      title={next ? next.hint : "Everything is in place — files can be checked."}
+                      onClick={() => nav(next ? next.to : flowUrl(p.id, "setup"))}
                     >
-                      <td>
-                        {/* A link, not just a clickable row. The row handler alone
-                            gave no affordance — nothing looked clickable, so the
-                            programme read as a dead label — and it could not be
-                            opened in a new tab or reached by keyboard. */}
-                        <div className="flex items-center gap-2.5">
-                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-navy/10">
-                            <Layers size={15} className="text-navy" />
-                          </span>
-                          <div className="min-w-0">
-                            <Link
-                              to={`/programs/${p.id}/brokers`}
-                              onClick={e => e.stopPropagation()}
-                              className="block truncate font-medium text-navy hover:underline"
-                            >
-                              {p.name}
-                            </Link>
-                            {p.product_line && (
-                              <div className="truncate text-xs text-ink-muted">{p.product_line}</div>
-                            )}
-                          </div>
+                      <td className="align-middle">
+                        {/* A link, not just a clickable row — it can be opened in a
+                            new tab and reached by keyboard. */}
+                        <Link
+                          to={`/programs/${p.id}/brokers`}
+                          onClick={e => e.stopPropagation()}
+                          title={about || undefined}
+                          className="block font-semibold text-ink hover:text-navy hover:underline"
+                        >
+                          {p.name}
+                        </Link>
+                        <div className="mt-0.5 text-xs text-ink-muted">
+                          {p.created_at ? `Created ${fmtDate(p.created_at)} · ` : ""}
+                          {frequencyLabel(p.bdx_frequency).toLowerCase()}
                         </div>
                       </td>
-                      <td>
-                        {p.business_segment
-                          ? <span className="pill pill-grey">{p.business_segment}</span>
-                          : <span className="text-ink-soft">—</span>}
+                      <td className="align-middle">
+                        {/* Each pill opens its own step for this programme. */}
+                        <ProgrammeStepper programme={p} />
                       </td>
-                      <td className="text-ink-muted">{frequencyLabel(p.bdx_frequency)}</td>
-                      {/* Zero brokers is the state worth calling out, not hiding:
-                          nothing can be done with the programme until it has one,
-                          so the cell says what to DO rather than showing a 0 the
-                          reader has to interpret. */}
-                      <td>
-                        {p.broker_count === 0 ? (
-                          <span className="pill pill-amber whitespace-nowrap"
-                            title="A programme with no broker cannot hold a contract.">
-                            Needs a broker
-                          </span>
+                      <td className="whitespace-nowrap text-right align-middle">
+                        {next ? (
+                          <Button className="!px-3 !py-1.5 !text-[12.5px] !font-semibold" title={next.hint}
+                            onClick={e => { e.stopPropagation(); nav(next.to); }}>
+                            {next.label}
+                          </Button>
                         ) : (
-                          <span className="inline-flex items-center gap-1.5 text-ink">
-                            <Users2 size={13} className="text-ink-soft" />
-                            <span className="font-medium tabular-nums">{p.broker_count}</span>
+                          <span className="inline-flex items-center gap-1 text-[12.5px] font-semibold text-success">
+                            Ready
+                            <ChevronRight size={16}
+                              className="text-ink-soft transition group-hover:translate-x-0.5 group-hover:text-navy" />
                           </span>
                         )}
                       </td>
-                      <td>
-                        <span className={`inline-flex items-center gap-1.5 ${
-                          p.contract_count === 0 ? "text-ink-soft" : "text-ink"}`}>
-                          <FileText size={13} className="text-ink-soft" />
-                          <span className="font-medium tabular-nums">{p.contract_count}</span>
-                        </span>
-                      </td>
-                      <td className="w-10">
-                        <ChevronRight
-                          size={16}
-                          className="text-ink-soft transition group-hover:translate-x-0.5 group-hover:text-navy"
-                        />
-                      </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -199,9 +170,9 @@ export default function Programs() {
             )}
 
             <p className="mt-3 border-t border-border pt-3 text-xs text-ink-muted">
-              Open a programme to manage the brokers on it. Contracts belong to a
-              programme <b className="font-medium">and</b> a broker together, so
-              they are listed under the broker that produced them.
+              Each programme goes Programme → Brokers → Contract → Setup. Green is
+              done, red is what's stopping files. Click a row to go straight to
+              where that programme is up to, or click any step to open it.
             </p>
           </Card>
         )}

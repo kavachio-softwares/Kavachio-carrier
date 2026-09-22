@@ -28,9 +28,10 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowLeft, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import AddContractModal from "../components/AddContractModal";
+import { InfoTip } from "../components/InfoTip";
 import { WordingEditor } from "../components/WordingEditor";
 import { SignaturePlacer, signerTargets }
   from "../components/SignaturePlacer";
@@ -390,6 +391,10 @@ export default function ContractNew() {
           {f.required
             ? <span style={{ color: "var(--p-crit-ink)" }}>*</span>
             : <span className="muted" style={{ fontWeight: 500 }}> — optional</span>}
+          {(shut || f.hint) && (
+            <InfoTip text={shut ? "Set by the duration — choose Custom to type a date."
+                                : f.hint ?? ""} />
+          )}
         </label>
         <input
           type={f.kind === "date" ? "date"
@@ -407,11 +412,7 @@ export default function ContractNew() {
             : set(f.name, e.target.value))}
           style={bad ? { borderColor: "var(--p-crit)" } : undefined}
         />
-        <div className="hint" style={bad ? { color: "var(--p-crit-ink)" } : undefined}>
-          {bad
-           || (shut ? "Set by the duration — choose Custom to type a date."
-                    : f.hint)}
-        </div>
+        {bad && <div className="hint" style={{ color: "var(--p-crit-ink)" }}>{bad}</div>}
       </div>
     );
   }
@@ -422,7 +423,7 @@ export default function ContractNew() {
    *  assuming the required one. */
   function renderFields(list: ContractField[]) {
     return list.flatMap(f => f.name === EXPIRY_FIELD && term.ready
-      ? [<TermDurationField key="term-duration" term={term} />, input(f)]
+      ? [<TermDurationField key="term-duration" term={term} tip />, input(f)]
       : [input(f)]);
   }
 
@@ -887,16 +888,24 @@ export default function ContractNew() {
           {STEPS.map((s, i) => (
             <span key={s.key} style={{ display: "contents" }}>
               {i > 0 && <span className="sep">›</span>}
-              <span
+              {/* Every step is a way there. Going forward runs the same
+                  check as the Next button, so a step whose terms are still
+                  missing stops on step 1 with the gap named, not a blank page. */}
+              <button
+                type="button"
                 className={`step-c ${i === step ? "on" : i < furthest || i < step ? "done" : "off"}`}
-                onClick={() => i <= furthest && go(i)}
+                aria-current={i === step ? "step" : undefined}
+                title={i === step ? undefined : `Go to ${s.label}`}
+                onClick={() => i !== step && go(i)}
               >
-                <span className="n">{i + 1}</span>
+                <span className="n">
+                  {i !== step && (i < furthest || i < step) ? <Check size={12} strokeWidth={3} /> : i + 1}
+                </span>
                 <span className="lvbox">
                   <span className="lv">Step {i + 1}</span>
                   <span className="nm">{s.label}</span>
                 </span>
-              </span>
+              </button>
             </span>
           ))}
         </div>
@@ -907,9 +916,9 @@ export default function ContractNew() {
           <div>
             <div className="page-head">
               <div className="t">
-                <h2>{kind === "endorse" ? "Endorse a Contract" : "Create a Contract"}</h2>
-                <p>
-                  {kind === "endorse"
+                <h2>
+                  {kind === "endorse" ? "Endorse a Contract" : "Create a Contract"}
+                  <InfoTip text={kind === "endorse"
                     ? "Change some terms of a contract that is already running. "
                       + "Kavachio writes the endorsement, attaches it beside the "
                       + "wording, and moves the checks — nothing is attached "
@@ -917,8 +926,8 @@ export default function ContractNew() {
                     : "Answer these questions once. Kavachio writes the "
                       + "document, you read it through, then it goes out for "
                       + "signature — and nothing is sent to anybody until that "
-                      + "last step."}
-                </p>
+                      + "last step."} />
+                </h2>
               </div>
               <div className="actions">
                 <Link to="/contracts" className="btn">
@@ -939,7 +948,7 @@ export default function ContractNew() {
             <div className="card pad">
               <div className="fh">
                 What are you making?
-                <em>they end in different places, so this is the first question</em>
+                <InfoTip text="They end in different places, so this is the first question." />
               </div>
               <div className="startpick">
                 {KINDS.map(k => (
@@ -1043,7 +1052,7 @@ export default function ContractNew() {
                   <>
                     <div className="fh">
                       The contract you are changing
-                      <em>none of this moves — an endorsement changes terms, not parties</em>
+                      <InfoTip text="None of this moves — an endorsement changes terms, not parties." />
                     </div>
                     <div className="grid g-3" style={{ marginBottom: 18 }}>
                       <div className="field" style={{ marginBottom: 0 }}>
@@ -1077,7 +1086,7 @@ export default function ContractNew() {
                   rearrange themselves. */}
               <div className="fh">
                 Who is it with?
-                <em>this decides what the contract has to state</em>
+                <InfoTip text="This decides what the contract has to state." />
               </div>
               {/* Two across, not the three the class assumes: there are two
                   types, and a trailing empty column reads as a missing option. */}
@@ -1105,7 +1114,8 @@ export default function ContractNew() {
               </div>
 
               <div className="fh">
-                The basics <em>who the contract is with, and how long it runs</em>
+                The basics
+                <InfoTip text="Who the contract is with, and how long it runs." />
               </div>
               <div className="grid g-3">
                 <div className="field">
@@ -1172,11 +1182,10 @@ export default function ContractNew() {
                       ? "Hide the rest"
                       : `＋ More about this contract (${optionalBasics.length})`}
                   </button>
-                  <span className="sub" style={{ marginLeft: 10 }}>
-                    Reference, year of account and the like — leave
-                    them out and nothing asks again.
-                    {filledOptional > 0 && ` ${filledOptional} set.`}
-                  </span>
+                  <InfoTip text="Reference, year of account and the like — leave them out and nothing asks again." />
+                  {filledOptional > 0 && (
+                    <span className="sub" style={{ marginLeft: 8 }}>{filledOptional} set</span>
+                  )}
                   {showMoreBasics && (
                     <div className="grid g-3" style={{ marginTop: 14 }}>
                       {renderFields(optionalBasics)}
@@ -1191,13 +1200,11 @@ export default function ContractNew() {
 
               <div className="fh">
                 {kind === "endorse" ? "The terms — change what moved" : "The limits you agreed"}
-                <em>
-                  {kind === "endorse"
-                    ? "these are its current terms — edit the ones the "
-                      + "endorsement changes and leave the rest alone"
-                    : "each line becomes a clause in the contract and a check "
-                      + "that runs on every file the broker sends"}
-                </em>
+                <InfoTip text={kind === "endorse"
+                  ? "These are its current terms — edit the ones the "
+                    + "endorsement changes and leave the rest alone."
+                  : "Each line becomes a clause in the contract and a check "
+                    + "that runs on every file the broker sends."} />
               </div>
               {limitGroups.map(g => {
                 const rows = visibleLimits.filter(l => l.group === g.key);
@@ -1210,8 +1217,10 @@ export default function ContractNew() {
                   // one be read as the first row of the next.
                   <div className="limgrp" key={g.key}>
                     <div className="limgrp-h">
-                      <div className="sub-h">{g.label}</div>
-                      <div className="hint">{g.sub}</div>
+                      <div className="sub-h">
+                        {g.label}
+                        {g.sub && <InfoTip text={g.sub} />}
+                      </div>
                     </div>
                     <div className="limgrp-b">
                       <div className="lim lim-h">
@@ -1235,18 +1244,15 @@ export default function ContractNew() {
                       ? "Show fewer"
                       : `＋ ${hiddenCount} more you can set`}
                   </button>
-                  <span className="sub" style={{ marginLeft: 10 }}>
-                    Brokerage, profit commission, settlement, tax — leave them
-                    out and the contract simply does not mention them.
-                  </span>
+                  <InfoTip text="Brokerage, profit commission, settlement, tax — leave them out and the contract simply does not mention them." />
                 </div>
               )}
 
               {kind !== "endorse" && (
               <>
               <div className="divider" />
-              <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-                <span className="badge b-ok" style={{ flex: "0 0 auto", marginTop: 1 }}>
+              <div style={{ display: "flex", alignItems: "center" }}>
+                <span className="badge b-ok" style={{ flex: "0 0 auto" }}>
                   <span className="d" />
                   {preview?.checks.length
                     ?? (Object.entries(limits).filter(([k]) =>
@@ -1254,13 +1260,12 @@ export default function ContractNew() {
                         + (values.inception_dt && values.expiry_dt ? 1 : 0))}{" "}
                   checks
                 </span>
-                <span className="muted" style={{ fontSize: 12.5, lineHeight: 1.6 }}>
-                  One for each limit above that a spreadsheet can be measured
-                  against, plus one from the dates — a risk that starts outside
-                  the contract term is not covered by it. Because you typed these
-                  numbers rather than us reading them out of somebody else's PDF,
-                  every one of them can be checked automatically.
-                </span>
+                <InfoTip text={"One for each limit above that a spreadsheet can be "
+                  + "measured against, plus one from the dates — a risk that "
+                  + "starts outside the contract term is not covered by it. "
+                  + "Because you typed these numbers rather than us reading "
+                  + "them out of somebody else's PDF, every one of them can be "
+                  + "checked automatically."} />
               </div>
               </>
               )}
@@ -1369,10 +1374,10 @@ export default function ContractNew() {
                 Already have a contract somebody else drafted?{" "}
                 <span className="linkish" role="button" onClick={() => setUploading(true)}>
                   Upload the signed PDF instead →
-                </span>{" "}
-                Kavachio reads the terms out of it and builds what checks it can
-                — but a contract written from its own terms never has a clause
-                the checks cannot read.
+                </span>
+                <InfoTip text={"Kavachio reads the terms out of it and builds "
+                  + "what checks it can — but a contract written from its own "
+                  + "terms never has a clause the checks cannot read."} />
               </p>
             )}
           </div>
@@ -1383,7 +1388,15 @@ export default function ContractNew() {
           <>
             <div className="page-head">
               <div className="t">
-                <h2>Write the Wording</h2>
+                <h2>
+                  Write the Wording
+                  <InfoTip text={"Kavachio has written the wording from your "
+                    + "terms. The shaded bits are live values, not typed text — "
+                    + "click one to change it without leaving this page, or "
+                    + "change it on Terms; either way every sentence quoting it "
+                    + "updates, and so does the check behind it. Anything you "
+                    + "type yourself stays exactly as you typed it."} />
+                </h2>
                 <p>
                   {values.name || "This contract"}
                   {counterparty && <>, for {counterparty.name}</>}
@@ -1416,14 +1429,6 @@ export default function ContractNew() {
                   Read it through →
                 </button>
               </div>
-            </div>
-
-            <div className="note" style={{ marginBottom: 18 }}>
-              <b>Kavachio has written the wording from your terms.</b> The shaded
-              bits are <b>live values</b>, not typed text — click one to change
-              it without leaving this page, or change it on Terms; either way
-              every sentence quoting it updates, and so does the check behind
-              it. Anything you type yourself stays exactly as you typed it.
             </div>
 
             <div className="doc" style={{ marginBottom: 18 }}>
@@ -1475,12 +1480,11 @@ export default function ContractNew() {
                     <h4>
                       §{activeSection + 1} &nbsp;
                       {active.title || <span className="faint">Untitled section</span>}
+                      <InfoTip text={"Click into the text and type. This is the "
+                        + "wording that will appear in the signed contract. To "
+                        + "remove a whole section, hover it in the list on the "
+                        + "left and click the ×."} />
                     </h4>
-                    <p className="muted" style={{ fontSize: 12.5, margin: "0 0 14px" }}>
-                      Click into the text and type. This is the wording that will
-                      appear in the signed contract. To remove a whole section,
-                      hover it in the list on the left and click the <b>×</b>.
-                    </p>
                     <div className="field" style={{ marginBottom: 12 }}>
                       <label>Section title</label>
                       <input
@@ -1511,7 +1515,13 @@ export default function ContractNew() {
                     <div className="termbar">
                       <span className="muted" style={{ fontSize: 11.5,
                             alignSelf: "center", marginRight: 2 }}>
-                        Drop in a live value:
+                        Drop in a live value
+                        <InfoTip text={"A chip is tied to the term you set in "
+                          + "step 1. Click one to change it — here, on Terms, and "
+                          + "in the check behind it, all at once — or change it "
+                          + "on Terms and every sentence quoting it follows. "
+                          + "Either way the contract and the checks say the same "
+                          + "thing."} />
                       </span>
                       {Object.keys(preview?.tokens ?? {}).map(t => (
                         <button
@@ -1521,16 +1531,6 @@ export default function ContractNew() {
                           {tokenLabels[t] ?? t}
                         </button>
                       ))}
-                    </div>
-
-                    <div className="note ok" style={{ marginTop: 16 }}>
-                      <b>Why the shaded values matter.</b> A chip is tied to the
-                      term you set in step 1. <b>Click one to change it</b> —
-                      here, on Terms, and in the check behind it, all at once —
-                      or change it on Terms and every sentence quoting it
-                      follows. Either way the contract and the checks say the
-                      same thing, which is the whole point of them being shaded
-                      rather than typed.
                     </div>
                   </>
                 ) : (
@@ -1549,10 +1549,8 @@ export default function ContractNew() {
                       onClick={() => refresh(null)}>
                 Start the wording again
               </button>
-              <span className="sub">
-                “Start again” throws away your edits and rewrites every section
-                from the terms.
-              </span>
+              <InfoTip text={"“Start again” throws away your edits and "
+                + "rewrites every section from the terms."} />
             </div>
           </>
         )}
@@ -1624,7 +1622,10 @@ export default function ContractNew() {
               <div className="card" style={{ marginBottom: 18 }}>
                 <div className="card-h">
                   <h3>Two things worth knowing</h3>
-                  <span className="sub">neither stops you sending it</span>
+                  <InfoTip text={"Neither stops you sending it. Nothing here is "
+                    + "an error — both are the kind of thing somebody notices "
+                    + "three months later and asks about, so it is cheaper to "
+                    + "see them now."} />
                 </div>
                 <div style={{ padding: "16px 20px" }}>
                   {preview.uncheckable.map((u, i) => (
@@ -1633,11 +1634,9 @@ export default function ContractNew() {
                         <b style={{ color: "var(--p-ink)" }}>
                           {u.title} will not be checked
                         </b>
-                        <div className="sub">
-                          It is a real term and it stays in the contract, but it
-                          quotes nothing a spreadsheet can be compared against,
-                          so no check comes out of it.
-                        </div>
+                        <InfoTip text={"It is a real term and it stays in the "
+                          + "contract, but it quotes nothing a spreadsheet can be "
+                          + "compared against, so no check comes out of it."} />
                       </span>
                     </div>
                   ))}
@@ -1649,11 +1648,6 @@ export default function ContractNew() {
                       </span>
                     </div>
                   ))}
-                  <div className="note" style={{ marginTop: 12 }}>
-                    Nothing here is an error. Both are the kind of thing somebody
-                    notices three months later and asks about, so it is cheaper
-                    to see them now.
-                  </div>
                 </div>
               </div>
             )}
@@ -1661,7 +1655,10 @@ export default function ContractNew() {
             <div className="card" style={{ marginBottom: 18 }}>
               <div className="card-h">
                 <h3>The document</h3>
-                <span className="sub">exactly what the broker will open</span>
+                <InfoTip text={"Exactly what the broker will open. Kavachio adds "
+                  + "the signature page and places both signature blocks on it "
+                  + "for you — you can move them in the next step if your "
+                  + "broker's lawyers want them somewhere else."} />
               </div>
               <div style={{ padding: "16px 20px" }}>
                 {preview.sections.map((s, i) => (
@@ -1673,20 +1670,15 @@ export default function ContractNew() {
                     </div>
                   </div>
                 ))}
-                <div className="note">
-                  <b>Kavachio adds the signature page.</b> Both signature blocks
-                  are placed on it for you. You can move them in the next step if
-                  your broker's lawyers want them somewhere else.
-                </div>
               </div>
             </div>
 
             <div className="card">
               <div className="card-h">
                 <h3>The checks it will run</h3>
-                <span className="sub">
-                  from the moment both parties sign
-                </span>
+                <InfoTip text={"From the moment both parties sign. These do "
+                  + "nothing until the contract is created and in force — a "
+                  + "draft never checks anything."} />
               </div>
               <div className="tbl-wrap">
                 <table>
@@ -1708,11 +1700,6 @@ export default function ContractNew() {
                     ))}
                   </tbody>
                 </table>
-              </div>
-              <div className="note" style={{ margin: 0, borderRadius: 0,
-                   borderLeft: 0, borderRight: 0, borderBottom: 0 }}>
-                These do nothing until the contract is created and in force. A
-                draft never checks anything.
               </div>
             </div>
           </>
@@ -1746,13 +1733,17 @@ export default function ContractNew() {
           <>
             <div className="page-head">
               <div className="t">
-                <h2>Set up the signing</h2>
-                <p>
-                  {values.name} · what each side has to fill in when they sign.
-                  Nothing is emailed from here, and none of these buttons puts
-                  the contract in force — it goes in force when both sides have
-                  signed it, on its own signature page.
-                </p>
+                <h2>
+                  Set up the signing
+                  <InfoTip text={"Choose what each side has to fill in when "
+                    + "they sign. None of these buttons puts the contract in "
+                    + "force — it goes in force when both sides have signed it, "
+                    + "on its own signature page."} />
+                </h2>
+                {/* Kept on screen, not in the (i): see the note above this step
+                    — a carrier who thinks a link went out waits for a reply
+                    that is never coming. */}
+                <p>{values.name} · <b>Nothing is emailed from here.</b></p>
               </div>
               <div className="actions">
                 <button className="btn" type="button" onClick={() => go(2)}>
@@ -1822,9 +1813,13 @@ export default function ContractNew() {
                 <div className="card">
                   <div className="card-h">
                     <h3>What each side has to fill in</h3>
-                    <span className="sub">
-                      the lines printed under each signature on the document
-                    </span>
+                    <InfoTip text={"The lines printed under each signature on "
+                      + "the document.\n\nTicked — the signer gets a box they "
+                      + "have to fill in on the real document.\nUnticked — the "
+                      + "line is not on the page at all; nobody is asked for it."
+                      + "\n\nWho signs is not decided here. The contract's own "
+                      + "signature page names them, once there is a document for "
+                      + "them to sign."} />
                   </div>
                   <div style={{ padding: "16px 20px" }}>
                     <div className="grid g-2">
@@ -1861,10 +1856,18 @@ export default function ContractNew() {
                                     })}
                                   />
                                   <b style={{ color: "var(--p-ink)" }}>{f.label}</b>
-                                  <div className="sub" style={{ marginLeft: 24 }}>
-                                    {f.hint}
-                                    {f.fixed && " · always on"}
-                                  </div>
+                                  {/* Inside the checkbox's <label>: without this,
+                                      clicking the (i) would tick the box. */}
+                                  {f.hint && (
+                                    <span onClick={e => e.preventDefault()}>
+                                      <InfoTip text={f.hint} />
+                                    </span>
+                                  )}
+                                  {f.fixed && (
+                                    <div className="sub" style={{ marginLeft: 24 }}>
+                                      always on
+                                    </div>
+                                  )}
                                 </span>
                               </label>
                             );
@@ -1875,7 +1878,14 @@ export default function ContractNew() {
 
                     <div className="divider" />
                     <div className="field" style={{ marginBottom: 0, maxWidth: 320 }}>
-                      <label>How the two blocks sit on the page</label>
+                      <label>
+                        How the two blocks sit on the page
+                        {sigSpec.arrangements
+                          .find(a => a.key === sigLayout.arrangement)?.hint && (
+                          <InfoTip text={sigSpec.arrangements
+                            .find(a => a.key === sigLayout.arrangement)?.hint ?? ""} />
+                        )}
+                      </label>
                       <select
                         value={sigLayout.arrangement}
                         onChange={e => setSigLayout(
@@ -1896,10 +1906,6 @@ export default function ContractNew() {
                           <option key={a.key} value={a.key}>{a.label}</option>
                         ))}
                       </select>
-                      <div className="hint">
-                        {sigSpec.arrangements
-                          .find(a => a.key === sigLayout.arrangement)?.hint}
-                      </div>
                     </div>
 
                     {/* Placed by hand: the pages below are this contract as it
@@ -1931,47 +1937,17 @@ export default function ContractNew() {
                           }))}
                         />
                         <div className="hint" style={{ marginTop: 8 }}>
-                          <ul>
-                            <li>
-                              <b>Drop a block anywhere.</b> The wording moves
-                              down to make room for it, so it never covers a
-                              clause.
-                            </li>
-                            {/* <li>
-                              <b>Nothing has been sent.</b> These pages are
-                              composed from what you have typed and saved
-                              nowhere.
-                            </li> */}
-                            <li>
-                              <b>One block per side here</b> — nobody is named
-                              to sign until the contract exists.
-                            </li>
-                            <li>
-                              <b>Name them afterwards</b> on the contract's own
-                              signature page, and each person gets a block of
-                              their own to place next to these.
-                            </li>
-                          </ul>
+                          How placing works
+                          <InfoTip text={"Drop a block anywhere — the wording "
+                            + "moves down to make room for it, so it never covers "
+                            + "a clause.\n\nOne block per side here — nobody is "
+                            + "named to sign until the contract exists. Name them "
+                            + "afterwards on the contract's own signature page, "
+                            + "and each person gets a block of their own to place "
+                            + "next to these."} />
                         </div>
                       </div>
                     )}
-                    <div className="hint" style={{ marginTop: 12 }}>
-                      <ul>
-                        <li>
-                          <b>Ticked</b> — the signer gets a box they have to
-                          fill in on the real document.
-                        </li>
-                        <li>
-                          <b>Unticked</b> — the line is not on the page at all.
-                          Nobody is asked for it, and nothing is left blank.
-                        </li>
-                        <li>
-                          <b>Who signs is not decided here.</b> The contract's
-                          own signature page names them, once there is a
-                          document for them to sign.
-                        </li>
-                      </ul>
-                    </div>
                   </div>
                 </div>
               )}
@@ -1989,6 +1965,14 @@ export default function ContractNew() {
               <div className="card pad">
                 <h3 style={{ margin: "0 0 12px", fontSize: 14 }}>
                   What you are about to create
+                  <InfoTip text={"Save as a draft keeps it to yourself.\n\n"
+                    + "Send it for review puts it in the "
+                    + (spec?.counterparty_label?.toLowerCase() ?? "broker")
+                    + "'s queue here — no email goes out.\n\nSign it now skips "
+                    + "their reading of the terms, and is recorded as review "
+                    + "skipped under your name.\n\nNone of the three puts the "
+                    + "contract in force: both signatures do that, on its own "
+                    + "signature page."} />
                 </h3>
                 <div className="kv">
                   <span className="k">Contract</span>
@@ -2005,17 +1989,6 @@ export default function ContractNew() {
                 <div className="kv">
                   <span className="k">Checks</span>
                   <span className="v">{preview?.checks.length ?? 0}</span>
-                </div>
-
-                <div className="divider" />
-                <div className="hint">
-                  <b>Save as a draft</b> keeps it to yourself.{" "}
-                  <b>Send it for review</b> puts it in the{" "}
-                  {spec?.counterparty_label?.toLowerCase() ?? "broker"}'s queue
-                  here — no email goes out. <b>Sign it now</b> skips their
-                  reading of the terms, and is recorded as review skipped under
-                  your name. None of the three puts the contract in force: both
-                  signatures do that, on its own signature page.
                 </div>
               </div>
             </div>

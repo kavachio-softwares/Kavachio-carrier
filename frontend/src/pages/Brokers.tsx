@@ -27,12 +27,9 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ChevronRight, FileText, Layers, Search, UserPlus, Users2 } from "lucide-react";
-import { PageBody, PageHeader } from "../components/Layout";
-import { Card } from "../components/ui/Card";
-import { Button } from "../components/ui/Button";
 import { OrgAvatar } from "../components/ui/OrgAvatar";
-import { Sk } from "../components/ui/Skeleton";
-import { OnboardingBadge } from "../components/OnboardingBadge";
+import { InfoTip } from "../components/InfoTip";
+import { Pagination } from "../components/Pagination";
 import {
   getBrokersPaged, resendBrokerInvitation, revokeBrokerInvitation,
   type BrokerSummary,
@@ -49,6 +46,19 @@ const MAX_CHIPS = 2;
 
 /** Rows per page. The server cuts the page, so this is what gets fetched. */
 const PAGE_SIZE = 10;
+
+/** The onboarding state as a .proto pill — the same labels and hover text as
+ *  OnboardingBadge, drawn in the badge styles every other list here uses. */
+const ONBOARDING: Record<string, { label: string; cls: string; title: string }> = {
+  not_invited: { label: "Not invited", cls: "b-mut",
+    title: "This broker is on your list but nobody there has a login yet." },
+  invited: { label: "Invited", cls: "b-warn",
+    title: "Their admin was invited and hasn't used the link yet — worth chasing." },
+  active: { label: "Active", cls: "b-ok",
+    title: "Someone there has set a password and signed in." },
+  suspended: { label: "Suspended", cls: "b-crit",
+    title: "The company itself was switched off. Their history stays readable." },
+};
 
 export default function Brokers() {
   const nav = useNavigate();
@@ -104,98 +114,90 @@ export default function Brokers() {
   // you paged would be a different sentence.
   const stranded = extra?.stranded ?? 0;
 
+  const invite = (
+    /* One action, whether or not the broker already has a login. Which of the
+       two it is depends on facts about somebody else's book, and a second
+       button would let a carrier discover them by seeing which one worked. */
+    <Link to="/users/new?for=broker" className="btn pri">
+      <UserPlus size={15} /> Invite a party
+    </Link>
+  );
+
   return (
-    <>
-      <PageHeader
-        title="Party"
-        subtitle={seat === "user"
-          ? "The broker companies you invited, and how far each one reaches."
-          : "The party organisations that produce into your programmes."}
-        action={
-          /* One action, whether or not the broker already has a login. Which
-             of the two it is depends on facts about somebody else's book, and
-             a second button would let a carrier discover them by seeing which
-             one worked. */
-          <Link
-            to="/users/new?for=broker"
-            className="inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md
-              bg-navy px-3.5 py-2 text-sm font-medium text-white transition hover:bg-navy-dark
-              hover:no-underline"
-          >
-            <UserPlus size={15} /> Invite a party
-          </Link>
-        }
-      />
-      <PageBody>
-        {note && (
-          <div className="rounded-md border border-ok/40 bg-ok/10 px-3 py-2 text-sm">
-            {note}
+    <div className="proto">
+      <div className="view full">
+        <div className="page-head">
+          <div className="t">
+            <h2>
+              Party
+              <InfoTip text={"Open a party to see its contracts and people across "
+                + "every programme. Put a party on a programme from that "
+                + "programme's page."} />
+            </h2>
+            <p>
+              {seat === "user"
+                ? "The broker companies you invited, and how far each one reaches."
+                : "The party organisations that produce into your programmes."}
+            </p>
           </div>
-        )}
-        {err && (
-          <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">
-            {err}
+          <div className="actions">{invite}</div>
+        </div>
+
+        {note && <div className="note ok" style={{ marginBottom: 16 }}>{note}</div>}
+        {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
+
+        {/* Said once above the table, the way Contracts says a document is
+            missing, rather than leaving the reader to scan for amber cells. */}
+        {stranded > 0 && (
+          <div className="note warn"
+               style={{ marginBottom: 16, display: "flex", gap: 9, alignItems: "center" }}>
+            <Layers size={15} style={{ flex: "0 0 auto" }} />
+            <span>
+              <b>
+                {stranded === 1
+                  ? "One party is not on a programme yet"
+                  : `${stranded} parties are not on a programme yet`}
+              </b>
+              , so {stranded === 1 ? "it" : "they"} cannot produce anything.
+            </span>
           </div>
         )}
 
         {loading && shown.length === 0 ? (
-          <Card>
-            <div className="space-y-2">
-              {Array.from({ length: 3 }, (_, i) => <Sk key={i} className="h-12 w-full" />)}
-            </div>
-          </Card>
+          <div className="card"><div className="empty">Loading…</div></div>
         ) : total === 0 && !needle ? (
-          <Card>
-            <div className="py-12 text-center">
-              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2">
-                <Users2 size={20} className="text-ink-soft" />
-              </div>
-              <p className="text-sm font-medium">No parties yet</p>
-              <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">
+          <div className="card">
+            <div className="empty">
+              <Users2 size={22} style={{ margin: "0 auto 10px", display: "block" }} />
+              <b style={{ color: "var(--p-ink)" }}>No parties yet</b>
+              <div style={{ maxWidth: 420, margin: "4px auto 14px" }}>
                 A party is created by inviting its first admin — that person is
                 what makes the organisation reachable.
-              </p>
-              <Link
-                to="/users/new?for=broker"
-                className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-navy px-3.5 py-2
-                  text-sm font-medium text-white transition hover:bg-navy-dark hover:no-underline"
-              >
-                <UserPlus size={15} /> Invite a party
-              </Link>
+              </div>
+              {invite}
             </div>
-          </Card>
+          </div>
         ) : (
-          <Card>
+          <div className="card">
             {/* Search and the count sit on one line: the count is what tells you
                 the search did something, so it belongs beside the box rather
                 than left to be inferred from the table length. */}
-            <div className="mb-3 flex flex-wrap items-center gap-3">
-              <div className="input flex max-w-sm flex-1 items-center gap-2">
-                <Search size={14} className="shrink-0 text-ink-soft" />
-                <input
-                  className="flex-1 bg-transparent text-sm outline-none"
-                  placeholder="Search parties…"
-                  value={q}
-                  onChange={e => setQ(e.target.value)}
-                />
+            <div className="card-h" style={{ gap: 14, flexWrap: "wrap" }}>
+              <div className="search">
+                <Search className="ic" />
+                <input placeholder="Search parties…" value={q}
+                  onChange={e => setQ(e.target.value)} />
               </div>
-              <span className="text-xs text-ink-muted">
-                {needle
-                  ? `${total} match${total === 1 ? "" : "es"}`
-                  : `${total} part${total === 1 ? "y" : "ies"}`}
-              </span>
+              <div className="right">
+                <span className="sub">
+                  {needle
+                    ? `${total} match${total === 1 ? "" : "es"}`
+                    : `${total} part${total === 1 ? "y" : "ies"}`}
+                </span>
+              </div>
             </div>
 
-            {stranded > 0 && (
-              <div className="mb-3 flex items-center gap-2 rounded-md bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
-                <Layers size={14} className="shrink-0" />
-                {stranded === 1
-                  ? "One party is not on a programme yet, so it cannot produce anything."
-                  : `${stranded} parties are not on a programme yet, so they cannot produce anything.`}
-              </div>
-            )}
-
-            <div className="overflow-x-auto">
+            <div className="tbl-wrap">
               <table>
                 <thead>
                   <tr>
@@ -203,59 +205,59 @@ export default function Brokers() {
                     <th>Status</th>
                     <th>Programmes</th>
                     <th>Contracts</th>
-                    <th />
+                    <th style={{ width: 44 }} />
                   </tr>
                 </thead>
                 <tbody>
                   {shown.map(b => {
                     const invited = b.relationship === "invited";
                     const extra = b.programmes.length - MAX_CHIPS;
+                    const look = invited ? ONBOARDING.invited
+                      : b.onboarding_status ? ONBOARDING[b.onboarding_status] : undefined;
                     return (
                       <tr
                         key={b.id}
-                        className="group cursor-pointer"
+                        className="click party-row"
                         onClick={() => nav(`/brokers/${b.id}`)}
                       >
                         <td>
                           {/* A link as well as a clickable row: the row alone gives
                               no affordance, and cannot be opened in a new tab or
                               reached by keyboard. */}
-                          <div className="flex items-center gap-2.5">
+                          <div className="party-org">
                             <OrgAvatar name={b.legal_name} />
-                            <div className="min-w-0">
+                            <div style={{ minWidth: 0 }}>
                               <Link
                                 to={`/brokers/${b.id}`}
                                 onClick={e => e.stopPropagation()}
-                                className="block truncate font-medium text-navy hover:underline"
+                                className="party-nm"
                               >
                                 {b.legal_name}
                               </Link>
                               {invited && b.invitation ? (
-                                <div className="text-xs text-ink-muted">
+                                <div className="sub">
                                   Invited {b.invitation.email}
                                   {b.invitation.invited_at
                                     && <> on {fmtDate(b.invitation.invited_at)}</>}
                                   {mayChase(b.invitation.by_user_id) && <>
                                   {" · "}
-                                  <button
-                                    type="button"
-                                    className="linkish text-xs"
+                                  <span
+                                    className="linkish" role="button" tabIndex={0}
                                     onClick={e => { e.stopPropagation(); resend(b.invitation!.id); }}
                                   >
                                     Send again
-                                  </button>
+                                  </span>
                                   {" · "}
-                                  <button
-                                    type="button"
-                                    className="linkish mut text-xs"
+                                  <span
+                                    className="linkish mut" role="button" tabIndex={0}
                                     onClick={e => { e.stopPropagation(); revoke(b.invitation!.id); }}
                                   >
                                     Withdraw
-                                  </button>
+                                  </span>
                                   </>}
                                 </div>
                               ) : b.dba_name ? (
-                                <div className="truncate text-xs text-ink-muted">{b.dba_name}</div>
+                                <div className="sub party-dba">{b.dba_name}</div>
                               ) : null}
                             </div>
                           </div>
@@ -265,37 +267,39 @@ export default function Brokers() {
                           {/* The relationship with US, which is not the same as
                               how far the broker has got with their own account:
                               one who works with another carrier is fully set up
-                              and still only INVITED here until they answer. */}
-                          {invited
-                            ? <span className="pill pill-amber">Invited</span>
-                            : <OnboardingBadge status={b.onboarding_status} />}
+                              and still only INVITED here until they answer. A
+                              party that isn't a producer carries no onboarding
+                              state at all, and shows a dash. */}
+                          {look ? (
+                            <span className={`badge ${look.cls}`} title={look.title}>
+                              <span className="d" />{look.label}
+                            </span>
+                          ) : <span className="faint">—</span>}
                         </td>
 
                         <td>
                           {/* No programme is the state that blocks everything
                               else, so it is named rather than counted. */}
                           {b.programmes.length === 0 ? (
-                            <span className="pill pill-amber whitespace-nowrap"
+                            <span className="badge b-warn"
                               title="Until they are on a programme they cannot produce anything.">
                               Needs a programme
                             </span>
                           ) : (
-                            <div className="flex flex-wrap items-center gap-1.5">
+                            <div className="party-chips">
                               {b.programmes.slice(0, MAX_CHIPS).map(p => (
                                 <Link
                                   key={p.id}
                                   to={`/programs/${p.id}/brokers`}
                                   onClick={e => e.stopPropagation()}
-                                  className="whitespace-nowrap rounded-md border border-border px-2 py-0.5
-                                    text-[11.5px] text-ink-muted transition hover:border-navy
-                                    hover:text-navy hover:no-underline"
+                                  className="party-chip"
                                 >
                                   {p.name}
                                 </Link>
                               ))}
                               {extra > 0 && (
                                 <span
-                                  className="text-[11.5px] text-ink-soft"
+                                  className="sub"
                                   title={b.programmes.slice(MAX_CHIPS).map(p => p.name).join(", ")}
                                 >
                                   +{extra} more
@@ -306,62 +310,30 @@ export default function Brokers() {
                         </td>
 
                         <td>
-                          <span className={`inline-flex items-center gap-1.5 ${
-                            b.contract_count === 0 ? "text-ink-soft" : "text-ink"}`}>
-                            <FileText size={13} className="text-ink-soft" />
-                            <span className="font-medium tabular-nums">{b.contract_count}</span>
+                          <span className={`party-count${b.contract_count === 0 ? " zero" : ""}`}>
+                            <FileText size={14} />
+                            {b.contract_count}
                           </span>
                         </td>
 
-                        <td className="w-10">
-                          <ChevronRight
-                            size={16}
-                            className="text-ink-soft transition group-hover:translate-x-0.5 group-hover:text-navy"
-                          />
+                        <td>
+                          <ChevronRight size={16} className="party-chev" />
                         </td>
                       </tr>
                     );
                   })}
-
-                  {shown.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="py-8 text-center text-sm text-ink-muted">
-                        No party matches “{q}”.
-                      </td>
-                    </tr>
-                  )}
                 </tbody>
               </table>
+              {shown.length === 0 && (
+                <div className="empty">No party matches “{q}”.</div>
+              )}
             </div>
 
-            {pageCount > 1 && (
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3
-                border-t border-border pt-3 text-xs text-ink-muted">
-                <span>
-                  {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)}
-                  {" of "}{total} part{total === 1 ? "y" : "ies"}
-                </span>
-                <div className="flex items-center gap-2">
-                  <Button variant="secondary" className="!px-2.5 !py-1 !text-xs"
-                    disabled={page <= 1} onClick={() => setPage(page - 1)}>
-                    ← Prev
-                  </Button>
-                  <span>Page {page} of {pageCount}</span>
-                  <Button variant="secondary" className="!px-2.5 !py-1 !text-xs"
-                    disabled={page >= pageCount} onClick={() => setPage(page + 1)}>
-                    Next →
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            <p className="mt-3 border-t border-border pt-3 text-xs text-ink-muted">
-              Open a party to see its contracts and people across every
-              programme. Put a party on a programme from that programme's page.
-            </p>
-          </Card>
+            <Pagination page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
+              totalItems={total} onPageChange={setPage} noun="parties" />
+          </div>
         )}
-      </PageBody>
-    </>
+      </div>
+    </div>
   );
 }

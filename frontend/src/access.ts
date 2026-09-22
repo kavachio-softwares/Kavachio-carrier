@@ -79,6 +79,7 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   { pattern: "/parties/:id", requires: "carrier_admin" },
   { pattern: "/programs", requires: "carrier_admin" },
   { pattern: "/programs/new", requires: "carrier_admin" },
+  { pattern: "/programs/:programId/setup", requires: "carrier_admin" },
   { pattern: "/programs/:programId/brokers", requires: "carrier_admin" },
   { pattern: "/programs/:programId/contracts/:contractId", requires: "carrier_admin" },
   // The contract RECORD screens. The carrier-wide list and the create form are

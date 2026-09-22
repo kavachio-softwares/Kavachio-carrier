@@ -166,6 +166,8 @@ export default function App() {
             own carrier picker, so the route needs no param of its own. */}
         <Route path="/program-management" element={<ProgramManagement />} />
         <Route path="/programs/new" element={<AddProgram />} />
+        {/* The same flow, picked up for a programme that already exists. */}
+        <Route path="/programs/:programId/setup" element={<AddProgram />} />
         <Route path="/programs/:programId/brokers" element={<ProgramBrokers />} />   {/* the mesh, managed */}
         {/* The contract as a RECORD — terms, documents, lifecycle. The
             programme-scoped route below is what it PRODUCED: clauses and rules. */}

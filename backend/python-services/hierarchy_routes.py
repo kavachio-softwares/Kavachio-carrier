@@ -40,7 +40,7 @@ from db import (
     Tenant,
     BrokerInvitation,
     SessionLocal, Party, Program, Contract, AppUser,
-    ProgramBroker, ContractApproval,
+    ProgramBroker, ContractApproval, Pipeline,
 )
 from auth_deps import current_principal, require_role, Principal, resolve_broker_party_id
 from app_routes import (
@@ -949,6 +949,27 @@ def hierarchy(principal: Principal = Depends(current_principal)):
             .all()
         )
 
+        # Bordereau setups, so the Programmes list can show how far each
+        # programme has got (programme → brokers → contract → setup). A setup
+        # is per (programme, broker); one with no broker predates the broker
+        # level and still covers every broker on its programme.
+        pipelines = (
+            s.query(Pipeline.program_id, Pipeline.broker_party_id, Pipeline.status)
+            .filter(Pipeline.program_id.in_(prog_ids),
+                    Pipeline.status.in_(("active", "draft")))
+            .all()
+        )
+        setup_rank = {"active": 2, "draft": 1}
+        setups: dict[tuple, str] = {}
+        for prog_id, broker_id, status in pipelines:
+            key = (prog_id, broker_id)
+            if setup_rank.get(status, 0) > setup_rank.get(setups.get(key), 0):
+                setups[key] = status
+
+        def setup_status(prog_id: int, broker_id: int) -> Optional[str]:
+            own, shared = setups.get((prog_id, broker_id)), setups.get((prog_id, None))
+            return max((own, shared), key=lambda st: setup_rank.get(st, 0)) or None
+
         by_prog: dict[int, list] = {}
         for link, party in links:
             by_prog.setdefault(link.program_id, []).append((link, party))
@@ -964,8 +985,13 @@ def hierarchy(principal: Principal = Depends(current_principal)):
                     "id": party.id,
                     "legal_name": party.legal_name,
                     "link_status": link.status,
+                    # active | draft | None — the best setup this broker has here.
+                    "setup_status": setup_status(p.id, party.id),
                     "contracts": [
-                        {"id": c.id, "filename": c.filename, "status": c.status}
+                        {"id": c.id, "filename": c.filename, "status": c.status,
+                         # The business state (draft … active), which is what
+                         # "is this contract live" means; `status` is extraction.
+                         "lifecycle": c.lifecycle}
                         for c in sorted(bc, key=lambda c: c.id)
                     ],
                 })
@@ -978,6 +1004,8 @@ def hierarchy(principal: Principal = Depends(current_principal)):
                 "business_segment": p.business_segment,
                 "product_line": p.product_line,
                 "bdx_frequency": p.bdx_frequency,
+                # Shown under the name on the Programmes list ("Created 2 Sep 2026").
+                "created_at": _iso_utc(p.created_at),
                 "broker_count": len(brokers),
                 "contract_count": sum(len(b["contracts"]) for b in brokers),
                 "brokers": brokers,

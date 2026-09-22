@@ -15,7 +15,7 @@
  * anywhere else means first remembering which contract you meant.
  */
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { FilePlus2, History, Upload } from "lucide-react";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import {
@@ -72,7 +72,10 @@ export default function Contracts() {
   const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState("");
 
-  const [programme, setProgramme] = useState("");
+  // ?program_id= opens the list already filtered — the Programmes stepper
+  // links here for a programme whose contracts are all in place.
+  const [params] = useSearchParams();
+  const [programme, setProgramme] = useState(params.get("program_id") ?? "");
   const [lifecycle, setLifecycle] = useState("");
   const [type, setType] = useState("");
   const [q, setQ] = useState("");

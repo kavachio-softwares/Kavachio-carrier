@@ -26,6 +26,7 @@
  * duration is stored on the contract.
  */
 import { useState } from "react";
+import { InfoTip } from "./InfoTip";
 import {
   describeLength, describeTerm, durationOf, expiryFor, type TermSpec,
 } from "../utils/term";
@@ -115,15 +116,23 @@ export function useTermDuration({ spec, inception, expiry, setInception, setExpi
 }
 
 /** The control itself — one `.field`, to sit in the same grid as the dates. */
-export function TermDurationField({ term }: { term: Term }) {
+/** `tip` moves the standing instruction into an (i) beside the label and keeps
+ *  only the worked-out term under the select. */
+export function TermDurationField({ term, tip }: { term: Term; tip?: boolean }) {
   const { inception, expiry, value, length, durations } = term;
   const noStart = !inception;
+  const summary = describeTerm(inception, expiry, term.inclusive);
+  const guide = value === CUSTOM
+    ? "Type the expiry date beside this."
+    : "Pick a length and the expiry works itself out — or choose "
+      + "Custom to type the date yourself.";
 
   return (
     <div className="field" style={{ marginBottom: 0 }}>
       <label>
         Duration
         <span className="muted" style={{ fontWeight: 500 }}> — sets the expiry</span>
+        {tip && <InfoTip text={guide} />}
       </label>
       <select
         value={value ?? ""}
@@ -147,13 +156,7 @@ export function TermDurationField({ term }: { term: Term }) {
           {value === CUSTOM && length ? ` (${length})` : ""}
         </option>
       </select>
-      <div className="hint">
-        {describeTerm(inception, expiry, term.inclusive)
-         || (value === CUSTOM
-             ? "Type the expiry date beside this."
-             : "Pick a length and the expiry works itself out — or choose "
-               + "Custom to type the date yourself.")}
-      </div>
+      {(summary || !tip) && <div className="hint">{summary || guide}</div>}
     </div>
   );
 }

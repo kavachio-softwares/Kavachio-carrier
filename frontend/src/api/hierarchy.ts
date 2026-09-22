@@ -11,6 +11,8 @@ export type HierarchyContract = {
   id: number;
   filename: string | null;
   status: string | null;
+  /** The business state (draft … active). `status` is what extraction did. */
+  lifecycle?: string | null;
 };
 
 export type HierarchyBroker = {
@@ -19,6 +21,8 @@ export type HierarchyBroker = {
   /** active | inactive — a broker taken off a programme that still has
    *  contracts stays here as inactive rather than disappearing. */
   link_status: string;
+  /** The best bordereau setup this broker has on the programme. */
+  setup_status?: "active" | "draft" | null;
   contracts: HierarchyContract[];
 };
 
@@ -29,6 +33,7 @@ export type HierarchyProgramme = {
   business_segment: string | null;
   product_line: string | null;
   bdx_frequency: string | null;
+  created_at?: string | null;
   broker_count: number;
   contract_count: number;
   brokers: HierarchyBroker[];
