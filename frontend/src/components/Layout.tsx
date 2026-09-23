@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
   FileCheck, CalendarDays,
 } from "lucide-react";
-import { useCarrierSeat } from "../hooks/useCarrierSeat";
+import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
 import { BrokerCarrierSwitch } from "./BrokerCarrierSwitch";
@@ -19,7 +19,11 @@ import { initials } from "../branding";
 // destination's entry in ROUTE_ACCESS (access.ts), which is also what guards the
 // route. One source of truth, so the sidebar can never offer a link that would
 // bounce the user straight back to their dashboard.
-type Item = { to: string; label: string; icon: React.ElementType };
+// `carrierAdminOnly` is the one rule ROUTE_ACCESS cannot express: everyone at a
+// carrier holds the same `carrier_admin` DB role, so the carrier admin is told
+// apart from a carrier user by the organisation's owner pointer, which arrives
+// with the brand rather than with the token (see hooks/useCarrierSeat).
+type Item = { to: string; label: string; icon: React.ElementType; carrierAdminOnly?: boolean };
 
 // Nav grouped to match the prototype's sidebar. All existing destinations are
 // preserved; each item is shown only when the current role may actually open it
@@ -125,7 +129,10 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     title: "Admin",
     requires: "carrier_admin",
     items: [
-      { to: "/tenant", label: "Company", icon: Building2 },
+      // The organisation's own settings — name, logo, currency. That is the
+      // carrier admin's alone; a carrier user does the carrier's work inside
+      // the company but does not change what the company IS.
+      { to: "/tenant", label: "Company", icon: Building2, carrierAdminOnly: true },
       // The old party directory. It is a directory to look things up in, not
       // part of building the book, so it sits with the other admin screens.
       { to: "/users", label: "Users & Roles", icon: UserCog },
@@ -270,14 +277,18 @@ export default function Layout() {
     if (g.only) return r !== null && g.only.includes(r);
     return g.requires === undefined || hasRole(g.requires);
   };
-  const groups = isKavachioAdmin()
-    ? ADMIN_GROUPS
-    : GROUPS
-        .map(g => ({ ...g, items: g.items.filter(i => canAccessPath(i.to)) }))
-        .filter(g => g.items.length > 0);
   // Everyone at a carrier holds the carrier_admin DB role; only the owner is
   // the Carrier Admin. The rest are Carrier Users (see hooks/useCarrierSeat).
   const seat = useCarrierSeat();
+  const groups = isKavachioAdmin()
+    ? ADMIN_GROUPS
+    : GROUPS
+        // A carrier-admin-only item stays hidden until the seat is KNOWN to be
+        // an admin's. The brand is hydrated from localStorage, so that is
+        // settled on the first paint of every load after signing in.
+        .map(g => ({ ...g, items: g.items.filter(
+          i => canAccessPath(i.to) && (!i.carrierAdminOnly || addsCarrierUsers(seat))) }))
+        .filter(g => g.items.length > 0);
   const roleLabel = !user ? ""
     : seat === "user" ? "Carrier User" : ROLE_LABEL[normalizeRole(user.role)];
   // The workspace card's contents — shared by its interactive (admin) and
@@ -337,7 +348,9 @@ export default function Layout() {
               and nothing to click (it would only bounce them to the dashboard).
               Admins get the interactive card exactly as before. */}
           {!isKavachioAdmin() && brand?.legal_name && (
-            canAccessPath("/tenant") ? (
+            // Same rule as the Company nav item: a carrier user gets the card
+            // as identity only, so this is not a second door into the settings.
+            canAccessPath("/tenant") && addsCarrierUsers(seat) ? (
               <button type="button" className="wscard" title="Open Company settings"
                 onClick={() => nav("/tenant")}>
                 {workspaceIdentity}

@@ -3,6 +3,7 @@ import { api, getDeduped } from "../api/client";
 import { currentMga, isKavachioAdmin, isTenantAdmin, setTenantBrand } from "../auth";
 import { fileToLogoDataUrl, initials } from "../branding";
 import CountryOptions from "../components/CountryOptions";
+import { useCarrierSeat } from "../hooks/useCarrierSeat";
 
 type Tenant = {
   id: number; mga: string; legal_name?: string; tenant_type?: string;
@@ -39,6 +40,9 @@ const ORG_TYPES: [string, string][] = [
 export default function TenantPage() {
   const mga = currentMga();
   const isAdmin = isTenantAdmin();
+  // Carrier admin vs carrier user — the organisation's owner pointer, not the
+  // DB role, which is `carrier_admin` for both. Only the admin owns this page.
+  const seat = useCarrierSeat();
   // What KIND of organisation this tenant is decides how the rest of the app
   // treats it, so it is not the carrier's own to change — a carrier admin
   // flipping itself to "Broker" would re-shape screens it still has to run.
@@ -93,6 +97,21 @@ export default function TenantPage() {
     } catch (e: any) {
       setMsg(e?.message ?? "Save failed.");
     } finally { setSaving(false); }
+  }
+
+  // The nav item and the workspace card are both hidden from a carrier user, so
+  // this is only reached by typing the URL or following an old bookmark. Say so
+  // plainly rather than showing settings they cannot save.
+  if (seat === "user") {
+    return (
+      <div className="proto"><div className="view full">
+        <div className="page-head"><div className="t"><h2>Company</h2></div></div>
+        <div className="note warn" style={{ maxWidth: 560 }}>
+          Your carrier admin looks after the company's details. Ask them if the
+          name, logo, currency or address needs changing.
+        </div>
+      </div></div>
+    );
   }
 
   if (!t) return null;

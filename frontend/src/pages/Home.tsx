@@ -46,7 +46,7 @@ type Run = {
   source_upload_id: number | null;
 };
 const SUBTITLE: Record<Role, string> = {
-  carrier_admin: "What needs you today, and your most recent bordereau runs.",
+  carrier_admin: "",
   kavachio_admin: "Platform activity and your most recent bordereau runs.",
   // Broker seats do not have a carrier Home yet — the API refuses a broker
   // token on every carrier route, so these are placeholders, not promises.

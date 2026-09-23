@@ -6180,18 +6180,41 @@ def users_list(
 def _people_headline_counts(s) -> dict:
     """The who-is-on-the-platform counts, over EVERY user. Users & Roles and the
     Kavachio dashboard both read this one function, so the two screens can
-    never show different numbers for the same people."""
-    from auth_deps import _ROLE_ALIASES
+    never show different numbers for the same people.
+
+    One count per SEAT, and the four seats add up to the people total once the
+    Kavachio account is added. Carrier admin and carrier user share the one DB
+    role `carrier_admin` — see `_assert_is_carrier_admin` for why — so they are
+    told apart the same way the dashboard's seat tiles do it: the carrier admin
+    is the organisation's owner, everyone else at a carrier is a carrier user.
+    """
+    from auth_deps import _ROLE_ALIASES, normalize_role
 
     def _n(*roles):
         raw = [r for r, n in _ROLE_ALIASES.items() if n in roles]
         return s.query(func.count(AppUser.id)).filter(
             AppUser.role.in_(raw or list(roles))).scalar() or 0
+
+    owner_ids = {oid for (oid,) in s.query(Tenant.owner_user_id)
+                 .filter(Tenant.owner_user_id.isnot(None)).all()}
+    carrier_admins = carrier_users = 0
+    for uid, r in s.query(AppUser.id, AppUser.role).all():
+        if normalize_role(r) != "carrier_admin":
+            continue
+        if uid in owner_ids:
+            carrier_admins += 1
+        else:
+            carrier_users += 1
     return {
         "total":          s.query(func.count(AppUser.id)).scalar() or 0,
         "kavachio":       _n("kavachio_admin"),
-        "carrier_users":  _n("carrier_admin"),
-        "broker_users":   _n("broker_admin", "operator"),
+        "carrier_admins": carrier_admins,
+        "carrier_users":  carrier_users,
+        "broker_admins":  _n("broker_admin"),
+        "broker_users":   _n("operator"),
+        # Both sides together, for a screen that wants the company view.
+        "carrier_people": carrier_admins + carrier_users,
+        "broker_people":  _n("broker_admin", "operator"),
         "operators":      _n("operator"),
         "never_signed_in": s.query(func.count(AppUser.id)).filter(
             AppUser.last_login_at.is_(None)).scalar() or 0,
@@ -6233,7 +6256,18 @@ def admin_users_list(
             query = query.filter(or_(
                 func.lower(AppUser.full_name).like(ql),
                 func.lower(AppUser.email).like(ql)))
-        if role:
+        # Carrier admin and carrier user hold the same DB role, so the split is
+        # the organisation's owner pointer — the same rule as the seat tiles and
+        # as _assert_is_carrier_admin. Read once, used by the filter and by
+        # every row's role label.
+        owner_ids = {oid for (oid,) in s.query(Tenant.owner_user_id)
+                     .filter(Tenant.owner_user_id.isnot(None)).all()}
+        if role in ("carrier_admin", "carrier_user"):
+            raw = [r for r, n in _ROLE_ALIASES.items() if n == "carrier_admin"] or ["carrier_admin"]
+            query = query.filter(AppUser.role.in_(raw))
+            query = query.filter(AppUser.id.in_(owner_ids) if role == "carrier_admin"
+                                 else AppUser.id.notin_(owner_ids or [-1]))
+        elif role:
             raw = [r for r, n in _ROLE_ALIASES.items() if n == role]
             query = query.filter(AppUser.role.in_(raw or [role]))
         if status == "invited":
@@ -6252,6 +6286,8 @@ def admin_users_list(
         items = []
         for u, t_legal, t_name, b_legal in ordered.all():
             r = normalize_role(u.role)
+            if r == "carrier_admin" and u.id not in owner_ids:
+                r = "carrier_user"
             if r == "kavachio_admin":
                 org, kind = "Kavachio", "kavachio"
             elif b_legal:

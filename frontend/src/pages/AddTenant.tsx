@@ -67,10 +67,11 @@ export default function AddTenant() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Create Carrier</h2>
-            <p>
-              Add the insurance company and invite its owner, who sets up their own programmes, brokers and contracts from there.
-            </p>
+            <h2>
+              Create Carrier
+              <InfoTip text={"Add the insurance company and invite its owner, who sets up "
+                + "their own programmes, brokers and contracts from there."} />
+            </h2>
           </div>
           <div className="actions">
             <button className="btn" onClick={() => nav("/tenants")}>← Carriers</button>
@@ -108,12 +109,12 @@ export default function AddTenant() {
               is what makes the organisation accountable to somebody from the
               moment it exists, rather than to whoever happens to log in. */}
           <div className="card pad">
-            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>Owner</h3>
-            <p style={{ margin: "0 0 14px", fontSize: 12, color: "var(--p-muted)" }}>
-              The one person accountable for this organisation. They get an email
-              inviting them to set a password, then set the company up and add
-              their own colleagues as admins.
-            </p>
+            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>
+              Owner
+              <InfoTip text={"The one person accountable for this organisation. They get an "
+                + "email inviting them to set a password, then set the company up and add "
+                + "their own colleagues as admins."} />
+            </h3>
             <div className="field">
               <label>Full name <span style={{ color: "var(--p-crit)" }}>*</span></label>
               <input value={f.admin_name} placeholder="Full name"
@@ -132,11 +133,11 @@ export default function AddTenant() {
           </div>
         </div>
 
-        {missing.length > 0 && (
+        {/* {missing.length > 0 && (
           <div style={{ marginTop: 16, fontSize: 13, color: "var(--p-muted)" }}>
             Still needed: {missing.join(", ")}
           </div>
-        )}
+        )} */}
       </div>
 
       {busy && <LoadingOverlay label="Creating the carrier and sending the invite…" />}

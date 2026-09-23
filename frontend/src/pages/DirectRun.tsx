@@ -11,6 +11,7 @@ import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
 import { useBrokerContractScope } from "../components/BrokerContractScope";
 import { resolveOutputTemplate, type ResolveResult } from "../api/outputTemplate";
 import { contractLabel } from "../utils/contractLabel";
+import { InfoTip } from "../components/InfoTip";
 
 type Party = { id: number; legal_name: string; is_active?: boolean };
 type Program = { id: number; name: string; status?: string; party_id?: number | null };
@@ -253,9 +254,11 @@ export default function DirectRun() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Process Bordereau</h2>
-            <p>Pick who the bordereau is for, drop the file, generate the
-              validated output.</p>
+            <h2>
+              Process Bordereau
+              <InfoTip text={"Pick who the bordereau is for, drop the file, generate "
+                + "the validated output."} />
+            </h2>
           </div>
         </div>
 

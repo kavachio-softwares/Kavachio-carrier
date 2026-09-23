@@ -24,6 +24,7 @@ import {
   type CalendarStatus, type SubmissionVersionRow,
 } from "../api/calendar";
 import NotificationBell from "../components/NotificationBell";
+import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
 
 // Same vocabulary as ProgramCalendar's status badges, so a period reads the
@@ -151,9 +152,11 @@ export default function BordereauCalendar() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Bordereau Calendar</h2>
-            <p>What each broker owes you and when, what has actually turned up,
-              and what you have sent on.</p>
+            <h2>
+              Bordereau Calendar
+              <InfoTip text={"What each broker owes you and when, what has actually "
+                + "turned up, and what you have sent on."} />
+            </h2>
           </div>
           <div className="actions">
             <NotificationBell placement="inline" />

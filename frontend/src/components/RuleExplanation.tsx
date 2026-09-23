@@ -21,11 +21,17 @@
  * both: `proto` for screens under a `.proto` root (Exceptions, Rule Review, BDX
  * inline review) and `tw` for the Tailwind cards in the triage listing, which
  * have no `.proto` ancestor and would render unstyled under proto.css.
+ *
+ * `chipsOnly` keeps the provenance/kind chips and drops everything below them.
+ * The Exception Triage listing uses it: that screen is a list of rules to choose
+ * between, and the explanation belongs on the rule's own review screen, where
+ * the policies it affects are.
  */
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { RuleExplanation as Explanation } from "../api/validation";
 import { ClauseText } from "./ClauseText";
+import { InfoTip } from "./InfoTip";
 
 /** Provenance chip colour — a contract rule and a platform default are not the
  *  same kind of thing, and the reviewer acts on them differently. */
@@ -50,6 +56,7 @@ export function hasExplanation(e?: Explanation | null): boolean {
 
 export default function RuleExplanation({
   explanation, variant = "proto", clauseFallback, clausePage, compact = false,
+  chipsOnly = false,
 }: {
   explanation?: Explanation | null;
   variant?: "proto" | "tw";
@@ -58,14 +65,20 @@ export default function RuleExplanation({
   clausePage?: number | null;
   /** Drops the collapsible + how-to-fix — for the narrow inline-review popover. */
   compact?: boolean;
+  /** The provenance/kind chips ALONE — for the Exception Triage listing, which
+   *  is a list of rules to pick from, not the place the rule is read. The full
+   *  explanation is one click away on the rule's own review screen. */
+  chipsOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const e = explanation ?? {};
   const sourceText = e.source_text ?? clauseFallback ?? null;
 
   // Nothing derived and no clause to fall back on → render nothing rather than
-  // an empty labelled box.
-  if (!hasExplanation(e) && !sourceText) return null;
+  // an empty labelled box. In chipsOnly the chips are the whole point, so it is
+  // the chips themselves that decide.
+  if (chipsOnly ? !(e.origin_label || e.kind_label)
+                : (!hasExplanation(e) && !sourceText)) return null;
 
   const tw = variant === "tw";
   const tone = ORIGIN_TONE[e.origin ?? "contract"] ?? ORIGIN_TONE.contract;
@@ -91,14 +104,25 @@ export default function RuleExplanation({
       {/* provenance chip, plus the rule KIND when it is not a plain compliance
           check — a referral trigger is not a breach and must not read like one */}
       {(e.origin_label || e.kind_label) && (
-        <div style={tw ? undefined : { marginBottom: 6, display: "flex", gap: 6, flexWrap: "wrap" }}
-          className={tw ? "mb-1.5 flex gap-1.5 flex-wrap" : undefined}>
+        <div style={tw ? undefined : {
+              marginBottom: chipsOnly ? 0 : 6,
+              display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center",
+            }}
+          className={tw ? "mb-1.5 flex gap-1.5 flex-wrap items-center" : undefined}>
           {e.origin_label && (
             <span
               className={tw
                 ? `inline-block border rounded px-1.5 py-0.5 text-[10px] font-medium ${tone.tw}`
                 : `badge ${tone.proto}`}>
               {!tw && <span className="d" />}{e.origin_label}
+            </span>
+          )}
+          {/* The chip names the KIND of check; on a chipsOnly card there is no
+              "Where this comes from" below to say what that kind means, so the
+              note the backend already writes goes behind an "i" instead. */}
+          {chipsOnly && e.origin_label && e.origin_note && (
+            <span onClick={ev => ev.stopPropagation()} style={{ display: "inline-flex" }}>
+              <InfoTip text={e.origin_note} />
             </span>
           )}
           {e.kind_label && (
@@ -112,6 +136,7 @@ export default function RuleExplanation({
         </div>
       )}
 
+      {chipsOnly ? null : <>
       {/* the headline — what the rule actually requires */}
       {e.requirement && (
         <div className={tw ? "mb-1.5" : undefined} style={tw ? undefined : { marginBottom: 8 }}>
@@ -239,6 +264,7 @@ export default function RuleExplanation({
           </div>
         </div>
       )}
+      </>}
     </div>
   );
 }

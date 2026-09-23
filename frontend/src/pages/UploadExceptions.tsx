@@ -5,7 +5,7 @@ import {
   type UploadExceptionsResponse,
 } from "../api/validation";
 import { groupByRule, exportCSV, buildReverseSpec, tallyDecisions } from "../components/ExceptionCards";
-import RuleExplanationBlock, { hasExplanation } from "../components/RuleExplanation";
+import RuleExplanationBlock from "../components/RuleExplanation";
 import { downloadFile } from "../api/client";
 import { isBrokerSeat, isKavachioAdmin } from "../auth";
 import { CheckCircle2 } from "lucide-react";
@@ -401,34 +401,6 @@ export default function UploadExceptions() {
               <div className="tile"><div className="k">Open</div><div className="v">{open}</div></div>
             </div>
 
-            {/* ── how to resolve ── (steps a view-only reader cannot take) */}
-            {!viewOnly && <div className="card" style={{ marginTop: 18, marginBottom: 18 }}>
-              <div className="card-h"><h3>How to resolve</h3></div>
-              <div className="grid g-3" style={{ padding: "16px 20px" }}>
-                {[
-                  { n: 1, cls: "b-crit", title: "Open a rule to review",
-                    body: "Each rule above shows the contract clause it came from and how many policies are affected. Click Review to open its table — one row per affected policy with its actual value and the recommendation." },
-                  { n: 2, cls: "b-warn", title: "Decide each policy",
-                    body: "For every row pick a decision — Approve the recommendation, Fix with a corrected value, or Dismiss (keep as-is). Select rows to apply a bulk decision, then Save decisions." },
-                  { n: 3, cls: "b-info", title: downloadId ? "Re-generate the output" : "Re-upload & re-validate",
-                    body: downloadId
-                      ? "After saving, click Fix & Validate to produce a corrected BDX — Fixed & Approved values are written in, Dismissed rows keep their value, and decisions carry over."
-                      : "Upload the corrected file, then Fix & Validate to re-validate and confirm the exceptions are resolved." },
-                ].map(s => (
-                  <div key={s.n} style={{ display: "flex", gap: 10 }}>
-                    <span className={`badge ${s.cls}`}
-                      style={{ width: 24, height: 24, justifyContent: "center", borderRadius: "50%", padding: 0, flex: "0 0 auto" }}>
-                      {s.n}
-                    </span>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 13 }}>{s.title}</div>
-                      <div className="muted" style={{ fontSize: 12, marginTop: 2, lineHeight: 1.5 }}>{s.body}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>}
-
             {/* ── search ── */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
               <div className="search" style={{ minWidth: 280 }}>
@@ -457,7 +429,6 @@ export default function UploadExceptions() {
                     onClick={() => navigate(ruleRoute(g))}>
                     <div className="card-h">
                       <h3>{g.ruleName}</h3>
-                      <span className="sub mono">{g.ruleId != null ? `RULE-${g.ruleId}` : g.ruleKey}</span>
                       <div className="right">
                         <span className={`badge ${SEV_BADGE[g.severity] ?? "b-info"}`}>
                           <span className="d" />{SEV_LABEL[g.severity] ?? g.severity} · {g.count} {g.count === 1 ? "policy" : "policies"}
@@ -465,37 +436,28 @@ export default function UploadExceptions() {
                         <span className="linkish">{viewOnly ? "View →" : "Review →"}</span>
                       </div>
                     </div>
-                    <div style={{ padding: "0 20px 14px" }}>
-                      {(g.contractFilename || sheets.length > 0) && (
-                        <div style={{ color: "var(--p-muted)", fontSize: 11.5, marginBottom: 8,
-                                      display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          {g.contractFilename && (
-                            <span>Enforced by <strong>{g.contractFilename}</strong>
-                              {g.clausePage ? ` · p.${g.clausePage}` : ""}</span>
-                          )}
-                          {sheets.length > 0 && (
-                            <span>Sheet{sheets.length > 1 ? "s" : ""}: <strong>{sheets.join(", ")}</strong></span>
-                          )}
-                        </div>
-                      )}
-                      {/* What the rule requires, in plain English, with the raw
-                          clause demoted into a collapsible. Falls back to the
-                          old error message for rules the backend can't explain. */}
-                      {hasExplanation(g.explanation) || g.contractClause ? (
-                        <div style={{ marginBottom: 8 }}>
-                          <RuleExplanationBlock
-                            explanation={g.explanation}
-                            clauseFallback={g.contractClause}
-                            clausePage={g.clausePage}
-                          />
-                        </div>
-                      ) : (
-                        g.errorMessage && (
-                          <div style={{ color: "var(--p-muted)", fontSize: 12.5, marginBottom: 8 }}>
-                            {g.errorMessage}
-                          </div>
-                        )
-                      )}
+                    {/* Matches .card-h's own 15px padding, so the chips clear the
+                        header rule instead of sitting on it. */}
+                    <div style={{ padding: "14px 20px" }}>
+                      {/* One row of chips: WHERE the rule fired and WHAT KIND of
+                          check it is. The kind carries an "i" with its meaning.
+                          What the rule requires, what went wrong, the contract
+                          wording and how to fix it are all on the rule's own
+                          review screen, one click away behind Review. */}
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap",
+                                    alignItems: "center", marginBottom: 10 }}>
+                        {sheets.length > 0 && (
+                          <span className="badge b-mut"><span className="d" />
+                            Sheet{sheets.length > 1 ? "s" : ""}: {sheets.join(", ")}
+                          </span>
+                        )}
+                        {g.contractFilename && (
+                          <span className="badge b-mut"><span className="d" />
+                            {g.contractFilename}{g.clausePage ? ` · p.${g.clausePage}` : ""}
+                          </span>
+                        )}
+                        <RuleExplanationBlock chipsOnly explanation={g.explanation} />
+                      </div>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                         <span className="badge b-ok">Approved {t.approve}</span>
                         <span className="badge b-info">Fixed {t.fix}</span>
@@ -510,6 +472,52 @@ export default function UploadExceptions() {
                 <div className="card"><div className="empty">No rules match "{search}".</div></div>
               )}
             </div>
+
+            {/* ── how to resolve ── (steps a view-only reader cannot take).
+                Kept BELOW the rules: on the way in it only pushed the work
+                off the screen, and it is read after a rule is open. */}
+            {!viewOnly && <div className="card" style={{ marginTop: 18 }}>
+              <div className="card-h"><h3>How to resolve</h3></div>
+              <div className="grid g-3" style={{ padding: "16px 20px" }}>
+                {[
+                  { n: 1, cls: "b-crit", title: "Open a rule to review",
+                    bullets: [
+                      "See the clause it came from and the policies it hit.",
+                      "Click Review to see each row and our suggestion.",
+                    ] },
+                  { n: 2, cls: "b-warn", title: "Decide each policy",
+                    bullets: [
+                      "Approve, Fix, or Dismiss each row.",
+                      "Or select rows and decide in bulk, then Save.",
+                    ] },
+                  { n: 3, cls: "b-info", title: downloadId ? "Re-generate the output" : "Re-upload & re-validate",
+                    bullets: downloadId
+                      ? [
+                          "Click Fix & Validate for a corrected BDX.",
+                          "Decisions are applied and carry over.",
+                        ]
+                      : [
+                          "Upload the corrected file, then Fix & Validate.",
+                          "Decisions are applied and carry over.",
+                        ] },
+                ].map(s => (
+                  <div key={s.n} style={{ display: "flex", gap: 10 }}>
+                    <span className={`badge ${s.cls}`}
+                      style={{ width: 24, height: 24, justifyContent: "center", borderRadius: "50%", padding: 0, flex: "0 0 auto" }}>
+                      {s.n}
+                    </span>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{s.title}</div>
+                      <ul className="muted" style={{ fontSize: 12, marginTop: 4, lineHeight: 1.5, paddingLeft: 16, listStyle: "disc outside" }}>
+                        {s.bullets.map((b, i) => (
+                          <li key={i} style={{ listStyle: "disc", marginBottom: 4 }}>{b}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>}
 
             
             

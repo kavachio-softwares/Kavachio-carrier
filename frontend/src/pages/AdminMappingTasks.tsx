@@ -143,31 +143,30 @@ export default function AdminMappingTasks() {
               <div className="n">1</div>
               <div>
                 <h4>Set Up Kavachio Mapping</h4>
-                <p>
-                  A new format shows as <b>Needs Mapping</b>. Click <b>Set Up Kavachio Mapping</b> to have the AI
-                  propose a mapping from the source columns to the Kavachio canonical data model.
-                </p>
+                <ul>
+                  <li>New layout shows as <b>Needs Mapping</b>.</li>
+                  <li>Click <b>Set Up Kavachio Mapping</b> — AI proposes the match.</li>
+                </ul>
               </div>
             </div>
             <div className="step s2">
               <div className="n">2</div>
               <div>
                 <h4>Review &amp; Map The Columns</h4>
-                <p>
-                  A scored table shows each source column with its best-match canonical field and
-                  confidence. Fix any low-confidence matches, then save. The task becomes
-                  <b> Mapping Drafted</b> — use <b>Open</b> to re-open it any time.
-                </p>
+                <ul>
+                  <li>Each column gets a Kavachio field + confidence score.</li>
+                  <li>Fix the weak ones, save → <b>Mapping Drafted</b>.</li>
+                </ul>
               </div>
             </div>
             <div className="step s3">
               <div className="n">3</div>
               <div>
                 <h4>Approve &amp; Backfill</h4>
-                <p>
-                  Approving the mapping writes every pending file of this format into the data model,
-                  and future files of the same format then map automatically.
-                </p>
+                <ul>
+                  <li>Approve to go live.</li>
+                  <li>Waiting files get read in; future ones map on their own.</li>
+                </ul>
               </div>
             </div>
           </div>

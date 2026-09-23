@@ -8,6 +8,7 @@ import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { InviteSentModal } from "../components/InviteSentModal";
+import { InfoTip } from "../components/InfoTip";
 
 type Tenant = {
   mga: string; name: string; code: string;
@@ -119,10 +120,11 @@ export default function Tenants() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Carriers</h2>
-            <p>
-              Every insurance company using Kavachio — adding one emails its owner an invitation to join.
-            </p>
+            <h2>
+              Carriers
+              <InfoTip text={"Every insurance company using Kavachio — adding one "
+                + "emails its owner an invitation to join."} />
+            </h2>
           </div>
           <div className="actions">
             <button className="btn pri" onClick={() => nav("/tenants/new")}>＋ Create Carrier</button>
@@ -167,7 +169,7 @@ export default function Tenants() {
               <thead>
                 <tr>
                   <th>Carrier</th><th>Programmes</th><th>Brokers</th>
-                  <th>Status</th><th></th>
+                  <th>Status</th><th className="r">Actions</th>
                 </tr>
               </thead>
               <tbody>
