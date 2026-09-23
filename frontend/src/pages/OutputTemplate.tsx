@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, Wand2,
   Search, RefreshCw, FileText, Quote, ShieldAlert, Layers, Download,
@@ -101,6 +101,7 @@ type ContractMapping = {
 
 export default function OutputTemplate() {
   const { id } = useParams();
+  const nav = useNavigate();
   // WHO IS LOOKING decides how much of the blueprint this page shows.
   //
   // The carrier reviews the column mapping (the sheet blocks below) and sees
@@ -354,7 +355,13 @@ export default function OutputTemplate() {
           </div>
           <TemplateSheetPreview sheets={t.structure?.sheets ?? []}
             templateId={Number(id)}
-            onChanged={() => { reloadTemplate(); setFieldsKey(k => k + 1); }} />
+            onChanged={(nextId) => {
+              // A used template is versioned, not edited: the column landed on a
+              // new id, so follow it — re-reading this one would show the layout
+              // without the change and look like nothing happened.
+              if (nextId != null) { nav(`/outputs/templates/${nextId}`); return; }
+              reloadTemplate(); setFieldsKey(k => k + 1);
+            }} />
         </Card>
 
         {/* The blueprint itself: which columns the delivered file carries, what

@@ -4,7 +4,6 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, FileSpreadsheet, ShieldCheck, FileUp, FileText,
   FileSpreadsheet as FileOut, FileWarning, UploadCloud, ShieldAlert, ArrowRight,
-  ExternalLink, Download,
   Save, Trash2, Sparkles,
 } from "lucide-react";
 import { api, downloadFile, downloadErrorText } from "../api/client";
@@ -174,11 +173,6 @@ export default function DirectSetup() {
   // server rather than patched up locally.
   const [resolveTick, setResolveTick] = useState(0);
   const [showCreateTemplate, setShowCreateTemplate] = useState(false);
-  // The template this session just made. Held so the screen can hand the user
-  // the one link that matters next — the full column list, with any required
-  // column that has nothing to fill it named there rather than in the dialog
-  // they have already closed.
-  const [justCreated, setJustCreated] = useState<{ id: number; name: string } | null>(null);
   // "Create Output BDX Template" needs both sides of the job in front of it —
   // the bordereau to see what can be filled, the contract to see what must be
   // reported. When one is missing this names it instead of opening a dialog
@@ -1406,36 +1400,11 @@ export default function DirectSetup() {
         </Modal>
         {msg && <Banner kind="ok"><CheckCircle2 size={15} /> {msg}</Banner>}
 
-        {justCreated && (
-          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3.5
-            flex items-start gap-3">
-            <CheckCircle2 size={17} className="text-emerald-600 mt-0.5 shrink-0" />
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-emerald-900">
-                Output template “{justCreated.name}” created
-              </div>
-              <p className="text-[12.5px] text-emerald-800 mt-0.5 leading-relaxed">
-                Open it to see the file it produces as a spreadsheet, check the
-                columns and their sources, and deal with anything the standard
-                requires that your bordereau does not carry. It opens in a new
-                tab, so everything you have picked and uploaded here stays put.
-              </p>
-              <div className="flex gap-2 mt-2">
-                <Button variant="secondary"
-                  onClick={() => openTemplateTab(justCreated.id)}>
-                  Review the columns <ExternalLink size={14} />
-                </Button>
-                <Button variant="secondary"
-                  onClick={() => downloadTemplate(justCreated.id)}>
-                  <Download size={14} /> Download template
-                </Button>
-                <Button variant="ghost" onClick={() => setJustCreated(null)}>
-                  Later — build the setup
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
+        {/* No "just created" banner. The template's own row further down says
+            the same thing permanently — name, version, how specific the match
+            is, and Review fields / Download / Replace — so a second block of
+            the same buttons only appeared for the few seconds after creating
+            one. See components/OutputTemplateState.tsx. */}
 
         <Card title="Setup Details">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2078,10 +2047,6 @@ export default function DirectSetup() {
             // the only thing that knows which setup would run against it.
             setResolveTick(n => n + 1);
             setMsg(null);
-            // The uploads staged here are NOT thrown away by reviewing the
-            // template — the card opens it in a new tab (see openTemplateTab),
-            // so this screen, its scope and its files are still here after.
-            setJustCreated({ id: t.id, name: t.name });
           }} />
 
         {/* Save / Activate / Delete for the setup just built (or loaded) in this

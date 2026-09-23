@@ -8,7 +8,7 @@
 // time instead of a stack of collapsed cards.
 import { useSearchParams } from "react-router-dom";
 
-export type SetupTabKey = "overview" | "mapping" | "contracts" | "attention" | "calendar";
+export type SetupTabKey = "overview" | "mapping" | "contracts" | "output" | "attention" | "calendar";
 
 export type SetupTab = {
   key: SetupTabKey;

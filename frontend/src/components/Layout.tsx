@@ -126,7 +126,7 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     ],
   },
   {
-    title: "Admin",
+    title: "Profile",
     requires: "carrier_admin",
     items: [
       // The organisation's own settings — name, logo, currency. That is the

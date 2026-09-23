@@ -20,6 +20,7 @@ import {
   MissingReferenceDocsNote, useRefDocs, PipelineRefDocs,
 } from "../components/MissingReferenceDocsNote";
 import ProgramCalendar from "../components/ProgramCalendar";
+import SetupOutputTemplate from "../components/SetupOutputTemplate";
 import {
   assignmentFor, outputsForInput, seedFromColumnMapping, sheetFieldKey, errText, feedIndex,
   MappingRule, SheetRouting, Contract, ContractDetailT,
@@ -220,6 +221,7 @@ export default function BordereauSetupDetail() {
     { key: "mapping", label: "Field mapping",
       ...(unsourcedFields.length ? { count: unsourcedFields.length, warn: true } : {}) },
     { key: "contracts", label: "Contracts & rules", count: ruleCount },
+    { key: "output", label: "Output BDX" },
     { key: "attention", label: "Needs attention",
       ...(refDocs.missing.length ? { count: refDocs.missing.length, warn: true } : {}) },
     ...(pipeline?.program_id != null
@@ -235,7 +237,9 @@ export default function BordereauSetupDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, pipeline, contracts]);
   // Edit has no "Needs attention" tab — its fixes are made on Field mapping.
-  const editTab = tab === "attention" ? "mapping" : tab;
+  // "Overview" has no Edit counterpart to land on either: Edit's first tab is
+  // Field mapping, so that is where the summary sends you.
+  const editTab = tab === "attention" || tab === "overview" ? "mapping" : tab;
 
   return (
     <>
@@ -505,6 +509,13 @@ export default function BordereauSetupDetail() {
                 })}
               </div>
               </Card>
+            )}
+
+            {tab === "output" && (
+              /* The layout this setup delivers. Read-only here, like the rest
+                 of this page — columns are changed from Edit. */
+              <SetupOutputTemplate boundId={pipeline.output_template_id}
+                templateName={pipeline.output_template_name} />
             )}
 
             {tab === "attention" && (

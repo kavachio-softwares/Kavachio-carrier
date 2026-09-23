@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { getScopedContracts } from "../api/outputTemplate";
+import SetupOutputTemplate from "../components/SetupOutputTemplate";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, CheckCircle2, ChevronDown,
   ChevronRight, FileSpreadsheet, FileText, Save, Trash2,
@@ -92,6 +93,10 @@ export default function BordereauSetupEdit() {
   // per-schedule contract bindings + the setup's fallback/default contract
   const [sheetContracts, setSheetContracts] = useState<Record<string, number | "">>({});
   const [contractId, setContractId] = useState<number | null>(null);
+  // The output template the Output BDX tab is looking at. Held HERE rather than
+  // in the tab, so moving to another tab does not throw away a version an edit
+  // just created — that is what made an added column look like it vanished.
+  const [shownTplId, setShownTplId] = useState<number | null>(null);
   const [savingSC, setSavingSC] = useState(false);
   const [scSaved, setScSaved] = useState(false);
 
@@ -348,6 +353,22 @@ export default function BordereauSetupEdit() {
 
   /** Process Bordereau, opened on this setup's carrier + program (+ broker and
    *  contract where the setup names one). */
+  /** Point this setup at `tplId` — the version the column edits are in. Sent on
+   *  its own, and with the setup's existing contracts, so saving the output
+   *  layout never disturbs the mapping being edited on another tab. */
+  async function saveOutputTemplate(tplId: number) {
+    if (!pipeline) return;
+    await api.put(`/pipelines/${pipeline.id}`, {
+      input_format_id: pipeline.input_format_id,
+      output_template_id: tplId,
+      contracts: pipeline.contracts.map(c => ({
+        contract_id: c.contract_id, sheet_key: c.sheet_key,
+      })),
+    });
+    await load();
+    setShownTplId(tplId);
+  }
+
   async function goRun() {
     const q = new URLSearchParams();
     if (pipeline?.carrier_party_id != null) q.set("carrier_party_id", String(pipeline.carrier_party_id));
@@ -427,12 +448,16 @@ export default function BordereauSetupEdit() {
 
   // ── the tabs ── the same as the read-only view's, less "Needs attention":
   // its fixes are made here on Setup & documents and Field mapping.
+  // "Setup & documents" sits second to last, not first: View's Overview is the
+  // summary you land on, and its Edit counterpart is the paperwork you finish
+  // with, after the mapping and the rules.
   const tabs: SetupTab[] = [
-    { key: "overview", label: "Setup & documents",
-      ...(refDocs.missing.length ? { count: refDocs.missing.length, warn: true } : {}) },
     { key: "mapping", label: "Field mapping",
       ...(unsourcedFields.length ? { count: unsourcedFields.length, warn: true } : {}) },
     { key: "contracts", label: "Contracts & rules", count: ruleCount },
+    { key: "output", label: "Output BDX" },
+    { key: "overview", label: "Setup & documents",
+      ...(refDocs.missing.length ? { count: refDocs.missing.length, warn: true } : {}) },
     ...(pipeline?.program_id != null
       ? [{ key: "calendar" as const, label: "Submission calendar" }] : []),
   ];
@@ -564,6 +589,18 @@ export default function BordereauSetupEdit() {
             it. The carrier and program come from the pipeline, so unlike the
             standalone My Calendar page there is nothing to select — offering a
             picker here would let the section contradict the setup it is in. */}
+        {tab === "output" && (
+          /* The output half of this setup: the layout the delivered file has.
+             Editable here — this is the Edit screen — while the setup view
+             beside it only shows it. */
+          <SetupOutputTemplate boundId={pipeline.output_template_id}
+            templateName={pipeline.output_template_name}
+            shownId={shownTplId ?? pipeline.output_template_id}
+            onShown={setShownTplId}
+            onSave={saveOutputTemplate}
+            editable />
+        )}
+
         {tab === "calendar" && pipeline.program_id != null && (
           <Card title={<span className="flex items-center gap-2">
             <CalendarDays size={16} className="text-navy" /> Submission Calendar</span>}>
