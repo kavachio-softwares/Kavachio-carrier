@@ -825,6 +825,59 @@
 .proto .trail .step-c.off:not(:has(.nm)) .lv{font-size:12.5px;letter-spacing:0;text-transform:none;color:var(--p-faint);font-weight:600}
 .proto .trail .step-c.off .nm{color:var(--p-muted);font-weight:600}
 .proto .trail > span{flex:1 1 0;min-width:0;display:flex!important;align-items:center}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   .wizbody / .secrail   step 1 of Create a Contract, cut into sections
+
+   The Terms step asks a lot in one scroll: two pickers, the basics, then a
+   panel for each group of limits. Nothing about the questions changed — the
+   rail shows ONE section at a time and says which are still short, the way
+   `.doc-rail` below already does for the wording's sections. The four-step
+   `.trail` above stays what it is: the stages of making the contract, not
+   the parts of this one.
+   ───────────────────────────────────────────────────────────────────────── */
+.proto .wizbody{display:grid;grid-template-columns:238px minmax(0,1fr);gap:16px;align-items:start}
+.proto .secrail{background:var(--p-surface);border:1px solid var(--p-border);border-radius:var(--p-r);
+      padding:8px;position:sticky;top:16px;box-shadow:var(--p-sh-sm)}
+.proto .secrail .cap{font-size:9.5px;letter-spacing:1.1px;text-transform:uppercase;font-weight:700;
+      color:var(--p-faint);padding:9px 10px 5px}
+.proto .secitem{display:flex;align-items:flex-start;gap:10px;width:100%;border:0;background:transparent;
+      padding:9px 10px;border-radius:var(--p-r-sm);cursor:pointer;text-align:left;font:inherit;
+      color:var(--p-ink);transition:background .12s}
+.proto .secitem:hover{background:var(--p-surface-2)}
+.proto .secitem .n{width:21px;height:21px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;
+      font-size:11px;font-weight:700;background:var(--p-surface-3);color:var(--p-muted);margin-top:1px}
+.proto .secitem .lvbox{min-width:0}
+.proto .secitem .t{display:block;font-size:12.5px;font-weight:600;line-height:1.35}
+.proto .secitem .m{display:block;font-size:10.5px;color:var(--p-faint);margin-top:2px}
+.proto .secitem.done .n{background:var(--p-ok-soft);color:var(--p-ok-ink)}
+.proto .secitem.todo .t{color:var(--p-muted)}
+/* Short of an answer, and only once Next has been pressed — a form that goes
+   red before anybody has typed reads as broken rather than helpful. */
+.proto .secitem.warn .n{background:var(--p-crit-soft);color:var(--p-crit-ink)}
+.proto .secitem.warn .m{color:var(--p-crit-ink)}
+.proto .secitem.on{background:var(--p-primary-soft)}
+.proto .secitem.on .t{color:var(--p-primary-h)}
+.proto .secitem.on .m{color:var(--p-primary)}
+.proto .secitem.on .n{background:var(--p-primary);color:#fff}
+.proto .secitem:focus-visible{outline:2px solid var(--p-primary);outline-offset:-2px}
+.proto .secrail .tail{border-top:1px solid var(--p-border);margin-top:6px;padding:11px 10px 5px}
+/* The panel and whatever belongs under it (the "upload a signed PDF instead"
+   line) share the grid's second column, so that line sits below the section
+   rather than centred across the whole page beside the rail. */
+.proto .secmain{min-width:0}
+.proto .secnav{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:22px;
+      border-top:1px solid var(--p-border);padding-top:14px}
+.proto .secnav .sub{font-size:11.5px;color:var(--p-faint)}
+.proto .secnav .btn.pri{margin-left:auto}
+/* Narrow: the rail lies down above the panel and scrolls sideways, so the
+   section you are on is still named without eating half the width. */
+@media (max-width:1040px){
+  .proto .wizbody{grid-template-columns:minmax(0,1fr)}
+  .proto .secrail{position:static;display:flex;gap:4px;overflow-x:auto;padding:6px}
+  .proto .secrail .cap,.proto .secrail .tail{display:none}
+  .proto .secitem{width:auto;flex:0 0 auto;white-space:nowrap}
+}
 .proto .doc{display:grid;grid-template-columns:214px minmax(0,1fr);gap:0;border:1px solid var(--p-border);
       border-radius:var(--p-r);overflow:hidden;background:var(--p-surface)}
 .proto .doc-rail{background:var(--p-surface-2);border-right:1px solid var(--p-border);padding:8px}
@@ -1372,3 +1425,74 @@
    box drawn around it. */
 .proto .recharts-wrapper:focus:not(:focus-visible),
 .proto .recharts-wrapper :focus:not(:focus-visible){outline:none}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   .wiz — one step of Create a Contract: its parts as a rail down the left,
+   one part at a time in the panel on the right (components: WizardStep in
+   pages/ContractNew.tsx).
+
+   The four STAGES across the top are `.trail` above; this is the level below
+   them. Steps 2, 3 and 4 were a section list, a stack of cards and a
+   two-column form — three shapes for the same job — and each scrolled past
+   what came next. One shape, and the buttons stay where they were.
+   ═════════════════════════════════════════════════════════════════════════ */
+.proto .wiz{display:grid;grid-template-columns:268px minmax(0,1fr);gap:18px;align-items:start}
+
+.proto .wiz-rail{background:var(--p-surface);border:1px solid var(--p-border);border-radius:var(--p-r);
+  padding:8px;box-shadow:var(--p-sh-sm);position:sticky;top:16px;display:grid;gap:2px;align-content:start}
+.proto .wiz-rail .cap{display:flex;align-items:center;gap:6px;padding:8px 10px 6px;
+  font-size:10px;letter-spacing:1.1px;text-transform:uppercase;font-weight:700;color:var(--p-faint)}
+.proto .wiz-rail .cap .ct{margin-left:auto;letter-spacing:0;text-transform:none;font-weight:700}
+.proto .wiz-rail .sec{display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;align-items:start;
+  width:100%;border:0;background:transparent;padding:10px;border-radius:var(--p-r-sm);cursor:pointer;
+  text-align:left;font:inherit;color:var(--p-ink);position:relative;box-shadow:none}
+.proto .wiz-rail .sec:hover{background:var(--p-surface-2)}
+.proto .wiz-rail .sec .n{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
+  font-size:11px;font-weight:700;background:var(--p-surface-3);color:var(--p-muted);margin-top:1px}
+.proto .wiz-rail .sec .txt{min-width:0}
+.proto .wiz-rail .sec .t{display:block;font-size:13.5px;font-weight:600;line-height:1.35;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .wiz-rail .sec .m{display:block;font-size:11.5px;color:var(--p-faint);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .wiz-rail .sec.done .n{background:var(--p-ok-soft);color:var(--p-ok-ink)}
+.proto .wiz-rail .sec.warn .n{background:var(--p-warn-soft);color:var(--p-warn-ink)}
+.proto .wiz-rail .sec.warn .m{color:var(--p-warn-ink)}
+.proto .wiz-rail .sec.on{background:var(--p-primary-soft)}
+.proto .wiz-rail .sec.on .t{color:var(--p-primary)}
+.proto .wiz-rail .sec.on .m{color:var(--p-primary);opacity:.75}
+.proto .wiz-rail .sec.on .n{background:var(--p-primary);color:#fff}
+.proto .wiz-rail .sec.on::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;
+  border-radius:0 3px 3px 0;background:var(--p-primary)}
+.proto .wiz-rail .sec:focus-visible{outline:2px solid var(--p-primary);outline-offset:-2px}
+/* Step 2's delete × and its locked mark, in the row's top-right corner. */
+.proto .wiz-rail .sec .rm,.proto .wiz-rail .sec .keep{position:absolute;right:8px;top:9px;
+  font-size:14px;line-height:1;color:var(--p-faint)}
+.proto .wiz-rail .sec .rm{opacity:0;cursor:pointer}
+.proto .wiz-rail .sec:hover .rm,.proto .wiz-rail .sec.on .rm{opacity:1}
+.proto .wiz-rail .sec .rm:hover{color:var(--p-crit)}
+.proto .wiz-rail .tail{border-top:1px solid var(--p-border);margin-top:6px;padding:10px;display:grid;gap:6px}
+.proto .wiz-rail .tail .btn{width:100%;justify-content:center;padding:10px 12px;font-size:12.5px}
+
+.proto .wiz-pane{background:var(--p-surface);border:1px solid var(--p-border);border-radius:var(--p-r);
+  box-shadow:var(--p-sh);display:flex;flex-direction:column;min-height:520px;min-width:0}
+.proto .wiz-pane-h{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;
+  padding:16px 20px 14px;border-bottom:1px solid var(--p-border)}
+.proto .wiz-pane-h h3{margin:0;font-size:16.5px;font-weight:600;letter-spacing:-.1px}
+.proto .wiz-pane-h p{margin:4px 0 0;font-size:13px;color:var(--p-muted);max-width:72ch;line-height:1.55}
+.proto .wiz-pane-h .r{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.proto .wiz-pane-b{flex:1;padding:18px 20px;display:grid;gap:16px;align-content:start;min-width:0}
+.proto .wiz-pane-b>.note,.proto .wiz-pane-b>.hint{margin:0}
+.proto .wiz-pane-f{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:13px 20px;border-top:1px solid var(--p-border)}
+.proto .wiz-pane-f .r{margin-left:auto;display:flex;gap:8px}
+
+@media(max-width:1040px){
+  .proto .wiz{grid-template-columns:1fr}
+  /* The rail becomes a strip of tabs above the panel. */
+  .proto .wiz-rail{position:static;grid-auto-flow:column;grid-auto-columns:minmax(190px,1fr);
+    overflow-x:auto;gap:6px}
+  .proto .wiz-rail .cap{display:none}
+  /* The tail stays reachable — it holds Add a section and the two rewrite
+     buttons, which exist nowhere else on a narrow screen. */
+  .proto .wiz-rail .tail{border-top:0;border-left:1px solid var(--p-border);margin:0;align-content:center}
+}
