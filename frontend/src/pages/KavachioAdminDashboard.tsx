@@ -338,7 +338,6 @@ export default function KavachioAdminDashboard() {
   const sevRows = [
     { k: "Critical", sub: "Stops the file going out.", v: ox.critical, c: SEV.critical },
     { k: "Warning", sub: "Should be checked.", v: ox.warning, c: SEV.warning },
-    { k: "Info", sub: "For awareness only.", v: ox.info, c: SEV.info },
   ];
   const pr = ox.put_right;
 
@@ -411,7 +410,7 @@ export default function KavachioAdminDashboard() {
           <StatCard title="Files Processed" value={nf(d.runs.window_count)} icon={Zap}
             trend={d.runs.delta_pct == null ? undefined
               : `${d.runs.delta_pct >= 0 ? "+" : ""}${d.runs.delta_pct}%`}
-            subtitle={d.runs.delta_pct == null ? "no runs the period before"
+            subtitle={d.runs.delta_pct == null ? undefined
               : `vs ${nf(d.runs.prev_count)} the period before`} />
           <StatCard title="Clean Runs" icon={CheckCircle2}
             value={d.runs.clean_rate == null ? "—" : `${d.runs.clean_rate}%`}

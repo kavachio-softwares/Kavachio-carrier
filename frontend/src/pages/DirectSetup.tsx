@@ -1356,7 +1356,7 @@ export default function DirectSetup() {
         )}
       </Modal>
       <PageHeader title="Bordereau Setup"
-        subtitle="Done once per carrier and programme, so every later bordereau is just an upload." />
+        subtitle="Configure and upload your Bordereau file. Start by selecting your details below." />
       <PageBody>
         {fromFlow && <ProgrammeFlowBar programId={programId === "" ? null : Number(programId)} at={4} />}
         {err && <Banner kind="error"><AlertTriangle size={15} /> {err}</Banner>}
@@ -1437,11 +1437,7 @@ export default function DirectSetup() {
           </div>
         )}
 
-        <Card title="1 · Scope & Uploads">
-          <div className="mb-3 flex items-baseline gap-2">
-            <h3 className="text-[13px] font-semibold">Scope</h3>
-            <span className="text-xs text-ink-muted">Who this setup is for.</span>
-          </div>
+        <Card title="Setup Details">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* The carrier is who you are, not a choice, so it is not asked for
                 or shown here — it is already in the setup's name. */}

@@ -301,7 +301,7 @@ export default function BordereauSetupDetail() {
                       <div className="font-medium">{fmtStamp(pipeline.created_at)}</div>
                     </div>
                     <div>
-                      <div className="text-[11px] uppercase text-ink-muted mb-1">Input Template</div>
+                      <div className="text-[11px] uppercase text-ink-muted mb-1 b">Input Template</div>
                       <div className="font-medium flex items-center gap-1.5">
                         <FileUp size={13} className="text-ink-soft shrink-0" />
                         <span className="truncate">{pipeline.input_format_name ?? "— None —"}</span>

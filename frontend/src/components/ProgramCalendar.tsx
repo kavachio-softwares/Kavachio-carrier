@@ -35,6 +35,10 @@ import { FREQUENCIES, FREQUENCY_LABEL } from "../constants/frequency";
 
 const PAGE_SIZE = 12;
 
+// Tailwind's preflight strips the marker off every list, so a bulleted note
+// has to ask for the disc back by hand.
+const LI: React.CSSProperties = { listStyle: "disc", marginBottom: 4 };
+
 // One colour per step of the deadline, escalating grey → blue → amber → red, so
 // the table can be read by colour alone. Grey means "nothing for you to do":
 // either it is not due yet, or it is already sent. Green is the good outcome.
@@ -624,30 +628,31 @@ export default function ProgramCalendar({
           {/* The whole rule in plain words, built from the numbers actually in the
               fields above, so the reader can check the setting against what will
               happen without saving to find out. */}
-          <div style={{ fontSize: 12, color: "var(--p-muted)", margin: "10px 0 2px" }}>
+          <ul style={{ fontSize: 12, color: "var(--p-muted)", margin: "10px 0 12px",
+            padding: "0 0 0 16px", listStyle: "disc outside" }}>
             {!isWeekly && (
-              <>
-                Each bordereau is due on the <b>{ordinal(form.due_day_of_month)}</b> of
-                the month after the period it covers.{" "}
-              </>
+              <li style={LI}>
+                Due on the <b>{ordinal(form.due_day_of_month)}</b> of the month after
+                the period it covers.
+              </li>
             )}
-            You get three reminders: <b>{form.soon_window_days} day
-            {Number(form.soon_window_days) === 1 ? "" : "s"} before</b> the due date,
-            again <b>on the day</b>, and once more <b>after it passes</b>. Each is
-            sent once, not repeated. There is no grace period — one day past the due
-            date counts as overdue.
-          </div>
-          <div style={{ fontSize: 12, color: "var(--p-muted)", margin: "2px 0 12px" }}>
+            <li style={LI}>
+              Reminders: <b>{form.soon_window_days} day
+              {Number(form.soon_window_days) === 1 ? "" : "s"} before</b>, on the day,
+              and once after it is late.
+            </li>
+            <li style={LI}>Each reminder is sent once, not repeated.</li>
+            <li style={LI}>No grace period — one day late is overdue.</li>
+            <li style={LI}>
             {/* Says which fields the contract actually drives, and — the part the
                 old wording left out — that filling one STOPS it tracking the
                 contract, since an override always wins over the contract value. */}
             {overridden.length === 0 ? (
               contractGives.length === 2 ? (
                 <>
-                  The first two come from the contract
+                  Frequency and start date come from the contract
                   {` (${FREQ_LABEL[sched!.contract_frequency!] ?? sched!.contract_frequency}, from ${fmtDate(sched!.contract_anchor)})`}
-                  . Change one only if this program differs — it then stops following
-                  the contract.
+                  . Change either one and this program stops following it.
                 </>
               ) : contractGives.length === 1 ? (
                 <>
@@ -682,7 +687,8 @@ export default function ProgramCalendar({
                 )}
               </>
             )}
-          </div>
+            </li>
+          </ul>
           <button className="btn pri" onClick={save} disabled={saving || !canSave}
             title={canSave ? "" : `Set ${missing.join(" and ")} first`}>
             {saving ? "Saving…" : "Save deadlines"}

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { getScopedContracts } from "../api/outputTemplate";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, CheckCircle2, ChevronDown,
   ChevronRight, FileSpreadsheet, FileText, Save, Trash2,
@@ -331,14 +332,39 @@ export default function BordereauSetupEdit() {
         input_format_id: editor.format_id, output_template_id: pipeline.output_template_id,
         contracts: contractsBody,
       });
-      if (activate) await api.post(`/pipelines/${pipeline.id}/activate`);
-      // Activating never navigates the user away — it stays on this page with a
-      // success message and reloads, so nothing can bounce them to onboarding.
-      setMsg(activate
-        ? "Setup activated — bordereaux can now be processed for this carrier + program. Any previous setup was superseded."
-        : "Saved.");
+      if (activate) {
+        await api.post(`/pipelines/${pipeline.id}/activate`);
+        // An activated setup exists to be RUN, so hand the user straight to
+        // Process Bordereau with this setup's scope already picked. The broker
+        // is not on the pipeline — it hangs off the contract, so it is looked
+        // up here rather than left for the run screen to guess.
+        await goRun();
+        return;
+      }
+      setMsg("Saved.");
       await load();
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
+  }
+
+  /** Process Bordereau, opened on this setup's carrier + program (+ broker and
+   *  contract where the setup names one). */
+  async function goRun() {
+    const q = new URLSearchParams();
+    if (pipeline?.carrier_party_id != null) q.set("carrier_party_id", String(pipeline.carrier_party_id));
+    if (pipeline?.program_id != null) q.set("program_id", String(pipeline.program_id));
+    if (contractId != null) {
+      q.set("contract_id", String(contractId));
+      // The run screen only offers a broker's contracts once that broker is
+      // picked, so the pair has to travel together or the contract is dropped.
+      if (pipeline?.program_id != null) {
+        try {
+          const rows = await getScopedContracts(pipeline.program_id, null);
+          const bid = rows.find(c => c.id === contractId)?.broker_party_id;
+          if (bid != null) q.set("broker_party_id", String(bid));
+        } catch { /* scope is a convenience — never block the redirect on it */ }
+      }
+    }
+    navigate(`/direct?${q.toString()}`);
   }
 
   async function deleteSetup() {

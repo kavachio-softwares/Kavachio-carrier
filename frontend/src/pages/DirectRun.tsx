@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { History, AlertTriangle, Download } from "lucide-react";
 import { api, downloadFile, downloadErrorText } from "../api/client";
 import { LoadingOverlay } from "../components/Busy";
@@ -22,6 +22,19 @@ export default function DirectRun() {
   const mga = currentMga();
   const nav = useNavigate();
   const admin = isTenantAdmin();
+
+  // Arriving from elsewhere with the scope already decided — today that is
+  // Activate Setup, which lands here on the setup it just switched on. Each
+  // level is applied only once its own list has loaded, because selecting a
+  // level clears the ones below it; and only once, so the user can change any
+  // of them afterwards without the URL putting them back.
+  const [params] = useSearchParams();
+  const wanted = useRef({
+    carrier: Number(params.get("carrier_party_id")) || null,
+    program: Number(params.get("program_id")) || null,
+    broker: Number(params.get("broker_party_id")) || null,
+    contract: Number(params.get("contract_id")) || null,
+  });
 
   const [carriers, setCarriers] = useState<Party[]>([]);
   // A tenant IS a carrier, and its own carrier party is not "app managed", so
@@ -167,6 +180,31 @@ export default function DirectRun() {
       })
       .catch(() => { setHasSetup(false); setSetup(null); });
   }, [programId]);
+
+  // The carrier is known before anything is fetched, so it can be applied on
+  // the first render; the /my-carrier-party default below only fills a blank.
+  useEffect(() => {
+    const c = wanted.current.carrier;
+    if (c != null) { wanted.current.carrier = null; setCarrierId(c); }
+  }, []);
+  useEffect(() => {
+    const p = wanted.current.program;
+    if (p == null || !programs.some(x => x.id === p)) return;
+    wanted.current.program = null;
+    setProgramId(p);
+  }, [programs]);
+  useEffect(() => {
+    const b = wanted.current.broker;
+    if (b == null || !scope.brokers.some(x => x.id === b)) return;
+    wanted.current.broker = null;
+    scope.setBrokerPartyId(b);
+  }, [scope.brokers]);
+  useEffect(() => {
+    const c = wanted.current.contract;
+    if (c == null || !scope.contracts.some(x => x.id === c)) return;
+    wanted.current.contract = null;
+    scope.setContractId(c);
+  }, [scope.contracts]);
 
   function clearForm() {
     setFile(null); setResult(null); setPreview(null); setErr(null);
