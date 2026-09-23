@@ -3,6 +3,7 @@ import { api, getDeduped } from "../api/client";
 import { currentMga, isKavachioAdmin, isTenantAdmin, setTenantBrand } from "../auth";
 import { fileToLogoDataUrl, initials } from "../branding";
 import CountryOptions from "../components/CountryOptions";
+import { InfoTip } from "../components/InfoTip";
 import { useCarrierSeat } from "../hooks/useCarrierSeat";
 
 type Tenant = {
@@ -122,8 +123,10 @@ export default function TenantPage() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Company</h2>
-            <p>Your company's identity, currency and address.</p>
+            <h2>
+              Company
+              <InfoTip text={"Your company's identity, currency and address."} />
+            </h2>
           </div>
           {isAdmin && (
             <div className="actions">
@@ -141,7 +144,11 @@ export default function TenantPage() {
           <div className="card pad">
             <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>Company Identity</h3>
             <div className="field">
-              <label>Company Logo</label>
+              <label>
+                Company Logo
+                <InfoTip text={"Shown in the sidebar on a dark background — a "
+                  + "transparent or light logo looks best. PNG, SVG or JPG."} />
+              </label>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 {/* Preview on a dark swatch that mirrors the sidebar, so the
                     logo is shown exactly as it will appear there (no white box). */}
@@ -168,10 +175,6 @@ export default function TenantPage() {
                   </>
                 )}
               </div>
-              <span className="muted" style={{ fontSize: 11 }}>
-                Shown in the sidebar on a dark background — a transparent or light
-                logo looks best. PNG, SVG or JPG.
-              </span>
             </div>
             <div className="field">
               <label>Company Name</label>

@@ -69,6 +69,13 @@ function fmtMonth(key?: string | null): string {
 // Rows per page in the programme list — the same size Users & Roles pages at.
 const PAGE_SIZE = 10;
 
+/* Tailwind's preflight strips the marker off every list, so bulleted notes
+   have to ask for the disc back by hand. */
+const LIST: React.CSSProperties = {
+  margin: 0, paddingLeft: 16, listStyle: "disc outside",
+};
+const LI: React.CSSProperties = { listStyle: "disc", marginBottom: 4 };
+
 export default function BordereauCalendar() {
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [month, setMonth] = useState<string | undefined>(undefined);
@@ -341,11 +348,12 @@ export default function BordereauCalendar() {
           </div>
 
           <div className="note" style={{ margin: 0, border: 0,
-            borderTop: "1px solid var(--p-border)", borderRadius: 0 }}>
-            <b>A programme with no broker owes you nothing.</b> It shows a blank
-            row rather than an overdue one, because there is nobody to be late.
-            It stays in the list so you can see it is idle instead of forgetting
-            it exists.
+            borderTop: "1px solid var(--p-border)", borderRadius: 0,
+            display: "flex", alignItems: "center", gap: 6 }}>
+            <b>A programme with no broker owes you nothing.</b>
+            <InfoTip text={"It shows a blank row rather than an overdue one, because "
+              + "there is nobody to be late. It stays in the list so you can see it "
+              + "is idle instead of forgetting it exists."} />
           </div>
         </div>
 
@@ -589,11 +597,14 @@ function ChaseModal({ rows, onClose, onConfirm }: {
 
           <div className="note" style={{ marginBottom: 14 }}>
             {single ? (
-              <>
-                Their <b>{rows[0].period}</b> file for {rows[0].program_name} was
-                due on <b>{fmtFull(rows[0].due_date)}</b> and has still not
-                arrived. This records that you asked.
-              </>
+              <ul style={LIST}>
+                <li style={LI}>
+                  <b>{rows[0].period}</b> file for {rows[0].program_name} — due{" "}
+                  <b>{fmtFull(rows[0].due_date)}</b>.
+                </li>
+                <li style={LI}>Still not arrived.</li>
+                <li style={LI}>This saves a note that you asked for it.</li>
+              </ul>
             ) : (
               <>
                 One reminder each, for the person who sends the file. Nothing goes
@@ -677,10 +688,16 @@ function ChaseModal({ rows, onClose, onConfirm }: {
           {/* The one thing this dialog must not do is imply an email left the
               building. Sending is not wired up; the record is. */}
           <div className="note" style={{ marginTop: 14 }}>
-            Every reminder is recorded, so if it ever goes to a dispute you can
-            show what was asked and when. <b>Email delivery is not connected
-            yet</b> — for now this writes the reminder to each period's record
-            rather than sending it.
+            <ul style={LIST}>
+              <li style={LI}>
+                Every reminder is saved with its date — proof you asked, if it is
+                ever questioned.
+              </li>
+              <li style={LI}>
+                <b>Email is not connected yet</b> — this only writes to the
+                period's record, nothing is sent.
+              </li>
+            </ul>
           </div>
 
           <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
