@@ -21,7 +21,7 @@ import {
 } from "../components/MissingReferenceDocsNote";
 import ProgramCalendar from "../components/ProgramCalendar";
 import {
-  assignmentFor, outputsForInput, seedFromColumnMapping, sheetFieldKey, errText,
+  assignmentFor, outputsForInput, seedFromColumnMapping, sheetFieldKey, errText, feedIndex,
   MappingRule, SheetRouting, Contract, ContractDetailT,
 } from "../utils/directSetup";
 
@@ -137,6 +137,8 @@ export default function BordereauSetupDetail() {
   }
 
   const { sel, extra } = useMemo(() => seedFromColumnMapping(editor?.column_mapping), [editor]);
+  // BDX output column → the broker column(s) feeding it, for Contracts & rules.
+  const feedFor = useMemo(() => feedIndex(sel, extra), [sel, extra]);
 
   // Output columns with no source — same calculation the editor warns about
   // before activating, so activating from here can't skip that check.
@@ -224,6 +226,14 @@ export default function BordereauSetupDetail() {
       ? [{ key: "calendar" as const, label: "Submission calendar" }] : []),
   ];
   const [tab, setTab] = useSetupTab(tabs);
+  // A setup with a single contract opens it on Contracts & rules — there is
+  // nothing to choose between, so the rules are the first thing shown.
+  useEffect(() => {
+    if (tab === "contracts" && pipeline?.contracts.length === 1 && openContractId == null
+        && contracts.some(c => c.id === pipeline.contracts[0].contract_id))
+      toggleContract(pipeline.contracts[0].contract_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, pipeline, contracts]);
   // Edit has no "Needs attention" tab — its fixes are made on Field mapping.
   const editTab = tab === "attention" ? "mapping" : tab;
 
@@ -485,7 +495,7 @@ export default function BordereauSetupDetail() {
                         <div className="border-t border-border px-4 py-3">
                           {contractBusy ? null : contractDetail
                             ? <ContractInline detail={contractDetail} programId={pipeline.program_id ?? ""}
-                                contractId={c.id} mga={mga} onChanged={reloadContractDetail} readOnly
+                                contractId={c.id} mga={mga} onChanged={reloadContractDetail} readOnly feedFor={feedFor}
                                 canEditVariations={canEditVariations} />
                             : <div className="text-sm text-ink-muted">Could not load this contract.</div>}
                         </div>

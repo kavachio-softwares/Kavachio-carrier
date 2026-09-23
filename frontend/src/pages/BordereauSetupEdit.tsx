@@ -25,7 +25,7 @@ import {
 import ProgramCalendar from "../components/ProgramCalendar";
 import {
   assignmentFor, outputsForInput, seedFromColumnMapping, sheetFieldKey, errText,
-  MappingRule, SheetRouting, OutField, Contract, ContractDetailT,
+  MappingRule, SheetRouting, OutField, Contract, ContractDetailT, feedIndex,
 } from "../utils/directSetup";
 
 type PipelineDetail = {
@@ -188,6 +188,8 @@ export default function BordereauSetupEdit() {
   // read-only setup view shows, so a document that was never attached is
   // visible from the screen where the setup is actually being fixed.
   const refDocs = useRefDocs(pipeline?.reference_documents);
+  // BDX output column → the broker column(s) feeding it, for Contracts & rules.
+  const feedFor = useMemo(() => feedIndex(sel, extra), [sel, extra]);
 
   function outFieldsFor(outSheet: string): string[] {
     return (editor?.fields ?? []).filter(f => f.sheet === outSheet).map(f => f.field);
@@ -388,7 +390,7 @@ export default function BordereauSetupEdit() {
           <div className="border-t border-border px-4 py-3">
             {contractBusy ? null : contractDetail
               ? <ContractInline detail={contractDetail} programId={pipeline?.program_id ?? ""}
-                  contractId={c.id} mga={mga} onChanged={reloadContractDetail}
+                  contractId={c.id} mga={mga} onChanged={reloadContractDetail} feedFor={feedFor}
                   canEditVariations={isAdmin} />
               : <div className="text-sm text-ink-muted">Could not load this contract.</div>}
           </div>
@@ -409,6 +411,13 @@ export default function BordereauSetupEdit() {
       ? [{ key: "calendar" as const, label: "Submission calendar" }] : []),
   ];
   const [tab, setTab] = useSetupTab(tabs);
+  // A setup with a single contract opens it on Contracts & rules.
+  useEffect(() => {
+    if (tab === "contracts" && pipeline?.contracts.length === 1 && openContractId == null
+        && contracts.some(c => c.id === pipeline.contracts[0].contract_id))
+      toggleContract(pipeline.contracts[0].contract_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, pipeline, contracts]);
 
   if (loading) {
     return (

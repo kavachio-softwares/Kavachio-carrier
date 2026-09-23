@@ -209,9 +209,13 @@ export function Combo({ value, options, placeholder, onSelect, clearable = true,
 // same context the standalone Contract page shows, without leaving setup.
 // Each rule can be retargeted to a different output field or removed.
 export function ContractInline({ detail, programId, contractId, mga, onChanged,
-                                 readOnly = false, canEditVariations = false }: {
+                                 readOnly = false, canEditVariations = false, feedFor }: {
   detail: ContractDetailT; programId: number | ""; contractId: number;
   mga: string; onChanged: () => Promise<void> | void; readOnly?: boolean;
+  /** The broker (input) column(s) that feed a BDX output column, from the
+   *  setup's field mapping — shown beside each column a rule checks, so it is
+   *  plain that rules run on the OUTPUT column, filled from the broker's own. */
+  feedFor?: (outputField: string) => string[];
   /** Show the "add a spelling" control on value-matching rules. Deliberately
    *  SEPARATE from `readOnly`: the read-only viewer (Bordereau Setups)
    *  is exactly where a tenant_admin corrects a spelling, so gating on !readOnly
@@ -244,6 +248,14 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
     }
     return [...by.values()];
   }, [maps]);
+  // One list at a time: rules, clauses still without a column, the terms read
+  // from the contract, or the clause → BDX output column index.
+  const [view, setView] = useState<"rules" | "clauses" | "terms" | "cols">("rules");
+  const [ruleFilter, setRuleFilter] = useState<"contract" | "standard" | "all">(
+    ownRules.length > 0 ? "contract" : "all");
+  const [ruleQuery, setRuleQuery] = useState("");
+  // The rule whose details (and, in Edit, its controls) are open.
+  const [openRule, setOpenRule] = useState<number | null>(null);
   const [busyRule, setBusyRule] = useState<number | null>(null);
   const [ruleErr, setRuleErr] = useState<string | null>(null);
   // The rule pending removal — drives the in-app confirm dialog. A native
@@ -510,10 +522,10 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
 
   // One awaiting-a-field clause. Same reason as renderRule — two lists, one
   // row, so a folded standard rule stays as resolvable as a contract clause.
-  function renderReviewClause(rc: ClauseRouting) {
+  function renderReviewClause(rc: ClauseRouting, n = 1) {
     return (
       <ReviewClauseRow key={`${rc.clause_id ?? "x"}-${rc.rule_name ?? ""}`}
-        item={rc} fieldOptions={fieldOptions} readOnly={readOnly}
+        item={rc} n={n} fieldOptions={fieldOptions} readOnly={readOnly}
         onResolve={async (outputFields, note) => {
           const r = await api.post(
             `/programs/${programId}/contracts/${contractId}` +
@@ -556,7 +568,7 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
                 )}
                 <div className="mt-1.5 space-y-1">
                   <div className="flex items-center gap-2 text-ink-muted">
-                    Mapped to Output Column{multiField ? "s" : ""}:
+                    Mapped to BDX Output Column{multiField ? "s" : ""}:
                   </div>
                   {canRetarget ? boundFields.map(bf => {
                     const key = `${r.validation_rule_id}::${bf}`;
@@ -671,91 +683,150 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
     );
   }
 
+  // ── the layout ─────────────────────────────────────────────────────────────
+  // Every control above is unchanged; this only arranges them: a line of
+  // counts, a switch between four lists, and one line per rule that opens to
+  // the rule's full card (and, when editable, all of its controls).
+  const boundOf = (r: ContractRule) => (r.output_fields && r.output_fields.length)
+    ? r.output_fields : (r.output_field ? [r.output_field] : []);
+  const outputColumnsChecked = new Set(maps.map(m => m.output_field)).size;
+  const q = ruleQuery.trim().toLowerCase();
+  const listed = (ruleFilter === "contract" ? ownRules : ruleFilter === "standard" ? libraryRules : rules)
+    .filter(r => !q || r.rule_name.toLowerCase().includes(q)
+      || boundOf(r).some(f => f.toLowerCase().includes(q)));
+  const sevTone = (sev?: string | null) => /crit|error|reject|high/i.test(sev ?? "")
+    ? "bg-danger/10 text-danger" : "bg-amber-50 text-amber-700";
+  // `bare` is for the table, whose column header already says what these are.
+  const feedLine = (field: string, bare = false) => {
+    if (!feedFor) return null;
+    const cols = feedFor(field);
+    if (!cols.length) {
+      return <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+        Nothing feeds it</span>;
+    }
+    return bare
+      ? <span className="font-mono text-[11px] text-ink">{cols.join(", ")}</span>
+      : <span className="text-[11px] text-ink-muted">from input column{cols.length > 1 ? "s" : ""}{" "}
+          <b className="font-mono font-medium text-ink">{cols.join(", ")}</b></span>;
+  };
+  const switchBtn = (key: typeof view, label: ReactNode) => (
+    <button type="button" onClick={() => setView(key)} aria-pressed={view === key}
+      className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors
+        ${view === key ? "bg-white text-ink shadow-sm" : "text-ink-muted hover:text-ink"}`}>
+      {label}
+    </button>
+  );
+  const filterChip = (key: typeof ruleFilter, label: string, n: number) => (
+    <button type="button" onClick={() => setRuleFilter(key)} aria-pressed={ruleFilter === key}
+      className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors
+        ${ruleFilter === key ? "border-navy bg-navy/10 text-navy" : "border-border bg-white text-ink-muted hover:text-ink"}`}>
+      {label} · {n}
+    </button>
+  );
+
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-ink-muted">
-        <span><b className="text-ink">{rules.length}</b> rule{rules.length !== 1 ? "s" : ""}</span>
-        <span><b className="text-ink">{maps.length}</b> mapped field{maps.length !== 1 ? "s" : ""}</span>
-        <span><b className="text-ink">{terms.length}</b> extracted term{terms.length !== 1 ? "s" : ""}</span>
-        {detail.output_template && (
-          <span>Output Template <b className="text-ink">{detail.output_template.name} v{detail.output_template.version}</b></span>
+    <div className="space-y-3">
+      {/* The contract in four numbers. */}
+      <div className="flex flex-wrap items-end gap-x-7 gap-y-2 rounded-md bg-surface-2 px-3 py-2.5 text-xs text-ink-muted">
+        <span><b className="block text-base text-ink tabular-nums">{rules.length}</b>rule{rules.length !== 1 ? "s" : ""} check your file</span>
+        <span><b className="block text-base text-ink tabular-nums">{outputColumnsChecked}</b>BDX output column{outputColumnsChecked !== 1 ? "s" : ""} checked</span>
+        <span><b className="block text-base text-ink tabular-nums">{terms.length}</b>term{terms.length !== 1 ? "s" : ""} read from the contract</span>
+        {reviewClauses.length > 0 && (
+          <span><b className="block text-base text-amber-600 tabular-nums">{ownClauses.length}</b>
+            clause{ownClauses.length !== 1 ? "s" : ""} with no column yet ·{" "}
+            <button type="button" onClick={() => setView("clauses")} className="font-semibold text-navy hover:underline">see →</button>
+          </span>
         )}
       </div>
 
-      {mapGroups.length > 0 && (
-        // Folded by default: every pair here is already shown on the rule it
-        // belongs to, under "Mapped to Output Column". This is the same data
-        // indexed clause-first, useful for scanning coverage, not for acting.
-        <Foldaway label="Contract Clause → Output Column" count={mapGroups.length}>
-          <div className="space-y-1 pt-1">
-            {mapGroups.map((g, i) => (
-              <div key={i} className="flex items-start gap-2 text-xs">
-                <span className="truncate max-w-[14rem]" title={g.clause}>{g.clause}</span>
-                <ArrowRight size={12} className="text-ink-soft mt-0.5 shrink-0" />
-                <span className="flex flex-wrap gap-1">
-                  {g.fields.map(f => (
-                    <span key={f} className="rounded bg-surface-2 px-1.5 py-0.5 font-medium">{f}</span>
-                  ))}
-                </span>
-              </div>
-            ))}
-          </div>
-        </Foldaway>
+      <div className="inline-flex flex-wrap gap-0.5 rounded-lg bg-surface-2 p-1" role="group" aria-label="Show">
+        {switchBtn("rules", <>Rules · {rules.length}</>)}
+        {reviewClauses.length > 0 && switchBtn("clauses", <>Clauses with no column · {ownClauses.length}</>)}
+        {switchBtn("terms", <>Contract terms · {terms.length}</>)}
+        {switchBtn("cols", <>Clause → BDX Output column</>)}
+      </div>
+
+      {ruleErr && (
+        <div className="rounded-md bg-danger/10 text-danger px-2 py-1 text-[11px]">{ruleErr}</div>
       )}
 
-      {terms.length > 0 && (
+      {/* ── Rules: one line each; opening one shows its whole card ── */}
+      {view === "rules" && (rules.length === 0 ? (
+        <p className="text-xs text-ink-muted">No rules were made from this contract.</p>
+      ) : (
         <div>
-          <div className="text-xs font-medium mb-1.5">AI-Extracted Terms ({terms.length})</div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-ink-muted border-b border-border">
-                  <th className="py-1 pr-3 font-medium">Term</th>
-                  <th className="py-1 pr-3 font-medium">Value</th>
-                  <th className="py-1 font-medium">Source</th>
-                </tr>
-              </thead>
-              <tbody>
-                {terms.map(t => (
-                  <tr key={t.id} className="border-b border-border/60 align-top">
-                    <td className="py-1 pr-3 font-medium capitalize">{String(t.category ?? "").replace(/_/g, " ") || "—"}</td>
-                    <td className="py-1 pr-3">{fmtTermValue(t.value)}</td>
-                    <td className="py-1 text-ink-muted max-w-md">{t.source_text ? <ClauseText text={t.source_text} /> : "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            {libraryRules.length > 0 && <>
+              {filterChip("contract", "From this contract", ownRules.length)}
+              {filterChip("standard", "Standard checks", libraryRules.length)}
+              {filterChip("all", "All", rules.length)}
+            </>}
+            <label className="ml-auto flex w-56 max-w-full items-center gap-1.5 rounded-md border border-border bg-white px-2 py-1">
+              <Search size={12} className="shrink-0 text-ink-soft" />
+              <input value={ruleQuery} onChange={e => setRuleQuery(e.target.value)}
+                placeholder="Search rules or columns" aria-label="Search rules or columns"
+                className="w-full border-0 bg-transparent text-xs outline-none" />
+            </label>
           </div>
-        </div>
-      )}
-
-      {rules.length > 0 && (
-        <div>
-          <div className="text-xs font-medium mb-1.5">
-            Validation Rules ({rules.length})
-            {libraryRules.length > 0 && (
-              <span className="ml-1.5 font-normal text-ink-soft">
-                · {ownRules.length} from this contract
-              </span>
-            )}
+          <div className="overflow-hidden rounded-md border border-border">
+            {listed.length === 0 && <p className="px-3 py-3 text-xs text-ink-muted">No rule matches that.</p>}
+            {listed.map(r => {
+              const isOpen = openRule === r.validation_rule_id;
+              const cols = boundOf(r).map(f => pending[`${r.validation_rule_id}::${f}`] ?? f);
+              const unsaved = boundOf(r).some(f => pending[`${r.validation_rule_id}::${f}`]);
+              const page = r.source_clause?.page_number;
+              return (
+                <div key={r.validation_rule_id} className="border-b border-border last:border-b-0">
+                  <button type="button" aria-expanded={isOpen}
+                    onClick={() => setOpenRule(isOpen ? null : r.validation_rule_id)}
+                    className={`grid w-full grid-cols-[minmax(0,1fr)_auto_auto_14px] items-center gap-3 px-3 py-2.5 text-left transition-colors
+                      ${isOpen ? "bg-surface-2" : "bg-white hover:bg-surface-2"}`}>
+                    <span className="min-w-0">
+                      <span className="flex flex-wrap items-center gap-1.5 text-[13px] font-semibold text-ink">
+                        {r.rule_name}
+                        {unsaved && <span className="rounded-full bg-amber-50 px-1.5 text-[10px] font-bold text-amber-700">Unsaved</span>}
+                      </span>
+                      <span className="block truncate text-[11px] text-ink-muted">
+                        {isLibraryRule(r) ? "Standard check" : page ? `From the contract · page ${page}` : "From the contract"}
+                      </span>
+                    </span>
+                    <span className="hidden max-w-[16rem] flex-wrap justify-end gap-1 sm:flex">
+                      {cols.slice(0, 2).map(f => (
+                        <span key={f} className="truncate rounded-full bg-navy/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-navy">{f}</span>
+                      ))}
+                      {cols.length > 2 && <span className="text-[11px] text-ink-muted">+{cols.length - 2}</span>}
+                    </span>
+                    <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${sevTone(r.severity)}`}>
+                      {r.severity ?? "rule"}
+                    </span>
+                    {isOpen ? <ChevronDown size={14} className="text-ink-soft" /> : <ChevronRight size={14} className="text-ink-soft" />}
+                  </button>
+                  {isOpen && (
+                    <div className="space-y-2 bg-surface-2 px-3 pb-3">
+                      {feedFor && boundOf(r).length > 0 && (
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1 text-[11px] text-ink-muted">
+                          <span className="font-semibold uppercase tracking-wide text-ink-soft">BDX Output column it checks</span>
+                          {boundOf(r).map(f => (
+                            <span key={f} className="inline-flex items-center gap-1.5">
+                              <span className="rounded-full bg-navy/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-navy">{f}</span>
+                              {feedLine(f)}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="bg-white">{renderRule(r)}</div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
-          {ruleErr && (
-            <div className="mb-2 rounded-md bg-danger/10 text-danger px-2 py-1 text-[11px]">{ruleErr}</div>
-          )}
-          <div className="space-y-2">
-            {ownRules.map(r => renderRule(r))}
-          </div>
-          {libraryRules.length > 0 && (
-            <div className="mt-2">
-              <Foldaway label="Standard & derived rules (not from this contract)"
-                count={libraryRules.length}>
-                <div className="space-y-2 pt-1">{libraryRules.map(r => renderRule(r))}</div>
-              </Foldaway>
-            </div>
-          )}
 
           {!readOnly && pendingCount > 0 && (
-            <div className="mt-3 flex items-center gap-2 border-t border-border pt-3">
+            <div className="sticky bottom-0 mt-2 flex items-center gap-2 rounded-md bg-amber-50 px-3 py-2">
+              <span className="text-xs font-semibold text-amber-800">
+                {pendingCount} column change{pendingCount !== 1 ? "s" : ""} not saved yet
+              </span>
               <Button onClick={saveChanges} disabled={saving}>
                 <Save size={14} />
                 Save {pendingCount} Change{pendingCount !== 1 ? "s" : ""}
@@ -767,45 +838,111 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
             </div>
           )}
         </div>
-      )}
+      ))}
 
-      {reviewClauses.length > 0 && (
+      {/* ── Clauses that should have a rule but no column fitted ── */}
+      {view === "clauses" && reviewClauses.length > 0 && (
         <div>
-          <div className="text-xs font-medium mb-1.5 flex items-center gap-1.5">
-            <AlertTriangle size={12} className="text-amber-500" />
-            Clauses Awaiting a Field ({ownClauses.length})
-            {libraryClauses.length > 0 && (
-              <span className="font-normal text-ink-soft">
-                · {libraryClauses.length} standard rule{libraryClauses.length === 1 ? "" : "s"} folded below
-              </span>
-            )}
-          </div>
-          <p className="text-[11px] text-ink-muted mb-2">
+          <p className="mb-2 text-[12.5px] text-ink-muted">
             {readOnly
-              ? "These clauses are rule-bearing but weren't auto-mapped to an output column. " +
-                "Open this setup in Bordereau Setup to pick a column and generate their rules."
-              : "Pick the column each one applies to and add a reference note describing the " +
-                "rule logic to enforce — then generate its rule."}
+              ? "These clauses should have a rule, but no BDX output column fitted them. Press Edit to pick a column and generate their rules."
+              : "Each clause below should have a rule, but no column fitted it. Pick the column(s), describe the rule, then Generate Rule."}
           </p>
-          <div className="space-y-2">
-            {ownClauses.map(rc => renderReviewClause(rc))}
+          <div className="overflow-hidden rounded-md border border-border bg-white">
+            {ownClauses.map((rc, i) => renderReviewClause(rc, i + 1))}
           </div>
           {libraryClauses.length > 0 && (
             // Kept reachable, not shown first: these are the shared library's
             // checks (claims, currency, NAICS…) that this template has no column
             // for. They are still resolvable, but they are not what this
-            // contract asks for, and they outnumber those that are 27 to 5.
+            // contract asks for.
             <div className="mt-2">
               <Foldaway label="Standard rules with no column in this template"
                 count={libraryClauses.length}>
-                <div className="space-y-2 pt-1">
-                  {libraryClauses.map(rc => renderReviewClause(rc))}
+                <div className="overflow-hidden rounded-md border border-border bg-white">
+                  {libraryClauses.map((rc, i) => renderReviewClause(rc, i + 1))}
                 </div>
               </Foldaway>
             </div>
           )}
         </div>
       )}
+
+      {/* ── Terms read from the contract ── */}
+      {view === "terms" && (terms.length === 0 ? (
+        <p className="text-xs text-ink-muted">No terms were read from this contract.</p>
+      ) : (
+        <div className="overflow-x-auto rounded-md border border-border bg-white">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-border bg-surface-2 text-[10.5px] uppercase tracking-wide text-ink-soft">
+                <th className="px-4 py-2.5 text-left font-semibold">Term</th>
+                <th className="px-4 py-2.5 text-left font-semibold">Value</th>
+                <th className="px-4 py-2.5 text-left font-semibold">Where the contract says so</th>
+              </tr>
+            </thead>
+            <tbody>
+              {terms.map(t => (
+                <tr key={t.id} className="border-b border-border last:border-b-0 align-top">
+                  <td className="px-4 py-2.5 text-left font-semibold capitalize">{String(t.category ?? "").replace(/_/g, " ") || "—"}</td>
+                  <td className="px-4 py-2.5 text-left">{fmtTermValue(t.value)}</td>
+                  <td className="max-w-md px-4 py-2.5 text-left text-[12.5px] italic text-ink-muted">
+                    {t.source_text ? <ClauseText text={t.source_text} /> : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+
+      {/* ── Clause → BDX output column: the same pairs the rules carry,
+          indexed clause-first, with the broker column that fills each one ── */}
+      {view === "cols" && (mapGroups.length === 0 ? (
+        <p className="text-xs text-ink-muted">No clause is checked on a column yet.</p>
+      ) : (
+        <div>
+          <p className="mb-2 text-[12.5px] text-ink-muted">
+            Rules check your <b className="text-ink">BDX output columns</b>, not the broker's own column
+            names. Each broker's file is first mapped into your BDX layout on the Field mapping tab, so
+            one rule works for every broker.
+          </p>
+          <div className="overflow-x-auto rounded-md border border-border bg-white">
+            <table className="w-full min-w-[560px] text-[13px]">
+              <thead>
+                <tr className="border-b border-border bg-surface-2 text-[10.5px] uppercase tracking-wide text-ink-soft">
+                  <th className="px-4 py-2.5 text-left font-semibold">Contract clause</th>
+                  <th className="w-6" />
+                  <th className="px-4 py-2.5 text-left font-semibold">BDX output column it checks</th>
+                  {feedFor && <th className="px-4 py-2.5 text-left font-semibold">Input column</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {mapGroups.map((g, i) => g.fields.map((f, k) => (
+                  <tr key={`${i}-${f}`} className={k === g.fields.length - 1 ? "border-b border-border last:border-b-0" : "border-b border-border/50"}>
+                    {k === 0 && <>
+                      <td rowSpan={g.fields.length} className="px-4 py-2.5 text-left align-top">
+                        <span className="line-clamp-3" title={g.clause}>{g.clause}</span>
+                        {g.fields.length > 1 && (
+                          <span className="mt-0.5 block text-[11px] text-ink-muted">
+                            uses {g.fields.length} columns — the first is the main one</span>
+                        )}
+                      </td>
+                      <td rowSpan={g.fields.length} className="align-top pt-3 text-ink-soft">
+                        <ArrowRight size={13} />
+                      </td>
+                    </>}
+                    <td className="px-4 py-2 text-left align-top">
+                      <span className="rounded-full bg-navy/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-navy">{f}</span>
+                    </td>
+                    {feedFor && <td className="px-4 py-2 text-left align-top">{feedLine(f, true)}</td>}
+                  </tr>
+                )))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
 
       {rules.length === 0 && terms.length === 0 && maps.length === 0 && reviewClauses.length === 0 && (
         <p className="text-xs text-ink-muted">No terms or rules were extracted from this contract.</p>
@@ -1057,8 +1194,8 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
 }
 
 // One review-queue clause: pick one or more output fields and generate its rule.
-function ReviewClauseRow({ item, fieldOptions, onResolve, readOnly = false }: {
-  item: ClauseRouting; fieldOptions: string[]; readOnly?: boolean;
+function ReviewClauseRow({ item, n, fieldOptions, onResolve, readOnly = false }: {
+  item: ClauseRouting; n: number; fieldOptions: string[]; readOnly?: boolean;
   onResolve: (outputFields: string[], note: string) => Promise<{ ok: boolean; reason?: string; created_rules?: unknown[] }>;
 }) {
   const [fields, setFields] = useState<string[]>([]);
@@ -1088,21 +1225,31 @@ function ReviewClauseRow({ item, fieldOptions, onResolve, readOnly = false }: {
   }
 
   return (
-    <div className="rounded-md border border-border/70 p-2 text-xs">
-      <div className="flex items-center gap-1.5">
-        <AlertTriangle size={12} className="text-amber-500 shrink-0" />
-        <span className="font-medium">{item.rule_name || "Unmapped Clause"}</span>
-        {item.source_page ? <span className="text-ink-soft">· p.{item.source_page}</span> : null}
-      </div>
-      {item.clause_text && <div className="mt-0.5 italic text-ink-muted"><ClauseText text={item.clause_text} /></div>}
-      {item.reason && <p className="mt-0.5 text-amber-700">Why Unmapped: {item.reason}</p>}
+    <div className="grid grid-cols-[22px_minmax(0,1fr)] items-start gap-3 border-b border-border px-3 py-3 text-xs last:border-b-0">
+      <span className="mt-0.5 grid h-[22px] w-[22px] place-items-center rounded-full bg-amber-50 text-[11px] font-bold text-amber-700">
+        {n}
+      </span>
+      <div className="min-w-0">
+        <div className="text-[13.5px] font-semibold text-ink">
+          {item.rule_name || "Unmapped Clause"}
+          {item.source_page ? <span className="ml-1.5 text-[11px] font-normal text-ink-soft">page {item.source_page}</span> : null}
+        </div>
+        {item.reason && <p className="mt-0.5 text-[12.5px] text-ink-muted">{item.reason}</p>}
+        {item.clause_text && (
+          <details className="mt-1.5">
+            <summary className="cursor-pointer text-[12px] font-semibold text-navy">Show the contract's words</summary>
+            <div className="mt-1.5 border-l-[3px] border-border bg-surface px-2.5 py-1.5 text-[12.5px] italic text-ink-muted">
+              <ClauseText text={item.clause_text} />
+            </div>
+          </details>
+        )}
 
       {!readOnly && (
         <>
           {/* Step 1 — choose the field(s) */}
-          <label className="mt-2 block text-[11px] font-medium text-ink-muted">
-            1. Output column(s) — pick one, or several when the rule spans columns (first is primary)
-          </label>
+          <div className="mt-2.5 text-[11.5px] font-semibold text-ink-muted">
+            1. BDX output column(s) — the first is the main one
+          </div>
           <div className="mt-1 w-56">
             <Combo value="" options={remaining} clearable={false} disabled={busy}
               placeholder={fields.length ? "Add another column…" : "Choose output column…"}
@@ -1124,9 +1271,9 @@ function ReviewClauseRow({ item, fieldOptions, onResolve, readOnly = false }: {
           )}
 
           {/* Step 2 — describe the rule logic */}
-          <label className="mt-2.5 block text-[11px] font-medium text-ink-muted">
-            2. Reference note — the rule logic for this field/clause (and why)
-          </label>
+          <div className="mt-2.5 text-[11.5px] font-semibold text-ink-muted">
+            2. Reference note — the rule logic for this column (and why)
+          </div>
           <textarea
             value={note}
             onChange={e => setNote(e.target.value)}
@@ -1150,6 +1297,7 @@ function ReviewClauseRow({ item, fieldOptions, onResolve, readOnly = false }: {
           {result.message}
         </p>
       )}
+      </div>
     </div>
   );
 }

@@ -324,3 +324,17 @@ export function pickRecoveredContract(
     && (c.output_template_id == null || c.output_template_id === opts.templateId));
   return fresh.length ? Math.max(...fresh.map(c => c.id)) : null;
 }
+
+/** Output field → the broker (input) column(s) mapped into it, for the
+ *  Contracts & rules tab. A field filled by a constant or the tab name says so. */
+export function feedIndex(sel: Record<string, string>, extra: Record<string, MappingRule>) {
+  const by: Record<string, string[]> = {};
+  const add = (f: string, v: string) => { (by[f] ??= []).includes(v) || by[f].push(v); };
+  for (const [k, field] of Object.entries(sel)) add(field, k.slice(k.indexOf("||") + 2));
+  for (const [k, rule] of Object.entries(extra)) {
+    const field = k.slice(k.indexOf("||") + 2);
+    if (rule.kind === "const") add(field, `constant "${rule.value ?? ""}"`);
+    else if (rule.kind === "source_sheet") add(field, "the source tab name");
+  }
+  return (field: string) => by[field] ?? [];
+}
