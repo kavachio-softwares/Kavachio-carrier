@@ -238,3 +238,193 @@ export function ResolvedTrend({ data }: {
     </div>
   );
 }
+
+/* ---- who sent what, and how much of it is still open --------------------- */
+
+/** An exception nobody has decided yet — the flagged amber, so a run's colour
+ *  means the same thing wherever it is drawn. */
+const OPEN = FLAGGED;
+/** An exception that has been fixed, approved, dismissed or rejected. */
+const PUT_RIGHT = CLEAN;
+/** No exception at all. Not an outcome anyone worked for, so no colour —
+ *  the same neutral "nothing here" as a file nobody has checked. */
+const NO_ISSUES = NOT_CHECKED;
+const TRACK = "#F0F2F6";
+
+export type UploaderRow = {
+  id: number; name: string; note?: string;
+  files: number;
+  uploads: {
+    rows: number; rows_flagged: number;
+    exceptions: number; open: number; put_right: number;
+    latest_export_id: number | null; latest_upload_id: number | null;
+  };
+  /** Exceptions this person decided themselves, wherever the file came from. */
+  resolved: number;
+};
+
+/**
+ * One bar per person: the exceptions on the files THEY sent, amber for what is
+ * still open and green for what has been put right.
+ *
+ * WHY EXCEPTIONS AND NOT ROWS OR CELLS. An exception sits on a single CELL. A
+ * row of forty values with one bad date is one thing to fix, but counting it
+ * as a ROW paints the whole row amber and reports "10 of 10 rows need review"
+ * about a file that is 97% fine. Counting the other way — every exception
+ * against every cell checked — is honest about the file and useless on a
+ * dashboard: fourteen exceptions in five hundred cells is a sliver nobody can
+ * see. So the bar is the WORK, which is the question this card answers, and
+ * the size of what it came from is written beside it in files and rows.
+ *
+ * Each bar is that person's own 100%: it shows how far THEIR pile has been
+ * cleared, never whose pile is biggest — the counts on the right carry that.
+ * A person with nothing wrong still gets a bar, a full grey one that says so,
+ * because an empty track reads as a broken chart rather than as good news.
+ * Every number is written out too, so colour is never the only way to read a
+ * row, and the key under the title says what each one means.
+ */
+export function UploaderBars({ rows, cap = 5, total, onViewAll, personTo, empty }: {
+  rows: UploaderRow[]; cap?: number; empty: string;
+  /** The whole team's size when `rows` is only the top of it. */
+  total?: number | null;
+  onViewAll?: () => void;
+  /** Where a person's name goes — their own activity page. */
+  personTo?: (row: UploaderRow) => string;
+}) {
+  if (!rows.length) return <div className="empty">{empty}</div>;
+  const shown = rows.slice(0, cap);
+  const count = total ?? rows.length;
+  const more = count - shown.length;
+  const anyFiles = shown.some(r => r.files > 0);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12,
+                    color: "var(--p-muted)", marginBottom: 14 }}>
+        <Key color={OPEN} label="Still open" />
+        <Key color={PUT_RIGHT} label="Put right" />
+        <Key color={NO_ISSUES} label="No issues" />
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {shown.map(r => <UploaderRowView key={r.id} r={r} personTo={personTo} />)}
+      </div>
+
+      {!anyFiles && (
+        <div style={{ fontSize: 12, color: "var(--p-faint)", marginTop: 12 }}>
+          Nobody on your team has sent a file in this period. Files a carrier ran
+          for you are not counted here — they belong to no one person.
+        </div>
+      )}
+
+      {more > 0 && (
+        <div style={{ textAlign: "right", marginTop: 14 }}>
+          <button type="button" className="linkish"
+                  style={{ background: "none", border: 0, cursor: "pointer", fontSize: 13 }}
+                  onClick={onViewAll}>
+            View all {count} →
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+
+function UploaderRowView({ r, personTo }: {
+  r: UploaderRow; personTo?: (row: UploaderRow) => string;
+}) {
+  const u = r.uploads;
+  const sent = r.files
+    ? `${plural(r.files, "file")} sent · ${plural(u.rows, "row")}`
+    : "No files sent in this period";
+  const tip = [
+    r.name,
+    sent,
+    u.exceptions
+      ? `${plural(u.exceptions, "exception")} across ${plural(u.rows_flagged, "row")}`
+        + ` — ${u.open} still open, ${u.put_right} put right`
+      : r.files ? "Nothing was flagged on them" : "",
+    `${plural(r.resolved, "exception")} put right by ${r.name} in this period`,
+  ].filter(Boolean).join("\n");
+
+  const seg = (n: number, color: string) => n > 0 && (
+    <span style={{ flex: n, background: color, borderRadius: 6, minWidth: 3 }} />
+  );
+
+  return (
+    <div title={tip}
+         style={{ display: "grid", gridTemplateColumns: "minmax(110px, 150px) 1fr 122px",
+                  alignItems: "center", gap: 14 }}>
+      <span style={{ minWidth: 0 }}>
+        <span style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--p-ink)",
+                       overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {personTo ? (
+            <Link to={personTo(r)} style={{ color: "inherit", textDecoration: "none" }}>{r.name}</Link>
+          ) : r.name}
+          {r.note && <span style={{ color: "var(--p-faint)", fontWeight: 400 }}> · {r.note}</span>}
+        </span>
+        <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
+          {r.files ? `${plural(r.files, "file")} · ${plural(u.rows, "row")}` : "no files sent"}
+        </span>
+      </span>
+
+      {r.files ? (
+        <span style={{ height: 12, borderRadius: 6, background: TRACK, display: "block" }}>
+          <span style={{ display: "flex", gap: 2, height: "100%", width: "100%" }}>
+            {u.exceptions ? (
+              <>{seg(u.open, OPEN)}{seg(u.put_right, PUT_RIGHT)}</>
+            ) : (
+              // Nothing was flagged. The track is filled rather than left
+              // empty: "no issues" is an answer, and a blank bar is not one.
+              <span style={{ flex: 1, background: NO_ISSUES, borderRadius: 6 }} />
+            )}
+          </span>
+        </span>
+      ) : (
+        <span style={{ fontSize: 12, color: "var(--p-faint)" }}>Nothing sent in this period</span>
+      )}
+
+      <span style={{ fontSize: 12.5, textAlign: "right", fontVariantNumeric: "tabular-nums",
+                     color: "var(--p-muted)" }}>
+        {!r.files ? "—" : !u.exceptions ? (
+          <>
+            <b style={{ color: "var(--p-ink)" }}>No issues</b>
+            <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
+              nothing flagged
+            </span>
+          </>
+        ) : u.open > 0 ? (
+          <>
+            <b style={{ color: "var(--p-ink)" }}>{u.open}</b> of {u.exceptions} open
+            <span style={{ display: "block", fontSize: 11.5 }}>
+              {u.latest_export_id ? (
+                <Link className="linkish"
+                      to={`/uploads/${u.latest_upload_id ?? u.latest_export_id}/exceptions`
+                          + `?download=${u.latest_export_id}&from=broker`}>
+                  Open exceptions →
+                </Link>
+              ) : <span style={{ color: "var(--p-faint)" }}>{u.put_right} put right</span>}
+            </span>
+          </>
+        ) : (
+          <>
+            <b style={{ color: "var(--p-ink)" }}>All clear</b>
+            <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
+              {plural(u.put_right, "exception")} put right
+            </span>
+          </>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function Key({ color, label }: { color: string; label: string }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span style={{ width: 10, height: 10, borderRadius: 3, background: color }} />{label}
+    </span>
+  );
+}

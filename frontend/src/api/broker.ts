@@ -214,13 +214,39 @@ export type BrokerInsightDay = {
   resolved: number;
 };
 
-/** A person on the broker's own team; `resolved` counts decisions on
- *  exceptions. `rank` is their place in the whole team (ties share one). */
+/** The files one person sent, and the exceptions on them.
+ *
+ *  `open` + `put_right` = `exceptions`, counted per EXCEPTION — one cell each.
+ *  `rows` and `rows_flagged` are the size of what those exceptions came from,
+ *  for the sentence beside the bar ("14 across 10 rows"); a row is never drawn
+ *  as a share, because one bad cell does not make a bad row. */
+export type UploaderWork = {
+  rows: number;
+  /** Rows carrying at least one exception that is still open. */
+  rows_flagged: number;
+  exceptions: number;
+  /** Nobody has decided these yet. */
+  open: number;
+  /** Fixed, approved, dismissed or rejected — by anyone on the team. */
+  put_right: number;
+  /** The newest of their files that still has something open, for the link
+   *  out of the row; null when nothing is open. */
+  latest_export_id: number | null;
+  latest_upload_id: number | null;
+};
+
+/** A person on the broker's own team. `files` is what they sent through
+ *  Process Bordereau in the window and `uploads` the exceptions on those
+ *  files; `resolved` counts decisions they made themselves. `rank` is their
+ *  place in the whole team — files first, decisions as the tie-break (ties
+ *  share one rank). */
 export type BrokerInsightPerson = {
   id: number; name: string;
   role: "broker_admin" | "operator";
   resolved: number;
   rank: number;
+  files: number;
+  uploads: UploaderWork;
 };
 
 /** A carrier ranked by files run; `rank` is its place among ALL the broker's

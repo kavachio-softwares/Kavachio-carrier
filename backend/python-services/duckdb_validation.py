@@ -459,10 +459,49 @@ def dry_run(con, sql):
 # 5. Execute a compiled SQL and map rows -> exceptions
 # =====================================================================
 
+def _aggregate_marker(rule) -> "dict | None":
+    """What an aggregate rule's `actual_value` actually IS, or None for a
+    row-level rule.
+
+    An `aggregate_cap` exception reports a TOTAL — the sum of a whole column,
+    or of one policy's rows — but it still has to be pinned to a row to be
+    shown, and the compiler pins it to MIN(__rowid), the first row that fed it.
+    The screens then drew that total against a single cell and labelled it
+    "Actual", so a file whose ten premiums add up to 110,150 showed "Actual
+    110,150" beside a cell reading 12,450 and looked like a bug.
+
+    This marker travels with the exception so a reader can be told which one
+    they are looking at: `level` says what the number covers ("file" — the
+    whole column, or "group" — one policy / key), `function` how it was
+    reduced, and `group_by` the key when there is one. Row-level rules carry
+    nothing, so nothing about them changes.
+
+    Read from the rule's IR (`rule_spec.ir`), which is what the SQL was
+    compiled from — not re-derived from the reason sentence, which is prose.
+    """
+    spec = rule.get("rule_spec")
+    if isinstance(spec, str):
+        try:
+            spec = json.loads(spec)
+        except Exception:
+            return None
+    ir = (spec or {}).get("ir") if isinstance(spec, dict) else None
+    if not isinstance(ir, dict) or ir.get("template") != "aggregate_cap":
+        return None
+    params = ir.get("params") or {}
+    group_by = [g for g in (params.get("group_by") or []) if g]
+    return {
+        "level": "group" if group_by else "file",
+        "function": str(params.get("aggregation") or "sum").lower(),
+        "group_by": group_by,
+    }
+
+
 def execute_rule(con, sql, rule, contract, max_rows):
     """Run the SQL; return list of structured exception dicts."""
     rel = con.execute(sql)
     colnames = [d[0].lower() for d in rel.description]
+    aggregate = _aggregate_marker(rule)
     out = []
     for row in rel.fetchmany(max_rows):
         d = dict(zip(colnames, row))
@@ -511,6 +550,10 @@ def execute_rule(con, sql, rule, contract, max_rows):
             # recommended value" (e.g. the review table's Approve) covers these
             # rows too, without having to learn a second name for it.
             "error_class": "type_mismatch" if numeric_format else "data_violation",
+            # Present only on an aggregate rule, where `actual_value` is a
+            # total rather than the flagged cell's own value — see
+            # `_aggregate_marker`. Absent on every row-level exception.
+            **({"aggregate": aggregate} if aggregate else {}),
         })
     return out
 

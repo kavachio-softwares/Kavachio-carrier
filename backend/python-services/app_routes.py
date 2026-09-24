@@ -4873,6 +4873,9 @@ def dashboard_broker_performance(mga: str,
                    as its Exception Triage screen counts them (same decision
                    matching, same notices left out), so the bar and the screen
                    it opens always agree: issues = resolved + open.
+                   A broker with no file with issues reports its most recent
+                   CLEAN file instead (issues = 0), so the card can say "clean"
+                   rather than go blank. NULL only when nothing was checked.
     """
     since = datetime.utcnow() - timedelta(days=days)   # stored times are utcnow
     with SessionLocal() as s:
@@ -4893,15 +4896,24 @@ def dashboard_broker_performance(mga: str,
         per: dict[int, dict] = {}
         for eid, bid, status, created in exports:          # newest first
             b = per.setdefault(bid, {"clean": 0, "flagged": 0, "not_checked": 0,
-                                     "last_run_at": created, "latest_export_id": None})
+                                     "last_run_at": created, "latest_export_id": None,
+                                     "latest_clean_id": None})
             if status == "clean":
                 b["clean"] += 1
+                if b["latest_clean_id"] is None:
+                    b["latest_clean_id"] = eid
             elif status == "has_exceptions":
                 b["flagged"] += 1
                 if b["latest_export_id"] is None:
                     b["latest_export_id"] = eid
             else:
                 b["not_checked"] += 1
+        # A file with issues is what the card is FOR, so it wins even when a
+        # cleaner file came after it — outstanding work must not be hidden by
+        # the next good run. Only a broker with nothing outstanding falls back
+        # to its latest clean file, which is what draws the all-clean bar.
+        for b in per.values():
+            b["latest_export_id"] = b["latest_export_id"] or b["latest_clean_id"]
 
         ranked = sorted(per.items(), key=lambda kv: kv[1]["last_run_at"] or since,
                         reverse=True)[:limit]
@@ -4909,25 +4921,13 @@ def dashboard_broker_performance(mga: str,
                  s.query(Party).filter(Party.id.in_([bid for bid, _ in ranked] or [0])).all()}
 
         from main import _attach_decisions   # the triage screen's own matching
-        resolved_kinds = {"approved", "fixed", "dismissed", "rejected"}
+        from broker_tally import broker_latest_tally
 
         def _tally(export_id):
             r = s.get(OutputExport, export_id)
-            excs = [e for e in _attach_decisions(r.exceptions or [], r)
-                    if isinstance(e, dict)
-                    and e.get("error_class") != "not_checked"
-                    and not (e.get("error_class") == "not_validated"
-                             and e.get("rule_id") is None)]
-            done = 0
-            for e in excs:
-                st = str(e.get("status") or "").lower()
-                note = str(e.get("resolution_note") or "").strip().lower()
-                if st in resolved_kinds or (st == "resolved" and note.startswith(
-                        ("fixed", "approved", "dismissed", "rejected"))):
-                    done += 1
+            t = broker_latest_tally(_attach_decisions(r.exceptions or [], r))
             return {"export_id": r.id, "source_upload_id": r.source_upload_id,
-                    "issues": len(excs), "resolved": done, "open": len(excs) - done,
-                    "run_at": _iso_utc(r.created_at)}
+                    "run_at": _iso_utc(r.created_at), **t}
 
         items = []
         for bid, b in ranked:

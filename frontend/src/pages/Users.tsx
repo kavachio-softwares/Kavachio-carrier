@@ -7,6 +7,7 @@ import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { InfoTip } from "../components/InfoTip";
 import { InviteSentModal } from "../components/InviteSentModal";
 import { addsCarrierUsers, invitesBrokers, useCarrierSeat } from "../hooks/useCarrierSeat";
 
@@ -261,14 +262,15 @@ export default function Users() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Users &amp; Roles</h2>
             {/* Each carrier seat sees only the people it manages — the server
                 sends nothing else. */}
-            <p>
-              {seat === "admin" ? "Your team, and the admins of the broker companies you work with."
-               : seat === "user" ? "The broker companies you invited, shown by the person who runs each one."
-               : "Everyone who signs in on your side — your own team, and the admins at the brokers who send you files."}
-            </p>
+            <h2>
+              Users &amp; Roles
+              <InfoTip text={
+                seat === "admin" ? "Your team, and the admins of the broker companies you work with."
+                : seat === "user" ? "The broker companies you invited, shown by the person who runs each one."
+                : "Everyone who signs in on your side — your own team, and the admins at the brokers who send you files."} />
+            </h2>
           </div>
           {/* Every carrier seat brings in brokers; only the carrier admin also
               adds carrier users. The server refuses anything else either way. */}
@@ -323,8 +325,8 @@ export default function Users() {
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Name</th><th>Organisation</th><th>Role</th><th>Can do</th>
-                  <th>Status</th><th>Last Sign-In</th><th></th></tr>
+                <tr><th>Name</th><th>Organisation</th><th>Role</th>
+                  <th>Status</th><th>Last Sign-In</th><th>Actions</th><th></th></tr>
               </thead>
               <tbody>
                 {pageRows.map(u => {
@@ -342,9 +344,9 @@ export default function Users() {
                           it "Broker Admin" says the seat but not the company. */}
                       <td>
                         {u.org_name ?? "—"}
-                        <div className="sub">
+                        {/* <div className="sub">
                           {u.org_kind === "broker" ? "Broker" : "Your organisation"}
-                        </div>
+                        </div> */}
                       </td>
                       <td>
                         {/* One organisation, one carrier admin — the person
@@ -360,11 +362,11 @@ export default function Users() {
                             : u.is_owner ? "Carrier Admin" : "Carrier User"}
                         </span>
                       </td>
-                      <td className="l">
+                      {/* <td className="l">
                         {u.org_kind === "broker"
                           ? (ROLE_CAN_DO[role] ?? "—")
                           : u.is_owner ? CARRIER_CAN_DO.admin : CARRIER_CAN_DO.member}
-                      </td>
+                      </td> */}
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">
@@ -439,10 +441,19 @@ export default function Users() {
           )}
         </div>
 
-        <div className="note" style={{ marginTop: 14, maxWidth: 560 }}>
-          Bringing a broker company on board? Invite it above. Put it on a
-          programme from Programmes — until then it cannot send you files.
-          Each broker company adds its own staff, so they do not appear here.
+        <div className="note" style={{ marginTop: 14 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Adding a broker company</div>
+          {/* Tailwind's preflight strips the marker off every list, so the disc
+              is asked for by hand — the same as ProgramCalendar's notes. */}
+          <ul style={{ margin: 0, padding: "0 0 0 16px", listStyle: "disc outside" }}>
+            <li style={{ listStyle: "disc", marginBottom: 4 }}>Invite the company above.</li>
+            <li style={{ listStyle: "disc", marginBottom: 4 }}>
+              Add it to a programme — it can't send files until then.
+            </li>
+            <li style={{ listStyle: "disc" }}>
+              Broker company adds its own staff, so they're not listed here.
+            </li>
+          </ul>
         </div>
       </div>
 

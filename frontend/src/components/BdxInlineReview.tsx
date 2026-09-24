@@ -22,7 +22,7 @@ import { Check, Wrench, Hand, X } from "lucide-react";
 import { streamNdjson } from "../api/client";
 import { useRowWindow, WINDOW_MIN_ROWS } from "../hooks/useRowWindow";
 import { getUser } from "../auth";
-import { saveExportDecisions, type StoredException } from "../api/validation";
+import { aggregateLabel, saveExportDecisions, type StoredException } from "../api/validation";
 import { decisionKindOf, type DecisionKind } from "./ExceptionCards";
 import RuleExplanationBlock, { hasExplanation } from "./RuleExplanation";
 import { writeValue, enumOptions, recoParts, RecommendationValue, type Decision } from "./ExceptionDecisionTable";
@@ -300,6 +300,8 @@ function ExcDetail({ e, saving, onDecide, readOnly = false }: {
   const approvable = writeValue(e, { kind: "approve" } as Decision) != null;
   const rp = recoParts(e);
   const saved = decisionKindOf(e) as DecisionKind | null;
+  // Set only when `actual_value` is a total rather than this cell's value.
+  const agg = aggregateLabel(e.aggregate, e.field_path);
   const clause = e.contract_clause_text
     ? (e.contract_clause_text.length > 200 ? e.contract_clause_text.slice(0, 200) + "…" : e.contract_clause_text)
     : null;
@@ -353,10 +355,18 @@ function ExcDetail({ e, saving, onDecide, readOnly = false }: {
       )}
 
       <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 mt-2 text-xs">
-        <span className="text-ink-soft">Actual</span>
+        {/* An aggregate rule's actual is a TOTAL, not this cell's value — a
+            file whose ten premiums make 110,150 showed "Actual 110,150" beside
+            a cell reading 12,450 and read as a bug. Say which number it is. */}
+        <span className="text-ink-soft">{agg ? agg.label : "Actual"}</span>
         <span className="font-mono" style={{ color: HL_FG }}>
           {e.actual_value?.trim() ? e.actual_value : <i>(empty)</i>}
         </span>
+        {agg && (
+          <span className="col-span-2 text-[11px] text-ink-soft leading-relaxed">
+            {agg.note}
+          </span>
+        )}
         {/* A format rule has no recommended value — the row shows an EXAMPLE of
             the required shape, so it is labelled as one rather than as the value
             to accept. */}

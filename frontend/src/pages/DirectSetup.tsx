@@ -3,7 +3,7 @@ import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, FileSpreadsheet, ShieldCheck, FileUp, FileText,
-  FileSpreadsheet as FileOut, FileWarning, UploadCloud, ShieldAlert, ArrowRight,
+  FileSpreadsheet as FileOut, UploadCloud, ShieldAlert, ArrowRight,
   Save, Trash2, Sparkles,
 } from "lucide-react";
 import { api, downloadFile, downloadErrorText } from "../api/client";
@@ -325,6 +325,11 @@ export default function DirectSetup() {
     // (no contract, or unavailable); the build itself is unaffected either way.
     missing: MissingColumnsResp | null;
   }>(null);
+  // Which of the summary dialog's two lists is open. "missing" is the default
+  // because a column the bordereau does not carry is the finding that changes
+  // what the delivered file looks like; a clause awaiting a column only means
+  // one fewer check ran.
+  const [summaryTab, setSummaryTab] = useState<"missing" | "clauses">("missing");
 
   // results of the build
   const [templateId, setTemplateId] = useState<number | null>(null);
@@ -1031,6 +1036,7 @@ export default function DirectSetup() {
         missingCols = data;
       } catch { missingCols = null; }
     }
+    setSummaryTab("missing");
     setBuildSummary({
       pipelineId: pid,
       inputSheets: u.data.input_sheets.length, outputSheets: u.data.output_sheets.length,
@@ -1197,12 +1203,13 @@ export default function DirectSetup() {
           </Modal>
         </div>
       )}
-      {/* Widened only when there is a missing-column list to read — column names
-          plus their reason are unreadable at the summary-only width, and the
-          summary-only case keeps exactly the width it had. */}
+      {/* Widened only when there is a list to read — a column name plus its
+          reason, or a quoted clause, is unreadable at the summary-only width,
+          and the summary-only case keeps exactly the width it had. */}
       <Modal open={!!buildSummary} onClose={() => setBuildSummary(null)}
         title="Mapping Generated"
-        size={buildSummary?.missing?.items.length ? "2xl" : "md"}
+        size={(buildSummary?.missing?.items.length
+               || buildSummary?.missing?.unmapped_clauses?.length) ? "2xl" : "md"}
         footer={
           <div className="flex items-center gap-2">
             {/* Review the mapping on the setup's own page … */}
@@ -1234,52 +1241,47 @@ export default function DirectSetup() {
             })()}
           </div>
         }>
-        {buildSummary && (
-          <div className="text-center">
-            <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-full bg-emerald-50 text-emerald-600">
-              <CheckCircle2 size={28} />
-            </div>
+        {buildSummary && (() => {
+          const missingItems = buildSummary.missing?.items ?? [];
+          const clauses = buildSummary.missing?.unmapped_clauses ?? [];
+          // One list at a time. Stacked, the two boxes each scrolled inside a
+          // dialog that scrolled too — three nested scrollbars, and the actions
+          // pushed below the fold. Tabs make the dialog one screen again.
+          const tab = missingItems.length === 0 && clauses.length > 0 ? "clauses" : summaryTab;
+          return (
+          <div>
             <p className="text-sm text-ink-muted mb-4">
               <span className="font-semibold text-ink">{setupName}</span> is mapped and ready to review.
             </p>
             {/* Three across, pinned. The dialog's width does not follow the
-                viewport once past it (max-w-md, or max-w-2xl when there are
-                missing columns to read), so a `sm:` breakpoint would be
-                measuring the wrong thing; and at two columns the last tile
-                sits alone in a half-empty row. */}
+                viewport once past it, so a `sm:` breakpoint would be measuring
+                the wrong thing; and at two columns the last tile sits alone in
+                a half-empty row. */}
             <div className="grid grid-cols-3 gap-2.5 text-left">
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-[20px] font-semibold text-ink">{buildSummary.outputSheets}</div>
-                <div className="text-[11px] text-ink-muted">
-                  Output Sheet{buildSummary.outputSheets === 1 ? "" : "s"} From{" "}
-                  {buildSummary.inputSheets} Input Sheet{buildSummary.inputSheets === 1 ? "" : "s"}
-                </div>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-[20px] font-semibold text-ink">{buildSummary.rules}</div>
-                <div className="text-[11px] text-ink-muted">
-                  Contract Rule{buildSummary.rules === 1 ? "" : "s"} Across{" "}
-                  {buildSummary.fieldsWithRules} Of {buildSummary.totalFields} Fields
-                </div>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-[20px] font-semibold text-ink">{buildSummary.contracts}</div>
-                <div className="text-[11px] text-ink-muted">
-                  Contract{buildSummary.contracts === 1 ? "" : "s"} Processed
-                </div>
-              </div>
+              <Stat v={buildSummary.rules}
+                k={`Contract Rule${buildSummary.rules === 1 ? "" : "s"} Created`} />
+              <Stat v={buildSummary.fieldsWithRules}
+                k={`Of ${buildSummary.totalFields} Columns Carry a Rule`} />
+              <Stat v={clauses.length} k="Clauses Awaiting a Column"
+                tone={clauses.length > 0 ? "warn" : undefined} />
             </div>
+            <p className="mt-2 text-[11px] text-ink-soft">
+              {buildSummary.outputSheets} output sheet{buildSummary.outputSheets === 1 ? "" : "s"} from{" "}
+              {buildSummary.inputSheets} input sheet{buildSummary.inputSheets === 1 ? "" : "s"} ·{" "}
+              {buildSummary.contracts} contract{buildSummary.contracts === 1 ? "" : "s"} processed
+            </p>
+
             {/* The mapping ladder's verdict. A required output column with no
                 confident source will be EMPTY in the delivered file, so it is
                 said here rather than found later. */}
             {buildSummary.mappingReview && (
-              <div className="mt-4 text-left">
+              <div className="mt-4">
                 <MappingReview review={buildSummary.mappingReview} compact />
               </div>
             )}
 
             {buildSummary.deferredCount > 0 && (
-              <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 text-amber-800 text-xs px-3 py-2.5 text-left">
+              <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 text-amber-800 text-xs px-3 py-2.5">
                 <AlertTriangle size={14} className="mt-0.5 shrink-0" />
                 <span>
                   {buildSummary.deferredCount} contract{buildSummary.deferredCount === 1 ? "" : "s"}{" "}
@@ -1289,56 +1291,51 @@ export default function DirectSetup() {
               </div>
             )}
 
-            {/* NOTE: what the contract asks for that this bordereau doesn't
-                provide. Every column is listed (the list scrolls inside its own
-                box, so a long one can't push the actions out of reach), and the
-                same note is kept on the setup's own page. */}
-            {buildSummary.missing && buildSummary.missing.items.length > 0 && (
-              <div className="mt-4 text-left">
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <FileWarning size={15} className="shrink-0 text-amber-600" />
-                  <span className="text-sm font-semibold text-ink">
-                    Note · {buildSummary.missing.counts.total} Column
-                    {buildSummary.missing.counts.total === 1 ? "" : "s"} May Be Missing From Your Bordereau
-                  </span>
-                  {buildSummary.missing.counts.required > 0 && (
-                    <span className="pill pill-red">{buildSummary.missing.counts.required} Required</span>
-                  )}
-                  {buildSummary.missing.counts.recommended > 0 && (
-                    <span className="pill pill-amber">
-                      {buildSummary.missing.counts.recommended} Recommended</span>
-                  )}
+            {(missingItems.length > 0 || clauses.length > 0) && (
+              <div className="mt-4 rounded-lg border border-border overflow-hidden">
+                <div className="flex items-center gap-1 border-b border-border px-1">
+                  <SummaryTab active={tab === "missing"} disabled={missingItems.length === 0}
+                    onClick={() => setSummaryTab("missing")}
+                    label="Columns May Be Missing" count={missingItems.length} />
+                  <SummaryTab active={tab === "clauses"} disabled={clauses.length === 0}
+                    onClick={() => setSummaryTab("clauses")}
+                    label="Clauses Awaiting Columns" count={clauses.length} />
                 </div>
-                <MissingColumnsList items={buildSummary.missing.items} maxHeight="15rem" />
-                <p className="mt-2 text-[11px] text-ink-soft">
-                  This note stays on the setup — you can review it any time from Configured
-                  Bordereau Setups.
-                </p>
+                {tab === "missing" ? (
+                  /* What the contract asks for that this bordereau doesn't
+                     provide. The same note is kept on the setup's own page. */
+                  <div className="p-3">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      {buildSummary.missing!.counts.required > 0 && (
+                        <span className="pill pill-red">
+                          {buildSummary.missing!.counts.required} Required</span>
+                      )}
+                      {buildSummary.missing!.counts.recommended > 0 && (
+                        <span className="pill pill-amber">
+                          {buildSummary.missing!.counts.recommended} Recommended</span>
+                      )}
+                    </div>
+                    <MissingColumnsList items={missingItems} maxHeight="16rem" />
+                    <p className="mt-2 text-[11px] text-ink-soft">
+                      This note stays on the setup — you can review it any time from Configured
+                      Bordereau Setups.
+                    </p>
+                  </div>
+                ) : (
+                  /* The DERIVED half: clauses the extraction wanted a rule for
+                     but could not bind to a column. No model call behind these,
+                     so they show even when the check above couldn't run. */
+                  <div className="p-3">
+                    <UnmappedClausesList items={clauses} maxHeight="16rem" />
+                    <p className="mt-2 text-[11px] text-ink-soft">
+                      Pick a column for each on the setup's page to generate its rule.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
-            {/* The DERIVED half: clauses the extraction wanted a rule for but
-                could not bind to a column. No model call behind these, so they
-                show even when the check above couldn't run. Resolved from the
-                setup's own page, which is where the column picker lives. */}
-            {(buildSummary.missing?.unmapped_clauses?.length ?? 0) > 0 && (
-              <div className="mt-4 text-left">
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <FileWarning size={15} className="shrink-0 text-sky-600" />
-                  <span className="text-sm font-semibold text-ink">
-                    {buildSummary.missing!.unmapped_clauses!.length} Clause
-                    {buildSummary.missing!.unmapped_clauses!.length === 1 ? "" : "s"} Awaiting a Column
-                  </span>
-                </div>
-                <UnmappedClausesList items={buildSummary.missing!.unmapped_clauses!}
-                  maxHeight="15rem" />
-                <p className="mt-2 text-[11px] text-ink-soft">
-                  Pick a column for each on the setup's page to generate its rule.
-                </p>
-              </div>
-            )}
-            {buildSummary.missing?.analyzed && buildSummary.missing.items.length === 0
-              && (buildSummary.missing.unmapped_clauses?.length ?? 0) === 0 && (
-              <div className="mt-3 flex items-start gap-2 rounded-lg bg-emerald-50 text-emerald-700 text-xs px-3 py-2.5 text-left">
+            {buildSummary.missing?.analyzed && missingItems.length === 0 && clauses.length === 0 && (
+              <div className="mt-3 flex items-start gap-2 rounded-lg bg-emerald-50 text-emerald-700 text-xs px-3 py-2.5">
                 <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
                 <span>
                   Every contract clause is mapped to a column, and your bordereau provides
@@ -1347,7 +1344,8 @@ export default function DirectSetup() {
               </div>
             )}
           </div>
-        )}
+          );
+        })()}
       </Modal>
       <PageHeader title="Bordereau Setup"
         subtitle="Configure and upload your Bordereau file. Start by selecting your details below." />
@@ -2419,3 +2417,35 @@ function SheetPicker({ kind, options, selected, onToggle, hint }: {
   );
 }
 
+
+/** One headline number from the build. `tone` marks the count that is work
+ *  still to do, so it is not read at the same weight as the two that are done. */
+function Stat({ v, k, tone }: { v: number; k: string; tone?: "warn" }) {
+  return (
+    <div className={`rounded-lg border p-3 ${
+      tone === "warn" && v > 0 ? "border-amber-200 bg-amber-50/60" : "border-border"}`}>
+      <div className={`text-[20px] font-semibold ${
+        tone === "warn" && v > 0 ? "text-amber-700" : "text-ink"}`}>{v}</div>
+      <div className="text-[11px] text-ink-muted">{k}</div>
+    </div>
+  );
+}
+
+/** A tab in the build summary. An empty list keeps its tab — the count is the
+ *  answer to "is there anything here", and a tab that vanishes makes the reader
+ *  wonder whether the check ran at all. */
+function SummaryTab({ active, disabled, onClick, label, count }: {
+  active: boolean; disabled: boolean; onClick: () => void; label: string; count: number;
+}) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled}
+      className={`px-3 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors
+        ${active ? "border-navy text-ink"
+          : disabled ? "border-transparent text-ink-soft cursor-default"
+          : "border-transparent text-ink-muted hover:text-ink"}`}>
+      {label}
+      <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[11px] ${
+        count > 0 ? "bg-surface-2 text-ink-muted" : "text-ink-soft"}`}>{count}</span>
+    </button>
+  );
+}

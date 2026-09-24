@@ -8,10 +8,11 @@ const PAGE_SIZE = 25;
 const DAYS = 30;
 
 /**
- * The whole team's exception tally — the rest of what the dashboard's Team
- * Activity card only has room for the top 5 of. Ranking, searching and
- * paging all happen on the server, so this page costs the same to open
- * whether the team has ten people or a thousand.
+ * The whole team, the rest of what the dashboard's Team Activity card only has
+ * room for the busiest 5 of. Same numbers, same order: files sent, the
+ * exceptions on them, and the exceptions that person put right themselves. Ranking,
+ * searching and paging all happen on the server, so this page costs the same to
+ * open whether the team has ten people or a thousand.
  */
 export default function TeamActivity() {
   const [q, setQ] = useState("");
@@ -38,7 +39,10 @@ export default function TeamActivity() {
         <div className="page-head">
           <div className="t">
             <h2>Team Activity</h2>
-            <p>Exceptions each person put right in the last {DAYS} days.</p>
+            <p>
+              What each person sent in the last {DAYS} days and how much of it is
+              still waiting — the exceptions on their files, open and put right.
+            </p>
           </div>
         </div>
 
@@ -63,7 +67,15 @@ export default function TeamActivity() {
               <div className="tbl-wrap">
                 <table>
                   <thead>
-                    <tr><th>#</th><th>Name</th><th style={{ textAlign: "right" }}>Put right</th></tr>
+                    <tr>
+                      <th>#</th><th>Name</th>
+                      <th style={{ textAlign: "right" }}>Files</th>
+                      <th style={{ textAlign: "right" }}>Rows</th>
+                      <th style={{ textAlign: "right" }}>Exceptions</th>
+                      <th style={{ textAlign: "right" }}>Still open</th>
+                      <th style={{ textAlign: "right" }}>Put right</th>
+                      <th style={{ textAlign: "right" }}>Their decisions</th>
+                    </tr>
                   </thead>
                   <tbody>
                     {data.items.map(u => (
@@ -73,6 +85,24 @@ export default function TeamActivity() {
                           <Link to={`/broker/team-activity/${u.id}`}>{u.name}</Link>
                           {u.role === "broker_admin" && <span className="muted" style={{ fontSize: 12 }}> · admin</span>}
                         </td>
+                        <Num v={u.files} />
+                        <Num v={u.uploads.rows} />
+                        <Num v={u.uploads.exceptions} />
+                        <td style={{ textAlign: "right" }}>
+                          {u.uploads.open > 0 && u.uploads.latest_export_id ? (
+                            <Link className="btn sm"
+                                  to={`/uploads/${u.uploads.latest_upload_id ?? u.uploads.latest_export_id}`
+                                      + `/exceptions?download=${u.uploads.latest_export_id}&from=broker`}>
+                              {u.uploads.open} →
+                            </Link>
+                          ) : (
+                            <span style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums",
+                                           color: u.uploads.open ? undefined : "var(--p-faint)" }}>
+                              {u.uploads.open}
+                            </span>
+                          )}
+                        </td>
+                        <Num v={u.uploads.put_right} />
                         <td style={{ textAlign: "right" }}>
                           {u.resolved > 0 ? (
                             <Link className="btn sm" to={`/broker/team-activity/${u.id}`}>{u.resolved} →</Link>
@@ -94,5 +124,14 @@ export default function TeamActivity() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** A count, right-aligned, greyed when it is zero — a zero is an answer, not
+ *  a gap, and it should not read as loudly as a real number. */
+function Num({ v }: { v: number }) {
+  return (
+    <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums",
+                 color: v ? undefined : "var(--p-faint)" }}>{v}</td>
   );
 }

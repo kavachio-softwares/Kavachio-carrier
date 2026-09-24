@@ -8,6 +8,7 @@ import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
 import { BrokerCarrierSwitch } from "./BrokerCarrierSwitch";
+import { BrokerOrgCard } from "./BrokerOrgCard";
 import { api, getDeduped } from "../api/client";
 import { GlobalLoadingOverlay } from "./Busy";
 import PlatformNotificationCard from "./PlatformNotificationCard";
@@ -346,8 +347,11 @@ export default function Layout() {
           {/* Organization settings are admin-only, so for an Operator the card
               is identity only — same logo, name and live dot, but no chevron
               and nothing to click (it would only bounce them to the dashboard).
-              Admins get the interactive card exactly as before. */}
-          {!isKavachioAdmin() && brand?.legal_name && (
+              Admins get the interactive card exactly as before.
+              A BROKER seat is excluded and gets its own card below: `brand` is
+              the CARRIER tenant, so naming it "Company" in a broker's sidebar
+              would label the wrong organisation as theirs. */}
+          {!isKavachioAdmin() && !isBrokerSeat() && brand?.legal_name && (
             // Same rule as the Company nav item: a carrier user gets the card
             // as identity only, so this is not a second door into the settings.
             canAccessPath("/tenant") && addsCarrierUsers(seat) ? (
@@ -361,12 +365,16 @@ export default function Layout() {
             )
           )}
 
-          {/* Which carrier this broker is working on. In the sidebar, above the
-              nav, because it scopes every screen below it — a scope control
-              living inside one page would look like that page's filter, and
-              the broker would not know the dashboard and the bordereau run
-              were following it too. Renders nothing for a broker on one
-              carrier: there is no choice to make. */}
+          {/* The broker's own company: whose seat this is. Read-only — a
+              broker does not choose their own organisation. */}
+          {isBrokerSeat() && <BrokerOrgCard />}
+
+          {/* …and under it, which carrier they are working on. In the sidebar,
+              above the nav, because it scopes every screen below it — a scope
+              control living inside one page would look like that page's
+              filter, and the broker would not know the dashboard and the
+              bordereau run were following it too. Renders nothing for a broker
+              on one carrier: there is no choice to make. */}
           {isBrokerSeat() && <BrokerCarrierSwitch />}
         </div>
 

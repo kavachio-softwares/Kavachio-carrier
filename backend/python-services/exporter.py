@@ -1946,12 +1946,29 @@ def highlight_exceptions(
     painted light red with a comment explaining why, so the problems are visible
     in the downloaded file.
 
-    Cell positions mirror `_generate_with_template`'s row math exactly: per sheet,
-    the i-th output record (1-based — which is what the validator stores in each
-    exception's `row`/`__rowid`) is written at Excel row `data_start_row + 1 +
-    (i - 1)`, and each output column lives at `column_index + 1`. Exceptions that
-    don't resolve to a real cell (unknown sheet/column, missing row, merged-cell
-    anchor) are skipped rather than guessed.
+    Row math mirrors the renderers exactly: per sheet, the i-th output record
+    (1-based — which is what the validator stores in each exception's
+    `row`/`__rowid`) is written at Excel row `data_start_row + 1 + (i - 1)`.
+
+    COLUMNS ARE FOUND BY NAME IN THE FILE WE ARE PAINTING, not by the template's
+    `column_index`. There are two renderers: `_render_with_template` keeps the
+    sample's physical positions (`column_index + 1`), while `render_output`'s
+    plain writer — used whenever the template has diverged from its sample, i.e.
+    a field was switched off or the order changed — lays the ACTIVE columns out
+    contiguously at 1..N. Painting at `column_index + 1` was therefore right for
+    one renderer and wrong for the other: on export 35 all 14 fills landed on the
+    wrong column (Risk Expiry Date's ten on "Gross premium paid this time") and
+    one landed at column 144 of a 64-column sheet, leaving 80 empty columns
+    behind. Reading the header row of the workbook in hand is correct for both,
+    and for any renderer added later.
+
+    `column_index + 1` remains the fallback for a column whose name is not in the
+    header row, but only while it lands inside the columns that were actually
+    written — past that it would paint an empty cell into open space and widen
+    the sheet, which is what created those trailing columns.
+
+    Exceptions that don't resolve to a real cell (unknown sheet/column, missing
+    row, merged-cell anchor) are skipped rather than guessed.
 
     Pure, defensive post-processing: it NEVER raises. On any failure it returns
     the input bytes unchanged so adding highlights can never break the download.
@@ -1961,6 +1978,7 @@ def highlight_exceptions(
     try:
         from openpyxl.styles import PatternFill
         from openpyxl.comments import Comment
+        import output_template_fields as otf
 
         # Match sheet/column names tolerantly: collapse internal whitespace, trim,
         # lowercase. The validator's `sheet`/`field` are SQL string literals the
@@ -1973,16 +1991,56 @@ def highlight_exceptions(
         # normalized worksheet title -> real title (so wb[...] uses the real one)
         ws_by_norm = {_norm(t): t for t in wb.sheetnames}
 
+        def _headers_at(ws, row_1b: int) -> dict[str, int]:
+            """{normalized header text: 1-based column} for one row of the file.
+
+            First occurrence wins: a workbook that repeats a header keeps the
+            leftmost column, the same one a reader would look at first."""
+            found: dict[str, int] = {}
+            if ws is None or (ws.max_row or 0) < row_1b:
+                return found
+            for cell in ws[row_1b]:
+                v = cell.value
+                if v is None or not str(v).strip():
+                    continue
+                found.setdefault(_norm(v), cell.column)
+            return found
+
         # normalized sheet_name -> (data_start_1based, {normalized_col: col_idx})
         sheet_meta: dict[str, tuple[int, dict[str, int]]] = {}
         for sh in structure.get("sheets") or []:
             name = sh.get("sheet_name") or ""
             data_start = (sh.get("data_start_row") or 1) + 1
+            ws = wb[ws_by_norm[_norm(name)]] if _norm(name) in ws_by_norm else None
+            # The template's own header row; the plain writer always uses row 1,
+            # so fall back to it when that row carries nothing.
+            written = (_headers_at(ws, (sh.get("header_row") or 0) + 1)
+                       or _headers_at(ws, 1))
+            last_written = max(written.values(), default=0)
+
             colmap: dict[str, int] = {}
             for c in sh.get("columns") or []:
                 cn = c.get("column_name")
-                if cn:
-                    colmap[_norm(cn)] = c["column_index"] + 1
+                if not cn:
+                    continue
+                # A renamed column carries the user's word in the file while
+                # the exception still names the internal one, so try both.
+                pos = None
+                for nm in (otf.header_of(c), cn):
+                    if nm and _norm(nm) in written:
+                        pos = written[_norm(nm)]
+                        break
+                if pos is None:
+                    fallback = (c.get("column_index") or 0) + 1
+                    # Only inside what was written — see the docstring.
+                    pos = fallback if fallback <= (last_written or fallback) else None
+                if pos is not None:
+                    colmap[_norm(cn)] = pos
+            # An exception may name a column the structure does not carry (a
+            # template edited since the run); the file's own header still
+            # places it.
+            for nm, idx in written.items():
+                colmap.setdefault(nm, idx)
             sheet_meta[_norm(name)] = (data_start, colmap)
 
         fills = {

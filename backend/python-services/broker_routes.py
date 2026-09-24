@@ -855,12 +855,16 @@ def broker_insights(days: int = Query(30, ge=7, le=90),
     a gap to fill later — the carrier must not be able to see which of a
     broker's people did what.
 
-    The one thing that IS attributable to a person is a decision on an
-    exception: `exception_decision_log` takes the decider from the login, and
-    `decided_by_broker_party_id` is that person's own broker. That is what
-    `by_person` counts, and why it counts decisions rather than files. It goes
-    to the broker ADMIN only — the team roster is already admin-only, and a
-    per-colleague league table is not an operator's business.
+    Two things ARE attributable to a person, and `by_person` carries both.
+    A decision on an exception: `exception_decision_log` takes the decider from
+    the login, and `decided_by_broker_party_id` is that person's own broker.
+    And a file sent through Process Bordereau: `output_exports
+    .generated_by_user_id` is stamped from the principal that ran it — never
+    served to a carrier seat, which still sees only "broker:<id>". So each
+    person's row carries the files they sent and the exceptions on them,
+    still open or put right. It goes to the broker
+    ADMIN only — the team roster is already admin-only, and a per-colleague
+    league table is not an operator's business.
 
     Days with nothing in them are returned as zeros rather than skipped, so a
     quiet day reads as a quiet day instead of collapsing the axis.
@@ -990,16 +994,150 @@ def _run_rows(s, exports) -> list[dict]:
     } for e in exports]
 
 
+def _current_export_ids(s, bid: int) -> set[int]:
+    """The broker's exports that are still the LIVE result of an upload.
+
+    A "Fix & re-run" writes a NEW export and moves the landing pointer to it,
+    but the old export keeps its own exception blob. Counting both would report
+    the same problem twice — once as it was, once as it is. So the live set is
+    the export a landing still points at (Process Bordereau, the direct lane)
+    plus the newest export of each upload (the canonical lane). Superseded runs
+    are history, not work in front of anyone.
+    """
+    from db import LandingRecord, OutputExport
+    live = {i for (i,) in s.query(LandingRecord.output_export_id)
+             .join(OutputExport, OutputExport.id == LandingRecord.output_export_id)
+             .filter(OutputExport.broker_party_id == bid,
+                     LandingRecord.output_export_id.isnot(None)).distinct().all()}
+    live |= {i for (i,) in s.query(func.max(OutputExport.id))
+              .filter(OutputExport.broker_party_id == bid,
+                      OutputExport.source_upload_id.isnot(None))
+              .group_by(OutputExport.source_upload_id).all()}
+    return live
+
+
+def _row_key(e: dict):
+    """Which ROW of the bordereau an exception sits on.
+
+    Counted in rows, not exceptions, because that is the question being asked:
+    one row can break three rules and it is still one row to go and look at.
+    The direct lane identifies a row by (sheet, row) — the same key its
+    decisions are stored under; the canonical lane has a policy number. When a
+    file gives neither, the exception is its own row rather than being folded
+    into a shared "unknown" bucket, which would under-count the work.
+    """
+    row = e.get("row")
+    if row is not None:
+        return ("r", e.get("sheet"), str(row))
+    pn = str(e.get("policy_number") or "").strip()
+    if pn:
+        return ("p", pn)
+    return ("x", id(e))
+
+
+def _uploader_work(s, bid: int, user_ids: list[int], since) -> dict[int, dict]:
+    """Per person: the exceptions on the files THEY sent, open and put right.
+
+    The only per-user file fact a broker has is `generated_by_user_id`, stamped
+    on a run made through Process Bordereau (see the dashboard's own note on
+    per-user attribution). Files run before that column existed, and files the
+    CARRIER ran for the broker, carry no user — they are left out rather than
+    attributed to a guess.
+
+    COUNTED IN EXCEPTIONS, NOT ROWS OR CELLS. An exception sits on one CELL:
+    a row of forty values with one bad date is one exception, not a bad row.
+    Counting it as a row said "10 of 10 rows need review" about a file where
+    thirty-nine values in forty were fine — true by its own definition and
+    wrong to every reader. Counting the other way, against every cell checked,
+    buries the same 14 exceptions in ~500 cells and draws a sliver nobody can
+    see. So the bar is the WORK — how much of it is still open — and the size
+    of what it came from is written beside it as files and rows.
+
+    `rows_flagged` is kept for that sentence only ("14 exceptions across 10
+    rows"), never as a bar: it is context for the count, not a share of the
+    file.
+
+    Decisions are matched to the file's exceptions AS THEY ARE NOW, notices
+    left out, exactly as Exception Triage matches them, so a bar here always
+    equals the screen it opens. Counting `exception_decision_log` rows instead
+    would call a file fixed on the strength of decisions about a rule that is
+    no longer an exception on it.
+    """
+    from db import OutputExport
+    from main import _attach_decisions
+    from app_routes import _decision_kind
+
+    out = {uid: {"files": 0, "rows": 0, "rows_flagged": 0,
+                 "exceptions": 0, "open": 0, "put_right": 0,
+                 "latest_export_id": None, "latest_upload_id": None}
+           for uid in user_ids}
+    if not user_ids:
+        return out
+    live = _current_export_ids(s, bid)
+    if not live:
+        return out
+    rows = (s.query(OutputExport.id, OutputExport.generated_by_user_id)
+             .filter(OutputExport.broker_party_id == bid,
+                     OutputExport.generated_by_user_id.in_(user_ids),
+                     OutputExport.created_at >= since,
+                     OutputExport.id.in_(live))
+             .order_by(OutputExport.created_at.desc(), OutputExport.id.desc()).all())
+    for eid, uid in rows:
+        # One export at a time, then let it go: the exceptions column runs to
+        # megabytes on a big bordereau and a busy person has many of them.
+        r = s.get(OutputExport, eid)
+        if r is None:
+            continue
+        tally = out[uid]
+        excs = [e for e in _attach_decisions(r.exceptions or [], r)
+                if isinstance(e, dict)
+                and e.get("error_class") != "not_checked"
+                and not (e.get("error_class") == "not_validated"
+                         and e.get("rule_id") is None)]
+        per_row: set = set()
+        opened = 0
+        for e in excs:
+            if _decision_kind(e) is None:
+                opened += 1
+                per_row.add(_row_key(e))
+        tally["files"] += 1
+        tally["rows"] += max(int(r.policy_count or 0), len(per_row))
+        tally["rows_flagged"] += len(per_row)
+        tally["exceptions"] += len(excs)
+        tally["open"] += opened
+        tally["put_right"] += len(excs) - opened
+        # Newest first, so the first file with something still open is the one
+        # the row links to.
+        if opened and tally["latest_export_id"] is None:
+            tally["latest_export_id"] = r.id
+            tally["latest_upload_id"] = r.source_upload_id
+        s.expunge(r)
+    return out
+
+
 def _team_ranking(s, bid: int, since, q: Optional[str] = None,
                   offset: int = 0, limit: int = 10,
                   exclude_user_id: Optional[int] = None):
-    """The broker's whole team ranked by exceptions put right since `since`.
+    """The broker's whole team ranked by how much work they have brought in
+    since `since` — files sent, then exceptions put right.
 
-    Counted and ranked in the database, so it costs the same for five people
-    as for five thousand. The rank is the TEAM rank, taken before any search,
-    so someone found by name keeps their real place rather than becoming #1
-    of the results. Ties share a rank; everyone who resolved nothing shares
-    the last one.
+    RANKED ON FILES, NOT ON DECISIONS. A person who uploads a bordereau with
+    fourteen exceptions on it and has fixed none of them is the most active
+    person on the team and the one an admin most needs to see; ranking on
+    decisions alone put them LAST and pushed them off a five-row card. So the
+    order is files sent first, decisions as the tie-break, and the row itself
+    says which of its rows still need review.
+
+    Counted and ranked in the database, so the rank costs the same for five
+    people as for five thousand. The rank is the TEAM rank, taken before any
+    search, so someone found by name keeps their real place rather than
+    becoming #1 of the results. Ties share a rank; everyone who has done
+    nothing in the window shares the last one.
+
+    `uploads` is attached only to the page being returned (see
+    `_uploader_work`, which has to open each file's exception blob) — ranking
+    stays in SQL, the detail is bought for the handful of people actually
+    being drawn.
 
     `exclude_user_id` drops the VIEWER from their own team list — the admin
     is not someone they are keeping tabs on, and seeing your own name in a
@@ -1008,7 +1146,7 @@ def _team_ranking(s, bid: int, since, q: Optional[str] = None,
     row being present or absent.
     """
     from auth_deps import normalize_role
-    from db import ExceptionDecisionLog
+    from db import ExceptionDecisionLog, OutputExport
     counts = (s.query(ExceptionDecisionLog.decided_by_user_id.label("uid"),
                       func.count(ExceptionDecisionLog.id).label("n"))
                .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
@@ -1017,14 +1155,27 @@ def _team_ranking(s, bid: int, since, q: Optional[str] = None,
                        ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss")))
                .group_by(ExceptionDecisionLog.decided_by_user_id)
                .subquery())
+    # Files each person SENT in the window. Only runs made through Process
+    # Bordereau carry a user; a run the carrier made for this broker does not,
+    # and is not attributed to anyone.
+    sent = (s.query(OutputExport.generated_by_user_id.label("uid"),
+                    func.count(OutputExport.id).label("n"))
+             .filter(OutputExport.broker_party_id == bid,
+                     OutputExport.created_at >= since,
+                     OutputExport.generated_by_user_id.isnot(None))
+             .group_by(OutputExport.generated_by_user_id)
+             .subquery())
     n = func.coalesce(counts.c.n, 0)
+    f = func.coalesce(sent.c.n, 0)
     base = s.query(AppUser.id.label("id"),
                    AppUser.full_name.label("full_name"),
                    AppUser.email.label("email"),
                    AppUser.role.label("role"),
                    n.label("resolved"),
-                   func.rank().over(order_by=n.desc()).label("rank")) \
+                   f.label("files"),
+                   func.rank().over(order_by=(f.desc(), n.desc())).label("rank")) \
              .outerjoin(counts, counts.c.uid == AppUser.id) \
+             .outerjoin(sent, sent.c.uid == AppUser.id) \
              .filter(AppUser.broker_party_id == bid)
     if exclude_user_id is not None:
         base = base.filter(AppUser.id != exclude_user_id)
@@ -1039,11 +1190,35 @@ def _team_ranking(s, bid: int, since, q: Optional[str] = None,
                           func.lower(func.coalesce(ranked.c.full_name, ranked.c.email)),
                           ranked.c.id)
                 .offset(offset).limit(limit).all())
-    return [{"id": r.id,
-             "name": r.full_name or r.email or f"User {r.id}",
-             "role": normalize_role(r.role),
-             "resolved": int(r.resolved),
-             "rank": int(r.rank)} for r in page], total
+    work = _uploader_work(s, bid, [r.id for r in page], since)
+    items = []
+    for r in page:
+        w = work.get(r.id, {})
+        items.append({
+            "id": r.id,
+            "name": r.full_name or r.email or f"User {r.id}",
+            "role": normalize_role(r.role),
+            "resolved": int(r.resolved),
+            "rank": int(r.rank),
+            # The files this person sent, and the exceptions on them. `files`
+            # comes from the same query the rank does, so the number and the
+            # order can never disagree.
+            "files": int(r.files),
+            "uploads": {
+                "rows": w.get("rows", 0),
+                # Rows carrying at least one open exception — context for the
+                # count ("14 across 10 rows"), never drawn as a share.
+                "rows_flagged": w.get("rows_flagged", 0),
+                "exceptions": w.get("exceptions", 0),
+                "open": w.get("open", 0),
+                "put_right": w.get("put_right", 0),
+                # The newest of their files that still has something open, so
+                # a row can open the work rather than only describing it.
+                "latest_export_id": w.get("latest_export_id"),
+                "latest_upload_id": w.get("latest_upload_id"),
+            },
+        })
+    return items, total
 
 
 def _carrier_ranking(s, bid: int, prog_ids: list[int], links, since,

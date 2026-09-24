@@ -18,7 +18,7 @@ import { useBrokerCarrierId } from "../brokerCarrier";
 import { fmtDate } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
 import { Activity, AlertCircle, Building2, Clock, FileCheck2, PenLine, Users } from "lucide-react";
-import { RankedBars, RunTrend } from "../components/BrokerCharts";
+import { RankedBars, RunTrend, UploaderBars } from "../components/BrokerCharts";
 import { InfoTip } from "../components/InfoTip";
 import { ChartCard, LinkCard, StatCard } from "../components/StatCard";
 
@@ -175,16 +175,24 @@ export default function BrokerDashboard() {
                 {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} />}
               </ChartCard>
               <ChartCard title="Team Activity"
-                info={<InfoTip text={`Exceptions each person on your team put right in the last ${DAYS} days. Showing the top 5 — open the full list for everyone.`} />}>
+                info={<InfoTip text={
+                  `What each person on your team sent in the last ${DAYS} days, and how much of it `
+                  + "is still waiting. Each bar is the exceptions on that person's files: amber is "
+                  + "what is still open, green what has been put right, and a full grey bar means "
+                  + "nothing was flagged at all. An exception is one cell, not a whole row, so the "
+                  + "file's size is written beside the bar instead of being drawn. Bars are not "
+                  + "compared with each other; the counts on the right are. Showing the busiest 5 "
+                  + "— open the full list for everyone."} />}>
                 {!ins ? <div className="muted">Loading…</div> : (
-                  <RankedBars unit="put right" cap={5}
+                  <UploaderBars cap={5}
                     total={ins.people_total}
                     onViewAll={() => nav("/broker/team-activity")}
-                    linkTo={r => `/broker/team-activity/${r.id}`}
+                    personTo={r => `/broker/team-activity/${r.id}`}
                     empty="No one on your team yet."
                     rows={(ins.by_person ?? []).map(u => ({
-                      id: u.id, name: u.name, value: u.resolved,
+                      id: u.id, name: u.name,
                       note: u.role === "broker_admin" ? "admin" : undefined,
+                      files: u.files, uploads: u.uploads, resolved: u.resolved,
                     }))} />
                 )}
               </ChartCard>

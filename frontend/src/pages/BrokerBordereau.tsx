@@ -338,12 +338,13 @@ export default function BrokerBordereau() {
             preview={preview}
             urls={urls}
             onError={setErr}
-            // A broker has no Exception Triage screen to be sent to — that
-            // route is carrier_admin-only, and deciding exceptions is the
-            // carrier's call, not theirs. So the findings are listed HERE, on
-            // a real submission as much as on a check: being told "14
-            // exceptions" with nothing to act on is not a result.
-            findings="always"
+            // TEMPORARILY HIDDEN on a real submission (was findings="always").
+            // Restore that value to bring the "What Failed Validation" list
+            // back. The reason it was there: a broker has no Exception Triage
+            // screen to be sent to — that route is carrier_admin-only, and
+            // deciding exceptions is the carrier's call, not theirs — so being
+            // told "268 exceptions" with nothing to act on is not a result.
+            findings="check-only"
             // The SAME Exception Triage screen the carrier uses. The export id
             // in the path is what scopes it, and the server only hands back an
             // export stamped with this broker — so this opens their own run and

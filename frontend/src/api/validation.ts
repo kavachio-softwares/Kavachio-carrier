@@ -180,6 +180,9 @@ export type StoredException = {
   source_row?: number | null;
   /** Output sheet name (direct-lane output exceptions) — decision key. */
   source_sheet?: string | null;
+  /** Set when `actual_value` is a TOTAL rather than this cell's own value —
+   *  see AggregateMarker. */
+  aggregate?: AggregateMarker | null;
 };
 
 export type StoredRun = {
@@ -228,11 +231,75 @@ export async function getUploadExceptions(
 // ── Output-stage (per-download) exceptions ───────────────────────────────────
 
 /** A generate-time exception from /export/downloads/{id} (output stage). */
+/** What an aggregate rule's `actual_value` covers.
+ *
+ *  A rule like "the total premium must not exceed 100,000" adds a whole column
+ *  up and compares the TOTAL, but the exception still has to hang off a row, so
+ *  the compiler pins it to the first row that fed the sum. Without this marker
+ *  the screens showed that total beside one cell under the word "Actual" — a
+ *  file whose ten premiums make 110,150 read "Actual 110,150" next to a cell
+ *  showing 12,450, which looks like a bug and is not one.
+ *
+ *  `level` is what the number covers: "file" = the whole column, "group" = one
+ *  policy or key. Row-level rules carry no marker at all. */
+export type AggregateMarker = {
+  level: "file" | "group";
+  function: "sum" | "count" | "distinct_count" | string;
+  group_by: string[];
+};
+
+/** The compiler's own sentences for an aggregate breach (rule_compiler
+ *  `_b_aggregate_cap` / `_b_aggregate_cap_dedup`). Read only as a FALLBACK, for
+ *  files validated before the marker was stamped on the exception — every new
+ *  run carries `aggregate` and never reaches this. */
+function aggregateFromReason(reason?: string | null,
+                             policyNumber?: string | null): AggregateMarker | null {
+  const r = (reason ?? "").trim();
+  const m = r.match(/^(sum|count|distinct_count)\((.+)\) breaches limit$/i);
+  if (m) {
+    return {
+      // The sentence does not name the key, so the presence of a policy is the
+      // only signal for whether this total is the file's or one policy's.
+      level: policyNumber ? "group" : "file",
+      function: m[1].toLowerCase(),
+      group_by: [],
+    };
+  }
+  if (/^cumulative .+ across schedules breaches limit$/i.test(r)) {
+    return { level: "group", function: "sum", group_by: [] };
+  }
+  return null;
+}
+
+/** How to label an aggregate's `actual_value` in place of "Actual", and the
+ *  one line that explains why the highlight is where it is. Null for a
+ *  row-level exception, whose actual IS the cell. */
+export function aggregateLabel(a: AggregateMarker | null | undefined, field?: string | null) {
+  if (!a) return null;
+  const where = a.level === "file" ? "the whole file"
+    : a.group_by.length ? `this ${a.group_by.join(", ")}` : "this policy";
+  const name =
+    a.function === "count" ? "Rows counted"
+    : a.function === "distinct_count" ? "Values found"
+    : a.level === "file" ? "File total" : "Total for this policy";
+  const what =
+    a.function === "count" ? `Rows counted across ${where}`
+    : a.function === "distinct_count" ? `The different values of ${field ?? "this column"} across ${where}`
+    : `${field ?? "This column"} added up across ${where}`;
+  return {
+    label: name,
+    note: `${what}. The highlight sits on the first row that feeds it — `
+      + "the breach belongs to the total, not to this one value.",
+  };
+}
+
 export type OutputException = {
   severity: string; code?: string; sheet?: string; row?: number;
   column?: string; field?: string; message?: string;
   rule_name?: string; rule_id?: number; contract_filename?: string;
   reason?: string; error_class?: string;
+  /** Present only on an aggregate rule — see AggregateMarker. */
+  aggregate?: AggregateMarker | null;
   contract_id?: number; contract_clause_text?: string | null;
   contract_clause_page?: number | null;
   policy_number?: string | null; actual_value?: string | null;
@@ -297,6 +364,7 @@ export function outputExcToStored(x: OutputException, i: number): StoredExceptio
     contract_filename: x.contract_filename ?? null,
     source_row: x.row ?? null,
     source_sheet: x.sheet ?? null,
+    aggregate: x.aggregate ?? aggregateFromReason(x.reason, x.policy_number),
     // Hand-enumerated mapper: a field missing here is silently dropped for the
     // whole output lane (every ?download=<id> screen), so it must be listed.
     explanation: x.explanation ?? null,
