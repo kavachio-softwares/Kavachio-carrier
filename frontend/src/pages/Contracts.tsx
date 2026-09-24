@@ -46,7 +46,10 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   in_review: { label: "Out for review", cls: "b-warn", note: "with the broker" },
   changes_requested: { label: "Changes requested", cls: "b-warn",
                        note: "the broker pushed back — your move" },
-  agreed: { label: "Terms agreed", cls: "b-ok", note: "the broker signs next" },
+  // The note is finished per row from whose_turn — see turnNote(). `agreed`
+  // covers the whole signing round, carrier first and broker after it, so the
+  // state on its own cannot say who is being waited on.
+  agreed: { label: "Terms agreed", cls: "b-ok", note: "terms settled" },
   signed: { label: "Signed", cls: "b-ok",
             note: "returned — yours to place and put in force" },
   // "In force", not "Live". Live is what a website is: it says the row is
@@ -209,6 +212,13 @@ export default function Contracts() {
               <tbody>
                 {rows.map(c => {
                   const st = STATE[c.lifecycle] ?? STATE.draft;
+                  // Who the signing round is on. The carrier signs first, so a
+                  // freshly agreed contract is waiting on the carrier, not the
+                  // broker.
+                  const note = c.lifecycle !== "agreed" ? st.note
+                    : c.whose_turn === "carrier" ? "the carrier signs next"
+                    : c.whose_turn === "broker" ? "the broker signs next"
+                    : st.note;
                   return (
                     <tr key={c.id}>
                       <td>
@@ -236,7 +246,7 @@ export default function Contracts() {
                         <span className={`badge ${st.cls}`}>
                           <span className="d" />{st.label}
                         </span>
-                        <div className="sub">{st.note}</div>
+                        <div className="sub">{note}</div>
                       </td>
                     </tr>
                   );

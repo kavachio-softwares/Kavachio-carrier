@@ -67,9 +67,12 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   changes_requested: { label: "Changes requested", cls: "b-warn",
                        note: "The broker has pushed back. Revise the terms and "
                            + "send them again." },
+  // The note here says only that the terms are settled — WHO signs next is
+  // not a property of the state. The carrier signs first and the broker after
+  // it, and a contract stays `agreed` through both, so the sentence is
+  // finished per contract from whose_turn. See turnNote().
   agreed: { label: "Terms agreed", cls: "b-ok",
-            note: "Both sides have settled the terms. The broker signs next, "
-                + "and returns it." },
+            note: "Both sides have settled the terms." },
   signed: { label: "Signed", cls: "b-ok",
             note: "The broker signed and returned it. It is with the carrier "
                 + "to place and put in force." },
@@ -362,6 +365,13 @@ export default function ContractRecord() {
   // one thing: written down, not live, still editable.
   const draftNote = "Not live yet — nothing is checked against it. Its terms "
     + "can still be changed, and you can make it live when you are ready.";
+  // Whose signature the contract is actually waiting on. `agreed` covers the
+  // whole signing round — carrier first, then broker — so the state cannot
+  // say this and the record's own whose_turn has to.
+  const turnNote = rec.lifecycle !== "agreed" ? ""
+    : rec.whose_turn === "carrier" ? " The carrier signs next, then the broker."
+    : rec.whose_turn === "broker" ? " The carrier has signed. The broker signs next, and returns it."
+    : "";
   const a = rec.actions;
   const docs = rec.documents ?? [];
   const active = docs.filter(d => d.is_active);
@@ -1086,7 +1096,7 @@ export default function ContractRecord() {
           <div className="card-h">
             <span className={`badge ${st.cls}`}><span className="d" />{st.label}</span>
             <span className="sub">
-              {rec.lifecycle === "draft" ? draftNote : st.note}
+              {rec.lifecycle === "draft" ? draftNote : st.note + turnNote}
             </span>
           </div>
           <div style={{ padding: "16px 20px" }}>
@@ -1102,8 +1112,9 @@ export default function ContractRecord() {
             )}
             {rec.lifecycle === "agreed" && !isUploaded && (
               <div className="hint">
-                Terms are settled. The broker signs and returns it, then the
-                carrier puts it in force.{" "}
+                {rec.whose_turn === "broker"
+                  ? "The carrier has signed. The broker signs and returns it, then the carrier puts it in force."
+                  : "Terms are settled. The carrier signs first, then the broker signs and returns it."}{" "}
                 <Link to={`/contracts/${rec.id}/signature`} className="linkish">
                   Go to signature →
                 </Link>

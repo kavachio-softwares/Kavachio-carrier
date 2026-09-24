@@ -4699,15 +4699,40 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             AdminMappingTask.status.in_(("open", "in_progress")),
         ).count()
 
-        # "Pending Signatures" count
-        pending_signatures = s.query(EsignEnvelope).filter(
-            EsignEnvelope.tenant_id == tid,
-            EsignEnvelope.status.in_(("sent", "in_progress")),
-        ).count()
+        # "Pending Signatures" tile — CONTRACTS waiting on this carrier's own
+        # signature, not e-sign envelopes.
+        #
+        # It used to count envelopes in ("sent", "in_progress"), and an
+        # envelope does not exist until somebody presses Sign
+        # (esign_routes._open_round). So a contract whose terms the broker had
+        # just agreed — the exact moment the carrier has to act, since the
+        # CARRIER SIGNS FIRST — left this tile reading 0, and the carrier was
+        # told nothing was waiting on them.
+        #
+        # Counted the same way the broker's own queue is: the contract is in
+        # the signing round and this side has not signed yet.
+        import contract_routes as _cr
+        sign_rows = s.query(Contract).filter(
+            Contract.tenant_id == tid,
+            Contract.lifecycle.in_(("agreed", "signed")),
+        ).all()
+        pending_signatures = 0
+        for _c in sign_rows:
+            if _cr._effective_lifecycle(_c) not in ("agreed", "signed"):
+                continue        # lapsed in the meantime — nobody signs it now
+            if "carrier" in _cr._unsigned_sides(_cr._signatures(s, _c.id)):
+                pending_signatures += 1
 
-        completed_signatures = s.query(EsignEnvelope).filter(
-            EsignEnvelope.tenant_id == tid,
-            EsignEnvelope.status == "completed",
+        # The subtitle beside it, counted in the same units: contracts both
+        # sides have signed. An envelope count here would have said "1
+        # completed" next to two contracts in force, since a contract signed
+        # on paper and recorded has no envelope at all.
+        completed_signatures = sum(
+            1 for _c in sign_rows
+            if not _cr._unsigned_sides(_cr._signatures(s, _c.id)))
+        completed_signatures += s.query(Contract).filter(
+            Contract.tenant_id == tid,
+            Contract.lifecycle.in_(("active", "expired", "terminated")),
         ).count()
 
         # "Avg Turnaround" tile (tenant/operator) — average wall-clock time from a
@@ -4830,10 +4855,16 @@ def dashboard_broker_performance(mga: str,
                                  limit: int = Query(5, ge=1, le=20),
                                  principal: Principal = Depends(current_principal)):
     """How each broker company is working, and how far its issues have been
-    resolved — the most recently active `limit` brokers in this seat's reach.
+    resolved — the most recently active `limit` brokers of this carrier.
 
-    Reach is the Party screen's: a carrier user sees the brokers THEY invited,
-    the carrier admin (and Kavachio) every broker the carrier works with.
+    Every broker the CARRIER works with, not only the ones the signed-in person
+    invited. This is a dashboard card, and every other number on that screen —
+    runs, exceptions, turnaround — is counted over the whole carrier. Narrowing
+    this one card to the viewer's own invitations made the screen contradict
+    itself: a carrier user could see 242 exceptions raised on files a broker
+    sent and, beside them, "no broker has sent a file". Who invited whom still
+    decides what a seat may MANAGE (see `_brokers_in_reach`); it does not decide
+    what its own company's dashboard reports.
 
     Per broker:
       runs / clean / flagged / not_checked
@@ -4846,14 +4877,16 @@ def dashboard_broker_performance(mga: str,
     since = datetime.utcnow() - timedelta(days=days)   # stored times are utcnow
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
-        reach = _brokers_in_reach(s, principal, tid)
-        if not reach:
-            return {"days": days, "items": [], "active_total": 0}
-
+        # Which brokers to report is read off the runs themselves — a broker is
+        # on this card because it sent a file, full stop. Matching against a
+        # separately-built list of "the carrier's brokers" only ever subtracted:
+        # a broker missing from that list (its party reached the carrier by some
+        # route the list does not cover) had its files silently dropped from the
+        # card while the same files were still counted by every tile above it.
         exports = (s.query(OutputExport.id, OutputExport.broker_party_id,
                            OutputExport.status, OutputExport.created_at)
                    .filter(OutputExport.tenant_id == tid,
-                           OutputExport.broker_party_id.in_(reach),
+                           OutputExport.broker_party_id.isnot(None),
                            OutputExport.created_at >= since)
                    .order_by(OutputExport.created_at.desc(), OutputExport.id.desc())
                    .all())

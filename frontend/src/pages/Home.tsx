@@ -373,10 +373,10 @@ export default function Home() {
         </div>
 
         {/* How each broker company is working and putting its issues right —
-            the five most recently active, within this seat's reach. */}
+            the five that most recently sent this carrier a file. */}
         {carrierSeat && (
           <div style={{ marginBottom: 24 }}>
-            <BrokerPerformance mga={mga} mine={seat === "user"} />
+            <BrokerPerformance mga={mga} />
           </div>
         )}
 

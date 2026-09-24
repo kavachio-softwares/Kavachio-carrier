@@ -32,8 +32,9 @@ const DAYS = 30;
 
 /**
  * How each broker company is working and how its exceptions are being put
- * right — the five most recently active brokers in this seat's reach (a
- * carrier user: the brokers they invited; the carrier admin: every broker).
+ * right — the five brokers that most recently sent this carrier a file. Both
+ * carrier seats see the same brokers, because every other number on this
+ * dashboard is counted over the whole carrier too.
  *
  * One stacked horizontal bar per broker — the issues on its latest file:
  * resolved (green) then still open (amber), counted as its Exception Triage
@@ -42,7 +43,7 @@ const DAYS = 30;
  * Every number is also written out on the row, so colour is never the only
  * way to read it.
  */
-export default function BrokerPerformance({ mga, mine }: { mga: string; mine: boolean }) {
+export default function BrokerPerformance({ mga }: { mga: string }) {
   const [rows, setRows] = useState<BrokerPerf[] | null>(null);
   const [activeTotal, setActiveTotal] = useState(0);
 
@@ -59,8 +60,8 @@ export default function BrokerPerformance({ mga, mine }: { mga: string; mine: bo
     <ChartCard
       title="Broker Performance"
       info={<InfoTip text={
-        `The ${mine ? "broker companies you invited" : "broker companies"} that sent files most recently, `
-        + `over the last ${DAYS} days. Each bar is the issues on that broker's latest file: `
+        `The broker companies that sent files most recently, over the last ${DAYS} days. `
+        + "Each bar is the issues on that broker's latest file: "
         + "green is resolved, amber is still open — the same numbers as its exception "
         + "screen. Click a broker to open it."} />}
     >
@@ -68,8 +69,7 @@ export default function BrokerPerformance({ mga, mine }: { mga: string; mine: bo
         <div className="empty">Loading…</div>
       ) : rows.length === 0 ? (
         <div className="empty">
-          {mine ? "None of the broker companies you invited" : "No broker company"} has
-          sent a file in the last {DAYS} days.
+          No broker company has sent a file in the last {DAYS} days.
         </div>
       ) : (
         <>

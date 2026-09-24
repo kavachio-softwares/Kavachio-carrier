@@ -310,12 +310,14 @@ export default function BrokerBordereau() {
           <Dropzone file={file} onPick={setFile} disabled={!ready?.ready} />
 
           <div style={{ marginTop: 18, display: "flex", gap: 10, alignItems: "center" }}>
-            {/* The self-check is the reason a broker has this screen, so unlike
-                the carrier's it is offered first and prominently. */}
-            <button className="btn" onClick={() => submit(true)} disabled={!canSubmit}
+            {/* Hidden for now, the same as on the carrier's screen — Generate
+                BDX is the only action offered. Everything behind it still
+                works (submit(true) → check_only, which validates without
+                submitting), so restoring it is uncommenting these lines. */}
+            {/* <button className="btn" onClick={() => submit(true)} disabled={!canSubmit}
               title="Run every validation without sending — see what to fix first">
               Check My Bordereau
-            </button>
+            </button> */}
             <button className="btn pri" onClick={() => submit(false)} disabled={!canSubmit}>
               Generate BDX
             </button>
