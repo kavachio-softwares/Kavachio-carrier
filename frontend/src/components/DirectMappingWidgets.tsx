@@ -2,6 +2,7 @@ import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "re
 import {
   AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronRight, Plus,
   RotateCcw, Save, Search, ShieldAlert, Sparkles, Trash2, X,
+  ListChecks, Columns3, FileText, FileWarning, type LucideIcon,
 } from "lucide-react";
 import { api } from "../api/client";
 import { getUser } from "../auth";
@@ -72,6 +73,31 @@ function spellingLabel(r: ContractRule): string {
 // output-field combo box, and the full contract inline editor (terms, rules,
 // clause routing, tolerance bands). Kept in one place so both surfaces render
 // a contract identically instead of drifting apart.
+
+/** A compact dashboard-style KPI tile — icon beside the number, one line of
+ *  label — for the contract's counts, where the full StatCard is too tall. */
+function MiniStat({ label, value, icon: Icon, alert, hint, onClick }: {
+  label: string; value: number; icon: LucideIcon; alert?: boolean;
+  hint?: string; onClick?: () => void;
+}) {
+  return (
+    <button type="button" onClick={onClick}
+      className={`flex items-center gap-3 rounded-xl border bg-white px-3 py-2.5 text-left shadow-sm
+        transition hover:-translate-y-0.5 hover:shadow-md
+        ${alert ? "border-red-200" : "border-border"}`}>
+      <span className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg
+        ${alert ? "bg-red-50 text-red-500" : "bg-teal-50 text-teal-600"}`}>
+        <Icon size={16} strokeWidth={2.5} />
+      </span>
+      <span className="min-w-0">
+        <b className="block text-lg leading-tight text-ink tabular-nums">{value}</b>
+        <span className="block truncate text-xs text-ink-muted">
+          {label}{hint && <span className="ml-1 font-semibold text-navy">{hint}</span>}
+        </span>
+      </span>
+    </button>
+  );
+}
 
 export function ScoreChip({ score, label = "Kavachio" }: { score: number; label?: string }) {
   const pct = Math.round(score * 100);
@@ -711,8 +737,9 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
   };
   const switchBtn = (key: typeof view, label: ReactNode) => (
     <button type="button" onClick={() => setView(key)} aria-pressed={view === key}
-      className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors
-        ${view === key ? "bg-white text-ink shadow-sm" : "text-ink-muted hover:text-ink"}`}>
+      className={`relative flex-1 whitespace-nowrap rounded-md px-3 py-1.5 text-center text-xs font-semibold transition-colors
+        before:absolute before:-left-px before:top-1/4 before:h-1/2 before:w-px before:bg-gray-300 first:before:hidden
+        ${view === key ? "bg-white text-ink shadow-sm before:hidden" : "text-ink-muted hover:text-ink"}`}>
       {label}
     </button>
   );
@@ -726,20 +753,22 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
 
   return (
     <div className="space-y-3">
-      {/* The contract in four numbers. */}
-      <div className="flex flex-wrap items-end gap-x-7 gap-y-2 rounded-md bg-surface-2 px-3 py-2.5 text-xs text-ink-muted">
-        <span><b className="block text-base text-ink tabular-nums">{rules.length}</b>rule{rules.length !== 1 ? "s" : ""} check your file</span>
-        <span><b className="block text-base text-ink tabular-nums">{outputColumnsChecked}</b>BDX output column{outputColumnsChecked !== 1 ? "s" : ""} checked</span>
-        <span><b className="block text-base text-ink tabular-nums">{terms.length}</b>term{terms.length !== 1 ? "s" : ""} read from the contract</span>
+      {/* The contract in four numbers — the dashboard's KPI tiles. */}
+      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+        <MiniStat label={`Rule${rules.length !== 1 ? "s" : ""} check your file`}
+          value={rules.length} icon={ListChecks} onClick={() => setView("rules")} />
+        <MiniStat label={`BDX output column${outputColumnsChecked !== 1 ? "s" : ""} checked`}
+          value={outputColumnsChecked} icon={Columns3} onClick={() => setView("cols")} />
+        <MiniStat label={`Term${terms.length !== 1 ? "s" : ""} read from the contract`}
+          value={terms.length} icon={FileText} onClick={() => setView("terms")} />
         {reviewClauses.length > 0 && (
-          <span><b className="block text-base text-amber-600 tabular-nums">{ownClauses.length}</b>
-            clause{ownClauses.length !== 1 ? "s" : ""} with no column yet ·{" "}
-            <button type="button" onClick={() => setView("clauses")} className="font-semibold text-navy hover:underline">see →</button>
-          </span>
+          <MiniStat label={`Clause${ownClauses.length !== 1 ? "s" : ""} with no column yet`}
+            value={ownClauses.length} icon={FileWarning} alert hint="see →"
+            onClick={() => setView("clauses")} />
         )}
       </div>
 
-      <div className="inline-flex flex-wrap gap-0.5 rounded-lg bg-surface-2 p-1" role="group" aria-label="Show">
+      <div className="flex w-full flex-wrap gap-0.5 rounded-lg bg-surface-2 p-1" role="group" aria-label="Show">
         {switchBtn("rules", <>Rules · {rules.length}</>)}
         {reviewClauses.length > 0 && switchBtn("clauses", <>Clauses with no column · {ownClauses.length}</>)}
         {switchBtn("terms", <>Contract terms · {terms.length}</>)}
