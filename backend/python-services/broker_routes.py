@@ -21,6 +21,7 @@ from sqlalchemy import String, and_, func, or_
 
 import contract_routes
 import contract_types as ct
+from exception_tally import current_export_ids, export_tally as _export_tally
 from auth_deps import Principal, current_principal
 from db import (
     CarrierBroker, link_carrier_broker,
@@ -930,7 +931,9 @@ def broker_insights(days: int = Query(30, ge=7, le=90),
                     func.count(ExceptionDecisionLog.id))
              .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
                      ExceptionDecisionLog.decided_at >= since,
-                     ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss")))
+                     # "reject" settles an exception too — see _team_ranking.
+                     ExceptionDecisionLog.kind.in_(
+                         ("fix", "approve", "dismiss", "reject")))
              .group_by(func.date(ExceptionDecisionLog.decided_at)).all()
         ):
             resolved[str(d)] = resolved.get(str(d), 0) + n
@@ -994,47 +997,6 @@ def _run_rows(s, exports) -> list[dict]:
     } for e in exports]
 
 
-def _current_export_ids(s, bid: int) -> set[int]:
-    """The broker's exports that are still the LIVE result of an upload.
-
-    A "Fix & re-run" writes a NEW export and moves the landing pointer to it,
-    but the old export keeps its own exception blob. Counting both would report
-    the same problem twice — once as it was, once as it is. So the live set is
-    the export a landing still points at (Process Bordereau, the direct lane)
-    plus the newest export of each upload (the canonical lane). Superseded runs
-    are history, not work in front of anyone.
-    """
-    from db import LandingRecord, OutputExport
-    live = {i for (i,) in s.query(LandingRecord.output_export_id)
-             .join(OutputExport, OutputExport.id == LandingRecord.output_export_id)
-             .filter(OutputExport.broker_party_id == bid,
-                     LandingRecord.output_export_id.isnot(None)).distinct().all()}
-    live |= {i for (i,) in s.query(func.max(OutputExport.id))
-              .filter(OutputExport.broker_party_id == bid,
-                      OutputExport.source_upload_id.isnot(None))
-              .group_by(OutputExport.source_upload_id).all()}
-    return live
-
-
-def _row_key(e: dict):
-    """Which ROW of the bordereau an exception sits on.
-
-    Counted in rows, not exceptions, because that is the question being asked:
-    one row can break three rules and it is still one row to go and look at.
-    The direct lane identifies a row by (sheet, row) — the same key its
-    decisions are stored under; the canonical lane has a policy number. When a
-    file gives neither, the exception is its own row rather than being folded
-    into a shared "unknown" bucket, which would under-count the work.
-    """
-    row = e.get("row")
-    if row is not None:
-        return ("r", e.get("sheet"), str(row))
-    pn = str(e.get("policy_number") or "").strip()
-    if pn:
-        return ("p", pn)
-    return ("x", id(e))
-
-
 def _uploader_work(s, bid: int, user_ids: list[int], since) -> dict[int, dict]:
     """Per person: the exceptions on the files THEY sent, open and put right.
 
@@ -1064,24 +1026,20 @@ def _uploader_work(s, bid: int, user_ids: list[int], since) -> dict[int, dict]:
     no longer an exception on it.
     """
     from db import OutputExport
-    from main import _attach_decisions
-    from app_routes import _decision_kind
 
     out = {uid: {"files": 0, "rows": 0, "rows_flagged": 0,
-                 "exceptions": 0, "open": 0, "put_right": 0,
-                 "latest_export_id": None, "latest_upload_id": None}
+                 "exceptions": 0, "open": 0, "put_right": 0}
            for uid in user_ids}
     if not user_ids:
         return out
-    live = _current_export_ids(s, bid)
+    live = current_export_ids(s, broker_party_id=bid)
     if not live:
         return out
     rows = (s.query(OutputExport.id, OutputExport.generated_by_user_id)
              .filter(OutputExport.broker_party_id == bid,
                      OutputExport.generated_by_user_id.in_(user_ids),
                      OutputExport.created_at >= since,
-                     OutputExport.id.in_(live))
-             .order_by(OutputExport.created_at.desc(), OutputExport.id.desc()).all())
+                     OutputExport.id.in_(live)).all())
     for eid, uid in rows:
         # One export at a time, then let it go: the exceptions column runs to
         # megabytes on a big bordereau and a busy person has many of them.
@@ -1089,28 +1047,13 @@ def _uploader_work(s, bid: int, user_ids: list[int], since) -> dict[int, dict]:
         if r is None:
             continue
         tally = out[uid]
-        excs = [e for e in _attach_decisions(r.exceptions or [], r)
-                if isinstance(e, dict)
-                and e.get("error_class") != "not_checked"
-                and not (e.get("error_class") == "not_validated"
-                         and e.get("rule_id") is None)]
-        per_row: set = set()
-        opened = 0
-        for e in excs:
-            if _decision_kind(e) is None:
-                opened += 1
-                per_row.add(_row_key(e))
+        t = _export_tally(r)
         tally["files"] += 1
-        tally["rows"] += max(int(r.policy_count or 0), len(per_row))
-        tally["rows_flagged"] += len(per_row)
-        tally["exceptions"] += len(excs)
-        tally["open"] += opened
-        tally["put_right"] += len(excs) - opened
-        # Newest first, so the first file with something still open is the one
-        # the row links to.
-        if opened and tally["latest_export_id"] is None:
-            tally["latest_export_id"] = r.id
-            tally["latest_upload_id"] = r.source_upload_id
+        tally["rows"] += t["rows"]
+        tally["rows_flagged"] += t["rows_flagged"]
+        tally["exceptions"] += t["exceptions"]
+        tally["open"] += t["open"]
+        tally["put_right"] += t["put_right"]
         s.expunge(r)
     return out
 
@@ -1152,7 +1095,11 @@ def _team_ranking(s, bid: int, since, q: Optional[str] = None,
                .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
                        ExceptionDecisionLog.decided_at >= since,
                        ExceptionDecisionLog.decided_by_user_id.isnot(None),
-                       ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss")))
+                       # Every kind that settles an exception, "reject" too —
+                       # a file's own tally counts a rejected one as resolved,
+                       # so leaving it out here made the two disagree.
+                       ExceptionDecisionLog.kind.in_(
+                           ("fix", "approve", "dismiss", "reject")))
                .group_by(ExceptionDecisionLog.decided_by_user_id)
                .subquery())
     # Files each person SENT in the window. Only runs made through Process
@@ -1212,10 +1159,6 @@ def _team_ranking(s, bid: int, since, q: Optional[str] = None,
                 "exceptions": w.get("exceptions", 0),
                 "open": w.get("open", 0),
                 "put_right": w.get("put_right", 0),
-                # The newest of their files that still has something open, so
-                # a row can open the work rather than only describing it.
-                "latest_export_id": w.get("latest_export_id"),
-                "latest_upload_id": w.get("latest_upload_id"),
             },
         })
     return items, total
@@ -1285,25 +1228,50 @@ def broker_person_decisions(user_id: int, days: int = Query(30, ge=7, le=90),
                             page: int = Query(1, ge=1),
                             page_size: int = Query(25, ge=1, le=100),
                             p: Principal = Depends(current_principal)):
-    """WHICH exceptions this person put right — the count on Team Activity is
-    only the headline; this is the receipt behind it.
+    """WHO resolved what on the files this person SENT — the receipt behind the
+    "Put right" column above it.
 
-    Broker admin only, and naturally scoped to THIS broker even though
-    `user_id` is caller-supplied: every row is filtered on
-    `decided_by_broker_party_id == bid`, so a colleague's id from a DIFFERENT
-    broker returns nothing rather than leaking their name into a page that
-    was never theirs to open — there is no separate ownership check to forget.
+    It used to list the decisions this person made themselves, anywhere. That
+    answered a question nobody was asking and read as broken: Cleap's page said
+    "nothing put right" beside a file showing 65 put right, because the 65 were
+    the ADMIN's. What a broker admin wants from a person's page is the other
+    cut — this is the work on THEIR files, whoever did it, with the decider
+    named on every row.
+
+    Scoped to THIS broker by the FILES, not by the decider: only exports
+    stamped with this broker and sent by this user are looked at, so a user id
+    from another broker matches no export and returns nothing. That also lets a
+    decision made by a CARRIER person on one of these files appear — it is work
+    on this file, and the name is written the way a broker seat may see it
+    (their own people by name, the other side as its company: see
+    `decision_log.Labeller`).
+
+    A re-run moves the landing pointer to a new export, so decisions saved
+    against the older one are matched by landing too — otherwise "Fix & Validate"
+    would empty this list.
     """
-    from db import ExceptionDecisionLog, OutputExport
+    from db import ExceptionDecisionLog, LandingRecord, OutputExport
     with SessionLocal() as s:
         bid = _broker_admin(s, p)
         today = dt.datetime.utcnow().date()
         since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+
+        live = current_export_ids(s, broker_party_id=bid)
+        mine = [i for (i,) in s.query(OutputExport.id)
+                .filter(OutputExport.broker_party_id == bid,
+                        OutputExport.generated_by_user_id == user_id,
+                        OutputExport.created_at >= since,
+                        OutputExport.id.in_(live or {-1})).all()]
+        landings = [i for (i,) in s.query(LandingRecord.id)
+                    .filter(LandingRecord.output_export_id.in_(mine or [0])).all()]
         q = (s.query(ExceptionDecisionLog)
-              .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
-                      ExceptionDecisionLog.decided_by_user_id == user_id,
-                      ExceptionDecisionLog.decided_at >= since,
-                      ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss"))))
+              .filter(or_(ExceptionDecisionLog.export_id.in_(mine or [0]),
+                          ExceptionDecisionLog.landing_id.in_(landings or [0])),
+                      # Every kind that settles an exception, "reject" included:
+                      # the file's own tally counts a rejected one as put right,
+                      # so leaving it out here made the two disagree.
+                      ExceptionDecisionLog.kind.in_(
+                          ("fix", "approve", "dismiss", "reject"))))
         total = q.count()
         rows = (q.order_by(ExceptionDecisionLog.decided_at.desc())
                  .offset((page - 1) * page_size).limit(page_size).all())
@@ -1316,6 +1284,8 @@ def broker_person_decisions(user_id: int, days: int = Query(30, ge=7, le=90),
                        .filter(Program.id.in_(pids)).all()} if pids else {})
 
         from app_routes import _iso_utc
+        from decision_log import Labeller
+        who = Labeller(s, p)
 
         def _row(r):
             exp = exports.get(r.export_id)
@@ -1333,6 +1303,9 @@ def broker_person_decisions(user_id: int, days: int = Query(30, ge=7, le=90),
                 "export_id": r.export_id,
                 "filename": exp.filename if exp else None,
                 "programme": prog_names.get(exp.program_id) if exp else None,
+                # WHO resolved it, in the words this viewer may see.
+                "decided_by": who.label(r.decided_by_user_id),
+                "decided_by_user_id": r.decided_by_user_id,
             }
 
         # Same bid filter as the decisions query, for the same reason: a
@@ -1345,6 +1318,115 @@ def broker_person_decisions(user_id: int, days: int = Query(30, ge=7, le=90),
                        "name": (person.full_name or person.email) if person else None},
             "items": [_row(r) for r in rows],
             "total": total,
+        }
+
+
+@router.get("/broker/insights/people/{user_id}/files")
+def broker_person_files(user_id: int, days: int = Query(30, ge=7, le=90),
+                        page: int = Query(1, ge=1),
+                        page_size: int = Query(25, ge=1, le=100),
+                        p: Principal = Depends(current_principal)):
+    """WHICH files this person sent, and what is still open on each one.
+
+    The Team Activity bar is one number for a person — "564 of 564 open" — and
+    a broker admin cannot act on that. Those 564 came from four files on two
+    different programmes, and a programme is the unit a broker admin actually
+    reviews: the contract, the rules and the carrier all hang off it. So this
+    returns the files themselves, each with its own counts and its own way in,
+    plus the same totals grouped by programme. Sending an admin straight to the
+    newest flagged file (what the card's link used to do) answered a question
+    nobody asked.
+
+    Counted by `_export_tally`, the same function behind the dashboard bar, so
+    the file rows add up to the bar and each row equals the triage screen it
+    opens.
+
+    Broker admin only, and scoped to THIS broker: every export is filtered on
+    `broker_party_id == bid`, so a user id belonging to another broker returns
+    an empty list rather than that broker's files.
+    """
+    from db import OutputExport
+    from app_routes import _iso_utc
+    with SessionLocal() as s:
+        bid = _broker_admin(s, p)
+        today = dt.datetime.utcnow().date()
+        since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+
+        person = (s.query(AppUser)
+                   .filter(AppUser.id == user_id, AppUser.broker_party_id == bid)
+                   .first())
+        live = current_export_ids(s, broker_party_id=bid)
+        q = (s.query(OutputExport.id)
+              .filter(OutputExport.broker_party_id == bid,
+                      OutputExport.generated_by_user_id == user_id,
+                      OutputExport.created_at >= since,
+                      OutputExport.id.in_(live or {-1}))
+              .order_by(OutputExport.created_at.desc(), OutputExport.id.desc()))
+        eids = [i for (i,) in q.all()]
+        total = len(eids)
+
+        # Which carrier each programme belongs to — the broker's own links, so
+        # a programme it was taken off simply has no carrier name rather than
+        # reaching into a carrier it can no longer see.
+        links = _links(s, bid)
+        carrier_of_prog = {l.program_id: l.tenant_id for l in links}
+        cids = {c for c in carrier_of_prog.values() if c}
+        carrier_names = ({t.id: (t.legal_name or t.tenant_name) for t in
+                          s.query(Tenant).filter(Tenant.id.in_(cids)).all()}
+                         if cids else {})
+        pids = {pid for (pid,) in s.query(OutputExport.program_id)
+                .filter(OutputExport.id.in_(eids or [0])).distinct().all() if pid}
+        prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
+                       .filter(Program.id.in_(pids)).all()} if pids else {})
+
+        # Every file is tallied (the programme summary has to cover all of
+        # them), but only the page asked for is returned. A broker's files in a
+        # 30-day window are tens, not thousands — the cost is one exception blob
+        # per file, the same pass the dashboard already makes for its top five.
+        items, by_prog = [], {}
+        lo, hi = (page - 1) * page_size, (page - 1) * page_size + page_size
+        for n, eid in enumerate(eids):
+            r = s.get(OutputExport, eid)
+            if r is None:
+                continue
+            t = _export_tally(r)
+            cid = carrier_of_prog.get(r.program_id)
+            g = by_prog.setdefault(r.program_id, {
+                "id": r.program_id,
+                "name": prog_names.get(r.program_id) or "No programme",
+                "carrier": carrier_names.get(cid),
+                "files": 0, "rows": 0, "exceptions": 0, "open": 0, "put_right": 0,
+            })
+            g["files"] += 1
+            for k in ("rows", "exceptions", "open", "put_right"):
+                g[k] += t[k]
+            if lo <= n < hi:
+                items.append({
+                    "export_id": r.id,
+                    "source_upload_id": r.source_upload_id,
+                    "filename": r.filename,
+                    "programme_id": r.program_id,
+                    "programme": prog_names.get(r.program_id),
+                    "carrier": carrier_names.get(cid),
+                    "status": r.status,
+                    "created_at": _iso_utc(r.created_at),
+                    **t,
+                })
+            s.expunge(r)
+
+        programmes = sorted(by_prog.values(),
+                            key=lambda g: (-g["open"], -g["files"], g["name"].lower()))
+        return {
+            "person": {"id": user_id,
+                       "name": (person.full_name or person.email) if person else None},
+            "items": items,
+            "total": total,
+            "by_programme": programmes,
+            "totals": {
+                "files": total,
+                **{k: sum(g[k] for g in programmes)
+                   for k in ("rows", "exceptions", "open", "put_right")},
+            },
         }
 
 

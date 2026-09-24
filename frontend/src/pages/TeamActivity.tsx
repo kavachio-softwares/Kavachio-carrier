@@ -73,7 +73,7 @@ export default function TeamActivity() {
                       <th style={{ textAlign: "right" }}>Rows</th>
                       <th style={{ textAlign: "right" }}>Exceptions</th>
                       <th style={{ textAlign: "right" }}>Still open</th>
-                      <th style={{ textAlign: "right" }}>Put right</th>
+                      <th style={{ textAlign: "right" }}>Resolved</th>
                       <th style={{ textAlign: "right" }}>Their decisions</th>
                     </tr>
                   </thead>
@@ -89,10 +89,10 @@ export default function TeamActivity() {
                         <Num v={u.uploads.rows} />
                         <Num v={u.uploads.exceptions} />
                         <td style={{ textAlign: "right" }}>
-                          {u.uploads.open > 0 && u.uploads.latest_export_id ? (
-                            <Link className="btn sm"
-                                  to={`/uploads/${u.uploads.latest_upload_id ?? u.uploads.latest_export_id}`
-                                      + `/exceptions?download=${u.uploads.latest_export_id}&from=broker`}>
+                          {u.uploads.open > 0 ? (
+                            // Their file list, where the open work is split by
+                            // file and by programme — see PersonActivity.
+                            <Link className="btn sm" to={`/broker/team-activity/${u.id}`}>
                               {u.uploads.open} →
                             </Link>
                           ) : (

@@ -229,10 +229,6 @@ export type UploaderWork = {
   open: number;
   /** Fixed, approved, dismissed or rejected — by anyone on the team. */
   put_right: number;
-  /** The newest of their files that still has something open, for the link
-   *  out of the row; null when nothing is open. */
-  latest_export_id: number | null;
-  latest_upload_id: number | null;
 };
 
 /** A person on the broker's own team. `files` is what they sent through
@@ -272,6 +268,46 @@ export type BrokerInsights = {
   };
 };
 
+/** One file a person sent, with the same counts the dashboard bar is made of. */
+export type PersonFile = {
+  export_id: number;
+  source_upload_id: number | null;
+  filename: string | null;
+  programme_id: number | null;
+  programme: string | null;
+  carrier: string | null;
+  status: string | null;
+  created_at: string | null;
+  rows: number;
+  rows_flagged: number;
+  exceptions: number;
+  open: number;
+  put_right: number;
+};
+
+/** One programme's share of what a person sent — the cut a broker admin
+ *  reviews by, since the contract, the rules and the carrier all hang off the
+ *  programme. */
+export type PersonProgramme = {
+  id: number | null; name: string; carrier: string | null;
+  files: number; rows: number; exceptions: number; open: number; put_right: number;
+};
+
+export type PersonFiles = {
+  person: { id: number; name: string | null };
+  items: PersonFile[];
+  total: number;
+  by_programme: PersonProgramme[];
+  totals: { files: number; rows: number; exceptions: number; open: number; put_right: number };
+};
+
+export const getPersonFiles = (
+  userId: number,
+  { days = 30, page = 1, pageSize = 25 }: { days?: number; page?: number; pageSize?: number } = {},
+) =>
+  api.get<PersonFiles>(`/broker/insights/people/${userId}/files`,
+    { params: { days, page, page_size: pageSize } }).then(r => r.data);
+
 export const getBrokerInsights = (days = 30) =>
   api.get<BrokerInsights>("/broker/insights", { params: { days } })
      .then(r => r.data);
@@ -306,6 +342,10 @@ export type PersonDecision = {
   export_id: number | null;
   filename: string | null;
   programme: string | null;
+  /** WHO resolved it, in the words this viewer may see: their own colleagues
+   *  by name, the other side as its company (see backend decision_log). */
+  decided_by: string | null;
+  decided_by_user_id: number | null;
 };
 
 /** WHICH exceptions a person put right, newest first, a page at a time —

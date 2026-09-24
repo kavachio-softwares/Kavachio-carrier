@@ -19,7 +19,7 @@
  * The two-series pairs used here were checked for colour-blind separation
  * rather than eyeballed.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
@@ -64,14 +64,21 @@ const dayLabel = (l: any) => shortDay(String(l ?? ""));
  *  7 days or 90 and the axis has to stay readable at both. */
 const tickEvery = (n: number) => Math.max(0, Math.ceil(n / 8) - 1);
 
-type Row = { id: number; name: string; value: number; note?: string };
+type Row = {
+  id: number; name: string; value: number; note?: string;
+  /** The rest of this row's own whole — e.g. `value` is what is still open and
+   *  `settled` what has been put right, so `value + settled` is everything
+   *  that row raised. Present it and the bar stops being scaled against the
+   *  biggest row and becomes this row's own 100%. See RankedRow. */
+  settled?: number;
+};
 
 /**
  * Ranked horizontal bars. The top `cap` rows are drawn, each with its value at
  * the end of its track, so a zero reads as a zero rather than a missing bar;
  * rows past the cap are one click away in a list that holds any number.
  */
-export function RankedBars({ rows, cap = 8, unit, empty, total, onViewAll, linkTo }: {
+export function RankedBars({ rows, cap = 8, unit, empty, total, onViewAll, linkTo, title }: {
   rows: Row[]; cap?: number; unit: string; empty: string;
   /** The full count when `rows` is only the top of a longer list the server
    *  holds; "View all" then calls `onViewAll` instead of opening `rows`. */
@@ -80,6 +87,10 @@ export function RankedBars({ rows, cap = 8, unit, empty, total, onViewAll, linkT
   /** When given, each row opens the detail behind its own number — e.g. a
    *  person's count is a total; this is how a reader reaches WHICH ones. */
   linkTo?: (row: Row) => string;
+  /** Heading for the "view all" dialog. Defaults to the unit, but a card that
+   *  has a name should pass it — the dialog covers the card it came from, so
+   *  without it the reader loses which chart they opened. */
+  title?: string;
 }) {
   const [all, setAll] = useState(false);
   const ranked = [...rows].sort((a, b) => b.value - a.value || a.name.localeCompare(b.name));
@@ -90,83 +101,164 @@ export function RankedBars({ rows, cap = 8, unit, empty, total, onViewAll, linkT
   const more = count - shown.length;
   const max = Math.max(1, ...shown.map(r => r.value));
 
+  const share = ranked.some(r => r.settled != null);
+
   return (
     <div>
+      {share && <ShareLegend />}
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {shown.map(r => {
-          const row = (
-            <div style={{ display: "grid", gridTemplateColumns: "140px 1fr 40px",
-                          alignItems: "center", gap: 12 }}>
-              <span style={{ fontSize: 13, color: "var(--p-ink)", overflow: "hidden",
-                             textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {r.name}
-                {r.note && <span style={{ color: "var(--p-faint)" }}> · {r.note}</span>}
-              </span>
-              <span style={{ height: 10, borderRadius: 5, background: "#F0F2F6", overflow: "hidden" }}>
-                <span style={{ display: "block", height: "100%", borderRadius: 5, background: HUE,
-                               width: `${(r.value / max) * 100}%` }} />
-              </span>
-              <span style={{ fontSize: 13, fontWeight: 600, textAlign: "right",
-                             fontVariantNumeric: "tabular-nums",
-                             color: r.value ? "var(--p-ink)" : "var(--p-faint)" }}>
-                {r.value}
-              </span>
-            </div>
-          );
-          return linkTo ? (
-            <Link key={r.id} to={linkTo(r)}
-                  title={`${r.name}: ${r.value} ${unit} — see which ones`}
-                  style={{ color: "inherit", textDecoration: "none" }}
-                  className="rb-row">
-              {row}
-            </Link>
-          ) : (
-            <div key={r.id} title={`${r.name}: ${r.value} ${unit}`}>{row}</div>
-          );
-        })}
+        {shown.map(r => (
+          <RankedRow key={r.id} r={r} max={max} unit={unit} linkTo={linkTo} />
+        ))}
       </div>
       {more > 0 && (
         <div style={{ textAlign: "right", marginTop: 14 }}>
           <button type="button" className="linkish"
                   style={{ background: "none", border: 0, cursor: "pointer", fontSize: 13 }}
-                  onClick={() => (onViewAll ? onViewAll() : setAll(v => !v))}>
-            {all ? "Show less" : `View all ${count} →`}
+                  onClick={() => (onViewAll ? onViewAll() : setAll(true))}>
+            View all {count} →
           </button>
         </div>
       )}
-      {all && <FullList rows={ranked} unit={unit} linkTo={linkTo} />}
+      {all && (
+        <FullListModal rows={ranked} unit={unit} linkTo={linkTo}
+          title={title ?? `All ${unit}`} onClose={() => setAll(false)} />
+      )}
     </div>
   );
 }
 
-/** Every row, however many there are — the chart shows the top of the list,
- *  this is the whole of it, and the readable form for anyone the chart's
- *  shapes do not serve. It scrolls rather than stretching the card. */
-function FullList({ rows, unit, linkTo }: { rows: Row[]; unit: string; linkTo?: (row: Row) => string }) {
+/** One bar. The same row in the card and in the dialog, so opening the full
+ *  list does not change the shape of what is being read — only how much of it
+ *  is on screen.
+ *
+ *  TWO BARS LIVE HERE, and `settled` decides which.
+ *
+ *  Without it the bar is scaled against the biggest row: the length says "how
+ *  this row compares with the leader", which is what a ranked chart is for.
+ *
+ *  With it the bar is this row's OWN whole — still open, then put right — and
+ *  length no longer compares rows at all. That is the honest shape for a
+ *  rounded bar sitting in a track, which every reader has learned to read as a
+ *  progress meter: at max-scaling a broker with 913 of the leader's 1,116 drew
+ *  an 82%-full meter and was read as "82% of their file is broken". The count
+ *  beside it carries the volume, which the length no longer can. */
+function RankedRow({ r, max, unit, linkTo }: {
+  r: Row; max: number; unit: string; linkTo?: (row: Row) => string;
+}) {
+  const share = r.settled != null;
+  const whole = share ? r.value + (r.settled ?? 0) : 0;
+  const openPct = share ? (whole ? (r.value / whole) * 100 : 0) : (r.value / max) * 100;
+  const row = (
+    <div style={{ display: "grid",
+                  gridTemplateColumns: share ? "140px 1fr 96px" : "140px 1fr 40px",
+                  alignItems: "center", gap: 12 }}>
+      <span style={{ fontSize: 13, color: "var(--p-ink)", overflow: "hidden",
+                     textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {r.name}
+        {r.note && <span style={{ color: "var(--p-faint)" }}> · {r.note}</span>}
+      </span>
+      <span style={{ height: 10, borderRadius: 5, background: "#F0F2F6",
+                     overflow: "hidden", display: "flex" }}>
+        <span style={{ display: "block", height: "100%", borderRadius: 5,
+                       background: share ? FLAGGED : HUE, width: `${openPct}%` }} />
+        {share && (r.settled ?? 0) > 0 && (
+          <span style={{ display: "block", height: "100%", borderRadius: 5,
+                         background: CLEAN, width: `${100 - openPct}%` }} />
+        )}
+      </span>
+      {share ? (
+        <span style={{ fontSize: 12.5, textAlign: "right", fontVariantNumeric: "tabular-nums",
+                       color: "var(--p-muted)", lineHeight: 1.25 }}>
+          <b style={{ color: r.value ? "var(--p-ink)" : "var(--p-faint)" }}>{r.value}</b>
+          {" "}of {whole}
+          <span style={{ display: "block", fontSize: 11, color: "var(--p-faint)" }}>
+            {whole ? Math.round(openPct) : 0}% open
+          </span>
+        </span>
+      ) : (
+        <span style={{ fontSize: 13, fontWeight: 600, textAlign: "right",
+                       fontVariantNumeric: "tabular-nums",
+                       color: r.value ? "var(--p-ink)" : "var(--p-faint)" }}>
+          {r.value}
+        </span>
+      )}
+    </div>
+  );
+  const tip = share
+    ? `${r.name}: ${r.value} of ${whole} ${unit} still open — ${r.settled} put right`
+    : `${r.name}: ${r.value} ${unit}`;
+  return linkTo ? (
+    <Link to={linkTo(r)} title={`${tip} — see which ones`}
+          style={{ color: "inherit", textDecoration: "none" }} className="rb-row">
+      {row}
+    </Link>
+  ) : (
+    <div title={tip}>{row}</div>
+  );
+}
+
+/** The two halves, named. Colour is doing real work in a share bar — it is the
+ *  only thing separating the part that needs someone from the part that is
+ *  done — so it has to be written down somewhere. */
+function ShareLegend() {
   return (
-    <div className="tbl-wrap" style={{ marginTop: 10, maxHeight: 280, overflowY: "auto" }}>
-      <table>
-        <thead>
-          <tr><th>#</th><th>Name</th><th style={{ textAlign: "right" }}>{unit}</th></tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={r.id}>
-              <td className="muted">{i + 1}</td>
-              <td>
-                {linkTo ? (
-                  <Link to={linkTo(r)}>{r.name}</Link>
-                ) : r.name}
-                {r.note && <span className="muted" style={{ fontSize: 12 }}> · {r.note}</span>}
-              </td>
-              <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums",
-                           color: r.value ? undefined : "var(--p-faint)" }}>
-                {r.value}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div style={{ display: "flex", gap: 14, fontSize: 11.5, color: "var(--p-muted)",
+                  marginBottom: 12 }}>
+      {[["Still open", FLAGGED], ["Resolved", CLEAN]].map(([label, c]) => (
+        <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span style={{ width: 9, height: 9, borderRadius: 3, background: c }} />{label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Every row, however many there are, in a dialog.
+ *
+ *  It used to be a numbered table appended under the chart, which made the card
+ *  grow a second, differently-shaped reading of the same data and pushed
+ *  whatever sat beside it out of line. As a dialog the list keeps the chart's
+ *  own bars — the long tail is still ranked against the leader, which is the
+ *  comparison the card exists to make — and the card behind it does not move.
+ *
+ *  Bars are scaled to the top row of the WHOLE list, not of the page, so a row
+ *  is the same length here as it is in the card. */
+function FullListModal({ rows, unit, linkTo, title, onClose }: {
+  rows: Row[]; unit: string; linkTo?: (row: Row) => string;
+  title: string; onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const max = Math.max(1, ...rows.map(r => r.value));
+  const sum = rows.reduce((a, r) => a + r.value, 0);
+
+  return (
+    <div className="proto-modal-overlay" onClick={onClose}>
+      <div className="proto-modal" style={{ width: 680 }} onClick={e => e.stopPropagation()}
+           role="dialog" aria-modal="true" aria-label={title}>
+        <div className="m-h">
+          <h3>{title}</h3>
+          <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 14 }}>
+            <span style={{ fontSize: 13, color: "var(--p-faint)" }}>
+              {sum} {unit} · {rows.length} rows
+            </span>
+            <button type="button" className="x" onClick={onClose} aria-label="Close">×</button>
+          </span>
+        </div>
+        <div className="m-b" style={{ maxHeight: "60vh", overflowY: "auto" }}>
+          {rows.some(r => r.settled != null) && <ShareLegend />}
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {rows.map(r => (
+              <RankedRow key={r.id} r={r} max={max} unit={unit} linkTo={linkTo} />
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -230,7 +322,7 @@ export function ResolvedTrend({ data }: {
                  axisLine={false} tickLine={false} tick={axisTick} />
           <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
           <Tooltip {...TIP} labelFormatter={dayLabel}
-                   formatter={(v: any) => [v, "Put right"]} />
+                   formatter={(v: any) => [v, "Resolved"]} />
           <Line type="monotone" dataKey="resolved" stroke={HUE} strokeWidth={2}
                 dot={false} activeDot={{ r: 5 }} />
         </LineChart>
@@ -257,7 +349,6 @@ export type UploaderRow = {
   uploads: {
     rows: number; rows_flagged: number;
     exceptions: number; open: number; put_right: number;
-    latest_export_id: number | null; latest_upload_id: number | null;
   };
   /** Exceptions this person decided themselves, wherever the file came from. */
   resolved: number;
@@ -302,7 +393,7 @@ export function UploaderBars({ rows, cap = 5, total, onViewAll, personTo, empty 
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12,
                     color: "var(--p-muted)", marginBottom: 14 }}>
         <Key color={OPEN} label="Still open" />
-        <Key color={PUT_RIGHT} label="Put right" />
+        <Key color={PUT_RIGHT} label="Resolved" />
         <Key color={NO_ISSUES} label="No issues" />
       </div>
 
@@ -399,11 +490,13 @@ function UploaderRowView({ r, personTo }: {
           <>
             <b style={{ color: "var(--p-ink)" }}>{u.open}</b> of {u.exceptions} open
             <span style={{ display: "block", fontSize: 11.5 }}>
-              {u.latest_export_id ? (
-                <Link className="linkish"
-                      to={`/uploads/${u.latest_upload_id ?? u.latest_export_id}/exceptions`
-                          + `?download=${u.latest_export_id}&from=broker`}>
-                  Open exceptions →
+              {/* Their FILES, not the newest one. Four files on two programmes
+                  behind one number is the normal case, and dropping an admin
+                  into whichever file happened to be last answered a question
+                  nobody asked. */}
+              {personTo ? (
+                <Link className="linkish" to={personTo(r)}>
+                  {r.files === 1 ? "Review this file →" : `Review ${r.files} files →`}
                 </Link>
               ) : <span style={{ color: "var(--p-faint)" }}>{u.put_right} put right</span>}
             </span>

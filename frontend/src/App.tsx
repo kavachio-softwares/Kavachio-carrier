@@ -65,6 +65,7 @@ import {
 } from "./auth";
 import { canAccessPath, landingPath } from "./access";
 import BrokerDetail from "./pages/BrokerDetail";
+import BrokerFiles from "./pages/BrokerFiles";
 import Brokers from "./pages/Brokers";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -170,6 +171,9 @@ export default function App() {
             from a tenant — the same broker produces for several carriers. */}
         <Route path="/brokers" element={<Brokers />} />
         <Route path="/brokers/:brokerId" element={<BrokerDetail />} />
+        {/* What that broker has SENT, split by programme — opened from the
+            Broker Performance card on Home. */}
+        <Route path="/brokers/:brokerId/files" element={<BrokerFiles />} />
         {/* Carrier-scoped oversight dashboard. Without ?carrier= it renders its
             own carrier picker, so the route needs no param of its own. */}
         <Route path="/program-management" element={<ProgramManagement />} />

@@ -4658,7 +4658,9 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         ).filter(
             ExceptionDecisionLog.tenant_id == tid,
             ExceptionDecisionLog.decided_at >= week_ago,
-            ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss"))
+            # "reject" settles an exception too, and broker_tally counts a
+            # rejected one as resolved — the trend has to agree with the tiles.
+            ExceptionDecisionLog.kind.in_(("fix", "approve", "dismiss", "reject"))
         ).group_by(func.date(ExceptionDecisionLog.decided_at)).all()
         
         for d, c in resolved_rows:
@@ -4869,13 +4871,25 @@ def dashboard_broker_performance(mga: str,
     Per broker:
       runs / clean / flagged / not_checked
                    the files run for this carrier in the last `days`
-      latest       the broker's most recent file WITH issues, counted exactly
-                   as its Exception Triage screen counts them (same decision
-                   matching, same notices left out), so the bar and the screen
-                   it opens always agree: issues = resolved + open.
-                   A broker with no file with issues reports its most recent
-                   CLEAN file instead (issues = 0), so the card can say "clean"
-                   rather than go blank. NULL only when nothing was checked.
+      work         EVERY live file that broker sent in the window, tallied
+                   together: files, rows, exceptions, resolved, open — counted
+                   exactly as each file's Exception Triage screen counts them
+                   (same decision test, same notices left out), so the bar and
+                   the screens behind it always agree. A broker whose files are
+                   all clean has exceptions = 0, which is what draws the grey
+                   "clean" bar.
+
+    WHY ALL OF THEM AND NOT THE LATEST ONE. The card used to report a broker's
+    most recent flagged file and nothing else, so a broker that had sent four
+    files showed one file's numbers under its name — "14 of 14 open" for a
+    broker actually carrying 564. A bar under a company's name is read as that
+    company's workload, and a workload is all of it. The row links to that
+    broker's own file list, where the same total is split by programme and by
+    file, which is the level anything can actually be done at.
+
+    A superseded run is not counted twice: a "Fix & re-run" moves the landing
+    pointer to the new export and the old one becomes history (see
+    `exception_tally.current_export_ids`).
     """
     since = datetime.utcnow() - timedelta(days=days)   # stored times are utcnow
     with SessionLocal() as s:
@@ -4896,38 +4910,46 @@ def dashboard_broker_performance(mga: str,
         per: dict[int, dict] = {}
         for eid, bid, status, created in exports:          # newest first
             b = per.setdefault(bid, {"clean": 0, "flagged": 0, "not_checked": 0,
-                                     "last_run_at": created, "latest_export_id": None,
-                                     "latest_clean_id": None})
+                                     "last_run_at": created})
             if status == "clean":
                 b["clean"] += 1
-                if b["latest_clean_id"] is None:
-                    b["latest_clean_id"] = eid
             elif status == "has_exceptions":
                 b["flagged"] += 1
-                if b["latest_export_id"] is None:
-                    b["latest_export_id"] = eid
             else:
                 b["not_checked"] += 1
-        # A file with issues is what the card is FOR, so it wins even when a
-        # cleaner file came after it — outstanding work must not be hidden by
-        # the next good run. Only a broker with nothing outstanding falls back
-        # to its latest clean file, which is what draws the all-clean bar.
-        for b in per.values():
-            b["latest_export_id"] = b["latest_export_id"] or b["latest_clean_id"]
+        # No "latest file" is singled out any more: outstanding work cannot be
+        # hidden by a later good run when every file in the window is counted.
 
         ranked = sorted(per.items(), key=lambda kv: kv[1]["last_run_at"] or since,
                         reverse=True)[:limit]
         names = {p.id: (p.legal_name or p.dba_name or "—") for p in
                  s.query(Party).filter(Party.id.in_([bid for bid, _ in ranked] or [0])).all()}
 
-        from main import _attach_decisions   # the triage screen's own matching
-        from broker_tally import broker_latest_tally
+        from exception_tally import current_export_ids, export_tally
+        live = current_export_ids(s, tenant_id=tid)
 
-        def _tally(export_id):
-            r = s.get(OutputExport, export_id)
-            t = broker_latest_tally(_attach_decisions(r.exceptions or [], r))
-            return {"export_id": r.id, "source_upload_id": r.source_upload_id,
-                    "run_at": _iso_utc(r.created_at), **t}
+        def _work(broker_id) -> dict:
+            """Every live file this broker sent this carrier in the window."""
+            total = {"files": 0, "rows": 0, "exceptions": 0, "resolved": 0, "open": 0}
+            ids = [i for (i,) in s.query(OutputExport.id)
+                   .filter(OutputExport.tenant_id == tid,
+                           OutputExport.broker_party_id == broker_id,
+                           OutputExport.created_at >= since,
+                           OutputExport.id.in_(live or {-1})).all()]
+            for eid in ids:
+                # One export at a time, then let it go: the exceptions column
+                # runs to megabytes on a big bordereau.
+                r = s.get(OutputExport, eid)
+                if r is None:
+                    continue
+                t = export_tally(r)
+                total["files"] += 1
+                total["rows"] += t["rows"]
+                total["exceptions"] += t["exceptions"]
+                total["open"] += t["open"]
+                total["resolved"] += t["put_right"]
+                s.expunge(r)
+            return total
 
         items = []
         for bid, b in ranked:
@@ -4937,9 +4959,86 @@ def dashboard_broker_performance(mga: str,
                 "clean": b["clean"], "flagged": b["flagged"],
                 "not_checked": b["not_checked"],
                 "last_run_at": _iso_utc(b["last_run_at"]),
-                "latest": _tally(b["latest_export_id"]) if b["latest_export_id"] else None,
+                "work": _work(bid),
             })
         return {"days": days, "items": items, "active_total": len(per)}
+
+
+@router.get("/dashboard/brokers/{broker_party_id}/files")
+def dashboard_broker_files(broker_party_id: int, mga: str,
+                           days: int = Query(30, ge=7, le=90),
+                           page: int = Query(1, ge=1),
+                           page_size: int = Query(25, ge=1, le=100),
+                           principal: Principal = Depends(current_principal)):
+    """WHICH files one broker sent this carrier, and what is still open on each.
+
+    The carrier half of the broker's own "files they sent" page: same grouping
+    by programme, same counts, opposite end of the relationship. A programme is
+    the unit being reviewed on both sides — the contract, the rules and the
+    carrier all hang off it — so two files on one programme are one contract's
+    worth of work, and a carrier reading "536 open" needs to see that it is two
+    runs of the same bordereau rather than one catastrophic file.
+
+    Scoped to THIS carrier's tenant, so a broker party id from outside returns
+    an empty list rather than another carrier's runs.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        from exception_tally import current_export_ids, export_tally
+        live = current_export_ids(s, tenant_id=tid)
+        eids = [i for (i,) in s.query(OutputExport.id)
+                .filter(OutputExport.tenant_id == tid,
+                        OutputExport.broker_party_id == broker_party_id,
+                        OutputExport.created_at >= since,
+                        OutputExport.id.in_(live or {-1}))
+                .order_by(OutputExport.created_at.desc(),
+                          OutputExport.id.desc()).all()]
+        broker = s.query(Party).filter(Party.id == broker_party_id).first()
+        prog_names = {pid: nm for pid, nm in s.query(Program.id, Program.name)
+                      .filter(Program.tenant_id == tid).all()}
+
+        items, by_prog = [], {}
+        lo, hi = (page - 1) * page_size, (page - 1) * page_size + page_size
+        for n, eid in enumerate(eids):
+            r = s.get(OutputExport, eid)
+            if r is None:
+                continue
+            t = export_tally(r)
+            g = by_prog.setdefault(r.program_id, {
+                "id": r.program_id,
+                "name": prog_names.get(r.program_id) or "No programme",
+                "files": 0, "rows": 0, "exceptions": 0, "open": 0, "put_right": 0,
+            })
+            g["files"] += 1
+            for k in ("rows", "exceptions", "open", "put_right"):
+                g[k] += t[k]
+            if lo <= n < hi:
+                items.append({
+                    "export_id": r.id,
+                    "source_upload_id": r.source_upload_id,
+                    "filename": r.filename,
+                    "programme_id": r.program_id,
+                    "programme": prog_names.get(r.program_id),
+                    "status": r.status,
+                    "created_at": _iso_utc(r.created_at),
+                    **t,
+                })
+            s.expunge(r)
+
+        programmes = sorted(by_prog.values(),
+                            key=lambda g: (-g["open"], -g["files"], g["name"].lower()))
+        return {
+            "broker": {"id": broker_party_id,
+                       "name": (broker.legal_name or broker.dba_name) if broker else None},
+            "days": days,
+            "items": items,
+            "total": len(eids),
+            "by_programme": programmes,
+            "totals": {"files": len(eids),
+                       **{k: sum(g[k] for g in programmes)
+                          for k in ("rows", "exceptions", "open", "put_right")}},
+        }
 
 
 # ---- Program Management — the CARRIER-scoped oversight dashboard ----------
@@ -5479,7 +5578,7 @@ def _platform_open_exceptions(s, since: datetime, carrier: Optional[int] = None,
 
     The period (`since`) decides WHICH files: open exceptions are counted on
     current files run in the period, so every card under the dashboard's period
-    filter answers for the same files. "Put right" is activity: decisions made
+    filter answers for the same files. "Resolved" is activity: decisions made
     in the period, on any current file — a file run last month and fixed
     yesterday was put right yesterday."""
     from main import _attach_decisions
@@ -5501,6 +5600,16 @@ def _platform_open_exceptions(s, since: datetime, carrier: Optional[int] = None,
     open_items: list = []
     by_carrier: dict = {}
     by_broker: dict = {}
+    # The other half of each ranked row: exceptions on the SAME files that have
+    # already been decided. Deliberately not the `put_right` totals below —
+    # those count decision ACTIVITY in the period, on files of any age, which is
+    # the right answer to "what did we get through" and the wrong one to "how
+    # much of this broker's work is left". A bar has to be a whole: both halves
+    # here are drawn from one set of files, the current ones run in the period,
+    # so open + settled is everything that file raised and the bar can be that
+    # broker's own 100%.
+    settled_by_carrier: dict = {}
+    settled_by_broker: dict = {}
     put_right = {k: 0 for k in _PUT_RIGHT_KINDS}
     waiting = 0
     carriers_seen: set = set()
@@ -5532,6 +5641,11 @@ def _platform_open_exceptions(s, since: datetime, carrier: Optional[int] = None,
                 if r.created_at and _naive(r.created_at) < week_ago:
                     waiting += 1
             else:
+                if in_period:
+                    settled_by_carrier[r.tenant_id] = settled_by_carrier.get(r.tenant_id, 0) + 1
+                    if r.broker_party_id:
+                        settled_by_broker[r.broker_party_id] = \
+                            settled_by_broker.get(r.broker_party_id, 0) + 1
                 at = _naive_utc(e.get("decided_at"))
                 if at is not None and at >= since:
                     put_right[kind] += 1
@@ -5543,6 +5657,7 @@ def _platform_open_exceptions(s, since: datetime, carrier: Optional[int] = None,
         "waiting_over_7d": waiting,
         "put_right": {**put_right, "total": sum(put_right.values())},
         "by_carrier": by_carrier, "by_broker": by_broker,
+        "settled_by_carrier": settled_by_carrier, "settled_by_broker": settled_by_broker,
         "carriers_seen": carriers_seen, "brokers_seen": brokers_seen,
     }
 
@@ -5917,10 +6032,15 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
             "total": ox["total"], "critical": ox["critical"],
             "warning": ox["warning"], "info": ox["info"],
             "waiting_over_7d": ox["waiting_over_7d"], "put_right": ox["put_right"],
-            "by_carrier": sorted(({"id": k, "name": tname.get(k, "—"), "open": v}
+            # `settled` is the rest of that row's own bar — see the note in
+            # _open_exceptions. open + settled is every exception those files
+            # raised, so each row can be drawn as its own 100%.
+            "by_carrier": sorted(({"id": k, "name": tname.get(k, "—"), "open": v,
+                                   "settled": ox["settled_by_carrier"].get(k, 0)}
                                   for k, v in ox["by_carrier"].items() if v),
                                  key=lambda r: -r["open"]),
-            "by_broker": sorted(({"id": k, "name": pname.get(k, "—"), "open": v}
+            "by_broker": sorted(({"id": k, "name": pname.get(k, "—"), "open": v,
+                                  "settled": ox["settled_by_broker"].get(k, 0)}
                                  for k, v in ox["by_broker"].items() if v),
                                 key=lambda r: -r["open"]),
             # Carriers / brokers with current files but nothing left open.

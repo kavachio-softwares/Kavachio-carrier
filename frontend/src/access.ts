@@ -115,6 +115,9 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // link from the wrong role.
   { pattern: "/contracts/signatures", requires: "carrier_admin" },
   { pattern: "/brokers/:brokerId", requires: "carrier_admin" },
+  // What a broker has sent this carrier, from the Home card. Same gate as the
+  // broker record it sits beside; both carrier seats rank as carrier_admin.
+  { pattern: "/brokers/:brokerId/files", requires: "carrier_admin" },
   { pattern: "/outputs/templates/:id", requires: "carrier_admin" },
   // Exception triage. Open to BROKER seats too, not only the carrier: a broker
   // who ran a bordereau has to be able to see what failed on their own file and

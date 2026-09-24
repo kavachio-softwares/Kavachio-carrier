@@ -18,6 +18,21 @@ def _exception_settled(e: dict) -> bool:
         and note.startswith(("fixed", "approved", "dismissed", "rejected")))
 
 
+def settled(e: dict) -> bool:
+    """Public name for the decided test — the carrier card, the broker card and
+    the per-file lists all have to apply the SAME one (see exception_tally)."""
+    return _exception_settled(e)
+
+
+def countable(exceptions: list) -> list:
+    """The exceptions that are work: notices and unchecked rules left out."""
+    return [e for e in (exceptions or [])
+            if isinstance(e, dict)
+            and e.get("error_class") != "not_checked"
+            and not (e.get("error_class") == "not_validated"
+                     and e.get("rule_id") is None)]
+
+
 def broker_latest_tally(exceptions: list) -> dict:
     """Count the issues on one generated file: `issues` = `resolved` + `open`.
 
@@ -28,10 +43,6 @@ def broker_latest_tally(exceptions: list) -> dict:
     the file's ROWS: an issue is raised per field, so several can land on one
     row and row shares would tell a different story.
     """
-    excs = [e for e in (exceptions or [])
-            if isinstance(e, dict)
-            and e.get("error_class") != "not_checked"
-            and not (e.get("error_class") == "not_validated"
-                     and e.get("rule_id") is None)]
+    excs = countable(exceptions)
     done = sum(1 for e in excs if _exception_settled(e))
     return {"issues": len(excs), "resolved": done, "open": len(excs) - done}

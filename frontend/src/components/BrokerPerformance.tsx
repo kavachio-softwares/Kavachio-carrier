@@ -12,24 +12,24 @@ const OPEN = "#C77A12";
 const CLEAN = "#DDE1E8";
 const TRACK = "#F0F2F6";
 
-/** The broker's most recent file with issues, counted exactly as its
- *  Exception Triage screen counts them — the bar and the screen it opens
- *  always agree (issues = resolved + open). */
-type Latest = {
-  export_id: number; source_upload_id: number | null;
-  issues: number; resolved: number; open: number; run_at: string | null;
+/** EVERY live file this broker sent in the window, tallied together and
+ *  counted exactly as each file's Exception Triage screen counts them —
+ *  exceptions = resolved + open. */
+type Work = {
+  files: number; rows: number;
+  exceptions: number; resolved: number; open: number;
 };
 
 export type BrokerPerf = {
   id: number; name: string;
   runs: number; clean: number; flagged: number; not_checked: number;
   last_run_at: string | null;
-  latest: Latest | null;
+  work: Work;
 };
 
-/** The same Exception Triage screen the dashboard's own runs open. */
-const triagePath = (l: Latest) =>
-  `/uploads/${l.source_upload_id ?? l.export_id}/exceptions?download=${l.export_id}&from=home`;
+/** That broker's own files, split by programme — the level anything can be
+ *  done at. The file rows there open the Exception Triage screens. */
+const filesPath = (r: BrokerPerf) => `/brokers/${r.id}/files`;
 
 const DAYS = 30;
 
@@ -39,13 +39,17 @@ const DAYS = 30;
  * carrier seats see the same brokers, because every other number on this
  * dashboard is counted over the whole carrier too.
  *
- * One stacked horizontal bar per broker — the issues on its latest file:
- * resolved (green) then still open (amber), counted as its Exception Triage
- * screen counts them. Each bar is that broker's own 100%, so it shows how far
- * that file has been put right, never how it compares with another broker —
- * the counts on the right carry the volume. A broker with nothing outstanding
- * reports its latest clean file instead, drawn as one grey bar.
- * Clicking a broker opens that screen.
+ * One stacked horizontal bar per broker — ALL the issues on ALL the files it
+ * sent in the window: resolved (green) then still open (amber), counted as
+ * each file's Exception Triage screen counts them. Showing only the latest
+ * file put one file's numbers under a company's name; a bar under a company is
+ * read as that company's workload, and a workload is all of it.
+ *
+ * Each bar is that broker's own 100%, so it shows how far that broker's pile
+ * has been cleared, never how it compares with another broker — the counts on
+ * the right carry the volume. A broker whose files are all clean gets one grey
+ * bar. Clicking a broker opens its files, split by programme, each with its
+ * own way into the exceptions.
  * Every number is also written out on the row, so colour is never the only
  * way to read it.
  */
@@ -65,11 +69,11 @@ export default function BrokerPerformance({ mga }: { mga: string }) {
       title="Broker Performance"
       info={<InfoTip text={
         `The broker companies that sent files most recently, over the last ${DAYS} days. `
-        + "Each bar is all the issues on that broker's latest file: green is the "
-        + "share resolved, amber the share still open — the same numbers as its "
-        + "exception screen, or one grey bar when that file is clean. Bars are not "
-        + "compared with each other; the counts on the right are. Click a broker to "
-        + "open it."} />}
+        + "Each bar is every issue on every file that broker sent: green is the "
+        + "share resolved, amber the share still open — the same numbers as those "
+        + "files' exception screens, or one grey bar when nothing was flagged. Bars "
+        + "are not compared with each other; the counts on the right are. Click a "
+        + "broker for its files, split by programme."} />}
     >
       {rows === null ? (
         <div className="empty">Loading…</div>
@@ -107,17 +111,17 @@ export default function BrokerPerformance({ mga }: { mga: string }) {
 }
 
 function Row({ r }: { r: BrokerPerf }) {
-  const l = r.latest;
+  const w = r.work;
   const cleanPct = r.runs ? Math.round((r.clean / r.runs) * 100) : 0;
   const tip = [
     r.name,
     `Last ${DAYS} days: ${r.runs} ${r.runs === 1 ? "file" : "files"} — ${r.clean} clean, `
       + `${r.flagged} with issues` + (r.not_checked ? `, ${r.not_checked} not checked` : ""),
-    !l ? "No file checked"
-      : l.issues ? `Latest file with issues: ${l.issues} issues — `
-                   + `${l.resolved} resolved, ${l.open} still open`
-      : "Latest file: clean, no issues found",
-    l ? "Click to open its exceptions" : "",
+    w.exceptions
+      ? `${w.exceptions} issues across ${w.files} ${w.files === 1 ? "file" : "files"}`
+        + ` (${w.rows} rows) — ${w.resolved} resolved, ${w.open} still open`
+      : w.files ? "Nothing flagged on any of them" : "No file checked",
+    w.files ? "Click for its files, split by programme" : "",
   ].filter(Boolean).join("\n");
 
   const body = (
@@ -132,17 +136,17 @@ function Row({ r }: { r: BrokerPerf }) {
         </span>
       </span>
 
-      {l ? (
+      {w.files ? (
         <span style={{ height: 12, borderRadius: 6, background: TRACK, display: "block" }}>
           <span style={{ display: "flex", gap: 2, height: "100%", width: "100%" }}>
-            {l.issues === 0 ? (
+            {w.exceptions === 0 ? (
               <span style={{ flex: 1, background: CLEAN, borderRadius: 6 }} />
             ) : (<>
-              {l.resolved > 0 && (
-                <span style={{ flex: l.resolved, background: RESOLVED, borderRadius: 6, minWidth: 4 }} />
+              {w.resolved > 0 && (
+                <span style={{ flex: w.resolved, background: RESOLVED, borderRadius: 6, minWidth: 4 }} />
               )}
-              {l.open > 0 && (
-                <span style={{ flex: l.open, background: OPEN, borderRadius: 6, minWidth: 4 }} />
+              {w.open > 0 && (
+                <span style={{ flex: w.open, background: OPEN, borderRadius: 6, minWidth: 4 }} />
               )}
             </>)}
           </span>
@@ -153,15 +157,15 @@ function Row({ r }: { r: BrokerPerf }) {
 
       <span style={{ fontSize: 12.5, textAlign: "right", fontVariantNumeric: "tabular-nums",
                      color: "var(--p-muted)" }}>
-        {!l ? "—" : !l.issues ? (
+        {!w.files ? "—" : !w.exceptions ? (
           <><b style={{ color: "var(--p-ink)" }}>Clean</b>
             <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
               no issues found
             </span></>
         ) : (
-          <><b style={{ color: "var(--p-ink)" }}>{l.open}</b> of {l.issues} open
+          <><b style={{ color: "var(--p-ink)" }}>{w.open}</b> of {w.exceptions} open
             <span style={{ display: "block", fontSize: 11.5, color: "var(--p-faint)" }}>
-              {l.resolved} resolved
+              {w.resolved} resolved · {w.files} {w.files === 1 ? "file" : "files"}
             </span></>
         )}
       </span>
@@ -170,8 +174,8 @@ function Row({ r }: { r: BrokerPerf }) {
 
   const grid = { display: "grid", gridTemplateColumns: "minmax(120px, 180px) 1fr 130px",
                  alignItems: "center", gap: 14 } as const;
-  return l ? (
-    <Link to={triagePath(l)} title={tip} className="rb-row"
+  return w.files ? (
+    <Link to={filesPath(r)} title={tip} className="rb-row"
           style={{ ...grid, color: "inherit", textDecoration: "none" }}>
       {body}
     </Link>

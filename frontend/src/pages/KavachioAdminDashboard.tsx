@@ -56,7 +56,10 @@ type Platform = {
   open_exceptions: {
     total: number; critical: number; warning: number; info: number; waiting_over_7d: number;
     put_right: { fixed: number; approved: number; dismissed: number; rejected: number; total: number };
-    by_carrier: (Named & { open: number })[]; by_broker: (Named & { open: number })[];
+    // `settled` = exceptions already decided on the SAME files `open` is
+    // counted on, so open + settled is that row's own whole.
+    by_carrier: (Named & { open: number; settled: number })[];
+    by_broker: (Named & { open: number; settled: number })[];
     carriers_clear: number; brokers_clear: number;
   };
   overdue: { total: number; brokers: number; carriers: number };
@@ -439,7 +442,7 @@ export default function KavachioAdminDashboard() {
 
           <ChartCard title="Open Exceptions by Severity"
             info={<InfoTip text={"Exceptions still waiting on files run in this period (each file's latest "
-              + "run), counted the way the Exception Triage screen counts them. \"Put right\" = decisions made "
+              + "run), counted the way the Exception Triage screen counts them. \"Resolved\" = decisions made "
               + "in this period. Pick All time for the whole backlog."} />}>
             {ox.total === 0 ? <div className="empty">Nothing is waiting to be reviewed.</div> : (
               <>
@@ -469,7 +472,7 @@ export default function KavachioAdminDashboard() {
               display: "flex", justifyContent: "space-between", alignItems: "baseline",
               fontSize: 13, color: "var(--p-muted)"
             }}>
-              <span>Put right in {periodWords}</span>
+              <span>Resolved in {periodWords}</span>
               <b style={{ fontSize: 16, color: "var(--p-text)" }}>{nf(pr.total)}</b>
             </div>
             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
@@ -489,9 +492,13 @@ export default function KavachioAdminDashboard() {
         {/* ===== Where the open exceptions are + the Kavachio team's own queue ===== */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18, marginBottom: 18 }}>
           <ChartCard title="Exceptions by Carrier"
-            info={<InfoTip text="Open exceptions on files run in this period, per carrier, most first. A carrier opens its Recent File Submissions." />}>
-            <RankedBars cap={6} unit="open"
-              rows={ox.by_carrier.map(r => ({ id: r.id, name: r.name, value: r.open }))}
+            info={<InfoTip text={"Per carrier, most open first. Each bar is that carrier's own 100% — "
+              + "every exception raised on its files this period, split into what is still open and "
+              + "what has been put right. Bar LENGTH is not compared between carriers; the counts "
+              + "beside them are. A carrier opens its Recent File Submissions."} />}>
+            <RankedBars cap={6} unit="open" title="Exceptions by Carrier"
+              rows={ox.by_carrier.map(r => ({ id: r.id, name: r.name, value: r.open,
+                                              settled: r.settled }))}
               empty="Nothing is open at any carrier."
               linkTo={r => codeOf[r.id] ? `/tenants/${codeOf[r.id]}?tab=runs` : "/tenants"} />
             {ox.carriers_clear > 0 && (
@@ -501,9 +508,13 @@ export default function KavachioAdminDashboard() {
             )}
           </ChartCard>
           <ChartCard title="Exceptions by Broker"
-            info={<InfoTip text="Open exceptions on files run in this period, per broker, most first — across every carrier they send to." />}>
-            <RankedBars cap={6} unit="open"
-              rows={ox.by_broker.map(r => ({ id: r.id, name: r.name, value: r.open }))}
+            info={<InfoTip text={"Per broker, most open first — across every carrier they send to. "
+              + "Each bar is that broker's own 100%: every exception raised on its files this "
+              + "period, split into what is still open and what has been put right. Bar LENGTH is "
+              + "not compared between brokers; the counts beside them are."} />}>
+            <RankedBars cap={6} unit="open" title="Exceptions by Broker"
+              rows={ox.by_broker.map(r => ({ id: r.id, name: r.name, value: r.open,
+                                             settled: r.settled }))}
               empty="Nothing is open for any broker." />
             {ox.brokers_clear > 0 && (
               <div className="muted" style={{ fontSize: 12.5, marginTop: 12 }}>
