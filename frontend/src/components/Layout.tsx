@@ -68,6 +68,11 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // exists and is still reached from a carrier's page — only the nav entry
       // is commented out.
       // { to: "/program-management", label: "Program Management", icon: ClipboardList },
+      // Kept in the list on purpose, though no carrier seat sees it any more:
+      // ROUTE_ACCESS now closes /direct to them (a carrier does not produce the
+      // submission it is checking), and canAccessPath filters this row out
+      // accordingly. Kavachio staff still get it, and deleting the row would
+      // take it from them too.
       { to: "/direct", label: "Process Bordereau", icon: Zap },
       // The carrier's calendar IS listed: it is a whole-book view — every
       // broker's obligation for a due month — so unlike My Calendar it does not

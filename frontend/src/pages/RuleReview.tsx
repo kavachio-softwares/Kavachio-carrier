@@ -5,7 +5,7 @@ import {
 } from "../api/validation";
 import { groupByRule, tallyDecisions, type RuleGroup } from "../components/ExceptionCards";
 import ExceptionDecisionTable from "../components/ExceptionDecisionTable";
-import { isKavachioAdmin } from "../auth";
+import { canAmendExceptions } from "../auth";
 import RuleExplanationBlock, { hasExplanation } from "../components/RuleExplanation";
 
 const SEV_SPINE: Record<string, string> = { critical: "crit", warning: "warn", info: "info" };
@@ -156,7 +156,7 @@ export default function RuleReview() {
               templateId={data?.output_template_id ?? undefined}
               contractId={data?.run?.contract_id ?? undefined}
               exportId={downloadId ?? undefined}
-              readOnly={isKavachioAdmin()}
+              readOnly={!canAmendExceptions()}
               onSaved={() => { setSavedThisSession(true); return load(); }}
               backLink={backLink} backState={backState} />
           </>

@@ -7,7 +7,8 @@ import {
 import { groupByRule, exportCSV, buildReverseSpec, tallyDecisions } from "../components/ExceptionCards";
 import RuleExplanationBlock from "../components/RuleExplanation";
 import { downloadFile } from "../api/client";
-import { isBrokerSeat, isKavachioAdmin } from "../auth";
+import { canAmendExceptions, isBrokerSeat } from "../auth";
+import { canAccessPath } from "../access";
 import { CheckCircle2 } from "lucide-react";
 import { LoadingOverlay } from "../components/Busy";
 import BdxInlineReview from "../components/BdxInlineReview";
@@ -27,11 +28,13 @@ export default function UploadExceptions() {
   // Carries the sidebar-highlight context (Dashboard vs Process Bordereau)
   // through to the per-rule review sub-screen.
   const fromParam = params.get("from");
-  // Kavachio staff read every file but amend none — deciding, correcting and
-  // Fix & Validate belong to the carrier and the file's brokers. The API
-  // refuses them too (carrier_scope.assert_can_amend); this keeps the screen
-  // from offering what would only fail.
-  const viewOnly = isKavachioAdmin();
+  // Everyone opens this screen; only the BROKER seats change anything on it.
+  // Deciding, correcting and Fix & Validate are answering for the file that was
+  // sent, so they belong to the broker who sent it — Kavachio staff and both
+  // carrier seats read it and nothing more. The API refuses them too
+  // (carrier_scope.assert_can_amend); this keeps the screen from offering what
+  // would only fail.
+  const viewOnly = !canAmendExceptions();
   const navigate = useNavigate();
   // Set when the reviewer comes back from a rule's Decisions screen having
   // recorded decisions — we prompt them that Approved/Fixed values are NOT in
@@ -74,9 +77,13 @@ export default function UploadExceptions() {
     if (fromParam === "home") return { to: "/home", label: "Dashboard" };
     if (fromParam === "admin") return { to: "/admin/dashboard", label: "Dashboard" };
     if (fromParam === "direct") return { to: "/direct", label: "Process Bordereau" };
-    return isBrokerSeat()
-      ? { to: "/broker/bordereau", label: "Process Bordereau" }
-      : { to: "/direct", label: "Process Bordereau" };
+    if (isBrokerSeat()) return { to: "/broker/bordereau", label: "Process Bordereau" };
+    // A carrier seat no longer has a Process Bordereau screen to go back to,
+    // and sending them to one access.ts now refuses would bounce them to their
+    // dashboard anyway — so go there directly, with the honest label.
+    return canAccessPath("/direct")
+      ? { to: "/direct", label: "Process Bordereau" }
+      : { to: "/home", label: "Dashboard" };
   })();
 
   // Success confirmation — a "Done" modal the reviewer must acknowledge,
@@ -246,12 +253,12 @@ export default function UploadExceptions() {
             )}
             {downloadId ? (
               <button className="btn pri" onClick={regenerate} disabled={viewOnly || regenerating || loading || !data}
-                title={viewOnly ? "View only — only the carrier and its brokers can fix or re-validate this file." : undefined}>
+                title={viewOnly ? "View only — only the broker who sent this file can fix or re-validate it." : undefined}>
                 Fix &amp; Validate
               </button>
             ) : (
               <button className="btn pri" onClick={revalidate} disabled={viewOnly || revalidating || loading || !data}
-                title={viewOnly ? "View only — only the carrier and its brokers can fix or re-validate this file." : undefined}>
+                title={viewOnly ? "View only — only the broker who sent this file can fix or re-validate it." : undefined}>
                 Fix &amp; Validate
               </button>
             )}
@@ -325,8 +332,8 @@ export default function UploadExceptions() {
         </Modal>
         {viewOnly && (
           <div className="note" style={{ marginBottom: 18 }}>
-            <b>View only.</b> You can open every rule and the BDX, but only the carrier and its
-            brokers can approve, fix, dismiss or re-validate this file.
+            <b>View only.</b> You can open every rule and the BDX, but only the broker who sent
+            this file can approve, fix, dismiss or re-validate it.
           </div>
         )}
         {err && <div className="note warn" style={{ marginBottom: 18 }}>{err}</div>}

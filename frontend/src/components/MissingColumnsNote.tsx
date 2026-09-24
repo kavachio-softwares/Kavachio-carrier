@@ -25,9 +25,36 @@ const SEV_LABEL: Record<string, string> = {
 const sevPill = (s: string) => SEV_PILL[s] ?? "bg-gray-100 text-gray-700 border border-gray-200";
 const sevLabel = (s: string) => SEV_LABEL[s] ?? s;
 
+/** "Show the contract's words" — the toggle above a proof block.
+ *
+ *  The quote is the LONGEST thing in a row and the least often read: the name,
+ *  the severity and the reason are what a reviewer scans, and the verbatim
+ *  clause is what they open when one of those findings surprises them. Shown
+ *  always, three or four quoted paragraphs buried the list of findings itself.
+ *  Shut by default, a row is one finding again and the proof is one click away.
+ */
+function ProofToggle({ open, onClick, tone }: {
+  open: boolean; onClick: () => void; tone: "amber" | "sky";
+}) {
+  const colour = tone === "amber"
+    ? "text-amber-700 hover:bg-amber-100/70 border-amber-200"
+    : "text-sky-700 hover:bg-sky-100/70 border-sky-200";
+  return (
+    <button type="button" onClick={onClick} aria-expanded={open}
+      className={`mt-1.5 inline-flex items-center gap-1 rounded-md border bg-white/70
+                  px-2 py-[3px] text-[11px] font-medium transition-colors ${colour}`}>
+      {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+      <Quote size={10} />
+      {open ? "Hide contract wording" : "Show contract wording"}
+    </button>
+  );
+}
+
 /** One missing column. Everything below the name is optional — a finding with
  *  only a name still renders cleanly. */
 function MissingColumnRow({ item }: { item: MissingColumn }) {
+  // Per ROW, not per list: opening one finding's proof must not open twenty.
+  const [showProof, setShowProof] = useState(false);
   return (
     <li className="px-3.5 py-3 first:pt-3 hover:bg-amber-50/40 transition-colors">
       <div className="flex items-start gap-2 flex-wrap">
@@ -40,7 +67,17 @@ function MissingColumnRow({ item }: { item: MissingColumn }) {
       {item.reason && (
         <p className="mt-1 text-[12.5px] leading-snug text-ink-muted">{item.reason}</p>
       )}
+      {item.related_output_field && (
+        <p className="mt-1.5 flex items-center gap-1 text-[11px] text-ink-soft">
+          <ArrowRight size={11} className="shrink-0" />
+          Feeds output column <span className="font-medium text-ink-muted">{item.related_output_field}</span>
+        </p>
+      )}
       {item.contract_reference && (
+        <ProofToggle open={showProof} tone="amber"
+          onClick={() => setShowProof(v => !v)} />
+      )}
+      {item.contract_reference && showProof && (
         // The contract's OWN words — quoted verbatim by the check, never
         // paraphrased — plus where to find them, so a reviewer can go straight
         // to the clause instead of taking the finding on trust.
@@ -59,12 +96,6 @@ function MissingColumnRow({ item }: { item: MissingColumn }) {
             </p>
           )}
         </div>
-      )}
-      {item.related_output_field && (
-        <p className="mt-1.5 flex items-center gap-1 text-[11px] text-ink-soft">
-          <ArrowRight size={11} className="shrink-0" />
-          Feeds output column <span className="font-medium text-ink-muted">{item.related_output_field}</span>
-        </p>
       )}
     </li>
   );
@@ -91,6 +122,7 @@ export function MissingColumnsList({ items, maxHeight = "22rem" }: {
  *  this is NOT a model finding — the extraction decided the clause deserves a
  *  rule and recorded why no column fitted, so `reason` is its own words. */
 function UnmappedClauseRow({ item }: { item: UnmappedClause }) {
+  const [showProof, setShowProof] = useState(false);
   return (
     <li className="px-3.5 py-3 first:pt-3 hover:bg-sky-50/40 transition-colors">
       <div className="flex items-start gap-2 flex-wrap">
@@ -103,7 +135,17 @@ function UnmappedClauseRow({ item }: { item: UnmappedClause }) {
           </span>
         )}
       </div>
+      {item.reason && (
+        <p className="mt-1 text-[12.5px] leading-snug text-ink-muted">
+          <span className="font-medium text-ink-soft">Why unmapped: </span>
+          {item.reason}
+        </p>
+      )}
       {item.clause_text && (
+        <ProofToggle open={showProof} tone="sky"
+          onClick={() => setShowProof(v => !v)} />
+      )}
+      {item.clause_text && showProof && (
         <div className="mt-1.5 rounded-md bg-white/70 border border-sky-100 px-2.5 py-1.5">
           <div className="flex items-start gap-1.5">
             <Quote size={11} className="mt-1 shrink-0 text-sky-500" />
@@ -112,12 +154,6 @@ function UnmappedClauseRow({ item }: { item: UnmappedClause }) {
             </p>
           </div>
         </div>
-      )}
-      {item.reason && (
-        <p className="mt-1 text-[12.5px] leading-snug text-ink-muted">
-          <span className="font-medium text-ink-soft">Why unmapped: </span>
-          {item.reason}
-        </p>
       )}
     </li>
   );

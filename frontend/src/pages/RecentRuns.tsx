@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { Search, ChevronDown, Check, X } from "lucide-react";
 import { api, downloadFile } from "../api/client";
 import { currentMga } from "../auth";
+import { canAccessPath } from "../access";
 import { fmtStamp, localDayStart, localDayEnd } from "../utils/date";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
@@ -103,10 +104,20 @@ export default function RecentRuns() {
             <h2>Process Bordereau History</h2>
             <p>Every bordereau you have processed, with its exceptions and its output.</p>
           </div>
+          {/* Back to wherever this history was reached FROM. A carrier seat no
+              longer has a Process Bordereau screen (access.ts), so offering it
+              here would only bounce them to the dashboard — send them there
+              outright and say so. */}
           <div className="actions">
-            <button className="btn" onClick={() => navigate("/direct")}>
-              ← Process Bordereau
-            </button>
+            {canAccessPath("/direct") ? (
+              <button className="btn" onClick={() => navigate("/direct")}>
+                ← Process Bordereau
+              </button>
+            ) : (
+              <button className="btn" onClick={() => navigate("/home")}>
+                ← Dashboard
+              </button>
+            )}
           </div>
         </div>
 

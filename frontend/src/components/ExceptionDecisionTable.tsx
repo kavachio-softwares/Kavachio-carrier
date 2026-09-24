@@ -1076,7 +1076,7 @@ export default function ExceptionDecisionTable({
       <div className={`sticky top-0 ${bulkMenuOpen || bulkPrompt ? "z-30" : "z-20"} flex items-center gap-2 px-3 py-2 flex-wrap rounded-lg bg-emerald-50 border border-emerald-200`}>
         {readOnly ? (
           <span className="text-sm text-ink-muted">
-            {decided}/{group.items.length} Decided · view only — the carrier and its brokers make these decisions
+            {decided}/{group.items.length} Decided · view only — the broker who sent this file makes these decisions
           </span>
         ) : selected.size > 0 ? (
           <>

@@ -294,17 +294,30 @@ def policy_scope(policy_id: int = Path(..., ge=1),
 
 def assert_can_amend(principal: Principal) -> None:
     """Changing a file's exceptions — deciding them (Approve / Fix / Dismiss),
-    correcting a value, or running Fix & Validate — is the work of the carrier
-    and the brokers on that file. Kavachio staff can open and read every file
-    (assert_can_read_export lets them), but amend none: a change made from the
-    platform would be an edit to a carrier's bordereau that neither side made.
+    correcting a value, or running Fix & Validate — is the BROKER's work, and
+    only the broker's.
+
+    A bordereau is the broker's submission. What is flagged on it is a question
+    put to the broker, and answering it is answering for their own file, so the
+    two broker seats are the only ones that may write here. Everyone else reads:
+    Kavachio staff open every file and amend none (a change made from the
+    platform is an edit neither side made), and a carrier reads what was flagged
+    on a file it received without correcting the submission on the sender's
+    behalf. Reading is untouched for all of them — assert_can_read_export still
+    lets each side see every file it is entitled to.
 
     Call it BEFORE any read-scope check, so the answer is the same 403 whatever
     the file — it is about who is asking, not which file."""
+    if principal.is_broker:
+        return
     if principal.is_platform_admin:
         raise HTTPException(
             403, "Kavachio can view exceptions but not change them. Only the "
-                 "carrier and its brokers can review, fix or re-validate a file.")
+                 "broker that sent a file can review, fix or re-validate it.")
+    raise HTTPException(
+        403, "You can view every exception on this file but not change them. "
+             "Only the broker that sent it can approve, fix, dismiss or "
+             "re-validate it.")
 
 
 def assert_can_read_export(s, p: Principal, export_row) -> None:

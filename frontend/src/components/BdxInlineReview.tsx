@@ -1308,7 +1308,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
           ))}
           {saveErr && <p className="text-[11px] text-danger mt-2">{saveErr}</p>}
           <p className="text-[10px] text-ink-soft mt-2">
-            {readOnly ? "View only — the carrier and its brokers make these decisions."
+            {readOnly ? "View only — the broker who sent this file makes these decisions."
                       : <>Saved immediately — the corrected value reaches the output on Fix &amp; Validate.</>}
           </p>
         </div>

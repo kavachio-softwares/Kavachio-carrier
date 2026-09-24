@@ -90,7 +90,19 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // user". Harmless while everyone signing in was a carrier user; the moment a
   // broker could sign in they got the whole carrier app by default. Listing
   // them explicitly is what actually closes that.
-  { pattern: "/direct", requires: "carrier_admin" },
+  // Process Bordereau — CLOSED to both carrier seats. Sending the bordereau is
+  // the broker's half of the month (/broker/bordereau), and a carrier running
+  // the file itself is the carrier producing the submission it is meant to be
+  // checking. Kavachio staff keep it: they run a file on a carrier's behalf
+  // when a broker cannot.
+  //
+  // This is the one rule, not a hidden link: the sidebar entry and the
+  // Dashboard's "＋ Process Bordereaux" button are both derived from it
+  // (canAccessPath), so nothing is left offering a screen that would bounce.
+  // Everything downstream — Run History, Bordereau Setup, the exception
+  // screens — is untouched; the carrier still sees every file and every
+  // exception on it, and only cannot start a run.
+  { pattern: "/direct", requires: "kavachio_admin", only: ["kavachio_admin"] },
   { pattern: "/parties", requires: "carrier_admin" },
   { pattern: "/parties/:id", requires: "carrier_admin" },
   { pattern: "/programs", requires: "carrier_admin" },

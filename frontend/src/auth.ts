@@ -161,6 +161,24 @@ export function isBrokerSeat(): boolean {
   const r = userRole();
   return r === "broker_admin" || r === "operator";
 }
+/**
+ * May DECIDE a file's exceptions — Approve / Fix / Dismiss / Reject, correct a
+ * value, or run Fix & Validate.
+ *
+ * The broker seats, and only them. A bordereau is the broker's submission, so
+ * putting it right is the broker's work: the carrier reads what was flagged and
+ * the broker answers for it. Kavachio staff were already refused (they read
+ * every file and amend none); both CARRIER seats now sit on the same side of
+ * that line.
+ *
+ * Viewing is untouched — every seat still opens the file, the rules and the
+ * BDX. This gates the write half only, and the API enforces the same rule
+ * independently (carrier_scope.assert_can_amend), so hiding the buttons is a
+ * courtesy rather than the guard.
+ */
+export function canAmendExceptions(): boolean {
+  return isBrokerSeat();
+}
 /** Can perform tenant-admin actions. kavachio_admin is a superset. */
 export function isTenantAdmin(): boolean {
   const r = userRole();

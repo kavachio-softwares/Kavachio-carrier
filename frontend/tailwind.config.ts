@@ -26,7 +26,10 @@ export default {
         sans: ['"Montserrat"', "system-ui", "sans-serif"],
       },
       boxShadow: {
-        card: "0 1px 2px rgba(17, 24, 39, 0.04), 0 1px 1px rgba(17, 24, 39, 0.03)",
+        // A card has to sit ON the page, not blend into it. The previous
+        // pair of 1px shadows at 3-4% was close enough to nothing that
+        // every card read as a flat white region of the background.
+        card: "0 1px 2px rgba(17, 24, 39, 0.06), 0 6px 16px -8px rgba(17, 24, 39, 0.12)",
       },
     },
   },

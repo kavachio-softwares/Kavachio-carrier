@@ -9,7 +9,7 @@ import { currentMga, isKavachioAdmin } from "../auth";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import { Select, TextInput } from "../components/ui/Field";
-import { PageBody, PageHeader } from "../components/Layout";
+import { PageHeader } from "../components/Layout";
 import OutputTemplateFields from "../components/OutputTemplateFields";
 import TemplateSheetPreview from "../components/TemplateSheetPreview";
 import { LoadingOverlay } from "../components/Busy";
@@ -99,8 +99,29 @@ type ContractMapping = {
   field_rules: Record<string, ContractRule[]>;
 };
 
+/** The route at /outputs/templates/:id — the template on a page of its own. */
 export default function OutputTemplate() {
   const { id } = useParams();
+  return <OutputTemplateEditor templateId={Number(id)} />;
+}
+
+/**
+ * The template review itself, so it can be read either on its own route or
+ * inside a tab. `embedded` is the only difference: on a route the screen owns
+ * the page chrome (PageHeader + PageBody + a Cancel that leaves), while in a
+ * tab the host already provides all three — so it draws its own toolbar and
+ * lets the host decide what leaving means.
+ */
+export function OutputTemplateEditor({ templateId, embedded, onVersioned }: {
+  templateId: number;
+  /** Rendered inside a host screen's tab rather than on its own route. */
+  embedded?: boolean;
+  /** A used template is versioned rather than edited, so an edit can land on a
+   *  NEW id. On the route that means navigating; a host passes this to follow
+   *  the new id in whatever way its own state requires. */
+  onVersioned?: (nextId: number) => void;
+}) {
+  const id = String(templateId);
   const nav = useNavigate();
   // WHO IS LOOKING decides how much of the blueprint this page shows.
   //
@@ -260,55 +281,86 @@ export default function OutputTemplate() {
 
   if (!t) return null;
 
+  // The same controls either way. Cancel is the one that cannot travel: on the
+  // route it leaves the screen, and in a tab there is no screen to leave.
+  const actions = (
+    <div className="flex items-center gap-2 flex-wrap">
+      <label className="flex items-center gap-1.5 text-sm text-ink-muted">
+        Output format
+        <Select
+          className="!py-1 !w-auto"
+          value={t.output_format ?? "xlsx"}
+          onChange={e => setT(prev => prev ? { ...prev, output_format: e.target.value } : prev)}
+        >
+          {OUTPUT_FORMATS.map(f => (
+            <option key={f.value} value={f.value}>{f.label}</option>
+          ))}
+        </Select>
+      </label>
+      <Button variant="secondary" onClick={downloadTemplate}
+        title="The file this template produces, with no rows in it">
+        <Download size={14} /> Download Template
+      </Button>
+      {!embedded && (
+        <Link to={platformAdmin ? `/tenants/${t.mga}` : "/direct/setups"}>
+          <Button variant="ghost">Cancel</Button>
+        </Link>
+      )}
+      {!hasAnyCandidates && (
+        <Button variant="secondary" onClick={refreshCandidates} disabled={busy || refreshing}>
+          <RefreshCw size={14} /> Re-Run AI Mapping
+        </Button>
+      )}
+      {dirty && (
+        <span className="pill pill-amber whitespace-nowrap">
+          <AlertTriangle size={11} /> Unsaved changes
+        </span>
+      )}
+      <Button onClick={() => save(false)} variant="secondary" disabled={busy}>
+        Save Draft
+      </Button>
+      <Button onClick={() => save(true)} disabled={busy}>
+        Save & Activate
+      </Button>
+    </div>
+  );
+
   return (
     <>
       {refreshing && (
         <LoadingOverlay label="Re-running the AI mapping against the original sample — this can take a minute…" />
       )}
-      <PageHeader
-        title={`Template: ${t.name}`}
-        subtitle={`${t.carrier ?? "—"} · review AI-proposed column mapping`}
-        action={
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1.5 text-sm text-ink-muted">
-              Output format
-              <Select
-                className="!py-1 !w-auto"
-                value={t.output_format ?? "xlsx"}
-                onChange={e => setT(prev => prev ? { ...prev, output_format: e.target.value } : prev)}
-              >
-                {OUTPUT_FORMATS.map(f => (
-                  <option key={f.value} value={f.value}>{f.label}</option>
-                ))}
-              </Select>
-            </label>
-            <Button variant="secondary" onClick={downloadTemplate}
-              title="The file this template produces, with no rows in it">
-              <Download size={14} /> Download Template
-            </Button>
-            <Link to={platformAdmin ? `/tenants/${t.mga}` : "/direct/setups"}>
-              <Button variant="ghost">Cancel</Button>
-            </Link>
-            {!hasAnyCandidates && (
-              <Button variant="secondary" onClick={refreshCandidates} disabled={busy || refreshing}>
-                <RefreshCw size={14} /> Re-Run AI Mapping
-              </Button>
-            )}
-            {dirty && (
-              <span className="pill pill-amber whitespace-nowrap">
-                <AlertTriangle size={11} /> Unsaved changes
-              </span>
-            )}
-            <Button onClick={() => save(false)} variant="secondary" disabled={busy}>
-              Save Draft
-            </Button>
-            <Button onClick={() => save(true)} disabled={busy}>
-              Save & Activate
-            </Button>
+      {embedded ? (
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-3
+          border-b border-border pb-3">
+          <div className="min-w-0">
+            <h3 className="text-[15px] font-semibold truncate">Template: {t.name}</h3>
+            <p className="text-xs text-ink-muted mt-0.5">
+              {t.carrier ?? "—"} · review AI-proposed column mapping
+            </p>
           </div>
-        }
-      />
-      <PageBody>
+          {actions}
+        </div>
+      ) : (
+        <PageHeader
+          title={`Template: ${t.name}`}
+          subtitle={`${t.carrier ?? "—"} · review AI-proposed column mapping`}
+          action={actions}
+        />
+      )}
+      {/* PageBody's own markup, with its page padding dropped when a host has
+          already applied it. A component picked at render time would be a new
+          type on every render, and React would remount everything below.
+
+          Every section below is a Card, which is right on a page of its own and
+          wrong inside one: a host's card would draw a second border and a second
+          five of padding around each. Embedded, the direct-child cards are
+          flattened to plain stacked sections — the spacing is space-y-5's
+          either way, so nothing shifts but the chrome. */}
+      <div className={embedded
+        ? "space-y-5 [&>.card]:!p-0 [&>.card]:border-0 [&>.card]:bg-transparent"
+          + " [&>.card]:shadow-none"
+        : "px-8 py-6 space-y-5"}>
         <Card>
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-3">
@@ -359,7 +411,11 @@ export default function OutputTemplate() {
               // A used template is versioned, not edited: the column landed on a
               // new id, so follow it — re-reading this one would show the layout
               // without the change and look like nothing happened.
-              if (nextId != null) { nav(`/outputs/templates/${nextId}`); return; }
+              if (nextId != null) {
+                if (onVersioned) onVersioned(nextId);
+                else nav(`/outputs/templates/${nextId}`);
+                return;
+              }
               reloadTemplate(); setFieldsKey(k => k + 1);
             }} />
         </Card>
@@ -373,8 +429,8 @@ export default function OutputTemplate() {
           <OutputTemplateFields templateId={Number(id)} refreshKey={fieldsKey}
             blockedReason={dirty
               ? "There are unsaved column-mapping changes above. Save Draft at the "
-                + "top of the page first — this list holds its own copy of the "
-                + "mapping, so saving it now would write the old values back."
+                + `top of the ${embedded ? "tab" : "page"} first — this list holds its own `
+                + "copy of the mapping, so saving it now would write the old values back."
               : null}
             onSaved={reloadTemplate} />
         )}
@@ -471,7 +527,7 @@ export default function OutputTemplate() {
           />
         ))}
         */}
-      </PageBody>
+      </div>
     </>
   );
 }
