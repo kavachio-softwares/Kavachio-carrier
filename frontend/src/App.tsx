@@ -58,6 +58,7 @@ import BordereauCalendar from "./pages/BordereauCalendar";
 import Files from "./pages/Files";
 import AddUser from "./pages/AddUser";
 import Profile from "./pages/Profile";
+import AuditLogs from "./pages/AuditLogs";
 import Welcome from "./pages/Welcome";
 import { useEffect } from "react";
 import {
@@ -228,6 +229,8 @@ export default function App() {
         <Route path="/intake/arrivals" element={<Navigate to="/files" replace />} />
         <Route path="/users/new" element={<AddUser />} />
         <Route path="/profile" element={<Profile />} />
+        {/* Audit Logs — one screen, five seats. The server scopes the rows. */}
+        <Route path="/audit" element={<AuditLogs />} />
       </Route>
       <Route path="*" element={<DefaultHome />} />
     </Routes>

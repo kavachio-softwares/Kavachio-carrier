@@ -51,6 +51,7 @@ from segment_routes import router as segment_router
 # side is Bearer-authenticated and tenant-scoped, the signing side has NO auth
 # at all because the emailed token is the credential (esign_routes.py).
 from esign_routes import router as esign_router, public_router as esign_public_router
+from audit_routes import router as audit_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -130,6 +131,10 @@ app.include_router(segment_router)
 # could swallow it.
 app.include_router(esign_public_router)
 app.include_router(esign_router)
+# Audit Logs (/audit/…). Every seat has one; what differs is whose rows come
+# back, which audit_feed.scope_for decides — so there is no role guard here to
+# fall out of step with it.
+app.include_router(audit_router)
 
 
 def _mark_deprecated_aliases() -> None:
@@ -218,6 +223,10 @@ async def _audit_activity(auth_header, method, path, status, ip):
             _audit.log_activity, tid, email,
             _audit.friendly_action(method, path), path,
             {"status": status, "ip": ip, "method": method},
+            # The acting SEAT, not just the display email: a broker token
+            # carries no tenant_id, so without this the row belongs to nobody
+            # the Audit Logs screen can scope it to (see db.ActivityEvent).
+            actor_user_id=uid,
         )
     except Exception:  # noqa: BLE001 — auditing must never break anything
         pass
@@ -3725,6 +3734,7 @@ def export_generate(
             target=f"export:{template_name}",
             details={"filename": fname, "policies": len(policies),
                      "exceptions": len(counted), "status": status},
+            **_audit.actor_columns(principal),
         ))
         s.commit()
         s.refresh(rec)

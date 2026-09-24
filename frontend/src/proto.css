@@ -430,6 +430,14 @@
 }
 .proto .fbar-date:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
 
+/* A labelled filter: the caption sits ABOVE its control rather than beside it.
+   ListFilterBar's bare row works when a page has one or two dropdowns whose
+   meaning is obvious from their values; Audit Logs has three whose values look
+   alike ("All actions", "Everyone in your reach"), so each says what it filters. */
+.proto .fbar-field{display:flex;flex-direction:column;gap:5px;min-width:170px}
+.proto .fbar-field > .sub{font-size:11.5px;font-weight:600;letter-spacing:.01em}
+.proto .fbar-field .fbar-select{width:100%}
+
 /* misc */
 .proto .note{font-size:12.5px;color:var(--p-muted);background:var(--p-surface-2);border:1px solid var(--p-border);border-radius:var(--p-r-sm);padding:11px 13px;line-height:1.5}
 .proto .note.warn{background:var(--p-warn-soft);border-color:#EAD7AE;color:var(--p-warn-ink)}

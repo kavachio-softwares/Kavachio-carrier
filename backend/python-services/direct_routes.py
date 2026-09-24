@@ -2403,12 +2403,16 @@ async def _render_landing(
             out.template_version = out_template_version
             out.output_format = output_format
             out.sample_comparison = sample_report
+        from audit import actor_columns as _actor_columns
         s.add(ActivityEvent(
             tenant_id=tenant_id, actor=actor,
             action="direct_output_checked" if check_only else "direct_output_generated",
             target=f"direct:{template_name}",
             details={"filename": fname, "rows": out.policy_count,
-                     "exceptions": len(counted), "status": status}))
+                     "exceptions": len(counted), "status": status},
+            # `actor` is the broker COMPANY for a broker-lane run, so the seat
+            # behind it is recorded separately for the Audit Logs screen.
+            **_actor_columns(user_id=run_by_user_id)))
         s.commit()
         s.refresh(out)
         export_id = out.id

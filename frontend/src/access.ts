@@ -76,6 +76,15 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   { pattern: "/broker/team-activity/:userId", requires: "broker_admin", only: ["broker_admin"] },
   { pattern: "/broker/files-by-carrier", requires: "broker_admin", only: ["broker_admin"] },
 
+  // --- Audit Logs ----------------------------------------------------------
+  // Every seat, on purpose. It is the one screen whose whole job is to show a
+  // person their own accountability, so no seat is excluded — including the
+  // operator, who sees only their own trail. The SERVER decides whose rows come
+  // back (audit_feed.scope_for); listing every role here only stops the UI
+  // bouncing someone before the server is asked.
+  { pattern: "/audit", requires: "operator",
+    only: ["kavachio_admin", "carrier_admin", "broker_admin", "operator"] },
+
   // --- Carrier screens -----------------------------------------------------
   // These were unlisted, and an unlisted path falls through to "any signed-in
   // user". Harmless while everyone signing in was a carrier user; the moment a

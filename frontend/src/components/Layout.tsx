@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, CalendarDays,
+  FileCheck, CalendarDays, ScrollText,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
@@ -53,6 +53,10 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // this team, not a manager of it. canAccessPath() filters it out for
       // them (ROUTE_ACCESS marks the path `only: ["broker_admin"]`).
       { to: "/broker/users", label: "Users & Roles", icon: UserCog },
+      // Both broker seats. An operator sees their own trail and an admin the
+      // whole team's — the difference is made by the server, not by hiding the
+      // link, because "what have I done" is a question every seat may ask.
+      { to: "/audit", label: "Audit Logs", icon: ScrollText },
     ],
   },
   {
@@ -138,6 +142,9 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // part of building the book, so it sits with the other admin screens.
       { to: "/users", label: "Users & Roles", icon: UserCog },
       { to: "/rule-library", label: "Rule Library", icon: ListChecks },
+      // Beside Users & Roles, because they answer the two halves of the same
+      // question: who may act, and what they did with it.
+      { to: "/audit", label: "Audit Logs", icon: ScrollText },
     ],
   },
   {
@@ -161,6 +168,8 @@ const ADMIN_GROUPS: typeof GROUPS = [
       { to: "/admin/users", label: "Users & Roles", icon: UserCog },
       { to: "/admin/mapping-tasks", label: "Data Mapping Queue", icon: Database },
       { to: "/rule-library", label: "Rule Library", icon: ListChecks },
+      // The whole platform's trail: every carrier, every broker, named.
+      { to: "/audit", label: "Audit Logs", icon: ScrollText },
     ],
   },
 ];

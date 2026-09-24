@@ -1446,6 +1446,7 @@ def decide_exceptions(body: DecideRequest,
     try:
         from audit import log_activity, actor_for
         log_activity(principal.tenant_id, actor_for(principal), "exception_decided",
+                     principal=principal,
                      target=f"exceptions:{updated}",
                      details={"updated": updated, "skipped": len(skipped),
                               "kinds": sorted({(d.kind or '').lower() for d in body.decisions})})
@@ -1613,6 +1614,7 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
             try:
                 from audit import log_activity, actor_for
                 log_activity(exp["tenant_id"], actor_for(principal), "exception_decided",
+                             principal=principal,
                              target=f"export:{export_id}",
                              details={"updated": _res.get("updated"), "skipped": len(_res.get("skipped") or []), "lane": "direct"})
             except Exception:
@@ -1702,6 +1704,7 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
     try:
         from audit import log_activity, actor_for
         log_activity(exp["tenant_id"], actor_for(principal), "exception_decided",
+                     principal=principal,
                      target=f"export:{export_id}",
                      details={"updated": updated, "skipped": len(skipped), "lane": "canonical"})
     except Exception:  # noqa: BLE001

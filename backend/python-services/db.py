@@ -1290,7 +1290,22 @@ class ColumnMappingCache(Base):
 
 
 class ActivityEvent(Base):
-    """Lightweight audit feed for S-12 'Recent activity'."""
+    """Lightweight audit feed for S-12 'Recent activity' and the Audit Logs screen.
+
+    `actor` is a DISPLAY string (an email, or `broker:<party id>` when the row
+    was written for the carrier to read — see audit.actor_for). It was the only
+    record of who acted, and that is not enough to scope the feed by role: a
+    broker row carrying `broker:12` has lost which of that broker's people did
+    it, so a broker admin could not see their own team's trail, and a row
+    written by a broker seat carries tenant_id NULL (a broker token has no
+    carrier), so the carrier could not find it either.
+
+    The three `actor_*` columns below record the acting SEAT alongside the
+    display string, so the audit feed can be scoped exactly and each viewer can
+    be shown the words they are allowed to see (audit_feed.py). Nullable with no
+    backfill: historical rows are still resolved at read time from `actor`, they
+    just cannot name the individual behind a `broker:<id>`.
+    """
     __tablename__ = "activity_events"
     id = Column(Integer, primary_key=True)
     tenant_id = Column(Integer, index=True, nullable=True)  # FK -> tenant.tenant_id (enforced in DB)
@@ -1299,6 +1314,10 @@ class ActivityEvent(Base):
     target = Column(String, nullable=True)
     details = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    # --- the acting seat (see the note above) ------------------------------
+    actor_user_id = Column(Integer, index=True, nullable=True)
+    actor_role = Column(String, nullable=True)          # normalized, one of VALID_ROLES
+    actor_broker_party_id = Column(Integer, index=True, nullable=True)
 
 
 class AuthAudit(Base):
@@ -2228,6 +2247,13 @@ def init_db():
         # Which clause a missing-column finding was quoted from (added after the
         # table shipped; create_all only CREATEs, it never ALTERs).
         _ensure_column(conn, inspector, "missing_bdx_columns", "clause_label", "VARCHAR")
+        # Audit Logs: the acting SEAT behind each activity row (db.ActivityEvent).
+        # Without these the feed cannot be scoped by role — a broker row's
+        # `actor` is the broker COMPANY and its tenant_id is NULL, so neither
+        # the broker admin nor the carrier could find it. Nullable, no backfill.
+        _ensure_column(conn, inspector, "activity_events", "actor_user_id", "INTEGER")
+        _ensure_column(conn, inspector, "activity_events", "actor_role", "VARCHAR")
+        _ensure_column(conn, inspector, "activity_events", "actor_broker_party_id", "INTEGER")
 
         # v4 model: tables shared between the ops ORM and the canonical schema
         # (tenant, party, program, contract, app_user, upload, …) are created
