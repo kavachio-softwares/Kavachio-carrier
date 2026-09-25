@@ -944,8 +944,10 @@ def broker_insights(days: int = Query(30, ge=7, le=90),
             # the dashboard draws a handful, and "View all" pages through the
             # rest from /broker/insights/people rather than shipping every
             # row on every load.
-            by_person, people_total = _team_ranking(
-                s, bid, since, limit=5, exclude_user_id=p.user_id)
+            # The admin's own row is IN it: they run bordereaux too now, so
+            # leaving themselves out hid real work from the one card that
+            # reports it (see _team_ranking).
+            by_person, people_total = _team_ranking(s, bid, since, limit=5)
 
         return {
             "days": days,
@@ -1082,11 +1084,18 @@ def _team_ranking(s, bid: int, since, q: Optional[str] = None,
     stays in SQL, the detail is bought for the handful of people actually
     being drawn.
 
-    `exclude_user_id` drops the VIEWER from their own team list — the admin
-    is not someone they are keeping tabs on, and seeing your own name in a
-    ranking of your team reads as a bug even when it isn't one. It is applied
-    before ranking, so a colleague's rank is never shifted by the admin's own
-    row being present or absent.
+    `exclude_user_id` drops a user from the list. It is applied before ranking,
+    so a colleague's rank is never shifted by the dropped row.
+
+    IT IS NO LONGER USED TO DROP THE VIEWER. It was, on the reasoning that an
+    admin is not someone they keep tabs on. That held while the admin could not
+    send a file: their row was an empty one and hiding it lost nothing. Now that
+    both broker seats run Process Bordereau, an admin who sends the month's
+    bordereaux themselves is the person doing the work this screen exists to
+    show — and excluding them answered "who on my team sent what" with a table
+    that left out the largest sender, or with nothing at all at a broker where
+    the admin is the only person. The parameter is kept because the exclusion is
+    still the right call for any OTHER row a caller wants left out.
     """
     from auth_deps import normalize_role
     from db import ExceptionDecisionLog, OutputExport
@@ -1445,8 +1454,7 @@ def broker_insights_people(days: int = Query(30, ge=7, le=90),
         today = dt.datetime.utcnow().date()
         since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
         items, total = _team_ranking(s, bid, since, q=q,
-                                     offset=(page - 1) * page_size, limit=page_size,
-                                     exclude_user_id=p.user_id)
+                                     offset=(page - 1) * page_size, limit=page_size)
         return {"items": items, "total": total}
 
 

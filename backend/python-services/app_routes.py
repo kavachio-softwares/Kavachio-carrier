@@ -3179,7 +3179,15 @@ def program_contract_detail(program_id: int, contract_id: int,
 
     Includes the contract, linked Output Template, extracted commercial terms,
     field mappings inferred from generated rules, and all validation rules.
+
+    The contract RECORD, so the platform seat is refused here as it is on
+    /contracts/{id} — the terms are the same terms whichever route reaches
+    them. program_contracts_list above stays open: which contracts a programme
+    has is the part oversight needs, and it names no terms.
     """
+    from carrier_scope import assert_can_open_contract
+    assert_can_open_contract(principal)
+
     with SessionLocal() as s:
         contract = s.get(Contract, contract_id)
         if not contract or contract.program_id != program_id:

@@ -42,6 +42,7 @@ export default function TeamActivity() {
             <p>
               What each person sent in the last {DAYS} days and how much of it is
               still waiting — the exceptions on their files, open and put right.
+              You are on the list too, for the bordereaux you send yourself.
             </p>
           </div>
         </div>

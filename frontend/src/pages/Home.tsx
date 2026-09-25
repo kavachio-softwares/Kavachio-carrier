@@ -68,6 +68,12 @@ export default function Home() {
   // on the dedicated Run history page (/runs).
   const RUNS_PAGE = 5;
   const [runs, setRuns] = useState<Run[]>([]);
+  // How many files have been run for this carrier ALTOGETHER. The card below
+  // used to print `runs.length`, which is this snapshot's size and therefore
+  // stopped at 5 however many files had actually come in — a carrier with
+  // ninety submissions read "5 Completed". Counted by the same endpoint the
+  // File Submissions screen pages through, so the two can never disagree.
+  const [runsTotal, setRunsTotal] = useState<number | null>(null);
   // Group 3: deadline counts for the "Deadlines" tile (own submission calendar).
   const [calCounts, setCalCounts] = useState<Partial<Record<CalendarStatus, number>>>({});
   // "How big is my book" — the two directory sizes, each read from the SAME
@@ -149,6 +155,16 @@ export default function Home() {
     api.get<Run[]>(`/export/downloads`, { params: { mga, limit: RUNS_PAGE } })
       .then(r => setRuns(r.data))
       .catch(() => setRuns([]));
+  }, [mga]);
+
+  // The total, bought for one row: `page` makes /direct/runs answer with
+  // {items, total}, and the total is counted over the whole tenant rather than
+  // over the page, so page_size 1 still yields the real figure. Same trick the
+  // book-count tiles above use.
+  useEffect(() => {
+    api.get<{ total: number }>(`/direct/runs`, { params: { mga, page: 1, page_size: 1 } })
+      .then(r => setRunsTotal(r.data?.total ?? null))
+      .catch(() => setRunsTotal(null));
   }, [mga]);
 
   const fmt = (v: number | null | undefined) => (v == null ? "—" : v);
@@ -412,8 +428,16 @@ export default function Home() {
                 <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Recent File Submissions</h3>
               </div>
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                <span style={{ fontSize: 32, fontWeight: 600, color: "white" }}>{runs.length}</span>
-                <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 14 }}>Completed</span>
+                <span style={{ fontSize: 32, fontWeight: 600, color: "white" }}>
+                  {runsTotal ?? runs.length}
+                </span>
+                {/* "Processed" rather than "Completed": a run in this count may
+                    have come back with exceptions still open, and calling that
+                    completed is the one reading a carrier must not take from
+                    this card. The open work is the tile above. */}
+                <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 14 }}>
+                  {(runsTotal ?? runs.length) === 1 ? "File Processed" : "Files Processed"}
+                </span>
               </div>
             </div>
             <div style={{ opacity: 0.5, color: "white" }}>

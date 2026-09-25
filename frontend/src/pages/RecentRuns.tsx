@@ -100,9 +100,26 @@ export default function RecentRuns() {
     <div className="proto">
       <div className="view full">
         <div className="page-head">
+          {/* Whose work this is depends on who is reading. Kavachio staff and
+              anyone else who can still start a run are looking at their own
+              history; a carrier seat is looking at what its BROKERS sent (plus
+              anything Kavachio ran on its behalf), and telling them they
+              processed it is both wrong and confusing now that they cannot. */}
           <div className="t">
-            <h2>Process Bordereau History</h2>
-            <p>Every bordereau you have processed, with its exceptions and its output.</p>
+            {canAccessPath("/direct") ? (
+              <>
+                <h2>Process Bordereau History</h2>
+                <p>Every bordereau you have processed, with its exceptions and its output.</p>
+              </>
+            ) : (
+              <>
+                <h2>File Submissions</h2>
+                <p>
+                  Every bordereau run for you, whoever sent it — what it produced,
+                  what it flagged, and how much of that is still open.
+                </p>
+              </>
+            )}
           </div>
           {/* Back to wherever this history was reached FROM. A carrier seat no
               longer has a Process Bordereau screen (access.ts), so offering it
@@ -161,7 +178,11 @@ export default function RecentRuns() {
             <div className="empty">
               {filtersActive
                 ? "No runs match your search — try different filters."
-                : "No runs yet — process a bordereau and it will appear here."}
+                : canAccessPath("/direct")
+                  ? "No runs yet — process a bordereau and it will appear here."
+                  // A carrier cannot fix this by acting: the next file is the
+                  // broker's to send. Say who it is waiting on.
+                  : "No files yet — one will appear here as soon as a broker sends it."}
             </div>
           ) : (
             <div className="tbl-wrap">

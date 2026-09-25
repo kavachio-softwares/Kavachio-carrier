@@ -290,6 +290,59 @@ def policy_scope(policy_id: int = Path(..., ge=1),
     return CarrierScope(**{**scope.__dict__, "policy_id": policy_id})
 
 
+# --- what the PLATFORM seat is not a party to --------------------------------
+#
+# require_role() lets a platform admin through every carrier gate — it is a
+# superset of the carrier roles by design. That is right for oversight, and
+# wrong for the two things below, which are not oversight: they are acts in a
+# relationship between a carrier and a broker that Kavachio is not part of.
+#
+# Both were "closed" only by accident before: each endpoint ends up calling
+# resolve_tenant_id(), which 400s a platform admin for not naming a tenant. A
+# 400 about a missing parameter is not a rule — it reads as something the
+# caller forgot rather than something they may not do, and it opens the moment
+# anyone adds a tenant picker to the screen. These say it outright instead.
+
+def assert_can_invite_brokers(principal: Principal) -> None:
+    """Bringing a broker on board, and chasing or withdrawing that invitation,
+    belongs to the CARRIER alone.
+
+    An invitation says "come and work with us", and Kavachio is not the "us".
+    The accepted invitation IS the carrier-broker relationship, so a platform
+    admin creating one would be making a relationship on a carrier's behalf
+    that the carrier never agreed to — and the broker would be told a carrier
+    invited them when nobody there did.
+
+    Kavachio's oversight of the same ground is unchanged: the carrier's page
+    still lists its brokers, and the audit trail still names every invitation.
+    Reading who works with whom is oversight; deciding it is not."""
+    if principal.is_platform_admin:
+        raise HTTPException(
+            403, "Kavachio can see a carrier's brokers but cannot invite one. "
+                 "An invitation comes from the carrier — only they can send, "
+                 "chase or withdraw it.")
+
+
+def assert_can_open_contract(principal: Principal) -> None:
+    """Opening a CONTRACT RECORD — its terms, its documents, its signature
+    page — is for the two organisations that hold it.
+
+    A contract is an agreement between a carrier and a broker, and its terms
+    are the commercial substance of that agreement. Kavachio runs the platform
+    the agreement is administered on; it is not a party to it, and being able
+    to read every carrier's rates and limits is not something running the
+    platform requires.
+
+    What oversight DOES need is left open on purpose: which contracts hang off
+    which programme, how many there are and what state they are in, all of
+    which the carrier's page still shows from the programme's contract list.
+    That answers "is this carrier set up" without opening the agreement."""
+    if principal.is_platform_admin:
+        raise HTTPException(
+            403, "Kavachio can see which contracts a programme has but cannot "
+                 "open one. A contract is between the carrier and the broker.")
+
+
 # --- reading one generated export, from either side --------------------------
 
 def assert_can_amend(principal: Principal) -> None:

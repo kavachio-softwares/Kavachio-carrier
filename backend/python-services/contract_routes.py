@@ -55,6 +55,7 @@ import contract_types as ct
 import esign_pdf
 import storage
 from auth_deps import Principal, current_principal, resolve_broker_party_id
+from carrier_scope import assert_can_open_contract
 from app_routes import _iso_utc, assert_tenant_owns, resolve_tenant_id
 from db import (
     Contract, ContractApproval, ContractDocument, ExportTemplate,
@@ -110,7 +111,15 @@ def _program_access(s, p: Principal, program_id: int) -> tuple[Program, int]:
 
 
 def _contract_access(s, p: Principal, contract_id: int) -> Contract:
-    """Fetch a contract the caller is allowed to see."""
+    """Fetch a contract the caller is allowed to see.
+
+    Every read and every write in this module comes through here, so the
+    platform seat is refused once, at the door, rather than on thirty
+    endpoints — and a new contract endpoint is covered the day it is written.
+    Asked BEFORE the row is fetched, so the answer cannot differ by contract:
+    it is about who is asking (see assert_can_open_contract).
+    """
+    assert_can_open_contract(p)
     c = s.get(Contract, contract_id)
     if not c:
         raise HTTPException(404, "contract not found")
@@ -1124,6 +1133,11 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
       * a BROKER gets a draft to finish and submit, and the DB trigger — not
         this code — marks it pending the carrier's decision.
     """
+    # Raising one is the same act as holding one: a contract Kavachio could
+    # create is a contract it could not then open (_contract_access), which is
+    # not a state worth having.
+    assert_can_open_contract(p)
+
     # Set when the caller sent a wording; stored as clauses after the commit.
     authored_sections: list[dict] | None = None
     with SessionLocal() as s:

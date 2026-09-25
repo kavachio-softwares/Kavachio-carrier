@@ -15,6 +15,7 @@ import {
   type BrokerDashboard as Dash, type BrokerInsights, type BrokerInvitation,
 } from "../api/broker";
 import { useBrokerCarrierId } from "../brokerCarrier";
+import { canAccessPath } from "../access";
 import { fmtDate } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
 import { Activity, AlertCircle, Building2, Clock, FileCheck2, PenLine, Users } from "lucide-react";
@@ -97,8 +98,16 @@ export default function BrokerDashboard() {
             <h2>Dashboard</h2>
             <p>{d.broker.name} — your team, your carriers, and what needs you today.</p>
           </div>
+          {/* The admin runs bordereaux too, so the month's actual work is the
+              primary action here and staffing the team is the secondary one —
+              the same order the sidebar puts them in. Derived from
+              canAccessPath, not hardcoded, so the button can never offer a
+              screen ROUTE_ACCESS would bounce. */}
           <div className="actions">
-            <Link className="btn pri" to="/broker/users">＋ Add a user</Link>
+            {canAccessPath("/broker/bordereau") && (
+              <Link className="btn pri" to="/broker/bordereau">＋ Process Bordereau</Link>
+            )}
+            <Link className="btn" to="/broker/users">＋ Add a user</Link>
           </div>
         </div>
 
@@ -177,7 +186,8 @@ export default function BrokerDashboard() {
               <ChartCard title="Team Activity"
                 info={<InfoTip text={
                   `What each person on your team sent in the last ${DAYS} days, and how much of it `
-                  + "is still waiting. Each bar is the exceptions on that person's files: amber is "
+                  + "is still waiting — you included, for the bordereaux you send yourself. "
+                  + "Each bar is the exceptions on that person's files: amber is "
                   + "what is still open, green what has been put right, and a full grey bar means "
                   + "nothing was flagged at all. An exception is one cell, not a whole row, so the "
                   + "file's size is written beside the bar instead of being drawn. Bars are not "

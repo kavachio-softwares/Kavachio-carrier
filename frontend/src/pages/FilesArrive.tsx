@@ -28,8 +28,12 @@ import { Modal } from "../components/ui/Modal";
 // data — the backend has no opinion on what "the old-fashioned way" means.
 const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }> = {
   upload: {
-    title: "Manual upload", sub: "someone signs in and uploads the file",
-    hint: "Process Bordereau screen",
+    // "someone" was accurate while a carrier seat could upload too. It cannot
+    // any more — Process Bordereau is the broker's screen now (access.ts) — so
+    // this names the broker rather than leaving a carrier reading their own
+    // intake page to conclude they are the someone.
+    title: "Manual upload", sub: "the broker signs in and uploads the file",
+    hint: "their Process Bordereau screen",
   },
   email: {
     title: "Email", sub: "the broker emails the file to their own address",
@@ -288,7 +292,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                 <div className="routes" id={`grp-${ch}`}>
                   {ch === "upload" ? (
                     <div className="note">
-                      Anyone with a login can drag a file in on the{" "}
+                      A broker can drag a file in on their own{" "}
                       <b>Process Bordereau</b> screen. It is the fallback for
                       everything else, so it cannot be switched off and there is
                       nothing to configure.

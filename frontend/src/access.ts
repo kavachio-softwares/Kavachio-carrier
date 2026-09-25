@@ -61,9 +61,16 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // but reaches each one from "Waiting on you" on their dashboard; an operator
   // never sees a contract at all.
   { pattern: "/broker/contracts", requires: "broker_admin", only: [] },
-  // Running the bordereau is the operator's job — the seat exists for it — and
-  // it is theirs alone: the broker admin staffs the team and signs contracts.
-  { pattern: "/broker/bordereau", requires: "operator", only: ["operator"] },
+  // Running the bordereau is BOTH broker seats' — the operator's day-to-day
+  // job, and the admin's when they do it themselves. It was the operator's
+  // alone, which read as a division of labour and worked as a blocker: a small
+  // broker is often one person holding the admin seat, and a large one still
+  // has an admin who covers a month their operator is away. Nothing about the
+  // screen is seat-specific — it picks one of THIS broker's contracts and runs
+  // against it, and the server already authorises both seats identically
+  // (carrier_scope resolves on `is_broker`, never on the role).
+  { pattern: "/broker/bordereau", requires: "operator",
+    only: ["broker_admin", "operator"] },
   // The broker staffs itself here. An operator is a seat inside that team, not
   // a manager of it, so this one is the admin's alone — the database says the
   // same thing (only a broker admin may create an operator).
@@ -109,23 +116,40 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   { pattern: "/programs/new", requires: "carrier_admin" },
   { pattern: "/programs/:programId/setup", requires: "carrier_admin" },
   { pattern: "/programs/:programId/brokers", requires: "carrier_admin" },
-  { pattern: "/programs/:programId/contracts/:contractId", requires: "carrier_admin" },
+  // `only`, not `requires`: a bare `requires` lets kavachio_admin in by rank,
+  // and this is the contract record by another route.
+  { pattern: "/programs/:programId/contracts/:contractId",
+    requires: "carrier_admin", only: ["carrier_admin"] },
   // The contract RECORD screens. The carrier-wide list and the create form are
   // the carrier's — a broker reaches its own contracts through My Contracts.
-  { pattern: "/contracts", requires: "carrier_admin" },
-  { pattern: "/contracts/new", requires: "carrier_admin" },
-  { pattern: "/contracts/upload", requires: "carrier_admin" },
-  // The record itself is open to both sides, because both have business with
+  { pattern: "/contracts", requires: "carrier_admin", only: ["carrier_admin"] },
+  { pattern: "/contracts/new", requires: "carrier_admin", only: ["carrier_admin"] },
+  { pattern: "/contracts/upload", requires: "carrier_admin", only: ["carrier_admin"] },
+  // The record itself is open to both SIDES, because both have business with
   // it: the carrier decides on it, and the broker has to attach the documents
   // it defers to and correct it after a rejection. The API scopes what each
   // one can see and do — a broker gets a 404 on anyone else's contract.
+  //
+  // kavachio_admin is deliberately NOT here. A contract is an agreement
+  // between a carrier and a broker and Kavachio is not a party to it, so the
+  // platform seat sees WHICH contracts a programme has — on the carrier's own
+  // page — and not what they say. The server refuses it independently
+  // (carrier_scope.assert_can_open_contract); this only stops the UI mounting
+  // a screen that would come back 403.
   { pattern: "/contracts/:contractId", requires: "operator",
-    only: ["broker_admin", "operator", "carrier_admin", "kavachio_admin"] },
+    only: ["broker_admin", "operator", "carrier_admin"] },
   // Signing is between the two organisations, so both sides reach it. The
-  // screen writes nothing, but it names the people who would sign.
+  // screen writes nothing, but it names the people who would sign — which is
+  // the same reason the platform seat is left off it.
   { pattern: "/contracts/:contractId/signature", requires: "operator",
-    only: ["broker_admin", "operator", "carrier_admin", "kavachio_admin"] },
-  { pattern: "/brokers", requires: "carrier_admin" },
+    only: ["broker_admin", "operator", "carrier_admin"] },
+  // Party — the carrier's brokers, and where one is invited. `only`, because
+  // the platform seat outranks carrier_admin and would otherwise reach the
+  // Invite Broker button by typing the path. Inviting a broker is an act in a
+  // relationship Kavachio is not part of; the server says so too
+  // (carrier_scope.assert_can_invite_brokers). Kavachio's own view of the same
+  // ground is the carrier's page under Carriers, which is unchanged.
+  { pattern: "/brokers", requires: "carrier_admin", only: ["carrier_admin"] },
   // Create-a-Contract steps 3 and 4. Carrier-only: a broker never sends a
   // contract for signature, they are sent one. Their half of the flow is
   // /sign, which is public and unlisted here because it has no session at
@@ -134,11 +158,12 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // No longer a sidebar entry — reached from Contracts and from a contract's
   // own record — so this rule is what guards it now that nothing hides the
   // link from the wrong role.
-  { pattern: "/contracts/signatures", requires: "carrier_admin" },
-  { pattern: "/brokers/:brokerId", requires: "carrier_admin" },
+  { pattern: "/contracts/signatures", requires: "carrier_admin", only: ["carrier_admin"] },
+  { pattern: "/brokers/:brokerId", requires: "carrier_admin", only: ["carrier_admin"] },
   // What a broker has sent this carrier, from the Home card. Same gate as the
   // broker record it sits beside; both carrier seats rank as carrier_admin.
-  { pattern: "/brokers/:brokerId/files", requires: "carrier_admin" },
+  { pattern: "/brokers/:brokerId/files", requires: "carrier_admin",
+    only: ["carrier_admin"] },
   { pattern: "/outputs/templates/:id", requires: "carrier_admin" },
   // Exception triage. Open to BROKER seats too, not only the carrier: a broker
   // who ran a bordereau has to be able to see what failed on their own file and

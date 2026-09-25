@@ -43,6 +43,7 @@ from db import (
     ProgramBroker, ContractApproval, Pipeline,
 )
 from auth_deps import current_principal, require_role, Principal, resolve_broker_party_id
+from carrier_scope import assert_can_invite_brokers
 from app_routes import (
     resolve_tenant_id, assert_tenant_owns, _iso_utc, PRODUCER_PARTY_TYPES,
     _carrier_seat, _my_broker_party_ids,
@@ -486,7 +487,13 @@ def broker_create(body: NewBrokerBody,
     They belong together anyway. A broker organisation with no admin is a name
     nobody can sign in as, and a broker on no programme cannot produce. Doing
     all three at once means what you end up with actually works.
+
+    The CARRIER's, not Kavachio's — see assert_can_invite_brokers. require_role
+    passes a platform admin through every carrier gate, so without this the
+    only thing stopping them was resolve_tenant_id's "select a tenant" 400.
     """
+    assert_can_invite_brokers(principal)
+
     from app_routes import (_make_invite_link, _send_invite_email,
                             _send_carrier_invite_email)
 
@@ -658,6 +665,7 @@ def broker_invitation_resend(invitation_id: int,
     them about it would be this carrier telling them something about their own
     account. Both answer the same way.
     """
+    assert_can_invite_brokers(principal)
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal)
         inv = s.get(BrokerInvitation, invitation_id)
@@ -704,6 +712,7 @@ def broker_invitation_revoke(invitation_id: int,
     ending that is taking the broker off your programmes — a different act,
     with contracts underneath it.
     """
+    assert_can_invite_brokers(principal)
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal)
         inv = s.get(BrokerInvitation, invitation_id)

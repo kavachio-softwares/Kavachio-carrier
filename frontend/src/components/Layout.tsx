@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, CalendarDays, ScrollText,
+  FileCheck, CalendarDays, ScrollText, History,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
@@ -47,6 +47,8 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       { to: "/operator", label: "Dashboard", icon: LayoutDashboard },
       // The monthly run — the reason a broker has a login at all, so it sits
       // directly under the dashboards rather than below the reference screens.
+      // BOTH broker seats see it: an admin runs the file as readily as an
+      // operator does (ROUTE_ACCESS says so, and canAccessPath follows).
       { to: "/broker/bordereau", label: "Process Bordereau", icon: Zap },
       { to: "/broker/contracts", label: "My Contracts", icon: FileCheck },
       // Admin-only inside the broker's own group: an operator is a seat in
@@ -74,6 +76,18 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // accordingly. Kavachio staff still get it, and deleting the row would
       // take it from them too.
       { to: "/direct", label: "Process Bordereau", icon: Zap },
+      // WHAT HAS BEEN RUN. Listed in its own right now, because for a carrier
+      // it is the only place the month's files can be watched: they no longer
+      // start a run, so their whole involvement is reading what arrived, how it
+      // validated, and what is still open. It used to have no nav entry at all
+      // — reachable only from the Dashboard's "Recent File Submissions" card —
+      // which was survivable while Process Bordereau sat above it and led to
+      // the same history, and is not now that the entry above is gone for them.
+      //
+      // It also covers the file a KAVACHIO admin ran on this carrier's behalf:
+      // /direct/runs is scoped to the tenant, never to who pressed the button,
+      // so such a run is listed here beside the brokers' own.
+      { to: "/runs", label: "File Submissions", icon: History },
       // The carrier's calendar IS listed: it is a whole-book view — every
       // broker's obligation for a due month — so unlike My Calendar it does not
       // belong inside one setup. It sits next to Process Bordereau because
@@ -169,6 +183,14 @@ const ADMIN_GROUPS: typeof GROUPS = [
     title: "",
     items: [
       { to: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      // NO "Process Bordereau" / "File Submissions" here, deliberately. Both
+      // screens are tenant-scoped and read `currentMga()`, and Kavachio staff
+      // have no tenant: the login response sets `mga: null` for them
+      // (app_routes ~582) and nothing in the app lets them pick one, so
+      // currentMga() falls through to the literal "default" and every such call
+      // answers "platform admin must select a tenant". Listing the screens here
+      // would put two links in the sidebar that lead to an error page. What is
+      // missing is a tenant selector for platform staff, not a nav entry.
       { to: "/tenants", label: "Carriers", icon: Boxes },
       { to: "/admin/users", label: "Users & Roles", icon: UserCog },
       { to: "/admin/mapping-tasks", label: "Data Mapping Queue", icon: Database },
@@ -225,11 +247,14 @@ function subScreenOwner(pathname: string, search: string): string | null {
   if (pathname === "/direct/setup" || pathname.startsWith("/direct/setup/")) return "/direct/setups";
   if (pathname.startsWith("/direct/setups/")) return "/direct/setups";
 
-  // Run History + exception triage are linked from both Dashboard and Process
-  // Bordereau — whichever one the user actually came from stays highlighted.
-  const isRunsOrExceptions = pathname === "/runs"
-    || /^\/uploads\/[^/]+\/exceptions(\/rule\/[^/]+)?$/.test(pathname);
-  if (isRunsOrExceptions) {
+  // Exception triage is linked from both Dashboard and Process Bordereau —
+  // whichever one the user actually came from stays highlighted.
+  //
+  // /runs is NOT in here any more. It has a nav entry of its own now (File
+  // Submissions), so it lights that entry, the way every other listed screen
+  // does. Rolling it up under whichever card linked to it made the sidebar say
+  // "Dashboard" while the reader was plainly on the history screen.
+  if (/^\/uploads\/[^/]+\/exceptions(\/rule\/[^/]+)?$/.test(pathname)) {
     const from = new URLSearchParams(search).get("from");
     if (from === "home") return "/home";
     if (from === "admin") return "/admin/dashboard";
