@@ -169,7 +169,7 @@ export default function Tenants() {
               <thead>
                 <tr>
                   <th>Carrier</th><th>Programmes</th><th>Brokers</th>
-                  <th>Status</th><th className="r">Actions</th>
+                  <th>Status</th><th style={{ textAlign: "right" }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -190,25 +190,39 @@ export default function Tenants() {
                       <td>{t.brokers ?? 0}</td>
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="r">
-                        <span className="linkish" onClick={() => nav(`/tenants/${encodeURIComponent(t.mga)}`)}>View</span>
-                        {/* Only offered while the org actually has an outstanding
-                            invite — nothing to resend once everyone has onboarded.
-                            While the request is in flight the element carries NO
-                            click handler, so it can't be fired twice. */}
-                        {(t.pending_invites ?? 0) > 0 && (
-                          <>
-                            {" · "}
-                            {resending === t.mga ? (
-                              <span className="linkish mut" aria-disabled="true">Sending…</span>
-                            ) : (
-                              <span className="linkish" onClick={() => resendInvite(t)}
-                                title={`Re-send the onboarding link to ${t.pending_invites} pending ${
-                                  t.pending_invites === 1 ? "user" : "users"} of ${t.name}`}>
-                                Resend invite
-                              </span>
-                            )}
-                          </>
-                        )}
+                        {/* BUTTONS, not linked words — matching Users & Roles
+                            (pages/Users.tsx): a plain-text "View · Resend
+                            invite" reads as one sentence, gives the eye no hit
+                            target, and a destructive action would sit in the
+                            same ink as a safe one. `rowacts` is the house flex
+                            row, flushed right, so a two-button row and a
+                            one-button row still share the same right edge down
+                            the column. */}
+                        <div className="rowacts" style={{ marginTop: 0, justifyContent: "flex-end" }}>
+                          {/* Resend invite BEFORE View, so View — the one
+                              action every row has — runs in a straight line
+                              down the right edge of the column. Left of it,
+                              Resend invite only appears on the rows that still
+                              have one outstanding, which is why it shifts
+                              rather than lining up itself. Disabled rather
+                              than removed while the request is in flight, so
+                              it cannot be fired twice and the row does not
+                              shift. */}
+                          {(t.pending_invites ?? 0) > 0 && (
+                            <button type="button" className="btn sm"
+                                    disabled={resending === t.mga}
+                                    onClick={() => resendInvite(t)}
+                                    title={resending === t.mga ? undefined
+                                      : `Re-send the onboarding link to ${t.pending_invites} pending ${
+                                          t.pending_invites === 1 ? "user" : "users"} of ${t.name}`}>
+                              {resending === t.mga ? "Sending…" : "Resend invite"}
+                            </button>
+                          )}
+                          <button type="button" className="btn sm"
+                                  onClick={() => nav(`/tenants/${encodeURIComponent(t.mga)}`)}>
+                            View
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

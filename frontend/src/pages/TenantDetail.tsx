@@ -17,7 +17,12 @@ type TenantRow = {
 type U = { id: number; email: string; full_name: string; role: string; status: string; last_login_at?: string | null;
   /** The organisation's owner — its Carrier Admin. Every other carrier_admin row is a Carrier User. */
   is_owner?: boolean };
-type Program = { id: number; name: string; product_line?: string | null; status?: string | null };
+type Program = {
+  id: number; name: string; product_line?: string | null; status?: string | null;
+  /** How many contracts hang off it. Sent only on the PAGED answer — a
+   *  screen holding ten programmes cannot count them itself. */
+  contract_count?: number;
+};
 type Contract = {
   id: number; filename?: string | null; status?: string | null;
   created_at?: string | null; clause_count?: number;
@@ -87,9 +92,6 @@ export default function TenantDetail() {
   const nav = useNavigate();
   const isAdmin = isKavachioAdmin();
   const [t, setT] = useState<TenantRow | null>(null);
-  const [programs, setPrograms] = useState<Program[]>([]);
-  const [contracts, setContracts] = useState<Contract[]>([]);
-  const [templates, setTemplates] = useState<OutTemplate[]>([]);
   // `?tab=runs` opens straight on Recent File Submissions — the dashboard's
   // "Exceptions by Carrier" links here to show that carrier's flagged files.
   // Dropped from the address as soon as another tab is picked, so a refresh
@@ -111,9 +113,15 @@ export default function TenantDetail() {
   const [savingDetails, setSavingDetails] = useState(false);
   const [detailsMsg, setDetailsMsg] = useState<string | null>(null);
   const [detailsErr, setDetailsErr] = useState<string | null>(null);
-  // Programs & contracts: clicking a program filters the Contracts panel to
-  // just that program's contracts; null (or clicking it again) shows all.
-  const [selectedProgramId, setSelectedProgramId] = useState<number | null>(null);
+  // Programs & contracts: clicking a program shows that program's contracts;
+  // clicking it again clears the panel.
+  //
+  // The NAME is held beside the id, not looked up in the programmes on screen.
+  // Programmes page now, so the selected one can be on a page nobody is
+  // looking at — and a panel that emptied itself because the reader turned
+  // the list behind it would look like the contracts had gone.
+  const [selected, setSelected] = useState<{ id: number; name: string } | null>(null);
+  const selectedProgramId = selected?.id ?? null;
 
   // Users tab filters — independent of the Recent runs tab's own filters below.
   const [userQ, setUserQ] = useState("");
@@ -133,17 +141,10 @@ export default function TenantDetail() {
     if (!mga || !isAdmin) return;
     api.get<TenantRow>(`/tenants/${mga}`)
       .then(r => setT(r.data)).catch(() => {});
-    api.get<Program[]>("/programs", { params: { mga } }).then(async r => {
-      setPrograms(r.data);
-      const lists = await Promise.all(
-        r.data.map(p => api.get<Contract[]>(`/programs/${p.id}/contracts`)
-          .then(cr => cr.data.map(c => ({ ...c, program_id: p.id, program_name: p.name })))
-          .catch(() => [])),
-      );
-      setContracts(lists.flat());
-    }).catch(() => { setPrograms([]); setContracts([]); });
-    api.get<OutTemplate[]>("/export/template", { params: { mga } })
-      .then(r => setTemplates(r.data)).catch(() => setTemplates([]));
+    // Programmes, contracts and templates are fetched a page at a time
+    // further down. This used to read all three whole, and the contracts one
+    // programme at a time — one request per programme on the carrier, before
+    // anybody had clicked the tab they are on.
   }, [mga, isAdmin]);
 
   // Seed / re-seed the Details form whenever the tenant record changes (initial
@@ -196,6 +197,56 @@ export default function TenantDetail() {
   const userPageRows = userItems;
   const userFiltersActive = userQ !== "" || userRole !== "" || userStatusFilter !== "";
   function clearUserFilters() { setUserQ(""); setUserRole(""); setUserStatusFilter(""); }
+
+  // --- Programs & Contracts tab: three lists, three pagers ---------------
+  // All three were read whole before, and the contracts one request PER
+  // PROGRAMME on top of that. Each now asks the server for its own page.
+
+  const {
+    page: progPage, setPage: setProgPage, items: progItems, total: progTotal,
+    pageCount: progPageCount,
+  } = useServerList<Program>(
+    (page, pageSize) =>
+      api.get<{ items: Program[]; total: number }>("/programs", {
+        params: { mga, page, page_size: pageSize },
+      }).then(r => r.data),
+    isAdmin ? "programs" : "disabled",
+    PAGE_SIZE,
+  );
+
+  // Contracts follow the SELECTED programme, so its id is the filter key —
+  // picking another programme snaps back to page 1, which is what turning to
+  // a different list should do. With nothing picked there is nothing to ask
+  // for, and the panel says so rather than showing the last programme's.
+  const {
+    page: conPage, setPage: setConPage, items: conItems, total: conTotal,
+    pageCount: conPageCount,
+  } = useServerList<Contract>(
+    (page, pageSize) =>
+      selectedProgramId == null
+        ? Promise.resolve({ items: [], total: 0 })
+        : api.get<{ items: Contract[]; total: number }>(
+            `/programs/${selectedProgramId}/contracts`,
+            { params: { page, page_size: pageSize } },
+          ).then(r => r.data),
+    isAdmin ? `contracts|${selectedProgramId ?? ""}` : "disabled",
+    PAGE_SIZE,
+  );
+
+  const {
+    page: tplPage, setPage: setTplPage, items: tplItems, total: tplTotal,
+    extra: tplExtra, pageCount: tplPageCount,
+  } = useServerList<OutTemplate, { drafts?: number }>(
+    (page, pageSize) =>
+      api.get<{ items: OutTemplate[]; total: number; drafts?: number }>(
+        "/export/template", { params: { mga, page, page_size: pageSize } },
+      ).then(r => r.data),
+    isAdmin ? "templates" : "disabled",
+    PAGE_SIZE,
+  );
+  // Drafts across EVERY template, from the server. Counting the ones on this
+  // page would put a smaller number under the same words.
+  const tplDrafts = tplExtra?.drafts ?? 0;
 
   const runFilterKey = `${runDq}|${runDateFrom}|${runDateTo}`;
   const {
@@ -383,28 +434,29 @@ export default function TenantDetail() {
 
         {/* Programs & contracts */}
         {tab === "pc" && (() => {
-          const selectedProgram = programs.find(p => p.id === selectedProgramId) ?? null;
           // Nothing shows on first load — a program must be picked before its
           // contracts are shown, so contracts are never viewed without knowing
           // which program they belong to.
-          const visibleContracts = selectedProgram
-            ? contracts.filter(c => c.program_id === selectedProgram.id)
-            : [];
+          const selectedProgram = selected;
           return (
           <>
           <div className="grid g-2">
             <div className="card">
-              <div className="card-h"><h3>Programs</h3><span className="sub">{programs.length}</span></div>
+              <div className="card-h"><h3>Programs</h3><span className="sub">{progTotal}</span></div>
               <div className="tbl-wrap">
                 <table>
                   <tbody>
-                    {programs.map(p => {
+                    {progItems.map(p => {
                       const st = itemStatus(p.status);
-                      const count = contracts.filter(c => c.program_id === p.id).length;
+                      // From the server. This used to be counted out of every
+                      // contract on the carrier, which the screen no longer
+                      // holds — and never should have, to write one number.
+                      const count = p.contract_count ?? 0;
                       const isSel = p.id === selectedProgramId;
                       return (
                         <tr key={p.id} className={`click${isSel ? " sel" : ""}`}
-                          onClick={() => setSelectedProgramId(cur => cur === p.id ? null : p.id)}>
+                          onClick={() => setSelected(cur =>
+                            cur?.id === p.id ? null : { id: p.id, name: p.name })}>
                           <td><b>{p.name}</b>{p.product_line && <div className="sub">{p.product_line}</div>}</td>
                           <td className="r muted">{count} contract{count === 1 ? "" : "s"}</td>
                           <td className="r"><span className={`badge ${st.cls}`}><span className="d" />{st.label}</span></td>
@@ -413,17 +465,21 @@ export default function TenantDetail() {
                     })}
                   </tbody>
                 </table>
-                {programs.length === 0 && <div className="empty">No programs yet.</div>}
+                {progTotal === 0 && <div className="empty">No programs yet.</div>}
               </div>
+              {progTotal > 0 && (
+                <Pagination page={progPage} pageCount={progPageCount} pageSize={PAGE_SIZE}
+                  totalItems={progTotal} onPageChange={setProgPage} noun="programs" />
+              )}
             </div>
             <div className="card">
               <div className="card-h">
                 <h3>Contracts</h3>
                 {selectedProgram && (
                   <>
-                    <span className="sub">{visibleContracts.length} · {selectedProgram.name}</span>
+                    <span className="sub">{conTotal} · {selectedProgram.name}</span>
                     <div className="right">
-                      <span className="linkish" onClick={() => setSelectedProgramId(null)}>Clear Selection</span>
+                      <span className="linkish" onClick={() => setSelected(null)}>Clear Selection</span>
                     </div>
                   </>
                 )}
@@ -431,13 +487,16 @@ export default function TenantDetail() {
               <div className="tbl-wrap">
                 <table>
                   <tbody>
-                    {visibleContracts.map(c => {
+                    {conItems.map(c => {
                       const st = itemStatus(c.status);
                       return (
                         <tr key={c.id}>
                           <td><b>{c.filename || `Contract #${c.id}`}</b>
                             <div className="sub">
-                              {c.program_name ?? "—"} · {fmtDateTime(c.created_at)} · {c.clause_count ?? 0} clause{(c.clause_count ?? 0) === 1 ? "" : "s"}
+                              {/* The programme is the one that was clicked —
+                                  the server answers for that programme alone,
+                                  so the row no longer carries its name. */}
+                              {selectedProgram?.name ?? "—"} · {fmtDateTime(c.created_at)} · {c.clause_count ?? 0} clause{(c.clause_count ?? 0) === 1 ? "" : "s"}
                             </div></td>
                           <td className="r"><span className={`badge ${st.cls}`}><span className="d" />{st.label}</span></td>
                         </tr>
@@ -445,12 +504,16 @@ export default function TenantDetail() {
                     })}
                   </tbody>
                 </table>
-                {visibleContracts.length === 0 && (
+                {conTotal === 0 && (
                   <div className="empty">
                     {selectedProgram ? "No contracts for this program." : "Select a program to see its contracts."}
                   </div>
                 )}
               </div>
+              {conTotal > 0 && (
+                <Pagination page={conPage} pageCount={conPageCount} pageSize={PAGE_SIZE}
+                  totalItems={conTotal} onPageChange={setConPage} noun="contracts" />
+              )}
             </div>
           </div>
 
@@ -460,15 +523,14 @@ export default function TenantDetail() {
             <div className="card-h">
               <h3>Output Templates</h3>
               <span className="sub">
-                {templates.length}
-                {templates.some(x => !x.approved) &&
-                  ` · ${templates.filter(x => !x.approved).length} draft`}
+                {tplTotal}
+                {tplDrafts > 0 && ` · ${tplDrafts} draft`}
               </span>
             </div>
             <div className="tbl-wrap">
               <table>
                 <tbody>
-                  {templates.map(x => (
+                  {tplItems.map(x => (
                     <tr key={x.id} className="click" onClick={() => nav(`/outputs/templates/${x.id}`)}>
                       <td><b>{x.name}</b>
                         <div className="sub">
@@ -484,8 +546,12 @@ export default function TenantDetail() {
                   ))}
                 </tbody>
               </table>
-              {templates.length === 0 && <div className="empty">No output templates yet.</div>}
+              {tplTotal === 0 && <div className="empty">No output templates yet.</div>}
             </div>
+            {tplTotal > 0 && (
+              <Pagination page={tplPage} pageCount={tplPageCount} pageSize={PAGE_SIZE}
+                totalItems={tplTotal} onPageChange={setTplPage} noun="templates" />
+            )}
           </div>
           </>
           );

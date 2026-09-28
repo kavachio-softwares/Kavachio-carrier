@@ -104,10 +104,15 @@ def mail_account(account: str = "") -> MailAccount:
 
 
 def send_email(to: str, subject: str, html: str, text: str | None = None,
-               account: str = "",
+               account: str = "", cc: "str | list[str] | None" = None,
                attachments: "list[tuple[str, bytes, str]] | None" = None) -> None:
     """Send an HTML email as `account` (default sender when omitted).
     Raises on failure — the caller decides how to handle it.
+
+    `cc` is one address or a list — e.g. the carrier user who asked for a
+    reminder to go out, so they hold a copy of exactly what the broker was
+    told. Left off the message entirely when empty, rather than an empty
+    header.
 
     `attachments` is a list of (filename, data, mime_type) — e.g. the completed
     contract sent to both parties when the last signature lands. A signed
@@ -116,7 +121,9 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
 
     Honours the MAIL_ALLOWED_RECIPIENTS test guard: when that is set, a
     recipient not on the list is skipped (logged, not raised) so callers that
-    fan out to several addresses still deliver to the allowed ones."""
+    fan out to several addresses still deliver to the allowed ones. Cc
+    addresses go through the same guard, individually — one disallowed cc
+    does not stop the message reaching an allowed `to`."""
     allowed = _allowed_recipients()
     if allowed and (to or "").strip().lower() not in allowed:
         # WARNING, not INFO: mail that a caller believes it sent is silently not
@@ -128,6 +135,10 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
     if allowed:
         log.warning("[Email] test mode: MAIL_ALLOWED_RECIPIENTS restricts delivery "
                     "to %d address(es); %s is allowed", len(allowed), to)
+    cc_in = [cc] if isinstance(cc, str) else list(cc or [])
+    cc_list = [c.strip() for c in cc_in if (c or "").strip()]
+    if allowed:
+        cc_list = [c for c in cc_list if c.strip().lower() in allowed]
     acct = mail_account(account)
     if not acct.user or not acct.password:
         prefix = (account or "").strip().upper()
@@ -140,6 +151,8 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
     msg["Subject"] = subject
     msg["From"] = formataddr((acct.sender_name, acct.sender))
     msg["To"] = to
+    if cc_list:
+        msg["Cc"] = ", ".join(cc_list)
     msg.set_content(text or "Open this message in an HTML-capable email client.")
     msg.add_alternative(html, subtype="html")
     for name, data, mime in (attachments or []):
@@ -150,11 +163,14 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
         msg.add_attachment(data, maintype=maintype or "application",
                            subtype=subtype or "octet-stream", filename=name)
 
-    log.info("[Email] sending '%s' to %s as %s via %s:%s",
-             subject, to, acct.sender, acct.host, acct.port)
+    log.info("[Email] sending '%s' to %s%s as %s via %s:%s",
+             subject, to, f" (cc {', '.join(cc_list)})" if cc_list else "",
+             acct.sender, acct.host, acct.port)
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(acct.host, acct.port, context=ctx, timeout=20) as server:
         server.login(acct.user, acct.password)
+        # No explicit to_addrs: smtplib pulls recipients from the To/Cc headers
+        # already on the message, so leaving `cc` off never sends bcc-style.
         server.send_message(msg)
     log.info("[Email] sent to %s as %s", to, acct.sender)
 
@@ -268,3 +284,49 @@ def carrier_invite_email_html(link: str, name: str | None = None,
     </div>
   </div>
 </body></html>"""
+
+
+def overdue_reminder_email_html(name: str | None, program_name: str, period: str,
+                                due_date: str | None, days_over: int,
+                                note: str | None = None) -> str:
+    """A carrier chasing a broker for a bordereau that is now late.
+
+    Plain and short on purpose — this is a nudge about one file, not a
+    marketing email. `note` is whatever the carrier user typed in "Anything to
+    add?"; shown only when they wrote one.
+    """
+    greeting = f"Hi {name}," if (name or "").strip() else "Hi,"
+    due_txt = f" It was due on <b>{due_date}</b>." if due_date else ""
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
+        {program_name} — {period} bordereau is {plural(days_over, 'day')} overdue
+      </h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        The <b>{period}</b> bordereau for <b>{program_name}</b> hasn't arrived yet.{due_txt}
+        Could you send it across when you get a chance?
+      </p>
+      {f'<p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 22px;'
+       f'padding:12px 14px;background:#F8F9FC;border-radius:8px">{escape_html(note)}</p>' if (note or "").strip() else ""}
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a reminder from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def escape_html(text: str) -> str:
+    from html import escape
+    return escape(text)

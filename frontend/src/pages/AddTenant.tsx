@@ -91,7 +91,7 @@ export default function AddTenant() {
               <InfoTip text="A brand new carrier is empty until its own admin signs in. They add the programmes and the brokers, not us." />
             </h3>
             <div className="field">
-              <label>Legal name <span style={{ color: "var(--p-crit)" }}>*</span></label>
+              <label>Name <span style={{ color: "var(--p-crit)" }}>*</span></label>
               <input value={f.name} autoFocus
                 placeholder="e.g. Northgate Mutual Insurance Co"
                 onChange={e => set("name", e.target.value)} />
@@ -125,11 +125,11 @@ export default function AddTenant() {
               <input type="email" value={f.admin_email} placeholder="admin@carrier.com"
                 onChange={e => set("admin_email", e.target.value)} />
             </div>
-            <div className="note" style={{ marginTop: 4 }}>
+            {/* <div className="note" style={{ marginTop: 4 }}>
               When they accept, they arrive at an empty account and we guide them
               through adding their first programme. They can hand ownership to
               one of their own admins later — you do not have to do it for them.
-            </div>
+            </div> */}
           </div>
         </div>
 

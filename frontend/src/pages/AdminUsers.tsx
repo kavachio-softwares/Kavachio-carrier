@@ -24,17 +24,19 @@ type Row = {
   created_at?: string | null; last_login_at?: string | null;
 };
 type Counts = {
-  total: number; kavachio: number;
+  total: number;
   carrier_admins: number; carrier_users: number;
   broker_admins: number; broker_users: number;
   never_signed_in: number; carriers: number; brokers: number;
 };
 
-// One entry per SEAT. Carrier admin and carrier user share the one DB role;
-// the server tells them apart by who owns the organisation and sends back
-// "carrier_user" for the rest, so this screen (and its filter) can name both.
+// One entry per SEAT this screen can show — Kavachio's own account is not one
+// of them (see the server's own comment on why: exactly one, and it is Us,
+// not a role a carrier or broker holds). Carrier admin and carrier user share
+// the one DB role; the server tells them apart by who owns the organisation
+// and sends back "carrier_user" for the rest, so this screen (and its filter)
+// can name both.
 const ROLE_LABEL: Record<string, string> = {
-  kavachio_admin: "Kavachio Admin",
   carrier_admin: "Carrier Admin",
   carrier_user: "Carrier User",
   broker_admin: "Broker Admin",
@@ -105,27 +107,29 @@ export default function AdminUsers() {
     
 
         {c && (
-          <div className="tiles six" style={{ marginBottom: 18 }}>
+          <div className="tiles five" style={{ marginBottom: 18 }}>
             <Tile k="Users" v={c.total}
-              foot={c.never_signed_in > 0
-                ? `${c.never_signed_in} ${c.never_signed_in === 1 ? "has" : "have"} not signed in yet`
-                : "all have signed in"}
-              info="Everyone with a login, across the five seats beside this one." />
-            <Tile k="Kavachio Admin" v={c.kavachio}
-              foot={c.kavachio === 1 ? "the only Kavachio account" : "Kavachio accounts"}
-              info="Us. The only accounts Kavachio creates and holds itself." />
+              info="Everyone with a login, across the four seats beside this one. Not Kavachio's own account — there is exactly one of those, and it is Us, not a seat to review." />
             <Tile k="Carrier Admin" v={c.carrier_admins}
-              foot={`across ${c.carriers} ${c.carriers === 1 ? "carrier" : "carriers"}`}
-              info="The one person accountable for each carrier — the owner we invited when the carrier was created." />
+              info={`The one person accountable for each carrier — its recognised `
+                + `owner. Not every carrier has named one yet (${c.carriers} carriers `
+                + `have people at all; only ${c.carrier_admins} of them have an owner `
+                + `on record), which is why this can read lower than the number of `
+                + `carrier organisations beside it.`} />
             <Tile k="Carrier User" v={c.carrier_users}
-              foot={`${c.carrier_admins + c.carrier_users} people at carriers in all`}
-              info="Colleagues the carrier admin added at their own company. They do the carrier's work but do not decide who else is in it." />
+              info={`Colleagues the carrier admin added at their own company. They `
+                + `do the carrier's work but do not decide who else is in it. Add `
+                + `the ${c.carrier_admins} carrier admins and ${c.carrier_admins + c.carrier_users} `
+                + `people work at carrier organisations in all.`} />
             <Tile k="Broker Admin" v={c.broker_admins}
-              foot={`across ${c.brokers} ${c.brokers === 1 ? "broker" : "brokers"}`}
-              info="The person a carrier invited at a broker. They add their own colleagues." />
+              info={`The first person a carrier invited at a broker. Unlike carriers, `
+                + `every broker they work with currently has exactly one — which is `
+                + `why this matches the number of broker organisations beside it.`} />
             <Tile k="Broker User" v={c.broker_users}
-              foot={`${c.broker_admins + c.broker_users} people at brokers in all`}
-              info="Colleagues the broker admin added. They send the files and clear the exceptions." />
+              info={`Colleagues the broker admin added. They send the files and `
+                + `clear the exceptions. Add the ${c.broker_admins} broker admins `
+                + `and ${c.broker_admins + c.broker_users} people work at broker `
+                + `organisations in all.`} />
           </div>
         )}
 
@@ -206,14 +210,13 @@ export default function AdminUsers() {
   );
 }
 
-// `foot` carries a fact with a number in it; anything that EXPLAINS the tile
-// goes in `info`, behind the icon, rather than on the face of the tile.
-function Tile({ k, v, foot, info }: { k: string; v: number; foot: string; info?: string }) {
+// Anything that EXPLAINS the tile goes in `info`, behind the icon, rather
+// than spelled out on the face of the tile.
+function Tile({ k, v, info }: { k: string; v: number; info?: string }) {
   return (
     <div className="tile">
       <div className="k">{k}{info && <InfoTip text={info} />}</div>
       <div className="v">{v}</div>
-      <div className="foot">{foot}</div>
     </div>
   );
 }

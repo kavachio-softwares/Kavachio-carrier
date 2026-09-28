@@ -1587,32 +1587,71 @@ class ProgramBody(BaseModel):
     # canonical_program_id: Optional[int] = None
 
 
-def _program_dict(p: Program, mga: Optional[str] = None) -> dict:
-    return {"id": p.id, "mga": mga, "name": p.name,
-            "party_id": p.party_id,
-            "lead_carrier": p.lead_carrier, "admin_party": p.admin_party,
-            "bdx_frequency": p.bdx_frequency,
-            "business_segment": p.business_segment,
-            "product_line": p.product_line,
-            "distribution_channel": p.distribution_channel,
-            "territory": p.territory, "commercial_terms": p.commercial_terms,
-            "status": p.status, "source_contract_file": p.source_contract_file}
-            # "canonical_program_id": p.canonical_program_id}
+def _program_dict(p: Program, mga: Optional[str] = None,
+                  contract_count: Optional[int] = None) -> dict:
+    """One programme as the API sends it.
+
+    `contract_count` is passed only where the caller has already counted —
+    the paged list does, because the screen that pages cannot count the
+    contracts itself any more. Left out entirely otherwise, so every other
+    endpoint that builds a programme keeps the payload it always sent.
+    """
+    d = {"id": p.id, "mga": mga, "name": p.name,
+         "party_id": p.party_id,
+         "lead_carrier": p.lead_carrier, "admin_party": p.admin_party,
+         "bdx_frequency": p.bdx_frequency,
+         "business_segment": p.business_segment,
+         "product_line": p.product_line,
+         "distribution_channel": p.distribution_channel,
+         "territory": p.territory, "commercial_terms": p.commercial_terms,
+         "status": p.status, "source_contract_file": p.source_contract_file}
+         # "canonical_program_id": p.canonical_program_id}
+    if contract_count is not None:
+        d["contract_count"] = contract_count
+    return d
 
 
 @router.get("/programs")
-def programs_list(mga: str, principal: Principal = Depends(current_principal)):
+def programs_list(mga: str,
+                  page: Optional[int] = Query(None, ge=1),
+                  page_size: Optional[int] = Query(None, ge=1, le=200),
+                  principal: Principal = Depends(current_principal)):
+    """Every programme this carrier runs.
+
+    Pagination is OPT-IN and changes the SHAPE, as everywhere else here: with
+    `page` it answers {items, total}, without it the bare list it always did,
+    so the callers that read the whole thing (the calendar, the setup screens)
+    are untouched.
+
+    A paged row also carries `contract_count`. A screen that holds every
+    programme can count the contracts itself; one holding ten cannot, and the
+    count is what its list is read for. It is left off the unpaged answer
+    rather than sent to everybody — an extra query for callers that would
+    not look at it.
+    """
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
+        q = s.query(Program).filter(Program.tenant_id == tid,
+                                    Program.is_app_managed.is_(True))
         # Newest first, for the same reason the broker list is: the programme
         # somebody is looking for right after creating it should be at the top,
         # not filed under its initial. Id breaks ties so two created in the
         # same second still have a stable order.
-        return [_program_dict(p, mga) for p in
-                s.query(Program).filter(Program.tenant_id == tid,
-                                        Program.is_app_managed.is_(True))
-                .order_by(Program.created_at.desc().nullslast(),
-                          Program.id.desc()).all()]
+        ordered = q.order_by(Program.created_at.desc().nullslast(),
+                             Program.id.desc())
+        if page is None:
+            return [_program_dict(p, mga) for p in ordered.all()]
+
+        total = q.order_by(None).count()
+        size = page_size or 10
+        rows = ordered.offset((page - 1) * size).limit(size).all()
+        # ONE grouped query for the page, not one per row.
+        counts = dict(s.query(Contract.program_id, func.count(Contract.id))
+                      .filter(Contract.program_id.in_([p.id for p in rows] or [-1]))
+                      .group_by(Contract.program_id).all())
+        return {"items": [_program_dict(p, mga, contract_count=counts.get(p.id, 0))
+                          for p in rows],
+                "total": total}
 
 
 @router.post("/programs")
@@ -1916,12 +1955,10 @@ class ChaseBody(BaseModel):
 @router.post("/calendar/chase")
 def calendar_chase(body: ChaseBody, mga: Optional[str] = None,
                    principal: Principal = Depends(current_principal)):
-    """Record that somebody was chased for a late file.
-
-    Stamps the rows and writes an activity event so the screen can say "chased
-    2 days ago". It does NOT email the broker — nothing here is wired to send
-    mail outward — but it makes the chase a recorded act rather than a private
-    one.
+    """Chase somebody for a late file: stamp the rows, write an activity event,
+    and email the broker's contact(s) — see record_chase. `actor` (the acting
+    carrier user's email) doubles as the cc, so they hold a copy of what went
+    out.
     """
     from submission_calendar_service import record_chase
     with SessionLocal() as s:
@@ -3050,6 +3087,8 @@ async def program_setup(
 @router.get("/programs/{program_id}/contracts")
 def program_contracts_list(program_id: int,
                            broker_party_id: Optional[int] = None,
+                           page: Optional[int] = Query(None, ge=1),
+                           page_size: Optional[int] = Query(None, ge=1, le=200),
                            principal: Principal = Depends(current_principal)):
     """Contracts on a programme.
 
@@ -3062,6 +3101,11 @@ def program_contracts_list(program_id: int,
     on the carrier's approval. Nothing waits any more — the approval gate and
     the broker-side upload it policed were removed together — so every contract
     on the programme is returned.
+
+    Pagination is OPT-IN and changes the shape: with `page` it answers
+    {items, total}, without it the bare list it always did. Several screens
+    read this whole — a setup picker wants every contract to choose from, not
+    the first ten — so the old answer has to stay the old answer.
     """
     with SessionLocal() as s:
         prog = s.get(Program, program_id)
@@ -3072,7 +3116,12 @@ def program_contracts_list(program_id: int,
         if broker_party_id is not None:
             q = q.filter(or_(Contract.broker_party_id == broker_party_id,
                              Contract.broker_party_id.is_(None)))
-        rows = q.order_by(Contract.id.desc()).all()
+        total = q.order_by(None).count()
+        ordered = q.order_by(Contract.id.desc())
+        if page is not None:
+            size = page_size or 10
+            ordered = ordered.offset((page - 1) * size).limit(size)
+        rows = ordered.all()
         # Clause count per contract = rows in clauses_extracted (defensive: the
         # table may be absent on minimal DBs).
         counts: dict[int, int] = {}
@@ -3104,19 +3153,20 @@ def program_contracts_list(program_id: int,
         # simply never returned, which left the pickers falling back to
         # "Contract 3115" for the contract the Contracts screen calls
         # "DEMO 2": one row, two names, and no way to tell they were the same.
-        return [{"id": c.id, "name": c.name, "filename": c.filename,
-                 "status": c.status,
-                 "extracted": c.extracted,
-                 "upload_token": extracted_upload_token(c.extracted),
-                 "clause_count": counts.get(c.id, 0),
-                 "output_template_id": c.output_template_id,
-                 "schedule_key": c.schedule_key,
-                 "broker_party_id": c.broker_party_id,
-                 "broker_name": broker_names.get(c.broker_party_id),
-                 "inception_dt": c.inception_dt.isoformat() if c.inception_dt else None,
-                 "expiry_dt": c.expiry_dt.isoformat() if c.expiry_dt else None,
-                 "created_at": _iso_utc(c.created_at)}
-                for c in rows]
+        items = [{"id": c.id, "name": c.name, "filename": c.filename,
+                  "status": c.status,
+                  "extracted": c.extracted,
+                  "upload_token": extracted_upload_token(c.extracted),
+                  "clause_count": counts.get(c.id, 0),
+                  "output_template_id": c.output_template_id,
+                  "schedule_key": c.schedule_key,
+                  "broker_party_id": c.broker_party_id,
+                  "broker_name": broker_names.get(c.broker_party_id),
+                  "inception_dt": c.inception_dt.isoformat() if c.inception_dt else None,
+                  "expiry_dt": c.expiry_dt.isoformat() if c.expiry_dt else None,
+                  "created_at": _iso_utc(c.created_at)}
+                 for c in rows]
+        return {"items": items, "total": total} if page is not None else items
 
 
 # =========================================================
@@ -6559,6 +6609,13 @@ def admin_users_list(
         query = (s.query(AppUser, Tenant.legal_name, Tenant.tenant_name, Party.legal_name)
                  .outerjoin(Tenant, Tenant.id == AppUser.tenant_id)
                  .outerjoin(Party, Party.id == AppUser.broker_party_id))
+        # Kavachio's own account never appears here. It is Us, not a seat a
+        # carrier or broker holds, there is exactly one of it, and there will
+        # only ever be one — nothing on the platform can create a second (see
+        # POST /users' refusal below). A row that can never vary and never
+        # needs managing has no business on a screen built to answer "who is
+        # this person and can they get in" about somebody ELSE's login.
+        query = query.filter(AppUser.role != "kavachio_admin")
         if q and q.strip():
             ql = f"%{q.strip().lower()}%"
             query = query.filter(or_(
@@ -6596,9 +6653,9 @@ def admin_users_list(
             r = normalize_role(u.role)
             if r == "carrier_admin" and u.id not in owner_ids:
                 r = "carrier_user"
-            if r == "kavachio_admin":
-                org, kind = "Kavachio", "kavachio"
-            elif b_legal:
+            # No "kavachio" branch: the query above already excludes that role,
+            # so every row here is a carrier or a broker.
+            if b_legal:
                 org, kind = b_legal, "broker"
             else:
                 org, kind = (t_legal or t_name or "—"), "carrier"
@@ -6611,8 +6668,20 @@ def admin_users_list(
                 "last_login_at": _iso_utc(u.last_login_at),
             })
 
-        # Headline counts, over EVERY user rather than the current page.
-        counts = _people_headline_counts(s)
+        # Headline counts, over EVERY user rather than the current page —
+        # except Kavachio's own, for the same reason it is off the table
+        # above. _people_headline_counts counts it (that function is also read
+        # by the platform dashboard, which is allowed to know its own
+        # headcount); this screen's tiles subtract it back out so "Users" and
+        # "have not signed in" stay true of the rows the table actually shows,
+        # rather than one higher than a reader can ever account for.
+        counts = dict(_people_headline_counts(s))
+        kavachio_total = counts.pop("kavachio", 0)
+        kavachio_unsigned = s.query(func.count(AppUser.id)).filter(
+            AppUser.role == "kavachio_admin",
+            AppUser.last_login_at.is_(None)).scalar() or 0
+        counts["total"] -= kavachio_total
+        counts["never_signed_in"] -= kavachio_unsigned
         return {"items": items, "total": int(total), "counts": counts,
                 "page": page, "page_size": page_size}
 

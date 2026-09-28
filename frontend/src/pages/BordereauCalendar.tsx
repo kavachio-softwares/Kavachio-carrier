@@ -135,6 +135,11 @@ export default function BordereauCalendar() {
     setErr(null);
     setMsg(res.chased === 0
       ? "Nothing to follow up — those files are no longer late."
+      : res.mail_failed.length > 0
+      ? `Follow-up recorded for ${plural(res.chased, "late file")}, but `
+        + `${plural(res.mail_failed.length, "reminder")} could not be emailed — try again shortly.`
+      : res.emailed > 0
+      ? `Follow-up recorded and ${plural(res.emailed, "reminder")} emailed.`
       : `Follow-up recorded for ${plural(res.chased, "late file")}.`);
     await load(month);
   }
@@ -172,7 +177,7 @@ export default function BordereauCalendar() {
               disabled={overdue.length === 0}
               title={overdue.length === 0 ? "Nothing is late" : ""}>
               {overdue.length === 0 ? "Nothing is late"
-                : `Follow up on late files (${overdue.length})`}
+                : `Remind on late files (${overdue.length})`}
             </button>
           </div>
         </div>
@@ -185,23 +190,23 @@ export default function BordereauCalendar() {
           <div className="tile">
             <div className="k">Due this month</div>
             <div className="v">{counts?.due ?? "—"}</div>
-            <div className="foot">
+            {/* <div className="foot">
               across {plural(board?.programme_count ?? 0, "programme")}
-            </div>
+            </div> */}
           </div>
           <div className="tile">
             <div className="k">Arrived on time</div>
             <div className="v" style={{ color: "var(--p-ok)" }}>{counts?.on_time ?? "—"}</div>
-            <div className="foot">
+            {/* <div className="foot">
               {counts && counts.due > 0
                 ? `${Math.round((counts.on_time / counts.due) * 100)}% of what was due`
                 : "nothing due"}
-            </div>
+            </div> */}
           </div>
           <div className="tile">
             <div className="k">Arrived late</div>
             <div className="v" style={{ color: "var(--p-warn)" }}>{counts?.late ?? "—"}</div>
-            <div className="foot">
+            {/* <div className="foot">
               {(() => {
                 const late = rows.filter(r => !r.unassigned && r.days_late != null);
                 if (late.length === 0) return "none";
@@ -209,12 +214,12 @@ export default function BordereauCalendar() {
                 return days.length === 1 ? plural(days[0], "day") + " over"
                   : `${days[0]} to ${days[days.length - 1]} days over`;
               })()}
-            </div>
+            </div> */}
           </div>
           <div className={`tile${(counts?.never ?? 0) > 0 ? " alert" : ""}`}>
             <div className="k">Never arrived</div>
             <div className="v" style={{ color: "var(--p-crit)" }}>{counts?.never ?? "—"}</div>
-            <div className="foot">
+            {/* <div className="foot">
               {overdue.length === 0 ? "nothing outstanding"
                 : (() => {
                   const worst = [...overdue].sort(
@@ -222,7 +227,7 @@ export default function BordereauCalendar() {
                   return `${worst.broker_name ?? "Unnamed broker"} · ${
                     plural(worst.days_over ?? 0, "day")} over`;
                 })()}
-            </div>
+            </div> */}
           </div>
         </div>
 
@@ -251,7 +256,7 @@ export default function BordereauCalendar() {
                 <tr>
                   <th>Programme</th><th>Broker</th><th>Period</th><th>Due by</th>
                   <th>Turned up</th><th>How it went</th>
-                  <th>Version</th><th></th>
+                  <th>Version</th><th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -336,7 +341,7 @@ export default function BordereauCalendar() {
                         {r.status === "overdue" && (
                           <span className="linkish" style={{ marginLeft: 8 }}
                             onClick={() => setChasing([r])}>
-                            Follow up →
+                            Remind →
                           </span>
                         )}
                       </td>
@@ -360,14 +365,14 @@ export default function BordereauCalendar() {
         {/* ---- what fills the calendar ---------------------------------- */}
         <div className="card">
           <div className="card-h">
-            <h3>How often each programme reports</h3>
+            <h3>Bordereau deadlines</h3>
             <span className="sub">this is what fills the calendar</span>
           </div>
           <div className="tbl-wrap">
             <table>
               <thead>
                 <tr><th>Programme</th><th>How often</th><th>Due</th>
-                  <th>Next one</th><th>Covered until</th><th></th></tr>
+                  <th>Next one</th><th>Covered until</th><th>Action</th></tr>
               </thead>
               <tbody>
                 {schedules.length === 0 && (
@@ -526,10 +531,9 @@ function VersionPanel({ row, onClose }: {
 // "Chase what is late" passes every overdue row on the board. The difference is
 // only how many rows arrive, so the dialog counts them rather than branching.
 //
-// The dialog is deliberately honest about the state of the feature: it records
-// the chase against each period and keeps your note with it. Sending the mail is
-// not wired up yet, and the dialog says so rather than letting the button imply
-// an email left the building.
+// Confirming records the chase against each period, keeps your note with it,
+// AND emails the broker's contact(s) — one reminder per late period, you cc'd
+// on each so you hold a copy of exactly what they were told.
 // ---------------------------------------------------------------------------
 function ChaseModal({ rows, onClose, onConfirm }: {
   rows: BoardRow[];
@@ -539,6 +543,10 @@ function ChaseModal({ rows, onClose, onConfirm }: {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // The bulk list shows a short preview and expands on request — a carrier
+  // with 100 late files should not open to a page-long dialog.
+  const [showAll, setShowAll] = useState(false);
+  const BULK_PREVIEW = 5;
 
   const single = rows.length === 1;
   // Everyone who would hear about it, deduplicated — one broker can be late on
@@ -578,14 +586,14 @@ function ChaseModal({ rows, onClose, onConfirm }: {
       display: "flex", alignItems: "center", justifyContent: "center",
       padding: 24, zIndex: 70 }}
       onClick={onClose}>
-      <div className="card" style={{ width: "min(560px, 100%)", maxHeight: "85vh",
-        overflowY: "auto", margin: 0 }}
+      <div className="card" style={{ width: single ? "min(560px, 100%)" : "min(820px, 100%)",
+        maxHeight: "88vh", overflowY: "auto", margin: 0 }}
         role="dialog" aria-modal="true"
         onClick={e => e.stopPropagation()}>
         <div className="card-h">
           <h3>{single
-            ? `Follow up with ${rows[0].broker_name ?? "this broker"}`
-            : "Follow up on all late files"}</h3>
+            ? `Remind ${rows[0].broker_name ?? "this broker"}`
+            : "Remind on all late files"}</h3>
           <div className="right">
             <span className="linkish" onClick={onClose}
               role="button" aria-label="Close"><X size={14} /></span>
@@ -603,7 +611,7 @@ function ChaseModal({ rows, onClose, onConfirm }: {
                   <b>{fmtFull(rows[0].due_date)}</b>.
                 </li>
                 <li style={LI}>Still not arrived.</li>
-                <li style={LI}>This saves a note that you asked for it.</li>
+                {/* <li style={LI}>This saves a note that you asked for it.</li> */}
               </ul>
             ) : (
               <>
@@ -617,22 +625,21 @@ function ChaseModal({ rows, onClose, onConfirm }: {
               chase the facts are broken out the way the prototype does it. */}
           {single ? (
             <>
-              <div className="kv">
-                <span className="k">Goes to</span>
-                <span className="v">
-                  {recipients.length === 0
-                    ? <span className="muted">nobody on record</span>
-                    : recipients.map(c => (
-                      <span key={c.email} style={{ display: "block" }}>
-                        {c.name} · {c.email}
-                        {/* An invited contact is the right address but an
-                            unconfirmed one — say so before it is relied on. */}
-                        {c.status === "invited" && (
-                          <span className="sub"> · invited, not signed in yet</span>
-                        )}
-                      </span>
-                    ))}
-                </span>
+              <div style={{ padding: "10px 0", borderBottom: "1px solid var(--p-border)", fontSize: 13 }}>
+                <div className="k" style={{ marginBottom: 6 }}>Goes to</div>
+                {recipients.length === 0
+                  ? <span className="muted">nobody on record</span>
+                  : recipients.map(c => (
+                    <div key={c.email} style={{ fontWeight: 600, marginBottom: 4 }}>
+                      <div>Name : {c.name}</div>
+                      <div>Email : {c.email}</div>
+                      {/* An invited contact is the right address but an
+                          unconfirmed one — say so before it is relied on. */}
+                      {c.status === "invited" && (
+                        <span className="sub" style={{ fontWeight: 400 }}> · invited, not signed in yet</span>
+                      )}
+                    </div>
+                  ))}
               </div>
               <div className="kv">
                 <span className="k">About</span>
@@ -653,15 +660,44 @@ function ChaseModal({ rows, onClose, onConfirm }: {
               )}
             </>
           ) : (
-            rows.map(r => (
-              <div className="kv" key={r.id}>
-                <span className="k">{r.broker_name ?? "Unnamed broker"}</span>
-                <span className="v">
-                  {r.program_name} · {r.period} ·{" "}
-                  <b>{plural(r.days_over ?? 0, "day")} over</b>
-                </span>
+            <div>
+              <div className="tbl-wrap" style={showAll
+                ? { maxHeight: 360, overflowY: "auto", border: "1px solid var(--p-border)", borderRadius: 8 }
+                : { border: "1px solid var(--p-border)", borderRadius: 8 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Broker</th><th>Email</th><th>Programme</th>
+                      <th>Due date</th><th style={{ textAlign: "right" }}>Overdue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(showAll ? rows : rows.slice(0, BULK_PREVIEW)).map(r => {
+                      const emails = (r.contacts ?? []).map(c => c.email);
+                      return (
+                        <tr key={r.id}>
+                          <td>{r.broker_name ?? "Unnamed broker"}</td>
+                          <td>{emails.length
+                            ? emails.join(", ")
+                            : <span className="muted">no contact on record</span>}</td>
+                          <td>{r.program_name} <span className="sub">· {r.period}</span></td>
+                          <td>{fmtFull(r.due_date)}</td>
+                          <td style={{ textAlign: "right" }}>
+                            <b>{plural(r.days_over ?? 0, "day")}</b>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
-            ))
+              {rows.length > BULK_PREVIEW && (
+                <button type="button" className="linkish" style={{ marginTop: 8 }}
+                  onClick={() => setShowAll(v => !v)}>
+                  {showAll ? "Show fewer" : `View all ${rows.length} →`}
+                </button>
+              )}
+            </div>
           )}
 
           {/* Nobody to tell is a real outcome, not an edge case to hide. */}
@@ -681,23 +717,8 @@ function ChaseModal({ rows, onClose, onConfirm }: {
             <label>Anything to add?</label>
             <input value={note} onChange={e => setNote(e.target.value)}
               placeholder="Optional — e.g. we need this before month end" />
-            <div className="hint">Kept with the follow-up, so what you asked for is
+            <div className="hint">Kept with the reminder, so what you asked for is
               readable later.</div>
-          </div>
-
-          {/* The one thing this dialog must not do is imply an email left the
-              building. Sending is not wired up; the record is. */}
-          <div className="note" style={{ marginTop: 14 }}>
-            <ul style={LIST}>
-              <li style={LI}>
-                Every reminder is saved with its date — proof you asked, if it is
-                ever questioned.
-              </li>
-              <li style={LI}>
-                <b>Email is not connected yet</b> — this only writes to the
-                period's record, nothing is sent.
-              </li>
-            </ul>
           </div>
 
           <div style={{ display: "flex", gap: 10, marginTop: 16 }}>

@@ -8,11 +8,14 @@ Reused by the schedule/calendar endpoints now, and by the daily late-flip job la
 """
 from __future__ import annotations
 
+import logging
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import and_, func, or_
+
+log = logging.getLogger("bdx.calendar")
 
 from db import (
     Program, Contract, SubmissionSchedule, ExpectedSubmission, ActivityEvent,
@@ -651,13 +654,16 @@ def record_release(session, expected_id: int, *, released_on: Optional[date] = N
 def record_chase(session, expected_ids: list[int], *, actor: Optional[str] = None,
                  note: Optional[str] = None,
                  today: Optional[date] = None) -> dict:
-    """Note that somebody was chased for a late file.
+    """Chase somebody for a late file: stamp the row, write an activity event,
+    and email the broker's contact(s) — one reminder per late period, so a
+    broker late on two programmes gets two messages, each naming its own file.
 
-    Writes an activity event and stamps the row, so the screen can say "chased
-    2 days ago" rather than offering a button whose effect nobody can see. It
-    does NOT send the broker an email — that would be a message leaving the
-    building, and nothing here is wired to send one. What it does is make the
-    chase a recorded act instead of a private one.
+    Sent from the NOTIFY_* mailbox (email_utils' "NOTIFY" account, i.e.
+    dinesh@kavachio.com), with the acting carrier user in cc so they hold a
+    copy of exactly what the broker was told. A mail failure is logged and
+    collected in `mail_failed` rather than raised — the chase must still be
+    recorded even if the mailbox is down; that record is what matters if the
+    reminder is ever disputed.
 
     Only rows that are actually late AND belong to a broker are chased; anything
     else is ignored rather than refused. The broker check matters: a period with
@@ -666,20 +672,26 @@ def record_chase(session, expected_ids: list[int], *, actor: Optional[str] = Non
     have happened. The tenant-wide path applies the same rule, so passing ids by
     hand no longer reaches rows the bulk button would skip. Caller commits.
     """
+    from email_utils import send_email, overdue_reminder_email_html, plural as _plural
+
     today = today or datetime.utcnow().date()
-    chased = []
-    for e in (session.query(ExpectedSubmission)
-              .filter(ExpectedSubmission.id.in_(expected_ids or [])).all()):
-        if e.broker_party_id is None:
-            continue
-        if e.received_at is not None or e.due_date is None or e.due_date >= today:
-            continue
+    rows = (session.query(ExpectedSubmission)
+            .filter(ExpectedSubmission.id.in_(expected_ids or [])).all())
+    due = [e for e in rows if e.broker_party_id is not None
+           and e.received_at is None and e.due_date is not None and e.due_date < today]
+    contacts = broker_contacts(session, [e.broker_party_id for e in due])
+    programs = {p.id: p for p in session.query(Program)
+                .filter(Program.id.in_({e.program_id for e in due})).all()}
+
+    chased, mailed, mail_failed = [], 0, []
+    for e in due:
         e.chased_at = today
         e.chase_count = (e.chase_count or 0) + 1
+        days_over = (today - e.due_date).days
         details = {"program_id": e.program_id, "period": e.period,
                    "broker_party_id": e.broker_party_id,
                    "due_date": e.due_date.isoformat(),
-                   "days_over": (today - e.due_date).days,
+                   "days_over": days_over,
                    "chase_count": e.chase_count}
         # What the operator actually said, kept with the chase. Without it the
         # record shows that somebody was chased but not what they were told,
@@ -692,9 +704,28 @@ def record_chase(session, expected_ids: list[int], *, actor: Optional[str] = Non
         chased.append({"expected_id": e.id, "period": e.period,
                        "program_id": e.program_id,
                        "broker_party_id": e.broker_party_id,
-                       "days_over": (today - e.due_date).days})
+                       "days_over": days_over})
+
+        prog = programs.get(e.program_id)
+        program_name = prog.name if prog else f"Programme {e.program_id}"
+        for c in contacts.get(e.broker_party_id, []):
+            try:
+                send_email(
+                    c["email"],
+                    f"Reminder: {program_name} · {e.period} bordereau is "
+                    f"{_plural(days_over, 'day')} overdue",
+                    overdue_reminder_email_html(
+                        c.get("name"), program_name, e.period,
+                        e.due_date.isoformat(), days_over, note),
+                    account="NOTIFY", cc=actor,
+                )
+                mailed += 1
+            except Exception as ex:  # noqa: BLE001 — one dead mailbox must not sink the chase
+                log.warning("chase reminder to %s failed: %s", c["email"], ex)
+                mail_failed.append({"email": c["email"], "error": str(ex)})
     session.flush()
-    return {"chased": len(chased), "rows": chased}
+    return {"chased": len(chased), "rows": chased,
+            "emailed": mailed, "mail_failed": mail_failed}
 
 
 def submission_versions(session, expected_id: int) -> list[dict]:

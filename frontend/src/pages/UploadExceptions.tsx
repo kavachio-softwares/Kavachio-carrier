@@ -354,19 +354,13 @@ export default function UploadExceptions() {
           />
         )}
 
-        {!loading && notices.map((n, i) => (
+        {/* The "Checks not run" notice (rules a sparse setup can't feed yet)
+            is left out of the page — it's informational noise for the review
+            flow, not something to act on here. "Not validated" stays: that
+            one means the file itself never ran. */}
+        {!loading && notices.filter(n => n.error_class === "not_validated").map((n, i) => (
           <div key={`notice-${i}`} className="note warn" style={{ marginBottom: 18 }}>
-            {n.error_class === "not_validated" ? (
-              <><strong>Not validated.</strong> {n.error_message}</>
-            ) : (
-              <details>
-                <summary style={{ cursor: "pointer" }}>
-                  <strong>{n.rule_name ?? "Checks not run"}.</strong>{" "}
-                  {(n.error_message ?? "").split("\n").filter(Boolean).length} check(s) could not be run on this file — show which
-                </summary>
-                <div style={{ whiteSpace: "pre-line", marginTop: 8, fontSize: 12.5 }}>{n.error_message}</div>
-              </details>
-            )}
+            <strong>Not validated.</strong> {n.error_message}
           </div>
         ))}
 

@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 log = logging.getLogger("bdx.main")
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
@@ -2006,13 +2006,39 @@ def export_template_update(template_id: int, body: UpdateExportTemplateBody,
 
 @app.get("/export/template")
 def export_template_list(mga: Optional[str] = None,
+                         page: Optional[int] = Query(None, ge=1),
+                         page_size: Optional[int] = Query(None, ge=1, le=200),
                          principal: Principal = Depends(current_principal)):
+    """Every output template this carrier has.
+
+    Pagination is OPT-IN and changes the shape: with `page` it answers
+    {items, total}, without it the bare list it always did. Building one
+    template's dict is not free — it reads the structure summary behind it —
+    so a paged call does that work for ten rows rather than for all of them.
+    """
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         q = s.query(ExportTemplate).filter(ExportTemplate.tenant_id == tid)
         summaries = _structure_summaries(s, tid)
-        return [_template_to_dict(t, s, structure=summaries.get(t.id))
-                for t in q.order_by(ExportTemplate.id.desc()).all()]
+        ordered = q.order_by(ExportTemplate.id.desc())
+        if page is None:
+            return [_template_to_dict(t, s, structure=summaries.get(t.id))
+                    for t in ordered.all()]
+
+        total = q.order_by(None).count()
+        # Counted over EVERY template, not the page: the card's header states
+        # "N draft" beside the total, and a count of the drafts that happen to
+        # be on screen is a different number wearing the same label.
+        # `approved` is an INTEGER column, 0/1, not a boolean — comparing it
+        # to False is a Postgres type error, not a falsy test. The dict this
+        # endpoint returns says bool(t.approved) for the same reason.
+        drafts = q.filter(or_(ExportTemplate.approved.is_(None),
+                              ExportTemplate.approved == 0)).count()
+        size = page_size or 10
+        rows = ordered.offset((page - 1) * size).limit(size).all()
+        return {"items": [_template_to_dict(t, s, structure=summaries.get(t.id))
+                          for t in rows],
+                "total": total, "drafts": drafts}
 
 
 @app.get("/export/templates")

@@ -461,13 +461,11 @@ export function OutputTemplateEditor({ templateId, embedded, onVersioned }: {
               {t.structure.sheets.filter(isSummarySheet).length} summary
             </span>
           </div>
-          <p className="mt-1 text-xs text-ink-muted">
-            The AI classified each tab from its column headers.{" "}
-            <strong>Data</strong> tabs are validated (rules are generated &amp; run on them);{" "}
-            <strong>Reference</strong> tabs are lookup / mapping tables, and{" "}
-            <strong>Summary</strong> tabs roll up totals from the data tabs — both are{" "}
-            <strong>excluded from rule generation</strong>. Change any that are wrong before proceeding.
-          </p>
+          <ul className="mt-1 list-disc pl-5 text-xs text-ink-muted space-y-0.5">
+            <li><strong>Data:</strong> the actual records.</li>
+            <li><strong>Reference:</strong> lookup lists, like codes.</li>
+            <li><strong>Summary:</strong> totals from the data tabs.</li>
+          </ul>
           <div className="mt-3 space-y-1.5">
             {t.structure.sheets.map((sh, si) => {
               const bucket = sheetBucket(sh);

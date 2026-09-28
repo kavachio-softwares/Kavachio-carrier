@@ -293,25 +293,25 @@ export default function Home() {
           {seat !== "user" && (
             <StatCard
               title="Active Setups" value={fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}
-              icon={LayoutDashboard} trend="+5%" subtitle={stats?.active_setup_carriers != null ? `across ${stats.active_setup_carriers} carriers` : undefined}
+              icon={LayoutDashboard} subtitle=""
             />
           )}
 
           {carrierSeat && (
             <>
-              <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="Active" />
+              <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />
 
               {seat !== "user" && (
-                <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="Entities" />
+                <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />
               )}
 
-              <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="Executing" />
+              <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="" />
 
               {seat !== "user" && (
                 stats?.my_brokers != null ? (
                   <StatCard title="Your Broker Companies" value={fmt(stats.my_brokers)} icon={Users} onClick={() => nav("/users")} subtitle={stats.my_brokers_pending ? `${stats.my_brokers_pending} not accepted yet` : undefined} />
                 ) : (
-                  <StatCard title="Carrier Users" value={fmt(stats?.users_total)} icon={Users} onClick={() => nav("/users")} trend="+3" subtitle={stats?.users_invited ? `${stats.users_invited} not signed up yet` : undefined} />
+                  <StatCard title="Carrier Users" value={fmt(stats?.users_total)} icon={Users} onClick={() => nav("/users")} subtitle={stats?.users_invited ? `${stats.users_invited} not signed up yet` : undefined} />
                 )
               )}
             </>
@@ -319,10 +319,10 @@ export default function Home() {
 
           <StatCard
             title="Exceptions to Review" value={fmt(stats?.pending_exceptions)}
-            icon={AlertCircle} tone="alert" subtitle="Alert"
+            icon={AlertCircle} tone="alert" subtitle=""
           />
 
-          <StatCard title="Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} trend="+12%" />
+          <StatCard title="Files Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} />
 
           {/* Kavachio staff only. This used to be a ternary whose other half
               was "Avg Turnaround Time" for the carrier seats; that box is
@@ -469,10 +469,7 @@ export default function Home() {
                   <YAxis yAxisId="left" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
                   <YAxis yAxisId="right" orientation="right" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
                   <Tooltip
-                    formatter={(value, name) => [
-                      value as number,
-                      name === 'clean' ? 'Clean Runs' : name === 'flagged' ? 'Flagged Runs' : 'Resolved Exceptions'
-                    ]}
+                    formatter={(value, name) => [value as number, name]}
                     labelFormatter={(label) => `${label}`}
                     contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)" }}
                     itemStyle={{ color: "#0f172a", fontWeight: 600, textTransform: "capitalize" }}
@@ -480,9 +477,9 @@ export default function Home() {
                     cursor={{ fill: '#f1f5f9' }}
                   />
                   <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: 13, color: "#64748b", textTransform: "capitalize" }} />
-                  <Bar yAxisId="left" dataKey="clean" name="Clean Runs" fill="#10b981" stackId="a" />
-                  <Bar yAxisId="left" dataKey="flagged" name="Flagged Runs" fill="#f59e0b" stackId="a" radius={[4, 4, 0, 0]} />
-                  <Line yAxisId="right" type="monotone" dataKey="resolved" name="Resolved Exceptions" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                  <Bar yAxisId="left" dataKey="clean" name="Clean Files" fill="#10b981" stackId="a" />
+                  <Bar yAxisId="left" dataKey="flagged" name="Flagged Files" fill="#f59e0b" stackId="a" radius={[4, 4, 0, 0]} />
+                  <Line yAxisId="right" type="monotone" dataKey="resolved" name="Resolved Exceptions in Files" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>

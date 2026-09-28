@@ -1007,6 +1007,75 @@ def test_a_period_with_no_broker_cannot_be_chased():
         db.ActivityEvent.action == "submission_chased").count() == 0
 
 
+# ---- a chase actually emails the broker -------------------------------------
+
+def test_a_chase_emails_the_brokers_contact():
+    import db, submission_calendar_service as svc
+    from unittest.mock import patch
+    s = _mem_session()
+    p, brokers, _ = _seed_with_brokers(s, n=1)
+    s.add(db.AppUser(email="boss@corvin.com", full_name="Ana Reis",
+                     role="broker_admin", broker_party_id=brokers[0].id))
+    s.commit()
+    rows = s.query(db.ExpectedSubmission).all()
+
+    with patch("email_utils.send_email") as mock_send:
+        res = svc.record_chase(s, [e.id for e in rows], actor="ops@carrier.com",
+                               note="please send soon", today=date(2026, 3, 20))
+
+    late = [e for e in rows if e.due_date < date(2026, 3, 20)]
+    assert res["chased"] == len(late) == mock_send.call_count
+    assert res["emailed"] == len(late)
+    assert res["mail_failed"] == []
+    call = mock_send.call_args_list[0]
+    assert call.args[0] == "boss@corvin.com"
+    assert "overdue" in call.args[1]
+    assert call.kwargs["account"] == "NOTIFY"
+    assert call.kwargs["cc"] == "ops@carrier.com"
+
+
+def test_a_chase_on_a_broker_with_no_account_sends_no_mail():
+    import db, submission_calendar_service as svc
+    from unittest.mock import patch
+    s = _mem_session()
+    p, brokers, _ = _seed_with_brokers(s, n=1)     # no AppUser for this broker
+    rows = s.query(db.ExpectedSubmission).all()
+
+    with patch("email_utils.send_email") as mock_send:
+        res = svc.record_chase(s, [e.id for e in rows], actor="ops@carrier.com",
+                               today=date(2026, 3, 20))
+
+    assert res["chased"] > 0
+    mock_send.assert_not_called()
+    assert res["emailed"] == 0
+    assert res["mail_failed"] == []
+
+
+def test_a_chase_is_still_recorded_when_the_mail_fails():
+    # A dead SMTP server must not swallow the chase itself — that record is
+    # what matters if the reminder is ever disputed.
+    import db, submission_calendar_service as svc
+    from unittest.mock import patch
+    s = _mem_session()
+    p, brokers, _ = _seed_with_brokers(s, n=1)
+    s.add(db.AppUser(email="boss@corvin.com", full_name="Ana Reis",
+                     role="broker_admin", broker_party_id=brokers[0].id))
+    s.commit()
+    rows = s.query(db.ExpectedSubmission).all()
+
+    with patch("email_utils.send_email", side_effect=RuntimeError("smtp down")):
+        res = svc.record_chase(s, [e.id for e in rows], actor="ops@carrier.com",
+                               today=date(2026, 3, 20))
+
+    late = [e for e in rows if e.due_date < date(2026, 3, 20)]
+    assert res["chased"] == len(late)
+    assert all(e.chase_count == 1 for e in late)
+    assert res["emailed"] == 0
+    assert len(res["mail_failed"]) == len(late)
+    assert res["mail_failed"][0]["email"] == "boss@corvin.com"
+    assert "smtp down" in res["mail_failed"][0]["error"]
+
+
 # ---- the calendar stops where the contract does ----------------------------
 
 def _seed_with_term(s, inception, expiries, freq="monthly"):

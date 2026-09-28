@@ -230,7 +230,11 @@ export async function releasePeriod(expectedId: number, body: {
  *  record. Passing no ids chases everything overdue for the tenant. */
 export async function chase(expectedIds?: number[], note?: string)
   : Promise<{ chased: number; rows: { expected_id: number; period: string;
-                                      days_over: number }[] }> {
+                                      days_over: number }[];
+              /** Reminders actually emailed to a broker contact. */
+              emailed: number;
+              /** Sends that failed — the chase is still recorded either way. */
+              mail_failed: { email: string; error: string }[] }> {
   const { data } = await api.post("/calendar/chase",
     { expected_ids: expectedIds ?? null, note: note ?? null },
     { params: { mga: currentMga() } });

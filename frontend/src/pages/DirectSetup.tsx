@@ -2162,13 +2162,11 @@ export default function DirectSetup() {
               </div>
             </div>
           }>
-          <p className="text-sm text-ink-muted">
-            The AI classified each tab from its column headers.{" "}
-            <strong>Data</strong> tabs are validated (rules are generated &amp; run on them).{" "}
-            <strong>Reference</strong> tabs are lookup / mapping tables, and{" "}
-            <strong>Summary</strong> tabs roll up totals from the data tabs — both are{" "}
-            <strong>excluded from rule generation</strong>. Fix any that are wrong, then proceed.
-          </p>
+          <ul className="list-disc pl-5 text-sm text-ink-muted space-y-0.5">
+            <li><strong>Data:</strong> the actual records.</li>
+            <li><strong>Reference:</strong> lookup lists, like codes.</li>
+            <li><strong>Summary:</strong> totals from the data tabs.</li>
+          </ul>
           <div className="mt-3 space-y-1.5">
             {sheetReview?.structure.sheets.map((sh, i) => {
               const bucket = sheetBucket(sh);

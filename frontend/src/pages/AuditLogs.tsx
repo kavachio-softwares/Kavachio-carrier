@@ -15,7 +15,7 @@ const PAGE_SIZE = 15;
  *  answer is different for every role and a table of rows cannot say it. */
 const SUBTITLE: Record<string, string> = {
   platform:
-    "Everything that happens on Kavachio — every carrier, every broker and every person, named.",
+    "Everything that happens on Kavachio — every carrier, every broker and every person.",
   carrier_admin:
     "Everyone at your company, and every broker you work with. A broker's people are shown as the broker.",
   carrier_user:
