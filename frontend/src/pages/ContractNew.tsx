@@ -29,6 +29,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Check, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
+import { canAccessPath } from "../access";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import AddContractModal from "../components/AddContractModal";
 import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
@@ -792,7 +793,13 @@ export default function ContractNew() {
         // record says what is wrong and offers the same skip button.
         try {
           await skipReview(created.id);
-          nav(`/contracts/${created.id}/signature`);
+          // Signing is the carrier ADMIN's. Sending a carrier user to the
+          // signature page would bounce them off it (ROUTE_ACCESS) and lose
+          // the contract they just raised, so they land on the record — which
+          // is where their part of the work ends anyway.
+          nav(canAccessPath(`/contracts/${created.id}/signature`)
+              ? `/contracts/${created.id}/signature`
+              : `/contracts/${created.id}`);
         } catch {
           nav(`/contracts/${created.id}`);
         }
@@ -2038,38 +2045,17 @@ export default function ContractNew() {
                     that is never coming. */}
                 <p>{values.name} · <b>Nothing is emailed from here.</b></p>
               </div>
+              {/* ONLY the way back. The three ways to FINISH live on the step
+                  itself — two under the summary of what is about to be created,
+                  and the primary one in the step's own footer beside Back.
+                  They were here as well, which put the same three decisions in
+                  two places on one screen: whichever a person read first, the
+                  other set looked like different buttons doing something else.
+                  The step is where the decision is described, so that is where
+                  it is taken. */}
               <div className="actions">
                 <button className="btn" type="button" onClick={() => go(2)}>
                   ← Read it through
-                </button>
-                {/* Three ways to finish, and none of them puts the contract in
-                    force. A contract goes live from its own page, once it has
-                    a wording somebody has read and — where there is a broker —
-                    terms they agreed to, and — always — signatures from both
-                    sides. Offering "make it live" here made the last click of
-                    an authoring flow the moment checks start running on real
-                    bordereaux, on a contract nobody had signed. That is still
-                    true of "sign it now": it skips the broker's READING of the
-                    terms, not either signature. */}
-                <button className="btn" type="button" disabled={!!busy || blocksUnplaced}
-                        onClick={() => create("draft")}>
-                  {busy === "create" ? "Saving…" : "Save as a draft"}
-                </button>
-                {/* Straight to signing, for a contract with nothing left to
-                    agree — a renewal on last year's wording — or one whose
-                    counterparty has no seat here to read it. Kept out of the
-                    primary slot: not asking the other side is the exception,
-                    and it should not be the easiest button to hit. */}
-                <button className="btn" type="button" disabled={!!busy || blocksUnplaced}
-                        onClick={() => create("sign")}>
-                  <PenLine size={14} />
-                  {busy === "create" ? "Creating…" : "Create and sign it now"}
-                </button>
-                <button className="btn pri" type="button" disabled={!!busy || blocksUnplaced}
-                        onClick={() => create("review")}>
-                  <FileText size={14} />
-                  {busy === "create"
-                    ? "Creating…" : "Create and send it for review"}
                 </button>
               </div>
             </div>

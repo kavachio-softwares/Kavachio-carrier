@@ -256,6 +256,11 @@ ACTION_WORDS = {
     # setup
     "bordereau_setup_completed": "Completed a Bordereau Setup",
     "bordereau_setup_activated": "Activated a Bordereau Setup",
+    # Approval: a carrier user builds a setup, the carrier admin decides.
+    # Worded from the actor's side, because that is who the row is about.
+    "bordereau_setup_submitted": "Sent a Bordereau Setup for approval",
+    "bordereau_setup_approved":  "Approved a Bordereau Setup",
+    "bordereau_setup_rejected":  "Sent a Bordereau Setup back",
     "bdx_setup_updated":         "Updated a Bordereau Setup",
     "bdx_setup_deleted":         "Deleted a Bordereau Setup",
     "sheet_bindings_saved":      "Saved the sheet bindings",
@@ -305,6 +310,15 @@ ACTION_WORDS = {
     "contract_edited":            "Edited a contract",
     "contract_submitted":         "Submitted a contract",
     "contract_sent_for_review":   "Sent a contract for review",
+    "contract_sent_back":         "Sent a contract back to be changed",
+    "contract_awaiting_review":   "Sent a contract up to the carrier admin",
+    # The gate that matters: the broker has agreed, and the contract is now on
+    # the carrier admin's desk for signature and nobody else's.
+    "contract_awaiting_signature": "Agreed the terms — waiting on the carrier "
+                                   "admin to sign",
+    "contract_accepted":          "Accepted an uploaded contract",
+    "contract_pushed_back":       "The broker asked for changes",
+    "contract_signed_off":        "Signed the contract for the carrier",
     "contract_terms_accepted":    "Accepted the contract terms",
     "contract_changes_requested": "Requested changes to a contract",
     "contract_approved":          "Approved a contract",
@@ -373,6 +387,21 @@ _STATUS = {
     "password_changed": ("Password changed", "info"),
     "token_refresh":    ("Session renewed", "muted"),
     "exception_decided": ("Exception resolved", "warn"),
+    # Without these the tail-matching below reads "_approved" as nothing
+    # in particular and "_rejected" not at all. An approval decision is
+    # the kind of row somebody scans a log FOR, so it says what it was.
+    "bordereau_setup_submitted": ("Awaiting approval", "info"),
+    "bordereau_setup_approved":  ("Approved", "ok"),
+    "bordereau_setup_rejected":  ("Sent back", "warn"),
+    "contract_sent_back":        ("Sent back", "warn"),
+    "contract_awaiting_review":  ("Awaiting review", "info"),
+    "contract_awaiting_signature": ("Awaiting signature", "warn"),
+    "contract_accepted":         ("Accepted", "ok"),
+    "contract_pushed_back":      ("Changes requested", "warn"),
+    # The busiest gate on the contract road had no badge at all, so the moment
+    # the broker agrees rendered as a grey "Completed" beside every other row.
+    "contract_terms_accepted":   ("Terms agreed", "ok"),
+    "contract_signed_off":       ("Signed", "ok"),
 }
 
 _METHOD_WORDS = {"POST": "Created", "PUT": "Updated", "PATCH": "Updated", "DELETE": "Deleted"}
@@ -770,6 +799,11 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     # touches one, so offering them this filter offers a guaranteed blank page.
     ("setup", "Setup and templates",
      ("bordereau_setup_completed", "bordereau_setup_activated",
+      # The approval trail. CARRIER_SEATS, like the rest of this category: the
+      # decision is internal to the carrier, and the broker only ever sees the
+      # setup that came out the other side.
+      "bordereau_setup_submitted", "bordereau_setup_approved",
+      "bordereau_setup_rejected",
       "bordereau_setup_created", "bdx_setup_updated", "bdx_setup_deleted",
       "sheet_bindings_saved", "input_mapper_generated", "input_mapper_updated",
       "input_mapper_activated", "output_template_generated",
@@ -787,7 +821,10 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "rule.disabled", "rule.tolerance_changed", "rule.output_field_changed",
       "rule.variation_value_added", "rule.variation_value_removed",
       "contract_raised", "contract_edited", "contract_submitted",
-      "contract_sent_for_review", "contract_terms_accepted",
+      "contract_sent_for_review", "contract_sent_back",
+      "contract_awaiting_review", "contract_awaiting_signature",
+      "contract_accepted", "contract_signed_off", "contract_terms_accepted",
+      "contract_pushed_back",
       "contract_changes_requested", "contract_approved", "contract_rejected",
       "contract_activated", "contract_terminated", "contract_renewed",
       "contract_document_attached", "contract_wording_saved",

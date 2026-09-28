@@ -14,6 +14,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { canAccessPath } from "../access";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, ChevronDown,
   ChevronRight, Download, ExternalLink,
@@ -42,7 +43,8 @@ import {
   openDocument,
   bindChecks,
   generateRules, getContract, getContractTypes, renewContract, requestChanges,
-  sendForReview, skipReview, submitSigned, terminateContract,
+  acceptContract, sendBackContract, sendForReview, skipReview, submitForApproval,
+  submitSigned, terminateContract,
   downloadContractPdf, previewWording,
   updateContract, uploadDocument, fieldErrors,
   type ContractDocumentKind, type ContractField, type ContractRecord as Rec,
@@ -59,8 +61,9 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   // submit it to, so "not submitted" would be describing a queue that does not
   // exist for it. See draftNote().
   draft: { label: "Draft", cls: "b-mut", note: "" },
-  pending: { label: "Pending", cls: "b-warn",
-             note: "Submitted and waiting on the carrier's decision." },
+  pending: { label: "Awaiting review", cls: "b-warn",
+             note: "One of your users raised this. It is with the carrier "
+                   + "admin, who reads the terms before they go to the broker." },
   in_review: { label: "Out for review", cls: "b-warn",
                note: "The terms are with the broker. They can agree them or "
                    + "ask for changes." },
@@ -118,6 +121,16 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 export default function ContractRecord() {
   const { contractId } = useParams();
   const id = Number(contractId);
+  // Signing is the carrier ADMIN's (carrier_scope.require_carrier_admin), and
+  // both carrier seats hold the same role — so this is the seat question, and
+  // ROUTE_ACCESS already knows the answer. Asked once here so every door into
+  // the signature pages on this screen agrees, and none of them offers a
+  // carrier user a link that bounces them to the dashboard.
+  const canSignHere = canAccessPath(`/contracts/${id}/signature`);
+  // Sending a colleague's contract back needs a reason, so the box is opened
+  // deliberately rather than the button firing on its own.
+  const [showSendBack, setShowSendBack] = useState(false);
+  const [sendBackNote, setSendBackNote] = useState("");
   const nav = useNavigate();
   // The raise flow attaches documents AFTER creating the contract, so a
   // document that failed to attach is reported here — where it can be retried —
@@ -393,8 +406,13 @@ export default function ContractRecord() {
   // no authored wording and no agreed limits (commercial terms). Signatures are
   // not relevant for it: nobody negotiated its terms in Kavachio, so there is
   // nothing to sign here.
-  const isUploaded = !authored
-    && !(rec.agreed_limits && Object.keys(rec.agreed_limits).length > 0);
+  // The server's answer where it gives one (`is_uploaded`), because the server
+  // ACTS on it: it offers the accept button on exactly the contracts it calls
+  // uploaded, and a screen deciding separately is how the two come to disagree
+  // about which road a contract is on. The old local test is kept as the
+  // fallback for a record served before the field existed.
+  const isUploaded = rec.is_uploaded ?? (!authored
+    && !(rec.agreed_limits && Object.keys(rec.agreed_limits).length > 0));
 
   // An authored contract's wording is generated from its terms, and the two are
   // tied: the sentences hold tokens, so changing a term moves the wording and
@@ -840,12 +858,16 @@ export default function ContractRecord() {
                     opened, reminded, withdrawn — is the round's own trail, and
                     this is the only way into it now that Signatures is not a
                     sidebar tab. Filtered to this contract. */}
-                <Link className="btn sm" to={`/contracts/signatures?contract=${id}`}>
-                  <History size={12} /> Signature history
-                </Link>
-                <Link className="btn sm" to={`/contracts/${id}/signature`}>
-                  <ArrowRight size={12} /> Signature page
-                </Link>
+                {canSignHere && (
+                  <>
+                    <Link className="btn sm" to={`/contracts/signatures?contract=${id}`}>
+                      <History size={12} /> Signature history
+                    </Link>
+                    <Link className="btn sm" to={`/contracts/${id}/signature`}>
+                      <ArrowRight size={12} /> Signature page
+                    </Link>
+                  </>
+                )}
               </span>
             </div>
             <div style={{ padding: "14px 20px" }}>
@@ -1115,9 +1137,11 @@ export default function ContractRecord() {
                 {rec.whose_turn === "broker"
                   ? "The carrier has signed. The broker signs and returns it, then the carrier puts it in force."
                   : "Terms are settled. The carrier signs first, then the broker signs and returns it."}{" "}
-                <Link to={`/contracts/${rec.id}/signature`} className="linkish">
-                  Go to signature →
-                </Link>
+                {canSignHere && (
+                  <Link to={`/contracts/${rec.id}/signature`} className="linkish">
+                    Go to signature →
+                  </Link>
+                )}
               </div>
             )}
             {rec.lifecycle === "signed" && (
@@ -1166,7 +1190,80 @@ export default function ContractRecord() {
               </div>
             )}
 
+            {/* Said once, above the buttons, because no state name on this
+                page says it: the contract is inside the carrier and the broker
+                has not been shown any of it. */}
+            {a.awaiting_carrier_admin && (
+              <div className="note warn" style={{ marginTop: 14 }}>
+                <b>
+                  {a.carrier_admin_seat
+                    ? "This one is waiting on you."
+                    : "Waiting on your carrier admin."}
+                </b>{" "}
+                {rec.lifecycle === "pending" && isUploaded
+                  // The uploaded road. Nothing to negotiate, nothing to sign.
+                  ? (a.carrier_admin_seat
+                      ? "This contract was signed before it got here, so there "
+                        + "is nothing to negotiate and nothing to sign. Read it "
+                        + "and either accept it — which puts it in force — or "
+                        + "send it back."
+                      : "They read an uploaded contract before it goes in "
+                        + "force. They can accept it, or send it back to you "
+                        + "for a change.")
+                  : rec.lifecycle === "pending"
+                  // An authored contract should never be here — one written
+                  // here goes straight to the broker — so this only ever
+                  // greets a row left behind by an earlier version of the
+                  // flow. It still has to say something true.
+                  ? (a.carrier_admin_seat
+                      ? "This was sent up to you before it went anywhere. Send "
+                        + "the terms to the broker, accept it as it stands, or "
+                        + "send it back for a change."
+                      : "They read it before it goes any further. They can send "
+                        + "the terms to the broker, accept it, or send it back "
+                        + "to you for a change.")
+                  // The authored road, at its one gate: the broker has agreed.
+                  : (a.carrier_admin_seat
+                      ? "The broker has agreed these terms, so nothing is "
+                        + "moving any more. Read them and sign — a contract "
+                        + "goes in force when both sides have signed, and the "
+                        + "carrier signs first."
+                      : "The broker has agreed the terms. Your carrier admin "
+                        + "signs for the company, so it sits with them now. "
+                        + "Once they have, you can build the bordereau setup "
+                        + "on it.")}
+              </div>
+            )}
+
             <div className="rowacts" style={{ marginTop: 14 }}>
+              {/* The uploaded road, and the primary button on it. Ahead of
+                  "send to broker" deliberately: an uploaded contract was
+                  executed before it arrived, so asking the broker to agree to
+                  it is asking them to agree to something they have already
+                  signed. Sending it out stays possible below, for the contract
+                  that genuinely does need the broker to look — it is just no
+                  longer the road the screen points at. */}
+              {a.submit_for_approval && (
+                <button
+                  className="btn pri" type="button" disabled={!!busy}
+                  onClick={() => run("approval", () => submitForApproval(id))}
+                >
+                  <ShieldCheck size={13} />
+                  {a.carrier_admin_seat
+                    // Their own act IS the approval — there is nobody left to
+                    // ask — so the button says what it will actually do.
+                    ? "Accept it and put it in force"
+                    : "Send to your carrier admin"}
+                </button>
+              )}
+              {a.accept_contract && (
+                <button
+                  className="btn pri" type="button" disabled={!!busy}
+                  onClick={() => run("accept-contract", () => acceptContract(id))}
+                >
+                  <CheckCircle2 size={13} /> Review and accept
+                </button>
+              )}
               {a.send_for_review && (
                 <button
                   className="btn pri" type="button" disabled={!!busy}
@@ -1174,7 +1271,17 @@ export default function ContractRecord() {
                 >
                   <MessagesSquare size={13} />
                   {rec.lifecycle === "changes_requested"
-                    ? "Send revised terms" : "Send to broker for review"}
+                    ? "Send revised terms"
+                    : "Send to broker for review"}
+                </button>
+              )}
+              {/* The carrier admin's third answer: not yet. Last in the row —
+                  the two ways forward come first, and sending work back should
+                  not be the easiest button to reach for. */}
+              {a.send_back && (
+                <button className="btn" type="button" disabled={!!busy}
+                        onClick={() => setShowSendBack(v => !v)}>
+                  <ArrowLeft size={13} /> Send it back for a change
                 </button>
               )}
               {/* Second-tier on purpose. Sending it out is the ordinary road
@@ -1217,7 +1324,12 @@ export default function ContractRecord() {
                   intermediate screen adds a click and shows less. Everything
                   else still goes to the signature screen, which is where
                   signatories are named and a paper signature is recorded. */}
-              {!isUploaded && (round?.can_sign ? (
+              {/* canSignHere as well as the round: `round.can_sign` answers
+                  "is this contract's signing round open and is it this side's
+                  turn", which is not the same question as "may THIS SEAT
+                  sign". A carrier user was shown a live Sign button on an
+                  agreed contract and the endpoint behind it 403'd. */}
+              {!isUploaded && canSignHere && (round?.can_sign ? (
                 <a className="btn pri" href={inAppSigningUrl(id)}
                    target="_blank" rel="noreferrer">
                   <PenLine size={13} /> Sign the contract
@@ -1255,17 +1367,62 @@ export default function ContractRecord() {
                   question, asked from the programme, and three buttons about
                   it crowded the row of actions that are actually about the
                   contract in front of you. */}
-              {/* Screen only — no signing provider is connected yet, which the
-                  screen itself says before anything else on it. Hidden for
-                  uploaded contracts — there is nothing to sign. */}
-              {!isUploaded && (
-                <Link className="btn" to={`/contracts/${rec.id}/signature`}>
-                  <PenLine size={13} /> Signature
-                </Link>
-              )}
+              {/* No standing "Signature" link here any more. It was rendered
+                  on nothing but `canSignHere` — which asks whether this SEAT
+                  may ever open the signature page, not whether this CONTRACT
+                  has anything to sign — so a carrier admin looking at terms
+                  still out with the broker was shown a signature button that
+                  led to a page with nothing on it. That was the reported "I
+                  can see it and I cannot sign it". The real signature buttons
+                  are the two above, and they appear exactly when the API
+                  would accept one. Signature history is still reachable from
+                  the Signatures panel further down. */}
             </div>
 
             {/* ── carrier: settle the terms alone ── */}
+            {/* Mirrors the skip panel beside it: an explanation of what the
+                answer means, then the box it needs. The button stays disabled
+                until a reason is written — the server refuses an empty one,
+                and a button that 400s is worse than one that waits. */}
+            {showSendBack && (
+              <div className="note warn" style={{ marginTop: 14 }}>
+                <b>Send this back to be changed</b>
+                <p style={{ margin: "6px 0 0" }}>
+                  It goes back to <b>Draft</b> with everything still on it, and
+                  whoever raised it is told why. They change what was wrong and
+                  send it up again — nobody re-raises the contract.
+                </p>
+                <p style={{ margin: "6px 0 0" }}>
+                  Nothing has gone to the {rec.contract_type === "insurer_reinsurer"
+                    ? "reinsurer" : "broker"}, and nothing will until you send
+                  it out yourself.
+                </p>
+                <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
+                  <textarea rows={2} value={sendBackNote}
+                            onChange={e => setSendBackNote(e.target.value)}
+                            placeholder="What needs to change? e.g. the premium cap is last year's — it should be 2.5m." />
+                </div>
+                <div className="rowacts">
+                  <button
+                    className="btn pri" type="button"
+                    disabled={!!busy || !sendBackNote.trim()}
+                    onClick={() => run("sendback", async () => {
+                      await sendBackContract(id, sendBackNote.trim());
+                      setShowSendBack(false);
+                      setSendBackNote("");
+                      setNote("Sent back. They have been told why.");
+                    })}
+                  >
+                    {busy === "sendback" ? "Sending back…" : "Send it back"}
+                  </button>
+                  <button className="btn" type="button"
+                          onClick={() => setShowSendBack(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
             {showSkip && (
               <div className="note warn" style={{ marginTop: 14 }}>
                 <b>Agree these terms without sending them out</b>

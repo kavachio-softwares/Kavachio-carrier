@@ -39,6 +39,7 @@ import { OrgAvatar } from "../components/ui/OrgAvatar";
 import {
   getHierarchy, getBrokers, addProgrammeBroker, removeProgrammeBroker,
   type HierarchyProgramme, type BrokerSummary,
+  onProgramme,
 } from "../api/hierarchy";
 import { OnboardingBadge } from "../components/OnboardingBadge";
 import { BrokerOnboarding } from "../components/BrokerOnboarding";
@@ -172,14 +173,14 @@ export default function ProgramBrokers() {
 
   // Only brokers not already on this programme can be added. A broker whose
   // link was deactivated IS offered again — adding it back reactivates it.
-  const onIt = new Set((prog?.brokers ?? []).filter(b => b.link_status === "active").map(b => b.id));
+  const onIt = new Set((prog?.brokers ?? []).filter(b => onProgramme(b.link_status)).map(b => b.id));
   const addable = all.filter(b => !onIt.has(b.id));
 
   const brokers = prog?.brokers ?? [];
   const needle = q.trim().toLowerCase();
   const shown = useMemo(() => brokers.filter(b => {
     if (needle && !b.legal_name.toLowerCase().includes(needle)) return false;
-    const off = b.link_status !== "active";
+    const off = !onProgramme(b.link_status);
     if (filter === "off") return off;
     if (filter === "no_contract") return !off && b.contracts.length === 0;
     if (filter === "no_setup") {
@@ -313,7 +314,7 @@ export default function ProgramBrokers() {
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <StatTile
               icon={<Users2 size={15} />}
-              n={brokers.filter(b => b.link_status === "active").length}
+              n={brokers.filter(b => onProgramme(b.link_status)).length}
               label="brokers on this programme" />
             <StatTile
               icon={<FileText size={15} />}
@@ -322,7 +323,7 @@ export default function ProgramBrokers() {
             <StatTile
               icon={<Layers size={15} />}
               n={brokers.filter(
-                b => b.link_status === "active" && setupFor(setups, b.id)).length}
+                b => onProgramme(b.link_status) && setupFor(setups, b.id)).length}
               label="ready to receive bordereaux" />
           </div>
         )}
@@ -449,7 +450,7 @@ export default function ProgramBrokers() {
                   <tbody>
                     {rows.map(b => {
                       const meta = all.find(x => x.id === b.id);
-                      const off = b.link_status !== "active";
+                      const off = !onProgramme(b.link_status);
                       const sx = setupFor(setups, b.id);
                       const open = expanded.has(b.id);
                       return (

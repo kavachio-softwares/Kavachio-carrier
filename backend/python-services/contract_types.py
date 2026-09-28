@@ -287,7 +287,14 @@ LIFECYCLE_TRANSITIONS: dict[str, tuple[str, ...]] = {
     # `active` is NOT reachable from here any more — a contract goes in force
     # because both sides signed it, which means passing through `signed`.
     "draft":             ("pending", "in_review", "agreed", "signed", "terminated"),
-    "pending":           ("signed", "draft", "terminated"),
+    # `pending` is now the CARRIER'S OWN review step: a contract one of its
+    # users raised, waiting on the carrier admin. From there the admin does
+    # whichever thing the author was asking for — send the terms to the broker,
+    # settle them without asking (skip-review), or sign a contract with no
+    # broker seat to ask — or sends it back to `draft` for the author to fix.
+    # It is deliberately the same set of onward moves a `draft` has, because
+    # the admin is deciding the same question the author would have.
+    "pending":           ("in_review", "agreed", "signed", "draft", "terminated"),
     # The negotiation loop. in_review ⇄ changes_requested can run as many times
     # as the two sides need; neither side can end it alone.
     "in_review":         ("changes_requested", "agreed", "draft", "terminated"),
@@ -311,7 +318,10 @@ LIFECYCLE_TRANSITIONS: dict[str, tuple[str, ...]] = {
 # The states in which the contract is out with the broker rather than with the
 # carrier. Used to decide who may edit and whose queue it belongs in.
 WITH_BROKER = ("in_review", "agreed")
-WITH_CARRIER = ("draft", "changes_requested", "signed")
+# `pending` belongs here: the contract is inside the carrier, on the carrier
+# admin's desk. Adding it is what puts it in their queue — _whose_turn already
+# answered "carrier" for it, and now the edit rules agree.
+WITH_CARRIER = ("draft", "pending", "changes_requested", "signed")
 
 
 class ContractTypeError(ValueError):

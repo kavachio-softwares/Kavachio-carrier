@@ -58,7 +58,7 @@ from auth_deps import Principal, current_principal, resolve_broker_party_id
 from carrier_scope import assert_can_open_contract
 from app_routes import _iso_utc, assert_tenant_owns, resolve_tenant_id
 from db import (
-    Contract, ContractApproval, ContractDocument, ExportTemplate,
+    AppUser, Contract, ContractApproval, ContractDocument, ExportTemplate,
     ContractSignature, Party, Program, ProgramBroker, SessionLocal,
 )
 
@@ -453,6 +453,11 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # The authored contract, where there is one. NULL on uploads — that is
         # the fact, not an omission.
         "agreed_limits": c.commercial_terms,
+        # Which of the two roads this contract is on — see _is_uploaded. The
+        # screen used to decide this for itself from the two fields below, and
+        # the two answers had already drifted: the server offers an accept
+        # button on exactly the contracts this says are uploaded.
+        "is_uploaded": _is_uploaded(c),
         # Each section BOTH ways: `body` keeps the tokens the editor turns into
         # chips, `rendered` is the same sentence with today's values in it. The
         # screen reads one and edits the other, and neither has to know how a
@@ -649,6 +654,94 @@ def _assert_speaks_for_broker(p: Principal, what: str) -> None:
                  f"files, the admin agrees and signs the contract")
 
 
+def _speaks_for_carrier(p: Principal | None) -> bool:
+    """May this seat commit the CARRIER to a contract?
+
+    The mirror of _speaks_for_broker on the other side of the table, and the
+    same principle: a signature is the organisation's word, so the person who
+    gives it is the one who runs the organisation's seat here. A carrier user
+    raises a contract and takes it as far as being ready to sign; the carrier
+    admin is who puts the company's name on it.
+
+    Unlike the broker side this CANNOT be read off the token — everyone at a
+    carrier holds the same `carrier_admin` role, and the two seats are told
+    apart by the organisation's owner pointer. So it costs one query. Called
+    once per contract screen, not in a loop.
+    """
+    if not p or p.is_broker:
+        return False
+    from carrier_scope import is_carrier_admin_seat
+    with SessionLocal() as s:
+        return is_carrier_admin_seat(s, p)
+
+
+def _assert_speaks_for_carrier(p: Principal, what: str) -> None:
+    """Refuse a carrier USER an act that commits the carrier."""
+    if not p.is_broker and not _speaks_for_carrier(p):
+        raise HTTPException(
+            403, f"only your carrier admin can {what} — carrier users raise "
+                 f"the contract, the carrier admin signs it")
+
+
+def _is_uploaded(c: Contract) -> bool:
+    """Was this contract's wording brought in as a document rather than written
+    here?
+
+    The two are governed differently and the difference is the whole of the
+    uploaded path: an AUTHORED contract is a proposal — its terms are Kavachio's
+    own structured fields, the broker reads them and agrees them, and both sides
+    then sign inside the app. An UPLOADED one was executed on paper before it
+    ever arrived; there is nothing left to negotiate and nobody left to sign, so
+    what it needs is not a signature but somebody at the carrier saying "yes,
+    this is ours" — which is the carrier admin's word, and is what
+    /contracts/{id}/accept records.
+
+    Read off the wording, not off a flag, because that is where the difference
+    actually lives: an authored contract HAS wording_sections and an uploaded
+    one does not. Agreed limits count as authorship too — a contract carrying
+    commercial terms was built here even if its prose has not been written yet,
+    which is the same test the record screen uses (ContractRecord.isUploaded),
+    kept in step deliberately so the screen and the server cannot disagree about
+    which of the two roads a contract is on.
+    """
+    if (c.wording_sections or {}).get("sections"):
+        return False
+    if isinstance(c.commercial_terms, dict) and c.commercial_terms:
+        return False
+    return bool(c.blob_ref or c.blob or c.filename)
+
+
+def _carrier_admin_turn(c: Contract, unsigned: list[str] | None = None) -> bool:
+    """Is this contract waiting on the CARRIER ADMIN, specifically?
+
+    _whose_turn answers "carrier or broker", which is the right question for the
+    other side of the table and the wrong one inside the carrier: a contract the
+    broker has just agreed is the carrier's move, but it is not the move of the
+    carrier USER who raised it — the signature is the admin's alone
+    (_assert_speaks_for_carrier). Counting those into the author's queue told
+    them to do something the API would refuse, and leaving them out of the
+    admin's told nobody at all.
+
+    So this is the one function that says whose desk, and the dashboard tile,
+    the record banner and the notifications all read it. Three states qualify:
+
+      pending            an uploaded contract sent up for acceptance
+      agreed / signed    the terms are settled and the carrier has not signed
+                         — the moment the whole gate exists for
+
+    Everything else on the carrier's side (a draft still being written, a change
+    request to answer) is ordinary work its author can do, and is deliberately
+    NOT here.
+    """
+    state = _effective_lifecycle(c)
+    if state == "pending":
+        return True
+    if state in ("agreed", "signed"):
+        return "carrier" in (unsigned if unsigned is not None
+                             else ["carrier", "counterparty"])
+    return False
+
+
 def _allowed_actions(c: Contract, missing: list[str],
                      p: Principal | None = None,
                      unsigned: list[str] | None = None,
@@ -671,6 +764,11 @@ def _allowed_actions(c: Contract, missing: list[str],
     is_carrier = bool(p and not p.is_broker)
     # The broker side's answers and signature are its admin's alone.
     broker_voice = _speaks_for_broker(p)
+    # …and the carrier's signature is its carrier admin's alone. Worked out
+    # here rather than on the screen for the reason at the top of this
+    # function: a carrier user shown a Sign button would be shown one the API
+    # refuses, and they would have no way to tell which of the two was wrong.
+    carrier_voice = _speaks_for_carrier(p)
     unsigned = ["carrier", "counterparty"] if unsigned is None else unsigned
     my_side = "counterparty" if is_broker else "carrier"
 
@@ -692,9 +790,21 @@ def _allowed_actions(c: Contract, missing: list[str],
         # `edit` stops at `agreed` too, the terms could not even have moved in
         # between. If they need to move, the broker asks for changes and the
         # contract comes back to `changes_requested`, which IS on this list.
+        # NOT from `pending`. That state means one thing now — an uploaded
+        # contract waiting to be accepted — and asking the broker to agree to a
+        # document they have already signed is not a question. The admin's two
+        # answers there are accept and send back; if one genuinely does need
+        # the broker to look, sending it back puts it in `draft`, where this
+        # button is offered exactly as it always was.
         "send_for_review": (
             is_carrier and not blocked
-            and state in ("draft", "changes_requested")
+            and (state in ("draft", "changes_requested")
+                 # An AUTHORED contract should never be in `pending` — one
+                 # written here goes straight to the broker. But a row left
+                 # there by an earlier version of this flow would otherwise
+                 # have no way out at all, so the admin can still send it on.
+                 or (state == "pending" and not _is_uploaded(c)
+                     and carrier_voice))
             and c.contract_type == "insurer_broker"
             and c.broker_party_id is not None),
         # Skip the review and go straight to signing. The carrier is not
@@ -706,7 +816,40 @@ def _allowed_actions(c: Contract, missing: list[str],
         #
         # Draft only. Once the terms have been out, skipping the answer to them
         # is not "no review was needed", it is ignoring one that was asked for.
-        "skip_review": is_carrier and state == "draft" and not blocked,
+        # DRAFT ONLY, because that is all the route accepts — a `pending`
+        # contract is an uploaded one waiting to be accepted, and "skip the
+        # review" is not the answer to it. Offering it there was a button that
+        # 409'd with "a pending contract's terms have already been out".
+        "skip_review": (is_carrier and not blocked and state == "draft"),
+        # An uploaded contract's way up to the carrier admin. It has no terms to
+        # negotiate and no broker to ask, so it does not go out for review — it
+        # goes to the one person who can accept it on the carrier's behalf.
+        "submit_for_approval": (is_carrier and not blocked
+                                and state == "draft" and _is_uploaded(c)),
+        # …and the admin's answer to it. Review and accept, in one act: there is
+        # no signature to give on a contract that was executed before it got
+        # here, and pretending otherwise would put a name in Kavachio under a
+        # document signed somewhere else.
+        # Not conditioned on _is_uploaded, although submit_for_approval is.
+        # `pending` means "waiting on the carrier admin's word" and their word
+        # has to be givable: tying the button to a test computed from the
+        # wording meant that saving one agreed limit on a contract already
+        # sitting there un-classified it, the button vanished, and the contract
+        # was stranded in a state with no exit but send-back.
+        "accept_contract": (is_carrier and carrier_voice
+                            and state == "pending"),
+        # Send a colleague's contract back to them. The carrier admin's answer
+        # when it is not right: the work stays, the author is told why, and it
+        # goes back to `draft` where they can change it and send it up again.
+        "send_back": is_carrier and carrier_voice and state == "pending",
+        # Said plainly so the screen does not have to infer it from a state
+        # name written for somebody else: this contract is on the carrier
+        # admin's desk and on nobody else's.
+        "awaiting_carrier_admin": _carrier_admin_turn(c, unsigned),
+        # Whether the person reading this IS that admin. The screen needs both:
+        # one says the contract is waiting on the carrier admin, the other says
+        # whether to show the buttons or the sentence explaining the wait.
+        "carrier_admin_seat": carrier_voice,
         # Broker's two answers. Never both sides' — this is their turn.
         "request_changes": broker_voice and state in ("in_review", "agreed"),
         "accept_terms": broker_voice and state == "in_review" and not blocked,
@@ -734,15 +877,25 @@ def _allowed_actions(c: Contract, missing: list[str],
         # button before the carrier has signed would be signing a document the
         # carrier has not, and the signing round would refuse it as out of turn
         # anyway.
+        # NOT `pending`. That state now means one thing only — an uploaded
+        # contract waiting to be accepted — and sign_contract refuses it
+        # outright ("these terms are still being settled"). Offering the button
+        # there was the reported "I can see it is waiting on me and I cannot
+        # sign it": the screen said yes and the API said no, and nothing on
+        # either told you which was wrong. An uploaded contract is accepted
+        # (accept_contract), never signed.
         "sign": (state in ("draft", "agreed", "signed")
                  and my_side in unsigned
                  and (not is_broker or "carrier" not in unsigned)
                  and (not is_broker or broker_voice)
+                 and (is_broker or carrier_voice)
                  and has_wording and bool(p)),
         # The carrier entering a signature made on paper or through a provider.
         # The only way a reinsurance contract is ever signed on both sides,
-        # since a reinsurer has no seat here.
-        "record_signature": (is_carrier and state in ("draft", "agreed", "signed")
+        # since a reinsurer has no seat here. Still a signing act, and still
+        # the carrier's word, so it is the carrier admin's too.
+        "record_signature": (is_carrier and carrier_voice
+                             and state in ("draft", "agreed", "signed")
                              and "counterparty" in unsigned and has_wording),
         "terminate": state in ("active", "expired") and is_carrier,
         "renew": state in ("active", "expired", "terminated") and is_carrier,
@@ -859,10 +1012,15 @@ def counterparties(party_type: str = Query(..., description="broker | reinsurer"
             prog = s.get(Program, program_id)
             if not prog or (tid is not None and prog.tenant_id != tid):
                 raise HTTPException(404, "programme not found")
+            # A carrier USER's link waits for the carrier admin, but the
+            # contract they are raising is the next step in building it — so
+            # the carrier picks from its pending links too. link_live() makes
+            # that the carrier's answer only; a broker still sees live ones.
+            from carrier_scope import link_live
             on_programme = {
                 l.broker_party_id for l in s.query(ProgramBroker).filter(
                     ProgramBroker.program_id == program_id,
-                    ProgramBroker.status == "active").all()
+                    link_live(p)).all()
             }
             q = q.filter(Party.id.in_(on_programme or {-1}))
         elif tid is not None:
@@ -885,6 +1043,8 @@ def list_contracts(
     counterparty_id: Optional[int] = Query(None),
     contract_type: Optional[str] = Query(None),
     lifecycle: Optional[str] = Query(None),
+    waiting: Optional[str] = Query(
+        None, description='"mine" — only contracts it is YOUR side\'s move on'),
     q: Optional[str] = Query(None, description="match on name, UMR or filename"),
     page: Optional[int] = Query(None, ge=1),
     page_size: Optional[int] = Query(None, ge=1, le=200),
@@ -900,6 +1060,15 @@ def list_contracts(
     it always has — ContractNew's endorsement picker reads the whole thing and
     must keep working. With `page` it returns
     {"items", "total", "page", "page_size"} for the Contracts screen.
+
+    `waiting="mine"` answers the question the screen is most often opened with,
+    and which the carrier had no way to ask: what is on MY side's desk. The
+    broker's own list has had it since it was written (`status=mine`); the
+    carrier could only filter by lifecycle, and no lifecycle answers it — a
+    contract sitting in `agreed` is the carrier's move or the broker's
+    depending on who has already signed, which is exactly what _whose_turn
+    exists to work out. It is the same function the record and both lists use,
+    so a row counted here always matches the one the screen shows.
     """
     with SessionLocal() as s:
         query = s.query(Contract)
@@ -937,7 +1106,11 @@ def list_contracts(
         # only after _record has run — slicing first would hand back a page
         # holding however many of its ten rows happened to survive the filter,
         # and a total counting rows the filter would have dropped.
-        if page is not None and not lifecycle:
+        # `waiting` joins `lifecycle` on the slow path for the same reason:
+        # whose move it is is DERIVED per row (from the lifecycle and from who
+        # has signed), so it is knowable only once _record has run. Slicing
+        # first would page over rows the filter then dropped.
+        if page is not None and not lifecycle and not waiting:
             total = query.order_by(None).count()
             rows = (query.order_by(Contract.id.desc())
                     .offset((page - 1) * size).limit(size).all())
@@ -956,6 +1129,19 @@ def list_contracts(
                for c in rows]
         if lifecycle:
             out = [r for r in out if r["lifecycle"] == lifecycle]
+        if waiting == "mine":
+            my_side = "broker" if p.is_broker else "carrier"
+            out = [r for r in out if r.get("whose_turn") == my_side]
+            # "Mine" means MINE, and inside a carrier that is two queues rather
+            # than one: the signature is the carrier admin's alone, so a
+            # contract the broker has just agreed is on their desk and not on
+            # the desk of the user who raised it. Filtered on the same flag the
+            # record screen and the dashboard tile read, so the count on the
+            # tile and the length of this list cannot disagree.
+            if not p.is_broker and not _speaks_for_carrier(p):
+                out = [r for r in out
+                       if not (r.get("actions") or {}).get(
+                           "awaiting_carrier_admin")]
         if page is not None:
             start = (page - 1) * size
             return {"items": out[start:start + size], "total": len(out),
@@ -1105,7 +1291,12 @@ def _check_counterparty(s, p: Principal, spec: dict, program_id: int,
                            f"the programme first.",
                 "errors": {"counterparty_party_id": "not on this programme"},
             })
-        if link.status != "active":
+        # A link still WAITING for the carrier admin is not "taken off" — it is
+        # the step the carrier is in the middle of, and this contract is the
+        # next one. link_is_live() lets the carrier through and still refuses a
+        # broker, and an actually-removed link ('inactive') is refused for both.
+        from carrier_scope import link_is_live
+        if not link_is_live(link, p):
             raise HTTPException(400, {
                 "message": f"{party.legal_name} has been taken off this "
                            f"programme, so no new contract can be filed "
@@ -1282,7 +1473,27 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
                     400, "only an insurer ↔ broker contract can go out for "
                          "review — a reinsurer has no seat in Kavachio, so "
                          "there is nobody on the other side to read it")
+            # STRAIGHT TO THE BROKER, whoever raised it.
+            #
+            # There was a version of this that stopped here first, at
+            # `pending`, so the carrier admin could read the terms before the
+            # broker did. It was removed on purpose: it put the admin in the
+            # conversation twice — once before the broker had said anything,
+            # and again to sign — and the first of those two readings is the
+            # one with the least information in it. Nobody has raised an
+            # objection yet, so there is nothing to weigh.
+            #
+            # The admin's gate is now the SECOND one, where it earns its keep:
+            # the broker agrees the terms (accept_terms), and the contract
+            # stops on the admin's desk for review and signature before it can
+            # go anywhere. One reading, of a settled document, by the person
+            # whose signature it needs. See _carrier_admin_turn.
             c.lifecycle = "in_review"
+            # Kept even though nothing gates on it any more: it is who to tell
+            # when the broker answers, and who the contract goes back to if the
+            # admin sends it back.
+            c.submitted_by_user_id = p.user_id
+            c.submitted_at = dt.datetime.now(dt.timezone.utc)
         elif mode == "draft":
             # Written down and nothing more: not live, nothing checked, and
             # the terms still editable. What makes it not-live is the
@@ -1330,7 +1541,88 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
         if authored_sections:
             _store_authored_clauses(s, c, authored_sections)
             s.commit()
+        _notify_contract_raised(s, c, p)
         return _record(s, c, p=p)
+
+
+
+def _notify_contract_raised(s, c: Contract, p: Principal) -> None:
+    """Tell the carrier admin that a colleague has raised a contract.
+
+    ONLY a carrier USER's. The signature at the end is the carrier admin's
+    alone (_assert_speaks_for_carrier), so a contract somebody else raises is
+    work that will land on them — and one THEY raised is not, because they were
+    the person doing it. Telling people about their own actions is how a
+    notification turns into something they filter.
+
+    NOT the same thing as sending a contract for review. That puts it in the
+    broker's queue, emails nobody by design, and is the broker's turn; this is
+    about whose desk it comes back to. The mail says which of the two has just
+    happened rather than implying a signature is due today.
+
+    Best-effort, like every notification: raising the contract has already been
+    committed, and must not fail because mail did not go out.
+    """
+    try:
+        if p.is_broker or _speaks_for_carrier(p):
+            return
+        from notifications import (CARRIER_ADMIN_FOOTER,
+                                   carrier_admin_recipients, notify_people)
+        state = _effective_lifecycle(c)
+        if state == "draft":
+            # Saved and nothing more. It has not been sent anywhere and nobody
+            # is waiting on it — the old copy said "It is waiting for your
+            # signature", which was simply untrue and taught the carrier admin
+            # that these mails do not mean anything.
+            return
+        waiting_on_admin = state == "pending"
+        with_broker = state in ("in_review", "changes_requested")
+        who = _actor_name(s, p)
+        name = c.name or c.filename or f"Contract {c.id}"
+        prog = s.get(Program, c.program_id) if c.program_id else None
+        party = s.get(Party, c.broker_party_id) if c.broker_party_id else None
+        notify_people(
+            carrier_admin_recipients(c.tenant_id),
+            (f"{who} has raised a contract for you to review"
+             if waiting_on_admin else
+             f"{who} has raised a contract you will need to sign"),
+            body=("Nothing has gone to the broker. Read the terms and either "
+                  "send them out, settle them without asking, or send it back "
+                  "for a change."
+                  if waiting_on_admin else
+                  "It is with the broker to read and agree first. It comes back "
+                  "to you for signature once they have."
+                  if with_broker else
+                  "It is waiting for your signature — a contract goes in force "
+                  "when both sides have signed it."),
+            facts=[f for f in (
+                ("Contract", name),
+                ("With", getattr(party, "legal_name", None)),
+                ("Programme", getattr(prog, "name", None)),
+                ("Raised by", who),
+                ("Now", "Waiting on you" if waiting_on_admin
+                        else "With the broker" if with_broker
+                        else "Waiting on you"),
+            ) if f[1]],
+            link_path=f"/contracts/{c.id}",
+            link_label="Open the contract",
+            action=("Review it" if waiting_on_admin
+                    else None if with_broker else "Sign it"),
+            subject=f"Contract to review: {name}" if waiting_on_admin
+                    else f"Contract raised: {name}",
+            footer=CARRIER_ADMIN_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _actor_name(s, p: Principal) -> str:
+    """The acting person's display name, for something a PERSON reads. Falls
+    back to the address, then to a neutral phrase — never to an empty name."""
+    try:
+        u = s.query(AppUser).filter(AppUser.id == p.user_id).first()
+        return (u.full_name or u.email) if u else "A colleague"
+    except Exception:  # noqa: BLE001
+        return "A colleague"
 
 
 class WordingPreviewIn(BaseModel):
@@ -1552,8 +1844,15 @@ def update_contract(contract_id: int, body: dict,
         # `changes_requested` is editable BY THE CARRIER and nobody else: the
         # broker asked for a change and this is the carrier answering it. Left
         # out, the negotiation would have a step 3 and no step 4.
-        editable = state in ("draft", "pending") or (
-            state == "changes_requested" and not p.is_broker)
+        # `draft` and `pending` are both CARRIER-side states — a contract being
+        # written, or one sitting on the carrier admin's desk — and a broker
+        # has no business in either. Nothing puts a broker's contract there any
+        # more (the path where a broker uploaded one was removed; see the note
+        # at the top of this module), so this was a door left open onto a room
+        # nobody uses: any broker seat, operators included, could rewrite a
+        # carrier's terms while they were still being decided.
+        editable = (not p.is_broker) and (
+            state in ("draft", "pending", "changes_requested"))
         if state == "in_review" and not p.is_broker:
             raise HTTPException(
                 409,
@@ -1853,6 +2152,11 @@ def send_for_review(contract_id: int, body: ReviewRequest = ReviewRequest(),
     _require_carrier(p)
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
+        # A contract WAITING on the carrier admin is theirs to decide.
+        # From any other state this is a no-op, so the carrier user's
+        # own revise-and-resend loop is untouched.
+        if _effective_lifecycle(c) == "pending":
+            _assert_speaks_for_carrier(p, "send a contract to the broker")
         docs = s.query(ContractDocument).filter(
             ContractDocument.contract_id == c.id).all()
         missing = _missing_references(c, docs)
@@ -1884,12 +2188,359 @@ def send_for_review(contract_id: int, body: ReviewRequest = ReviewRequest(),
 
         _move(c, "in_review")
         now = dt.datetime.now(dt.timezone.utc)
+        # WHO IS OWED THE ANSWER. Only create_contract used to set this, so a
+        # contract saved as a draft and sent out later had nobody recorded
+        # against it — and every notification addressed to "whoever raised it"
+        # (sent back, accepted, signed) quietly reached no one. Set only when
+        # it is still empty: the person who first put it out is the one
+        # waiting, not whoever re-sent it after a change request.
+        if not c.submitted_by_user_id:
+            c.submitted_by_user_id = p.user_id
+            c.submitted_at = now
         s.add(ContractApproval(
             tenant_id=c.tenant_id, contract_id=c.id, action="sent_for_review",
             acted_by_user_id=p.user_id, acted_at=now, note=body.note))
         s.commit()
         s.refresh(c)
         return _record(s, c, p=p)
+
+
+@router.post("/contracts/{contract_id}/send-back")
+def send_back_contract(contract_id: int, body: Note = Note(),
+                       p: Principal = Depends(current_principal)):
+    """Send a colleague's contract back to them, with a reason.
+
+    The carrier admin's third answer, beside sending the terms out and settling
+    them: this one is "not yet". It goes back to `draft` — where it came from —
+    with everything still on it, so the author changes what was wrong and sends
+    it up again rather than raising the whole contract a second time.
+
+    A REASON IS REQUIRED. A contract returned with nothing said about it leaves
+    its author to come and ask what was wrong, which is the conversation this
+    step exists to save.
+    """
+    note = (body.note or "").strip()
+    if not note:
+        raise HTTPException(400, {
+            "message": "Say why you are sending this back — whoever raised it "
+                       "has to know what to change.",
+            "errors": {"note": "required"}})
+    _require_carrier(p)
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        if _effective_lifecycle(c) != "pending":
+            raise HTTPException(
+                409, "this contract is not waiting on you — it is "
+                     f"{_effective_lifecycle(c)}.")
+        _assert_speaks_for_carrier(p, "decide on a contract")
+        _move(c, "draft")
+        s.add(ContractApproval(
+            tenant_id=c.tenant_id, contract_id=c.id, action="sent_back",
+            acted_by_user_id=p.user_id,
+            acted_at=dt.datetime.now(dt.timezone.utc), note=note))
+        s.commit()
+        s.refresh(c)
+        author = c.submitted_by_user_id
+        rec = _record(s, c, p=p)
+        _log_contract_event(s, c, p, "contract_sent_back", note)
+        _notify_contract_sent_back(s, c, p, note, author)
+        return rec
+
+
+
+def _log_contract_event(s, c: Contract, p: Principal, action: str,
+                        note: Optional[str] = None) -> None:
+    """One activity row for a contract decision, with the details the
+    notification bell needs to render and link it.
+
+    Written here rather than left to the middleware because the middleware
+    records the PATH and nothing else: the bell cannot show "ffff · poly org"
+    from "POST /contracts/123/send-back", and it cannot group the row under its
+    programme either.
+
+    WHETHER THIS IS THE ONLY ROW DEPENDS ON THE ENDPOINT, and both answers are
+    deliberate. Where the act is the carrier's own — send-back, accept,
+    submit-for-approval — the path is in audit._SELF_LOGGED and this is the
+    whole record. Where the act is the BROKER's — accept-terms, request-changes
+    — the middleware's row stays: it is the broker's trail, filed the way every
+    other broker action is, and taking it away to avoid a second line would
+    have cost them their own history. This row is the carrier's copy of the
+    same event, under the carrier's tenant, carrying what the carrier's bell
+    needs. Those two are given DIFFERENT action names for that reason, so
+    neither reader sees the same thing twice.
+
+    Best-effort: a contract must not fail to be decided because the trail could
+    not be written."""
+    try:
+        from audit import log_activity
+        prog = s.get(Program, c.program_id) if c.program_id else None
+        party = s.get(Party, c.broker_party_id) if c.broker_party_id else None
+        details = {
+            "contract_id": c.id,
+            "name": c.name or c.filename or f"Contract {c.id}",
+            # The bell groups by programme, like every other notification in it.
+            "program_id": c.program_id,
+            "program_name": getattr(prog, "name", None),
+            "broker_name": getattr(party, "legal_name", None),
+            "lifecycle": _effective_lifecycle(c),
+        }
+        if note:
+            details["note"] = note
+        log_activity(c.tenant_id, _principal_email_for(s, p), action,
+                     target=f"contract:{c.id}", details=details, principal=p)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _principal_email_for(s, p: Principal) -> Optional[str]:
+    """The actor of record. Best-effort, never raises into the request."""
+    try:
+        from audit import actor_email
+        return actor_email(p.user_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _notify_contract_sent_back(s, c: Contract, p: Principal, note: str,
+                               author) -> None:
+    """Tell whoever raised it what was wrong. Nobody to tell when the contract
+    was never submitted by anyone, which is the normal case for one the carrier
+    admin raised themselves."""
+    if not author:
+        return
+    try:
+        from notifications import (CARRIER_USER_FOOTER, notify_people,
+                                   user_recipients)
+        who = _actor_name(s, p)
+        name = c.name or c.filename or f"Contract {c.id}"
+        notify_people(
+            user_recipients(author),
+            f"{who} sent your contract back",
+            body="The work is all still there. Make the change and send it up again.",
+            facts=[("Contract", name), ("Sent back by", who), ("Reason", note)],
+            link_path=f"/contracts/{c.id}",
+            link_label="Open the contract",
+            subject=f"Sent back: {name}",
+            footer=CARRIER_USER_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# =============================================================================
+#  The uploaded road  —  review and accept, because there is nothing to sign
+# =============================================================================
+#
+# An uploaded contract did not start here. It was negotiated somewhere else,
+# executed on paper somewhere else, and arrives as a finished document. Sending
+# it out for the broker's agreement would be asking them to agree to something
+# they have already signed, and asking for signatures in Kavachio would put
+# names under a document that was signed before the app ever saw it.
+#
+# What it needs instead is one act by one person: the carrier admin reading it
+# and saying it is ours. That is `accept`, and these two endpoints are the road
+# to it — a carrier user sends it up, the admin accepts it. An admin who
+# uploaded it themselves skips the first step, exactly as they do on a
+# bordereau setup (direct_routes.pipeline_activate): their own act IS the
+# approval, and there is nobody left to ask.
+
+
+def _accept_uploaded(s, c: Contract, p: Principal,
+                     note: Optional[str] = None) -> Optional[str]:
+    """Record the carrier's acceptance of an uploaded contract and put it in
+    force. Returns what is still in the way, or None if it went live.
+
+    ONE SIGNATURE, NOT TWO. The carrier admin's acceptance is recorded on the
+    CARRIER side and nowhere else. It would have been convenient to stamp the
+    counterparty's too — the record would be tidy and `activate` would unblock
+    itself — but nobody here knows who signed for them or when, and inventing a
+    name is exactly the kind of fact this app is supposed to refuse to make up.
+    So the counterparty side stays unsigned, visibly, and the contract goes in
+    force on the strength of the executed copy rather than on a signature
+    Kavachio witnessed. Which is the truth of it.
+
+    `active` is reached directly rather than through activate_contract, which
+    requires both sides signed and would therefore refuse every uploaded
+    contract there has ever been. Both moves it makes — pending → signed and
+    signed → active — are ordinary transitions; see LIFECYCLE_TRANSITIONS.
+    """
+    now = dt.datetime.now(dt.timezone.utc)
+    # Only if the carrier has not already put its name to this. A second row
+    # would claim the company signed twice, which is not a thing that happened.
+    if "carrier" in _unsigned_sides(_signatures(s, c.id)):
+        s.add(ContractSignature(
+            tenant_id=c.tenant_id, contract_id=c.id, side="carrier",
+            signer_name=_actor_name(s, p), method="recorded",
+            by_user_id=p.user_id, signed_at=now,
+            note="Accepted the executed copy on file."))
+    s.add(ContractApproval(
+        tenant_id=c.tenant_id, contract_id=c.id, action="carrier_accepted",
+        acted_by_user_id=p.user_id, acted_at=now, note=note))
+    c.executed_date = c.executed_date or _today()
+    if _effective_lifecycle(c) != "signed":
+        _move(c, "signed")
+    docs = s.query(ContractDocument).filter(
+        ContractDocument.contract_id == c.id).all()
+    missing = _missing_references(c, docs)
+    if missing:
+        # Accepted, and said plainly why it is not running: some of its clauses
+        # defer to documents nobody has supplied, so they cannot be checked.
+        # Recorded as accepted rather than refused after the fact — the admin's
+        # decision stands, and what is missing is a separate thing to go and get.
+        return "it defers to document(s) nobody has supplied: " + ", ".join(missing)
+    _move(c, "active")
+    return None
+
+
+@router.post("/contracts/{contract_id}/submit-for-approval")
+def submit_for_approval(contract_id: int, body: Note = Note(),
+                        p: Principal = Depends(current_principal)):
+    """Send an uploaded contract up to the carrier admin to be accepted.
+
+    A carrier ADMIN pressing this accepts it there and then — see the note at
+    the top of this section.
+    """
+    _require_carrier(p)
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        state = _effective_lifecycle(c)
+        if state != "draft":
+            raise HTTPException(
+                409, f"only a draft goes up for approval — this one is {state}.")
+        if not _is_uploaded(c):
+            raise HTTPException(
+                409, "this contract was written here, so it takes the ordinary "
+                     "road: the broker agrees the terms, then your carrier "
+                     "admin signs it.")
+        admin = _speaks_for_carrier(p)
+        blocked_by = None
+        if admin:
+            blocked_by = _accept_uploaded(s, c, p, body.note)
+        else:
+            _move(c, "pending")
+            c.submitted_by_user_id = p.user_id
+            c.submitted_at = dt.datetime.now(dt.timezone.utc)
+            s.add(ContractApproval(
+                tenant_id=c.tenant_id, contract_id=c.id, action="submitted",
+                acted_by_user_id=p.user_id,
+                acted_at=dt.datetime.now(dt.timezone.utc),
+                note=body.note or "asked for it to be accepted"))
+        s.commit()
+        s.refresh(c)
+        rec = _record(s, c, p=p)
+        if admin:
+            _log_contract_event(s, c, p, "contract_accepted", body.note)
+        else:
+            _log_contract_event(s, c, p, "contract_awaiting_review", body.note)
+            _notify_contract_for_acceptance(s, c, p)
+        if blocked_by:
+            rec["signature_note"] = ("Accepted, but it cannot go in force while "
+                                     + blocked_by + ".")
+        return rec
+
+
+@router.post("/contracts/{contract_id}/accept")
+def accept_contract(contract_id: int, body: Note = Note(),
+                    p: Principal = Depends(current_principal)):
+    """The carrier admin accepts an uploaded contract, and it goes in force."""
+    _require_carrier(p)
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        state = _effective_lifecycle(c)
+        if state != "pending":
+            raise HTTPException(
+                409, f"this contract is not waiting on you — it is {state}.")
+        _assert_speaks_for_carrier(p, "accept a contract")
+        author = c.submitted_by_user_id
+        blocked_by = _accept_uploaded(s, c, p, body.note)
+        s.commit()
+        s.refresh(c)
+        rec = _record(s, c, p=p)
+        _log_contract_event(s, c, p, "contract_accepted", body.note)
+        _notify_contract_accepted(s, c, p, author)
+        rec["signature_note"] = (
+            "Accepted, but it cannot go in force while " + blocked_by + "."
+            if blocked_by else
+            "Accepted and in force. Bordereau setup can be built on it now.")
+        return rec
+
+
+def _notify_contract_for_acceptance(s, c: Contract, p: Principal) -> None:
+    """Tell the carrier admin an uploaded contract is waiting on them."""
+    try:
+        from notifications import (CARRIER_ADMIN_FOOTER,
+                                   carrier_admin_recipients, notify_people)
+        who = _actor_name(s, p)
+        name = c.name or c.filename or f"Contract {c.id}"
+        prog = s.get(Program, c.program_id) if c.program_id else None
+        party = s.get(Party, c.broker_party_id) if c.broker_party_id else None
+        notify_people(
+            carrier_admin_recipients(c.tenant_id),
+            f"{who} has sent you a contract to accept",
+            body="It was signed before it got here, so there is nothing to "
+                 "negotiate and nothing to sign. Read it and either accept it "
+                 "— which puts it in force — or send it back.",
+            facts=[f for f in (
+                ("Contract", name),
+                ("With", getattr(party, "legal_name", None)),
+                ("Programme", getattr(prog, "name", None)),
+                ("Uploaded by", who),
+            ) if f[1]],
+            link_path=f"/contracts/{c.id}",
+            link_label="Open the contract",
+            action="Review and accept it",
+            subject=f"Contract to accept: {name}",
+            footer=CARRIER_ADMIN_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _notify_contract_signed(s, c: Contract, p: Principal, author) -> None:
+    """Tell whoever raised it that the carrier admin has signed.
+
+    In the bell only. It is news, not work — and the work it unblocks (the
+    bordereau setup) is somewhere else entirely, so a mail would arrive saying
+    "nothing to do here" and be right.
+    """
+    if not author or author == p.user_id:
+        return
+    try:
+        from notifications import (CARRIER_USER_FOOTER, notify_people,
+                                   user_recipients)
+        who = _actor_name(s, p)
+        name = c.name or c.filename or f"Contract {c.id}"
+        notify_people(
+            user_recipients(author),
+            f"{who} has signed the contract you raised",
+            body="You can build the bordereau setup on it now.",
+            facts=[("Contract", name), ("Signed by", who)],
+            link_path=f"/contracts/{c.id}",
+            link_label="Open the contract",
+            subject=f"Signed: {name}",
+            footer=CARRIER_USER_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _notify_contract_accepted(s, c: Contract, p: Principal, author) -> None:
+    """Tell whoever sent it up that it is accepted and they can build on it."""
+    if not author:
+        return
+    try:
+        from notifications import (CARRIER_USER_FOOTER, notify_people,
+                                   user_recipients)
+        who = _actor_name(s, p)
+        name = c.name or c.filename or f"Contract {c.id}"
+        notify_people(
+            user_recipients(author),
+            f"{who} accepted the contract you sent up",
+            body="It is in force. You can build the bordereau setup on it now.",
+            facts=[("Contract", name), ("Accepted by", who)],
+            link_path=f"/contracts/{c.id}",
+            link_label="Open the contract",
+            subject=f"Accepted: {name}",
+            footer=CARRIER_USER_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.post("/contracts/{contract_id}/skip-review")
@@ -1919,6 +2570,11 @@ def skip_review(contract_id: int, body: ReviewRequest = ReviewRequest(),
     _require_carrier(p)
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
+        # A contract WAITING on the carrier admin is theirs to decide.
+        # From any other state this is a no-op, so the carrier user's
+        # own revise-and-resend loop is untouched.
+        if _effective_lifecycle(c) == "pending":
+            _assert_speaks_for_carrier(p, "settle a contract's terms")
         docs = s.query(ContractDocument).filter(
             ContractDocument.contract_id == c.id).all()
         missing = _missing_references(c, docs)
@@ -1952,12 +2608,26 @@ def skip_review(contract_id: int, body: ReviewRequest = ReviewRequest(),
                      "there is no review left to skip")
         _move(c, "agreed")
         now = dt.datetime.now(dt.timezone.utc)
+        if not c.submitted_by_user_id:
+            c.submitted_by_user_id = p.user_id
+            c.submitted_at = now
         s.add(ContractApproval(
             tenant_id=c.tenant_id, contract_id=c.id, action="review_skipped",
             acted_by_user_id=p.user_id, acted_at=now, note=body.note))
         s.commit()
         s.refresh(c)
-        return _record(s, c, p=p)
+        rec = _record(s, c, p=p)
+        # THIS ENDS AT THE SAME PLACE accept_terms DOES — `agreed`, with the
+        # carrier unsigned — so it puts the contract on the carrier admin's
+        # desk just as surely, and it did it silently. A carrier user may skip
+        # a review (there is nobody to ask on a treaty), and when they do, the
+        # admin has to be told the same way the broker agreeing tells them.
+        # Not when the admin did it themselves: they are standing on the page.
+        if not _speaks_for_carrier(p):
+            _log_contract_event(s, c, p, "contract_awaiting_signature",
+                                body.note)
+            _notify_terms_agreed(s, c, p, skipped=True)
+        return rec
 
 
 class ProposedChange(BaseModel):
@@ -2029,15 +2699,75 @@ def request_changes(contract_id: int, body: ChangeRequest,
                            f"{', '.join(unknown)}.",
                 "errors": {"changes": ", ".join(unknown)}})
 
+        # Only while the contract is THEIRS. `signed -> changes_requested` is a
+        # legal transition (it is how a signature is withdrawn from the
+        # carrier's side), so without this a broker could pull a contract the
+        # carrier admin had already signed back into the negotiation and the
+        # signature would go with it.
+        _state = _effective_lifecycle(c)
+        if _state not in ("in_review", "agreed"):
+            raise HTTPException(
+                409, f"this contract is {_state}, so there is nothing in front "
+                     f"of you to ask changes to.")
         _move(c, "changes_requested")
         now = dt.datetime.now(dt.timezone.utc)
         s.add(ContractApproval(
             tenant_id=c.tenant_id, contract_id=c.id, action="changes_requested",
             acted_by_user_id=p.user_id, acted_at=now, note=body.note.strip(),
             proposed_changes=[ch.model_dump() for ch in body.changes] or None))
+        author = c.submitted_by_user_id
         s.commit()
         s.refresh(c)
-        return _record(s, c, p=p)
+        rec = _record(s, c, p=p)
+        # The other half of the negotiation. The broker agreeing is told; the
+        # broker pushing back was not, and it is the answer that actually needs
+        # somebody to do something. It goes to whoever put the terms out —
+        # revising them is their work, not the admin's, and the admin is not
+        # needed again until there is something to sign.
+        # A DIFFERENT NAME from the middleware's `contract_changes_requested`,
+        # deliberately. That row is the broker's own trail and stays where it
+        # is; this one is written under the CARRIER's tenant with the contract,
+        # the broker and the reason on it, which is what the carrier's bell
+        # needs to render and link. Same event, two readers, and giving them
+        # one name would have made them one row that neither could use.
+        _log_contract_event(s, c, p, "contract_pushed_back",
+                            body.note.strip())
+        _notify_changes_requested(s, c, p, author, body.note.strip())
+        return rec
+
+
+def _notify_changes_requested(s, c: Contract, p: Principal, author,
+                              note: str) -> None:
+    """Tell the carrier the broker has pushed back, and what they said."""
+    try:
+        from notifications import (CARRIER_ADMIN_FOOTER, CARRIER_USER_FOOTER,
+                                   carrier_admin_recipients, notify_people,
+                                   user_recipients)
+        name = c.name or c.filename or f"Contract {c.id}"
+        party = s.get(Party, c.broker_party_id) if c.broker_party_id else None
+        broker = getattr(party, "legal_name", None) or "The broker"
+        # Whoever put the terms out, if anyone is on the record; the carrier
+        # admin otherwise, so a contract raised before this existed still
+        # reaches a person rather than nobody.
+        to = user_recipients(author) if author else []
+        notify_people(
+            to or carrier_admin_recipients(c.tenant_id),
+            f"{broker} has asked for changes",
+            body="They have read the terms and want something different. The "
+                 "contract is back with you — change what they asked about and "
+                 "send the revised terms out again.",
+            facts=[f for f in (
+                ("Contract", name),
+                ("With", getattr(party, "legal_name", None)),
+                ("What they said", note or None),
+            ) if f[1]],
+            link_path=f"/contracts/{c.id}",
+            link_label="Open the contract",
+            action="Read what they asked for",
+            subject=f"Changes requested: {name}",
+            footer=CARRIER_USER_FOOTER if to else CARRIER_ADMIN_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.post("/contracts/{contract_id}/accept-terms")
@@ -2056,6 +2786,16 @@ def accept_terms(contract_id: int, body: ReviewRequest = ReviewRequest(),
     _assert_speaks_for_broker(p, "agree a contract's terms")
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
+        # ONLY TERMS THAT WERE PUT TO THEM. LIFECYCLE_TRANSITIONS allows
+        # draft -> agreed (that is skip-review's road, and the carrier's own),
+        # so without this a broker could agree a contract still being written
+        # and land it on the carrier admin's desk for signature before its
+        # author had finished it.
+        _state = _effective_lifecycle(c)
+        if _state != "in_review":
+            raise HTTPException(
+                409, "these terms are not out for your review — this contract "
+                     f"is {_state}.")
         docs = s.query(ContractDocument).filter(
             ContractDocument.contract_id == c.id).all()
         missing = _missing_references(c, docs)
@@ -2073,7 +2813,68 @@ def accept_terms(contract_id: int, body: ReviewRequest = ReviewRequest(),
             acted_by_user_id=p.user_id, acted_at=now, note=body.note))
         s.commit()
         s.refresh(c)
-        return _record(s, c, p=p)
+        rec = _record(s, c, p=p)
+        # THIS IS THE MOMENT THE CARRIER ADMIN'S GATE OPENS, and it is the only
+        # one. Until now the contract was the broker's to read; from here it is
+        # settled, it is back inside the carrier, and the next act on it —
+        # signing — is the carrier admin's alone. Nothing else tells them: the
+        # broker agreeing is an act on the broker's screen, and the carrier
+        # side would otherwise only find out by going and looking.
+        _log_contract_event(s, c, p, "contract_awaiting_signature", body.note)
+        _notify_terms_agreed(s, c, p)
+        return rec
+
+
+def _notify_terms_agreed(s, c: Contract, p: Principal,
+                         skipped: bool = False) -> None:
+    """The broker has agreed. Mail the carrier admin, because it is now theirs.
+
+    BY MAIL, not only in the app. This is the one step of the flow that stops
+    dead until a named person acts — the carrier signs first, so the broker
+    cannot move either — and a notice that waits for them to come back and look
+    is a notice that can hold up both sides for a week.
+
+    Whoever RAISED it is told too, but through the bell rather than here: the
+    `contract_awaiting_signature` activity row carries no seat, so both seats
+    see it (NotificationBell.NOTIFY). For them it is news, not work — nothing
+    is theirs to do until the signature lands — and a second mail saying
+    "nothing to do" is how people learn to ignore the first one.
+    """
+    try:
+        from notifications import (CARRIER_ADMIN_FOOTER,
+                                   carrier_admin_recipients, notify_people)
+        name = c.name or c.filename or f"Contract {c.id}"
+        prog = s.get(Program, c.program_id) if c.program_id else None
+        party = s.get(Party, c.broker_party_id) if c.broker_party_id else None
+        broker = getattr(party, "legal_name", None) or "The broker"
+        who = _actor_name(s, p)
+        notify_people(
+            carrier_admin_recipients(c.tenant_id),
+            (f"{who} settled these terms without a review — they need your "
+             f"signature" if skipped else
+             f"{broker} has agreed the terms — it needs your signature"),
+            body=("The review was skipped, so the other side was never asked. "
+                  "Read the terms before you sign: yours is the only reading "
+                  "this contract will get."
+                  if skipped else
+                  "The terms are settled and nobody is waiting on the broker "
+                  "any more. Read them and sign: a contract goes in force when "
+                  "both sides have signed, and the carrier signs first."),
+            facts=[f for f in (
+                ("Contract", name),
+                ("With", getattr(party, "legal_name", None)),
+                ("Programme", getattr(prog, "name", None)),
+                ("Settled by", who if skipped else None),
+                ("Now", "Waiting on you to sign"),
+            ) if f[1]],
+            link_path=f"/contracts/{c.id}",
+            link_label="Open the contract",
+            action="Review and sign it",
+            subject=(f"Ready to sign (no review held): {name}" if skipped
+                     else f"Ready to sign: {name}"),
+            footer=CARRIER_ADMIN_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class SignedSubmission(BaseModel):
@@ -2112,6 +2913,24 @@ def submit_signed(contract_id: int, body: SignedSubmission = SignedSubmission(),
     _assert_speaks_for_broker(p, "sign a contract")
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
+        # THE SAME TWO RULES THE SCREEN SHOWS THIS BUTTON UNDER, enforced.
+        # Terms that are still moving cannot be signed and returned, and the
+        # CARRIER SIGNS FIRST — the broker is asked to sign a document that
+        # already carries the carrier's signature, which is the whole reason
+        # the contract stops on the carrier admin's desk at `agreed`. Without
+        # these, that stop could be walked straight past from the broker's
+        # side: submit-signed would carry the contract to `signed` with nobody
+        # at the carrier having read it.
+        _state = _effective_lifecycle(c)
+        if _state != "agreed":
+            raise HTTPException(
+                409, "a contract is signed and returned once both sides have "
+                     f"agreed its terms — this one is {_state}.")
+        if "carrier" in _unsigned_sides(_signatures(s, c.id)):
+            raise HTTPException(
+                409, "the carrier has not signed this yet. It comes to you for "
+                     "signature once they have, and you are emailed the moment "
+                     "it does.")
 
         doc = None
         if body.document_id is not None:
@@ -2439,9 +3258,14 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
                 409, f"this contract is {state} and is not waiting on a "
                      f"signature.")
 
+        # Counted exactly as _record counts it (see `has_wording` there),
+        # blob included. The two had drifted: the record said an old contract
+        # carrying only a blob_ref HAD a wording and offered Sign, and this
+        # said it did not and answered 400. One of the two had to be wrong and
+        # the user could not tell which.
         sections = ((c.wording_sections or {}).get("sections")
                     if isinstance(c.wording_sections, dict) else None)
-        has_wording = bool(sections) or bool(
+        has_wording = bool(sections) or bool(c.blob_ref or c.blob) or bool(
             s.query(ContractDocument).filter(
                 ContractDocument.contract_id == c.id,
                 ContractDocument.kind == "contract",
@@ -2452,6 +3276,11 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
                      "wording. Write it or attach it first.")
 
         # ── whose side ──
+        # The carrier's signature — and one it RECORDS on the other side's
+        # behalf, which is just as much the carrier's word — is the carrier
+        # admin's to give. A no-op when the caller is a broker, whose own
+        # equivalent is the line below.
+        _assert_speaks_for_carrier(p, "sign a contract")
         if p.is_broker:
             _assert_speaks_for_broker(p, "sign a contract")
             if body.recorded:
@@ -2554,9 +3383,17 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
                     _move(c, "signed")
                 _move(c, "active")
 
+        author = c.submitted_by_user_id
         s.commit()
         s.refresh(c)
         rec = _record(s, c, p=p)
+        # The carrier's signature is what releases the rest of the flow: until
+        # it is given, a bordereau setup built on this contract cannot be
+        # finished (direct_routes._pipeline_ready). Whoever raised it is waiting
+        # on exactly this, and had no way to know it had happened.
+        if side == "carrier":
+            _log_contract_event(s, c, p, "contract_signed_off")
+            _notify_contract_signed(s, c, p, author)
         rec["signature_note"] = (
             f"Signed for the {'carrier' if side == 'carrier' else 'counterparty'}"
             f" by {name}."
@@ -2591,6 +3428,15 @@ def unsign_contract(contract_id: int, signature_id: int,
             raise HTTPException(404, "that signature is not on this contract")
         if p.is_broker and sg.side != "counterparty":
             raise HTTPException(403, "that is not your signature to withdraw")
+        # WHOEVER COULD GIVE IT IS WHO MAY TAKE IT BACK. Signing is the carrier
+        # admin's alone, and withdrawing a signature is the same act in
+        # reverse — it un-signs the company's name and, on an uploaded
+        # contract, erases the acceptance that put it in force. Without this a
+        # carrier user could undo their admin's decision, which is the one
+        # thing this whole gate exists to prevent.
+        _assert_speaks_for_carrier(p, "withdraw a signature")
+        if p.is_broker:
+            _assert_speaks_for_broker(p, "withdraw a signature")
         s.delete(sg)
         if _effective_lifecycle(c) == "signed":
             c.lifecycle = "agreed" if c.broker_party_id else "draft"

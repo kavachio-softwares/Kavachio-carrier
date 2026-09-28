@@ -7,6 +7,7 @@
 // it costs no extra request per row.
 import { ArrowRight } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { onProgramme, setupFinished } from "../api/hierarchy";
 import type { HierarchyBroker, HierarchyProgramme } from "../api/hierarchy";
 
 export type StepState = "done" | "current" | "todo";
@@ -43,7 +44,7 @@ export const flowUrl = (programId: number, key: Step["key"]) =>
   `/programs/${programId}/setup?stage=${STAGE[key]}`;
 
 export function programmeSteps(p: HierarchyProgramme): Step[] {
-  const brokers = p.brokers.filter(b => b.link_status === "active");
+  const brokers = p.brokers.filter(b => onProgramme(b.link_status));
   const withContract = brokers.filter(hasLiveContract);
   const withSetup = withContract.filter(b => b.setup_status === "active");
   const programmeUrl = `/programs/${p.id}/brokers`;
@@ -58,8 +59,10 @@ export function programmeSteps(p: HierarchyProgramme): Step[] {
       ? `/contracts/${pending.id}`
       : `/contracts/new?program_id=${p.id}&broker_party_id=${needsContract.id}`;
 
-  // Setup: the first broker with a live contract but no setup in use.
-  const needsSetup = withContract.find(b => b.setup_status !== "active");
+  // Setup: the first broker with a live contract and nothing built yet. A
+  // setup WAITING for the carrier admin is not one of these — it is built, and
+  // sending its author back to the builder would ask for a second copy of it.
+  const needsSetup = withContract.find(b => !setupFinished(b.setup_status));
   const setupTo = needsSetup
     ? `/direct/setup?program_id=${p.id}&broker_party_id=${needsSetup.id}`
     : `/direct/setups?program_id=${p.id}`;
@@ -131,7 +134,7 @@ export function nextStep(p: HierarchyProgramme): { label: string; to: string; hi
   const steps = programmeSteps(p);
   const cur = steps.find(s => s.state === "current");
   if (!cur) return null;
-  const draftSetup = p.brokers.some(b => b.link_status === "active" && b.setup_status === "draft");
+  const draftSetup = p.brokers.some(b => onProgramme(b.link_status) && b.setup_status === "draft");
   const label =
     cur.key === "brokers" ? "Add a broker"
     : cur.key === "contract" ? (cur.to.startsWith("/contracts/new") ? "Add a contract" : "Open the contract")
@@ -143,7 +146,7 @@ export function nextStep(p: HierarchyProgramme): { label: string; to: string; hi
 /** One plain sentence for the "What's missing" column. Names the broker when
  *  there is only one; counts them when there are several. Null once complete. */
 export function whatsMissing(p: HierarchyProgramme): string | null {
-  const brokers = p.brokers.filter(b => b.link_status === "active");
+  const brokers = p.brokers.filter(b => onProgramme(b.link_status));
   if (brokers.length === 0) return "No broker on it yet";
   const noContract = brokers.filter(b => !hasLiveContract(b));
   if (noContract.length > 0) {
@@ -155,9 +158,15 @@ export function whatsMissing(p: HierarchyProgramme): string | null {
     }
     return `${noContract.length} brokers have no signed contract yet`;
   }
-  const noSetup = brokers.filter(b => b.setup_status !== "active");
+  const noSetup = brokers.filter(b => !setupFinished(b.setup_status));
   if (noSetup.length === 1) return `${noSetup[0].legal_name} has no setup, so their file can't be checked`;
   if (noSetup.length > 1) return `${noSetup.length} brokers have no setup, so their files can't be checked`;
+  // Built, sent, and not decided on. The step is still not done — the broker
+  // cannot send a file — but nobody is waiting on the person reading this, and
+  // "has no setup" would send them looking for work that is already done.
+  const waiting = brokers.filter(b => b.setup_status === "pending_approval");
+  if (waiting.length === 1) return `${waiting[0].legal_name}'s setup is waiting for your carrier admin to approve it`;
+  if (waiting.length > 1) return `${waiting.length} setups are waiting for your carrier admin to approve them`;
   return null;
 }
 

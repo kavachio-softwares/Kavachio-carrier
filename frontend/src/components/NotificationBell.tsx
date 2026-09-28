@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useNavigate } from "react-router-dom";
 import { Bell, X } from "lucide-react";
 import { currentMga, isBrokerSeat } from "../auth";
+import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { getActivity, type ActivityEvent } from "../api/activity";
 import { listPrograms, type ProgramLite } from "../api/calendar";
 
@@ -13,10 +15,76 @@ import { listPrograms, type ProgramLite } from "../api/calendar";
 // The three deadline moments, each its own reminder: ahead of the due date, on
 // the day, and once it has passed. Tones escalate blue → amber → red to match
 // the status badges on My Calendar, so the same event reads the same in both.
-export const NOTIFY: Record<string, { label: string; tone: string; to: string }> = {
+export const NOTIFY: Record<string, {
+  label: string; tone: string; to: string;
+  /** Where THIS row goes, when the answer depends on the row rather than on
+   *  the kind. A deadline always goes to the calendar; a contract goes to the
+   *  contract it is about. */
+  link?: (d: Record<string, any>) => string | null;
+  /** Which carrier seat this is FOR. The activity feed is tenant-wide, so
+   *  without it a carrier user would be told a contract is waiting for a
+   *  review only their carrier admin can do — and the admin would be told
+   *  their own decisions had been made. Omitted = everyone at the carrier. */
+  seat?: "admin" | "user";
+}> = {
   submission_overdue:   { label: "Bordereau overdue",   tone: "#c0392b", to: "/calendar" },
   submission_due_today: { label: "Bordereau due today", tone: "#b7791f", to: "/calendar" },
   submission_due_soon:  { label: "Bordereau due soon",  tone: "#2c6fbb", to: "/calendar" },
+
+  // --- waiting on the CARRIER ADMIN --------------------------------------
+  // A colleague has finished something that cannot reach the broker until the
+  // admin decides on it. Amber, not red: nothing is late, somebody is waiting.
+  contract_awaiting_review: {
+    seat: "admin",
+    label: "Contract to accept", tone: "#b7791f", to: "/contracts?waiting=mine",
+    link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
+  // THE GATE. The broker has agreed the terms and the contract has stopped on
+  // the carrier admin's desk for signature. No seat on it, deliberately, and
+  // it is the only one of these without: both seats need to know, and they
+  // need to know different halves of it — the admin that there is something to
+  // sign, the author that their contract got through and is nearly theirs to
+  // build on. One row, read twice, rather than two rows for one event.
+  contract_awaiting_signature: {
+    label: "Ready to sign", tone: "#b7791f", to: "/contracts?waiting=mine",
+    link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
+  bordereau_setup_submitted: {
+    seat: "admin",
+    label: "Setup to approve", tone: "#b7791f",
+    to: "/direct/setups?status=pending_approval",
+    link: d => d.pipeline_id ? `/direct/setups/${d.pipeline_id}` : null },
+
+  // --- the answer, back to the CARRIER USER who asked --------------------
+  // The half of the flow the person who did the work would otherwise only
+  // learn by opening the screen and noticing it had moved.
+  contract_sent_back: {
+    seat: "user",
+    label: "Contract sent back", tone: "#c0392b", to: "/contracts",
+    link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
+  // The other half of the negotiation. The broker agreeing already showed up
+  // here; the broker pushing back did not, and it is the answer that needs
+  // somebody to go and do something.
+  contract_pushed_back: {
+    label: "Changes requested", tone: "#b7791f", to: "/contracts?waiting=mine",
+    link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
+  // Both of these clear the way to the bordereau setup, which is the next
+  // thing the person who raised it has to do — so they are green, and they are
+  // addressed to them rather than to the admin who just did it.
+  contract_accepted: {
+    seat: "user",
+    label: "Contract accepted", tone: "#2f855a", to: "/contracts",
+    link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
+  contract_signed_off: {
+    seat: "user",
+    label: "Contract signed", tone: "#2f855a", to: "/contracts",
+    link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
+  bordereau_setup_approved: {
+    seat: "user",
+    label: "Setup approved", tone: "#2f855a", to: "/direct/setups",
+    link: d => d.pipeline_id ? `/direct/setups/${d.pipeline_id}` : null },
+  bordereau_setup_rejected: {
+    seat: "user",
+    label: "Setup sent back", tone: "#c0392b", to: "/direct/setups",
+    link: d => d.pipeline_id ? `/direct/setups/${d.pipeline_id}` : null },
 };
 export const NOTIFY_ACTIONS = Object.keys(NOTIFY);
 /** Every outstanding reminder, not a recent-activity sample: a deadline stays
@@ -81,6 +149,7 @@ export default function NotificationBell({
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [programs, setPrograms] = useState<ProgramLite[]>([]);
   const [open, setOpen] = useState(false);
+  const nav = useNavigate();
   const [dismissed, setDismissed] = useState<Set<number>>(dismissedIds);
   const ref = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -161,9 +230,30 @@ export default function NotificationBell({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
 
+  // A kind addressed to the other seat is not this person's to see. `both`
+  // (Kavachio staff, or an organisation with no owner recorded) sees
+  // everything, and so does a seat that has not resolved yet — the API is the
+  // boundary, and hiding a notification is not worth a flash of the wrong list.
+  const seat = useCarrierSeat();
   const notifs = useMemo(
-    () => events.filter(e => NOTIFY[e.action] && !dismissed.has(e.id)),
-    [events, dismissed]);
+    () => events.filter(e => {
+      const meta = NOTIFY[e.action];
+      if (!meta || dismissed.has(e.id)) return false;
+      // No seat on the entry: it is for everyone at the carrier.
+      if (!meta.seat) return true;
+      // "both" is the deliberate fail-open — Kavachio staff, and a carrier
+      // with no owner recorded, where carrier_scope treats every seat as the
+      // admin. Those people really can do all of it, so they see all of it.
+      if (seat === "both") return true;
+      // NOT while the seat is still unresolved. Showing everything until the
+      // answer arrives flashed the admin's queue — "contract to accept", with
+      // a name and a broker on it — at every carrier user on every page load,
+      // and then took it away. An item that appears a moment late is a far
+      // smaller thing than one that should never have been there.
+      if (seat === null) return false;
+      return meta.seat === seat;
+    }),
+    [events, dismissed, seat]);
   // The badge IS the length of the list below it. Nothing else to disagree with.
   const outstanding = notifs.length;
 
@@ -292,14 +382,35 @@ export default function NotificationBell({
                       display: "flex", alignItems: "flex-start",
                       borderBottom: "1px solid #f2f4f7",
                     }}>
-                      <div style={{ flex: 1, minWidth: 0, padding: "10px 4px 10px 14px" }}>
+                      {/* Clickable when the row is ABOUT something — a
+                          contract, a setup. A deadline reminder is not: it
+                          names a period, and the calendar is already one click
+                          away in the sidebar. Kept as the row body rather than
+                          a separate link so the whole row is the target. */}
+                      <div
+                        role={meta.link?.(d) ? "link" : undefined}
+                        tabIndex={meta.link?.(d) ? 0 : undefined}
+                        onClick={() => { const to = meta.link?.(d); if (to) { setOpen(false); nav(to); } }}
+                        onKeyDown={e => {
+                          if (e.key !== "Enter" && e.key !== " ") return;
+                          const to = meta.link?.(d);
+                          if (to) { e.preventDefault(); setOpen(false); nav(to); }
+                        }}
+                        style={{ flex: 1, minWidth: 0, padding: "10px 4px 10px 14px",
+                                 cursor: meta.link?.(d) ? "pointer" : "default" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 3 }}>
                           <span style={{ width: 7, height: 7, borderRadius: "50%", background: meta.tone, flex: "0 0 auto" }} />
                           <span style={{ fontSize: 12.5, fontWeight: 600 }}>{meta.label}</span>
                           <span style={{ marginLeft: "auto", fontSize: 11, color: "#9aa4b2" }}>{relTime(e.created_at)}</span>
                         </div>
                         <div style={{ fontSize: 12, color: "#5b6675", paddingLeft: 14 }}>
-                          {d.period ?? ""}{d.due_date ? ` · due ${d.due_date}` : ""}
+                          {/* A deadline is identified by its period; everything
+                              else by what it is about, and — when it came back
+                              with one — the reason it did. */}
+                          {d.period
+                            ? `${d.period}${d.due_date ? ` · due ${d.due_date}` : ""}`
+                            : [d.name, d.broker_name, d.note]
+                                .filter(Boolean).join(" · ")}
                         </div>
                       </div>
                       <button

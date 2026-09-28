@@ -24,6 +24,7 @@ import {
 } from "../api/contracts";
 import CreateOutputTemplate from "../components/CreateOutputTemplate";
 import { SetupTabs, useSetupTab, type SetupTab } from "../components/SetupTabs";
+import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { OutputTemplateEditor } from "./OutputTemplate";
 import OutputTemplateState from "../components/OutputTemplateState";
 import { type MappingReviewData } from "../components/MappingReview";
@@ -62,7 +63,8 @@ type OutField = { sheet: string; field: string; clauses: Clause[] };
 // A Pipeline binds this scope's Input Template (a DirectFormat) + Output
 // Template + contracts, and carries the run-time active status.
 type Pipeline = {
-  id: number; name: string | null; status: "draft" | "active" | "superseded";
+  id: number; name: string | null;
+  status: "draft" | "pending_approval" | "active" | "superseded";
   input_format_id: number | null; output_template_id: number | null;
   ready: boolean; ready_reason: string;
   contracts: { contract_id: number; sheet_key: string | null }[];
@@ -119,6 +121,11 @@ function buildLabel(step: string): string {
 export default function DirectSetup() {
   const mga = currentMga();
   const isAdmin = isTenantAdmin();
+  // Which of the two CARRIER seats — isTenantAdmin() is the role, which both of
+  // them hold. A carrier user finishing a setup sends it for approval; the
+  // carrier admin puts it live. The button has to say which it will do.
+  const carrierAdmin = addsCarrierUsers(useCarrierSeat());
+  const finishLabel = carrierAdmin ? "Activate Setup" : "Send for Approval";
   const navigate = useNavigate();
   // The setup's edit page opens with a "back" target so its header button
   // returns the user to wherever they came from — here, Bordereau Setup —
@@ -490,8 +497,14 @@ export default function DirectSetup() {
           const forContract = pickedContractId == null ? undefined
             : list.find(p => p.status === "active"
                 && p.contracts?.some(c => c.contract_id === pickedContractId));
+          // Live first, then one waiting for the carrier admin: for a carrier
+          // user who has just sent theirs up, the setup waiting IS the one
+          // this screen is about, and landing on a blank builder would read as
+          // the work having been lost.
           const target = forContract
-            ?? list.find(p => p.status === "active") ?? (list.length === 1 ? list[0] : null);
+            ?? list.find(p => p.status === "active")
+            ?? list.find(p => p.status === "pending_approval")
+            ?? (list.length === 1 ? list[0] : null);
           const fid = target?.input_format_id ?? null;
           if (fid != null && fid !== loadedSetupId) loadSetup(fid);
         }
@@ -676,12 +689,20 @@ export default function DirectSetup() {
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
-  // Activate an existing pipeline directly (supersedes the others for this scope).
+  // Finish an existing pipeline. The carrier ADMIN's goes live (superseding the
+  // others for this scope); a carrier USER's goes to the admin for approval.
+  // One endpoint, because it is one intent — the server knows which seat asked
+  // and therefore which of the two it means.
   async function activateExisting(pipelineId: number) {
     setBusy(true); setErr(null); setMsg(null);
     try {
-      await api.post(`/pipelines/${pipelineId}/activate`);
-      setMsg("Setup activated — bordereaux can now be processed for this carrier + program.");
+      const { data } = await api.post<{ status?: string }>(
+        `/pipelines/${pipelineId}/activate`);
+      setMsg(data?.status === "pending_approval"
+        ? "Sent to your carrier admin. Nothing reaches the broker until they "
+          + "approve it — the programme, the contract and the BDX template all "
+          + "wait with it."
+        : "Setup activated — bordereaux can now be processed for this carrier + program.");
       refreshExisting();
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
   }
@@ -1617,9 +1638,13 @@ export default function DirectSetup() {
                   {pipelines.map(p => (
                     <li key={p.id} className="flex items-center gap-2 text-sm">
                       <span className="font-medium">{p.name}</span>
-                      <span className={`text-[11px] rounded-full px-2 py-0.5 ${p.status === "active"
-                        ? "bg-emerald-100 text-emerald-700" : "bg-surface-2 text-ink-muted"}`}>
-                        {p.status === "active" ? "Active" : p.status === "superseded" ? "Superseded" : "Draft"}</span>
+                      <span className={`text-[11px] rounded-full px-2 py-0.5 ${
+                        p.status === "active" ? "bg-emerald-100 text-emerald-700"
+                        : p.status === "pending_approval" ? "bg-sky-50 text-sky-700"
+                        : "bg-surface-2 text-ink-muted"}`}>
+                        {p.status === "active" ? "Active"
+                         : p.status === "pending_approval" ? "Awaiting approval"
+                         : p.status === "superseded" ? "Superseded" : "Draft"}</span>
                       {/* Which of the two kinds this is. Without it a programme-wide
                           setup sitting beside a broker's own looks identical, and
                           activating the wrong one is silent. */}
@@ -1630,10 +1655,11 @@ export default function DirectSetup() {
                       <div className="ml-auto flex gap-1.5">
                         <Button variant="ghost" className="!py-1"
                           onClick={() => navigate(editHrefFor(p.id))}>Open / Edit</Button>
-                        {p.status !== "active" && (
+                        {p.status !== "active" && p.status !== "pending_approval" && (
                           <Button variant="ghost" className="!py-1" disabled={busy || !p.ready}
                             title={p.ready ? undefined : p.ready_reason}
-                            onClick={() => activateExisting(p.id)}>Activate</Button>
+                            onClick={() => activateExisting(p.id)}>
+                            {carrierAdmin ? "Activate" : "Send for approval"}</Button>
                         )}
                       </div>
                     </li>
@@ -2226,11 +2252,15 @@ export default function DirectSetup() {
               border-t border-border shadow-[0_-1px_8px_rgba(17,24,39,0.06)]"
               style={{ left: "var(--sidebar-w, 256px)" }}>
               <div className="flex flex-wrap items-center gap-2">
-                {currentPipeline.status !== "active" && (
+                {/* A setup already WAITING is not finished again from here —
+                    deciding on it is the carrier admin's, on the setup's own
+                    page where the whole chain is laid out to be read. */}
+                {currentPipeline.status !== "active"
+                  && currentPipeline.status !== "pending_approval" && (
                   <Button onClick={() => activateExisting(currentPipeline.id)}
                     disabled={busy || !currentPipeline.ready}
                     title={currentPipeline.ready ? undefined : currentPipeline.ready_reason}>
-                    <CheckCircle2 size={15} /> Activate Setup
+                    <CheckCircle2 size={15} /> {finishLabel}
                   </Button>
                 )}
                 <Button variant="secondary" onClick={saveDraft} disabled={busy}>

@@ -14,7 +14,8 @@
 // ---------------------------------------------------------------------------
 
 import { matchPath } from "react-router-dom";
-import { userRole, type Role } from "./auth";
+import { getTenantBrand, getUser, userRole, type Role } from "./auth";
+import { seatOf, type CarrierSeat } from "./hooks/useCarrierSeat";
 
 // The CARRIER side is a superset chain: kavachio_admin ⊇ tenant_admin ⊇
 // tenant_user. The two BROKER seats are not part of that chain — they belong to
@@ -39,7 +40,17 @@ const RANK: Record<Role, number> = {
 // operator rank the same (neither outranks the other), so a screen that belongs
 // to the admin alone has to name it. Same field, same meaning, as Layout's
 // sidebar groups.
-export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] = [
+// `carrierAdminOnly` is the one rule neither field can express. Both carrier
+// seats hold the `carrier_admin` role, so `requires`/`only` admit the carrier
+// USER as well — right for almost every path, wrong for the few the carrier
+// ADMIN alone may open. It narrows the CARRIER side only: a rule that also
+// lists broker seats keeps letting them through, because the seat it is about
+// does not exist on their side of the fence. Same flag, same meaning, as
+// Layout's sidebar items. The server enforces it too
+// (carrier_scope.require_carrier_admin) — this only stops the screen mounting.
+export const ROUTE_ACCESS: {
+  pattern: string; requires: Role; only?: Role[]; carrierAdminOnly?: boolean;
+}[] = [
   // --- Platform admin (Kavachio staff, cross-tenant) ---------------------
   { pattern: "/admin/dashboard", requires: "kavachio_admin" },
   { pattern: "/admin/mapping-tasks", requires: "kavachio_admin" },
@@ -141,8 +152,11 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // Signing is between the two organisations, so both sides reach it. The
   // screen writes nothing, but it names the people who would sign — which is
   // the same reason the platform seat is left off it.
+  // On the CARRIER side it is the admin's alone: a carrier user raises a
+  // contract, the carrier admin signs it. The broker seats are unaffected —
+  // `carrierAdminOnly` narrows only the carrier.
   { pattern: "/contracts/:contractId/signature", requires: "operator",
-    only: ["broker_admin", "operator", "carrier_admin"] },
+    only: ["broker_admin", "operator", "carrier_admin"], carrierAdminOnly: true },
   // Party — the carrier's brokers, and where one is invited. `only`, because
   // the platform seat outranks carrier_admin and would otherwise reach the
   // Invite Broker button by typing the path. Inviting a broker is an act in a
@@ -158,7 +172,10 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   // No longer a sidebar entry — reached from Contracts and from a contract's
   // own record — so this rule is what guards it now that nothing hides the
   // link from the wrong role.
-  { pattern: "/contracts/signatures", requires: "carrier_admin", only: ["carrier_admin"] },
+  // …and the carrier ADMIN's alone, for the same reason: this is the screen
+  // that names who signs and sends the envelope.
+  { pattern: "/contracts/signatures", requires: "carrier_admin",
+    only: ["carrier_admin"], carrierAdminOnly: true },
   { pattern: "/brokers/:brokerId", requires: "carrier_admin", only: ["carrier_admin"] },
   // What a broker has sent this carrier, from the Home card. Same gate as the
   // broker record it sits beside; both carrier seats rank as carrier_admin.
@@ -204,9 +221,23 @@ export const ROUTE_ACCESS: { pattern: string; requires: Role; only?: Role[] }[] 
   { pattern: "/direct/setups/:id/edit", requires: "carrier_admin" },
   // Rule library — tenant_admin sees their own tenant's rules, kavachio_admin
   // the platform-wide ones. The backend scopes the rows by role.
-  { pattern: "/rule-library", requires: "carrier_admin" },
-  { pattern: "/rule-library/new", requires: "carrier_admin" },
-  { pattern: "/rule-library/:id/edit", requires: "carrier_admin" },
+  // The carrier ADMIN's alone. A rule in the library is applied to every
+  // bordereau this carrier validates, on every programme and every broker —
+  // it is not work on one file, it is a standing instruction about the whole
+  // book, so it belongs to the one person accountable for it. A carrier user
+  // still sees every rule that FIRED, named, on the exception screens; what
+  // they no longer do is write one.
+  //
+  // `carrierAdminOnly` rather than `only`, because the two carrier seats hold
+  // the same DB role and nothing in the token tells them apart — the
+  // organisation's owner pointer does (see hooks/useCarrierSeat). It narrows
+  // the carrier side only, so Kavachio staff keep the platform-wide library.
+  // The server enforces it independently on all six endpoints
+  // (app_routes._assert_is_carrier_admin).
+  { pattern: "/rule-library", requires: "carrier_admin", carrierAdminOnly: true },
+  { pattern: "/rule-library/new", requires: "carrier_admin", carrierAdminOnly: true },
+  { pattern: "/rule-library/:id/edit", requires: "carrier_admin",
+    carrierAdminOnly: true },
 ];
 
 /** The rule covering a path, or null when any signed-in user may open it. */
@@ -224,11 +255,25 @@ export function hasRole(required: Role, role: Role | null = userRole()): boolean
   return role !== null && RANK[role] >= RANK[required];
 }
 
-/** True when the current user may open `pathname`. */
-export function canAccessPath(pathname: string, role: Role | null = userRole()): boolean {
+/** True when the current user may open `pathname`.
+ *
+ *  `seat` narrows the carrier side (see `carrierAdminOnly`). It is read from
+ *  the persisted auth slice, so a returning session knows it on the first
+ *  paint. A fresh login does not — the organisation has not been fetched yet —
+ *  and that case deliberately FAILS OPEN: bouncing the carrier admin off their
+ *  own signature screen for the half-second before the fetch lands is worse
+ *  than briefly showing a carrier user a screen whose every request the server
+ *  refuses. This was never the security boundary; the API is.
+ */
+export function canAccessPath(
+  pathname: string,
+  role: Role | null = userRole(),
+  seat: CarrierSeat = seatOf(getUser(), getTenantBrand()),
+): boolean {
   if (role === null) return false;               // signed out — RequireAuth handles it
   const rule = ruleFor(pathname);
   if (rule === null) return true;                // unlisted → any signed-in user
+  if (rule.carrierAdminOnly && role === "carrier_admin" && seat === "user") return false;
   if (rule.only) return rule.only.includes(role);
   return hasRole(rule.requires, role);
 }

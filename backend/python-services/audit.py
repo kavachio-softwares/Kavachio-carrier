@@ -217,7 +217,13 @@ _FRIENDLY = {
     ("DELETE", "/parties/{id}/contacts/{id}"):       "party_contact_removed",
     ("POST",   "/programs/{id}/contracts"):          "contract_uploaded",
     ("POST",   "/programs/{id}/setup"):              "bordereau_setup_completed",
+    # One endpoint, two outcomes: the carrier ADMIN activates, a carrier USER
+    # sends it up for approval. The middleware keys on the path alone and
+    # cannot tell them apart, so the route logs itself (_SELF_LOGGED) and
+    # these names are kept only to resolve rows written before it did.
     ("POST",   "/pipelines/{id}/activate"):          "bordereau_setup_activated",
+    ("POST",   "/pipelines/{id}/approve"):           "bordereau_setup_approved",
+    ("POST",   "/pipelines/{id}/reject"):            "bordereau_setup_rejected",
     ("PUT",    "/mappers/{id}/sheet-bindings"):      "sheet_bindings_saved",
     ("PUT",    "/users/{id}"):                       "user_updated",
     ("DELETE", "/users/{id}"):                       "user_deleted",
@@ -244,7 +250,13 @@ _FRIENDLY = {
     ("PATCH",  "/contracts/{id}"):                   "contract_edited",
     ("POST",   "/contracts/{id}/submit"):            "contract_submitted",
     ("POST",   "/contracts/{id}/send-for-review"):   "contract_sent_for_review",
+    # The carrier admin's answer when a colleague's contract is not right.
+    ("POST",   "/contracts/{id}/send-back"):        "contract_sent_back",
     ("POST",   "/contracts/{id}/accept-terms"):      "contract_terms_accepted",
+    # The uploaded road: a contract that was executed before it got here is
+    # accepted rather than signed. See contract_routes._accept_uploaded.
+    ("POST",   "/contracts/{id}/submit-for-approval"): "contract_awaiting_review",
+    ("POST",   "/contracts/{id}/accept"):            "contract_accepted",
     ("POST",   "/contracts/{id}/request-changes"):   "contract_changes_requested",
     ("POST",   "/contracts/{id}/approve"):           "contract_approved",
     ("POST",   "/contracts/{id}/reject"):            "contract_rejected",
@@ -395,6 +407,21 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/export/template/\d+/activate$")),
     ("POST",   re.compile(r"^/export/template/\d+/refresh$")),
     ("PUT",    re.compile(r"^/mappers/\d+/sheet-bindings$")),
+    # Bordereau Setup approval. All three log themselves because the event
+    # depends on WHO asked and on what the setup was in, neither of which a
+    # path can say: the same POST /pipelines/{id}/activate is an activation
+    # from the carrier admin and a submission from a carrier user, and
+    # recording both as "activated" would put a decision in the trail that
+    # nobody made.
+    ("POST",   re.compile(r"^/pipelines/\d+/activate$")),
+    ("POST",   re.compile(r"^/pipelines/\d+/approve$")),
+    ("POST",   re.compile(r"^/pipelines/\d+/reject$")),
+    # Writes its own row, with the contract's name, programme and broker in
+    # details — the notification bell cannot render or group a row that only
+    # carries the path.
+    ("POST",   re.compile(r"^/contracts/\d+/send-back$")),
+    ("POST",   re.compile(r"^/contracts/\d+/accept$")),
+    ("POST",   re.compile(r"^/contracts/\d+/submit-for-approval$")),
 ]
 
 def is_self_logged(method: str, path: str) -> bool:

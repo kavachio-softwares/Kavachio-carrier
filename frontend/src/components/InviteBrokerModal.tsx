@@ -132,7 +132,8 @@ export function InviteBrokerModal({ open, onClose, onInvited }: {
         <p className="rounded border border-border bg-surface-2 px-3 py-2 text-xs leading-relaxed text-ink-muted">
           A broker new to the platform can be put on this programme straight
           away. One who already works with another carrier keeps their login
-          and joins once they accept your invitation.
+          and their own organisation name, and joins once they accept your
+          invitation.
         </p>
       </div>
     </Modal>

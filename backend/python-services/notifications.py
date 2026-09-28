@@ -43,7 +43,7 @@ from typing import Any, Optional, Sequence
 from sqlalchemy import func
 
 from auth_deps import db_role_values, normalize_role
-from db import AppUser, PlatformNotification, SessionLocal
+from db import AppUser, PlatformNotification, SessionLocal, Tenant
 
 log = logging.getLogger("bdx.notify")
 
@@ -167,6 +167,12 @@ PLATFORM_ADMIN_FOOTER = (
 TENANT_ADMIN_FOOTER = (
     "You're receiving this because you're an administrator on this Kavachio "
     "account. Submission deadlines are set per program under My Calendar.")
+CARRIER_ADMIN_FOOTER = (
+    "You're receiving this because you're the carrier admin for this Kavachio "
+    "account — bordereau setups your colleagues build wait for your approval.")
+CARRIER_USER_FOOTER = (
+    "You're receiving this because you sent this work to your carrier admin "
+    "for approval.")
 
 
 def notification_email_html(title: str, body: Optional[str],
@@ -321,9 +327,16 @@ def _app_link(path: Optional[str]) -> Optional[str]:
 def _send_emails(recipients: list[dict], title: str, body: Optional[str],
                  facts: Sequence[tuple[str, Any]], link: Optional[str],
                  link_label: str, subject: str,
-                 action: Optional[str] = None) -> None:
+                 action: Optional[str] = None,
+                 footer: str = PLATFORM_ADMIN_FOOTER) -> None:
     """Mail every recipient, one message each. Per-recipient failures are logged
-    and skipped so one bad address can't stop the rest."""
+    and skipped so one bad address can't stop the rest.
+
+    `footer` is the "why am I getting this?" line and belongs to the AUDIENCE,
+    not the event — see the constants above. It defaults to the platform
+    wording because that is what every caller predating carrier notifications
+    meant.
+    """
     try:
         from email_utils import send_email
     except Exception as e:  # noqa: BLE001
@@ -336,11 +349,117 @@ def _send_emails(recipients: list[dict], title: str, body: Optional[str],
                 person["email"], subject,
                 notification_email_html(title, body, facts, link, link_label,
                                         greeting_name=person.get("name"),
-                                        action=action),
+                                        action=action, footer=footer),
                 text=text, account=NOTIFY_MAIL_ACCOUNT,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("notify: email to %s failed: %s", person["email"], e)
+
+
+def carrier_admin_recipients(tenant_id: Optional[int]) -> list[dict]:
+    """The ONE carrier admin of a carrier — the organisation's owner.
+
+    Not a role query, because it cannot be: everyone at a carrier holds the
+    `carrier_admin` role, and the seat is the organisation's owner pointer
+    (carrier_scope.carrier_seat, migration 18). Mailing the role would mail
+    every colleague the thing that is waiting on one person.
+
+    WHEN NO OWNER IS RECORDED — a legacy organisation migration 18 could not
+    name one for — this falls back to EVERY active person at the carrier, and
+    that is deliberate rather than lazy. carrier_scope.carrier_seat already
+    fails open for exactly the same tenants: with no owner it answers "both",
+    so every seat there is treated as the admin and every one of them is shown
+    the approve and sign buttons. Returning nobody here meant the permission
+    check said "you may all decide this" while the mail said "there is nobody
+    to tell", and the work sat unseen until somebody happened to look.
+
+    So the two now agree: wherever the app lets anyone decide, it tells
+    everyone it is waiting on. Nothing is sent to a carrier that HAS an owner
+    except to that owner.
+
+    Never raises, like its siblings above.
+    """
+    if tenant_id is None:
+        return []
+    people: list[dict] = []
+    try:
+        with SessionLocal() as s:
+            t = s.get(Tenant, tenant_id)
+            owner_id = getattr(t, "owner_user_id", None) if t else None
+            if owner_id is None:
+                rows = (s.query(AppUser.email, AppUser.full_name)
+                        .filter(AppUser.tenant_id == tenant_id,
+                                func.lower(func.coalesce(AppUser.status,
+                                                         "active")) == "active",
+                                AppUser.email.isnot(None))
+                        .all())
+                return [{"email": e, "name": n or e} for e, n in rows if e]
+            u = (s.query(AppUser.email, AppUser.full_name)
+                 .filter(AppUser.id == owner_id,
+                         func.lower(func.coalesce(AppUser.status, "active"))
+                         == "active").first())
+        if u:
+            people.append({"email": (u[0] or "").strip(),
+                           "name": (u[1] or "").strip() or None})
+    except Exception as e:  # noqa: BLE001
+        log.warning("notify: could not resolve carrier %s admin from the DB: %s",
+                    tenant_id, e)
+    return _dedupe_people(people)
+
+
+def user_recipients(user_id: Optional[int]) -> list[dict]:
+    """One named person, when the thing being told is theirs alone — "your
+    setup was approved". Same active-status rule as every resolver here."""
+    if user_id is None:
+        return []
+    try:
+        with SessionLocal() as s:
+            u = (s.query(AppUser.email, AppUser.full_name)
+                 .filter(AppUser.id == user_id,
+                         func.lower(func.coalesce(AppUser.status, "active"))
+                         == "active").first())
+    except Exception as e:  # noqa: BLE001
+        log.warning("notify: could not resolve user %s: %s", user_id, e)
+        return []
+    if not u:
+        return []
+    return _dedupe_people([{"email": (u[0] or "").strip(),
+                            "name": (u[1] or "").strip() or None}])
+
+
+def notify_people(recipients: list[dict], title: str, *,
+                  body: Optional[str] = None,
+                  facts: Optional[Sequence[tuple[str, Any]]] = None,
+                  link_path: Optional[str] = None,
+                  link_label: str = "Open Kavachio",
+                  subject: Optional[str] = None,
+                  action: Optional[str] = None,
+                  footer: str = PLATFORM_ADMIN_FOOTER,
+                  send_email_async: bool = True) -> None:
+    """Email an already-resolved set of people. Records nothing.
+
+    The deliberate difference from notify_platform_admins: that one writes a
+    PlatformNotification, which is the CROSS-TENANT feed behind Kavachio's own
+    bell and is read by platform admins only. A carrier admin is not one, so a
+    row there would be both invisible to them and visible to the wrong people.
+    Their in-app equivalent is the approvals queue, which reads the setups
+    themselves — so there is nothing to record here and this only mails.
+
+    NEVER RAISES, for the same reason as its siblings: it is called from the
+    tail of a business action that must succeed even when mail does not.
+    """
+    if not recipients:
+        return
+    try:
+        args = (recipients, title, body, list(facts or []), _app_link(link_path),
+                link_label, subject or title, action, footer)
+        if send_email_async:
+            threading.Thread(target=_send_emails, args=args, daemon=True,
+                             name="notify-people").start()
+        else:
+            _send_emails(*args)
+    except Exception as e:  # noqa: BLE001
+        log.exception("notify: could not dispatch '%s' emails: %s", title, e)
 
 
 def notify_platform_admins(

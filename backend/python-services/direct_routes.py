@@ -43,8 +43,8 @@ from app_routes import _iso_utc, _parse_client_dt
 from db import (
     ActivityEvent, AdminMappingTask, CanonicalSession, Contract, DirectFormat,
     ExportTemplate, LandingRecord, Mapper, MissingBdxColumn, OutputExport, Party,
-    Pipeline, PipelineContract, Program, ReferenceDocument, SessionLocal, Tenant,
-    exception_severity_counts,
+    Pipeline, PipelineContract, Program, ProgramBroker, ReferenceDocument,
+    SessionLocal, SetupApproval, Tenant, exception_severity_counts,
 )
 from exporter import parse_template, spec_sheet_names, is_reference_sheet
 from streaming import heartbeat_stream_response
@@ -1288,9 +1288,81 @@ def _pipeline_ready(s, p: Pipeline) -> tuple[bool, str]:
         return False, "Add an input template before activating."
     if not p.output_template_id:
         return False, "Add an output template before activating."
-    if not _pipeline_contracts(s, p.id):
+    pcs = _pipeline_contracts(s, p.id)
+    if not pcs:
         return False, "Add at least one contract before activating."
+    unsettled = _contracts_not_yet_settled(s, pcs, p.tenant_id)
+    if unsettled:
+        return False, (
+            "This setup is built on a contract that is not settled yet: "
+            + ", ".join(unsettled)
+            + ". A bordereau is produced UNDER a contract, so the contract has "
+              "to be finished first. One written here is finished when the "
+              "broker has agreed the terms and your carrier admin has signed "
+              "it; one that was uploaded, when your carrier admin has accepted "
+              "it. Open the contract to see which of the two it is waiting "
+              "for, then come back here.")
     return True, ""
+
+
+# The states a contract passes through before anyone at the carrier has put
+# their name to it. A setup built on one of these would be measuring files
+# against terms that can still move — and against a contract the broker may yet
+# push back on.
+#
+# `agreed` is NOT here, and that is the whole of what the carrier admin's
+# signature releases. The terms stop moving when the broker agrees them, but
+# the contract is not the carrier's word until the carrier admin signs it — and
+# once they have, the only thing still outstanding is the BROKER's signature,
+# which is theirs to give and no reason to hold up work on this side. So an
+# `agreed` contract blocks while the carrier has not signed and stops blocking
+# the moment it has, which is exactly where the flow says the setup may start.
+_CONTRACT_UNSETTLED = ("draft", "pending", "in_review", "changes_requested")
+
+
+def _contracts_not_yet_settled(s, pcs, tenant_id=None) -> list:
+    """Which of this setup's contracts have not got past the carrier admin.
+
+    READ OFF THE STORED COLUMN, not _effective_lifecycle, and deliberately: a
+    contract that predates the lifecycle column has NULL there, and
+    _effective_lifecycle reads NULL as `draft` — which would have made this gate
+    refuse every setup built before any of this existed. A contract only blocks
+    a setup if it is explicitly sitting in one of the pre-signature states.
+    """
+    ids = [pc.contract_id for pc in pcs if pc.contract_id]
+    if not ids:
+        return []
+    # Tenant-scoped, although every id here came off this pipeline's own rows:
+    # the return value is put in front of a user, and a name is the one part of
+    # a contract that is worth nothing to the reader and everything to whoever
+    # should not have seen it.
+    q = s.query(Contract).filter(Contract.id.in_(ids))
+    if tenant_id is not None:
+        q = q.filter(Contract.tenant_id == tenant_id)
+    out = []
+    for c in q.all():
+        state = (c.lifecycle or "").strip().lower()
+        if state in _CONTRACT_UNSETTLED:
+            out.append(c.name or c.filename or f"contract {c.id}")
+        elif state == "agreed" and not _carrier_has_signed(s, c):
+            out.append(c.name or c.filename or f"contract {c.id}")
+    return out
+
+
+def _carrier_has_signed(s, c) -> bool:
+    """Has the carrier admin put the carrier's name to this contract yet?
+
+    Asked through contract_routes so there is one answer to it — the record
+    screen, the dashboard tile and this gate all read the same signature rows,
+    and a second opinion here is how a setup comes to be refused on a contract
+    the screen says is signed. Fails OPEN: a setup must not become
+    un-activatable because a signature could not be read.
+    """
+    try:
+        import contract_routes as _cr
+        return "carrier" not in _cr._unsigned_sides(_cr._signatures(s, c.id))
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _contract_reference_documents(c) -> dict:
@@ -1430,6 +1502,14 @@ def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
         "reference_documents": _ref_docs,
         "rule_scope": _rule_scope_mod.pipeline_scope(s, p.id),
         "ready": ready, "ready_reason": reason,
+        # Who sent this up for approval and when. Both NULL on a setup that
+        # never went up — one a carrier ADMIN built, or one from before
+        # approvals existed — which is what the queue sorts and captions by.
+        "submitted_by_user_id": getattr(p, "submitted_by_user_id", None),
+        "submitted_by": _user_names(
+            s, [getattr(p, "submitted_by_user_id", None)]).get(
+                getattr(p, "submitted_by_user_id", None)),
+        "submitted_at": _iso_utc(getattr(p, "submitted_at", None)),
         "created_at": _iso_utc(p.created_at),
         "modified_at": _iso_utc(p.modified_at),
     }
@@ -3113,6 +3193,24 @@ def pipeline_update(pipeline_id: int, body: PipelineUpdate,
             p.output_template_id = body.output_template_id
         if body.contracts is not None:
             _replace_pipeline_contracts(s, p, body.contracts)
+            # THE GATE HAS TO HOLD AFTERWARDS TOO. Activation checks that every
+            # contract under a setup is settled, but this endpoint can swap the
+            # contracts on a setup that is already live — so a setup could be
+            # activated on a signed contract and then quietly re-pointed at one
+            # nobody has agreed, and the broker would go on producing bordereaux
+            # under it. Only checked for a setup that has already been sent up
+            # or gone live; a draft is still being built and is allowed to hold
+            # anything while it is.
+            if (p.status or "").strip().lower() in ("active", PENDING_APPROVAL):
+                s.flush()
+                unsettled = _contracts_not_yet_settled(
+                    s, _pipeline_contracts(s, p.id), p.tenant_id)
+                if unsettled:
+                    raise HTTPException(400, (
+                        "This setup is live, so every contract under it has to "
+                        "be settled: " + ", ".join(unsettled) + " has not been "
+                        "signed yet. Settle the contract first, or take this "
+                        "setup back to draft."))
         if body.rule_scope is not None:
             _store_rule_scope(s, p.id, body.rule_scope)
         p.modified_at = datetime.utcnow()
@@ -3121,39 +3219,383 @@ def pipeline_update(pipeline_id: int, body: PipelineUpdate,
         return _pipeline_to_dict(s, p)
 
 
+# ---- Bordereau Setup approval ----------------------------------------------
+#
+# A setup a carrier USER builds waits for the carrier admin, who sees the whole
+# chain — programme, broker, contract, BDX template — and decides once. A setup
+# the carrier ADMIN builds goes live the moment they finish it: their own act
+# IS the approval, and there is nobody left to ask.
+#
+# Nothing a pending setup touches reaches the broker. That does not need
+# enforcing in each reader because nearly every one of them asks for
+# `status == "active"` — in particular setup_scope._live, the single gate
+# behind Process Bordereau, the broker's readiness check, the template lookup
+# and the template download. See migration 27.
+
+PENDING_APPROVAL = "pending_approval"
+
+
+def _setup_facts(result: dict) -> list:
+    """The chain a setup IS, for an approval email and an audit row.
+
+    Levels the setup does not have are left out rather than shown empty: a
+    pre-broker setup has no broker, and "Broker: —" reads as something missing
+    rather than as a level that does not apply to this setup."""
+    contracts = ", ".join(
+        c.get("filename") or f"Contract {c.get('contract_id')}"
+        for c in (result.get("contracts") or [])) or None
+    pairs = [("Programme", result.get("program_name")),
+             ("Broker", result.get("broker_name")),
+             ("Carrier", result.get("carrier_name")),
+             ("Output BDX template", result.get("output_template_name")),
+             ("Contracts", contracts)]
+    return [(k, v) for k, v in pairs if v]
+
+
+def _log_setup_decision(tenant_id, principal, action: str, result: dict,
+                        note: Optional[str] = None) -> None:
+    """One audit row for a setup decision.
+
+    These endpoints are in audit._SELF_LOGGED, so the middleware writes nothing
+    for them and this is the only record. It has to be, because the event
+    depends on who asked: the same POST /pipelines/{id}/activate is an
+    activation from the carrier admin and a submission from a carrier user, and
+    a path-keyed name would record a decision nobody made.
+
+    Best-effort, like every other audit call here — a setup must not fail to be
+    approved because the trail could not be written."""
+    try:
+        from audit import log_activity
+        details = {"pipeline_id": result.get("id"),
+                   "name": result.get("name"),
+                   "program_id": result.get("program_id"),
+                   "program_name": result.get("program_name"),
+                   "broker_party_id": result.get("broker_party_id"),
+                   "broker_name": result.get("broker_name"),
+                   "status": result.get("status")}
+        if note:
+            details["note"] = note
+        log_activity(tenant_id, _principal_email(principal), action,
+                     target=f"pipeline:{result.get('id')}", details=details,
+                     principal=principal)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _activate_links_for(s, p: Pipeline) -> int:
+    """Put the programme→broker link(s) this setup depends on live.
+
+    A carrier user's link is created pending (hierarchy_routes), so the broker
+    cannot see the programme, its contracts or anything else on it until the
+    setup built on top of it is approved. Approving the setup is what releases
+    it — one decision covering the whole chain, which is what was asked for.
+
+    A setup with no broker predates the broker level and covers every broker on
+    its programme, so it releases every link waiting on that programme.
+    Returns how many were flipped, for the audit row."""
+    if not p.program_id:
+        return 0
+    q = s.query(ProgramBroker).filter(
+        ProgramBroker.program_id == p.program_id,
+        ProgramBroker.status == PENDING_APPROVAL)
+    if p.broker_party_id is not None:
+        q = q.filter(ProgramBroker.broker_party_id == p.broker_party_id)
+    rows = q.all()
+    for link in rows:
+        link.status = "active"
+    return len(rows)
+
+
+def _go_live(s, p: Pipeline, principal: Principal) -> tuple[dict, bool, int]:
+    """Make a setup live and release its programme link(s). Shared by the
+    carrier admin's own activation and their approval of somebody else's, which
+    differ in who asked and in nothing else.
+
+    Returns (serialised pipeline, whether this was a real transition, links
+    released). Commits."""
+    # Re-clicking Activate on the setup that is ALREADY live is a no-op, so it
+    # must not raise a second notification — only a real transition into active
+    # is "a setup was activated".
+    became_active = (p.status or "").strip().lower() != "active"
+    _activate_pipeline(s, p)
+    links = _activate_links_for(s, p)
+    s.commit()
+    s.refresh(p)
+    return _pipeline_to_dict(s, p), became_active, links
+
+
+def _after_go_live(result: dict, tenant_id, format_id, principal) -> None:
+    """The two things that follow a setup going live, whoever released it.
+
+    Both swallow their own errors and run after the commit, so neither can
+    affect the activation that triggered them."""
+    actor = _principal_email(principal)
+    # Raise the mapping task FIRST: the notification is about that task, so it
+    # has to exist before we look for it.
+    _queue_datamodel_mapping(tenant_id, format_id, actor)
+    _notify_setup_activated(result, actor, _principal_name(principal))
+
+
 @router.post("/pipelines/{pipeline_id}/activate")
 def pipeline_activate(pipeline_id: int,
                       principal: Principal = Depends(current_principal)):
-    """Activate a pipeline (requires input template + output template + >=1
-    contract). Supersedes the live pipelines it replaces — same carrier, program
-    and broker, covering any of the same contracts (see _activate_pipeline).
+    """Finish a setup (requires input template + output template + >=1
+    contract).
 
-    Also raises the admin data-model mapping task for the input format, when it
-    doesn't have one yet — see `_queue_datamodel_mapping`, and notifies Kavachio
-    platform admins — see `_notify_setup_activated`. Both run after the commit
-    below and swallow their own errors, so neither can affect activation."""
+    WHAT THAT MEANS DEPENDS ON WHO ASKS, and the server is what knows:
+
+      carrier admin   it goes live, superseding the setups it replaces (same
+                      carrier, program and broker, covering any of the same
+                      contracts — see _activate_pipeline), exactly as it always
+                      did. Their own act is the approval.
+      carrier user    it goes to `pending_approval` and waits for the carrier
+                      admin. Nothing about it reaches the broker until then.
+
+    ONE endpoint and ONE button, deliberately. The intent being expressed is
+    the same either way — "this setup is finished" — and which of the two it
+    turns into is not something the screen should have to work out and could
+    get wrong. It also means the existing button kept working, unchanged, for
+    everyone who had it before.
+
+    Re-clicking on a setup that is already live, or already waiting, is a
+    no-op — as it has always been.
+    """
+    from carrier_scope import is_carrier_admin_seat
     with SessionLocal() as s:
         p = s.get(Pipeline, pipeline_id)
         if not p:
             raise HTTPException(404, "pipeline not found")
         assert_tenant_owns(principal, p.tenant_id)
-        # Re-clicking Activate on the setup that is ALREADY live is a no-op, so
-        # it must not raise a second notification — only a real draft/superseded
-        # → active transition is "a setup was activated".
-        became_active = (p.status or "").strip().lower() != "active"
-        _activate_pipeline(s, p)
+        status = (p.status or "").strip().lower()
+
+        admin = is_carrier_admin_seat(s, principal)
+
+        # ── the carrier admin: live, as before ──
+        if admin:
+            result, became_active, _links = _go_live(s, p, principal)
+            tenant_id, format_id = p.tenant_id, p.input_format_id
+
+        # ── a carrier user: up for approval ──
+        else:
+            if status in ("active", PENDING_APPROVAL):
+                return _pipeline_to_dict(s, p)
+            ready, reason = _pipeline_ready(s, p)
+            if not ready:
+                raise HTTPException(400, reason)
+            p.status = PENDING_APPROVAL
+            p.submitted_by_user_id = principal.user_id
+            p.submitted_at = datetime.utcnow()
+            s.add(SetupApproval(tenant_id=p.tenant_id, pipeline_id=p.id,
+                                action="submitted",
+                                acted_by_user_id=principal.user_id))
+            s.commit()
+            s.refresh(p)
+            result = _pipeline_to_dict(s, p)
+            tenant_id, format_id = p.tenant_id, None
+
+    # Everything below runs with the session CLOSED, as it always has: these
+    # open their own, they swallow their own errors, and none of them may
+    # affect the decision that has already been committed above.
+    if admin:
+        if became_active:
+            _log_setup_decision(tenant_id, principal,
+                                "bordereau_setup_activated", result)
+        _after_go_live(result, tenant_id, format_id, principal)
+    else:
+        _log_setup_decision(tenant_id, principal,
+                            "bordereau_setup_submitted", result)
+        _notify_setup_submitted(tenant_id, result, principal)
+    return result
+
+
+@router.post("/pipelines/{pipeline_id}/approve")
+def pipeline_approve(pipeline_id: int,
+                     principal: Principal = Depends(current_principal)):
+    """Approve a setup a colleague built, and put it live.
+
+    The carrier admin's alone. Guarded here rather than by a dependency because
+    the 404 below has to come first: which setups exist at this carrier is not
+    something a 403 should confirm to somebody who cannot see them anyway.
+    """
+    from carrier_scope import is_carrier_admin_seat
+    with SessionLocal() as s:
+        p = s.get(Pipeline, pipeline_id)
+        if not p:
+            raise HTTPException(404, "pipeline not found")
+        assert_tenant_owns(principal, p.tenant_id)
+        if not is_carrier_admin_seat(s, principal):
+            raise HTTPException(
+                403, "only your organisation's carrier admin can approve a "
+                     "bordereau setup.")
+        if (p.status or "").strip().lower() != PENDING_APPROVAL:
+            raise HTTPException(
+                409, "this setup is not waiting for approval — it is "
+                     f"{p.status or 'draft'}.")
+        submitted_by = p.submitted_by_user_id
+        result, _became_active, links = _go_live(s, p, principal)
+        s.add(SetupApproval(tenant_id=p.tenant_id, pipeline_id=p.id,
+                            action="approved",
+                            acted_by_user_id=principal.user_id))
+        s.commit()
+        tenant_id, format_id = p.tenant_id, p.input_format_id
+
+    # How many programme links this released — the broker gained a programme,
+    # not just a setup, so the screen can say so.
+    result["links_released"] = links
+    _log_setup_decision(tenant_id, principal, "bordereau_setup_approved", result)
+    _after_go_live(result, tenant_id, format_id, principal)
+    _notify_setup_decided(result, submitted_by, principal, approved=True)
+    return result
+
+
+class SetupRejectBody(BaseModel):
+    note: Optional[str] = None
+
+
+@router.post("/pipelines/{pipeline_id}/reject")
+def pipeline_reject(pipeline_id: int, body: SetupRejectBody = SetupRejectBody(),
+                    principal: Principal = Depends(current_principal)):
+    """Send a setup back to the colleague who built it.
+
+    A reason is REQUIRED. A setup returned with nothing said about it is a
+    setup its author cannot act on, and they would have to come and ask — which
+    is the conversation this screen exists to save.
+
+    It goes back to `draft`, which is where it came from: the work is all still
+    there, and re-submitting it is the same button they pressed the first time.
+    """
+    note = (body.note or "").strip()
+    if not note:
+        raise HTTPException(400, {
+            "message": "Say why you are sending this back — whoever built it "
+                       "has to know what to change.",
+            "errors": {"note": "required"}})
+    from carrier_scope import is_carrier_admin_seat
+    with SessionLocal() as s:
+        p = s.get(Pipeline, pipeline_id)
+        if not p:
+            raise HTTPException(404, "pipeline not found")
+        assert_tenant_owns(principal, p.tenant_id)
+        if not is_carrier_admin_seat(s, principal):
+            raise HTTPException(
+                403, "only your organisation's carrier admin can decide on a "
+                     "bordereau setup.")
+        if (p.status or "").strip().lower() != PENDING_APPROVAL:
+            raise HTTPException(
+                409, "this setup is not waiting for approval — it is "
+                     f"{p.status or 'draft'}.")
+        submitted_by = p.submitted_by_user_id
+        p.status = "draft"
+        s.add(SetupApproval(tenant_id=p.tenant_id, pipeline_id=p.id,
+                            action="rejected", note=note,
+                            acted_by_user_id=principal.user_id))
         s.commit()
         s.refresh(p)
         result = _pipeline_to_dict(s, p)
-        tenant_id, format_id = p.tenant_id, p.input_format_id
+        tenant_id = p.tenant_id
 
-    actor = _principal_email(principal)
-    # Raise the mapping task FIRST: the notification is about that task, so it
-    # has to exist before we look for it.
-    _queue_datamodel_mapping(tenant_id, format_id, actor)
-    if became_active:
-        _notify_setup_activated(result, actor, _principal_name(principal))
+    _log_setup_decision(tenant_id, principal, "bordereau_setup_rejected",
+                        result, note=note)
+    _notify_setup_decided(result, submitted_by, principal, approved=False,
+                          note=note)
     return result
+
+
+@router.get("/pipelines/{pipeline_id}/approvals")
+def pipeline_approvals(pipeline_id: int,
+                       principal: Principal = Depends(current_principal)):
+    """Every decision ever made on this setup, newest first.
+
+    The pipeline row says what it is NOW; this says how it got there, which is
+    what "why was this sent back in June?" needs. Readable by both carrier
+    seats: the person who built it has as much reason to see the history as the
+    person who decided on it."""
+    with SessionLocal() as s:
+        p = _pipeline_for_principal(s, pipeline_id, principal)
+        rows = (s.query(SetupApproval)
+                .filter(SetupApproval.pipeline_id == p.id)
+                .order_by(SetupApproval.id.desc()).all())
+        names = _user_names(s, [r.acted_by_user_id for r in rows])
+        return [{"id": r.id, "action": r.action, "note": r.note,
+                 "acted_by_user_id": r.acted_by_user_id,
+                 "acted_by": names.get(r.acted_by_user_id),
+                 "acted_at": _iso_utc(r.acted_at)} for r in rows]
+
+
+def _user_names(s, user_ids) -> dict:
+    """{user_id: display name} for the people on a decision list. One query,
+    and it falls back to the address when an account has no name rather than
+    leaving a decision unattributed."""
+    ids = {int(u) for u in user_ids if u}
+    if not ids:
+        return {}
+    from db import AppUser
+    return {u.id: (u.full_name or u.email)
+            for u in s.query(AppUser).filter(AppUser.id.in_(ids)).all()}
+
+
+def _notify_setup_submitted(tenant_id, result: dict, principal) -> None:
+    """Tell the carrier admin a setup is waiting on them.
+
+    Email only, and deliberately: the in-app notification feed
+    (PlatformNotification) is Kavachio's own, read cross-tenant by platform
+    admins, so a row there would be invisible to the one person this is for and
+    visible to several it is not. Their in-app equivalent is the approvals
+    queue, which reads the pending setups themselves."""
+    try:
+        from notifications import (CARRIER_ADMIN_FOOTER,
+                                   carrier_admin_recipients, notify_people)
+        who = _principal_name(principal) or _principal_email(principal) or "A colleague"
+        name = result.get("name") or f"Setup {result.get('id')}"
+        notify_people(
+            carrier_admin_recipients(tenant_id),
+            f"{who} has sent a bordereau setup for your approval",
+            body=("Nothing about it reaches the broker until you approve it — "
+                  "the programme, the contract and the BDX template all wait "
+                  "with it."),
+            facts=[("Setup", name)] + _setup_facts(result)
+                  + [("Sent by", who)],
+            link_path="/direct/setups?status=pending_approval",
+            link_label="Review it",
+            action="Approve or send it back",
+            subject=f"Approval needed: {name}",
+            footer=CARRIER_ADMIN_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _notify_setup_decided(result: dict, submitted_by, principal, *,
+                          approved: bool, note: Optional[str] = None) -> None:
+    """Tell whoever built a setup what was decided about it.
+
+    Nobody to tell when the setup was never submitted — a carrier admin's own
+    setup has no author waiting on an answer — so an absent submitter is the
+    normal case, not a failure."""
+    if not submitted_by:
+        return
+    try:
+        from notifications import (CARRIER_USER_FOOTER, notify_people,
+                                   user_recipients)
+        who = _principal_name(principal) or _principal_email(principal) or "Your carrier admin"
+        name = result.get("name") or f"Setup {result.get('id')}"
+        facts = [("Setup", name)] + _setup_facts(result) + [("Decided by", who)]
+        if note:
+            facts.append(("Reason", note))
+        notify_people(
+            user_recipients(submitted_by),
+            (f"{who} approved your bordereau setup" if approved
+             else f"{who} sent your bordereau setup back"),
+            body=("It is live — the broker can now upload against it."
+                  if approved else
+                  "The work is all still there. Make the change and send it "
+                  "up again."),
+            facts=facts,
+            link_path="/direct/setups",
+            link_label="Open the setup",
+            subject=(f"Approved: {name}" if approved else f"Sent back: {name}"),
+            footer=CARRIER_USER_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.delete("/pipelines/{pipeline_id}")

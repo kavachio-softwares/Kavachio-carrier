@@ -26,6 +26,11 @@ from sqlalchemy import exists
 from sqlalchemy.exc import IntegrityError
 
 from auth_deps import require_role, current_principal, Principal
+# Module level, not inside a function like the other carrier_scope imports
+# here: this one is used in a Depends() default, which FastAPI evaluates
+# when the module is imported. carrier_scope imports only auth_deps and db,
+# so there is no cycle to avoid.
+from carrier_scope import require_carrier_admin
 
 router = APIRouter()
 
@@ -2090,7 +2095,10 @@ async def program_contract_upload(
                     status_code=400,
                     detail="That broker is not on this programme, so they cannot "
                            "hold a contract on it. Put them on the programme first.")
-            if link.status != "active":
+            # Same rule as the raise path: a link waiting for the carrier
+            # admin's approval is not one the broker was taken off.
+            from carrier_scope import link_is_live
+            if not link_is_live(link, principal):
                 raise HTTPException(
                     status_code=400,
                     detail="That broker has been taken off this programme, so no "
@@ -2381,6 +2389,57 @@ async def program_contract_upload(
                 status_code=500,
                 detail=persist_warning or "Contract was processed but could not be saved.",
             )
+
+        # ── AN UPLOADED CONTRACT STOPS AT THE CARRIER ADMIN ────────────────
+        # The persister writes status_ops='active' and leaves the lifecycle
+        # column empty, and _effective_lifecycle reads an empty lifecycle with
+        # status 'active' as `active` — in force. So until now, a carrier user
+        # uploading a PDF put a contract straight into force with nobody having
+        # read it, which is the one thing the carrier admin's gate exists to
+        # stop. An uploaded contract has no terms to negotiate and no broker to
+        # ask, so it does not go out for review; it goes to the one person who
+        # can accept it for the carrier (contract_routes.accept_contract).
+        #
+        # Stamped HERE rather than in the persister for two reasons: the
+        # persister is a raw INSERT shared by every upload path and does not
+        # know who is asking, and doing it after the pipeline means a failed
+        # extraction leaves no half-approved row behind.
+        #
+        # The carrier ADMIN's own upload is unchanged — their act IS the
+        # approval, exactly as it is on a bordereau setup. It is written down
+        # explicitly rather than left empty so nothing downstream has to infer
+        # a lifecycle from status_ops again.
+        try:
+            from carrier_scope import is_carrier_admin_seat
+            _cid2 = (persist_result or {}).get("contract_id")
+            if _cid2 and not principal.is_broker:
+                with SessionLocal() as _s:
+                    _admin = is_carrier_admin_seat(_s, principal)
+                    _c2 = _s.get(Contract, _cid2)
+                    # Only a contract this upload has just put in force by
+                    # default. One that already carries a considered lifecycle
+                    # — a re-upload onto an existing negotiation — keeps it.
+                    if _c2 is not None and not (_c2.lifecycle or "").strip():
+                        if _admin:
+                            _c2.lifecycle = "active"
+                        else:
+                            _c2.lifecycle = "pending"
+                            _c2.submitted_by_user_id = principal.user_id
+                            _c2.submitted_at = datetime.utcnow()
+                        _s.commit()
+                if not _admin:
+                    import contract_routes as _crx
+                    with SessionLocal() as _s2:
+                        _c3 = _s2.get(Contract, _cid2)
+                        if _c3 is not None:
+                            _crx._log_contract_event(
+                                _s2, _c3, principal, "contract_awaiting_review")
+                            _crx._notify_contract_for_acceptance(
+                                _s2, _c3, principal)
+        except Exception as _gate_exc:  # noqa: BLE001
+            # Never the reason an upload fails: the contract is saved either
+            # way, and the worst case is that it lands in force as it used to.
+            print(f"[Upload] could not set the approval gate: {_gate_exc}")
 
 
         # -------------------------------------------------
@@ -4733,6 +4792,41 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             if "carrier" in _cr._unsigned_sides(_cr._signatures(s, _c.id)):
                 pending_signatures += 1
 
+        # EVERYTHING on the carrier's desk, not only the signatures. A contract
+        # a colleague raised and left in draft, or one the broker has pushed
+        # back on, is just as much the carrier's move — and neither is in a
+        # signing round, so neither is counted above. The carrier had no way to
+        # see those at all: the list could be filtered by lifecycle, and no
+        # lifecycle answers "whose move is it" (a contract in `agreed` is one
+        # side's or the other's depending on who has already signed).
+        #
+        # Counted through _whose_turn, the same function the record, the
+        # carrier's list and the broker's list all use, so this tile and the
+        # screen it opens can never disagree.
+        #
+        # AND SPLIT BY SEAT, because "the carrier's move" is not one queue. The
+        # signature at the end is the carrier ADMIN's alone, so a contract the
+        # broker has just agreed is on their desk and on nobody else's; showing
+        # it to the carrier user who raised it would be telling them to do
+        # something the API refuses. _carrier_admin_turn is the one function
+        # that answers which of the two, and the record screen and the
+        # notifications read the same one.
+        waiting_rows = s.query(Contract).filter(Contract.tenant_id == tid).all()
+        _seat = _carrier_seat(s, principal)
+        _is_admin_seat = _seat in ("admin", "both")
+        contracts_waiting = 0
+        contracts_awaiting_admin = 0
+        for _c in waiting_rows:
+            _uns = _cr._unsigned_sides(_cr._signatures(s, _c.id))
+            if _cr._whose_turn(_c, _uns) != "carrier":
+                continue
+            _admins = _cr._carrier_admin_turn(_c, _uns)
+            if _admins:
+                contracts_awaiting_admin += 1
+            # A carrier user's tile counts only what a carrier user can act on.
+            if _is_admin_seat or not _admins:
+                contracts_waiting += 1
+
         # The subtitle beside it, counted in the same units: contracts both
         # sides have signed. An envelope count here would have said "1
         # completed" next to two contracts in force, since a contract signed
@@ -4855,6 +4949,12 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             "mapping_tasks_open": mapping_tasks_open,
             "pending_signatures": pending_signatures,
             "completed_signatures": completed_signatures,
+            # Contracts it is the CARRIER's move on — drafts, change requests
+            # and signatures together. A superset of pending_signatures.
+            "contracts_waiting": contracts_waiting,
+            # Of those, the ones only the carrier admin can move. The tile uses
+            # it to say "2 to sign" rather than leaving the reader to subtract.
+            "contracts_awaiting_admin": contracts_awaiting_admin,
             "avg_turnaround_min": round(avg_turnaround_min, 1) if avg_turnaround_min is not None else None,
         }
 
@@ -6542,14 +6642,13 @@ def _carrier_seat(s, principal: Principal) -> str:
       admin / both  the whole company — every carrier user, and every broker
                     the carrier works with, whoever invited it; and only they
                     add or remove carrier users (_assert_is_carrier_admin).
-      user          the brokers THEY invited (_my_broker_party_ids)."""
-    if principal.is_platform_admin:
-        return "both"
-    t = (s.query(Tenant).filter(Tenant.id == principal.tenant_id).first()
-         if principal.tenant_id else None)
-    if t is None or t.owner_user_id is None:
-        return "both"
-    return "admin" if t.owner_user_id == principal.user_id else "user"
+      user          the brokers THEY invited (_my_broker_party_ids).
+
+    The rule itself lives in carrier_scope.carrier_seat, which the signature
+    and setup-approval gates also read. One definition: a second copy here
+    would be the place the two drift apart."""
+    from carrier_scope import carrier_seat
+    return carrier_seat(s, principal)
 
 
 def _brokers_in_reach(s, principal: Principal, tid) -> set:
@@ -6978,8 +7077,29 @@ def _validate_rule_body(body: RuleBody) -> tuple[str, str, str, Optional[str]]:
     return name, body.class_name, severity, logic
 
 
+# ── the rule library ────────────────────────────────────────────────────────
+#
+# THE CARRIER ADMIN'S, not the carrier's. A rule here is not work on one file:
+# it is a standing instruction applied to every bordereau this carrier
+# validates, on every programme and for every broker. That is the same kind of
+# decision as who may sign a contract, so it sits with the same person — the
+# organisation's owner (carrier_scope.carrier_seat), not everyone holding the
+# `carrier_admin` DB role.
+#
+# require_carrier_admin() rather than require_role("tenant_admin") on ALL of
+# them, reads included: the screen is hidden from a carrier user entirely
+# (access.ts), so a read reaching here is a bookmark or a hand-made request,
+# and answering it would contradict the screen. Kavachio staff are unaffected
+# — require_role passes the platform seat and carrier_seat calls it "both" —
+# and they keep the platform-wide global rules they have always managed.
+#
+# A carrier user is NOT cut off from the rules themselves. Every rule that
+# fired is named, in full, on the exception screens they work in daily. What
+# they no longer do is write one.
 @router.get("/rule-library/classes")
-def rule_library_classes(principal: Principal = Depends(require_role("tenant_admin"))):
+def rule_library_classes(
+        principal: Principal = Depends(
+            require_carrier_admin("open the rule library"))):
     """The rule-type catalogue driving the create/edit dropdown. A rule only
     runs if its class_name is one of these, so the form offers exactly these."""
     return {"classes": _rule_supported_classes(), "severities": _RULE_SEVERITIES}
@@ -6988,7 +7108,8 @@ def rule_library_classes(principal: Principal = Depends(require_role("tenant_adm
 @router.get("/rule-library")
 def rule_library_list(page: Optional[int] = Query(None, ge=1),
                       page_size: Optional[int] = Query(None, ge=1, le=200),
-                      principal: Principal = Depends(require_role("tenant_admin"))):
+                      principal: Principal = Depends(
+                          require_carrier_admin("open the rule library"))):
     """Rules in the caller's scope. kavachio_admin sees the platform's GLOBAL
     rules; a tenant_admin sees only their own tenant's rules (globals are hidden
     from the tenant screen). Includes disabled rules so they can be re-enabled.
@@ -7016,7 +7137,8 @@ def rule_library_list(page: Optional[int] = Query(None, ge=1),
 
 @router.post("/rule-library")
 def rule_library_create(body: RuleBody,
-                        principal: Principal = Depends(require_role("tenant_admin"))):
+                        principal: Principal = Depends(
+                            require_carrier_admin("add a rule to the rule library"))):
     """Create a rule. Scope is forced from the token: kavachio_admin → global
     (tenant_id NULL); tenant_admin → their own tenant."""
     name, class_name, severity, logic = _validate_rule_body(body)
@@ -7038,7 +7160,8 @@ def rule_library_create(body: RuleBody,
 
 @router.put("/rule-library/{rule_id}")
 def rule_library_update(rule_id: int, body: RuleBody,
-                        principal: Principal = Depends(require_role("tenant_admin"))):
+                        principal: Principal = Depends(
+                            require_carrier_admin("change a rule in the rule library"))):
     """Edit a rule in the caller's own scope. Scope/tenant is immutable."""
     name, class_name, severity, logic = _validate_rule_body(body)
     with SessionLocal() as s:
@@ -7061,7 +7184,9 @@ class RuleToggleBody(BaseModel):
 
 @router.patch("/rule-library/{rule_id}")
 def rule_library_toggle(rule_id: int, body: RuleToggleBody,
-                        principal: Principal = Depends(require_role("tenant_admin"))):
+                        principal: Principal = Depends(
+                            require_carrier_admin(
+                                "turn a rule in the rule library on or off"))):
     """Enable/disable a rule (soft on/off) without editing its content."""
     with SessionLocal() as s:
         r = s.get(GenericRuleSpecification, rule_id)
@@ -7079,7 +7204,9 @@ def rule_library_toggle(rule_id: int, body: RuleToggleBody,
 
 @router.delete("/rule-library/{rule_id}")
 def rule_library_delete(rule_id: int,
-                        principal: Principal = Depends(require_role("tenant_admin"))):
+                        principal: Principal = Depends(
+                            require_carrier_admin(
+                                "delete a rule from the rule library"))):
     """Delete a rule in the caller's own scope."""
     with SessionLocal() as s:
         r = s.get(GenericRuleSpecification, rule_id)

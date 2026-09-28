@@ -12,7 +12,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 
 from db import (
     Program, Contract, SubmissionSchedule, ExpectedSubmission, ActivityEvent,
@@ -218,10 +218,16 @@ def active_broker_ids(session, program_id: int) -> list[int]:
     rows (see materialize_schedule), so it has to be stable across runs rather
     than whatever the database hands back.
     """
+    # An ALLOWLIST, and it has to be. This was "anything that is not
+    # 'inactive'", which is the same answer while there are only two states and
+    # the wrong one the moment there is a third: a link waiting for the carrier
+    # admin's approval (migration 27) is not inactive, so a denylist would put
+    # a submission deadline in front of a broker for a setup nobody had
+    # approved yet. Every other reader of this column asks for "active"; this
+    # one now does too.
     rows = (session.query(ProgramBroker.broker_party_id)
             .filter(ProgramBroker.program_id == program_id,
-                    or_(ProgramBroker.status.is_(None),
-                        ProgramBroker.status != "inactive"))
+                    func.coalesce(ProgramBroker.status, "active") == "active")
             .all())
     seen, out = set(), []
     for (bid,) in rows:

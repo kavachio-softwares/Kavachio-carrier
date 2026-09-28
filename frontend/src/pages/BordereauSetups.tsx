@@ -15,19 +15,28 @@ type Setup = {
   carrier_party_id: number | null; carrier_name: string | null;
   program_id: number | null; program_name: string | null;
   input_format_name: string | null; output_template_name: string | null;
-  status: "draft" | "active" | "superseded";
+  status: "draft" | "pending_approval" | "active" | "superseded";
   contracts: SetupContract[];
   modified_at: string | null;
+  /** Who sent it up for the carrier admin's approval, and when. Both null on a
+   *  setup that never went up — one the carrier admin built for themselves, or
+   *  one from before approvals existed. */
+  submitted_by: string | null;
+  submitted_at: string | null;
 };
 
 // Fixed application states (a Pipeline.status column value, not tenant data) —
 // the same closed set the builder page's own status pill already renders.
 const STATUS_LABEL: Record<Setup["status"], string> = {
-  active: "Active", draft: "Draft", superseded: "Superseded",
+  active: "Active", pending_approval: "Awaiting approval",
+  draft: "Draft", superseded: "Superseded",
 };
 // The .proto badge each status wears — the same pills Parties and Contracts use.
+// Awaiting approval is info, not a warning: nothing has gone wrong, somebody
+// simply has not looked at it yet.
 const STATUS_BADGE: Record<Setup["status"], string> = {
-  active: "b-ok", draft: "b-warn", superseded: "b-mut",
+  active: "b-ok", pending_approval: "b-info",
+  draft: "b-warn", superseded: "b-mut",
 };
 
 const PAGE_SIZE = 10;
@@ -53,7 +62,10 @@ export default function BordereauSetups() {
   // stepper links here once a programme's setups are all in place).
   const [params] = useSearchParams();
   const [program, setProgram] = useState(params.get("program_id") ?? "");   // program_id, as a string
-  const [status, setStatus] = useState("");
+  // ?status= opens the list filtered to one state — how the carrier admin's
+  // "waiting on you" tile and the approval email both land on exactly the
+  // setups they are about, rather than on the whole list to be found in.
+  const [status, setStatus] = useState(params.get("status") ?? "");
 
   const programOptions = facets?.programs ?? [];
   // A programme passed in the URL that has no setups is dropped rather than
@@ -134,6 +146,20 @@ export default function BordereauSetups() {
                 <Boxes size={26} style={{ margin: "0 auto 10px", display: "block" }} />
                 No setups yet — build one to map a programme's bordereau.
                 <div style={{ marginTop: 14 }}>{newSetup}</div>
+              </div>
+            ) : total === 0 && status === "pending_approval"
+                 && q === "" && program === "" ? (
+              /* Arrived from the carrier admin's Pending Approvals tile, which
+                 is clickable at zero on purpose. "No setups match your filters"
+                 would be true and would answer a question nobody asked — the
+                 one being asked is "is anything waiting on me?". */
+              <div className="empty">
+                <Boxes size={26} style={{ margin: "0 auto 10px", display: "block" }} />
+                Nothing is waiting for your approval.
+                <div className="sub" style={{ marginTop: 6 }}>
+                  A setup appears here when a colleague finishes one and sends
+                  it up. Until you approve it, the broker has none of it.
+                </div>
               </div>
             ) : total === 0 ? (
               <div className="empty">No setups match your filters.</div>

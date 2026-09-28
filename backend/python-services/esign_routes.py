@@ -55,6 +55,10 @@ from auth_deps import (
     Principal, current_principal, db_role_values, normalize_role, require_role,
     resolve_broker_party_id,
 )
+# Both carrier seats hold `carrier_admin`, so require_role alone lets a
+# carrier USER run a signing round. Sending, chasing and pulling back a
+# round is the carrier admin's — see carrier_scope.
+from carrier_scope import require_carrier_admin
 from db import (
     AppUser, Contract, ContractSignature, EsignEnvelope, EsignEvent, EsignField,
     EsignRecipient, Party, Program, SessionLocal, Tenant,
@@ -564,7 +568,8 @@ def _discard_stale_drafts(s, tenant_id: int, user_id: int | None) -> int:
 
 @router.post("/envelopes")
 def create_envelope(body: EnvelopeIn, request: Request,
-                    p: Principal = Depends(require_role("carrier_admin"))):
+                    p: Principal = Depends(
+                        require_carrier_admin("start a signing round"))):
     """Set a signing round up: build the document, work out who signs, and read
     the boxes back out of the document.
 
@@ -1129,8 +1134,12 @@ def signing_session(contract_id: int, request: Request,
     # (operator) opening the round would also re-point the broker's signer at
     # themselves and retire the admin's emailed link, so they are refused
     # before anything is looked at.
+    # The carrier's half of the same rule: a carrier USER raises the contract,
+    # the carrier admin signs it. Both asserts are no-ops for the other side,
+    # so this one door still serves both.
     import contract_routes
     contract_routes._assert_speaks_for_broker(p, "sign a contract")
+    contract_routes._assert_speaks_for_carrier(p, "sign a contract")
     with SessionLocal() as s:
         c = _contract_for_signing(s, p, contract_id)
         key = _my_party_key(s, p)
@@ -1243,7 +1252,8 @@ class SignerLookup(BaseModel):
             response_model=SignerLookup)
 def signer_lookup(contract_id: int,
                   email: str = Query(..., description="the address just typed"),
-                  p: Principal = Depends(require_role("carrier_admin"))):
+                  p: Principal = Depends(
+                      require_carrier_admin("name who signs a contract"))):
     """Is this address somebody Kavachio already knows on this contract?
 
     Asked while the carrier is naming who signs, so the screen can say plainly
@@ -1415,7 +1425,8 @@ def envelope_pdf(envelope_id: int, original: bool = Query(False),
 
 @router.post("/envelopes/{envelope_id}/send")
 def send_envelope(envelope_id: int, body: SendIn, request: Request,
-                  p: Principal = Depends(require_role("carrier_admin"))):
+                  p: Principal = Depends(
+                      require_carrier_admin("send a contract for signature"))):
     """Send it. Mints a link for the FIRST signer and emails only them.
 
     Only the first: the broker is emailed when the insurer has actually signed,
@@ -1477,7 +1488,8 @@ def _send_envelope(envelope_id: int, p: Principal, request: Request,
 
 @router.post("/envelopes/{envelope_id}/remind")
 def remind(envelope_id: int, request: Request,
-           p: Principal = Depends(require_role("carrier_admin"))):
+           p: Principal = Depends(
+               require_carrier_admin("chase a signature"))):
     """Nudge whoever is holding it up, on the link they already have."""
     with SessionLocal() as s:
         env = _load_envelope(s, envelope_id, p)
@@ -1510,7 +1522,8 @@ def remind(envelope_id: int, request: Request,
 
 @router.post("/envelopes/{envelope_id}/void")
 def void_envelope(envelope_id: int, request: Request,
-                  p: Principal = Depends(require_role("carrier_admin"))):
+                  p: Principal = Depends(
+                      require_carrier_admin("pull back a signing round"))):
     """Pull it back. Every outstanding link stops working immediately."""
     with SessionLocal() as s:
         env = _load_envelope(s, envelope_id, p)

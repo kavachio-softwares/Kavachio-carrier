@@ -33,7 +33,15 @@ type Item = { to: string; label: string; icon: React.ElementType; carrierAdminOn
 // broker_admin requirement). `only` is an EXACT set, for sections that belong
 // to one side of the platform and must not leak to the other: a carrier admin
 // outranks a broker but has no business on the broker's screens.
-const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[] = [
+// `carrierUserTitle` renames a SECTION for the carrier USER only. A heading
+// has to describe the rows under it, and two carrier seats can be left with
+// different rows: the items inside a section are filtered per seat, so a
+// heading that is right for the admin can end up sitting over something else
+// entirely for a carrier user.
+const GROUPS: {
+  title: string; carrierUserTitle?: string;
+  requires?: Role; only?: Role[]; items: Item[];
+}[] = [
   {
     // The broker's own world. They create no carriers and no programmes — a
     // carrier puts them on one, and everything here follows from that.
@@ -55,14 +63,12 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // this team, not a manager of it. canAccessPath() filters it out for
       // them (ROUTE_ACCESS marks the path `only: ["broker_admin"]`).
       { to: "/broker/users", label: "Users & Roles", icon: UserCog },
-      // Both broker seats. An operator sees their own trail and an admin the
-      // whole team's — the difference is made by the server, not by hiding the
-      // link, because "what have I done" is a question every seat may ask.
-      { to: "/audit", label: "Audit Logs", icon: ScrollText },
+      // Audit Logs is NOT here any more — it is its own "Logs" section at the
+      // foot of every sidebar (see the last group in this file).
     ],
   },
   {
-    title: "Run",
+    title: "Operations",
     requires: "carrier_admin",
     items: [
       { to: "/home", label: "Dashboard", icon: LayoutDashboard },
@@ -128,16 +134,16 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     // bordereau setup. Reading the section top to bottom IS the flow.
     items: [
       { to: "/programs", label: "Programmes", icon: Layers },
-      // Brokers, not carriers. Kavachio creates carriers (Platform → Carriers)
-      // and this tenant IS one — what a carrier manages is the brokers that
-      // produce into its programmes. Brokers come straight after Programmes
-      // because putting brokers on a programme is the next thing that happens.
-      { to: "/brokers", label: "Party", icon: Users2 },
-      // Contracts sit between the programme/broker pair and the setup built on
-      // them, which is where they sit in the work: a programme exists, brokers
-      // go on it, contracts are raised against those pairs, and each contract
-      // is what a bordereau setup runs against.
-      { to: "/contracts", label: "Contracts", icon: FileCheck },
+      // Party and Contracts are hidden from the sidebar for now. Both routes
+      // and both access rules are unchanged — only the nav entries are
+      // commented out, the same as Program Management above and Files below.
+      //
+      // Neither screen is stranded by it: the Dashboard's "Parties" and
+      // "Contracts" tiles open them, Broker Performance has "All brokers →",
+      // and a contract is normally reached from the programme it hangs off
+      // rather than from a flat list of every contract in the book.
+      // { to: "/brokers", label: "Party", icon: Users2 },
+      // { to: "/contracts", label: "Contracts", icon: FileCheck },
       // Signatures is NOT a sidebar entry. Watching a round is watching a
       // contract, so it is reached from Contracts ("Signature history") and
       // from the contract's own record, filtered to that contract. A top-level
@@ -150,7 +156,16 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     ],
   },
   {
+    // "Profile" for the carrier admin: their organisation's own settings,
+    // their colleagues, and the rules the carrier validates by.
+    //
+    // A carrier USER has none of that. Company and Rule Library are the
+    // admin's alone, so both are filtered out for them and the section is
+    // left holding one row — the brokers they invited. "Profile" over a list
+    // of other companies reads as the person's own account settings, which is
+    // the one thing it is not.
     title: "Profile",
+    carrierUserTitle: "Broker Companies",
     requires: "carrier_admin",
     items: [
       // The organisation's own settings — name, logo, currency. That is the
@@ -161,8 +176,23 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // part of building the book, so it sits with the other admin screens.
       { to: "/users", label: "Users & Roles", icon: UserCog },
       { to: "/rule-library", label: "Rule Library", icon: ListChecks },
-      // Beside Users & Roles, because they answer the two halves of the same
-      // question: who may act, and what they did with it.
+    ],
+  },
+  {
+    // ONE section, no `requires` and no `only`, so every seat that reaches this
+    // list gets it — a broker operator as much as a carrier admin. That is not
+    // laxity: /audit is deliberately open to all four seats (ROUTE_ACCESS says
+    // so) and the SERVER decides whose rows come back, so there is nothing here
+    // for a group gate to add.
+    //
+    // A section of its own rather than a row inside Profile or the broker's
+    // block. What someone did is not a setting and not part of the day's work,
+    // and it is the one screen a person may be sent to by someone else — an
+    // auditor, a carrier asking what happened to a file. Sitting last, under
+    // its own heading, it is findable without being read as a step in any
+    // flow above it.
+    title: "Logs",
+    items: [
       { to: "/audit", label: "Audit Logs", icon: ScrollText },
     ],
   },
@@ -195,7 +225,14 @@ const ADMIN_GROUPS: typeof GROUPS = [
       { to: "/admin/users", label: "Users & Roles", icon: UserCog },
       { to: "/admin/mapping-tasks", label: "Data Mapping Queue", icon: Database },
       { to: "/rule-library", label: "Rule Library", icon: ListChecks },
-      // The whole platform's trail: every carrier, every broker, named.
+    ],
+  },
+  {
+    // The same "Logs" section the other sidebars end on, so the screen is in
+    // the same place whoever signs in. For Kavachio it is the whole platform's
+    // trail: every carrier, every broker, named.
+    title: "Logs",
+    items: [
       { to: "/audit", label: "Audit Logs", icon: ScrollText },
     ],
   },
@@ -214,9 +251,12 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Programmes now own their own sub-screens (create, and a programme's
   // brokers), so they highlight Programmes rather than the old party directory.
   if (under("/programs")) return "/programs";
-  // Brokers have their own entry again, so a broker's page highlights it
-  // rather than borrowing the programme's.
-  if (under("/brokers")) return "/brokers";
+  // Party has no sidebar entry any more, and neither do contracts. Both are
+  // opened from the Dashboard's tiles, so — like /files — they keep Dashboard
+  // lit rather than pointing at a row that is no longer drawn, which would
+  // leave nothing highlighted at all.
+  if (under("/brokers")) return "/home";
+  if (under("/contracts")) return "/home";
   // An output template is part of a Bordereau Setup, and that is where the user
   // came from — highlighting anything else while they review a template they
   // opened from the setup screen makes the sidebar lie about where they are.
@@ -237,7 +277,7 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // a party", so Party stays lit. (Configure Program's "Add Broker" invites in
   // a dialog on its own screen and never comes here.)
   if (pathname === "/users/new" && new URLSearchParams(search).get("for") === "broker")
-    return "/brokers";
+    return "/home";
   if (under("/users")) return "/users";
   if (under("/rule-library")) return "/rule-library";
 
@@ -326,8 +366,16 @@ export default function Layout() {
         // A carrier-admin-only item stays hidden until the seat is KNOWN to be
         // an admin's. The brand is hydrated from localStorage, so that is
         // settled on the first paint of every load after signing in.
-        .map(g => ({ ...g, items: g.items.filter(
-          i => canAccessPath(i.to) && (!i.carrierAdminOnly || addsCarrierUsers(seat))) }))
+        // Renamed only for the seat it is wrong for, and only once the seat
+        // is KNOWN — an unresolved seat is null, not "user", so a carrier
+        // admin never sees the other heading flash on first paint.
+        .map(g => ({
+          ...g,
+          title: g.carrierUserTitle && seat === "user" ? g.carrierUserTitle : g.title,
+          items: g.items.filter(
+            i => canAccessPath(i.to)
+              && (!i.carrierAdminOnly || addsCarrierUsers(seat))),
+        }))
         .filter(g => g.items.length > 0);
   const roleLabel = !user ? ""
     : seat === "user" ? "Carrier User" : ROLE_LABEL[normalizeRole(user.role)];

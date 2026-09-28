@@ -18,13 +18,38 @@ export type HierarchyContract = {
 export type HierarchyBroker = {
   id: number;
   legal_name: string;
-  /** active | inactive — a broker taken off a programme that still has
-   *  contracts stays here as inactive rather than disappearing. */
+  /** active | pending_approval | inactive — a broker taken off a programme that
+   *  still has contracts stays here as inactive rather than disappearing, and
+   *  one a carrier USER put on waits at pending_approval until the carrier
+   *  admin approves the setup built on it. Test it with onProgramme(), never
+   *  against "active": from the CARRIER's side a waiting link is a broker they
+   *  are working with, and reading it as "taken off" stops the chain one step
+   *  after they started it. */
   link_status: string;
   /** The best bordereau setup this broker has on the programme. */
-  setup_status?: "active" | "draft" | null;
+  setup_status?: "active" | "pending_approval" | "draft" | null;
   contracts: HierarchyContract[];
 };
+
+/** Is this broker ON the programme, as the CARRIER sees it?
+ *
+ *  The twin of carrier_scope.link_is_live on the server, and it has to agree
+ *  with it: a link waiting for the carrier admin is real — the carrier can
+ *  raise the contract and build the setup on it — it simply has not been
+ *  released to the broker yet. Only "inactive" means taken off. A missing
+ *  value is a legacy row, which has always meant on. */
+export const onProgramme = (linkStatus?: string | null): boolean =>
+  !linkStatus || linkStatus === "active" || linkStatus === "pending_approval";
+
+/** Has the carrier FINISHED with this broker's setup?
+ *
+ *  Not the same question as whether the broker can send a file — only a live
+ *  setup lets them do that. This is "is there anything left for the person
+ *  building it to do", and for one waiting on the carrier admin there is not.
+ *  Pointing them back at the builder would ask them to make a second copy of
+ *  the setup they just sent up. */
+export const setupFinished = (setupStatus?: string | null): boolean =>
+  setupStatus === "active" || setupStatus === "pending_approval";
 
 export type HierarchyProgramme = {
   id: number;

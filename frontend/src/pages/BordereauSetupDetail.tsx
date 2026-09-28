@@ -7,6 +7,7 @@ import {
 import { SetupTabs, SheetChips, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
+import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { fmtStamp } from "../utils/date";
 import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
@@ -33,8 +34,12 @@ type PipelineDetail = {
   program_id: number | null; program_name: string | null;
   input_format_id: number | null; input_format_name: string | null;
   output_template_id: number | null; output_template_name: string | null;
-  status: "draft" | "active" | "superseded";
+  status: "draft" | "pending_approval" | "active" | "superseded";
   has_supplement: boolean;
+  /** Who sent it up for the carrier admin, and when. Both null on a setup that
+   *  never went up — one the carrier admin built, or one from before approvals. */
+  submitted_by?: string | null;
+  submitted_at?: string | null;
   contracts: PipelineContract[];
   // Absent on setups built before this was recorded — treat as [].
   reference_documents?: PipelineRefDocs[];
@@ -50,10 +55,14 @@ type EditorResp = {
 };
 
 const STATUS_LABEL: Record<PipelineDetail["status"], string> = {
-  active: "Active", draft: "Draft", superseded: "Superseded",
+  active: "Active", pending_approval: "Awaiting approval",
+  draft: "Draft", superseded: "Superseded",
 };
 const STATUS_TONE: Record<PipelineDetail["status"], string> = {
   active: "bg-emerald-100 text-emerald-700",
+  // Blue, not amber: nothing has gone wrong with a setup that is waiting —
+  // somebody simply has not looked at it yet.
+  pending_approval: "bg-sky-50 text-sky-700",
   draft: "bg-amber-50 text-amber-700",
   superseded: "bg-surface-2 text-ink-muted",
 };
@@ -93,6 +102,14 @@ export default function BordereauSetupDetail() {
   // switched on shouldn't have to be opened in the editor and re-saved.
   const [confirmActivate, setConfirmActivate] = useState(false);
   const [activating, setActivating] = useState(false);
+  // Which of the two carrier seats is reading this. A carrier USER finishing a
+  // setup sends it up for approval; the carrier ADMIN puts it live, and is the
+  // only one who can decide on somebody else's.
+  const seat = useCarrierSeat();
+  const isAdmin = addsCarrierUsers(seat);
+  const pending = pipeline?.status === "pending_approval";
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectNote, setRejectNote] = useState("");
   const [activateErr, setActivateErr] = useState<string | null>(null);
   const [activateMsg, setActivateMsg] = useState<string | null>(null);
 
@@ -150,6 +167,9 @@ export default function BordereauSetupDetail() {
       f => !used.has(`${f.sheet}::${f.field}`) && !extra[sheetFieldKey(f.sheet, f.field)]);
   }, [editor, sel, extra]);
 
+  /** Finish a setup. ONE endpoint, because it is one intent — "this setup is
+   *  done" — and which of the two things it means is the server's to decide
+   *  from the caller's seat, not this screen's to guess. */
   async function activateSetup() {
     if (!pipeline) return;
     setActivating(true); setActivateErr(null); setActivateMsg(null);
@@ -160,8 +180,45 @@ export default function BordereauSetupDetail() {
       const { data } = await api.get<PipelineDetail>(`/pipelines/${pipeline.id}`);
       setPipeline(data);
       setConfirmActivate(false);
-      setActivateMsg("Setup activated — your team can now process bordereaux for this "
-                     + "carrier and program. Any previously active setup was superseded.");
+      setActivateMsg(data.status === "pending_approval"
+        ? "Sent to your carrier admin. Nothing reaches the broker until they "
+          + "approve it — the programme, the contract and the BDX template all "
+          + "wait with it."
+        : "Setup activated — your team can now process bordereaux for this "
+          + "carrier and program. Any previously active setup was superseded.");
+    } catch (e: unknown) {
+      setActivateErr(errText(e));
+    } finally { setActivating(false); }
+  }
+
+  /** The carrier admin's decision on a colleague's setup. Approving is what
+   *  releases the whole chain: the setup goes live AND the programme link it
+   *  was built on is put live with it, so the broker sees all of it at once. */
+  async function approveSetup() {
+    if (!pipeline) return;
+    setActivating(true); setActivateErr(null); setActivateMsg(null);
+    try {
+      await api.post(`/pipelines/${pipeline.id}/approve`);
+      const { data } = await api.get<PipelineDetail>(`/pipelines/${pipeline.id}`);
+      setPipeline(data);
+      setConfirmActivate(false);
+      setActivateMsg("Approved — this setup is live, and the broker can now "
+                     + "upload against it.");
+    } catch (e: unknown) {
+      setActivateErr(errText(e));
+    } finally { setActivating(false); }
+  }
+
+  async function rejectSetup() {
+    if (!pipeline || !rejectNote.trim()) return;
+    setActivating(true); setActivateErr(null); setActivateMsg(null);
+    try {
+      await api.post(`/pipelines/${pipeline.id}/reject`, { note: rejectNote.trim() });
+      const { data } = await api.get<PipelineDetail>(`/pipelines/${pipeline.id}`);
+      setPipeline(data);
+      setRejecting(false); setRejectNote("");
+      setActivateMsg("Sent back. Whoever built it has been told why, and the "
+                     + "work is all still there.");
     } catch (e: unknown) {
       setActivateErr(errText(e));
     } finally { setActivating(false); }
@@ -253,12 +310,32 @@ export default function BordereauSetupDetail() {
               <ArrowLeft size={15} /> Configured Bordereau Setups
             </Button>
             {/* Only a setup that ISN'T already live can be switched on — an
-                active one has nothing to activate. */}
-            {pipeline && pipeline.status !== "active" && (
+                active one has nothing to activate.
+
+                Three cases, and the wording has to say which: the carrier
+                admin finishing their own setup ACTIVATES it, a carrier user
+                finishing theirs SENDS IT for approval, and a setup already
+                waiting is the admin's to decide on. A button labelled
+                "Activate" for somebody who cannot activate would be a button
+                that lies about what it does. */}
+            {pipeline && pipeline.status !== "active" && !pending && (
               <Button variant="secondary" disabled={activating}
                 onClick={() => { setActivateErr(null); setConfirmActivate(true); }}>
-                <ShieldCheck size={15} /> Activate Setup
+                <ShieldCheck size={15} />
+                {isAdmin ? "Activate Setup" : "Send for Approval"}
               </Button>
+            )}
+            {pipeline && pending && isAdmin && (
+              <>
+                <Button variant="secondary" disabled={activating}
+                  onClick={() => { setActivateErr(null); setRejectNote(""); setRejecting(true); }}>
+                  <ArrowLeft size={15} /> Send Back
+                </Button>
+                <Button variant="secondary" disabled={activating}
+                  onClick={() => { setActivateErr(null); setConfirmActivate(true); }}>
+                  <ShieldCheck size={15} /> Approve
+                </Button>
+              </>
             )}
             <Button onClick={() => nav(`/direct/setups/${id}/edit?back=${encodeURIComponent(`/direct/setups/${id}`)}&tab=${editTab}`)}>
               <Pencil size={15} /> Edit
@@ -266,6 +343,26 @@ export default function BordereauSetupDetail() {
           </div>
         } />
       <PageBody>
+        {/* Said once, at the top, because a status pill cannot say what the
+            state MEANS: that the broker has none of this yet. */}
+        {pending && (
+          <Banner kind="info">
+            <Info size={15} />
+            <span>
+              {isAdmin
+                ? "Waiting on you. Nothing here has reached the broker yet — "
+                  + "the programme, the contract and the BDX template are all "
+                  + "released together when you approve."
+                : "Sent to your carrier admin. Nothing reaches the broker "
+                  + "until they approve it."}
+              {pipeline?.submitted_by
+                ? ` Sent by ${pipeline.submitted_by}`
+                  + (pipeline.submitted_at ? ` on ${fmtStamp(pipeline.submitted_at)}` : "")
+                  + "."
+                : ""}
+            </span>
+          </Banner>
+        )}
         {activateMsg && <Banner kind="ok"><ShieldCheck size={15} /> {activateMsg}</Banner>}
         {activateErr && <Banner kind="error"><AlertTriangle size={15} /> {activateErr}</Banner>}
         {err && <Banner kind="error"><AlertTriangle size={15} /> {err}</Banner>}
@@ -555,28 +652,89 @@ export default function BordereauSetupDetail() {
         )}
       </PageBody>
 
-      {/* Activation is not a silent toggle: it makes this setup the one every
-          bordereau run uses and supersedes whichever setup was active before,
-          so it's confirmed explicitly — and warns about unsourced columns the
-          same way the editor does. */}
-      <Modal open={confirmActivate} title="Activate this setup?" size="md"
-        onClose={() => { if (!activating) setConfirmActivate(false); }}
+      {/* Sending a setup back REQUIRES a reason. Without one its author has to
+          come and ask what was wrong, which is the conversation this screen
+          exists to save — so the button stays disabled until something is
+          written, and the server refuses an empty note too. */}
+      <Modal open={rejecting} title="Send this setup back?" size="md"
+        onClose={() => { if (!activating) setRejecting(false); }}
         footer={
           <div className="flex items-center justify-end gap-2">
             <Button variant="secondary" disabled={activating}
-              onClick={() => setConfirmActivate(false)}>Cancel</Button>
-            <Button disabled={activating} onClick={activateSetup}>
-              {activating ? "Activating…" : "Activate setup"}
+              onClick={() => setRejecting(false)}>Cancel</Button>
+            <Button disabled={activating || !rejectNote.trim()} onClick={rejectSetup}>
+              {activating ? "Sending back…" : "Send back"}
             </Button>
           </div>
         }>
         <div className="text-sm text-ink-muted space-y-3">
           <p>
-            <strong className="text-ink">{setupName || "This setup"}</strong> will become the
-            setup used for every bordereau processed for this carrier and program.
-            Any setup that is currently active will be superseded.
+            It goes back to <strong className="text-ink">Draft</strong> with all the work
+            still on it, and whoever built it is told why. They can change it and
+            send it up again.
           </p>
-          {unsourcedFields.length > 0 && (
+          <div>
+            <label className="label" htmlFor="setup-reject-note">
+              What needs to change?
+            </label>
+            <textarea id="setup-reject-note" className="input" rows={4}
+              value={rejectNote} onChange={e => setRejectNote(e.target.value)}
+              placeholder="The BDX template is last year's — point it at v6 and send it back up." />
+          </div>
+        </div>
+      </Modal>
+
+      {/* Activation is not a silent toggle: it makes this setup the one every
+          bordereau run uses and supersedes whichever setup was active before,
+          so it's confirmed explicitly.
+
+          ONE SENTENCE, for the two admin answers. It used to spend a paragraph
+          on the mechanism — what supersedes what, and that the programme link
+          goes live alongside — and none of that changes the decision being
+          made: either every bordereau runs through this setup or it does not.
+          A dialog people skip is a dialog that is not asking anything. */}
+      <Modal open={confirmActivate}
+        title={pending ? "Approve this setup?"
+               : isAdmin ? "Activate this setup?" : "Send this for approval?"}
+        size="md"
+        onClose={() => { if (!activating) setConfirmActivate(false); }}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="secondary" disabled={activating}
+              onClick={() => setConfirmActivate(false)}>Cancel</Button>
+            <Button disabled={activating}
+              onClick={pending ? approveSetup : activateSetup}>
+              {activating
+                ? (pending ? "Approving…" : isAdmin ? "Activating…" : "Sending…")
+                : (pending ? "Approve setup"
+                   : isAdmin ? "Activate setup" : "Send for approval")}
+            </Button>
+          </div>
+        }>
+        <div className="text-sm text-ink-muted space-y-3">
+          <p>
+            {isAdmin ? (
+              <>
+                Every bordereau for{" "}
+                <strong className="text-ink">{setupName || "this programme"}</strong>{" "}
+                will run through this setup.
+              </>
+            ) : (
+              <>
+                <strong className="text-ink">{setupName || "This setup"}</strong> goes to your
+                carrier admin to approve. Nothing about it — the programme, the
+                contract or the BDX template — reaches the broker until they do.
+              </>
+            )}
+          </p>
+          {/* Not when APPROVING. The count is on the Field mapping tab behind
+              the reader, on the page they just came from, and repeating it
+              here turned a one-line question into a wall — which is how a
+              confirmation stops being read at all. It still shows when the
+              person activating is the one who built the mapping: that is
+              their last look at their own work, not a second opinion on
+              somebody else's. */}
+          {!pending && unsourcedFields.length > 0 && (
             <Banner kind="warn">
               <AlertTriangle size={15} />
               <span>

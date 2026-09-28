@@ -597,6 +597,11 @@ _BLK_TITLE_PT = 9.5
 _BLK_LINE_PT = 8.5
 _BLK_SIG_GAP = 30.0        # room above the rule for a signature to land in
 _BLK_CAP_PT = 6.0          # air under the rule, where the audit caption goes
+# The audit caption, set to fit that air. A BASELINE offset, not a box height:
+# see _stamp_signature for why nothing in a signature block may be written
+# with insert_textbox.
+_CAP_PT = 5.6
+_CAP_BASELINE_PT = 5.0
 _BLK_ROW = 11.5            # one printed line under the rule
 
 
@@ -855,6 +860,21 @@ def _stamp_signature(page: fitz.Page, rect: fitz.Rect, st: Stamp) -> None:
     Either way a small grey caption goes underneath — who signed and when. That
     line is the difference between a picture of a name and a record of an act,
     and it is what a reader looks for months later.
+
+    NOTHING HERE MAY USE insert_textbox. It writes nothing at all and returns a
+    negative number when one line at the requested size does not fit the box by
+    HEIGHT, and every box in a signature block is tight by design: the
+    signature is only as tall as the gap above its rule, and the caption sits
+    in a few points of air beneath it.
+
+    Silence is the worst possible failure for this particular function. The
+    signing screen draws each signer's OWN values over the page image in HTML,
+    and draws nothing over the other party's — a filled box that is not yours
+    renders empty, because its value is supposed to be burned into the page
+    underneath. So a stamp that does not land is invisible to exactly one
+    person: the one who has to see it. Every typed signature was lost this way,
+    and every audit caption with it, while the signer's own screen looked
+    perfect.
     """
     img = _decode_data_url(st.image)
     drawn = False
@@ -870,25 +890,35 @@ def _stamp_signature(page: fitz.Page, rect: fitz.Rect, st: Stamp) -> None:
         text = (st.value or "").strip()
         if text:
             # Times-Italic ("tiit") reads as a signature where Helvetica reads
-            # as a form field. Shrink to fit rather than overflow the block —
-            # by HEIGHT as well as width, because initials are set on a
-            # one-row box and a 20pt letter in a 15pt row either drops below
-            # its label or does not fit at all and prints nothing.
-            size = min(20.0, rect.height - 2.0)
+            # as a form field.
+            #
+            # Sized against the font's LINE BOX — ascender to descender — and
+            # then against the width. A box's height in points is not the type
+            # size it can hold, and treating the two as the same number is what
+            # asked 20pt type to sit in 23pt of room and print nothing.
+            font = fitz.Font(fontname="tiit")
+            size = min(20.0, max(6.0, (rect.height - 2.0)
+                                      / (font.ascender - font.descender)))
             while size > 8.0 and fitz.get_text_length(text, "tiit", size) > rect.width - 6:
                 size -= 1.0
-            page.insert_textbox(rect, text, fontname="tiit", fontsize=size,
-                                color=(0.06, 0.09, 0.20), align=fitz.TEXT_ALIGN_LEFT)
+            # Placed on a baseline, which is the same question `_fit` answers
+            # for a drawn mark and gets the same answer. A signature sits ON
+            # the ruled line at the foot of its box, with its descenders coming
+            # to rest on the rule rather than dropping through it into the
+            # caption. INITIALS do not: they are asked for beside a printed
+            # label, on a row with "Full name" and "Date signed", so they start
+            # at the top of the row like the words either side of them.
+            baseline = (rect.y1 + font.descender * size if st.type == "signature"
+                        else rect.y0 + font.ascender * size)
+            page.insert_text(fitz.Point(rect.x0 + 1.0, baseline), text,
+                             fontname="tiit", fontsize=size,
+                             color=(0.06, 0.09, 0.20))
     if st.caption:
-        # UNDER the ruled line. The box now ends ON the rule and a signature
-        # fills it, so the old position — the bottom of the box — printed the
-        # audit line straight through the signature it describes. Below the
-        # rule is where a reader looks for it anyway, and both layouts keep
-        # room there for exactly this.
-        cap = fitz.Rect(rect.x0, rect.y1 + 0.5,
-                        rect.x0 + max(rect.width, 190), rect.y1 + 8)
-        page.insert_textbox(cap, st.caption, fontname="helv", fontsize=5.6,
-                            color=(0.45, 0.48, 0.55))
+        # UNDER the ruled line, where a reader looks for it, and where both
+        # layouts leave _BLK_CAP_PT of air for exactly this.
+        page.insert_text(fitz.Point(rect.x0, rect.y1 + _CAP_BASELINE_PT),
+                         st.caption, fontname="helv", fontsize=_CAP_PT,
+                         color=(0.45, 0.48, 0.55))
 
 
 def _fit(box: fitz.Rect, image: bytes, *, on_rule: bool = True) -> fitz.Rect:
@@ -935,8 +965,18 @@ def _stamp_text(page: fitz.Page, rect: fitz.Rect, value: str) -> None:
     # Nudged down a point: the anchor marks the top of the box, and text sitting
     # flush against a ruled line above it reads as part of the line.
     box = fitz.Rect(rect.x0, rect.y0 + 1, rect.x1, rect.y1 + 4)
-    page.insert_textbox(box, text, fontname="helv", fontsize=size,
-                        color=(0.06, 0.09, 0.20))
+    # The return value is CHECKED. insert_textbox writes nothing at all and
+    # reports a negative number when the text will not fit by height, and the
+    # loop above measures width only — the same blind spot that lost every
+    # typed signature (see _stamp_signature). At the sizes these boxes are
+    # built at the first call succeeds and this changes nothing; it is here so
+    # that a tighter box degrades to smaller type instead of to silence.
+    while size > 4.0:
+        if page.insert_textbox(box, text, fontname="helv", fontsize=size,
+                               color=(0.06, 0.09, 0.20)) >= 0:
+            return
+        size -= 0.5
+    log.warning("[esign] %r did not fit its box and was not stamped", text[:40])
 
 
 # --- the certificate page ---------------------------------------------------

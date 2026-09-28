@@ -17,6 +17,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { FilePlus2, History, Upload } from "lucide-react";
+import { canAccessPath } from "../access";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import {
   listContractsPaged,
@@ -42,7 +43,14 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   // Neutral on purpose: this list carries both a carrier's own drafts (nobody
   // to submit to) and a broker's (waiting to be submitted).
   draft: { label: "Draft", cls: "b-mut", note: "not live yet" },
-  pending: { label: "Pending", cls: "b-warn", note: "waiting on a decision" },
+  // An UPLOADED contract, waiting on the carrier admin to accept it. It says
+  // "accept" rather than "review" because that is the whole of the act: the
+  // document was executed before it got here, so there is nothing to
+  // negotiate and nothing to sign, and the admin's word is what puts it in
+  // force. A contract WRITTEN here never passes through this state — it goes
+  // straight to the broker and meets the admin afterwards, at the signature.
+  pending: { label: "Awaiting acceptance", cls: "b-warn",
+             note: "with your carrier admin" },
   in_review: { label: "Out for review", cls: "b-warn", note: "with the broker" },
   changes_requested: { label: "Changes requested", cls: "b-warn",
                        note: "the broker pushed back — your move" },
@@ -78,6 +86,10 @@ export default function Contracts() {
   // links here for a programme whose contracts are all in place.
   const [params] = useSearchParams();
   const [programme, setProgramme] = useState(params.get("program_id") ?? "");
+  // ?waiting=mine opens the list already narrowed to what is this side's move
+  // — where both dashboard tiles land. Held as state, not read straight off
+  // the URL, so clearing it clears like every other filter on this screen.
+  const [waiting, setWaiting] = useState(params.get("waiting") === "mine");
   const [lifecycle, setLifecycle] = useState("");
   const [type, setType] = useState("");
   const [q, setQ] = useState("");
@@ -96,7 +108,7 @@ export default function Contracts() {
   // thousands to show ten. The filters are folded into one key, which the hook
   // uses to snap back to page 1 — a filter that narrowed the list while you sat
   // on page 4 would otherwise show an empty table.
-  const filterKey = [programme, lifecycle, type, query.trim()].join("|");
+  const filterKey = [programme, lifecycle, type, query.trim(), waiting].join("|");
   const {
     items: rows, total, page, pageCount, loading, setPage, reload,
   } = useServerList<ContractRecord>(
@@ -104,6 +116,7 @@ export default function Contracts() {
       program_id: programme ? Number(programme) : undefined,
       lifecycle: lifecycle || undefined,
       contract_type: type || undefined,
+      waiting: waiting ? "mine" : undefined,
       q: query.trim() || undefined,
       page: pg, page_size: size,
     }).catch(e => {
@@ -113,7 +126,7 @@ export default function Contracts() {
     filterKey, PAGE_SIZE,
   );
 
-  const filtersActive = !!(programme || lifecycle || type || q);
+  const filtersActive = !!(programme || lifecycle || type || q || waiting);
 
   // Surfaced above the table because it is the one thing on this screen that
   // blocks work: a contract that names a document nobody supplied cannot be
@@ -135,9 +148,11 @@ export default function Contracts() {
                 is watching a contract, so the way in is from the contracts you
                 hold rather than a tab of its own — and the same link, carrying
                 a contract id, is what the record's Signatures card opens. */}
-            <Link to="/contracts/signatures" className="btn">
-              <History size={14} /> Signature history
-            </Link>
+            {canAccessPath("/contracts/signatures") && (
+              <Link to="/contracts/signatures" className="btn">
+                <History size={14} /> Signature history
+              </Link>
+            )}
             <button type="button" className="btn" onClick={() => setUploading(true)}>
               <Upload size={14} /> Upload existing
             </button>
@@ -191,9 +206,24 @@ export default function Contracts() {
                   ...(Object.keys(STATE) as Lifecycle[]).map(k => ({
                     value: k, label: STATE[k].label }))],
               },
+              // Not a state, which is why it is its own filter: whose move it
+              // is is worked out per row from the lifecycle AND from who has
+              // already signed, so no entry in the list above can stand in
+              // for it. It is also the question this screen is most often
+              // opened with, and where both dashboard tiles land.
+              {
+                key: "waiting", ariaLabel: "Filter by whose move it is",
+                value: waiting ? "mine" : "",
+                onChange: v => setWaiting(v === "mine"),
+                options: [
+                  { value: "", label: "Anyone's move" },
+                  { value: "mine", label: "Waiting on me" },
+                ],
+              },
             ]}
             onClear={() => {
               setProgramme(""); setLifecycle(""); setType(""); setQ("");
+              setWaiting(false);
             }}
             active={filtersActive}
           />
@@ -255,7 +285,14 @@ export default function Contracts() {
             </table>
             {!loading && rows.length === 0 && (
               <div className="empty">
-                {filtersActive
+                {/* Arrived from a dashboard tile, which is clickable at zero on
+                    purpose. "No contracts match those filters" is true and
+                    answers a question nobody asked — the one being asked is
+                    "is anything waiting on me?". */}
+                {waiting && !programme && !lifecycle && !type && !q
+                  ? "Nothing is waiting on you. Every contract here is either "
+                    + "with the broker or already in force."
+                  : filtersActive
                   ? "No contracts match those filters."
                   : "No contracts yet. Upload a wording you already have, or raise "
                     + "one from its terms and let the wording follow."}

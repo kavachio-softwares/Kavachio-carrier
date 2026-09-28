@@ -23,9 +23,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Path
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
-from auth_deps import Principal, current_principal
+from auth_deps import Principal, current_principal, require_role
 from db import (
     AppUser, Contract, Program, ProgramBroker, SessionLocal, Tenant,
 )
@@ -92,6 +92,112 @@ def resolve_carrier(s, p: Principal, carrier_id: int) -> int:
     if p.tenant_id is None or int(p.tenant_id) != int(carrier_id):
         raise HTTPException(404, _NOT_FOUND)
     return int(carrier_id)
+
+
+# --- the two carrier seats --------------------------------------------------
+#
+# Everyone at a carrier holds the same `carrier_admin` DB role — the column
+# takes four values, and a fifth would ripple through every check in the
+# system. What separates the carrier ADMIN from a carrier USER is the
+# organisation's owner pointer, and nothing else.
+#
+# The consequence is easy to miss: `require_role("carrier_admin")` admits BOTH
+# seats. That is right for almost every route, and wrong for the few acts that
+# are the admin's alone — signing a contract, and approving a setup a carrier
+# user built. Those compose `require_carrier_admin` on top.
+#
+# app_routes._carrier_seat and _assert_is_carrier_admin are the same rule,
+# kept where their callers are; both delegate here so that who the carrier
+# admin is has ONE definition rather than three that can drift.
+
+def carrier_seat(s, p: Principal) -> str:
+    """Which carrier seat this is: "admin" (the organisation's owner), "user"
+    (everyone else there), or "both".
+
+    "both" covers Kavachio staff and an organisation with NO owner recorded —
+    a legacy tenant migration 18 could not name one for. Treating that as
+    "user" would lock every person in it out of their own company, so it opens
+    rather than closes.
+    """
+    if p.is_platform_admin:
+        return "both"
+    t = (s.query(Tenant).filter(Tenant.id == p.tenant_id).first()
+         if p.tenant_id else None)
+    if t is None or t.owner_user_id is None:
+        return "both"
+    return "admin" if t.owner_user_id == p.user_id else "user"
+
+
+def is_carrier_admin_seat(s, p: Principal) -> bool:
+    """True for the carrier admin, and for a seat the rule cannot pin down."""
+    return carrier_seat(s, p) in ("admin", "both")
+
+
+def require_carrier_admin(what: str = "do this"):
+    """Dependency factory for the acts that are the carrier ADMIN's alone.
+
+    Composed with require_role rather than replacing it: the role check is what
+    refuses a broker token, a platform-only seat and a signed-out caller, and
+    this adds the seat on top of it.
+
+    403, not 404. A carrier user is entitled to know the contract exists and is
+    simply not theirs to sign — "no such contract" would send them looking for
+    a bug. That is the opposite of the scope misses above, where a 404 is what
+    stops a caller enumerating another carrier's ids.
+    """
+    def _dep(p: Principal = Depends(require_role("carrier_admin"))) -> Principal:
+        with SessionLocal() as s:
+            if not is_carrier_admin_seat(s, p):
+                raise HTTPException(
+                    403, f"Only your organisation's carrier admin can {what}.")
+        return p
+    return _dep
+
+
+
+# --- a programme link that is still waiting -----------------------------------
+#
+# A carrier USER's programme→broker link is created `pending_approval` and is
+# released when the Bordereau Setup built on it is approved (migration 27).
+# While it waits it is REAL for the carrier — they are building the contract
+# and the setup on top of it — and does not exist for the broker, which is the
+# whole point of the gate.
+#
+# So the status check cannot be one condition for everybody. Every broker-side
+# reader keeps asking for `active` alone; the carrier's own scope chain asks
+# through here.
+
+LINK_LIVE = "active"
+LINK_PENDING = "pending_approval"
+
+
+def link_live(p: Principal | None = None):
+    """SQL condition for the programme links this caller may act through.
+
+    The carrier sees its own pending links; a broker seat, and any caller we
+    cannot identify, sees only live ones. Fails closed: an unknown caller gets
+    the narrower answer.
+    """
+    live = func.coalesce(ProgramBroker.status, LINK_LIVE) == LINK_LIVE
+    if p is not None and not p.is_broker:
+        return or_(live, ProgramBroker.status == LINK_PENDING)
+    return live
+
+
+def link_is_live(link, p: Principal | None = None) -> bool:
+    """The same rule as link_live(), for code holding the ROW rather than
+    building a query.
+
+    Both exist because both shapes are in use, and the rule has to be one
+    thing. A carrier raising a contract under a broker whose link is still
+    waiting for the carrier admin is doing exactly what the flow asks of them —
+    refusing it there stops the chain in the middle, one step after it was
+    started. A NULL status is a legacy row and has always meant live.
+    """
+    status = (getattr(link, "status", None) or LINK_LIVE)
+    if status == LINK_LIVE:
+        return True
+    return status == LINK_PENDING and p is not None and not p.is_broker
 
 
 # --- the resolved chain -----------------------------------------------------
@@ -165,7 +271,7 @@ def resolve_broker(s, p: Principal, carrier_id: int, program_id: int,
     link = (s.query(ProgramBroker)
               .filter(ProgramBroker.program_id == program_id,
                       ProgramBroker.broker_party_id == broker_party_id,
-                      func.coalesce(ProgramBroker.status, "active") == "active")
+                      link_live(p))
               .first())
     if link is None or (link.tenant_id is not None and link.tenant_id != carrier_id):
         raise HTTPException(404, _NOT_FOUND)

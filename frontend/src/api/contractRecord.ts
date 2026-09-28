@@ -92,6 +92,28 @@ export type ContractActions = {
    *  it — the review is the default road and this is the one for a contract
    *  with nothing to negotiate or nobody to ask. */
   skip_review: boolean;
+  /** Carrier ADMIN: send a colleague's contract back for a change. The third
+   *  answer beside sending the terms out and settling them — "not yet". Only
+   *  on a contract waiting on the carrier admin. */
+  send_back?: boolean;
+  /** Carrier: send an UPLOADED contract up to the carrier admin to be
+   *  accepted. It has no terms to negotiate and no broker to ask, so it does
+   *  not go out for review — it goes straight to the one person who can accept
+   *  it on the carrier's behalf. The admin pressing it accepts it outright. */
+  submit_for_approval?: boolean;
+  /** Carrier ADMIN: accept an uploaded contract, which puts it in force. There
+   *  is no signature to give on a document that was executed before it got
+   *  here, so acceptance is the whole of the act. */
+  accept_contract?: boolean;
+  /** This contract is on the CARRIER ADMIN's desk and nobody else's — either
+   *  an uploaded one waiting to be accepted, or one whose terms the broker has
+   *  agreed and which now needs the carrier's signature. Said plainly so the
+   *  screen does not have to read it out of a state name. */
+  awaiting_carrier_admin?: boolean;
+  /** …and whether the person reading this IS that admin. The screen needs
+   *  both: one says the contract is waiting on the carrier admin, the other
+   *  says whether to show the buttons or the sentence explaining the wait. */
+  carrier_admin_seat?: boolean;
   /** Broker: push back on the terms. */
   request_changes: boolean;
   /** Broker: agree them. Not the signature, and not going live. */
@@ -178,6 +200,11 @@ export type ContractRecord = {
   /** The authored contract, where there is one. Null on an upload — that is
    *  the fact, not an omission. */
   agreed_limits: AgreedLimits | null;
+  /** Was the wording brought in as a document rather than written here? The
+   *  server's answer, because the server acts on it — it offers an accept
+   *  button on exactly the contracts this calls uploaded, and the screen
+   *  working it out separately is how the two drift. */
+  is_uploaded?: boolean;
   /** Each section BOTH ways: `body` carries the tokens the editor turns into
    *  chips, `rendered` is the same sentence with today's values in it. Read
    *  `rendered`; edit `body`. Resolving a token is the server's job — it is
@@ -614,6 +641,11 @@ export type ContractFilters = {
   counterparty_id?: number;
   contract_type?: string;
   lifecycle?: string;
+  /** "mine" — only the contracts it is YOUR side's move on. Derived per row
+   *  from the lifecycle and from who has already signed, so no lifecycle
+   *  filter can stand in for it: a contract in `agreed` is one side's move or
+   *  the other's depending on whose signature is missing. */
+  waiting?: "mine";
   q?: string;
 };
 
@@ -685,6 +717,25 @@ export const sendForReview = (id: number, note?: string) =>
  *  happened, because one of them means the other side never got a say. */
 export const skipReview = (id: number, note?: string) =>
   api.post<ContractRecord>(`/contracts/${id}/skip-review`,
+                           { note: note ?? null }).then(r => r.data);
+
+/** Carrier admin: send a colleague's contract back to them. A reason is
+ *  required — the server refuses an empty one, because a contract returned
+ *  with nothing said about it leaves its author to come and ask. */
+export const sendBackContract = (id: number, note: string) =>
+  api.post<ContractRecord>(`/contracts/${id}/send-back`,
+                           { note }).then(r => r.data);
+
+/** Carrier: send an uploaded contract up to the carrier admin to be accepted.
+ *  A carrier ADMIN pressing this accepts it there and then — their own act is
+ *  the approval, exactly as it is on a bordereau setup. */
+export const submitForApproval = (id: number, note?: string) =>
+  api.post<ContractRecord>(`/contracts/${id}/submit-for-approval`,
+                           { note: note ?? null }).then(r => r.data);
+
+/** Carrier admin: accept an uploaded contract. It goes in force. */
+export const acceptContract = (id: number, note?: string) =>
+  api.post<ContractRecord>(`/contracts/${id}/accept`,
                            { note: note ?? null }).then(r => r.data);
 
 /** Broker: push back.

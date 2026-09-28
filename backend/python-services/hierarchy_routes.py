@@ -43,7 +43,9 @@ from db import (
     ProgramBroker, ContractApproval, Pipeline,
 )
 from auth_deps import current_principal, require_role, Principal, resolve_broker_party_id
-from carrier_scope import assert_can_invite_brokers
+from carrier_scope import (
+    LINK_PENDING, assert_can_invite_brokers, is_carrier_admin_seat,
+)
 from app_routes import (
     resolve_tenant_id, assert_tenant_owns, _iso_utc, PRODUCER_PARTY_TYPES,
     _carrier_seat, _my_broker_party_ids,
@@ -210,6 +212,18 @@ def programme_broker_add(program_id: int, body: BrokerAssignBody,
         _assert_programme(s, program_id, principal, tid)
         party = _assert_broker(s, body.broker_party_id, tid)
 
+        # PUTTING A BROKER ON A PROGRAMME IS THE ACT THAT LETS THEM PRODUCE, so
+        # a carrier USER's goes up for approval with the rest of the chain: the
+        # link waits at `pending_approval` and is released when the Bordereau
+        # Setup built on it is approved (direct_routes._activate_links_for).
+        # The carrier still sees and works through it — carrier_scope.link_live
+        # — the broker does not, which is the whole of the gate.
+        #
+        # The carrier admin's own goes live immediately, exactly as before:
+        # their act IS the approval.
+        status = ("active" if is_carrier_admin_seat(s, principal)
+                  else LINK_PENDING)
+
         existing = (
             s.query(ProgramBroker)
             .filter(ProgramBroker.program_id == program_id,
@@ -217,18 +231,19 @@ def programme_broker_add(program_id: int, body: BrokerAssignBody,
             .first()
         )
         if existing:
-            if existing.status == "active":
+            if existing.status in ("active", LINK_PENDING):
                 raise HTTPException(409, f"{party.legal_name} is already on this programme")
-            existing.status = "active"
+            existing.status = status
             existing.assigned_by_user_id = principal.user_id
             s.commit()
-            return {"ok": True, "reactivated": True, "link_id": existing.id}
+            return {"ok": True, "reactivated": True, "link_id": existing.id,
+                    "status": status}
 
         link = ProgramBroker(
             tenant_id=tid,
             program_id=program_id,
             broker_party_id=party.id,
-            status="active",
+            status=status,
             assigned_by_user_id=principal.user_id,
         )
         s.add(link)
@@ -238,7 +253,8 @@ def programme_broker_add(program_id: int, body: BrokerAssignBody,
         link_carrier_broker(s, tid, party.id, origin="programme",
                             by_user_id=principal.user_id)
         s.commit()
-        return {"ok": True, "reactivated": False, "link_id": link.id}
+        return {"ok": True, "reactivated": False, "link_id": link.id,
+                "status": status}
 
 
 @router.delete("/programs/{program_id}/brokers/{broker_party_id}")
@@ -541,7 +557,8 @@ def broker_create(body: NewBrokerBody,
         # relationship between that person and whichever carriers onboarded
         # them; the next carrier does not get to discover it by typing an
         # address into a form. Both branches end at the same response.
-        existing_user = s.query(AppUser).filter(AppUser.email == email).first()
+        existing_user = (s.query(AppUser)
+                         .filter(func.lower(AppUser.email) == email).first())
         existing_party = (s.get(Party, existing_user.broker_party_id)
                           if existing_user and existing_user.broker_party_id else None)
         is_existing_broker = bool(
@@ -965,10 +982,13 @@ def hierarchy(principal: Principal = Depends(current_principal)):
         pipelines = (
             s.query(Pipeline.program_id, Pipeline.broker_party_id, Pipeline.status)
             .filter(Pipeline.program_id.in_(prog_ids),
-                    Pipeline.status.in_(("active", "draft")))
+                    Pipeline.status.in_(("active", "pending_approval", "draft")))
             .all()
         )
-        setup_rank = {"active": 2, "draft": 1}
+        # How far a programme has got. `pending_approval` sits between the two
+        # it already knew about: further along than a draft nobody has finished,
+        # not as far as one the carrier admin has released.
+        setup_rank = {"active": 3, "pending_approval": 2, "draft": 1}
         setups: dict[tuple, str] = {}
         for prog_id, broker_id, status in pipelines:
             key = (prog_id, broker_id)

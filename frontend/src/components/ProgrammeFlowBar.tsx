@@ -8,7 +8,7 @@
 // programme's set-up and get no stepper.
 import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
+import { getHierarchy, onProgramme, type HierarchyProgramme } from "../api/hierarchy";
 import { FlowStepper, type FlowStep } from "./FlowStepper";
 
 const ENDED = new Set(["expired", "terminated", "superseded"]);
@@ -36,7 +36,7 @@ export function ProgrammeFlowBar({ programId, at, children }: {
   // is still shown on its own — the contract's steps must never go missing.
   if (!programId || !prog) return children ? <div className="mb-5">{children}</div> : null;
 
-  const brokers = prog.brokers.filter(b => b.link_status === "active");
+  const brokers = prog.brokers.filter(b => onProgramme(b.link_status));
   const withContract = brokers.filter(b => b.contracts.some(c => !ENDED.has(c.lifecycle ?? "")));
   const withSetup = withContract.filter(b => b.setup_status === "active");
   const brokersDone = brokers.length > 0;

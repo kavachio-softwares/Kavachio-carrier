@@ -49,6 +49,8 @@ import { Card } from "../components/ui/Card";
 import {
   addProgrammeBroker, getBrokers, getHierarchy,
   type BrokerSummary, type HierarchyBroker, type HierarchyProgramme,
+  onProgramme,
+  setupFinished,
 } from "../api/hierarchy";
 import { OnboardingBadge } from "../components/OnboardingBadge";
 import { InviteBrokerModal } from "../components/InviteBrokerModal";
@@ -199,7 +201,7 @@ export default function AddProgram() {
       if (p.bdx_frequency) setFrequency(p.bdx_frequency);
       setStatus(p.status ?? "active");
       setProgramId(p.id);
-      setAssigned(new Set(p.brokers.filter(b => b.link_status === "active").map(b => b.id)));
+      setAssigned(new Set(p.brokers.filter(b => onProgramme(b.link_status)).map(b => b.id)));
       const want = Number(search.get("stage"));
       setStage(want >= 1 && want <= 4 ? (want as 1 | 2 | 3 | 4) : 2);
     });
@@ -319,7 +321,7 @@ export default function AddProgram() {
   const setupDone = contractsDone && withSetup.length === withContract.length;
   // Where "Bordereau setup" leads from the step-3 button: the first broker with
   // a contract but no setup in use.
-  const setupBroker = withContract.find(b => onProg(b.id)?.setup_status !== "active") ?? withContract[0];
+  const setupBroker = withContract.find(b => !setupFinished(onProg(b.id)?.setup_status)) ?? withContract[0];
   const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
   const setupUrl = (brokerId: number) =>
     `/direct/setup?program_id=${programId}&broker_party_id=${brokerId}&flow=1`;
@@ -710,6 +712,8 @@ export default function AddProgram() {
                       <span className={`block text-xs ${setup === "active" ? "text-ok"
                         : hasContract ? "text-warn" : "text-ink-muted"}`}>
                         {setup === "active" ? "Setup in use — their files can be checked"
+                          : setup === "pending_approval"
+                            ? "Setup sent to your carrier admin — their files can be checked once it is approved"
                           : setup === "draft" ? "Setup started, not finished yet"
                           : hasContract ? "No setup yet, so their file can't be checked"
                           : "Needs a contract first"}

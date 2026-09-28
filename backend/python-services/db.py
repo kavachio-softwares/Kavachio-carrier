@@ -1585,9 +1585,23 @@ class Pipeline(Base):
     # broker level existed — those stay (carrier, program) setups and keep
     # running exactly as they did, so this is purely additive.
     broker_party_id = Column(Integer, index=True, nullable=True)     # FK -> party.party_id
-    # draft (never activated) | active (the one runs use) | superseded (replaced
-    # by a newer active pipeline for the same carrier+program).
+    # draft (never sent up) | pending_approval (a carrier USER built it and the
+    # carrier admin has not decided yet) | active (the one runs use) |
+    # superseded (replaced by a newer active pipeline for the same
+    # carrier+program+broker).
+    #
+    # `pending_approval` sits between draft and active and is invisible to
+    # everything that asks for `active` — which is nearly every reader, and in
+    # particular setup_scope._live, the one gate behind Process Bordereau, the
+    # broker's readiness check and the template lookup and download. That is
+    # what "nothing reaches the broker before the carrier admin approves"
+    # rests on. See migration 27.
     status = Column(String, default="draft")
+    # Who sent this setup up for approval, and when. NULL on a setup built
+    # before approvals existed, and on one a carrier ADMIN built — their own
+    # act is the approval, so it never goes up.
+    submitted_by_user_id = Column(Integer, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
     # pipeline.rule_scope — which of its contracts' rule sets this setup runs —
     # is deliberately NOT mapped here: a mapped column is selected by every
     # Pipeline query, and a database without migration 21 would fail them all.
@@ -1610,6 +1624,37 @@ class PipelineContract(Base):
     contract_id = Column(Integer, nullable=False)           # FK -> contract.contract_id
     sheet_key = Column(String, nullable=True)               # output sheet; NULL = fallback
     position = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SetupApproval(Base):
+    """Every decision ever made on a Bordereau Setup.
+
+    The pipeline row holds the CURRENT state; this holds how it got there. A
+    setup can be submitted, rejected, fixed and re-submitted, and "why was this
+    sent back in June?" has to stay answerable after the fact.
+
+    Its own table rather than a widening of ContractApproval, which is the same
+    kind of fact about a different thing: that table's `approval_contract_id`
+    is NOT NULL, and making it nullable to fit setups in would weaken the one
+    record that is certain what it is about.
+
+    Only a carrier USER's setup is ever recorded here. A setup the carrier
+    admin builds goes live directly — there is nobody left to ask — so it has
+    no submission and no decision, and its trail is the activation itself.
+    """
+    __tablename__ = "setup_approval"
+    id = Column("approval_id", Integer, primary_key=True)
+    tenant_id = Column(Integer, nullable=False, index=True)  # ops tenancy column
+    pipeline_id = Column(Integer, nullable=False, index=True)
+    # submitted | approved | rejected
+    action = Column(String, nullable=False)
+    acted_by_user_id = Column(Integer, nullable=False)
+    acted_at = Column(DateTime, default=datetime.utcnow)
+    # Why it was sent back. Required on a rejection by the route, not by the
+    # column: a setup returned with no reason is a setup the carrier user
+    # cannot act on.
+    note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -2071,6 +2116,11 @@ def init_db():
         # original template, and a setup with no scope runs its own template's
         # rules — so every existing rule and setup reads exactly as before.
         _ensure_column(conn, inspector, "pipeline", "rule_scope", json_type)
+        # Bordereau Setup approval (migration 27): who sent a setup up for the
+        # carrier admin's decision, and when. NULL on every setup built before
+        # this, which is exactly right — they were never sent up.
+        _ensure_column(conn, inspector, "pipeline", "submitted_by_user_id", "INTEGER")
+        _ensure_column(conn, inspector, "pipeline", "submitted_at", "TIMESTAMP")
         _ensure_column(conn, inspector, "validation_rule", "output_template_id", "INTEGER")
         # Generated-output metadata (plan section 22). template_version is the
         # one that matters: it keeps a historical download pinned to the layout

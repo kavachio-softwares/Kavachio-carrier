@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
-import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock } from "lucide-react";
+import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
 import { canAccessPath } from "../access";
@@ -9,7 +9,7 @@ import { canAccessPath } from "../access";
 import { getCalendar, type CalendarStatus } from "../api/calendar";
 import { getBrokersPaged, getHierarchy } from "../api/hierarchy";
 import { listContractsPaged } from "../api/contractRecord";
-import { useCarrierSeat } from "../hooks/useCarrierSeat";
+import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
 import { StatCard } from "../components/StatCard";
@@ -36,6 +36,14 @@ type Stats = {
   mapping_tasks_open?: number;                                   // kavachio_admin tile
   pending_signatures?: number;
   completed_signatures?: number;
+  /** Contracts it is the CARRIER's move on — a colleague's draft, a change the
+   *  broker asked for, and a signature due, together. A superset of
+   *  pending_signatures, which counts only the last of the three. */
+  contracts_waiting?: number;
+  /** Of those, the ones only the carrier admin can move: an uploaded contract
+   *  waiting to be accepted, or one whose terms the broker has agreed and
+   *  which now needs the carrier's signature. */
+  contracts_awaiting_admin?: number;
   avg_turnaround_min?: number | null;                           // tenant/operator tile
 };
 // A "run" = a generated output export (carries the validation result).
@@ -87,6 +95,11 @@ export default function Home() {
   const [progCount, setProgCount] = useState<number | null>(null);
   const [partyCount, setPartyCount] = useState<number | null>(null);
   const [contractCount, setContractCount] = useState<number | null>(null);
+  // Bordereau setups a colleague has sent up and this carrier admin has not
+  // decided on. The carrier admin's ONLY "waiting on me" — a setup sitting
+  // here is a broker who cannot send a file yet, so it belongs on the first
+  // screen they see rather than somewhere they have to think to look.
+  const [pendingSetups, setPendingSetups] = useState<number | null>(null);
   // Files no longer has a sidebar entry — the dashboard is its way in. A short
   // snapshot of the latest arrivals; the counts, filters and decisions all
   // stay on /files, so they are not repeated here.
@@ -127,6 +140,26 @@ export default function Home() {
       .then(r => setContractCount(r.total))
       .catch(() => setContractCount(null));
   }, [mga, carrierSeat]);
+
+  // Only the carrier admin can decide on these, so only they are asked to.
+  useEffect(() => {
+    if (!addsCarrierUsers(seat)) { setPendingSetups(null); return; }
+    api.get<{ total: number }>("/pipelines", {
+      params: { mga, status: "pending_approval", page: 1, page_size: 1 },
+    })
+      .then(r => setPendingSetups(r.data?.total ?? 0))
+      .catch(() => setPendingSetups(null));
+  }, [mga, seat]);
+
+  // Everything on this side's desk. `contracts_waiting` is the superset the
+  // server derives through _whose_turn; pending_signatures is the part of it
+  // that is a signature. Falls back to the signatures alone on an older server
+  // that does not send the wider figure, so the tile never reads blank.
+  const waitingTotal = stats?.contracts_waiting ?? stats?.pending_signatures ?? 0;
+  // The part of it nobody else at this carrier can do: sign a contract the
+  // broker has agreed, or accept an uploaded one. The server counts it, because
+  // the server is what decides it (contract_routes._carrier_admin_turn).
+  const adminOnly = Math.min(waitingTotal, stats?.contracts_awaiting_admin ?? 0);
 
   // /files is carrier-only (ROUTE_ACCESS), so only a carrier seat that can open
   // it gets the card — anyone else would be shown links that bounce them back.
@@ -281,14 +314,77 @@ export default function Home() {
             <StatCard title="Avg Turnaround Time" value={`${stats?.avg_turnaround_min == null ? "—" : stats.avg_turnaround_min}`} icon={Clock} trend="-8%" subtitle="Minutes per file" />
           )}
 
-          <StatCard 
-            title="Pending Signatures" 
-            value={fmt(stats?.pending_signatures)} 
-            icon={FileText} 
-            tone={stats?.pending_signatures ? "alert" : undefined} 
-            subtitle={`${stats?.completed_signatures ?? 0} Completed`} 
-            onClick={() => nav("/contracts")} 
-          />
+          {/* ONE box, not two — but the number on it has to be the one that
+              asks for something. It read `pending_signatures` before, which is
+              0 for a contract waiting to be REVIEWED, so the thing the carrier
+              admin had come to find showed as a zero they would not click.
+              The headline is now everything on their desk and the subtitle
+              splits it, which is also why the title is no longer only about
+              signatures: a box called Pending Signatures reading 1 for a
+              contract nobody can sign yet is a box that lies.
+
+              Carrier ADMIN only. Signing and approving are both theirs alone,
+              so for a carrier user this counts work they cannot do — they are
+              told through the notification bell instead, which is addressed to
+              them by name. */}
+          {addsCarrierUsers(seat) && (
+            <StatCard
+              title="Contract Review"
+              value={fmt(waitingTotal)}
+              icon={FileText}
+              tone={waitingTotal ? "alert" : undefined}
+              // Split by WHOSE MOVE, not by lifecycle: what the admin opening
+              // this wants to know is how much of it only they can clear. The
+              // subtitle used to subtract pending_signatures from the total,
+              // which counted a contract waiting to be ACCEPTED as one waiting
+              // to be reviewed — the two are the admin's alike, and neither is
+              // the author's.
+              subtitle={waitingTotal
+                ? `${adminOnly} needing you · `
+                  + `${Math.max(0, waitingTotal - adminOnly)} other`
+                : `${stats?.completed_signatures ?? 0} signed`}
+              onClick={() => nav("/contracts?waiting=mine")}
+              info={"Contracts it is your move on: terms the broker has agreed "
+                    + "and which need your signature, an uploaded contract to "
+                    + "accept, or one the broker has pushed back on. Only the "
+                    + "carrier admin signs and accepts, and the carrier signs "
+                    + "first."}
+            />
+          )}
+
+          {/* The OTHER thing that stops on the carrier admin's desk, and the
+              only one the contract tile beside it cannot count: a bordereau
+              setup a colleague finished and sent up. It was already being
+              fetched for this screen and then rendered nowhere, so the one
+              place the admin looks first said nothing about it and the setup
+              sat waiting until somebody happened to open Bordereau Setup.
+
+              Its own tile rather than a line inside "Contract Review": that one
+              counts CONTRACTS and opens the contracts list, and folding a
+              second kind of thing into its number would make the figure and
+              the screen it opens disagree.
+
+              Carrier ADMIN only, like the fetch that feeds it — approving a
+              setup is theirs alone, so for a carrier user this would count
+              work they cannot do. They are told through the bell instead. */}
+          {addsCarrierUsers(seat) && (
+            <StatCard
+              title="BDX Setup Review"
+              value={fmt(pendingSetups ?? 0)}
+              icon={ShieldCheck}
+              tone={pendingSetups ? "alert" : undefined}
+              subtitle={pendingSetups
+                ? `${pendingSetups === 1 ? "setup is" : "setups are"} waiting `
+                  + "on you"
+                : `${stats?.active_setups ?? 0} live`}
+              onClick={() => nav("/direct/setups?status=pending_approval")}
+              info={"Bordereau setups your carrier users have finished and sent "
+                    + "up. Nothing about one reaches the broker until you "
+                    + "approve it — not the programme, not the contract and "
+                    + "not the BDX template."}
+            />
+          )}
+
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>

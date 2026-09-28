@@ -293,15 +293,15 @@ export default function SignContract() {
                         text-[13px] font-medium text-ink hover:bg-surface-2 sm:inline-flex">
             <Download size={15} /> Download
           </a>
-          {!readOnly && (
-            <button onClick={finish} disabled={busy}
-              className="inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-[13px]
-                         font-semibold text-white disabled:opacity-60"
-              style={{ background: TEAL }}>
-              {busy ? <Loader2 className="animate-spin" size={15} /> : <PenLine size={15} />}
-              {outstanding.length ? `Finish — ${outstanding.length} left` : "Finish signing"}
-            </button>
-          )}
+          {/* NO "Finish signing" up here. There is exactly one place to sign,
+              and it is the one in the panel, directly under the sentence you
+              are agreeing to. Two buttons doing the same thing made the page
+              read as two different acts, and this one skipped the consent
+              checkbox entirely — it called finish() on its own, so the
+              signature could be given without ever ticking "I agree to sign
+              this contract electronically". The panel's button is disabled
+              until that box is ticked, which is the behaviour a signature
+              page has to have. */}
         </div>
       </header>
 

@@ -26,6 +26,7 @@ from auth_deps import Principal, current_principal
 from db import (
     CarrierBroker, link_carrier_broker,
     BrokerInvitation,
+    Pipeline, PipelineContract,
     SessionLocal, AppUser, Contract, Party, Program, ProgramBroker, Tenant,
 )
 
@@ -418,8 +419,23 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
                   .filter(Contract.program_id.in_(prog_ids),
                           Contract.broker_party_id == bid)
                   .order_by(Contract.id.desc()).all())
+
+        # Contracts belonging to a setup the carrier admin has not approved yet
+        # are not this broker's to see. `_links` above already hides a whole new
+        # chain, because the programme link waits with it — this covers the case
+        # it cannot: a broker ALREADY on the programme, for whom a colleague at
+        # the carrier has raised something new.
+        #
+        # Held back only while NOTHING live covers the contract. A contract that
+        # is also on an approved setup is one this broker is already working to,
+        # and a second setup being drafted over it — a new BDX template, say —
+        # must not take the first one off their list.
+        held = _contracts_awaiting_approval(s, prog_ids)
+
         out = []
         for c in rows:
+            if c.id in held:
+                continue
             cid = carrier_of.get(c.program_id)
             state = contract_routes._effective_lifecycle(c)
             out.append({
@@ -449,6 +465,27 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
                 "created_at": c.created_at.isoformat() if getattr(c, "created_at", None) else None,
             })
         return _page(out)
+
+
+
+def _contracts_awaiting_approval(s, prog_ids) -> set:
+    """Contract ids on a `pending_approval` setup and on no live one.
+
+    The carrier admin approves the chain as a whole — programme, broker,
+    contract, BDX template — so until they do, none of it is the broker's to
+    see. See direct_routes and migration 27.
+    """
+    if not prog_ids:
+        return set()
+
+    def _ids(status):
+        return {cid for (cid,) in
+                s.query(PipelineContract.contract_id)
+                 .join(Pipeline, Pipeline.id == PipelineContract.pipeline_id)
+                 .filter(Pipeline.program_id.in_(prog_ids),
+                         Pipeline.status == status).all()}
+
+    return _ids("pending_approval") - _ids("active")
 
 
 @router.get("/broker/dashboard")
