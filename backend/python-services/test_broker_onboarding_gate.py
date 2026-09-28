@@ -675,3 +675,105 @@ def test_an_invite_with_no_programme_still_says_so(w):
                if i["id"] == req.id)
     assert row["programme"] is None
 
+
+# =============================================================================
+#  The Programmes wizard cannot advance to Bordereau Setup on an unsigned
+#  contract — /hierarchy's per-contract `settled` flag, and the rule behind it
+# =============================================================================
+
+def test_settled_matches_the_real_pipeline_ready_gate(w):
+    """hierarchy_routes._contract_settled must agree with
+    direct_routes._pipeline_ready exactly — that is the whole point of reading
+    it off the server rather than re-deriving lifecycle logic in the browser.
+    """
+    import direct_routes as dr
+    from db import Contract, ContractSignature
+
+    with SessionLocal() as s:
+        made = []
+
+        def add(row):
+            s.add(row); s.commit(); made.append(row)
+            return row
+
+        draft = add(Contract(tenant_id=w["tid"], program_id=w["prog"],
+                             broker_party_id=w["broker"], name="c-draft",
+                             lifecycle="draft"))
+        agreed_unsigned = add(Contract(tenant_id=w["tid"], program_id=w["prog"],
+                                       broker_party_id=w["broker"],
+                                       name="c-agreed-unsigned", lifecycle="agreed"))
+        agreed_signed = add(Contract(tenant_id=w["tid"], program_id=w["prog"],
+                                     broker_party_id=w["broker"],
+                                     name="c-agreed-signed", lifecycle="agreed"))
+        import datetime as _dt
+        add(ContractSignature(tenant_id=w["tid"], contract_id=agreed_signed.id,
+                              side="carrier", signer_name="Carrier Admin",
+                              method="typed", by_user_id=w["admin_id"],
+                              signed_at=_dt.datetime.now(_dt.timezone.utc)))
+        s.commit()
+        signed_state = add(Contract(tenant_id=w["tid"], program_id=w["prog"],
+                                    broker_party_id=w["broker"], name="c-signed",
+                                    lifecycle="signed"))
+        active = add(Contract(tenant_id=w["tid"], program_id=w["prog"],
+                              broker_party_id=w["broker"], name="c-active",
+                              lifecycle="active"))
+        legacy_null = add(Contract(tenant_id=w["tid"], program_id=w["prog"],
+                                   broker_party_id=w["broker"], name="c-legacy",
+                                   lifecycle=None))
+        try:
+            from hierarchy_routes import _contract_settled
+            cases = {
+                draft.id: False, agreed_unsigned.id: False,
+                agreed_signed.id: True, signed_state.id: True,
+                active.id: True, legacy_null.id: True,
+            }
+            for cid, want in cases.items():
+                c = s.get(Contract, cid)
+                got = _contract_settled(s, c)
+                assert got == want, f"{c.name}: expected settled={want}, got {got}"
+
+            # And it has to be the SAME answer _pipeline_ready itself would give
+            # for a setup built on each — not merely an answer that looks right.
+            class _FakePC:
+                def __init__(self, cid): self.contract_id = cid
+            for cid, want in cases.items():
+                unsettled_names = dr._contracts_not_yet_settled(
+                    s, [_FakePC(cid)], w["tid"])
+                assert (len(unsettled_names) == 0) == want, s.get(Contract, cid).name
+        finally:
+            for row in reversed(made):
+                s.delete(s.get(type(row), row.id) or row)
+            s.commit()
+            for sig in (s.query(ContractSignature)
+                       .filter(ContractSignature.contract_id == agreed_signed.id)
+                       .all()):
+                s.delete(sig)
+            s.commit()
+
+
+def test_hierarchy_reports_settled_per_contract(w):
+    from db import Contract
+    with SessionLocal() as s:
+        c = Contract(tenant_id=w["tid"], program_id=w["prog"],
+                    broker_party_id=w["broker"], name="c-hier", lifecycle="agreed")
+        s.add(c); s.commit()
+        cid = c.id
+    try:
+        client.post(f"/programs/{w['prog']}/brokers",
+                    json={"broker_party_id": w["broker"]}, headers=w["admin_h"])
+        prog = next(p for p in client.get("/hierarchy", headers=w["admin_h"]).json()
+                    ["programmes"] if p["id"] == w["prog"])
+        broker_row = next(b for b in prog["brokers"] if b["id"] == w["broker"])
+        row = next(c for c in broker_row["contracts"] if c["id"] == cid)
+        assert row["lifecycle"] == "agreed"
+        assert row["settled"] is False
+    finally:
+        with SessionLocal() as s:
+            c = s.get(Contract, cid)
+            if c:
+                s.delete(c); s.commit()
+            for r in (s.query(ProgramBroker)
+                      .filter(ProgramBroker.program_id == w["prog"]).all()):
+                s.delete(r)
+            s.commit()
+

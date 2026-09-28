@@ -112,6 +112,9 @@ export default function ContractSignature() {
   const [signName, setSignName] = useState("");
   const [signTitle, setSignTitle] = useState("");
   const [signing, setSigning] = useState(false);
+  // Unpicked until somebody clicks: whoever can sign right now lands on the
+  // signing tab, everybody else starts at the document.
+  const [tab, setTab] = useState<"what" | "who" | "sign" | null>(null);
 
   // Which side THIS user signs for. Not a choice — a broker signs for the
   // counterparty and a carrier for itself, and the server enforces the same
@@ -366,6 +369,16 @@ export default function ContractSignature() {
   const unplaced = placerTargets
     .filter(t => t.required && !draftLayout?.blocks?.[t.key]).map(t => t.label);
 
+  const sigTabs = [
+    { key: "what", label: "What's being signed",
+      hint: "The contract, its dates, and anything attached to it" },
+    { key: "who", label: "Who needs to sign",
+      hint: "The people from each side whose signature is needed" },
+    { key: "sign", label: "Sign & track",
+      hint: "Sign it yourself, and see who has signed so far" },
+  ] as const;
+  const curTab = tab ?? (round?.can_sign ? "sign" : "what");
+
   return (
     <div className="proto">
       <div className="view full">
@@ -383,17 +396,27 @@ export default function ContractSignature() {
 
         {/* Says what is real before anything else, because the difference
             between "signed here" and "sent to a provider" is exactly the kind
-            of thing a screen like this is usually vague about. */}
-        <div className="note warn" style={{ marginBottom: 16 }}>
-          <b>
-            <AlertTriangle size={13} style={{ verticalAlign: "-2px" }} />{" "}
-            No signing provider is connected — signing happens on this page.
-          </b>{" "}
-          Nothing is emailed and no envelope goes anywhere. A signature here
-          records that a person who was logged in, was the right party and could
-          see this contract typed their name against it. Both sides signing is
-          what puts the contract in force, and it is the only thing that does.
-        </div>
+            of thing a screen like this is usually vague about.
+
+            The CARRIER's to read: they are the side that would connect a
+            provider and that sends a contract out, so the absence of one is
+            news to them. A broker is told the same thing in the words that
+            matter to them — "signing happens on this page" — by the Sign &
+            track panel they act in, and cannot do anything about the setup
+            either way. */}
+        {!isBrokerSeat() && (
+          <div className="note warn" style={{ marginBottom: 16 }}>
+            <b>
+              <AlertTriangle size={13} style={{ verticalAlign: "-2px" }} />{" "}
+              No signing provider is connected — signing happens on this page.
+            </b>{" "}
+            Nothing is emailed and no envelope goes anywhere. A signature here
+            records that a person who was logged in, was the right party and
+            could see this contract typed their name against it. Both sides
+            signing is what puts the contract in force, and it is the only
+            thing that does.
+          </div>
+        )}
 
         {saved && (
           <div className="note ok" style={{ marginBottom: 16 }}>{saved}</div>
@@ -407,8 +430,23 @@ export default function ContractSignature() {
           </div>
         )}
 
+        <div className="tabs">
+          {sigTabs.map(t => (
+            <button key={t.key} type="button"
+                    className={curTab === t.key ? "on" : ""}
+                    title={t.hint}
+                    onClick={() => setTab(t.key)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {curTab === "what" && (
         <div className="card" style={{ marginBottom: 18 }}>
-          <div className="card-h"><h3>What would be signed</h3></div>
+          <div className="card-h">
+            <h3>What's being signed</h3>
+            <span className="sub">the contract and everything that goes with it</span>
+          </div>
           <div style={{ padding: "16px 20px" }}>
             <div className="grid g-3">
               <div>
@@ -443,10 +481,12 @@ export default function ContractSignature() {
             </div>
           </div>
         </div>
+        )}
 
+        {curTab === "who" && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-h">
-            <h3>Who signs</h3>
+            <h3>Who needs to sign</h3>
             <span className="sub">
               {isBrokerSeat()
                 ? "named by the carrier — this is who the contract expects"
@@ -669,12 +709,13 @@ export default function ContractSignature() {
               <div className="hint" style={{ marginTop: 14 }}>
                 {isBrokerSeat()
                   ? "The carrier names who signs — it is part of the contract "
-                    + "they write. Your part is to sign it, below."
+                    + "they write. Your part is to sign it, on the Sign & track tab."
                   : "These can be changed while the contract is still a draft."}
               </div>
             )}
           </div>
         </div>
+        )}
 
         {/* ── the signatures themselves ──
             Real, and the only way a contract goes in force. What is NOT wired
@@ -682,9 +723,10 @@ export default function ContractSignature() {
             Someone signing here is a person who is logged in, is the right
             party, and typed their name against this contract — which is a
             smaller claim than a provider makes, and an honest one. */}
+        {curTab === "sign" && (
         <div className="card">
           <div className="card-h">
-            <h3>Signatures</h3>
+            <h3>Sign & track</h3>
             <span className="sub">
               {rec.unsigned_sides.length === 0
                 ? "both sides have signed"
@@ -777,9 +819,11 @@ export default function ContractSignature() {
                 return (
                   <div key={sd}>
                     <div className="sub" style={{ marginBottom: 8 }}>
-                      {sd === "carrier"
+                      {sd === myS
                         ? "Your side"
-                        : rec.counterparty?.name ?? "Counterparty"}
+                        : sd === "carrier"
+                          ? "The carrier"
+                          : rec.counterparty?.name ?? "Counterparty"}
                     </div>
 
                     {done.length === 0 ? (
@@ -892,6 +936,7 @@ export default function ContractSignature() {
             )}
           </div>
         </div>
+        )}
       </div>
 
       {/* ── where the blocks go ──

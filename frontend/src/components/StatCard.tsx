@@ -3,7 +3,7 @@ import { ChevronRight, type LucideIcon } from "lucide-react";
 import { InfoTip } from "./InfoTip";
 
 /** The dashboard KPI tile — one look across the carrier and broker dashboards. */
-export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onClick, footer, info }: {
+export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onClick, footer, info, split }: {
   title: string;
   value: string | number;
   icon: LucideIcon;
@@ -15,6 +15,15 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
   footer?: ReactNode;
   /** Explanation kept behind an "i" next to the title instead of on the tile. */
   info?: string;
+  /** TWO counts in one tile, each with its own label, instead of one headline
+   *  and a subtitle. For a tile whose single number answers only half the
+   *  question: Pending Signatures showed the signatures and pushed the
+   *  contracts still to be AGREED into grey subtitle text, where nobody read
+   *  them. Two jobs, two numbers, both the same size. `title` and `value` are
+   *  ignored while this is set — the labels below are the titles, and each
+   *  carries its own `hint` where a single `subtitle` would have to describe
+   *  both at once. */
+  split?: { label: string; value: string | number; hint?: string }[];
 }) {
   const alert = tone === "alert";
   return (
@@ -39,6 +48,37 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
       }}>
         <Icon size={18} strokeWidth={2.5} />
       </div>
+      {split ? (
+        <div>
+          <div style={{ display: "flex", alignItems: "stretch" }}>
+          {split.map((sp, i) => (
+            <div key={sp.label} style={{
+              flex: 1, minWidth: 0,
+              // A rule rather than a gap: two numbers this close together read
+              // as one figure and its footnote without something between them.
+              paddingLeft: i === 0 ? 0 : 16,
+              marginLeft: i === 0 ? 0 : 16,
+              borderLeft: i === 0 ? undefined : "1px solid var(--p-border-2)",
+            }}>
+              <div style={{ fontSize: 26, fontWeight: 700, color: "var(--p-text)",
+                            lineHeight: 1, marginBottom: 6 }}>
+                {sp.value}
+              </div>
+              <div style={{ color: "var(--p-text)", fontSize: 15, fontWeight: 500,
+                            display: "flex", alignItems: "center", gap: 5 }}>
+                {sp.label}{i === split.length - 1 && info && <InfoTip text={info} />}
+              </div>
+              {sp.hint && (
+                <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 2 }}>
+                  {sp.hint}
+                </div>
+              )}
+            </div>
+          ))}
+          </div>
+          {subtitle && <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 8 }}>{subtitle}</div>}
+        </div>
+      ) : (
       <div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
           <div style={{ fontSize: 26, fontWeight: 700, color: "var(--p-text)", lineHeight: 1 }}>
@@ -61,6 +101,7 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
         </div>
         {subtitle && <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 2 }}>{subtitle}</div>}
       </div>
+      )}
       {footer}
     </div>
   );

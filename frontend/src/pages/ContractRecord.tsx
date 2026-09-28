@@ -224,11 +224,13 @@ export default function ContractRecord() {
   // at a time, and the chips that tie its sentences to the terms above.
   const [wEditing, setWEditing] = useState(false);
   const [wSections, setWSections] = useState<WordingSection[]>([]);
-  // Collapsed by default — see the What was agreed, Clauses and Rules cards
-  // below.
-  const [agreedOpen, setAgreedOpen] = useState(false);
-  const [clausesOpen, setClausesOpen] = useState(false);
-  const [rulesOpen, setRulesOpen] = useState(false);
+  // Open by default: each now sits on its own tab, and a collapsed card behind
+  // a tab click is a second click for nothing.
+  const [agreedOpen, setAgreedOpen] = useState(true);
+  const [clausesOpen, setClausesOpen] = useState(true);
+  const [rulesOpen, setRulesOpen] = useState(true);
+  const [tab, setTab] = useState<
+    "summary" | "contract" | "agreed" | "clauses" | "wording">("summary");
   // Which heading is open for renaming. A heading is not part of the clause
   // text and must not be typed into by accident — it is the thing a reader
   // navigates by — so it is a label until it is asked to be an input.
@@ -780,6 +782,18 @@ export default function ContractRecord() {
     );
   }
 
+  const shownTabs = ([
+    { key: "summary", label: "Summary", show: true },
+    { key: "contract", label: "The contract", show: true },
+    { key: "agreed", label: "What was agreed",
+      show: !!rec.agreed_limits && Object.keys(rec.agreed_limits).length > 0 },
+    { key: "clauses", label: "Clauses",
+      show: !!clauses?.length || !!clauseRules.length },
+    { key: "wording", label: "The wording",
+      show: authored || wEditing || canWriteWording },
+  ] as const).filter(t => t.show);
+  const curTab = shownTabs.some(t => t.key === tab) ? tab : "summary";
+
   return (
     <div className="proto">
       <div className="view full">
@@ -829,89 +843,6 @@ export default function ContractRecord() {
           <div className="note warn" style={{ marginBottom: 14, maxWidth: 700 }}>{handoff}</div>
         )}
 
-        {/* ── the signatures ──
-            Shown wherever a contract is close to going live or already has,
-            because "why is this not live yet" and "who signed this" are the
-            two questions this page gets asked most once the terms are settled.
-            Read-only here: signing itself is done on the signature screen,
-            where the contract can be read first.
-
-            Hidden for uploaded contracts — they were imported as a document,
-            not created through a negotiation, so there is nothing to sign. */}
-        {!isUploaded && (rec.signatures.length > 0
-          || ["agreed", "signed"].includes(rec.lifecycle)) && (
-          <div className="card" style={{ marginBottom: 14 }}>
-            <div className="card-h">
-              <PenLine size={16} className="ci" />
-              <h3>Signatures</h3>
-              <span className="sub">
-                {rec.unsigned_sides.length === 0
-                  ? "both sides have signed"
-                  : `waiting on ${rec.unsigned_sides
-                      .map(u => u === "carrier"
-                        ? "the carrier"
-                        : rec.counterparty?.name ?? "the counterparty")
-                      .join(" and ")}`}
-              </span>
-              <span className="right">
-                {/* Who signed and when is on this card; WHAT HAPPENED — sent,
-                    opened, reminded, withdrawn — is the round's own trail, and
-                    this is the only way into it now that Signatures is not a
-                    sidebar tab. Filtered to this contract. */}
-                {canSignHere && (
-                  <>
-                    <Link className="btn sm" to={`/contracts/signatures?contract=${id}`}>
-                      <History size={12} /> Signature history
-                    </Link>
-                    <Link className="btn sm" to={`/contracts/${id}/signature`}>
-                      <ArrowRight size={12} /> Signature page
-                    </Link>
-                  </>
-                )}
-              </span>
-            </div>
-            <div style={{ padding: "14px 20px" }}>
-              <div className="grid g-2">
-                {(["carrier", "counterparty"] as const).map(sd => {
-                  const done = rec.signatures.filter(g => g.side === sd);
-                  return (
-                    <div key={sd}>
-                      <div className="sub" style={{ marginBottom: 6 }}>
-                        {sd === "carrier"
-                          ? "The carrier"
-                          : rec.counterparty?.name ?? "Counterparty"}
-                      </div>
-                      {done.length === 0 ? (
-                        <span className="badge b-mut">
-                          <span className="d" /> Not signed
-                        </span>
-                      ) : done.map(g => (
-                        <div key={g.id} style={{ marginBottom: 6 }}>
-                          <b style={{ fontSize: 13 }}>{g.signer_name}</b>
-                          <div className="sub">
-                            {[g.signer_title,
-                              g.signed_at && fmtDate(g.signed_at),
-                              g.method === "typed"
-                                ? "signed in Kavachio"
-                                : "signed elsewhere, recorded here"]
-                              .filter(Boolean).join(" · ")}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  );
-                })}
-              </div>
-              {rec.unsigned_sides.length > 0 && (
-                <div className="hint" style={{ marginTop: 10 }}>
-                  A contract goes in force when both sides have signed it — the
-                  second signature normally does it on its own.
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
         {/* ── whose move it is ──
             A negotiation that does not say whose turn it is becomes two people
             each assuming the other is looking at it. */}
@@ -959,6 +890,108 @@ export default function ContractRecord() {
                 {busy === "rules" ? "Reading…" : "Re-read now"}
               </button>
             )}
+          </div>
+        )}
+
+        {/* ── two columns from here down ──
+            LEFT is the contract, one tab at a time: where it stands, what it
+            is, what was agreed, what it says, and the words it says it in.
+            RIGHT is the paper trail about it — the files attached and how it
+            got here — and stays put whichever tab is open. */}
+        <div className="rec-split">
+          <div className="rec-main">
+
+        <div className="tabs">
+          {shownTabs.map(t => (
+            <button key={t.key} type="button"
+                    className={curTab === t.key ? "on" : ""}
+                    onClick={() => setTab(t.key)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {curTab === "summary" && (<>
+        {/* ── the signatures ──
+            Shown wherever a contract is close to going live or already has,
+            because "why is this not live yet" and "who signed this" are the
+            two questions this page gets asked most once the terms are settled.
+            Read-only here: signing itself is done on the signature screen,
+            where the contract can be read first.
+
+            Hidden for uploaded contracts — they were imported as a document,
+            not created through a negotiation, so there is nothing to sign. */}
+        {!isUploaded && (rec.signatures.length > 0
+          || ["agreed", "signed"].includes(rec.lifecycle)) && (
+          <div className="card" style={{ marginBottom: 14 }}>
+            <div className="card-h">
+              <PenLine size={16} className="ci" />
+              <h3>Signatures</h3>
+              <span className="sub">
+                {rec.unsigned_sides.length === 0
+                  ? "both sides have signed"
+                  : `waiting on ${rec.unsigned_sides
+                      .map(u => u === "carrier"
+                        ? "the carrier"
+                        : rec.counterparty?.name ?? "the counterparty")
+                      .join(" and ")}`}
+              </span>
+              <span className="right">
+                {/* Who signed and when is on this card; WHAT HAPPENED — sent,
+                    opened, reminded, withdrawn — is the round's own trail, and
+                    this is the only way into it now that Signatures is not a
+                    sidebar tab. Filtered to this contract. */}
+                {canSignHere && (
+                  <>
+                    <Link className="btn sm" to={`/contracts/signatures?contract=${id}`}>
+                      <History size={12} /> Signature history
+                    </Link>
+                    <Link className="btn sm" to={`/contracts/${id}/signature`}>
+                      <ArrowRight size={12} /> Signature Detail
+                    </Link>
+                  </>
+                )}
+              </span>
+            </div>
+            <div style={{ padding: "14px 20px" }}>
+              <div className="grid g-2">
+                {(["carrier", "counterparty"] as const).map(sd => {
+                  const done = rec.signatures.filter(g => g.side === sd);
+                  return (
+                    <div key={sd}>
+                      <div className="sub" style={{ marginBottom: 6 }}>
+                        {sd === "carrier"
+                          ? "The carrier"
+                          : rec.counterparty?.name ?? "Counterparty"}
+                      </div>
+                      {done.length === 0 ? (
+                        <span className="badge b-mut">
+                          <span className="d" /> Not signed
+                        </span>
+                      ) : done.map(g => (
+                        <div key={g.id} style={{ marginBottom: 6 }}>
+                          <b style={{ fontSize: 13 }}>{g.signer_name}</b>
+                          <div className="sub">
+                            {[g.signer_title,
+                              g.signed_at && fmtDate(g.signed_at),
+                              g.method === "typed"
+                                ? "signed in Kavachio"
+                                : "signed elsewhere, recorded here"]
+                              .filter(Boolean).join(" · ")}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+              {rec.unsigned_sides.length > 0 && (
+                <div className="hint" style={{ marginTop: 10 }}>
+                  A contract goes in force when both sides have signed it — the
+                  second signature normally does it on its own.
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1195,6 +1228,27 @@ export default function ContractRecord() {
                 has not been shown any of it. */}
             {a.awaiting_carrier_admin && (
               <div className="note warn" style={{ marginTop: 14 }}>
+                {/* WHO IS READING THIS. `awaiting_carrier_admin` is a fact
+                    about the CONTRACT — _carrier_admin_turn reads its state
+                    and nothing else — so it is true for the broker looking at
+                    the same row. Everything below it was written for someone
+                    inside the carrier, which left a broker reading about
+                    "your carrier admin" (not theirs, and a different company)
+                    and about building a bordereau setup, which no broker
+                    does. The broker gets the same fact said from their side
+                    of the table. */}
+                {isBrokerSeat() ? (
+                  <>
+                    <b>Now with the carrier to approve and sign.</b>{" "}
+                    {rec.lifecycle === "agreed" || rec.lifecycle === "signed"
+                      ? "You have agreed the terms, so nothing is waiting on "
+                        + "you. The carrier approves and signs for their "
+                        + "organisation first — once they have, it comes back "
+                        + "to you to sign and return."
+                      : "It is with the carrier's own people at the moment. "
+                        + "You will see it again when they send it to you."}
+                  </>
+                ) : (<>
                 <b>
                   {a.carrier_admin_seat
                     ? "This one is waiting on you."
@@ -1232,6 +1286,7 @@ export default function ContractRecord() {
                         + "signs for the company, so it sits with them now. "
                         + "Once they have, you can build the bordereau setup "
                         + "on it.")}
+                </>)}
               </div>
             )}
 
@@ -1722,15 +1777,9 @@ export default function ContractRecord() {
           </div>
         </div>
 
-        {/* ── two columns from here down ──
-            LEFT is the contract itself: what it is, what was agreed, what it
-            says, and the words it says it in. RIGHT is the paper trail about
-            it — the files attached and how it got here. They were stacked, so
-            reaching the history meant scrolling past the whole wording, and
-            the wording is the longest thing on the page. */}
-        <div className="rec-split">
-          <div className="rec-main">
+        </>)}
 
+        {curTab === "contract" && (<>
         {/* ── the record ── */}
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-h">
@@ -2077,12 +2126,14 @@ export default function ContractRecord() {
           </div>
         </div>
 
+        </>)}
+
+        {curTab === "agreed" && (<>
         {/* ── what was agreed ──
             The same 26 terms the create flow asked for, in the same three
             groups and the same words, each showing what happens when a file
             breaks it. Without this the record showed a contract's identity and
             none of its substance. */}
-        {/* Collapsed by default, same reasoning as Clauses and Rules below. */}
         {rec.agreed_limits && Object.keys(rec.agreed_limits).length > 0 && (
           <div className="card" style={{ marginBottom: 18 }}>
             <button type="button" className="card-h" style={{ width: "100%",
@@ -2153,14 +2204,13 @@ export default function ContractRecord() {
           </div>
         )}
 
+        </>)}
+
+        {curTab === "clauses" && (<>
         {/* ── what it says ──
             The clauses of this contract. For one written here they are its
             wording with the terms resolved — a clause row is READ, so it holds
-            words rather than the tokens the wording keeps.
-
-            Collapsed by default: the header already says how many clauses
-            there are, which is the answer most visits are after, and the
-            table can run long. */}
+            words rather than the tokens the wording keeps. */}
         {!!clauses?.length && (
           <div className="card" style={{ marginBottom: 18 }}>
             <button type="button" className="card-h" style={{ width: "100%",
@@ -2210,7 +2260,6 @@ export default function ContractRecord() {
             and read as "nothing checks this", which was false. Shown only when
             rules exist: until BDX setup binds the terms to a template there are
             none, and an empty table says nothing worth the space. */}
-        {/* Collapsed by default, same reasoning as Clauses above. */}
         {!!clauseRules.length && (
           <div className="card" style={{ marginBottom: 18 }}>
             <button type="button" className="card-h" style={{ width: "100%",
@@ -2275,6 +2324,9 @@ export default function ContractRecord() {
           </div>
         )}
 
+        </>)}
+
+        {curTab === "wording" && (<>
         {/* ── the wording it was written from ──
             Read as a document by default; editable in place while the contract
             is still a draft, because the wording IS the contract and a draft
@@ -2527,6 +2579,8 @@ export default function ContractRecord() {
             )}
           </div>
         )}
+
+        </>)}
 
         {/* ── reading one in the page ──
             A PDF renders inline. A .docx cannot — no browser renders one — so

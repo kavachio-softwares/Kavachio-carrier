@@ -67,6 +67,7 @@ export type BrokerDashboard = {
     signatures_completed: number;
     /** Contracts whose terms this broker still has to agree (before signing). */
     terms_to_agree: number;
+    terms_agreed: number;
   };
   /** There is no "waiting on the carrier" queue any more: the carrier's
    *  approval gate, and the broker-side upload that fed it, are both gone. A

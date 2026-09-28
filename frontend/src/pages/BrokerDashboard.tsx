@@ -153,11 +153,24 @@ export default function BrokerDashboard() {
                     subtitle={`${c.programmes} ${c.programmes === 1 ? "programme" : "programmes"}`} />
           <StatCard title="Active Contracts" value={c.live_contracts} icon={FileCheck2}
                     subtitle="In force" />
+          {/* Two numbers, not one. A contract waiting to be AGREED and one
+              waiting to be SIGNED are different jobs, and the second used to
+              sit in grey subtitle text as "· 1 to agree" — which read as a
+              footnote to the zero above it, so nobody saw there was anything
+              to do. Both counts open the same drawer, which lists both. */}
           <StatCard title="Pending Signatures" value={c.signatures_pending} icon={PenLine}
+                    split={[
+                      // Contracts first: agreeing the terms comes BEFORE
+                      // signing them, so the pair reads left to right in the
+                      // order the work actually happens.
+                      { label: "Pending Contract", value: c.terms_to_agree,
+                        hint: `${c.terms_agreed} agreed` },
+                      { label: "Pending Signatures", value: c.signatures_pending,
+                        hint: `${c.signatures_completed} completed` },
+                    ]}
+                    info="Contracts waiting on you: ones where the terms still have to be agreed, and ones already agreed that are waiting for your signature."
                     tone={c.waiting_on_me > 0 ? "alert" : undefined}
-                    onClick={c.waiting_on_me > 0 ? () => setWaitingOpen(true) : undefined}
-                    subtitle={`${c.signatures_completed} completed`
-                      + (c.terms_to_agree ? ` · ${c.terms_to_agree} to agree` : "")} />
+                    onClick={c.waiting_on_me > 0 ? () => setWaitingOpen(true) : undefined} />
           <StatCard title="Exceptions to Review" value={c.agency_exceptions} icon={AlertCircle}
                     tone={c.agency_exceptions > 0 ? "alert" : undefined}
                     subtitle="Across your team" />
@@ -233,7 +246,57 @@ export default function BrokerDashboard() {
   );
 }
 
-/** The contracts behind the Pending Signatures tile, with the step to take. */
+/** One group of contracts waiting on the broker, under its own heading.
+ *
+ *  The two are DIFFERENT JOBS and the drawer says so: agreeing terms is
+ *  reading and negotiating, signing is executing something already settled.
+ *  A single undivided list made them look like one queue, so somebody working
+ *  down it met the two in whatever order the ids fell. */
+function WaitingGroup({ heading, note, items, action }: {
+  heading: string; note: string;
+  items: Dash["waiting_on_me"]; action: "agree" | "sign";
+}) {
+  if (items.length === 0) return null;
+  return (
+    <>
+      <div style={{ padding: "0 20px" }}>
+        <div className="sub-h">{heading} · {items.length}</div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>{note}</div>
+      </div>
+      <div className="tbl-wrap">
+        <table>
+          <tbody>
+            {items.map(w => (
+              <tr key={w.id}>
+                <td>
+                  <Link to={`/contracts/${w.id}`}><b>{w.name}</b></Link>
+                  <div className="muted" style={{ fontSize: 12 }}>{w.carrier} · {w.programme}</div>
+                </td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  {/* The carrier has already signed by the time it waits
+                      on the broker's signature, so go straight to signing. */}
+                  {action === "sign" ? (
+                    <a className="btn sm pri" href={inAppSigningUrl(w.id)}
+                       target="_blank" rel="noreferrer">Sign →</a>
+                  ) : (
+                    <Link className="btn sm pri" to={`/contracts/${w.id}`}>Agree terms →</Link>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+/** The contracts behind the tile, split the same way the tile is.
+ *
+ *  Named for what it holds rather than for one of the two things in it: it was
+ *  called "Pending Signatures", which is the heading of only its second half,
+ *  so a contract waiting to be AGREED sat under a title that did not describe
+ *  it. */
 function WaitingDrawer({ open, items, onClose }: {
   open: boolean; items: Dash["waiting_on_me"]; onClose: () => void;
 }) {
@@ -243,42 +306,37 @@ function WaitingDrawer({ open, items, onClose }: {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+  // The SAME cut the tile makes (broker_routes: terms_to_agree counts
+  // in_review), so the two halves of the tile and the two sections here can
+  // never disagree. A contract waiting on the broker is only ever in_review,
+  // agreed or signed — see contract_types.WITH_BROKER — so these two groups
+  // between them hold every row.
+  const toAgree = items.filter(w => w.lifecycle === "in_review");
+  const toSign = items.filter(w => w.lifecycle !== "in_review");
   return (
     <>
       <div className={`scrim${open ? " on" : ""}`} onClick={onClose} />
       <aside className={`drawer${open ? " on" : ""}`} aria-hidden={!open}>
         <div className="drawer-h">
           <div>
-            <h4>Pending Signatures</h4>
-            <div className="ref">Contracts waiting on you</div>
+            <h4>Contracts Waiting on You</h4>
+            <div className="ref">
+              {[toAgree.length && `${toAgree.length} to agree`,
+                toSign.length && `${toSign.length} to sign`]
+                .filter(Boolean).join(" · ") || "nothing outstanding"}
+            </div>
           </div>
           <button type="button" className="closeb" aria-label="Close" onClick={onClose}>×</button>
         </div>
-        <div className="drawer-b" style={{ padding: 0 }}>
-          <div className="tbl-wrap">
-            <table>
-              <tbody>
-                {items.map(w => (
-                  <tr key={w.id}>
-                    <td>
-                      <Link to={`/contracts/${w.id}`}><b>{w.name}</b></Link>
-                      <div className="muted" style={{ fontSize: 12 }}>{w.carrier} · {w.programme}</div>
-                    </td>
-                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                      {/* The carrier has already signed by the time it waits
-                          on the broker's signature, so go straight to signing. */}
-                      {(w.lifecycle === "agreed" || w.lifecycle === "signed") ? (
-                        <a className="btn sm pri" href={inAppSigningUrl(w.id)}
-                           target="_blank" rel="noreferrer">Sign →</a>
-                      ) : (
-                        <Link className="btn sm pri" to={`/contracts/${w.id}`}>Agree terms →</Link>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        <div className="drawer-b" style={{ padding: "0 0 18px" }}>
+          <WaitingGroup heading="Pending Contract" items={toAgree} action="agree"
+                        note="Terms to read and agree, or ask for changes." />
+          {/* The rule between them, drawn only when both are there. */}
+          {toAgree.length > 0 && toSign.length > 0 && (
+            <div style={{ borderTop: "1px solid var(--p-border)", margin: "18px 0 0" }} />
+          )}
+          <WaitingGroup heading="Pending Signatures" items={toSign} action="sign"
+                        note="Terms already settled — these need your signature." />
         </div>
       </aside>
     </>

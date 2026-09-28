@@ -13,6 +13,13 @@ export type HierarchyContract = {
   status: string | null;
   /** The business state (draft … active). `status` is what extraction did. */
   lifecycle?: string | null;
+  /** Finished enough to build a bordereau setup on — the SAME rule the setup
+   *  activation gate enforces (direct_routes._pipeline_ready), not merely
+   *  "lifecycle is active". A contract the carrier has signed but the broker
+   *  has not yet countersigned answers true here while its lifecycle still
+   *  reads "agreed" — the broker's signature is not waited for. Absent on an
+   *  older server; treat missing as unknown, not as settled. */
+  settled?: boolean;
 };
 
 export type HierarchyBroker = {

@@ -90,7 +90,6 @@ function Step({ n, children }: { n: number; children: ReactNode }) {
 const ENDED = new Set(["expired", "terminated", "superseded"]);
 const openContracts = (b?: HierarchyBroker) =>
   (b?.contracts ?? []).filter(c => !ENDED.has(c.lifecycle ?? ""));
-const isLive = (lifecycle?: string | null) => lifecycle == null || lifecycle === "active";
 
 export default function AddProgram() {
   const mga = currentMga();
@@ -397,7 +396,23 @@ export default function AddProgram() {
   const onProg = (id: number) => prog?.brokers.find(b => b.id === id);
   const contractsOf = (id: number) =>
     Math.max(openContracts(onProg(id)).length, uploaded[id] ?? 0);
-  const withContract = assignedBrokers.filter(b => contractsOf(b.id) > 0);
+  // HAS A CONTRACT vs HAS ONE READY TO BUILD ON — two different questions.
+  // `contractsOf` (above) answers the first and stays as it was, for the plain
+  // count in the per-broker line. `withContract` used to be built from it,
+  // which meant a contract sitting at `draft` or `agreed` — created, but
+  // signed by nobody — counted the same as one in force: "Next: Bordereau
+  // setup" lit up, and Bordereau Setup then had nothing to check the file
+  // against and would refuse to activate anyway.
+  //
+  // `settled` is read off the server (hierarchy_routes._contract_settled), the
+  // SAME rule the setup activation gate itself enforces — not "lifecycle is
+  // active": a contract the carrier has signed answers true while it still
+  // reads `agreed`, because the broker's countersignature is not waited for
+  // (see [[carrier-admin-one-gate]]). Re-deriving that here would drift the
+  // moment the real rule changes; reading the server's own answer cannot.
+  const hasSettledContract = (id: number) =>
+    (onProg(id)?.contracts ?? []).some(c => c.settled);
+  const withContract = assignedBrokers.filter(b => hasSettledContract(b.id));
   const withSetup = withContract.filter(b => onProg(b.id)?.setup_status === "active");
   const contractsDone = assignedBrokers.length > 0 && withContract.length === assignedBrokers.length;
   const setupDone = contractsDone && withSetup.length === withContract.length;
@@ -437,10 +452,15 @@ export default function AddProgram() {
       key: "setup", label: "Bordereau setup",
       sub: setupDone ? "Every broker's setup is in use"
         : withContract.length > 0 ? `${withSetup.length} of ${withContract.length} setups ready`
+        : contractsDone === false && assignedBrokers.some(b => contractsOf(b.id) > 0)
+          ? "Waiting on a signature"
         : "After a contract is added",
       state: setupDone ? "done" : "todo",
       enabled: locked && withContract.length > 0,
-      title: withContract.length > 0 ? undefined : "Add a contract first — a setup is built from it",
+      title: withContract.length > 0 ? undefined
+        : assignedBrokers.some(b => contractsOf(b.id) > 0)
+          ? "A setup is built from a SIGNED contract — sign one first"
+          : "Add a contract first — a setup is built from it",
       onClick: () => setStage(4),
     },
   ];
@@ -738,19 +758,29 @@ export default function AddProgram() {
               <div className="space-y-1.5">
                 {assignedBrokers.map(b => {
                   const n = contractsOf(b.id);
-                  // The one to open: in force if there is one, else in progress.
+                  // The one to open: a SETTLED one if there is one, else in
+                  // progress. Preferring `settled` over `isLive` here too —
+                  // otherwise a contract the carrier has signed (settled, but
+                  // still reading `agreed`) showed the same amber "not signed
+                  // yet" as one nobody has signed, directly contradicting a
+                  // "Next: Bordereau setup" that is, correctly, now enabled.
                   const mine = openContracts(onProg(b.id));
-                  const shown = mine.find(c => isLive(c.lifecycle)) ?? mine[0];
-                  const live = !!shown && isLive(shown.lifecycle);
+                  const shown = mine.find(c => c.settled) ?? mine[0];
+                  const ready = !!shown?.settled;
+                  const live = ready && (shown!.lifecycle == null || shown!.lifecycle === "active");
                   return (
                     <div key={b.id}
                       className="flex flex-wrap items-center gap-3 rounded border border-border px-3 py-2.5">
                       <span className="min-w-0 flex-1">
                         <span className="block text-sm font-medium">{b.legal_name}</span>
-                        <span className={`block text-xs ${!n ? "text-ink-muted" : live || !shown ? "text-ok" : "text-warn"}`}>
+                        <span className={`block text-xs ${!n ? "text-ink-muted" : ready || !shown ? "text-ok" : "text-warn"}`}>
                           {!n ? "No contract on this programme yet"
                             : !shown ? `${plural(n, "contract")} uploaded`
                             : live ? `${plural(n, "contract")} · in force`
+                            // Settled but not yet fully executed — the carrier
+                            // has signed, the broker has not, and a bordereau
+                            // setup can be built on it regardless.
+                            : ready ? `${plural(n, "contract")} · you have signed`
                             : `${plural(n, "contract")} · not signed yet (${(shown.lifecycle ?? "").replace(/_/g, " ")})`}
                         </span>
                       </span>
@@ -786,13 +816,23 @@ export default function AddProgram() {
                     onClick={() => nav(`/programs/${programId}/brokers`)}>
                     Go to programme →
                   </button>
-                  {setupBroker && (
-                    <button type="button"
-                      className="rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark"
-                      onClick={() => setStage(4)}>
-                      Next: Bordereau setup →
-                    </button>
-                  )}
+                  {/* Always shown, disabled rather than hidden — a button
+                      that vanishes reads as "not available yet", not as "do
+                      something first", and offers no way to find out what.
+                      Disabled until at least one broker has a SETTLED
+                      contract: Bordereau Setup is built against a contract's
+                      terms, and one nobody has signed has none yet to check a
+                      file against — proceeding just meant discovering the
+                      refusal one screen later, on activation. */}
+                  <button type="button"
+                    className="rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-navy"
+                    disabled={!setupBroker}
+                    title={setupBroker ? undefined
+                      : "A bordereau setup is built from a contract's terms — "
+                        + "sign at least one contract on this programme first."}
+                    onClick={() => setupBroker && setStage(4)}>
+                    Next: Bordereau setup →
+                  </button>
                 </div>
               </div>
             </Card>
@@ -807,7 +847,12 @@ export default function AddProgram() {
             </p>
             <div className="space-y-1.5">
               {assignedBrokers.map(b => {
+                // SETTLED, not merely present — the same distinction as step
+                // 3. Offering "Bordereau Setup" for a contract nobody has
+                // signed just moved the refusal one screen later, onto the
+                // setup builder's own activation.
                 const hasContract = contractsOf(b.id) > 0;
+                const settled = hasSettledContract(b.id);
                 const setup = onProg(b.id)?.setup_status ?? null;
                 return (
                   <div key={b.id}
@@ -815,12 +860,13 @@ export default function AddProgram() {
                     <span className="min-w-0 flex-1">
                       <span className="block text-sm font-medium">{b.legal_name}</span>
                       <span className={`block text-xs ${setup === "active" ? "text-ok"
-                        : hasContract ? "text-warn" : "text-ink-muted"}`}>
+                        : settled ? "text-warn" : "text-ink-muted"}`}>
                         {setup === "active" ? "Setup in use — their files can be checked"
                           : setup === "pending_approval"
                             ? "Setup sent to your carrier admin — their files can be checked once it is approved"
                           : setup === "draft" ? "Setup started, not finished yet"
-                          : hasContract ? "No setup yet, so their file can't be checked"
+                          : settled ? "No setup yet, so their file can't be checked"
+                          : hasContract ? "Their contract is not signed yet"
                           : "Needs a contract first"}
                       </span>
                     </span>
@@ -830,7 +876,7 @@ export default function AddProgram() {
                           className="inline-flex items-center rounded border border-border px-3 py-1.5 text-xs font-medium text-ink hover:bg-surface-2 hover:no-underline">
                           View setup
                         </Link>
-                      ) : hasContract ? (
+                      ) : settled ? (
                         <button type="button" onClick={() => nav(setupUrl(b.id))}
                           className="inline-flex items-center rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark">
                           {setup === "draft" ? "Finish the setup" : "Bordereau Setup"}
@@ -838,7 +884,7 @@ export default function AddProgram() {
                       ) : (
                         <button type="button" onClick={() => setStage(3)}
                           className="inline-flex items-center rounded border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-2">
-                          Add a contract
+                          {hasContract ? "Go to contracts" : "Add a contract"}
                         </button>
                       )}
                     </div>
@@ -872,7 +918,12 @@ export default function AddProgram() {
               // Saved: carry on to step 4 once every broker has a contract;
               // otherwise stay on step 3 for the next one.
               if (contractSaved) {
-                const allHave = assignedBrokers.every(b => b.id === uploadFor.id || contractsOf(b.id) > 0);
+                // The same rule as the Next button below: a contract that
+                // exists but is not settled must not auto-advance either — NOT
+                // even the one just uploaded. The old check exempted it on the
+                // assumption that "just added" meant "done", which is exactly
+                // the assumption that let an unsigned contract through.
+                const allHave = assignedBrokers.every(b => hasSettledContract(b.id));
                 if (allHave) setStage(4);
               }
               setUploadFor(null);

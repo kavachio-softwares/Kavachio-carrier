@@ -1850,9 +1850,6 @@ export default function ContractNew() {
                   <Download size={14} />
                   {busy === "draft" ? "Composing…" : "Download the draft"}
                 </button>
-                <button className="btn pri" type="button" onClick={() => go(3)}>
-                  Set up signatures →
-                </button>
               </div>
             </div>
 

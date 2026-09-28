@@ -27,11 +27,16 @@ export type Step = {
   hint: string;
 };
 
-// A contract a bordereau can run against. Null is a contract raised before
-// the lifecycle existed — those were put straight in force.
-const LIVE = new Set(["active"]);
-const isLive = (lifecycle: string | null | undefined) => lifecycle == null || LIVE.has(lifecycle);
-const hasLiveContract = (b: HierarchyBroker) => b.contracts.some(c => isLive(c.lifecycle));
+// A contract a bordereau can run against. NOT the same question as "is it
+// active" — `settled` (from the server, hierarchy_routes._contract_settled)
+// answers yes once the carrier has signed, even while the lifecycle still
+// reads `agreed` and the broker has not countersigned; the broker's signature
+// is not waited for. Reading `settled` here, rather than lifecycle directly,
+// is what keeps this list agreeing with the Configure Program wizard about
+// the SAME programme — the two must not reach different answers to "is this
+// broker ready for a setup". Missing on an older server reads as not ready,
+// the safer direction to be wrong in.
+const hasSettledContract = (b: HierarchyBroker) => b.contracts.some(c => c.settled);
 // Contracts that have ended no longer count as work in progress.
 const ENDED = new Set(["expired", "terminated", "superseded"]);
 const openContract = (b: HierarchyBroker) => b.contracts.find(c => !ENDED.has(c.lifecycle ?? ""));
@@ -45,13 +50,13 @@ export const flowUrl = (programId: number, key: Step["key"]) =>
 
 export function programmeSteps(p: HierarchyProgramme): Step[] {
   const brokers = p.brokers.filter(b => onProgramme(b.link_status));
-  const withContract = brokers.filter(hasLiveContract);
+  const withContract = brokers.filter(hasSettledContract);
   const withSetup = withContract.filter(b => b.setup_status === "active");
   const programmeUrl = `/programs/${p.id}/brokers`;
 
   // Contract: the first broker still without a live contract decides where
   // the step leads — their contract in progress, or a new one pre-filled.
-  const needsContract = brokers.find(b => !hasLiveContract(b));
+  const needsContract = brokers.find(b => !hasSettledContract(b));
   const pending = needsContract ? openContract(needsContract) : undefined;
   const contractTo = !needsContract
     ? `/contracts?program_id=${p.id}`
@@ -166,7 +171,7 @@ export function nextStep(p: HierarchyProgramme): { label: string; to: string; hi
 export function whatsMissing(p: HierarchyProgramme): string | null {
   const brokers = p.brokers.filter(b => onProgramme(b.link_status));
   if (brokers.length === 0) return "No broker on it yet";
-  const noContract = brokers.filter(b => !hasLiveContract(b));
+  const noContract = brokers.filter(b => !hasSettledContract(b));
   if (noContract.length > 0) {
     const inProgress = noContract.filter(b => openContract(b));
     if (noContract.length === 1) {

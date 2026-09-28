@@ -140,6 +140,35 @@ def _assert_broker(session, party_id: int, tenant_id: int) -> Party:
     return party
 
 
+def _contract_settled(s, c: Contract) -> bool:
+    """Is this contract finished enough to build a bordereau setup on?
+
+    THE SAME RULE direct_routes._pipeline_ready enforces at the gate that
+    actually matters — a setup activation. Re-derived here rather than
+    imported wholesale (a lazy import avoids a module cycle; hierarchy_routes
+    and direct_routes do not import each other today) so the Programmes wizard
+    can say so BEFORE a carrier user builds a setup on a contract nobody has
+    signed and discovers the refusal only when they try to activate it.
+
+    A contract written here is settled once the broker has agreed the terms
+    AND the carrier has signed — not once BOTH sides have, which is
+    deliberate: see [[carrier-admin-one-gate]]. One that was uploaded is
+    settled once the carrier admin has accepted it. NULL lifecycle (a contract
+    older than this column) reads as settled, exactly as the setup gate does —
+    it must not retroactively block setups that have run for years.
+    """
+    try:
+        from direct_routes import _CONTRACT_UNSETTLED, _carrier_has_signed
+    except Exception:  # noqa: BLE001 — never blocks the tree from rendering
+        return True
+    state = (c.lifecycle or "").strip().lower()
+    if state in _CONTRACT_UNSETTLED:
+        return False
+    if state == "agreed" and not _carrier_has_signed(s, c):
+        return False
+    return True
+
+
 def _assert_programme(session, program_id: int, principal: Principal, tenant_id: int) -> Program:
     prog = session.get(Program, program_id)
     if not prog:
@@ -1231,7 +1260,14 @@ def hierarchy(principal: Principal = Depends(current_principal)):
                         {"id": c.id, "filename": c.filename, "status": c.status,
                          # The business state (draft … active), which is what
                          # "is this contract live" means; `status` is extraction.
-                         "lifecycle": c.lifecycle}
+                         "lifecycle": c.lifecycle,
+                         # Is THIS contract finished enough to build a setup on?
+                         # Not the same question as "is it active" — an `agreed`
+                         # contract the carrier has signed answers yes here
+                         # while its lifecycle still reads `agreed`, because the
+                         # broker's countersignature is not waited for. See
+                         # _contract_settled.
+                         "settled": _contract_settled(s, c)}
                         for c in sorted(bc, key=lambda c: c.id)
                     ],
                 })

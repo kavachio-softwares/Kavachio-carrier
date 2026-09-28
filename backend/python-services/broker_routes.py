@@ -546,7 +546,7 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
 
         # `pending` — contracts a broker had brought and the carrier had still
         # to approve — is gone with the upload flow that created them.
-        on_me, live = [], 0
+        on_me, live, terms_agreed = [], 0, 0
         if prog_ids:
             rows = (s.query(Contract)
                       .filter(Contract.program_id.in_(prog_ids),
@@ -581,6 +581,15 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 # against, and counting it as live would say it is.
                 if state == "active":
                     live += 1
+
+                # The counterpart to terms_to_agree, for the tile that shows
+                # the two side by side: contracts whose terms are SETTLED,
+                # whatever is left to do about signing them. `expired` and
+                # `terminated` are left out on purpose — their terms were
+                # agreed once, but counting them beside a queue of live work
+                # would overstate the book.
+                if state in ("agreed", "signed", "active"):
+                    terms_agreed += 1
 
         # Signatures on this broker's own contracts: signed by everyone
         # (completed), and waiting on this broker's signature. Terms still to
@@ -626,6 +635,7 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 "signatures_pending": len(on_me) - terms_to_agree,
                 "signatures_completed": int(signatures_completed),
                 "terms_to_agree": terms_to_agree,
+                "terms_agreed": terms_agreed,
             },
             # The queue only this broker can move.
             "waiting_on_me": on_me,
