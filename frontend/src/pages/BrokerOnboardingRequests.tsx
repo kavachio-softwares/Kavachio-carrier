@@ -24,7 +24,7 @@
  * here says so, because two approvals in a row is exactly the sort of thing a
  * reader assumes is one.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
 import { Handshake, Mail, ShieldCheck } from "lucide-react";
 import {
@@ -35,8 +35,14 @@ import {
 import { Modal } from "../components/ui/Modal";
 import { InfoTip } from "../components/InfoTip";
 import { OrgAvatar } from "../components/ui/OrgAvatar";
+import { Pagination } from "../components/Pagination";
+import { useServerList } from "../hooks/useServerList";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { fmtStamp } from "../utils/date";
+
+// Ten a table, as everywhere else. Two tables on this screen, so a screenful
+// is twenty at its fullest — and the waiting one is nearly always short.
+const PAGE_SIZE = 10;
 
 // Fixed application states — a status column value, not tenant data.
 const STATUS: Record<BrokerRequestStatus, { label: string; cls: string }> = {
@@ -55,7 +61,6 @@ export default function BrokerOnboardingRequests() {
   const seat = useCarrierSeat();
   const isAdmin = addsCarrierUsers(seat);
 
-  const [rows, setRows] = useState<BrokerOnboardingRequest[] | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -63,20 +68,68 @@ export default function BrokerOnboardingRequests() {
   const [turningDown, setTurningDown] = useState<BrokerOnboardingRequest | null>(null);
   const [reason, setReason] = useState("");
 
-  const load = useCallback(() => {
-    listBrokerRequests()
-      .then(r => setRows(r.items))
-      .catch(() => setRows([]));
-  }, []);
-  useEffect(load, [load]);
+  // TWO LISTS, PAGED SEPARATELY, and that is why the server grew an
+  // `answered` filter. Waiting sits above answered because the waiting ones
+  // are the only ones anybody came here to act on — and a single paged list
+  // would put page one's answered rows above page two's waiting ones, which
+  // is the wrong way round on the screen whose whole job is "what is waiting
+  // on me". The answered half is also the half that grows for ever; the
+  // waiting half empties as it is worked.
+  //
+  // Both fetchers report their own failure rather than letting the hook
+  // swallow it: an empty table reads as "nothing waiting", which is a very
+  // different thing from "we could not ask".
+  //
+  // A slot each, not one shared message. The two requests are in flight
+  // together, so a single `err` would let the one that SUCCEEDED clear the
+  // one that failed, purely on which answer came back last — and the reader
+  // would be shown an empty table with nothing said about it.
+  const [loadErr, setLoadErr] = useState<{ waiting?: string; answered?: string }>({});
+  const fetchWaiting = useCallback((page: number, pageSize: number) =>
+    listBrokerRequests({ status: "pending", page, page_size: pageSize })
+      .then(r => { setLoadErr(e => ({ ...e, waiting: undefined })); return r; })
+      .catch(e => {
+        setLoadErr(x => ({ ...x, waiting: "Could not load what is waiting." }));
+        throw e;
+      }), []);
+  const fetchAnswered = useCallback((page: number, pageSize: number) =>
+    listBrokerRequests({ status: "answered", page, page_size: pageSize })
+      .then(r => { setLoadErr(e => ({ ...e, answered: undefined })); return r; })
+      .catch(e => {
+        setLoadErr(x => ({ ...x, answered: "Could not load the answered requests." }));
+        throw e;
+      }), []);
 
-  // Waiting above answered, because the waiting ones are the only ones anybody
-  // came here to act on. Within each half the server's order (newest first)
-  // stands.
-  const { pending, done } = useMemo(() => ({
-    pending: (rows ?? []).filter(r => r.status === "pending"),
-    done: (rows ?? []).filter(r => r.status !== "pending"),
-  }), [rows]);
+  const waiting = useServerList<BrokerOnboardingRequest>(
+    fetchWaiting, "pending", PAGE_SIZE);
+  const answered = useServerList<BrokerOnboardingRequest>(
+    fetchAnswered, "answered", PAGE_SIZE);
+
+  // A decision moves a row from one table to the other, so both are asked
+  // again — refreshing only the one that was acted on would leave the answer
+  // nowhere to be seen.
+  //
+  // And if that row was the last one on the waiting page being read, the page
+  // it was on has just stopped existing. Stepping back one is what keeps the
+  // pager honest; reloading in place would draw an empty table under a count
+  // that is not zero, which reads as the queue having broken.
+  const { items: waitingItems, page: waitingPage,
+          setPage: setWaitingPage, reload: reloadWaiting } = waiting;
+  const { reload: reloadAnswered } = answered;
+  const load = useCallback(() => {
+    if (waitingItems.length <= 1 && waitingPage > 1) setWaitingPage(waitingPage - 1);
+    else reloadWaiting();
+    reloadAnswered();
+  }, [waitingItems.length, waitingPage, setWaitingPage, reloadWaiting, reloadAnswered]);
+
+  const firstLoad = waiting.loading && answered.loading
+    && waiting.total === 0 && answered.total === 0;
+  // "Nothing waiting" is a CLAIM about the queue, so it is only made when the
+  // queue actually answered. A failed load leaves both totals at nought too,
+  // and saying it then would be the screen inventing good news.
+  const nothingAtAll = !waiting.loading && !answered.loading
+    && waiting.total === 0 && answered.total === 0
+    && !loadErr.waiting && !loadErr.answered;
 
   function fail(e: any, fallback: string) {
     const d = e?.response?.data?.detail;
@@ -246,10 +299,15 @@ export default function BrokerOnboardingRequests() {
 
         {note && <div className="note ok" style={{ marginBottom: 16 }}>{note}</div>}
         {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
+        {(loadErr.waiting || loadErr.answered) && (
+          <div className="note warn" style={{ marginBottom: 16 }}>
+            {[loadErr.waiting, loadErr.answered].filter(Boolean).join(" ")}
+          </div>
+        )}
 
-        {rows === null ? (
+        {firstLoad ? (
           <div className="card"><div className="empty">Loading…</div></div>
-        ) : rows.length === 0 ? (
+        ) : nothingAtAll ? (
           <div className="card">
             <div className="empty">
               <ShieldCheck size={22} style={{ margin: "0 auto 10px", display: "block" }} />
@@ -266,22 +324,31 @@ export default function BrokerOnboardingRequests() {
           </div>
         ) : (
           <>
-            {pending.length > 0 && (
+            {waiting.total > 0 && (
               <div className="card" style={{ marginBottom: 16 }}>
                 <div className="card-h">
                   <b>{isAdmin ? "Waiting on you" : "Waiting on your carrier admin"}</b>
-                  <div className="right"><span className="sub">{pending.length}</span></div>
+                  {/* The WHOLE queue's count, from the server — not
+                      `items.length`, which would say 10 for ever once there
+                      were eleven. */}
+                  <div className="right"><span className="sub">{waiting.total}</span></div>
                 </div>
-                {table(pending)}
+                {table(waiting.items)}
+                <Pagination page={waiting.page} pageCount={waiting.pageCount}
+                  pageSize={PAGE_SIZE} totalItems={waiting.total}
+                  onPageChange={waiting.setPage} noun="waiting" />
               </div>
             )}
-            {done.length > 0 && (
+            {answered.total > 0 && (
               <div className="card">
                 <div className="card-h">
                   <b>Answered</b>
-                  <div className="right"><span className="sub">{done.length}</span></div>
+                  <div className="right"><span className="sub">{answered.total}</span></div>
                 </div>
-                {table(done)}
+                {table(answered.items)}
+                <Pagination page={answered.page} pageCount={answered.pageCount}
+                  pageSize={PAGE_SIZE} totalItems={answered.total}
+                  onPageChange={answered.setPage} noun="answered" />
               </div>
             )}
           </>

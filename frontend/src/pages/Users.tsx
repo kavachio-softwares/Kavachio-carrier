@@ -325,8 +325,13 @@ export default function Users() {
           <div className="tbl-wrap">
             <table>
               <thead>
+                {/* Six headings for six cells. The trailing empty <th> was
+                    left behind when the "Can do" column went, and a header
+                    column with no body cells under it took real width — which
+                    is why the actions sat in a wide, half-empty column. */}
                 <tr><th>Name</th><th>Organisation</th><th>Role</th>
-                  <th>Status</th><th>Last Sign-In</th><th>Actions</th><th></th></tr>
+                  <th>Status</th><th>Last Sign-In</th>
+                  <th style={{ textAlign: "right" }}>Actions</th></tr>
               </thead>
               <tbody>
                 {pageRows.map(u => {
@@ -370,58 +375,74 @@ export default function Users() {
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">
-                        {/* Resend / reset only on rows that are yours to act
-                            on — the server answers 403 on the others. */}
-                        {mayManage(u) && (invited ? (
-                          <span className="linkish" onClick={() => resend(u)}>
-                            Resend Invite
-                          </span>
-                        ) : (
-                          <span className="linkish" onClick={() => resetPassword(u)}>
-                            Reset Password
-                          </span>
-                        ))}
-                        {mayManage(u) && " · "}
-                        {/* When removal isn't allowed the element carries NO click
-                            handler at all — it's inert, not a link that silently
-                            does nothing — and aria-disabled drives the styling
-                            (grey, not-allowed cursor, no hover underline). The
-                            title says which rule applies. */}
-                        {/* Handing the organisation on. Offered only BY the
-                            owner and only TO another admin of this
-                            organisation, which is exactly what the server
-                            allows — a link that 403s is worse than no link. */}
-                        {/* Only an ACTIVE carrier can take the role — the
-                            server refuses anyone still sitting on an
-                            unaccepted invitation, so offering it here would be
-                            offering a link that 409s. */}
-                        {iAmOwner && !u.is_owner && u.org_kind !== "broker"
-                          && isAdminRow && u.status === "active" && (
-                          <>
-                            <span
-                              className="linkish"
+                        {/* BUTTONS, not linked words. Three actions separated
+                            by middots read as one sentence — "Reset Password ·
+                            Make carrier admin · Remove" — so the row offered no
+                            hit target the eye could find and the destructive
+                            one sat in the same ink as the safe ones. `rowacts`
+                            is the house flex row, flushed RIGHT. Centring put
+                            every row's buttons in a different place, because
+                            the rows do not all carry the same three: a two
+                            button row and a three button row shared no edge and
+                            the column read as ragged. Aligned right, the last
+                            button — the destructive one — runs in a straight
+                            line down the page, and the heading follows it.
+                            Its top margin is dropped inside a cell. */}
+                        <div className="rowacts"
+                             style={{ marginTop: 0, justifyContent: "flex-end" }}>
+                          {/* Resend / reset only on rows that are yours to act
+                              on — the server answers 403 on the others. */}
+                          {mayManage(u) && (invited ? (
+                            <button type="button" className="btn sm"
+                                    onClick={() => resend(u)}>
+                              Resend Invite
+                            </button>
+                          ) : (
+                            <button type="button" className="btn sm"
+                                    onClick={() => resetPassword(u)}>
+                              Reset Password
+                            </button>
+                          ))}
+                          {/* Handing the organisation on. Offered only BY the
+                              owner and only TO another admin of this
+                              organisation, which is exactly what the server
+                              allows — a button that 403s is worse than none.
+                              Only an ACTIVE carrier can take the role; the
+                              server refuses anyone still sitting on an
+                              unaccepted invitation. */}
+                          {iAmOwner && !u.is_owner && u.org_kind !== "broker"
+                            && isAdminRow && u.status === "active" && (
+                            <button
+                              type="button" className="btn sm"
                               title={`Make ${u.full_name} the carrier admin of this organisation`}
                               onClick={() => { setXferErr(null); setXferTarget(u); }}
                             >
                               Make carrier admin
+                            </button>
+                          )}
+                          {/* Removing somebody is the one act here that cannot
+                              be undone, so it is the one button that is not
+                              the same colour as the others. */}
+                          {canRemove(u) || u.is_owner ? (
+                            <button
+                              type="button" className="btn sm danger"
+                              title={u.is_owner ? whyNotRemovable(u) : "Remove this user"}
+                              onClick={() => askRemove(u)}
+                            >
+                              {u.is_owner && u.id === me?.id ? "Leave" : "Remove"}
+                            </button>
+                          ) : (
+                            // Genuinely disabled rather than a look-alike: no
+                            // handler, not focusable, announced as disabled.
+                            // The title sits on the wrapper because a disabled
+                            // button swallows the hover that would show it.
+                            <span title={whyNotRemovable(u)}>
+                              <button type="button" className="btn sm danger" disabled>
+                                Remove
+                              </button>
                             </span>
-                            {" · "}
-                          </>
-                        )}
-                        {canRemove(u) || u.is_owner ? (
-                          <span
-                            className="linkish"
-                            title={u.is_owner ? whyNotRemovable(u) : "Remove this user"}
-                            onClick={() => askRemove(u)}
-                          >
-                            {u.is_owner && u.id === me?.id ? "Leave" : "Remove"}
-                          </span>
-                        ) : (
-                          <span className="linkish mut" aria-disabled="true"
-                                title={whyNotRemovable(u)}>
-                            Remove
-                          </span>
-                        )}
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );

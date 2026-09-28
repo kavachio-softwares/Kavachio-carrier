@@ -30,7 +30,7 @@ from auth_deps import require_role, current_principal, Principal
 # here: this one is used in a Depends() default, which FastAPI evaluates
 # when the module is imported. carrier_scope imports only auth_deps and db,
 # so there is no cycle to avoid.
-from carrier_scope import require_carrier_admin
+from carrier_scope import require_carrier_admin, is_carrier_admin_seat
 
 router = APIRouter()
 
@@ -4816,8 +4816,23 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         _is_admin_seat = _seat in ("admin", "both")
         contracts_waiting = 0
         contracts_awaiting_admin = 0
+        # ...and split the SAME rows by what the carrier actually has to do,
+        # which is the split the tile draws: sign something already settled,
+        # or decide something that is not. Counted here rather than subtracted
+        # on the screen from `pending_signatures`, which is NOT seat-filtered —
+        # subtracting an unfiltered count from a filtered one is how two halves
+        # stop adding up to the number above them.
+        contracts_pending_signature = 0
+        contracts_pending_review = 0
+        contracts_terms_agreed = 0
         for _c in waiting_rows:
             _uns = _cr._unsigned_sides(_cr._signatures(s, _c.id))
+            _state = _cr._effective_lifecycle(_c)
+            # The counterpart to the review queue: terms this carrier has
+            # settled, whatever is left to do about signing them. Counted over
+            # every contract, not only the ones waiting on the carrier.
+            if _state in ("agreed", "signed", "active"):
+                contracts_terms_agreed += 1
             if _cr._whose_turn(_c, _uns) != "carrier":
                 continue
             _admins = _cr._carrier_admin_turn(_c, _uns)
@@ -4826,6 +4841,10 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             # A carrier user's tile counts only what a carrier user can act on.
             if _is_admin_seat or not _admins:
                 contracts_waiting += 1
+                if _state in ("agreed", "signed") and "carrier" in _uns:
+                    contracts_pending_signature += 1
+                else:
+                    contracts_pending_review += 1
 
         # The subtitle beside it, counted in the same units: contracts both
         # sides have signed. An envelope count here would have said "1
@@ -4972,6 +4991,14 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             # Contracts it is the CARRIER's move on — drafts, change requests
             # and signatures together. A superset of pending_signatures.
             "contracts_waiting": contracts_waiting,
+            # The two halves of that number, in the order the work happens:
+            # decide the contract, then sign it. They always sum to
+            # contracts_waiting — same rows, same seat filter, one pass.
+            "contracts_pending_review": contracts_pending_review,
+            "contracts_pending_signature": contracts_pending_signature,
+            # Terms already settled — the "done" count beside the review half,
+            # the carrier's mirror of the broker's terms_agreed.
+            "contracts_terms_agreed": contracts_terms_agreed,
             # Of those, the ones only the carrier admin can move. The tile uses
             # it to say "2 to sign" rather than leaving the reader to subtract.
             "contracts_awaiting_admin": contracts_awaiting_admin,
@@ -7099,27 +7126,23 @@ def _validate_rule_body(body: RuleBody) -> tuple[str, str, str, Optional[str]]:
 
 # ── the rule library ────────────────────────────────────────────────────────
 #
-# THE CARRIER ADMIN'S, not the carrier's. A rule here is not work on one file:
-# it is a standing instruction applied to every bordereau this carrier
-# validates, on every programme and for every broker. That is the same kind of
-# decision as who may sign a contract, so it sits with the same person — the
-# organisation's owner (carrier_scope.carrier_seat), not everyone holding the
+# WRITTEN BY THE CARRIER ADMIN, READ BY THE WHOLE CARRIER. A rule here is a
+# standing instruction applied to every bordereau this carrier validates, on
+# every programme and for every broker — the same kind of decision as who may
+# sign a contract, so adding, changing, switching and deleting sit with the
+# organisation's owner (require_carrier_admin), not everyone holding the
 # `carrier_admin` DB role.
 #
-# require_carrier_admin() rather than require_role("tenant_admin") on ALL of
-# them, reads included: the screen is hidden from a carrier user entirely
-# (access.ts), so a read reaching here is a bookmark or a hand-made request,
-# and answering it would contradict the screen. Kavachio staff are unaffected
-# — require_role passes the platform seat and carrier_seat calls it "both" —
-# and they keep the platform-wide global rules they have always managed.
-#
-# A carrier user is NOT cut off from the rules themselves. Every rule that
-# fired is named, in full, on the exception screens they work in daily. What
-# they no longer do is write one.
+# Reading is the carrier user's too. They run Bordereau Setup, which is what
+# puts these rules to work on a programme, and they read the exceptions the
+# rules raise — so they need to see the list they are working under. The two
+# GETs take require_role alone; `can_manage` on the list tells the screen
+# which of the two it is talking to, so it never offers a button the four
+# write endpoints would refuse. Kavachio staff are "both" and keep the
+# platform-wide global rules they have always managed.
 @router.get("/rule-library/classes")
 def rule_library_classes(
-        principal: Principal = Depends(
-            require_carrier_admin("open the rule library"))):
+        principal: Principal = Depends(require_role("carrier_admin"))):
     """The rule-type catalogue driving the create/edit dropdown. A rule only
     runs if its class_name is one of these, so the form offers exactly these."""
     return {"classes": _rule_supported_classes(), "severities": _RULE_SEVERITIES}
@@ -7128,8 +7151,7 @@ def rule_library_classes(
 @router.get("/rule-library")
 def rule_library_list(page: Optional[int] = Query(None, ge=1),
                       page_size: Optional[int] = Query(None, ge=1, le=200),
-                      principal: Principal = Depends(
-                          require_carrier_admin("open the rule library"))):
+                      principal: Principal = Depends(require_role("carrier_admin"))):
     """Rules in the caller's scope. kavachio_admin sees the platform's GLOBAL
     rules; a tenant_admin sees only their own tenant's rules (globals are hidden
     from the tenant screen). Includes disabled rules so they can be re-enabled.
@@ -7139,6 +7161,7 @@ def rule_library_list(page: Optional[int] = Query(None, ge=1),
     the edit form depends on: there is no GET-one endpoint, so it reads the list
     and picks its rule out of it by id."""
     with SessionLocal() as s:
+        can_manage = is_carrier_admin_seat(s, principal)
         q = s.query(GenericRuleSpecification)
         if principal.is_platform_admin:
             q = q.filter(GenericRuleSpecification.tenant_id.is_(None))
@@ -7147,12 +7170,13 @@ def rule_library_list(page: Optional[int] = Query(None, ge=1),
         ordered = q.order_by(GenericRuleSpecification.id.desc())
         if page is None:
             rows = ordered.all()
-            return {"items": [_rule_dict(r) for r in rows], "total": len(rows)}
+            return {"items": [_rule_dict(r) for r in rows], "total": len(rows),
+                    "can_manage": can_manage}
         size = page_size or 10
         total = q.order_by(None).count()
         rows = ordered.offset((page - 1) * size).limit(size).all()
         return {"items": [_rule_dict(r) for r in rows], "total": int(total),
-                "page": page, "page_size": size}
+                "page": page, "page_size": size, "can_manage": can_manage}
 
 
 @router.post("/rule-library")

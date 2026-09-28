@@ -777,3 +777,41 @@ def test_hierarchy_reports_settled_per_contract(w):
                 s.delete(r)
             s.commit()
 
+
+def test_hierarchy_flags_the_admins_own_move_on_a_contract(w):
+    """awaiting_carrier_admin agrees with contract_routes._carrier_admin_turn —
+    the same answer the contract record's banner, the dashboard tile and the
+    bell all read. An `agreed`, unsigned contract IS the admin's move; a
+    `draft` one is nobody's yet."""
+    from db import Contract
+    with SessionLocal() as s:
+        agreed = Contract(tenant_id=w["tid"], program_id=w["prog"],
+                          broker_party_id=w["broker"], name="c-awaiting",
+                          lifecycle="agreed")
+        draft = Contract(tenant_id=w["tid"], program_id=w["prog"],
+                         broker_party_id=w["broker"], name="c-not-yet",
+                         lifecycle="draft")
+        s.add(agreed); s.add(draft); s.commit()
+        agreed_id, draft_id = agreed.id, draft.id
+    try:
+        client.post(f"/programs/{w['prog']}/brokers",
+                    json={"broker_party_id": w["broker"]}, headers=w["admin_h"])
+        prog = next(p for p in client.get("/hierarchy", headers=w["admin_h"]).json()
+                    ["programmes"] if p["id"] == w["prog"])
+        rows = {c["id"]: c for c in
+                next(b for b in prog["brokers"] if b["id"] == w["broker"])["contracts"]}
+        assert rows[agreed_id]["awaiting_carrier_admin"] is True
+        assert rows[agreed_id]["settled"] is False
+        assert rows[draft_id]["awaiting_carrier_admin"] is False
+    finally:
+        with SessionLocal() as s:
+            for cid in (agreed_id, draft_id):
+                c = s.get(Contract, cid)
+                if c:
+                    s.delete(c)
+            s.commit()
+            for r in (s.query(ProgramBroker)
+                      .filter(ProgramBroker.program_id == w["prog"]).all()):
+                s.delete(r)
+            s.commit()
+

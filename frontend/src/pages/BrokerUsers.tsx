@@ -10,14 +10,19 @@
  * a broker admin, and a broker admin may not create another one), and a role
  * dropdown here would exist only to be refused.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   getBrokerUsers, inviteBrokerOperator, resendBrokerInvite, removeBrokerUser,
-  type BrokerUser, type BrokerUsers as Team,
+  type BrokerUser,
 } from "../api/broker";
 import { getUser } from "../auth";
 import { fmtDateTime } from "../utils/date";
 import { InviteSentModal } from "../components/InviteSentModal";
+import { Pagination } from "../components/Pagination";
+import { useServerList } from "../hooks/useServerList";
+
+// Ten, as everywhere else in the app.
+const PAGE_SIZE = 10;
 
 const ROLE_LABEL: Record<string, string> = {
   broker_admin: "Broker Admin",
@@ -32,9 +37,28 @@ function statusBadge(s: string): { cls: string; label: string } {
 
 export default function BrokerUsers() {
   const me = getUser();
-  const [team, setTeam] = useState<Team | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "warn"; text: string } | null>(null);
+
+  // TRUE server-side paging: the server cuts the page and sends the TEAM'S
+  // totals beside it. `total_admins` has to be the team's — "you cannot
+  // remove the last admin" is a fact about the organisation, and reading it
+  // off ten rows would start offering Remove on the only admin as soon as an
+  // eleventh person joined.
+  //
+  // The fetcher reports its own failures rather than letting the hook swallow
+  // them: it empties the list on an error, and an empty list here reads as
+  // "nobody works here", which is not the same thing as "we could not ask".
+  const fetchPage = useCallback((page: number, pageSize: number) =>
+    getBrokerUsers({ page, page_size: pageSize })
+      .then(r => { setErr(null); return r; })
+      .catch(e => { setErr("Could not load your team."); throw e; }), []);
+  const { page, setPage, items, total, extra, pageCount, loading, reload } =
+    useServerList<BrokerUser, {
+      broker: { id: number; name: string }; total_admins: number;
+    }>(fetchPage, "", PAGE_SIZE);
+  const brokerName = extra?.broker?.name ?? "your organisation";
+  const totalAdmins = extra?.total_admins ?? 0;
 
   // Invite an operator — a dialog rather than its own page, because there are
   // only two things to fill in and the role is already decided.
@@ -48,12 +72,6 @@ export default function BrokerUsers() {
   const [removeTarget, setRemoveTarget] = useState<BrokerUser | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeErr, setRemoveErr] = useState<string | null>(null);
-
-  function load() {
-    getBrokerUsers().then(t => { setTeam(t); setErr(null); })
-      .catch(() => setErr("Could not load your team."));
-  }
-  useEffect(load, []);
 
   const canSend = name.trim().length > 0 && email.trim().length > 0;
 
@@ -69,7 +87,7 @@ export default function BrokerUsers() {
       await inviteBrokerOperator(name.trim(), email.trim());
       setSent({ name: name.trim(), email: email.trim() });
       setInviteOpen(false);
-      load();
+      reload();
     } catch (e: any) {
       setInviteErr(e?.response?.data?.detail ?? "Could not send the invitation.");
     } finally { setInviteBusy(false); }
@@ -84,14 +102,14 @@ export default function BrokerUsers() {
       setMsg({ kind: "warn", text: e?.response?.data?.detail
         ?? `Couldn't resend the invite to ${u.email}.` });
     }
-    load();
+    reload();
   }
 
   // Removal rules match the API exactly, so a link is never offered for
   // something the server will refuse.
   function canRemove(u: BrokerUser) {
     if (u.id === me?.id) return false;
-    if (u.role === "broker_admin" && (team?.total_admins ?? 0) <= 1) return false;
+    if (u.role === "broker_admin" && totalAdmins <= 1) return false;
     return true;
   }
   function closeRemove() { if (!removeBusy) { setRemoveTarget(null); setRemoveErr(null); } }
@@ -102,7 +120,11 @@ export default function BrokerUsers() {
       await removeBrokerUser(removeTarget.id);
       setMsg({ kind: "ok", text: `${removeTarget.email} was removed.` });
       setRemoveTarget(null);
-      load();
+      // Removing the last person on a page takes the page away with them.
+      // Step back rather than reload in place, which would leave an empty
+      // table under a count that is not zero.
+      if (items.length <= 1 && page > 1) setPage(page - 1);
+      else reload();
     } catch (e: any) {
       setRemoveErr(e?.response?.data?.detail
         ?? "We couldn't remove this user. Please try again.");
@@ -115,7 +137,9 @@ export default function BrokerUsers() {
       <div className="note warn" style={{ maxWidth: 560 }}>{err}</div>
     </div></div>
   );
-  if (!team) return (
+  // Only the FIRST load blanks the screen. Turning a page keeps the table
+  // where it is rather than throwing the reader back to a "Loading…" line.
+  if (loading && extra === null) return (
     <div className="proto"><div className="view full">
       <div className="page-head"><div className="t"><h2>Users &amp; Roles</h2></div></div>
       <div className="muted">Loading…</div>
@@ -129,7 +153,7 @@ export default function BrokerUsers() {
           <div className="t">
             <h2>Users &amp; Roles</h2>
             {/* <p>
-              Your team at {team.broker.name}. A <b>Broker User</b> sends your
+              Your team at {brokerName}. A <b>Broker User</b> sends your
               bordereau files and sorts out the errors they raise. Everything
               else stays with you. All your broker users work on the same
               files, runs and deadlines — what one sends, the others see.
@@ -152,11 +176,12 @@ export default function BrokerUsers() {
               <thead>
                 <tr>
                   <th>Name</th><th>Role</th>
-                  <th>Status</th><th>Last sign-in</th><th></th>
+                  <th>Status</th><th>Last sign-in</th>
+                  <th style={{ textAlign: "right" }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {team.items.map(u => {
+                {items.map(u => {
                   const sb = statusBadge(u.status);
                   const invited = u.status === "invited" || u.status === "pending";
                   return (
@@ -173,33 +198,45 @@ export default function BrokerUsers() {
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">
-                        {invited && (
-                          <span className="linkish" onClick={() => resend(u)}>Resend</span>
-                        )}
-                        {/* The separator only when BOTH actions are there — an
-                            invited user who cannot be removed would otherwise
-                            end on a dangling dot. */}
-                        {invited && canRemove(u) && " · "}
-                        {/* Removal is offered only where the server would allow
-                            it. When it wouldn't — your own account, or the only
-                            admin — the action is simply absent rather than drawn
-                            greyed out: a disabled "Remove" on your own row reads
-                            as something you might be able to do, and there is
-                            nothing on this screen that could make it enabled. */}
-                        {canRemove(u) && (
-                          <span className="linkish" title="Remove this user"
-                            onClick={() => { setRemoveErr(null); setRemoveTarget(u); }}>
-                            Remove
-                          </span>
-                        )}
+                        {/* BUTTONS, not linked words joined by a middot, and
+                            flushed right — the same treatment as the carrier's
+                            Users & Roles, which is the same screen for the
+                            other seat. The gap replaces the separator, so the
+                            dangling-dot case it guarded against cannot arise. */}
+                        <div className="rowacts"
+                             style={{ marginTop: 0, justifyContent: "flex-end" }}>
+                          {invited && (
+                            <button type="button" className="btn sm"
+                                    onClick={() => resend(u)}>
+                              Resend
+                            </button>
+                          )}
+                          {/* Removal is offered only where the server would allow
+                              it. When it wouldn't — your own account, or the only
+                              admin — the action is simply absent rather than drawn
+                              greyed out: a disabled "Remove" on your own row reads
+                              as something you might be able to do, and there is
+                              nothing on this screen that could make it enabled. */}
+                          {canRemove(u) && (
+                            <button type="button" className="btn sm danger"
+                              title="Remove this user"
+                              onClick={() => { setRemoveErr(null); setRemoveTarget(u); }}>
+                              Remove
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-            {team.total === 0 && <div className="empty">No one here yet.</div>}
+            {total === 0 && <div className="empty">No one here yet.</div>}
           </div>
+          {total > 0 && (
+            <Pagination page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
+              totalItems={total} onPageChange={setPage} noun="people" />
+          )}
         </div>
 
         {/* <div className="note" style={{ marginTop: 16, maxWidth: 720 }}>
@@ -215,7 +252,7 @@ export default function BrokerUsers() {
         <div className="proto-modal-overlay" onClick={closeInvite}>
           <div className="proto-modal" onClick={e => e.stopPropagation()}>
             <div className="m-h">
-              <h3>Add a broker user to {team.broker.name}</h3>
+              <h3>Add a broker user to {brokerName}</h3>
               <button className="x" onClick={closeInvite} aria-label="Close">×</button>
             </div>
             <div className="m-b">
@@ -270,7 +307,7 @@ export default function BrokerUsers() {
               <button className="x" onClick={closeRemove} aria-label="Close">×</button>
             </div>
             <div className="m-b">
-              Remove <b>{removeTarget.full_name || removeTarget.email}</b> from {team.broker.name}?
+              Remove <b>{removeTarget.full_name || removeTarget.email}</b> from {brokerName}?
               They lose access straight away. Everything they did — runs, uploads —
               keeps their name on it, so your records stay complete.
               {removeErr && (

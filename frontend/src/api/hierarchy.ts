@@ -20,6 +20,13 @@ export type HierarchyContract = {
    *  reads "agreed" — the broker's signature is not waited for. Absent on an
    *  older server; treat missing as unknown, not as settled. */
   settled?: boolean;
+  /** Is it the CARRIER ADMIN's move on this one right now — the same answer
+   *  the contract record's own banner, the dashboard's "Waiting on You" tile
+   *  and the notification bell all give (contract_routes._carrier_admin_turn).
+   *  Lets a screen offer a "Review contract" action only where there truly is
+   *  something to review, rather than a plain "Open" that reads the same
+   *  whether the ball is in the admin's court or the broker's. */
+  awaiting_carrier_admin?: boolean;
 };
 
 export type HierarchyBroker = {

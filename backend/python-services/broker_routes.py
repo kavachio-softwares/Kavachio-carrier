@@ -684,7 +684,9 @@ def _broker_user_dict(u: AppUser) -> dict:
 
 
 @router.get("/broker/users")
-def broker_users(p: Principal = Depends(current_principal)):
+def broker_users(page: Optional[int] = Query(None, ge=1),
+                 page_size: Optional[int] = Query(None, ge=1, le=200),
+                 p: Principal = Depends(current_principal)):
     """Everyone at this broker organisation.
 
     Scoped by broker_party_id, never by tenant: a broker producing for three
@@ -693,18 +695,29 @@ def broker_users(p: Principal = Depends(current_principal)):
     Admin-only, reads included — an operator has no sidebar entry for this
     screen, and an endpoint that answers a request the UI never makes is just a
     way for the two layers to disagree later.
+
+    Pagination is OPT-IN: without `page` the whole team comes back exactly as
+    it always did. `total` and `total_admins` are the TEAM'S, never the page's
+    — the screen states the first above its table, and the second is what the
+    "you cannot remove the last admin" rule is decided on. Counting either off
+    one page of ten would make both of them quietly wrong the moment an
+    eleventh person joined.
     """
     with SessionLocal() as s:
         bid = _broker_admin(s, p)
         me = s.query(Party).filter(Party.id == bid).first()
-        rows = (s.query(AppUser)
-                  .filter(AppUser.broker_party_id == bid)
-                  .order_by(AppUser.email).all())
-        admins = sum(1 for u in rows if u.role == "broker_admin")
+        base = s.query(AppUser).filter(AppUser.broker_party_id == bid)
+        total = base.order_by(None).count()
+        admins = base.filter(AppUser.role == "broker_admin").count()
+        ordered = base.order_by(AppUser.email)
+        if page is not None:
+            size = page_size or 10
+            ordered = ordered.offset((page - 1) * size).limit(size)
+        rows = ordered.all()
         return {
             "broker": {"id": bid, "name": (me.legal_name if me else "—")},
             "items": [_broker_user_dict(u) for u in rows],
-            "total": len(rows),
+            "total": total,
             "total_admins": admins,
         }
 

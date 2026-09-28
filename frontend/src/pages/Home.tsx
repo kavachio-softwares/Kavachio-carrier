@@ -44,6 +44,12 @@ type Stats = {
    *  waiting to be accepted, or one whose terms the broker has agreed and
    *  which now needs the carrier's signature. */
   contracts_awaiting_admin?: number;
+  /** The two halves of contracts_waiting, in the order the work happens:
+   *  decide the contract, then sign it. They sum to contracts_waiting. */
+  contracts_pending_review?: number;
+  contracts_pending_signature?: number;
+  /** Terms already settled — the "done" count beside the review half. */
+  contracts_terms_agreed?: number;
   /** Broker onboarding requests waiting on the carrier admin. Null for a
    *  carrier user, who is not the one being asked. */
   broker_requests_pending?: number | null;
@@ -162,10 +168,14 @@ export default function Home() {
   // that is a signature. Falls back to the signatures alone on an older server
   // that does not send the wider figure, so the tile never reads blank.
   const waitingTotal = stats?.contracts_waiting ?? stats?.pending_signatures ?? 0;
-  // The part of it nobody else at this carrier can do: sign a contract the
-  // broker has agreed, or accept an uploaded one. The server counts it, because
-  // the server is what decides it (contract_routes._carrier_admin_turn).
-  const adminOnly = Math.min(waitingTotal, stats?.contracts_awaiting_admin ?? 0);
+  // The tile's two counts. The server splits the same rows it counted for
+  // waitingTotal, so these add up to it; an older server that sends neither
+  // falls back to putting everything under review, which is where a contract
+  // with no signature due belongs anyway.
+  const pendingSignature = stats?.contracts_pending_signature
+    ?? stats?.pending_signatures ?? 0;
+  const pendingReview = stats?.contracts_pending_review
+    ?? Math.max(0, waitingTotal - pendingSignature);
 
   // /files is carrier-only (ROUTE_ACCESS), so only a carrier seat that can open
   // it gets the card — anyone else would be shown links that bounce them back.
@@ -343,16 +353,17 @@ export default function Home() {
               value={fmt(waitingTotal)}
               icon={FileText}
               tone={waitingTotal ? "alert" : undefined}
-              // Split by WHOSE MOVE, not by lifecycle: what the admin opening
-              // this wants to know is how much of it only they can clear. The
-              // subtitle used to subtract pending_signatures from the total,
-              // which counted a contract waiting to be ACCEPTED as one waiting
-              // to be reviewed — the two are the admin's alike, and neither is
-              // the author's.
-              subtitle={waitingTotal
-                ? `${adminOnly} needing you · `
-                  + `${Math.max(0, waitingTotal - adminOnly)} other`
-                : `${stats?.completed_signatures ?? 0} signed`}
+              // TWO counts, the same pair the broker's dashboard shows from
+              // the other side of the table. Deciding a contract and signing
+              // one are different jobs, and the second used to sit in grey
+              // subtitle text where it read as a footnote to the number above
+              // it. Contracts first: it is agreed before it is signed.
+              split={[
+                { label: "Pending Contract", value: fmt(pendingReview),
+                  hint: `${stats?.contracts_terms_agreed ?? 0} agreed` },
+                { label: "Pending Signatures", value: fmt(pendingSignature),
+                  hint: `${stats?.completed_signatures ?? 0} completed` },
+              ]}
               onClick={() => nav("/contracts?waiting=mine")}
               info={"Contracts it is your move on: terms the broker has agreed "
                     + "and which need your signature, an uploaded contract to "

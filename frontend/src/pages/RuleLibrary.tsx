@@ -23,6 +23,10 @@ export default function RuleLibrary() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [delTarget, setDelTarget] = useState<Rule | null>(null);
   const [delBusy, setDelBusy] = useState(false);
+  // The server's answer, not the seat hook's: a carrier user reads this list
+  // but the four write endpoints refuse them. False until the first page lands
+  // so nobody sees a button flash that they cannot use.
+  const [canManage, setCanManage] = useState(false);
 
   // One page, counted by the server. The edit form still reads the WHOLE list
   // through listRules(): there is no GET-one endpoint, so it finds its rule by
@@ -30,7 +34,10 @@ export default function RuleLibrary() {
   const {
     items: rows, total, page, pageCount, loading, setPage, reload,
   } = useServerList<Rule>(
-    (pg, size) => listRulesPaged(pg, size).catch(e => {
+    (pg, size) => listRulesPaged(pg, size).then(d => {
+      setCanManage(d.can_manage !== false);
+      return d;
+    }).catch(e => {
       setErr(e?.response?.data?.detail ?? "Couldn't load rules. Please try again.");
       throw e;
     }),
@@ -72,12 +79,16 @@ export default function RuleLibrary() {
             <p>
               {platform
                 ? "Generic checks that run on every broker's BDX files. Changes here affect all tenants."
-                : "Your generic rules. They run on all your BDX files and only your team can see them."}
+                : canManage
+                  ? "Your generic rules. They run on all your BDX files and only your team can see them."
+                  : "The checks your company runs on every BDX file. Your carrier admin looks after this list."}
             </p>
           </div>
-          <div className="actions">
-            <button className="btn pri" onClick={() => nav("/rule-library/new")}>＋ New Rule</button>
-          </div>
+          {canManage && (
+            <div className="actions">
+              <button className="btn pri" onClick={() => nav("/rule-library/new")}>＋ New Rule</button>
+            </div>
+          )}
         </div>
 
         {err && <div className="note warn" style={{ marginBottom: 14, maxWidth: 640 }}>{err}</div>}
@@ -88,8 +99,13 @@ export default function RuleLibrary() {
         <div className="note warn" style={{ marginBottom: 16 }}>
           <b>These generic rules run on {platform ? "every broker's" : "all your"} BDX files.</b>
           <div style={{ marginTop: 6 }}>
-            A rule only starts working after you run <b>Bordereau Setup</b> for a program. Add or edit
-            rules here first, then run Bordereau Setup.
+            {canManage ? (
+              <>A rule only starts working after you run <b>Bordereau Setup</b> for a program. Add or edit
+              rules here first, then run Bordereau Setup.</>
+            ) : (
+              <>You can read these rules but not change them — only your carrier admin can add, edit,
+              turn off or delete one. A rule starts working on a program when its <b>Bordereau Setup</b> is run.</>
+            )}
           </div>
           <div style={{ marginTop: 6 }}>
             If a program is already set up, it won't use a new rule until you run its setup again.
@@ -100,7 +116,7 @@ export default function RuleLibrary() {
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Rule</th><th>Type</th><th>Severity</th><th>Status</th><th></th></tr>
+                <tr><th>Rule</th><th>Type</th><th>Severity</th><th>Status</th>{canManage && <th></th>}</tr>
               </thead>
               <tbody>
                 {rows.map(r => {
@@ -118,6 +134,7 @@ export default function RuleLibrary() {
                           <span className="d" />{r.is_active ? "Active" : "Disabled"}
                         </span>
                       </td>
+                      {canManage && (
                       <td className="r">
                         <span className="linkish" onClick={() => nav(`/rule-library/${r.id}/edit`)}>Edit</span>
                         {" · "}
@@ -129,6 +146,7 @@ export default function RuleLibrary() {
                         <span className="linkish" title="Delete this rule"
                           onClick={() => setDelTarget(r)}>Delete</span>
                       </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -136,7 +154,9 @@ export default function RuleLibrary() {
             </table>
             {!loading && rows.length === 0 && (
               <div className="empty">
-                No rules yet. {platform ? "Add a platform-wide check" : "Create your first rule"} to get started.
+                {canManage
+                  ? <>No rules yet. {platform ? "Add a platform-wide check" : "Create your first rule"} to get started.</>
+                  : "No rules yet. Your carrier admin hasn't added any."}
               </div>
             )}
             {loading && <div className="empty">Loading…</div>}
@@ -147,8 +167,11 @@ export default function RuleLibrary() {
         </div>
 
         <div className="note" style={{ marginTop: 14}}>
-          Disabled rules stop running but are kept, so you can turn them back on any time. Changes take
-          effect after you run Bordereau Setup again.
+          {canManage
+            ? <>Disabled rules stop running but are kept, so you can turn them back on any time. Changes take
+              effect after you run Bordereau Setup again.</>
+            : <>Disabled rules are kept but do not run. A change your carrier admin makes takes effect the
+              next time a program's Bordereau Setup is run.</>}
         </div>
       </div>
 

@@ -57,6 +57,7 @@ import { InviteBrokerModal } from "../components/InviteBrokerModal";
 import { InviteSentModal } from "../components/InviteSentModal";
 import AddContractModal from "../components/AddContractModal";
 import { Pagination } from "../components/Pagination";
+import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { getSegments, addSegment, type Segment } from "../api/segments";
 
 // Segments are the CARRIER's own list now (api/segments), not a fixed five —
@@ -94,6 +95,9 @@ const openContracts = (b?: HierarchyBroker) =>
 export default function AddProgram() {
   const mga = currentMga();
   const nav = useNavigate();
+  // Only the carrier ADMIN reviews and signs a contract; a carrier user's
+  // "Open the contract" stays a plain look, not an action item.
+  const isAdmin = addsCarrierUsers(useCarrierSeat());
   // /programs/:programId/setup?stage=N picks the flow up for a programme that
   // already exists — the Programmes list sends each row here, at the step it
   // is stuck on. /programs/new starts a new one.
@@ -781,15 +785,33 @@ export default function AddProgram() {
                             // has signed, the broker has not, and a bordereau
                             // setup can be built on it regardless.
                             : ready ? `${plural(n, "contract")} · you have signed`
+                            // The admin's own move, named plainly rather than
+                            // via the raw lifecycle word — the same case the
+                            // "Review contract" button above answers.
+                            : isAdmin && shown.awaiting_carrier_admin
+                              ? `${plural(n, "contract")} · waiting on your signature`
                             : `${plural(n, "contract")} · not signed yet (${(shown.lifecycle ?? "").replace(/_/g, " ")})`}
                         </span>
                       </span>
                       <OnboardingBadge status={b.onboarding_status} />
                       <div className="flex shrink-0 items-center gap-2">
                         {shown && (
+                          // "Review contract" when there is genuinely
+                          // something for THIS admin to decide on it right
+                          // now — the same signal the contract record's own
+                          // banner and the dashboard's "Waiting on You" tile
+                          // read (contract_routes._carrier_admin_turn).
+                          // Otherwise the plain "Open the contract" look, for
+                          // a carrier user or a contract that is not on
+                          // anybody's desk. Same destination either way — one
+                          // button, not two that could disagree.
                           <Link to={`/contracts/${shown.id}`}
-                            className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium text-ink hover:bg-surface-2 hover:no-underline">
-                            <FileText size={13} /> Open the contract
+                            className={isAdmin && shown.awaiting_carrier_admin
+                              ? "inline-flex items-center gap-1.5 rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark hover:no-underline"
+                              : "inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium text-ink hover:bg-surface-2 hover:no-underline"}>
+                            <FileText size={13} />
+                            {isAdmin && shown.awaiting_carrier_admin
+                              ? "Review contract" : "Open the contract"}
                           </Link>
                         )}
                         <button type="button" onClick={() => { setContractSaved(false); setUploadFor(b); }}

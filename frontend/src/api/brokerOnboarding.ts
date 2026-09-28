@@ -49,9 +49,20 @@ export type BrokerOnboardingRequest = {
 };
 
 /** The queue. A carrier admin gets every request at the carrier; a carrier
- *  user gets their own, which is how the rejection reason reaches them. */
-export const listBrokerRequests = (params?: { status?: BrokerRequestStatus }) =>
-  api.get<{ items: BrokerOnboardingRequest[]; pending: number }>(
+ *  user gets their own, which is how the rejection reason reaches them.
+ *
+ *  `status` takes the four real states and one derived value, `answered` —
+ *  everything that is not waiting. The screen shows waiting and answered as
+ *  two tables that page separately, so each asks for its own half rather than
+ *  cutting one out of a page of the other.
+ *
+ *  `pending` is always the whole queue's waiting count, whatever was filtered
+ *  or paged; `total` is how many matched the filter. */
+export const listBrokerRequests = (params?: {
+  status?: BrokerRequestStatus | "answered";
+  page?: number; page_size?: number;
+}) =>
+  api.get<{ items: BrokerOnboardingRequest[]; pending: number; total: number }>(
     "/broker-onboarding-requests", { params }).then(r => r.data);
 
 /** Approve it: the broker is onboarded and the invitation goes out now.

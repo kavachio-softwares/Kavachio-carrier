@@ -233,20 +233,18 @@ export const ROUTE_ACCESS: {
   { pattern: "/direct/setups/:id/edit", requires: "carrier_admin" },
   // Rule library — tenant_admin sees their own tenant's rules, kavachio_admin
   // the platform-wide ones. The backend scopes the rows by role.
-  // The carrier ADMIN's alone. A rule in the library is applied to every
-  // bordereau this carrier validates, on every programme and every broker —
-  // it is not work on one file, it is a standing instruction about the whole
-  // book, so it belongs to the one person accountable for it. A carrier user
-  // still sees every rule that FIRED, named, on the exception screens; what
-  // they no longer do is write one.
+  // READ by both carrier seats, WRITTEN by the carrier admin alone. A rule in
+  // the library is applied to every bordereau this carrier validates, so
+  // adding or changing one belongs to the one person accountable for the book;
+  // a carrier user runs the setups that put these rules to work, so they see
+  // the list, read-only.
   //
-  // `carrierAdminOnly` rather than `only`, because the two carrier seats hold
-  // the same DB role and nothing in the token tells them apart — the
-  // organisation's owner pointer does (see hooks/useCarrierSeat). It narrows
-  // the carrier side only, so Kavachio staff keep the platform-wide library.
-  // The server enforces it independently on all six endpoints
-  // (app_routes._assert_is_carrier_admin).
-  { pattern: "/rule-library", requires: "carrier_admin", carrierAdminOnly: true },
+  // `carrierAdminOnly` rather than `only` on the two write screens, because
+  // the two carrier seats hold the same DB role and nothing in the token tells
+  // them apart — the organisation's owner pointer does (see
+  // hooks/useCarrierSeat). The server enforces the same split on its four
+  // write endpoints (carrier_scope.require_carrier_admin).
+  { pattern: "/rule-library", requires: "carrier_admin" },
   { pattern: "/rule-library/new", requires: "carrier_admin", carrierAdminOnly: true },
   { pattern: "/rule-library/:id/edit", requires: "carrier_admin",
     carrierAdminOnly: true },

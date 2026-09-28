@@ -48,7 +48,9 @@ export async function listRules() {
  *  returning every rule: getRule below has no GET-one endpoint to call and
  *  finds its rule by reading the whole list. */
 export async function listRulesPaged(page: number, pageSize: number) {
-  const r = await api.get<{ items: Rule[]; total: number }>(
+  // can_manage: false for a carrier user, who may read the library but not
+  // change it.
+  const r = await api.get<{ items: Rule[]; total: number; can_manage?: boolean }>(
     "/rule-library", { params: { page, page_size: pageSize } });
   return r.data;
 }

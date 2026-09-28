@@ -159,13 +159,12 @@ const GROUPS: {
     // "Profile" for the carrier admin: their organisation's own settings,
     // their colleagues, and the rules the carrier validates by.
     //
-    // A carrier USER has none of that. Company and Rule Library are the
-    // admin's alone, so both are filtered out for them and the section is
-    // left holding one row — the brokers they invited. "Profile" over a list
-    // of other companies reads as the person's own account settings, which is
-    // the one thing it is not.
+    // A carrier USER does not get Company, so the section holds the brokers
+    // they invited and the Rule Library, which they may read but not change.
+    // "Profile" over those reads as the person's own account settings, which
+    // is the one thing it is not.
     title: "Profile",
-    carrierUserTitle: "Broker Companies",
+    carrierUserTitle: "Brokers & Rules",
     requires: "carrier_admin",
     items: [
       // The organisation's own settings — name, logo, currency. That is the

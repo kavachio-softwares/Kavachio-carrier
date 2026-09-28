@@ -169,6 +169,28 @@ def _contract_settled(s, c: Contract) -> bool:
     return True
 
 
+def _contract_awaiting_admin(s, c: Contract) -> bool:
+    """Is THIS contract sitting on the carrier admin's desk right now?
+
+    THE ONE ANSWER, read off contract_routes._carrier_admin_turn — the same
+    function the contract record's banner, the dashboard's "Waiting on You"
+    tile and the notification bell all read. Re-deriving "is it the admin's
+    move" a second time here is exactly how those three came to disagree with
+    each other before [[carrier-admin-one-gate]]; this must not become a
+    fourth copy.
+
+    Lazy import for the same reason as _contract_settled: no module cycle
+    exists, but importing at call time keeps it that way regardless of load
+    order between the two route files.
+    """
+    try:
+        from contract_routes import (_carrier_admin_turn, _signatures,
+                                     _unsigned_sides)
+        return _carrier_admin_turn(c, _unsigned_sides(_signatures(s, c.id)))
+    except Exception:  # noqa: BLE001 — never blocks the tree from rendering
+        return False
+
+
 def _assert_programme(session, program_id: int, principal: Principal, tenant_id: int) -> Program:
     prog = session.get(Program, program_id)
     if not prog:
@@ -1267,7 +1289,13 @@ def hierarchy(principal: Principal = Depends(current_principal)):
                          # while its lifecycle still reads `agreed`, because the
                          # broker's countersignature is not waited for. See
                          # _contract_settled.
-                         "settled": _contract_settled(s, c)}
+                         "settled": _contract_settled(s, c),
+                         # Is it the CARRIER ADMIN's move on this one? Lets the
+                         # Programmes wizard put a "Review contract" action
+                         # right where the admin is already looking, instead of
+                         # a plain "Open the contract" that reads the same
+                         # whether there is something to do or nothing at all.
+                         "awaiting_carrier_admin": _contract_awaiting_admin(s, c)}
                         for c in sorted(bc, key=lambda c: c.id)
                     ],
                 })

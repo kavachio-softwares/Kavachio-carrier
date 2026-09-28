@@ -140,14 +140,20 @@ export type BrokerUser = {
 
 export type BrokerUsers = {
   broker: { id: number; name: string };
+  /** One page of the team when `page` was asked for; all of it otherwise. */
   items: BrokerUser[];
+  /** Team-wide, never the page's — what the pager counts against. */
   total: number;
   /** Team-wide, so "can't remove the last admin" uses the true count. */
   total_admins: number;
 };
 
-export const getBrokerUsers = () =>
-  api.get<BrokerUsers>("/broker/users").then(r => r.data);
+/** The team. `page`/`page_size` are optional and the server ignores their
+ *  absence — `total` and `total_admins` stay the whole team's either way, so
+ *  "you cannot remove the last admin" is decided on the team and not on the
+ *  ten people who happen to be on screen. */
+export const getBrokerUsers = (params?: { page?: number; page_size?: number }) =>
+  api.get<BrokerUsers>("/broker/users", { params }).then(r => r.data);
 
 export const inviteBrokerOperator = (full_name: string, email: string) =>
   api.post<BrokerUser>("/broker/users", { full_name, email }).then(r => r.data);

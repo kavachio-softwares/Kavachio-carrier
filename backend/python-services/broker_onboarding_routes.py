@@ -356,6 +356,8 @@ def _row(req: BrokerOnboardingRequest, progs: dict, parties: dict,
 @router.get("/broker-onboarding-requests")
 def broker_onboarding_requests(
         status: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: Optional[int] = Query(None, ge=1, le=200),
         principal: Principal = Depends(require_role("carrier_admin"))):
     """The queue. What it contains depends on the seat, as everywhere else here.
 
@@ -367,22 +369,44 @@ def broker_onboarding_requests(
     reason has to reach them, and the screen they raised the request from is
     not where they will be when the answer comes.
 
-    `status` filters; omitted, it returns everything, newest first, so the
-    screen can show the answered ones under the waiting ones without a second
-    call.
+    `status` filters. On top of the four real states it takes one derived
+    value, `answered` — everything that is not waiting. The screen draws the
+    waiting ones and the answered ones as two tables, and each pages on its
+    own; without this the second table would have to be cut out of a page of
+    the first, which is the one thing server paging cannot do.
+
+    Pagination is OPT-IN: omit `page` and it returns everything, newest first,
+    exactly as before. `pending` is always the WHOLE queue's waiting count —
+    not the page's and not the filter's — because it is what the dashboard
+    tile and this screen's heading both state.
     """
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal)
-        q = (s.query(BrokerOnboardingRequest)
-             .filter(BrokerOnboardingRequest.tenant_id == tid))
-        if status:
-            q = q.filter(BrokerOnboardingRequest.status == status.strip().lower())
+        base = (s.query(BrokerOnboardingRequest)
+                .filter(BrokerOnboardingRequest.tenant_id == tid))
         if _carrier_seat(s, principal) == "user":
-            q = q.filter(
+            base = base.filter(
                 BrokerOnboardingRequest.requested_by_user_id == principal.user_id)
-        rows = q.order_by(BrokerOnboardingRequest.id.desc()).all()
+        # Counted off the SEAT'S whole queue, before any status filter and
+        # before the page is cut.
+        pending_total = base.filter(
+            BrokerOnboardingRequest.status == PENDING).count()
+
+        q = base
+        want = (status or "").strip().lower()
+        if want == "answered":
+            q = q.filter(BrokerOnboardingRequest.status != PENDING)
+        elif want:
+            q = q.filter(BrokerOnboardingRequest.status == want)
+
+        total = q.order_by(None).count()
+        ordered = q.order_by(BrokerOnboardingRequest.id.desc())
+        if page is not None:
+            size = page_size or 10
+            ordered = ordered.offset((page - 1) * size).limit(size)
+        rows = ordered.all()
         if not rows:
-            return {"items": [], "pending": 0}
+            return {"items": [], "pending": pending_total, "total": total}
 
         progs = {p.id: p.name for p in s.query(Program).filter(
             Program.id.in_([r.program_id for r in rows if r.program_id] or [-1])).all()}
@@ -395,8 +419,7 @@ def broker_onboarding_requests(
             u.id: {"id": u.id, "full_name": u.full_name, "email": u.email}
             for u in s.query(AppUser).filter(AppUser.id.in_(ids or {-1})).all()}
         items = [_row(r, progs, parties, people) for r in rows]
-        return {"items": items,
-                "pending": sum(1 for r in rows if r.status == PENDING)}
+        return {"items": items, "pending": pending_total, "total": total}
 
 
 # =============================================================================
