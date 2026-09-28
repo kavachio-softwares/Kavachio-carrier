@@ -4905,6 +4905,23 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         # brought on board, and how many of those have not accepted yet.
         seat = _carrier_seat(s, principal)
         users_total = users_invited = my_brokers = my_brokers_pending = None
+        # "Broker onboarding pending" — brokers a carrier user has asked to
+        # bring on and nobody has answered yet. The carrier ADMIN's only, like
+        # the setup queue: they are the one who decides, and a count of work
+        # waiting on somebody else is noise on a colleague's dashboard.
+        #
+        # ALWAYS A NUMBER for them, never None, because the tile is meant to be
+        # there at nought as well — "nothing is waiting on me" is the answer
+        # they come to the dashboard for, and a tile that appears only when
+        # there is bad news is a tile nobody learns to trust.
+        broker_requests_pending = None
+        if seat in ("admin", "both"):
+            from db import BrokerOnboardingRequest
+            broker_requests_pending = (
+                s.query(func.count(BrokerOnboardingRequest.id))
+                .filter(BrokerOnboardingRequest.tenant_id == tid,
+                        BrokerOnboardingRequest.status == "pending")
+                .scalar() or 0)
         if seat in ("admin", "both"):
             owner_id = s.query(Tenant.owner_user_id).filter(Tenant.id == tid).scalar()
             user_rows = s.query(AppUser.status, func.count(AppUser.id)).filter(
@@ -4929,6 +4946,9 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             "users_invited": users_invited,
             "my_brokers": my_brokers,
             "my_brokers_pending": my_brokers_pending,
+            # Broker onboarding requests waiting on the carrier admin. None for
+            # a carrier user, who is not the one being asked.
+            "broker_requests_pending": broker_requests_pending,
             "uploads_today": uploads_today,
             "uploads_total": total_uploads,
             "open_bdx_cycles": programs,

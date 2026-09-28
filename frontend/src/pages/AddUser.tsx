@@ -34,6 +34,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { currentMga, getTenantBrand } from "../auth";
 import { api } from "../api/client";
 import { InviteSentModal } from "../components/InviteSentModal";
+import { InfoTip } from "../components/InfoTip";
 import { inviteBroker } from "../api/hierarchy";
 import { addsCarrierUsers, invitesBrokers, useCarrierSeat } from "../hooks/useCarrierSeat";
 
@@ -74,7 +75,15 @@ export default function AddUser() {
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [created, setCreated] = useState<{ name: string; email: string; org: string } | null>(null);
+  // `pending` is set when a carrier user's broker invite became a REQUEST for
+  // their carrier admin. Nothing was created and nothing was sent, so the
+  // confirmation below must not say either.
+  const [created, setCreated] = useState<{
+    name: string; email: string; org: string;
+    /** The organisation name as TYPED. `org` holds the server's sentence for
+     *  the sent case, which is not a name and cannot be put in bold. */
+    orgTyped?: string; pending?: boolean;
+  } | null>(null);
 
   // Nothing to send until the form describes somebody. A broker admin ALSO
   // needs the broker named, or there is no organisation for them to be admin
@@ -114,7 +123,8 @@ export default function AddUser() {
         // confirmed: if that address already belongs to a broker, no
         // organisation was created and their real name is not ours to show.
         setCreated({ name: full_name.trim(), email: email.trim(),
-                     org: r.message });
+                     org: r.message, orgTyped: brokerName.trim(),
+                     pending: r.pending ?? !r.invited });
       }
     } catch (e: any) {
       // `detail` is a string for simple refusals and an object for the ones
@@ -135,12 +145,17 @@ export default function AddUser() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>{kind === "carrier" ? "Add a carrier user" : "Invite a broker"}</h2>
+            <h2>
+              {kind === "carrier" ? "Add a carrier user" : "Invite a broker"}
+              {kind === "carrier" && (
+                <InfoTip text={"They do the same daily work as you — contracts, "
+                  + "programmes, files and inviting broker companies — but "
+                  + "only you add or remove carrier users."} />
+              )}
+            </h2>
             <p>
               {kind === "carrier"
-                ? "A colleague at your organisation. They do the same daily "
-                  + "work as you — contracts, programmes, files and inviting "
-                  + "broker companies — but only you add or remove carrier users."
+                ? "A colleague at your organisation."
                 : "Name the broker company and its broker admin — the person "
                   + "who runs it. Both are created together."}
             </p>
@@ -300,16 +315,28 @@ export default function AddUser() {
 
       {created && (
         <InviteSentModal
-          title={kind === "carrier" ? "Carrier user added" : "Broker invited"}
+          /* A green tick says "done", and it is read before the headline. On a
+             request nothing has been done — it is waiting on somebody. */
+          kind={created.pending ? "pending" : "sent"}
+          title={kind === "carrier" ? "Carrier user added"
+            : created.pending ? "Waiting for approval" : "Broker invited"}
           message={kind === "carrier"
             ? `${created.name} can set a password and sign in for ${created.org}.`
+            : created.pending
+            ? <>Nothing is sent to <b>{created.orgTyped}</b> until your carrier
+                admin approves.</>
             : created.org}
-          email={created.email}
+          /* No envelope row on a request: nothing has been sent. */
+          email={created.pending ? undefined : created.email}
           note={kind === "carrier"
             ? "They can work on everything this organisation holds and invite "
               + "your brokers. Adding and removing carrier users stays with you."
+            : created.pending
+            ? "You will be told either way."
             : "They appear on your Brokers list once they accept."}
-          onDone={() => nav(kind === "carrier" ? "/users" : "/brokers")}
+          doneLabel={created.pending ? "See my requests" : "Done"}
+          onDone={() => nav(kind === "carrier" ? "/users"
+            : created.pending ? "/brokers/requests" : "/brokers")}
         />
       )}
     </div>

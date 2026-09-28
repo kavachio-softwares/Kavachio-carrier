@@ -198,63 +198,147 @@ def programme_brokers(program_id: int, principal: Principal = Depends(current_pr
         return out
 
 
+# Both endpoints below are in audit._SELF_LOGGED, because each one now means
+# two different things depending on who calls it: POST /brokers is an
+# onboarding from the carrier admin and a REQUEST from a carrier user, and the
+# middleware keys on the path alone. A path-keyed name would put "added a
+# broker" in the trail on a day nobody added one. So the carrier admin's own
+# acts are logged here, and the carrier user's requests in
+# broker_onboarding_routes — under different names, so neither reader sees the
+# same event twice or the wrong one once.
+
+def _log_broker_act(s, tid: int, principal: Principal, action: str,
+                    details: dict) -> None:
+    """Best-effort audit row. A broker must not fail to be onboarded because
+    the trail could not be written."""
+    try:
+        from audit import log_activity, actor_email
+        log_activity(tid, actor_email(principal.user_id), action,
+                     target=details.get("target"), details=details,
+                     principal=principal)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _log_broker_onboarded(s, tid: int, principal: Principal, result: dict,
+                          program_id: Optional[int]) -> None:
+    """The carrier admin brought a broker on board themselves."""
+    prog = s.get(Program, program_id) if program_id else None
+    _log_broker_act(s, tid, principal, "broker_added", {
+        "target": f"broker:{result.get('email')}",
+        "name": result.get("email"),
+        "email": result.get("email"),
+        "program_id": program_id,
+        "program_name": getattr(prog, "name", None),
+    })
+
+
+def _log_broker_linked(s, tid: int, principal: Principal, program_id: int,
+                       party: Party, result: dict) -> None:
+    """The carrier admin put a broker on a programme themselves."""
+    prog = s.get(Program, program_id) if program_id else None
+    _log_broker_act(s, tid, principal, "broker_put_on_programme", {
+        "target": f"party:{party.id}",
+        "name": party.legal_name,
+        "broker_name": party.legal_name,
+        "broker_party_id": party.id,
+        "program_id": program_id,
+        "program_name": getattr(prog, "name", None),
+        "link_status": result.get("status"),
+        "reactivated": result.get("reactivated"),
+    })
+
+
+def _do_programme_link(s, tid: int, program_id: int, party: Party,
+                       by_user_id: int, status: str) -> dict:
+    """Write the programme→broker pair. THE ACT ITSELF, with no gate in it.
+
+    Pulled out of the route because it now has two callers that must do exactly
+    the same thing: the carrier admin adding a broker directly, and the carrier
+    admin APPROVING a colleague's request to. Any difference between those two
+    would be a difference nobody asked for.
+
+    Re-assigning a broker that was previously removed REACTIVATES the existing
+    row rather than inserting a second one — the pair is unique, and the
+    history of when it was first assigned is worth keeping.
+
+    Does NOT commit: the approval path writes this and the decision on the
+    request together, and half of that landing would be worse than neither.
+    """
+    existing = (
+        s.query(ProgramBroker)
+        .filter(ProgramBroker.program_id == program_id,
+                ProgramBroker.broker_party_id == party.id)
+        .first()
+    )
+    if existing:
+        if existing.status in ("active", LINK_PENDING):
+            raise HTTPException(409, f"{party.legal_name} is already on this programme")
+        existing.status = status
+        existing.assigned_by_user_id = by_user_id
+        return {"ok": True, "reactivated": True, "link_id": existing.id,
+                "status": status}
+
+    link = ProgramBroker(
+        tenant_id=tid,
+        program_id=program_id,
+        broker_party_id=party.id,
+        status=status,
+        assigned_by_user_id=by_user_id,
+    )
+    s.add(link)
+    # Producing on a programme is the strongest evidence there is that the
+    # two work together, so it records the relationship as well. Idempotent
+    # — the usual case is that it already exists.
+    link_carrier_broker(s, tid, party.id, origin="programme",
+                        by_user_id=by_user_id)
+    s.flush()
+    return {"ok": True, "reactivated": False, "link_id": link.id,
+            "status": status}
+
+
 @router.post("/programs/{program_id}/brokers")
 def programme_broker_add(program_id: int, body: BrokerAssignBody,
                          principal: Principal = Depends(require_role("carrier_admin"))):
     """Put a broker on a programme. This is the act that lets them produce.
 
-    Re-assigning a broker that was previously removed REACTIVATES the existing
-    row rather than inserting a second one — the pair is unique, and the
-    history of when it was first assigned is worth keeping.
+    WHAT THIS DOES DEPENDS ON WHO ASKS, and the server is what knows:
+
+      carrier admin   the pair is written and the link goes live, exactly as
+                      before. Their own act IS the approval.
+      carrier user    a REQUEST is written and the carrier admin is asked.
+                      Nothing is linked and nothing is sent until they answer.
+
+    ONE endpoint and ONE button, for the same reason pipeline_activate is one:
+    the intent being expressed is the same either way — "this broker belongs on
+    this programme" — and which of the two it turns into is not something the
+    screen should have to work out and could get wrong.
+
+    TWO GATES NOW STAND IN A ROW, and they are not the same gate:
+
+      this one    WHO do we work with?   — releases the invitation
+      setup 27    WHAT may they send?    — releases the programme
+
+    So an approved request still writes the link at `pending_approval` for a
+    carrier user's broker, and the Bordereau Setup approval still releases it
+    (direct_routes._activate_links_for), untouched. Approving a broker opens
+    the relationship; it does not put the programme in the broker's sight.
     """
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal)
         _assert_programme(s, program_id, principal, tid)
         party = _assert_broker(s, body.broker_party_id, tid)
 
-        # PUTTING A BROKER ON A PROGRAMME IS THE ACT THAT LETS THEM PRODUCE, so
-        # a carrier USER's goes up for approval with the rest of the chain: the
-        # link waits at `pending_approval` and is released when the Bordereau
-        # Setup built on it is approved (direct_routes._activate_links_for).
-        # The carrier still sees and works through it — carrier_scope.link_live
-        # — the broker does not, which is the whole of the gate.
-        #
-        # The carrier admin's own goes live immediately, exactly as before:
-        # their act IS the approval.
-        status = ("active" if is_carrier_admin_seat(s, principal)
-                  else LINK_PENDING)
+        if not is_carrier_admin_seat(s, principal):
+            from broker_onboarding_routes import raise_request_for_existing_broker
+            return raise_request_for_existing_broker(
+                s, tid, program_id, party, principal)
 
-        existing = (
-            s.query(ProgramBroker)
-            .filter(ProgramBroker.program_id == program_id,
-                    ProgramBroker.broker_party_id == party.id)
-            .first()
-        )
-        if existing:
-            if existing.status in ("active", LINK_PENDING):
-                raise HTTPException(409, f"{party.legal_name} is already on this programme")
-            existing.status = status
-            existing.assigned_by_user_id = principal.user_id
-            s.commit()
-            return {"ok": True, "reactivated": True, "link_id": existing.id,
-                    "status": status}
-
-        link = ProgramBroker(
-            tenant_id=tid,
-            program_id=program_id,
-            broker_party_id=party.id,
-            status=status,
-            assigned_by_user_id=principal.user_id,
-        )
-        s.add(link)
-        # Producing on a programme is the strongest evidence there is that the
-        # two work together, so it records the relationship as well. Idempotent
-        # — the usual case is that it already exists.
-        link_carrier_broker(s, tid, party.id, origin="programme",
-                            by_user_id=principal.user_id)
+        result = _do_programme_link(s, tid, program_id, party,
+                                    principal.user_id, "active")
+        _log_broker_linked(s, tid, principal, program_id, party, result)
         s.commit()
-        return {"ok": True, "reactivated": False, "link_id": link.id,
-                "status": status}
+        return result
 
 
 @router.delete("/programs/{program_id}/brokers/{broker_party_id}")
@@ -489,6 +573,196 @@ def _join_link(invitation_id: int) -> str:
 # in: see broker_create, and BrokerInvitation.
 
 
+def check_broker_onboarding(s, tid: int, name: str, email: str):
+    """Everything that can REFUSE bringing this broker on, decided without
+    creating anything. Returns the resolved (existing_user, existing_party,
+    is_existing_broker) trio for whoever is going to act on it.
+
+    Its own function because the refusals now have to happen TWICE, in two
+    places, with the same words: once when a carrier user asks (so they hear
+    "that email is already in use" at the moment they type it, rather than
+    their carrier admin hearing it days later and having to relay it), and
+    again when the request is approved (because a colleague may have invited
+    the same address in between). Two copies of these four rules would drift,
+    and the third one would be the one that leaked whose broker this is.
+
+    IT STILL REFUSES IN THE SAME VOICE, which is the part that matters. "That
+    email is already in use" says nothing about whether the address belongs to
+    a broker, to a carrier's own staff, or to nobody at all — see the comments
+    below. A carrier user running this early learns exactly what they learned
+    before, and nothing more.
+    """
+    # ── facts about THIS carrier's own book: safe to state plainly ──
+    dup = (s.query(BrokerInvitation)
+           .filter(BrokerInvitation.tenant_id == tid,
+                   func.lower(BrokerInvitation.email) == email,
+                   BrokerInvitation.status == "pending")
+           .first())
+    if dup:
+        raise HTTPException(409, {
+            "message": f"You have already invited {email}. They have not "
+                       f"answered yet.",
+            "errors": {"admin_email": "already invited"}})
+
+    # ── facts about somebody ELSE's book: never stated, never implied ──
+    #
+    # From here the two cases diverge and the carrier is told NOTHING about
+    # which one they are in. Whether this address already has a login is a
+    # relationship between that person and whichever carriers onboarded
+    # them; the next carrier does not get to discover it by typing an
+    # address into a form. Both branches end at the same response.
+    existing_user = (s.query(AppUser)
+                     .filter(func.lower(AppUser.email) == email).first())
+    existing_party = (s.get(Party, existing_user.broker_party_id)
+                      if existing_user and existing_user.broker_party_id else None)
+    is_existing_broker = bool(
+        existing_party
+        and (existing_party.party_type or "").lower() in PRODUCER_PARTY_TYPES)
+
+    if is_existing_broker and not multi_carrier_brokers_enabled():
+        # The old behaviour, and the default. A broker belongs to the
+        # carrier that onboarded them, so a second carrier cannot reach
+        # them at all — the address is simply taken.
+        raise HTTPException(409, {
+            "message": "That email is already in use.",
+            "errors": {"admin_email": "taken"}})
+
+    if is_existing_broker:
+        if existing_party.id in carrier_broker_ids(s, tid):
+            # Their own book again — this one they can be told.
+            raise HTTPException(409, {
+                "message": "You already work with that broker.",
+                "errors": {"admin_email": "already yours"}})
+    elif not existing_user:
+        # A party can only be created when the email is genuinely free, so the
+        # organisation name only has to be unique in that one case. Where the
+        # address is taken by somebody who is not a broker, nothing is created
+        # and the name is never used — see the branch in _do_broker_onboarding.
+        if s.query(Party).filter(Party.tenant_id == tid,
+                                 func.lower(Party.legal_name) == name.lower()).first():
+            raise HTTPException(409, {
+                "message": f"You already work with a broker called {name}.",
+                "errors": {"legal_name": "duplicate"}})
+
+    return existing_user, existing_party, is_existing_broker
+
+
+def _do_broker_onboarding(s, tid: int, body: NewBrokerBody, name: str,
+                          email: str,
+                          by_user_id: int) -> tuple[dict, callable, Optional[int]]:
+    """Bring the broker on board: the organisation, its first admin and the
+    invitation. THE ACT ITSELF, with no gate in it.
+
+    Pulled out of the route verbatim, for the same reason as
+    _do_programme_link: the carrier admin doing it directly and the carrier
+    admin APPROVING a colleague's request must do the identical thing. This is
+    the "existing broker-onboarding flow" that the approval sits in FRONT of —
+    it is not re-implemented anywhere, and nothing in it changed.
+
+    Returns (response, send_mail, our_party_id). It does NOT commit and it does
+    NOT send: the caller commits, then calls send_mail(). Mail goes out after
+    the commit because an invitation the broker has been told about and the
+    database has not is the one combination there is no way back from.
+
+    `our_party_id` is the organisation THIS carrier just created, and None in
+    every other case. It is the only safe answer to "may a programme link be
+    written for them right now?": a broker who already had a login has agreed
+    to nothing yet, and their link is written when they accept
+    (broker_routes._accept_invitation) — never by the carrier alone.
+    """
+    from app_routes import (_make_invite_link, _send_invite_email,
+                            _send_carrier_invite_email)
+
+    existing_user, existing_party, is_existing_broker = check_broker_onboarding(
+        s, tid, name, email)
+
+    admin, link, party = None, None, None
+    if is_existing_broker:
+        # They exist. Nothing is created — no organisation, no login, and
+        # no programme link. The invitation waits on THEIR screen, and the
+        # link appears when they accept it. A carrier can no longer put a
+        # broker on a programme by unilateral act.
+        party = existing_party
+    else:
+        # New to the platform, OR an address belonging to somebody who is
+        # not a broker (a carrier's own staff, say). Both are handled the
+        # same way on purpose: a party can only be created when the email
+        # is genuinely free, and the difference between "new" and "taken by
+        # a non-broker" is not the inviting carrier's business either.
+        if existing_user:
+            # The address cannot become a broker login. The invitation is
+            # recorded and simply never accepted — indistinguishable from
+            # one nobody got round to answering, which is the point.
+            s.add(BrokerInvitation(
+                tenant_id=tid, program_id=body.program_id, email=email,
+                org_name=name, status="pending",
+                by_user_id=by_user_id))
+            return ({"ok": True, "invited": True, "email": email,
+                     "message": f"Invitation sent to {email}."},
+                    lambda: None, None)
+
+        party = Party(tenant_id=tid, party_type=body.party_type,
+                      legal_name=name, scope="tenant",
+                      is_app_managed=True, is_active=True)
+        s.add(party); s.flush()
+        admin = AppUser(
+            email=email,
+            full_name=(body.admin_name or "").strip() or email.split("@")[0].title(),
+            role="broker_admin", status="invited",
+            # A broker seat belongs to the broker and to NO carrier — the
+            # same broker produces for several (chk_app_user_scope).
+            tenant_id=None, broker_party_id=party.id,
+            invited_by_user_id=by_user_id)
+        s.add(admin)
+        link = _make_invite_link(admin)
+        # This carrier brought them on, so they work together from now —
+        # the invitation that follows is accepted as onboarding completes,
+        # but the relationship does not wait on that to be true.
+        link_carrier_broker(s, tid, party.id, origin="onboarded",
+                            by_user_id=by_user_id)
+
+    invitation = BrokerInvitation(
+        tenant_id=tid, program_id=body.program_id, email=email,
+        party_id=party.id if party else None, org_name=name,
+        status="pending", by_user_id=by_user_id)
+    s.add(invitation)
+    s.flush()
+
+    # Everything the mail needs, read off the rows NOW, while the session is
+    # open and they are certainly loaded. The thunk runs after the commit and
+    # must not touch the session — a lazy load from a closed one is exactly the
+    # sort of failure that would swallow the invitation.
+    if admin and link:
+        # New: hand them an account. "Complete onboarding."
+        to, nm, org = admin.email, admin.full_name, party.legal_name
+
+        def send_mail() -> None:
+            _send_invite_email(to, link, nm, org)
+    elif is_existing_broker:
+        # Already has a login: ask them a question. "Join now" drops them on
+        # the invitation screen, signed in as themselves — no password, no
+        # expiry. Without this the invitation sat silently on a dashboard
+        # they had no reason to open.
+        me = s.query(Tenant).filter(Tenant.id == tid).first()
+        join, nm = _join_link(invitation.id), (existing_user.full_name
+                                              if existing_user else None)
+        carrier = (me.legal_name or me.tenant_name) if me else None
+
+        def send_mail() -> None:
+            _send_carrier_invite_email(email, join, nm, carrier)
+    else:
+        def send_mail() -> None:
+            return None
+
+    # ONE response shape for both branches. A carrier comparing two
+    # invitations must not be able to tell which broker already existed.
+    return ({"ok": True, "invited": True, "email": email,
+             "message": f"Invitation sent to {email}. They start working "
+                        f"with you once they accept — put them on "
+                        f"programmes after that."},
+            send_mail, (party.id if admin is not None else None))
+
+
 @router.post("/brokers")
 def broker_create(body: NewBrokerBody,
                   principal: Principal = Depends(require_role("carrier_admin"))):
@@ -504,14 +778,25 @@ def broker_create(body: NewBrokerBody,
     nobody can sign in as, and a broker on no programme cannot produce. Doing
     all three at once means what you end up with actually works.
 
+    WHO ASKS DECIDES WHAT HAPPENS, as on the programme endpoint above:
+
+      carrier admin   the broker is onboarded and the invitation goes out, as
+                      it always did. Their own act IS the approval.
+      carrier user    a REQUEST is written and the carrier admin is asked. No
+                      organisation, no login, no relationship and above all NO
+                      EMAIL — the broker never learns they were considered
+                      unless the answer is yes.
+
+    The refusals still happen HERE either way, at the moment the address is
+    typed (check_broker_onboarding). A carrier user finding out a week later,
+    through their admin, that the email was taken is not an improvement on
+    finding out immediately.
+
     The CARRIER's, not Kavachio's — see assert_can_invite_brokers. require_role
     passes a platform admin through every carrier gate, so without this the
     only thing stopping them was resolve_tenant_id's "select a tenant" 400.
     """
     assert_can_invite_brokers(principal)
-
-    from app_routes import (_make_invite_link, _send_invite_email,
-                            _send_carrier_invite_email)
 
     name = (body.legal_name or "").strip()
     if not name:
@@ -538,127 +823,17 @@ def broker_create(body: NewBrokerBody,
         if body.program_id:
             _assert_programme(s, body.program_id, principal, tid)
 
-        # ── facts about THIS carrier's own book: safe to state plainly ──
-        dup = (s.query(BrokerInvitation)
-               .filter(BrokerInvitation.tenant_id == tid,
-                       func.lower(BrokerInvitation.email) == email,
-                       BrokerInvitation.status == "pending")
-               .first())
-        if dup:
-            raise HTTPException(409, {
-                "message": f"You have already invited {email}. They have not "
-                           f"answered yet.",
-                "errors": {"admin_email": "already invited"}})
+        if not is_carrier_admin_seat(s, principal):
+            from broker_onboarding_routes import raise_request_to_invite
+            return raise_request_to_invite(s, tid, body, name, email, principal)
 
-        # ── facts about somebody ELSE's book: never stated, never implied ──
-        #
-        # From here the two cases diverge and the carrier is told NOTHING about
-        # which one they are in. Whether this address already has a login is a
-        # relationship between that person and whichever carriers onboarded
-        # them; the next carrier does not get to discover it by typing an
-        # address into a form. Both branches end at the same response.
-        existing_user = (s.query(AppUser)
-                         .filter(func.lower(AppUser.email) == email).first())
-        existing_party = (s.get(Party, existing_user.broker_party_id)
-                          if existing_user and existing_user.broker_party_id else None)
-        is_existing_broker = bool(
-            existing_party
-            and (existing_party.party_type or "").lower() in PRODUCER_PARTY_TYPES)
-
-        if is_existing_broker and not multi_carrier_brokers_enabled():
-            # The old behaviour, and the default. A broker belongs to the
-            # carrier that onboarded them, so a second carrier cannot reach
-            # them at all — the address is simply taken.
-            raise HTTPException(409, {
-                "message": "That email is already in use.",
-                "errors": {"admin_email": "taken"}})
-
-        admin, link, party = None, None, None
-        if is_existing_broker:
-            # They exist. Nothing is created — no organisation, no login, and
-            # no programme link. The invitation waits on THEIR screen, and the
-            # link appears when they accept it. A carrier can no longer put a
-            # broker on a programme by unilateral act.
-            party = existing_party
-            already_ours = party.id in carrier_broker_ids(s, tid)
-            if already_ours:
-                # Their own book again — this one they can be told.
-                raise HTTPException(409, {
-                    "message": "You already work with that broker.",
-                    "errors": {"admin_email": "already yours"}})
-        else:
-            # New to the platform, OR an address belonging to somebody who is
-            # not a broker (a carrier's own staff, say). Both are handled the
-            # same way on purpose: a party can only be created when the email
-            # is genuinely free, and the difference between "new" and "taken by
-            # a non-broker" is not the inviting carrier's business either.
-            if existing_user:
-                # The address cannot become a broker login. The invitation is
-                # recorded and simply never accepted — indistinguishable from
-                # one nobody got round to answering, which is the point.
-                s.add(BrokerInvitation(
-                    tenant_id=tid, program_id=body.program_id, email=email,
-                    org_name=name, status="pending",
-                    by_user_id=principal.user_id))
-                s.commit()
-                return {"ok": True, "invited": True, "email": email,
-                        "message": f"Invitation sent to {email}."}
-
-            if s.query(Party).filter(Party.tenant_id == tid,
-                                     func.lower(Party.legal_name) == name.lower()).first():
-                raise HTTPException(409, {
-                    "message": f"You already work with a broker called {name}.",
-                    "errors": {"legal_name": "duplicate"}})
-
-            party = Party(tenant_id=tid, party_type=body.party_type,
-                          legal_name=name, scope="tenant",
-                          is_app_managed=True, is_active=True)
-            s.add(party); s.flush()
-            admin = AppUser(
-                email=email,
-                full_name=(body.admin_name or "").strip() or email.split("@")[0].title(),
-                role="broker_admin", status="invited",
-                # A broker seat belongs to the broker and to NO carrier — the
-                # same broker produces for several (chk_app_user_scope).
-                tenant_id=None, broker_party_id=party.id,
-                invited_by_user_id=principal.user_id)
-            s.add(admin)
-            link = _make_invite_link(admin)
-            # This carrier brought them on, so they work together from now —
-            # the invitation that follows is accepted as onboarding completes,
-            # but the relationship does not wait on that to be true.
-            link_carrier_broker(s, tid, party.id, origin="onboarded",
-                                by_user_id=principal.user_id)
-
-        invitation = BrokerInvitation(
-            tenant_id=tid, program_id=body.program_id, email=email,
-            party_id=party.id if party else None, org_name=name,
-            status="pending", by_user_id=principal.user_id)
-        s.add(invitation)
+        result, send_mail, _ours = _do_broker_onboarding(
+            s, tid, body, name, email, principal.user_id)
+        _log_broker_onboarded(s, tid, principal, result, body.program_id)
         s.commit()
 
-        if admin and link:
-            # New: hand them an account. "Complete onboarding."
-            s.refresh(party)
-            _send_invite_email(admin.email, link, admin.full_name, party.legal_name)
-        elif is_existing_broker:
-            # Already has a login: ask them a question. "Join now" drops them on
-            # the invitation screen, signed in as themselves — no password, no
-            # expiry. Without this the invitation sat silently on a dashboard
-            # they had no reason to open.
-            s.refresh(invitation)
-            me = s.query(Tenant).filter(Tenant.id == tid).first()
-            _send_carrier_invite_email(
-                email, _join_link(invitation.id),
-                existing_user.full_name if existing_user else None,
-                (me.legal_name or me.tenant_name) if me else None)
-
-        # ONE response shape for both branches. A carrier comparing two
-        # invitations must not be able to tell which broker already existed.
-        return {"ok": True, "invited": True, "email": email,
-                "message": f"Invitation sent to {email}. They start working "
-                           f"with you once they accept — put them on "
-                           f"programmes after that."}
+    send_mail()
+    return result
 
 
 
@@ -999,6 +1174,42 @@ def hierarchy(principal: Principal = Depends(current_principal)):
             own, shared = setups.get((prog_id, broker_id)), setups.get((prog_id, None))
             return max((own, shared), key=lambda st: setup_rank.get(st, 0)) or None
 
+        # BROKERS A CARRIER USER HAS ASKED FOR AND NOBODY HAS ANSWERED YET.
+        #
+        # Without these the Programmes screen says "add a broker" to somebody
+        # who just did — there is no link, because a request is not a link, and
+        # every reader below counts links. So they kept being told to do the
+        # thing they were waiting on, and doing it again was refused.
+        #
+        # Reported separately from `brokers` rather than mixed in, because a
+        # waiting request is NOT a broker on the programme: no contract can
+        # hang off it and no setup can be built on it. The two must not be
+        # added together anywhere.
+        #
+        # Scoped like the queue itself — a carrier user sees their own asks,
+        # the carrier admin sees the company's.
+        awaiting_by_prog: dict[int, list] = {}
+        try:
+            from db import BrokerOnboardingRequest
+            aq = (s.query(BrokerOnboardingRequest, Party)
+                  .outerjoin(Party,
+                             Party.id == BrokerOnboardingRequest.broker_party_id)
+                  .filter(BrokerOnboardingRequest.tenant_id == tid,
+                          BrokerOnboardingRequest.status == "pending",
+                          BrokerOnboardingRequest.program_id.in_(prog_ids)))
+            if _carrier_seat(s, principal) == "user":
+                aq = aq.filter(
+                    BrokerOnboardingRequest.requested_by_user_id == principal.user_id)
+            for req, party in aq.all():
+                awaiting_by_prog.setdefault(req.program_id, []).append({
+                    "request_id": req.id,
+                    "broker_party_id": req.broker_party_id,
+                    "legal_name": (party.legal_name if party else None)
+                                  or req.org_name,
+                })
+        except Exception:  # noqa: BLE001 — the tree must render regardless
+            awaiting_by_prog = {}
+
         by_prog: dict[int, list] = {}
         for link, party in links:
             by_prog.setdefault(link.program_id, []).append((link, party))
@@ -1038,5 +1249,10 @@ def hierarchy(principal: Principal = Depends(current_principal)):
                 "broker_count": len(brokers),
                 "contract_count": sum(len(b["contracts"]) for b in brokers),
                 "brokers": brokers,
+                # NOT part of broker_count, deliberately: nothing can be built
+                # on one of these until it is approved.
+                "brokers_awaiting": sorted(
+                    awaiting_by_prog.get(p.id, []),
+                    key=lambda b: (b["legal_name"] or "").lower()),
             })
         return {"tenant_id": tid, "programmes": tree}

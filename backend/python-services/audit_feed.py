@@ -353,6 +353,14 @@ ACTION_WORDS = {
     "broker_user_created":        "Created a broker user",
     "broker_invitation_accepted": "Accepted their invitation",
     "broker_put_on_programme":    "Put a broker on a programme",
+    # The approval that now stands in front of both of those. A carrier user
+    # asks; the carrier admin answers. Named for what HAPPENED, so a reader
+    # scanning the log is never told a broker was added on a day one was only
+    # asked about.
+    "broker_request_submitted":   "Asked to bring a broker on board",
+    "broker_request_approved":    "Approved bringing a broker on board",
+    "broker_request_rejected":    "Turned down a broker",
+    "broker_request_withdrawn":   "Withdrew their broker request",
     # the run
     "bordereau_run":              "Ran a bordereau",
     "bordereau_setup_created":    "Created a Bordereau Setup",
@@ -393,6 +401,12 @@ _STATUS = {
     "bordereau_setup_submitted": ("Awaiting approval", "info"),
     "bordereau_setup_approved":  ("Approved", "ok"),
     "bordereau_setup_rejected":  ("Sent back", "warn"),
+    "broker_request_submitted":  ("Awaiting approval", "info"),
+    "broker_request_approved":   ("Approved", "ok"),
+    # "Turned down", not "Sent back": there is nothing to send back. Nothing
+    # was created, so the request ends here and a new one starts the ask again.
+    "broker_request_rejected":   ("Turned down", "bad"),
+    "broker_request_withdrawn":  ("Withdrawn", "muted"),
     "contract_sent_back":        ("Sent back", "warn"),
     "contract_awaiting_review":  ("Awaiting review", "info"),
     "contract_awaiting_signature": ("Awaiting signature", "warn"),
@@ -850,6 +864,11 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     # on. A broker is put ON these, and does none of it.
     ("brokers", "Brokers and programmes",
      ("broker_added", "broker_linked", "broker_put_on_programme",
+      # The approval trail in front of them. CARRIER_SEATS like the rest of
+      # this category: the decision is internal to the carrier, and a broker
+      # who was turned down must never be able to learn they were considered.
+      "broker_request_submitted", "broker_request_approved",
+      "broker_request_rejected", "broker_request_withdrawn",
       "broker_invitation_withdrawn", "broker_removed_from_programme",
       "program_created", "program_updated", "party_created", "party_updated",
       "party_contact_added", "party_contact_removed",

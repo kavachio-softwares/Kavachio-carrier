@@ -67,6 +67,10 @@ export function programmeSteps(p: HierarchyProgramme): Step[] {
     ? `/direct/setup?program_id=${p.id}&broker_party_id=${needsSetup.id}`
     : `/direct/setups?program_id=${p.id}`;
 
+  // Brokers asked for and not yet approved. They do NOT make the step done —
+  // nothing can be built on one — but they do mean the person looking at this
+  // has already acted, so the step must not read as untouched.
+  const awaiting = p.brokers_awaiting ?? [];
   const brokersDone = brokers.length > 0;
   const contractDone = brokersDone && withContract.length === brokers.length;
   // Every broker who HAS a live contract also has a setup. The step is only done
@@ -87,12 +91,21 @@ export function programmeSteps(p: HierarchyProgramme): Step[] {
       hint: `${p.name} is configured.`,
     },
     {
-      key: "brokers", label: "Brokers", partial: false,
-      pill: brokersDone ? plural(brokers.length, "broker") : "Brokers",
-      state: state(1), to: programmeUrl,
-      detail: brokersDone ? plural(brokers.length, "broker") : "none yet",
+      key: "brokers", label: "Brokers",
+      // Amber rather than untouched: somebody is waiting on somebody else.
+      partial: !brokersDone && awaiting.length > 0,
+      pill: brokersDone ? plural(brokers.length, "broker")
+        : awaiting.length > 0 ? `${awaiting.length} waiting` : "Brokers",
+      state: state(1), to: awaiting.length > 0 && !brokersDone
+        ? "/brokers/requests" : programmeUrl,
+      detail: brokersDone ? plural(brokers.length, "broker")
+        : awaiting.length > 0 ? "waiting for approval" : "none yet",
       hint: brokersDone
         ? `${plural(brokers.length, "broker")} on this programme.`
+        : awaiting.length > 0
+        ? `${awaiting.map(b => b.legal_name || "A broker").join(", ")} `
+          + `${awaiting.length === 1 ? "is" : "are"} waiting for your carrier `
+          + `admin to approve. Nothing is sent to the broker until then.`
         : "No broker on this programme yet — add one so it can hold a contract.",
     },
     {
@@ -136,7 +149,12 @@ export function nextStep(p: HierarchyProgramme): { label: string; to: string; hi
   if (!cur) return null;
   const draftSetup = p.brokers.some(b => onProgramme(b.link_status) && b.setup_status === "draft");
   const label =
-    cur.key === "brokers" ? "Add a broker"
+    // Never "Add a broker" while one is already waiting — that is the advice
+    // that sent people round the loop of adding the same broker twice and
+    // being refused. There is nothing for them to do but wait.
+    cur.key === "brokers"
+      ? ((p.brokers_awaiting ?? []).length > 0 && p.brokers.length === 0
+         ? "Waiting for approval" : "Add a broker")
     : cur.key === "contract" ? (cur.to.startsWith("/contracts/new") ? "Add a contract" : "Open the contract")
     : cur.key === "setup" ? (draftSetup ? "Finish the setup" : "Bordereau Setup")
     : "Open";

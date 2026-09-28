@@ -128,12 +128,12 @@ export default function BrokerUsers() {
         <div className="page-head">
           <div className="t">
             <h2>Users &amp; Roles</h2>
-            <p>
+            {/* <p>
               Your team at {team.broker.name}. A <b>Broker User</b> sends your
               bordereau files and sorts out the errors they raise. Everything
               else stays with you. All your broker users work on the same
               files, runs and deadlines — what one sends, the others see.
-            </p>
+            </p> */}
           </div>
           <div className="actions">
             <button className="btn pri" onClick={openInvite}>＋ Add Broker User</button>
@@ -202,12 +202,12 @@ export default function BrokerUsers() {
           </div>
         </div>
 
-        <div className="note" style={{ marginTop: 16, maxWidth: 720 }}>
+        {/* <div className="note" style={{ marginTop: 16, maxWidth: 720 }}>
           A broker user only sees what they need to run a file: what is due, the
           run screen, and the errors to sort out. They never see a contract, a setup
           or the carrier's business — so a new starter can be useful on day one
           without being able to change anything that was agreed.
-        </div>
+        </div> */}
       </div>
 
       {/* Invite an operator */}

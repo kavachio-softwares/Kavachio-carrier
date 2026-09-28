@@ -15,6 +15,7 @@
 import { useEffect, useState } from "react";
 import { Modal } from "./ui/Modal";
 import { inviteBroker } from "../api/hierarchy";
+import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 
 // The kinds of organisation that can produce business — the same four the
 // invite page offers. A broker is the usual one; the others occupy the same
@@ -26,12 +27,26 @@ const PARTY_TYPES: [string, string][] = [
 const INPUT = "w-full rounded border border-border px-2.5 py-1.5 text-sm";
 const LABEL = "mb-1 block text-xs font-medium text-ink-muted";
 
-export function InviteBrokerModal({ open, onClose, onInvited }: {
+export function InviteBrokerModal({ open, onClose, onInvited, programId }: {
   open: boolean;
   onClose: () => void;
-  /** Called with the server's confirmation, and the address it went to. */
-  onInvited: (message: string, email: string) => void;
+  /** The programme this was opened from, when it was opened from one. Sent
+   *  with the invite so the broker and the programme are ONE ask — see
+   *  inviteBroker. Omitted where there is no programme in view. */
+  programId?: number;
+  /** Called with the server's confirmation and the address it concerns.
+   *  `pending` is true when this only ASKED — a carrier user's invite raises a
+   *  request for their carrier admin and sends the broker nothing. `org` is
+   *  what was typed, so the caller can name it rather than repeating the
+   *  server's longer sentence. */
+  onInvited: (message: string, email: string, pending?: boolean,
+              org?: string) => void;
 }) {
+  const seat = useCarrierSeat();
+  // The carrier admin's own invite goes out at once; everyone else's is asked
+  // first. Drawn from the seat only so the dialog does not PROMISE an email it
+  // is not going to send — the server decides, and reports back in `pending`.
+  const needsApproval = seat !== null && !addsCarrierUsers(seat);
   const [orgName, setOrgName] = useState("");
   const [orgType, setOrgType] = useState("broker");
   const [fullName, setFullName] = useState("");
@@ -59,8 +74,10 @@ export function InviteBrokerModal({ open, onClose, onInvited }: {
         party_type: orgType,
         admin_name: fullName.trim(),
         admin_email: email.trim(),
+        ...(programId != null ? { program_id: programId } : {}),
       });
-      onInvited(r.message, email.trim());
+      onInvited(r.message, email.trim(), r.pending ?? !r.invited,
+                orgName.trim());
       onClose();
     } catch (e: any) {
       // `detail` is a string for simple refusals and an object for the ones
@@ -71,7 +88,8 @@ export function InviteBrokerModal({ open, onClose, onInvited }: {
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Invite a broker" size="2xl"
+    <Modal open={open} onClose={onClose}
+      title={needsApproval ? "Ask to invite a broker" : "Invite a broker"} size="2xl"
       footer={<>
         <button type="button"
           className="rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
@@ -80,7 +98,8 @@ export function InviteBrokerModal({ open, onClose, onInvited }: {
           className="rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:opacity-50"
           onClick={send} disabled={!canSend}
           title={canSend ? undefined : "Fill in the organisation, name and email first"}>
-          {busy ? "Sending…" : "Send invite"}
+          {busy ? "Sending…"
+                : needsApproval ? "Send for approval" : "Send invite"}
         </button>
       </>}>
       <div className="space-y-5">
@@ -123,17 +142,28 @@ export function InviteBrokerModal({ open, onClose, onInvited }: {
             </div>
           </div>
           <p className="text-xs text-ink-muted">
-            The invitation and a password-setup link are sent to this address.
+            {needsApproval
+              ? "Nothing is sent to this address yet — your carrier admin "
+                + "approves it first."
+              : "The invitation and a password-setup link are sent to this address."}
           </p>
         </section>
 
         {/* Stated generally on purpose: which of the two cases this is, the
-            server does not say, and the dialog must not guess. */}
+            server does not say, and the dialog must not guess.
+
+            For a carrier user the whole paragraph is beside the point — none of
+            it happens until their carrier admin has agreed — so they get the
+            one fact that is true now instead. */}
         <p className="rounded border border-border bg-surface-2 px-3 py-2 text-xs leading-relaxed text-ink-muted">
-          A broker new to the platform can be put on this programme straight
-          away. One who already works with another carrier keeps their login
-          and their own organisation name, and joins once they accept your
-          invitation.
+          {needsApproval
+            ? "This goes to your carrier admin first. Nothing at all is sent to "
+              + "the broker until they approve it, so if it is turned down the "
+              + "broker never knows it was asked."
+            : "A broker new to the platform can be put on this programme straight "
+              + "away. One who already works with another carrier keeps their login "
+              + "and their own organisation name, and joins once they accept your "
+              + "invitation."}
         </p>
       </div>
     </Modal>

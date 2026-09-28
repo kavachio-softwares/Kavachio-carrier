@@ -155,11 +155,26 @@ export default function AddProgram() {
   // refuses a second add ("already on this programme", 409), so a retry after
   // a partial failure has to skip these rather than trip over them.
   const [assigned, setAssigned] = useState<Set<number>>(new Set());
+  // Brokers whose assignment became a REQUEST for the carrier admin rather
+  // than a link. Kept apart from `assigned` on purpose: step 3 adds a contract
+  // to a broker ON this programme, and one who is still waiting to be approved
+  // is not on it. Folding these into `assigned` would offer a contract step
+  // that the server refuses every time.
+  const [requested, setRequested] = useState<Set<number>>(new Set());
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteNote, setInviteNote] = useState<string | null>(null);
+  // Brokers that went up for the carrier admin's approval instead of onto the
+  // programme. Its own line rather than inviteNote's, because that one ends
+  // "Assign to put them on this programme" — advice that does not apply to
+  // something already sent and waiting.
+  const [approvalNote, setApprovalNote] = useState<string | null>(null);
   // The same "Invite sent" confirmation the Party invite page shows — the
   // dialog closing on its own was too quiet to be sure anything happened.
-  const [sent, setSent] = useState<{ message: string; email: string } | null>(null);
+  // `pending` when a carrier user's invite only ASKED their carrier admin.
+  // Nothing was sent to the broker, so the dialog must not say it was — not in
+  // its words and not in its icon, which is the part people read first.
+  const [sent, setSent] = useState<
+    { message: React.ReactNode; email: string; pending?: boolean } | null>(null);
 
   // Step 3. Who the upload dialog is open for, and how many contracts each
   // broker has had uploaded here — so a row can say it is done.
@@ -202,6 +217,11 @@ export default function AddProgram() {
       setStatus(p.status ?? "active");
       setProgramId(p.id);
       setAssigned(new Set(p.brokers.filter(b => onProgramme(b.link_status)).map(b => b.id)));
+      // Seeded from the SERVER, not only from what happened in this tab: a
+      // request survives a reload, and without this the broker was offered
+      // again and the second ask was refused as a duplicate.
+      setRequested(new Set((p.brokers_awaiting ?? [])
+        .map(b => b.broker_party_id).filter((id): id is number => id != null)));
       const want = Number(search.get("stage"));
       setStage(want >= 1 && want <= 4 ? (want as 1 | 2 | 3 | 4) : 2);
     });
@@ -238,27 +258,63 @@ export default function AddProgram() {
 
   // Step 2 — put every ticked broker on it. One at a time, so a failure names
   // the broker it failed on. True when nothing is left outstanding.
-  async function assignPicked(): Promise<boolean> {
-    if (programId == null) return false;
-    const todo = [...picked].filter(id => !assigned.has(id));
-    if (todo.length === 0) return true;
+  async function assignPicked(): Promise<{ ok: boolean; linked: number }> {
+    if (programId == null) return { ok: false, linked: 0 };
+    const todo = [...picked].filter(
+      id => !assigned.has(id) && !requested.has(id));
+    if (todo.length === 0) return { ok: true, linked: assigned.size };
     setAssigning(true); setErr(null);
     const ok: number[] = [];
-    const failed: number[] = [];
+    const asked: number[] = [];
+    const failed: { id: number; why?: string }[] = [];
     for (const id of todo) {
-      try { await addProgrammeBroker(programId, id); ok.push(id); }
-      catch { failed.push(id); }
+      try {
+        const r = await addProgrammeBroker(programId, id);
+        (r.pending ? asked : ok).push(id);
+      }
+      catch (e: any) {
+        // `detail` is a string for the simple refusals and an object for the
+        // ones carrying a remedy — unpacked, not rendered raw.
+        const d = e?.response?.data?.detail;
+        failed.push({ id, why: typeof d === "string" ? d : d?.message });
+      }
     }
     setAssigned(prev => new Set([...prev, ...ok]));
+    setRequested(prev => new Set([...prev, ...asked]));
     setAssigning(false);
+    const name = (id: number) =>
+      brokers?.find(b => b.id === id)?.legal_name ?? `#${id}`;
+    // Whatever was asked for is now waiting, so it must not stay ticked —
+    // otherwise Finish tries it again and is refused for being a duplicate.
+    if (asked.length) setPicked(prev => {
+      const next = new Set(prev);
+      asked.forEach(id => next.delete(id));
+      return next;
+    });
     if (failed.length) {
-      const names = failed.map(id => brokers?.find(b => b.id === id)?.legal_name ?? `#${id}`);
-      setErr(`These brokers could not be added: ${names.join(", ")}. A broker who `
-        + `already works with another carrier can only be put on a programme once `
-        + `they accept your invitation; otherwise, try again.`);
-      return false;
+      // THE SERVER'S OWN WORDS, when it gave any. It knows which of half a
+      // dozen reasons applies — already on the programme, already asked and
+      // waiting, not reachable by this carrier — and the fixed sentence that
+      // used to be here claimed the one about accepting an invitation
+      // regardless, which was usually wrong and never actionable.
+      const said = [...new Set(failed.map(f => f.why).filter(Boolean))];
+      setErr(said.length === 1 ? said[0]!
+        : said.length > 1 ? said.join(" ")
+        : `These brokers could not be added: `
+          + `${failed.map(f => name(f.id)).join(", ")}. Try again.`);
+      return { ok: false, linked: assigned.size + ok.length };
     }
-    return true;
+    if (asked.length) {
+      // Not an error — it is the flow working. But it IS the end of the road
+      // for those brokers on this screen, so say so rather than letting step 3
+      // present a contract step for somebody who is not on the programme yet.
+      setApprovalNote(
+        `${asked.map(name).join(", ")} ${asked.length === 1 ? "has" : "have"} `
+        + `gone to your carrier admin to approve. Nothing is sent to `
+        + `${asked.length === 1 ? "them" : "any of them"} until then, and you can `
+        + `add ${asked.length === 1 ? "their" : "the"} contract once it is through.`);
+    }
+    return { ok: true, linked: assigned.size + ok.length };
   }
 
   // Step 2's button. With nobody picked there is no contract to add — a
@@ -269,9 +325,18 @@ export default function AddProgram() {
       nav(`/programs/${programId}/brokers`);
       return;
     }
-    if (await assignPicked()) {
-      setStage(3);
-      if (programId != null) reload(programId);
+    const r = await assignPicked();
+    if (programId != null) reload(programId);   // re-reads what is now waiting
+    if (r.ok) {
+      // Step 3 needs at least one broker actually ON the programme. When every
+      // one of them went up for approval instead, there is nothing to add a
+      // contract to — so stay put and let the note explain, rather than
+      // advancing to a step that cannot be completed. Read off the return
+      // value, not `assigned`: that setState has not re-rendered yet.
+      if (r.linked > 0) {
+        setStage(3);
+        if (programId != null) reload(programId);
+      }
     }
   }
 
@@ -279,9 +344,26 @@ export default function AddProgram() {
   // invite does not return an id (it must not reveal whether that address
   // belonged to an existing broker), so "new" is read off the list itself —
   // which shows nothing the Party screen would not show anyway.
-  async function onInvited(message: string, email: string) {
+  async function onInvited(message: string, email: string, pending?: boolean,
+                           org?: string) {
+    setSent({
+      email, pending,
+      message: pending
+        ? <>Nothing is sent to <b>{org || "this broker"}</b> until your
+            carrier admin approves.</>
+        : message,
+    });
+    if (pending) {
+      // Nothing was created, so there is nobody new on the list to tick and
+      // nothing to assign. inviteNote's "Anyone new is ticked below" would be
+      // false on both counts.
+      setApprovalNote(message + " Nothing has been sent to them.");
+      // It names this programme, so it is now in brokers_awaiting — refetch so
+      // the step shows it waiting rather than reading as untouched.
+      if (programId != null) reload(programId);
+      return;
+    }
     setInviteNote(message);
-    setSent({ message, email });
     const before = new Set((brokers ?? []).map(b => b.id));
     try {
       const fresh = await getBrokers();
@@ -527,6 +609,14 @@ export default function AddProgram() {
               they are not listed.
             </p>
 
+            {approvalNote && (
+              /* Info, not amber: nothing has gone wrong and nothing is late —
+                 it is with somebody else, which is what the flow asks for. */
+              <p className="mb-3 rounded border border-border bg-surface-2 px-3 py-2 text-xs text-ink-muted">
+                {approvalNote}
+              </p>
+            )}
+
             {inviteNote && (
               /* Amber, not green: the invitation is out but nothing is settled —
                  they still have to accept, and nobody is on the programme until
@@ -553,24 +643,36 @@ export default function AddProgram() {
                 <div className="space-y-1.5">
                   {brokersOnPage.map(b => {
                     const done = assigned.has(b.id);
+                    // Asked for and not yet answered. Locked like `done`: there
+                    // is nothing to do but wait, and ticking it again only
+                    // earns a duplicate refusal.
+                    const waiting = requested.has(b.id);
                     const on = picked.has(b.id) || done;
                     return (
                       <label key={b.id}
                         className={`flex items-center gap-2.5 rounded border px-2.5 py-2 text-sm ${
-                          locked && !done ? "cursor-pointer" : ""} ${
-                          on ? "border-navy bg-navy/5" : "border-border hover:bg-surface-2"}`}>
-                        <input type="checkbox" checked={on} disabled={done}
+                          locked && !done && !waiting ? "cursor-pointer" : ""} ${
+                          waiting ? "border-warn/40 bg-warn/5"
+                          : on ? "border-navy bg-navy/5"
+                          : "border-border hover:bg-surface-2"}`}>
+                        <input type="checkbox" checked={on} disabled={done || waiting}
                           onChange={() => toggle(b.id)} />
                         <span className="min-w-0 flex-1">
                           <span className="block font-medium">{b.legal_name}</span>
                           <span className="block text-xs text-ink-muted">
-                            {b.programmes.length === 0
+                            {waiting
+                              ? "Waiting for your carrier admin to approve"
+                              : b.programmes.length === 0
                               ? "On no programme yet"
                               : `Already on ${b.programmes.map(p => p.name).join(", ")}`}
-                            {" · "}{b.contract_count} contract{b.contract_count === 1 ? "" : "s"}
+                            {!waiting && <>
+                              {" · "}{b.contract_count} contract{b.contract_count === 1 ? "" : "s"}
+                            </>}
                           </span>
                         </span>
-                        {done
+                        {waiting
+                          ? <span className="text-xs font-medium text-warn">Awaiting approval</span>
+                          : done
                           ? <span className="text-xs font-medium text-ok">Assigned</span>
                           : <OnboardingBadge status={b.onboarding_status} />}
                       </label>
@@ -596,6 +698,9 @@ export default function AddProgram() {
                 <p className="text-xs text-ink-muted">
                   {pending > 0
                     ? `${pending} broker${pending === 1 ? "" : "s"} will be put on this programme.`
+                    : requested.size > 0 && assigned.size === 0
+                    ? `${requested.size} broker${requested.size === 1 ? "" : "s"} waiting for your `
+                      + `carrier admin. Nothing is sent to them until it is approved.`
                     : assigned.size > 0
                     ? `${assigned.size} broker${assigned.size === 1 ? "" : "s"} assigned — add their contracts next.`
                     : "No brokers picked — the programme will start empty."}
@@ -781,15 +886,22 @@ export default function AddProgram() {
             }} />
         )}
 
+        {/* Only once step 1 has saved and there IS a programme — before that
+            there is nothing to attach the invite to. */}
         <InviteBrokerModal open={inviteOpen} onClose={() => setInviteOpen(false)}
-          onInvited={onInvited} />
+          programId={programId ?? undefined} onInvited={onInvited} />
 
         {sent && (
           <InviteSentModal
-            title="Broker invited"
+            kind={sent.pending ? "pending" : "sent"}
+            title={sent.pending ? "Waiting for approval" : "Broker invited"}
             message={sent.message}
-            email={sent.email}
-            note="They are ticked in the broker list — press Assign to put them on this programme."
+            /* The envelope row is the dialog SAYING an email went out. On a
+               request none has, so the row is dropped rather than relabelled. */
+            email={sent.pending ? undefined : sent.email}
+            note={sent.pending
+              ? "Nothing to assign yet — carry on setting up the programme."
+              : "They are ticked in the broker list — press Assign to put them on this programme."}
             doneLabel="Continue"
             onDone={() => setSent(null)}
           />

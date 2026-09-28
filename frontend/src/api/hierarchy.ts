@@ -31,6 +31,19 @@ export type HierarchyBroker = {
   contracts: HierarchyContract[];
 };
 
+/** A broker a carrier user has ASKED to put on this programme, still waiting
+ *  on their carrier admin.
+ *
+ *  NOT a broker on the programme, and never counted as one: no contract can
+ *  hang off it and no setup can be built on it. It exists so the screens stop
+ *  saying "add a broker" to somebody who just did — which is what sent people
+ *  round the loop of adding the same broker again and being refused. */
+export type AwaitingBroker = {
+  request_id: number;
+  broker_party_id: number | null;
+  legal_name: string | null;
+};
+
 /** Is this broker ON the programme, as the CARRIER sees it?
  *
  *  The twin of carrier_scope.link_is_live on the server, and it has to agree
@@ -62,6 +75,9 @@ export type HierarchyProgramme = {
   broker_count: number;
   contract_count: number;
   brokers: HierarchyBroker[];
+  /** Asked for, not yet approved. Deliberately NOT in broker_count — see
+   *  AwaitingBroker. Absent on an older server. */
+  brokers_awaiting?: AwaitingBroker[];
 };
 
 export type Hierarchy = { tenant_id: number; programmes: HierarchyProgramme[] };
@@ -193,9 +209,22 @@ export const listBrokerContracts = (brokerId: number, params: {
 export const getProgrammeBrokers = (programId: number) =>
   api.get<ProgrammeBroker[]>(`/programs/${programId}/brokers`).then(r => r.data);
 
+/** Put a broker on a programme.
+ *
+ *  WHAT THIS DOES DEPENDS ON THE SEAT, and the server is what knows. A carrier
+ *  ADMIN's call links the broker as it always did. A carrier USER's raises a
+ *  BROKER ONBOARDING REQUEST for their carrier admin instead — `pending` is
+ *  true and `link_id` is null. Nothing is linked and nothing is sent to the
+ *  broker until that is approved.
+ *
+ *  Callers must read `pending` and say so, rather than reporting "added". */
 export const addProgrammeBroker = (programId: number, brokerPartyId: number) =>
   api.post(`/programs/${programId}/brokers`, { broker_party_id: brokerPartyId })
-     .then(r => r.data as { ok: boolean; reactivated: boolean; link_id: number });
+     .then(r => r.data as {
+       ok: boolean; reactivated: boolean; link_id: number | null;
+       /** True when this became a request for the carrier admin. */
+       pending?: boolean; request_id?: number; message?: string;
+     });
 
 /** Removing a pair that already carries contracts DEACTIVATES it — the
  *  response says which happened so the UI can tell the truth about it. */
@@ -211,6 +240,11 @@ export const getApprovalHistory = (contractId: number) =>
  *  used to leave a carrier with a broker nobody could sign in as. */
 /** Invite a broker onto a programme.
  *
+ *  FOR A CARRIER USER THIS ONLY ASKS. The server raises a broker onboarding
+ *  request for their carrier admin and sends the broker nothing at all;
+ *  `invited` comes back false and `pending` true. For a carrier admin it
+ *  onboards and mails, exactly as before.
+ *
  *  The response is the SAME whether or not that address already has a login —
  *  which of the two it is depends on facts about another carrier's book, and
  *  the inviting carrier does not get to learn them. An existing broker sees
@@ -222,8 +256,28 @@ export const inviteBroker = (body: {
   party_type?: string;
   admin_name?: string;
   admin_email: string;
+  /** The programme this broker is being brought on FOR, when the invite was
+   *  raised from one.
+   *
+   *  Carried all the way through: it is stamped on the request, so the carrier
+   *  admin's queue shows which programme they are approving for rather than
+   *  "No programme yet", and on approval the programme link is written with
+   *  the rest of the onboarding. Without it the invite and the programme were
+   *  two separate asks, and the second one could only be made after the first
+   *  was approved.
+   *
+   *  Left off by the Party screen, which genuinely has no programme — a broker
+   *  can be brought into the directory before anyone decides where they
+   *  produce. */
+  program_id?: number;
 }) => api.post<{
-  ok: boolean; invited: boolean; email: string; message: string;
+  ok: boolean;
+  /** FALSE when a carrier user raised a request instead — nothing has been
+   *  sent to the broker, and `message` says so. Never render "invitation
+   *  sent" without checking this. */
+  invited: boolean;
+  email: string; message: string;
+  pending?: boolean; request_id?: number;
 }>("/brokers", body).then(r => r.data);
 
 

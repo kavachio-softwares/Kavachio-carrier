@@ -146,7 +146,13 @@ export default function ProgramBrokers() {
   // Inviting a broker who is not on the platform yet, without leaving the
   // programme — the same dialog Configure Program uses.
   const [inviteOpen, setInviteOpen] = useState(false);
-  const [sent, setSent] = useState<{ message: string; email: string; note: string } | null>(null);
+  // `pending` as well as the words: on a carrier user's request nothing has
+  // been sent to anybody, so the dialog needs a different headline, a
+  // different sentence AND a different icon — a green tick is read as "done"
+  // before anybody gets to the text.
+  const [sent, setSent] = useState<{
+    pending: boolean; message: React.ReactNode; email: string; note: string;
+  } | null>(null);
 
   const load = useCallback(() => {
     getHierarchy()
@@ -174,7 +180,13 @@ export default function ProgramBrokers() {
   // Only brokers not already on this programme can be added. A broker whose
   // link was deactivated IS offered again — adding it back reactivates it.
   const onIt = new Set((prog?.brokers ?? []).filter(b => onProgramme(b.link_status)).map(b => b.id));
-  const addable = all.filter(b => !onIt.has(b.id));
+  // …and neither is one ALREADY ASKED FOR. A pending request is not a link, so
+  // nothing above knows about it, and offering the broker again only earns a
+  // duplicate refusal — which is exactly the loop people got stuck in.
+  const awaiting = prog?.brokers_awaiting ?? [];
+  const asked = new Set(awaiting.map(b => b.broker_party_id)
+                                .filter((id): id is number => id != null));
+  const addable = all.filter(b => !onIt.has(b.id) && !asked.has(b.id));
 
   const brokers = prog?.brokers ?? [];
   const needle = q.trim().toLowerCase();
@@ -198,16 +210,27 @@ export default function ProgramBrokers() {
     setBusy(true); setMsg(null);
     try {
       const r = await addProgrammeBroker(pid, Number(adding));
-      setMsg(r.reactivated
+      // A CARRIER USER'S ADD IS A REQUEST, not an add. The server says which
+      // it was; reporting "added" either way would be the screen telling them
+      // something had happened that had not, and they would go looking for the
+      // broker's row.
+      setMsg(r.pending
+        ? (r.message
+           ?? "That broker has gone to your carrier admin to approve.")
+        : r.reactivated
         ? "That broker was put back on this programme — their earlier contracts are live again."
         : "Broker added to this programme.");
       setAdding("");
-      // Open their row: the contract is the next thing to do for them, and
-      // its Upload / Raise buttons live there.
-      setExpanded(s => new Set(s).add(Number(adding)));
+      // Open their row only when there IS one. Nothing was linked for a
+      // request, so there is nothing to expand and no contract step to reach.
+      if (!r.pending) setExpanded(s => new Set(s).add(Number(adding)));
       load();
     } catch (e: any) {
-      setErr(e?.response?.data?.detail ?? "Could not add that broker.");
+      // `detail` is a string for the simple refusals and an object for the
+      // ones carrying a remedy. Rendering the object shows "[object Object]".
+      const d = e?.response?.data?.detail;
+      setErr((typeof d === "string" ? d : d?.message)
+             ?? "Could not add that broker.");
     } finally { setBusy(false); }
   }
 
@@ -220,7 +243,9 @@ export default function ProgramBrokers() {
         : `${name} was removed from this programme.`);
       load();
     } catch (e: any) {
-      setErr(e?.response?.data?.detail ?? "Could not remove that broker.");
+      const d = e?.response?.data?.detail;
+      setErr((typeof d === "string" ? d : d?.message)
+             ?? "Could not remove that broker.");
     } finally { setBusy(false); }
   }
 
@@ -230,7 +255,26 @@ export default function ProgramBrokers() {
   // the address was already known), hence reading "new" off the list. A
   // broker who already works with another carrier is not on the list until
   // they accept, so nothing is added for them yet — the note says so.
-  async function onInvited(message: string, email: string) {
+  //
+  // A CARRIER USER'S INVITE CREATES NOTHING AT ALL. It asks their carrier
+  // admin, so the directory is unchanged, the diff below finds nobody, and
+  // there is nothing to put on the programme. `pending` says so rather than
+  // leaving it to be inferred from an empty diff, which is also what an
+  // existing broker looks like.
+  async function onInvited(message: string, email: string, pending?: boolean,
+                           org?: string) {
+    if (pending) {
+      setSent({
+        pending: true, email,
+        message: <>Nothing is sent to <b>{org || "this broker"}</b> until
+          your carrier admin approves.</>,
+        note: "You will be told either way.",
+      });
+      // The request names this programme, so it is now in brokers_awaiting —
+      // refetch so the banner says so instead of the page looking untouched.
+      load();
+      return;
+    }
     const before = new Set(all.map(b => b.id));
     let note = "Once they accept, put them on this programme using the bar above.";
     try {
@@ -246,7 +290,7 @@ export default function ProgramBrokers() {
         load();
       }
     } catch { /* the invite itself went through; the bar above can still add them */ }
-    setSent({ message, email, note });
+    setSent({ pending: false, message, email, note });
   }
 
   function toggleRow(id: number) {
@@ -304,6 +348,21 @@ export default function ProgramBrokers() {
         {err && (
           <div className="rounded-md border border-warn/30 bg-warn/10 px-3.5 py-2.5 text-sm text-warn">
             {err}
+          </div>
+        )}
+
+        {/* SAID ONCE, ABOVE THE TABLE, because these brokers are in none of
+            the rows below it — a request is not a link, so there is nothing to
+            put in the table and nothing to count in the tiles. Without this
+            the page looked untouched to somebody who had just added a broker,
+            and the only way they could tell was by adding it again and being
+            refused. */}
+        {awaiting.length > 0 && (
+          <div className="rounded-md border border-warn/30 bg-warn/10 px-3.5 py-2.5 text-sm text-warn">
+            <b>{awaiting.map(b => b.legal_name || "A broker").join(", ")}</b>
+            {awaiting.length === 1 ? " is" : " are"} waiting for your carrier
+            admin to approve. Nothing is sent to the broker until then, and they
+            appear here once it is through.
           </div>
         )}
 
@@ -770,14 +829,19 @@ export default function ProgramBrokers() {
             onAdded={() => load()} />
         )}
 
+        {/* The programme goes with the invite: this screen IS a programme, so
+            the broker and the programme are one ask rather than two. */}
         <InviteBrokerModal open={inviteOpen} onClose={() => setInviteOpen(false)}
-          onInvited={onInvited} />
+          programId={pid} onInvited={onInvited} />
 
         {sent && (
           <InviteSentModal
-            title="Broker invited"
+            kind={sent.pending ? "pending" : "sent"}
+            title={sent.pending ? "Waiting for approval" : "Broker invited"}
+            /* The envelope row is the dialog SAYING an email went out. On a
+               request none has, so the row is dropped rather than relabelled. */
+            email={sent.pending ? undefined : sent.email}
             message={sent.message}
-            email={sent.email}
             note={sent.note}
             doneLabel="Continue"
             onDone={() => setSent(null)}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
-import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck } from "lucide-react";
+import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck, UserCheck } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
 import { canAccessPath } from "../access";
@@ -44,7 +44,13 @@ type Stats = {
    *  waiting to be accepted, or one whose terms the broker has agreed and
    *  which now needs the carrier's signature. */
   contracts_awaiting_admin?: number;
-  avg_turnaround_min?: number | null;                           // tenant/operator tile
+  /** Broker onboarding requests waiting on the carrier admin. Null for a
+   *  carrier user, who is not the one being asked. */
+  broker_requests_pending?: number | null;
+  /** Still served, but no longer drawn on this screen — the carrier's
+   *  "Avg Turnaround Time" box was hidden. Kept so the shape matches the
+   *  endpoint. */
+  avg_turnaround_min?: number | null;
 };
 // A "run" = a generated output export (carries the validation result).
 type Run = {
@@ -308,10 +314,14 @@ export default function Home() {
 
           <StatCard title="Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} trend="+12%" />
 
-          {role === "kavachio_admin" ? (
+          {/* Kavachio staff only. This used to be a ternary whose other half
+              was "Avg Turnaround Time" for the carrier seats; that box is
+              hidden now, so there is nothing to fall back to. The figure is
+              still served (`avg_turnaround_min`) and the broker's own
+              dashboard still draws its version of it — only the carrier's box
+              is gone. */}
+          {role === "kavachio_admin" && (
             <StatCard title="Mapping Tasks" value={fmt(stats?.mapping_tasks_open)} icon={Clock} onClick={() => nav("/admin/mapping-tasks")} />
-          ) : (
-            <StatCard title="Avg Turnaround Time" value={`${stats?.avg_turnaround_min == null ? "—" : stats.avg_turnaround_min}`} icon={Clock} trend="-8%" subtitle="Minutes per file" />
           )}
 
           {/* ONE box, not two — but the number on it has to be the one that
@@ -382,6 +392,40 @@ export default function Home() {
                     + "up. Nothing about one reaches the broker until you "
                     + "approve it — not the programme, not the contract and "
                     + "not the BDX template."}
+            />
+          )}
+
+          {/* The THIRD thing that stops on the carrier admin's desk, and the
+              earliest of the three: a broker a colleague wants to bring on.
+              Nothing has been sent to that broker and nothing exists for them
+              yet — this is the one gate where waiting costs nobody anything,
+              which is exactly why it would otherwise go unnoticed.
+
+              ALWAYS SHOWN, at nought as well. "Nothing is waiting on me" is
+              the answer the admin comes to the dashboard for, and a tile that
+              appears only when there is news is one nobody learns to trust.
+              The count comes back as a number for them and null for a carrier
+              user, so the seat test and the data agree.
+
+              Not folded into BDX Setup Review beside it: that one counts
+              setups and opens the setups list. These are two decisions about
+              two different things, taken weeks apart. */}
+          {addsCarrierUsers(seat) && (
+            <StatCard
+              title="Broker Onboarding Pending"
+              value={fmt(stats?.broker_requests_pending ?? 0)}
+              icon={UserCheck}
+              tone={stats?.broker_requests_pending ? "alert" : undefined}
+              subtitle={stats?.broker_requests_pending
+                ? `${stats.broker_requests_pending === 1 ? "broker is" : "brokers are"} `
+                  + "waiting on you"
+                : "nothing waiting"}
+              onClick={() => nav("/brokers/requests")}
+              info={"Brokers your carrier users want to bring on board. Nothing "
+                    + "has been sent to any of them — they hear from Kavachio "
+                    + "only once you approve. Approving sends the invitation; "
+                    + "what they may send you is still settled by the bordereau "
+                    + "setup approval."}
             />
           )}
 

@@ -164,6 +164,18 @@ export const ROUTE_ACCESS: {
   // (carrier_scope.assert_can_invite_brokers). Kavachio's own view of the same
   // ground is the carrier's page under Carriers, which is unchanged.
   { pattern: "/brokers", requires: "carrier_admin", only: ["carrier_admin"] },
+  // The broker onboarding queue. `only` for the same reason as /brokers above:
+  // approving a request IS sending the invitation, and Kavachio is not part of
+  // that relationship (carrier_scope.assert_can_invite_brokers refuses them on
+  // the server too).
+  //
+  // NOT carrierAdminOnly, deliberately, even though only the admin can decide.
+  // A carrier user has to be able to read WHY their request was turned down,
+  // and they will not be on the programme screen they raised it from when the
+  // answer arrives. The server scopes the list to their own requests and
+  // refuses them the decisions; the screen simply does not draw the buttons.
+  { pattern: "/brokers/requests", requires: "carrier_admin",
+    only: ["carrier_admin"] },
   // Create-a-Contract steps 3 and 4. Carrier-only: a broker never sends a
   // contract for signature, they are sent one. Their half of the flow is
   // /sign, which is public and unlisted here because it has no session at

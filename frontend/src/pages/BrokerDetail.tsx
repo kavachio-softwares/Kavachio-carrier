@@ -70,8 +70,14 @@ export default function BrokerDetail() {
       const name = allProgrammes.find(p => String(p.id) === assignTo)?.name
                    ?? "that programme";
       // Re-assigning somebody taken off before reactivates the existing link
-      // rather than adding a second — say which happened.
-      setAssignMsg(r.reactivated
+      // rather than adding a second — say which happened. And a CARRIER USER's
+      // assign is a request their carrier admin has to answer, so it did not
+      // happen at all yet: "they can produce on it now" would be wrong twice
+      // over.
+      setAssignMsg(r.pending
+        ? (r.message
+           ?? `${name} has gone to your carrier admin to approve.`)
+        : r.reactivated
         ? `Back on ${name}. Their earlier contracts there are live again.`
         : `Added to ${name}. They can produce on it now.`);
       setAssignTo("");

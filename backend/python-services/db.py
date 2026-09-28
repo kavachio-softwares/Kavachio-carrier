@@ -839,6 +839,67 @@ class BrokerInvitation(Base):
     note = Column("broker_invitation_note", String, nullable=True)
 
 
+class BrokerOnboardingRequest(Base):
+    """A carrier USER asking to put a broker on a programme, and the carrier
+    admin's answer. The step BEFORE the invitation above.
+
+    IT HOLDS AN INTENTION, NOT A THING. Nothing exists yet when this row is
+    written — no organisation, no broker login, no relationship, no programme
+    link, and above all no email. That is the whole point: a request that is
+    rejected must leave nothing behind, and the only way to be sure of that is
+    to have created nothing in the first place. Approving it runs the ordinary
+    onboarding the carrier admin has always run (hierarchy_routes), unchanged.
+
+    TWO SHAPES IN ONE TABLE, told apart by `broker_party_id`:
+
+      set    an existing broker out of this carrier's own directory. Only a
+             programme link is wanted, and no email is ever sent for one.
+      NULL   a broker to invite. `email`, `org_name`, `party_type` and
+             `admin_name` are what the carrier user typed, and they are all
+             that is kept — whether that address already belongs to a broker
+             is decided at approval, by the same code that decides it today,
+             so this row cannot leak the answer either.
+
+    ONE ROW PER DECISION. Re-asking after a rejection writes a new row rather
+    than reopening this one, so "why was this turned down in June?" stays
+    answerable — which is why there is no separate decision log beside it, as
+    there is for setups (SetupApproval). A setup already existed before it was
+    submitted; a request like this one IS the submission.
+
+    A carrier ADMIN never appears here. Their own act is the approval — there
+    is nobody left to ask — so their broker goes on the programme directly,
+    exactly as it did before this table existed.
+    """
+    __tablename__ = "broker_onboarding_request"
+    id = Column("request_id", Integer, primary_key=True)
+    tenant_id = Column(Integer, nullable=False, index=True)  # ops tenancy column
+    # NULL where no programme was named. A carrier user bringing a broker into
+    # the DIRECTORY (the Party screen's invite) is onboarding them just as
+    # surely as one adding them to a programme — the same email goes to the
+    # same person — so it needs the same approval, and it has no programme to
+    # record. The queue shows those as "no programme yet".
+    program_id = Column(Integer, nullable=True, index=True)
+    # Set for a broker already in the directory; NULL for one to be invited.
+    broker_party_id = Column(Integer, nullable=True, index=True)
+    # What was typed, for the invite shape. Unused where broker_party_id is set.
+    email = Column(String, nullable=True)
+    org_name = Column(String, nullable=True)
+    party_type = Column(String, nullable=True)
+    admin_name = Column(String, nullable=True)
+    # pending | approved | rejected | withdrawn
+    status = Column(String, nullable=False, default="pending")
+    requested_by_user_id = Column(Integer, nullable=False)
+    requested_at = Column(DateTime, default=datetime.utcnow)
+    decided_by_user_id = Column(Integer, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    # Why it was turned down. Required on a rejection by the route rather than
+    # by the column: a request returned with nothing said about it is one the
+    # carrier user cannot act on, and they would have to go and ask.
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ProgramBroker(Base):
     """Which brokers may produce into which programme — the many-to-many that
     makes the carrier hierarchy work.
@@ -2085,6 +2146,23 @@ def init_db():
             pass
         if dialect == "sqlite" and _sqlite_relax_expected_submission_key(conn):
             inspector = inspect(conn)     # rebuilt — every cached shape is stale
+        # broker_onboarding_request.program_id must be NULLABLE. A request can
+        # name no programme at all — bringing a broker into the DIRECTORY sends
+        # the same email to the same person, so it needs the same approval and
+        # has no programme to record.
+        #
+        # Needed as an ALTER rather than left to create_all because create_all
+        # only ever CREATES: a database that met this table while the column was
+        # still NOT NULL keeps that shape for ever, and every directory invite
+        # there dies on a constraint. Idempotent, and a no-op on the tables that
+        # were created right.
+        if dialect == "postgresql":
+            try:
+                conn.exec_driver_sql(
+                    "ALTER TABLE broker_onboarding_request "
+                    "ALTER COLUMN program_id DROP NOT NULL")
+            except Exception:
+                pass
         _ensure_column(conn, inspector, "mappers", "spec_by_sheet", json_type)
         _ensure_column(conn, inspector, "mappers", "candidates", json_type)
         _ensure_column(conn, inspector, "mappers", "samples", json_type)

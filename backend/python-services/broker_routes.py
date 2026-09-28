@@ -132,6 +132,22 @@ def _accept_invitation(s, inv, party_id: int, how: str) -> None:
                         origin="invitation", by_user_id=inv.by_user_id)
     if not inv.program_id:
         return
+    # WHOSE INVITATION THIS WAS decides what the link is worth, because the
+    # carrier's own rule for programme links does not stop applying just
+    # because the broker is the one clicking. A link the carrier ADMIN asked
+    # for goes live; one a carrier USER asked for waits at `pending_approval`
+    # and is released by the Bordereau Setup approval built on top of it
+    # (carrier_scope.LINK_PENDING, direct_routes._activate_links_for), exactly
+    # as it does when the same user adds the same broker from the programme
+    # screen.
+    #
+    # It used to be flat "active" here, which meant an invitation that named a
+    # programme handed the broker a live one the moment they accepted —
+    # straight past the setup gate. Nothing in the UI sent `program_id`, so it
+    # never fired; it was a hole waiting for the first caller that did.
+    from carrier_scope import LINK_PENDING, is_carrier_admin_user
+    status = ("active" if is_carrier_admin_user(s, inv.tenant_id, inv.by_user_id)
+              else LINK_PENDING)
     link = (s.query(ProgramBroker)
             .filter(ProgramBroker.program_id == inv.program_id,
                     ProgramBroker.broker_party_id == party_id)
@@ -139,12 +155,14 @@ def _accept_invitation(s, inv, party_id: int, how: str) -> None:
     if link:
         # Re-accepting after having been taken off reactivates the row rather
         # than inserting a second one; when it was first assigned is worth
-        # keeping.
-        link.status = "active"
+        # keeping. An already-live link is never pushed back down: it is live
+        # because something released it, and that has not been undone.
+        if link.status != "active":
+            link.status = status
         link.tenant_id = inv.tenant_id
     else:
         s.add(ProgramBroker(tenant_id=inv.tenant_id, program_id=inv.program_id,
-                            broker_party_id=party_id, status="active",
+                            broker_party_id=party_id, status=status,
                             assigned_by_user_id=inv.by_user_id))
 
 

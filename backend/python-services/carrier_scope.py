@@ -133,6 +133,29 @@ def is_carrier_admin_seat(s, p: Principal) -> bool:
     return carrier_seat(s, p) in ("admin", "both")
 
 
+def is_carrier_admin_user(s, tenant_id, user_id) -> bool:
+    """The same question as is_carrier_admin_seat, asked about a USER ID rather
+    than about whoever is signed in.
+
+    Needed where the act is happening later than the decision to do it: an
+    invitation is accepted days after it was sent, and what the carrier's own
+    rule says about the link it writes depends on who sent it, not on the
+    broker clicking Accept. There is no Principal to hand it by then — only
+    `broker_invitation.by_user_id`.
+
+    Fails OPEN on an unknown tenant or a tenant with no owner recorded, exactly
+    as carrier_seat does: those organisations answer "both", every seat in them
+    is treated as the admin, and this has to agree with that or the two rules
+    would disagree about the same person.
+    """
+    if user_id is None:
+        return True
+    t = s.query(Tenant).filter(Tenant.id == tenant_id).first() if tenant_id else None
+    if t is None or t.owner_user_id is None:
+        return True
+    return t.owner_user_id == user_id
+
+
 def require_carrier_admin(what: str = "do this"):
     """Dependency factory for the acts that are the carrier ADMIN's alone.
 

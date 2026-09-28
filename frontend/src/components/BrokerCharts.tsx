@@ -263,14 +263,40 @@ function FullListModal({ rows, unit, linkTo, title, onClose }: {
   );
 }
 
-/** Runs a day, split by how each one came out. Stacked, because the three
- *  outcomes are parts of that day's total rather than competing series. */
-export function RunTrend({ data, onDayClick }: {
+/** Runs a day, split by how each one came out. Stacked, because the outcomes
+ *  are parts of that day's total rather than competing series.
+ *
+ *  A BROKER sees the two outcomes that describe a file somebody actually
+ *  checked, named for what they do about it: a clean file, or one with
+ *  exceptions to work through. KAVACHIO sees a third, "not checked yet",
+ *  because overseeing the platform means being able to spot a file whose
+ *  checks never ran — and the table beside that chart badges it the same way.
+ *  Folding it into either colour on the broker's chart would report work that
+ *  never happened, so it is dropped there rather than merged. */
+const SERIES = {
+  broker: [
+    { key: "clean", name: "Clean File", fill: CLEAN },
+    { key: "flagged", name: "Exception File", fill: FLAGGED },
+  ],
+  platform: [
+    { key: "clean", name: "Clean", fill: CLEAN },
+    { key: "flagged", name: "Flagged", fill: FLAGGED },
+    { key: "not_checked", name: "Not checked yet", fill: NOT_CHECKED },
+  ],
+} as const;
+
+export function RunTrend({ data, onDayClick, audience = "platform" }: {
   data: { date: string; clean: number; flagged: number; not_checked: number }[];
   /** When given, clicking anywhere in a day's column reports that day. */
   onDayClick?: (date: string) => void;
+  /** Which outcomes to draw, and what to call them. See SERIES above. */
+  audience?: keyof typeof SERIES;
 }) {
-  const any = data.some(d => d.clean + d.flagged + d.not_checked > 0);
+  const series = SERIES[audience];
+  // Counted over the series actually DRAWN: on the broker's chart a day of
+  // nothing but unchecked files has nothing to show, and "no files have been
+  // run" is a truer answer than an empty plot.
+  const any = data.some(d => series.some(b => (d[b.key] ?? 0) > 0));
   if (!any) return <div className="empty">No files have been run in this period.</div>;
   return (
     <div style={{ width: "100%", height: 260 }}>
@@ -293,11 +319,13 @@ export function RunTrend({ data, onDayClick }: {
           <Legend verticalAlign="bottom" height={30} iconType="circle"
                   wrapperStyle={{ fontSize: 12, color: AXIS }} />
           {/* 2px of surface between segments instead of a stroke, so the
-              split reads without a border darkening the fill. */}
-          <Bar dataKey="clean" name="Clean" stackId="r" fill={CLEAN} maxBarSize={26} />
-          <Bar dataKey="flagged" name="Flagged" stackId="r" fill={FLAGGED} maxBarSize={26} />
-          <Bar dataKey="not_checked" name="Not checked yet" stackId="r"
-               fill={NOT_CHECKED} maxBarSize={26} radius={[3, 3, 0, 0]} />
+              split reads without a border darkening the fill. The rounded cap
+              belongs to whichever series is on TOP, which differs by audience. */}
+          {series.map((b, i) => (
+            <Bar key={b.key} dataKey={b.key} name={b.name} stackId="r" fill={b.fill}
+                 maxBarSize={26}
+                 radius={i === series.length - 1 ? [3, 3, 0, 0] : undefined} />
+          ))}
         </BarChart>
       </ResponsiveContainer>
     </div>

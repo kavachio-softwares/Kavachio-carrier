@@ -68,6 +68,7 @@ import { canAccessPath, landingPath } from "./access";
 import BrokerDetail from "./pages/BrokerDetail";
 import BrokerFiles from "./pages/BrokerFiles";
 import Brokers from "./pages/Brokers";
+import BrokerOnboardingRequests from "./pages/BrokerOnboardingRequests";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   // A stored user with an expired refresh token is a dead session — treat it
@@ -171,6 +172,9 @@ export default function App() {
         {/* The carrier hierarchy: brokers are reached from the carrier, not
             from a tenant — the same broker produces for several carriers. */}
         <Route path="/brokers" element={<Brokers />} />
+        {/* Before /brokers/:brokerId so the static segment cannot be read as an
+            id. React Router ranks it ahead anyway; the order says why. */}
+        <Route path="/brokers/requests" element={<BrokerOnboardingRequests />} />
         <Route path="/brokers/:brokerId" element={<BrokerDetail />} />
         {/* What that broker has SENT, split by programme — opened from the
             Broker Performance card on Home. */}

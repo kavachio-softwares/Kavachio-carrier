@@ -277,10 +277,18 @@ _FRIENDLY = {
     # (/contracts/{id}/approve, /submit, /reject, /brokers/link): they are what
     # the ROWS ALREADY IN THE TABLE say, and this map is read on the way out as
     # well as on the way in, so keeping them is what makes that history legible.
+    # One endpoint, two outcomes, as with /pipelines/{id}/activate above: the
+    # carrier ADMIN onboards the broker, a carrier USER raises a request for
+    # their carrier admin. Both routes log themselves (_SELF_LOGGED) and these
+    # names are kept only to resolve rows written before they did.
     ("POST",   "/brokers"):                          "broker_added",
     ("POST",   "/broker/users"):                     "broker_user_created",
     ("POST",   "/broker/invitations/{id}/accept"):   "broker_invitation_accepted",
     ("POST",   "/programs/{id}/brokers"):            "broker_put_on_programme",
+    # --- broker onboarding approval (the carrier admin's decision)
+    ("POST",   "/broker-onboarding-requests/{id}/approve"): "broker_request_approved",
+    ("POST",   "/broker-onboarding-requests/{id}/reject"):  "broker_request_rejected",
+    ("DELETE", "/broker-onboarding-requests/{id}"):         "broker_request_withdrawn",
     # --- the run itself, through the canonical carrier-scoped path. This is
     # the broker's whole reason for having a login, and it had no name.
     ("POST",   "/carriers/{id}/programs/{id}/brokers/{id}/contracts/{id}/runs"):
@@ -416,6 +424,15 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/pipelines/\d+/activate$")),
     ("POST",   re.compile(r"^/pipelines/\d+/approve$")),
     ("POST",   re.compile(r"^/pipelines/\d+/reject$")),
+    # Broker onboarding approval. The first two fork on WHO asked — the same
+    # POST /brokers is an onboarding from the carrier admin and a request from
+    # a carrier user — and the rest carry the broker, the programme and the
+    # reason in details, which the notification bell cannot render from a path.
+    ("POST",   re.compile(r"^/brokers$")),
+    ("POST",   re.compile(r"^/programs/\d+/brokers$")),
+    ("POST",   re.compile(r"^/broker-onboarding-requests/\d+/approve$")),
+    ("POST",   re.compile(r"^/broker-onboarding-requests/\d+/reject$")),
+    ("DELETE", re.compile(r"^/broker-onboarding-requests/\d+$")),
     # Writes its own row, with the contract's name, programme and broker in
     # details — the notification bell cannot render or group a row that only
     # carries the path.

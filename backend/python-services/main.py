@@ -37,6 +37,7 @@ from auth_deps import current_principal, Principal
 from validation_routes import router as validation_router
 from direct_routes import router as direct_router
 from hierarchy_routes import router as hierarchy_router
+from broker_onboarding_routes import router as broker_onboarding_router
 from broker_routes import router as broker_router
 from output_template_routes import router as output_template_router
 # Feature 10 — file intake channels ("How Files Arrive" / "Files Received").
@@ -113,6 +114,7 @@ app.include_router(app_router)
 app.include_router(validation_router)
 app.include_router(direct_router)
 app.include_router(hierarchy_router)
+app.include_router(broker_onboarding_router)
 app.include_router(broker_router)
 # Output BDX template: create from a reporting standard or a contract, edit,
 # validate, and resolve the one that applies to a carrier+programme+broker+contract.

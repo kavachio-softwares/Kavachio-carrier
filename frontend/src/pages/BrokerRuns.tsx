@@ -50,7 +50,7 @@ export default function BrokerRuns() {
                 <table>
                   <thead>
                     <tr>
-                      <th>File</th><th>Programme</th><th>Sent by</th><th>Rows</th>
+                      <th>File Name</th><th>Programme</th><th>Sent by</th><th>Rows</th>
                       <th>Result</th><th>When</th><th></th>
                     </tr>
                   </thead>

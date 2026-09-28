@@ -114,8 +114,8 @@ export default function OperatorHome() {
         {d.recent_runs.length > 0 && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
             <ChartCard title="Bordereau Status"
-              info={<InfoTip text={`Your team's files over the last ${DAYS} days, by result: clean, flagged with exceptions, or not checked yet.`} />}>
-              {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} />}
+              info={<InfoTip text={`Your team's files over the last ${DAYS} days, by result: a clean file, or one with exceptions to review.`} />}>
+              {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} audience="broker" />}
             </ChartCard>
             <ChartCard title="Exceptions Resolved"
               info={<InfoTip text={`Exceptions your team put right each day over the last ${DAYS} days.`} />}>

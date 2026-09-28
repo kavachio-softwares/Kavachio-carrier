@@ -52,6 +52,13 @@ export const NOTIFY: Record<string, {
     label: "Setup to approve", tone: "#b7791f",
     to: "/direct/setups?status=pending_approval",
     link: d => d.pipeline_id ? `/direct/setups/${d.pipeline_id}` : null },
+  // The EARLIEST of the admin's three gates: a colleague wants to bring a
+  // broker on board, and that broker has been sent nothing at all. Amber like
+  // the other two — nothing is late, somebody is waiting — and it is the one
+  // where waiting is invisible from outside, which is why it needs telling.
+  broker_request_submitted: {
+    seat: "admin",
+    label: "Broker to approve", tone: "#b7791f", to: "/brokers/requests" },
 
   // --- the answer, back to the CARRIER USER who asked --------------------
   // The half of the flow the person who did the work would otherwise only
@@ -85,6 +92,17 @@ export const NOTIFY: Record<string, {
     seat: "user",
     label: "Setup sent back", tone: "#c0392b", to: "/direct/setups",
     link: d => d.pipeline_id ? `/direct/setups/${d.pipeline_id}` : null },
+  // The answer on a broker, back to the colleague who asked. Green clears them
+  // to carry on with the contract; red is where they go to read the reason,
+  // which is why both land on the queue rather than on the broker.
+  broker_request_approved: {
+    seat: "user",
+    label: "Broker approved", tone: "#2f855a", to: "/brokers/requests" },
+  // "Turned down", not "sent back": nothing was created, so there is nothing
+  // to fix and resubmit. Asking again starts a new request.
+  broker_request_rejected: {
+    seat: "user",
+    label: "Broker turned down", tone: "#c0392b", to: "/brokers/requests" },
 };
 export const NOTIFY_ACTIONS = Object.keys(NOTIFY);
 /** Every outstanding reminder, not a recent-activity sample: a deadline stays
