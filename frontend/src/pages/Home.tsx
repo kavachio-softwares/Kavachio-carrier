@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck, UserCheck } from "lucide-react";
@@ -6,14 +6,17 @@ import { api } from "../api/client";
 import { currentMga, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
 import { canAccessPath } from "../access";
 
-import { getCalendar, type CalendarStatus } from "../api/calendar";
+import { getBoard, getCalendar, type BoardResponse, type CalendarStatus } from "../api/calendar";
 import { getBrokersPaged, getHierarchy } from "../api/hierarchy";
 import { listContractsPaged } from "../api/contractRecord";
 import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
 import { StatCard } from "../components/StatCard";
+import { ArrivalsCard } from "../components/ArrivalsCard";
 import BrokerPerformance from "../components/BrokerPerformance";
+import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
+import { clickedDayIndex } from "../components/BrokerCharts";
 
 
 type Stats = {
@@ -30,7 +33,7 @@ type Stats = {
   exception_runs?: number;                                       // # runs with open exceptions
   exceptions_by_severity?: { critical: number; warning: number; info: number };
   runs_this_week?: number;
-  runs_by_day_status?: { clean: number; flagged: number; resolved: number }[];
+  runs_by_day_status?: { clean: number; flagged: number; resolved: number; date?: string }[];
   active_setups?: number;
   active_setup_carriers?: number;
   mapping_tasks_open?: number;                                   // kavachio_admin tile
@@ -82,6 +85,8 @@ export default function Home() {
   // Same role, two seats at a carrier: only the owner is the Carrier Admin.
   const seat = useCarrierSeat();
   const [stats, setStats] = useState<Stats | null>(null);
+  // The Bordereau Status day whose files are open in the side drawer.
+  const [statusDay, setStatusDay] = useState<string | null>(null);
   // Whether this tenant still needs first-time setup (carrier + Bordereau).
   const [needsSetup, setNeedsSetup] = useState(false);
   // The dashboard shows a small snapshot; the full, filterable history lives
@@ -96,6 +101,9 @@ export default function Home() {
   const [runsTotal, setRunsTotal] = useState<number | null>(null);
   // Group 3: deadline counts for the "Deadlines" tile (own submission calendar).
   const [calCounts, setCalCounts] = useState<Partial<Record<CalendarStatus, number>>>({});
+  // The Bordereau Calendar's own counts, so the Overdue Bordereaux box and the
+  // page it opens always show the same numbers.
+  const [board, setBoard] = useState<BoardResponse | null>(null);
   // "How big is my book" — the two directory sizes, each read from the SAME
   // endpoint its own screen reads. /dashboard/stats already carries a programme
   // count (`open_bdx_cycles`) but it counts only app-managed ACTIVE ones, so a
@@ -125,6 +133,12 @@ export default function Home() {
   useEffect(() => {
     getCalendar().then(c => setCalCounts(c.counts ?? {})).catch(() => setCalCounts({}));
   }, [mga]);
+
+  // Both carrier seats; Kavachio staff have the box on their own dashboard.
+  useEffect(() => {
+    if (role !== "carrier_admin") return;
+    getBoard().then(setBoard).catch(() => setBoard(null));
+  }, [mga, role]);
 
   // Both directories are carrier-scoped. A broker seat carries no tenant, so
   // these routes answer "no tenant bound to this user" for them — don't ask.
@@ -167,6 +181,16 @@ export default function Home() {
   // server derives through _whose_turn; pending_signatures is the part of it
   // that is a signature. Falls back to the signatures alone on an older server
   // that does not send the wider figure, so the tile never reads blank.
+  // The carrier ADMIN's tiles come to 11, which leaves an odd one over on a
+  // 5-wide grid. Their grid is 20 columns instead: five tiles on the first
+  // row, four on the second, and the two multi-count boxes (Overdue
+  // Bordereaux, Contract Review) half a row each on the third. Everyone else's
+  // grid is untouched — `cell` hands the tile back as it is.
+  const adminGrid = role === "carrier_admin" && addsCarrierUsers(seat);
+  const cell = (span: number, node: ReactNode) => adminGrid
+    ? <div style={{ gridColumn: `span ${span}`, display: "grid" }}>{node}</div>
+    : node;
+
   const waitingTotal = stats?.contracts_waiting ?? stats?.pending_signatures ?? 0;
   // The tile's two counts. The server splits the same rows it counted for
   // waitingTotal, so these add up to it; an older server that sends neither
@@ -246,6 +270,18 @@ export default function Home() {
     pieData.push({ name: "Uncategorized", value: stats.pending_exceptions, color: "#94a3b8" });
   }
 
+  // The last seven days, oldest first. Named by each day's real weekday — the
+  // series starts six days ago, not on a Monday.
+  const statusSeries = (stats?.runs_by_day_status ?? []).map((d, i) => ({
+    date: d.date,
+    name: d.date
+      ? new Date(`${d.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" })
+      : `Day ${i + 1}`,
+    clean: d.clean || 0,
+    flagged: d.flagged || 0,
+    resolved: d.resolved || 0,
+  }));
+
   // Only a carrier admin can run the org/carrier/Bordereau setup. Until it is
   // done, anyone else gets a single notice instead of a dashboard with nothing
   // behind it.
@@ -289,8 +325,8 @@ export default function Home() {
             Setups and the three operational tiles on the second. Two separate
             grids sized the numbers differently row to row, which read as two
             unrelated components rather than one panel. */}
-        <div style={{ display: "grid", gridTemplateColumns: seat === "user" ? "repeat(3, 1fr)" : (role === "kavachio_admin" ? "repeat(4, 1fr)" : "repeat(5, 1fr)"), gap: 20, marginBottom: 24 }}>
-          {seat !== "user" && (
+        <div style={{ display: "grid", gridTemplateColumns: adminGrid ? "repeat(20, 1fr)" : seat === "user" ? "repeat(3, 1fr)" : (role === "kavachio_admin" ? "repeat(4, 1fr)" : "repeat(5, 1fr)"), gap: 20, marginBottom: 24 }}>
+          {seat !== "user" && cell(4,
             <StatCard
               title="Active Setups" value={fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}
               icon={LayoutDashboard} subtitle=""
@@ -299,15 +335,15 @@ export default function Home() {
 
           {carrierSeat && (
             <>
-              <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />
+              {cell(4, <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />)}
 
               {seat !== "user" && (
-                <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />
+                cell(4, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
               )}
 
-              <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="" />
+              {cell(4, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="" />)}
 
-              {seat !== "user" && (
+              {seat !== "user" && cell(4,
                 stats?.my_brokers != null ? (
                   <StatCard title="Your Broker Companies" value={fmt(stats.my_brokers)} icon={Users} onClick={() => nav("/users")} subtitle={stats.my_brokers_pending ? `${stats.my_brokers_pending} not accepted yet` : undefined} />
                 ) : (
@@ -317,12 +353,12 @@ export default function Home() {
             </>
           )}
 
-          <StatCard
+          {cell(5, <StatCard
             title="Exceptions to Review" value={fmt(stats?.pending_exceptions)}
             icon={AlertCircle} tone="alert" subtitle=""
-          />
+          />)}
 
-          <StatCard title="Files Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} />
+          {cell(5, <StatCard title="Files Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} />)}
 
           {/* Kavachio staff only. This used to be a ternary whose other half
               was "Avg Turnaround Time" for the carrier seats; that box is
@@ -332,45 +368,6 @@ export default function Home() {
               is gone. */}
           {role === "kavachio_admin" && (
             <StatCard title="Mapping Tasks" value={fmt(stats?.mapping_tasks_open)} icon={Clock} onClick={() => nav("/admin/mapping-tasks")} />
-          )}
-
-          {/* ONE box, not two — but the number on it has to be the one that
-              asks for something. It read `pending_signatures` before, which is
-              0 for a contract waiting to be REVIEWED, so the thing the carrier
-              admin had come to find showed as a zero they would not click.
-              The headline is now everything on their desk and the subtitle
-              splits it, which is also why the title is no longer only about
-              signatures: a box called Pending Signatures reading 1 for a
-              contract nobody can sign yet is a box that lies.
-
-              Carrier ADMIN only. Signing and approving are both theirs alone,
-              so for a carrier user this counts work they cannot do — they are
-              told through the notification bell instead, which is addressed to
-              them by name. */}
-          {addsCarrierUsers(seat) && (
-            <StatCard
-              title="Contract Review"
-              value={fmt(waitingTotal)}
-              icon={FileText}
-              tone={waitingTotal ? "alert" : undefined}
-              // TWO counts, the same pair the broker's dashboard shows from
-              // the other side of the table. Deciding a contract and signing
-              // one are different jobs, and the second used to sit in grey
-              // subtitle text where it read as a footnote to the number above
-              // it. Contracts first: it is agreed before it is signed.
-              split={[
-                { label: "Pending Contract", value: fmt(pendingReview),
-                  hint: `${stats?.contracts_terms_agreed ?? 0} agreed` },
-                { label: "Pending Signatures", value: fmt(pendingSignature),
-                  hint: `${stats?.completed_signatures ?? 0} completed` },
-              ]}
-              onClick={() => nav("/contracts?waiting=mine")}
-              info={"Contracts it is your move on: terms the broker has agreed "
-                    + "and which need your signature, an uploaded contract to "
-                    + "accept, or one the broker has pushed back on. Only the "
-                    + "carrier admin signs and accepts, and the carrier signs "
-                    + "first."}
-            />
           )}
 
           {/* The OTHER thing that stops on the carrier admin's desk, and the
@@ -388,7 +385,7 @@ export default function Home() {
               Carrier ADMIN only, like the fetch that feeds it — approving a
               setup is theirs alone, so for a carrier user this would count
               work they cannot do. They are told through the bell instead. */}
-          {addsCarrierUsers(seat) && (
+          {addsCarrierUsers(seat) && cell(5,
             <StatCard
               title="BDX Setup Review"
               value={fmt(pendingSetups ?? 0)}
@@ -421,7 +418,7 @@ export default function Home() {
               Not folded into BDX Setup Review beside it: that one counts
               setups and opens the setups list. These are two decisions about
               two different things, taken weeks apart. */}
-          {addsCarrierUsers(seat) && (
+          {addsCarrierUsers(seat) && cell(5,
             <StatCard
               title="Broker Onboarding Pending"
               value={fmt(stats?.broker_requests_pending ?? 0)}
@@ -440,6 +437,55 @@ export default function Home() {
             />
           )}
 
+          {/* Third row on the carrier admin's grid: the two boxes that carry
+              more than one count get half the row each. */}
+          {role === "carrier_admin" && cell(10,
+            <ArrivalsCard onTime={board?.counts.on_time} late={board?.counts.late}
+              never={board?.counts.never}
+              subtitle={board ? `Due in ${new Date(`${board.month}-01T00:00:00`)
+                .toLocaleDateString("en-GB", { month: "long", year: "numeric" })}` : undefined}
+              info="Bordereaux your brokers owed this month, by how they arrived." />
+          )}
+
+          {/* ONE box, not two — but the number on it has to be the one that
+              asks for something. It read `pending_signatures` before, which is
+              0 for a contract waiting to be REVIEWED, so the thing the carrier
+              admin had come to find showed as a zero they would not click.
+              The headline is now everything on their desk and the subtitle
+              splits it, which is also why the title is no longer only about
+              signatures: a box called Pending Signatures reading 1 for a
+              contract nobody can sign yet is a box that lies.
+
+              Carrier ADMIN only. Signing and approving are both theirs alone,
+              so for a carrier user this counts work they cannot do — they are
+              told through the notification bell instead, which is addressed to
+              them by name. */}
+          {addsCarrierUsers(seat) && cell(10,
+            <StatCard
+              title="Contract Review"
+              value={fmt(waitingTotal)}
+              icon={FileText}
+              tone={waitingTotal ? "alert" : undefined}
+              // TWO counts, the same pair the broker's dashboard shows from
+              // the other side of the table. Deciding a contract and signing
+              // one are different jobs, and the second used to sit in grey
+              // subtitle text where it read as a footnote to the number above
+              // it. Contracts first: it is agreed before it is signed.
+              split={[
+                { label: "Pending Contract", value: fmt(pendingReview),
+                  hint: `${stats?.contracts_terms_agreed ?? 0} agreed` },
+                { label: "Pending Signatures", value: fmt(pendingSignature),
+                  hint: `${stats?.completed_signatures ?? 0} completed` },
+              ]}
+              onClick={() => nav("/contracts?waiting=mine")}
+              info={"Contracts it is your move on: terms the broker has agreed "
+                    + "and which need your signature, an uploaded contract to "
+                    + "accept, or one the broker has pushed back on. Only the "
+                    + "carrier admin signs and accepts, and the carrier signs "
+                    + "first."}
+            />
+          )}
+
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
@@ -452,17 +498,17 @@ export default function Home() {
             <div style={{ width: "100%", height: 260 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart
-                  data={(stats?.runs_by_day_status ?? []).map((dayData, i) => {
-                    const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-                    return { 
-                        name: days[i] || `Day ${i + 1}`, 
-                        clean: dayData.clean || 0,
-                        flagged: dayData.flagged || 0,
-                        resolved: dayData.resolved || 0
-                    };
-                  })}
+                  data={statusSeries}
                   margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
                   barSize={32}
+                  style={{ cursor: "pointer" }}
+                  // A day's column opens the files behind it; the legend
+                  // under the chart does not (clickedDayIndex).
+                  onClick={(st: any, e: any) => {
+                    const i = clickedDayIndex(st, e);
+                    const d = i != null ? statusSeries[i]?.date : undefined;
+                    if (d) setStatusDay(d);
+                  }}
                 >
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                   <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} dy={10} />
@@ -594,8 +640,14 @@ export default function Home() {
           </div>
         </div>
 
-       
+
       </div >
+
+      <DayFilesDrawer day={statusDay} from="home"
+        load={dd => api.get<DayRuns>("/dashboard/runs-on-day", {
+          params: { day: dd, mga },
+        }).then(a => a.data)}
+        onClose={() => setStatusDay(null)} />
     </div >
   );
 }

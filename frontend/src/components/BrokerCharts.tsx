@@ -266,13 +266,10 @@ function FullListModal({ rows, unit, linkTo, title, onClose }: {
 /** Runs a day, split by how each one came out. Stacked, because the outcomes
  *  are parts of that day's total rather than competing series.
  *
- *  A BROKER sees the two outcomes that describe a file somebody actually
- *  checked, named for what they do about it: a clean file, or one with
- *  exceptions to work through. KAVACHIO sees a third, "not checked yet",
- *  because overseeing the platform means being able to spot a file whose
- *  checks never ran — and the table beside that chart badges it the same way.
- *  Folding it into either colour on the broker's chart would report work that
- *  never happened, so it is dropped there rather than merged. */
+ *  Both audiences see the two outcomes that describe a file somebody actually
+ *  checked: a clean file, or one with exceptions to work through. A file whose
+ *  checks never ran is left off the chart rather than folded into either
+ *  colour, which would report work that never happened. */
 const SERIES = {
   broker: [
     { key: "clean", name: "Clean File", fill: CLEAN },
@@ -281,9 +278,19 @@ const SERIES = {
   platform: [
     { key: "clean", name: "Clean", fill: CLEAN },
     { key: "flagged", name: "Flagged", fill: FLAGGED },
-    { key: "not_checked", name: "Not checked yet", fill: NOT_CHECKED },
   ],
 } as const;
+
+/** A chart click that should open a day: over the plot, never on the legend
+ *  below it. Recharts hands the handler the LAST hovered day even when the
+ *  pointer has moved down onto the legend, so both are checked. */
+export function clickedDayIndex(st: any, e: any): number | null {
+  const target = e?.target as Element | undefined;
+  if (target?.closest?.(".recharts-legend-wrapper")) return null;
+  if (!st?.isTooltipActive) return null;
+  const i = Number(st?.activeIndex ?? st?.activeTooltipIndex);
+  return Number.isInteger(i) ? i : null;
+}
 
 export function RunTrend({ data, onDayClick, audience = "platform" }: {
   data: { date: string; clean: number; flagged: number; not_checked: number }[];
@@ -303,12 +310,11 @@ export function RunTrend({ data, onDayClick, audience = "platform" }: {
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}
           style={onDayClick ? { cursor: "pointer" } : undefined}
-          onClick={onDayClick ? (st: any) => {
+          onClick={onDayClick ? (st: any, e: any) => {
             // The whole column is the target, not just the painted bar, so a
             // day with one small run is as easy to hit as a busy one.
-            const i = Number(st?.activeIndex);
-            const day = Number.isInteger(i) && data[i] ? data[i].date : st?.activeLabel;
-            if (day) onDayClick(String(day));
+            const i = clickedDayIndex(st, e);
+            if (i != null && data[i]) onDayClick(data[i].date);
           } : undefined}>
           <CartesianGrid vertical={false} stroke={GRID} />
           <XAxis dataKey="date" tickFormatter={shortDay} interval={tickEvery(data.length)}

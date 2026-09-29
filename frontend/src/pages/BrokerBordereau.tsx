@@ -440,12 +440,12 @@ export default function BrokerBordereau() {
           </div>
         )}
 
-        <div className="note" style={{ marginTop: 14 }}>
+        {/* <div className="note" style={{ marginTop: 14 }}>
           Your carrier builds the setup that decides what a valid file looks
           like, and the contract decides the rules it is checked against. If
           either is wrong for your book, that is a conversation with them — see{" "}
           <Link to="/broker/contracts">My Contracts</Link>.
-        </div>
+        </div> */}
       </div>
     </div>
   );

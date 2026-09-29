@@ -147,16 +147,21 @@ export const ROUTE_ACCESS: {
   // page — and not what they say. The server refuses it independently
   // (carrier_scope.assert_can_open_contract); this only stops the UI mounting
   // a screen that would come back 403.
-  { pattern: "/contracts/:contractId", requires: "operator",
-    only: ["broker_admin", "operator", "carrier_admin"] },
+  //
+  // On the BROKER side it is the admin's alone. The operator runs bordereaux
+  // against a contract but never sees one (same rule as My Contracts above) —
+  // agreeing, correcting and signing are the broker admin's.
+  { pattern: "/contracts/:contractId", requires: "broker_admin",
+    only: ["broker_admin", "carrier_admin"] },
   // Signing is between the two organisations, so both sides reach it. The
   // screen writes nothing, but it names the people who would sign — which is
   // the same reason the platform seat is left off it.
   // On the CARRIER side it is the admin's alone: a carrier user raises a
   // contract, the carrier admin signs it. The broker seats are unaffected —
-  // `carrierAdminOnly` narrows only the carrier.
-  { pattern: "/contracts/:contractId/signature", requires: "operator",
-    only: ["broker_admin", "operator", "carrier_admin"], carrierAdminOnly: true },
+  // `carrierAdminOnly` narrows only the carrier. The operator is off it for
+  // the same reason as the record above.
+  { pattern: "/contracts/:contractId/signature", requires: "broker_admin",
+    only: ["broker_admin", "carrier_admin"], carrierAdminOnly: true },
   // Party — the carrier's brokers, and where one is invited. `only`, because
   // the platform seat outranks carrier_admin and would otherwise reach the
   // Invite Broker button by typing the path. Inviting a broker is an act in a

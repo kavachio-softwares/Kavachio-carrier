@@ -19,7 +19,7 @@ log = logging.getLogger("bdx.calendar")
 
 from db import (
     Program, Contract, SubmissionSchedule, ExpectedSubmission, ActivityEvent,
-    SubmissionVersion, ProgramBroker, Party, AppUser,
+    SubmissionVersion, ProgramBroker, Party, AppUser, Tenant,
 )
 from submission_calendar import (
     resolve_schedule, generate_expected, derive_status, ResolvedSchedule, _add_months,
@@ -1084,7 +1084,7 @@ def _month_key(d: Optional[date]) -> Optional[str]:
 
 
 def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = None,
-                   today: Optional[date] = None) -> dict:
+                   today: Optional[date] = None, broker_id: Optional[int] = None) -> dict:
     """The carrier's Bordereau Calendar for one due-month.
 
     Returns the rows (one per programme x broker x period due that month), the
@@ -1095,15 +1095,41 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
     overdue. There is nobody to be late, and an overdue row against no-one is a
     number that cannot be acted on — it stays in the list so the programme reads
     as idle instead of being forgotten.
+
+    `tenant_id=None` is the PLATFORM ADMIN's cross-tenant view — every carrier's
+    board in one, keyed the same way. Every row and schedule then also carries
+    `carrier_name`, which a single-tenant caller has no use for and gets `None`.
+    `broker_id` narrows either view to one broker, the same as the platform
+    dashboard's own broker filter.
     """
     today = today or datetime.utcnow().date()
-    programs = {p.id: p for p in session.query(Program)
-                .filter(Program.tenant_id == tenant_id).all()}
-    schedules = {s.program_id: s for s in session.query(SubmissionSchedule)
-                 .filter(SubmissionSchedule.tenant_id == tenant_id).all()}
-    all_rows = (session.query(ExpectedSubmission)
-                .filter(ExpectedSubmission.tenant_id == tenant_id)
-                .order_by(ExpectedSubmission.due_date.asc()).all())
+    prog_q = session.query(Program)
+    sched_q = session.query(SubmissionSchedule)
+    rows_q = session.query(ExpectedSubmission)
+    if tenant_id is not None:
+        prog_q = prog_q.filter(Program.tenant_id == tenant_id)
+        sched_q = sched_q.filter(SubmissionSchedule.tenant_id == tenant_id)
+        rows_q = rows_q.filter(ExpectedSubmission.tenant_id == tenant_id)
+    if broker_id is not None:
+        rows_q = rows_q.filter(ExpectedSubmission.broker_party_id == broker_id)
+    programs = {p.id: p for p in prog_q.all()}
+    schedules = {s.program_id: s for s in sched_q.all()}
+    all_rows = rows_q.order_by(ExpectedSubmission.due_date.asc()).all()
+    if broker_id is not None:
+        # A broker-narrowed board still needs every programme it could be due
+        # on, not just the ones with a broker-matching row this month — the
+        # "Bordereau deadlines" table below reads from `programs` directly.
+        prog_ids = {e.program_id for e in all_rows}
+        programs = {pid: p for pid, p in programs.items() if pid in prog_ids}
+
+    # Cross-tenant only: which carrier each row/programme belongs to, so the
+    # platform admin's table can say. `tenant_id` already pins single-tenant
+    # callers to one carrier, so the lookup (and the field) is skipped there.
+    carrier_name: dict[int, str] = {}
+    if tenant_id is None:
+        tids = {p.tenant_id for p in programs.values()} | {e.tenant_id for e in all_rows}
+        for t in session.query(Tenant).filter(Tenant.id.in_(tids)).all():
+            carrier_name[t.id] = t.legal_name or (t.tenant_name or "").title() or f"Carrier {t.id}"
 
     months = sorted({_month_key(e.due_date) for e in all_rows if e.due_date},
                     reverse=True)
@@ -1140,6 +1166,7 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             "id": e.id,
             "program_id": e.program_id,
             "program_name": prog.name if prog else f"Programme {e.program_id}",
+            "carrier_name": carrier_name.get(e.tenant_id),
             "broker_party_id": e.broker_party_id,
             "broker_name": names.get(e.broker_party_id),
             "unassigned": unassigned,
@@ -1198,6 +1225,7 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         schedule_rows.append({
             "program_id": pid,
             "program_name": p.name,
+            "carrier_name": carrier_name.get(p.tenant_id),
             "frequency": resolved.frequency if resolved else None,
             "frequency_label": (_FREQ_LABEL.get(resolved.frequency, resolved.frequency)
                                 if resolved else "Not set"),

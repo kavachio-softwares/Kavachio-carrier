@@ -147,17 +147,17 @@ export default function AddUser() {
           <div className="t">
             <h2>
               {kind === "carrier" ? "Add a carrier user" : "Invite a broker"}
-              {kind === "carrier" && (
-                <InfoTip text={"They do the same daily work as you — contracts, "
+              <InfoTip text={kind === "carrier"
+                ? "They do the same daily work as you — contracts, "
                   + "programmes, files and inviting broker companies — but "
-                  + "only you add or remove carrier users."} />
-              )}
+                  + "only you add or remove carrier users."
+                : "Name the broker company and its broker admin — the "
+                  + "person who runs it. Both are created together."} />
             </h2>
             <p>
               {kind === "carrier"
                 ? "A colleague at your organisation."
-                : "Name the broker company and its broker admin — the person "
-                  + "who runs it. Both are created together."}
+                : "An outside broker company and its admin."}
             </p>
           </div>
           <div className="actions">
@@ -182,10 +182,9 @@ export default function AddUser() {
         {/* Asked first, because it changes what the rest of the form means:
             a carrier joins the organisation you are already in, a broker
             arrives with a company that has to be created around them. */}
-        <div className="card pad" style={{ marginBottom: 18 }}>
+        {/* <div className="card pad" style={{ marginBottom: 18 }}>
           <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Who are you adding?</h3>
-          {/* A choice only for someone who may do both. Everyone else has one
-              kind of person to add, so the card just says which. */}
+          
           {canCarrier && canBroker && !brokerOnly ? (
             <div className="segpick" style={{ marginTop: 12 }}>
               <button type="button" className={kind === "carrier" ? "on" : ""}
@@ -213,7 +212,7 @@ export default function AddUser() {
                 + "company. They add their own broker users. The company can "
                 + "work with other carriers too, so it does not belong to you."}
           </div>
-        </div>
+        </div> */}
 
         <div className="grid g-2">
           {/* Person */}
@@ -286,14 +285,14 @@ export default function AddUser() {
               <label>Broker Organisation name</label>
               <input value={brokerName} placeholder="e.g. Marlowe Broking Ltd"
                 onChange={e => setBrokerName(e.target.value)} />
-              <div className="hint">
+              {/* <div className="hint">
                 Used if they are new to the platform. If they already have a
                 login, they keep the organisation they have.
-              </div>
+              </div> */}
             </div>
 
 
-            <div className="hint" style={{ marginBottom: 12 }}>
+            {/* <div className="hint" style={{ marginBottom: 12 }}>
               Broker users are not here on purpose: they belong to the broker,
               and the broker&rsquo;s own admin adds them.
             </div>
@@ -307,7 +306,7 @@ export default function AddUser() {
               You are inviting them to work with <b>you</b>, not with one
               programme. Put them on programmes afterwards, from{" "}
               <b>Programmes</b> — as many as you like, whenever you like.
-            </div>
+            </div> */}
             </div>
           )}
         </div>

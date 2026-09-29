@@ -130,6 +130,10 @@ export type BoardRow = {
   id: number;
   program_id: number;
   program_name: string;
+  /** Which carrier this row belongs to. Only set on the platform admin's
+   *  cross-tenant board (getBoard's `platform` mode) — null on a single
+   *  carrier's own board, where every row is already theirs. */
+  carrier_name: string | null;
   broker_party_id: number | null;
   broker_name: string | null;
   /** True when the programme has no broker on it — it owes nothing. */
@@ -165,6 +169,8 @@ export type BrokerContact = {
 export type BoardSchedule = {
   program_id: number;
   program_name: string;
+  /** Same as BoardRow.carrier_name — only set in `platform` mode. */
+  carrier_name: string | null;
   frequency: string | null;
   frequency_label: string;
   due_rule: string;
@@ -205,9 +211,33 @@ export type SubmissionVersionRow = {
   note: string | null;
 };
 
-export async function getBoard(month?: string): Promise<BoardResponse> {
+/** `carrier`/`broker` are the platform dashboard's own filters (tenant id /
+ *  broker party id) — pass them only from the platform admin's cross-tenant
+ *  board; a tenant-bound caller is pinned server-side regardless. */
+export async function getBoard(month?: string, opts?: {
+  carrier?: number; broker?: number;
+}): Promise<BoardResponse> {
   const { data } = await api.get<BoardResponse>("/calendar/board", {
-    params: { mga: currentMga(), ...(month ? { month } : {}) },
+    params: {
+      mga: currentMga(), ...(month ? { month } : {}),
+      carrier: opts?.carrier, broker: opts?.broker,
+    },
+  });
+  return data;
+}
+
+/** The platform admin's cross-tenant board — every carrier's deadlines in
+ *  one table. Sends no `mga`, which is what tips the backend into its
+ *  cross-tenant path for a platform admin (AdminMappingTasks does the same
+ *  for the data-mapping queue). */
+export async function getPlatformBoard(month?: string, opts?: {
+  carrier?: number; broker?: number;
+}): Promise<BoardResponse> {
+  const { data } = await api.get<BoardResponse>("/calendar/board", {
+    params: {
+      ...(month ? { month } : {}),
+      carrier: opts?.carrier, broker: opts?.broker,
+    },
   });
   return data;
 }

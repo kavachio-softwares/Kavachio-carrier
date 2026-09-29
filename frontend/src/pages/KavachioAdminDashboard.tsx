@@ -14,12 +14,14 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  AlertTriangle, Briefcase, Building2, CalendarX, CheckCircle2, PenLine, User, Users, Zap,
+  AlertTriangle, Briefcase, Building2, CheckCircle2, PenLine, User, Users, Zap,
 } from "lucide-react";
 import { api } from "../api/client";
 import { InfoTip } from "../components/InfoTip";
 import { RankedBars, RunTrend } from "../components/BrokerCharts";
 import { ChartCard, StatCard } from "../components/StatCard";
+import { ArrivalsCard } from "../components/ArrivalsCard";
+import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 
 // Date-range presets (value → label). `range` is passed to the API, which
 // windows every time-based metric.
@@ -62,7 +64,8 @@ type Platform = {
     by_broker: (Named & { open: number; settled: number })[];
     carriers_clear: number; brokers_clear: number;
   };
-  overdue: { total: number; brokers: number; carriers: number };
+  // on_time / late: absent on an older server, and the box shows "—".
+  overdue: { total: number; brokers: number; carriers: number; on_time?: number; late?: number };
   signatures: { awaiting: number; over_7d: number };
   tenants_table: {
     tenant_id: number; code: string; name: string; users: number; brokers: number;
@@ -79,12 +82,6 @@ const nf = (n: number | null | undefined) => (n == null ? "—" : n.toLocaleStri
 /** The viewer's zone, so a bar's "7 Sep" is the 7 Sep they see everywhere else. */
 const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; }
                     catch { return "UTC"; } })();
-/** "2026-09-07" → "Mon 7 Sep 2026", read as a calendar day (no zone shift). */
-function longDay(iso: string) {
-  const [y, m, d] = iso.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-GB", {
-    weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
-}
 const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 0);
 const plural = (n: number, one: string, many: string) => `${nf(n)} ${n === 1 ? one : many}`;
 
@@ -145,118 +142,6 @@ function Chip({ v, k }: { v: number | string; k: string }) {
       <div style={{ fontSize: 18, fontWeight: 700, color: "var(--p-text)" }}>{v}</div>
       <div style={{ fontSize: 12, color: "var(--p-muted)" }}>{k}</div>
     </div>
-  );
-}
-
-type DayRun = {
-  export_id: number; source_upload_id: number | null; run_at: string | null;
-  result: "clean" | "flagged" | "not_checked"; exceptions: number; current: boolean;
-  file: string; programme: string | null;
-  carrier: { id: number; name: string; code: string | null };
-  broker: { id: number; name: string } | null;
-};
-type DayRuns = {
-  day: string; items: DayRun[];
-  totals: { runs: number; clean: number; flagged: number; not_checked: number };
-  carriers: { id: number; name: string; code: string | null; runs: number }[];
-};
-
-/** The files behind one bar of Runs per Day — every carrier's, in the
- *  dashboard's current carrier/broker scope, counted exactly as the bar is. */
-function DayPanel({ day, carrier, broker, onClose }: {
-  day: string | null; carrier: number | ""; broker: number | ""; onClose: () => void;
-}) {
-  const [data, setData] = useState<DayRuns | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    if (!day) return;
-    setData(null); setErr(null);
-    api.get<DayRuns>("/dashboard/platform/runs", {
-      params: { day, tz: TZ, carrier: carrier || undefined, broker: broker || undefined },
-    }).then(a => setData(a.data)).catch(() => setErr("Could not load the files for this day."));
-  }, [day, carrier, broker]);
-  useEffect(() => {
-    if (!day) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [day, onClose]);
-
-  const open = !!day;
-  const t = data?.totals;
-  const result = (x: DayRun) => {
-    if (!x.current) return <span className="badge b-mut">Replaced by a re-run</span>;
-    if (x.result === "clean") return <span className="badge b-ok"><span className="d" />Clean</span>;
-    if (x.result === "not_checked") return <span className="badge b-mut">Not checked</span>;
-    return <span className="badge b-warn"><span className="d" />{nf(x.exceptions)} exception{x.exceptions === 1 ? "" : "s"}</span>;
-  };
-  // The app's tables centre their cells; a list of files reads down the left edge.
-  const L: React.CSSProperties = { textAlign: "left" };
-  const triage = (x: DayRun) =>
-    `/uploads/${x.source_upload_id ?? x.export_id}/exceptions?download=${x.export_id}&from=admin`;
-
-  return (
-    <>
-      <div className={`scrim${open ? " on" : ""}`} onClick={onClose} />
-      <aside className={`drawer wide${open ? " on" : ""}`} aria-hidden={!open}>
-        <div className="drawer-h">
-          <div>
-            <h4>Files processed on {day ? longDay(day) : ""}</h4>
-            <div style={{ fontSize: 12.5, color: "var(--p-muted)" }}>
-              {t ? <>{plural(t.runs, "run", "runs")} · <b style={{ color: "var(--p-ok)" }}>{nf(t.clean)} clean</b>
-                {" · "}<b style={{ color: "var(--p-warn)" }}>{nf(t.flagged)} flagged</b>
-                {t.not_checked > 0 && <> · {nf(t.not_checked)} not checked</>}</> : "\u00a0"}
-            </div>
-          </div>
-          <button type="button" className="closeb" aria-label="Close" onClick={onClose}>×</button>
-        </div>
-        <div className="drawer-b" style={{ padding: 0 }}>
-          {err && <div className="note warn" style={{ margin: 16 }}>{err}</div>}
-          {!data && !err && <div className="muted" style={{ padding: 20 }}>Loading…</div>}
-          {data && data.items.length === 0 && <div className="empty" style={{ padding: 20 }}>No files were processed on this day.</div>}
-          {data && data.items.length > 0 && (
-            <div className="tbl-wrap">
-              <table>
-                <thead><tr>{["Time", "Carrier ← Broker · File", "Result"].map(h =>
-                  <th key={h} style={L}>{h}</th>)}</tr></thead>
-                <tbody>
-                  {data.items.map(x => (
-                    <tr key={x.export_id} style={x.current ? undefined : { opacity: 0.6 }}>
-                      <td className="muted" style={{ ...L, whiteSpace: "nowrap", fontSize: 12.5 }}>
-                        {x.run_at ? new Date(x.run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</td>
-                      <td style={L}>
-                        <div><b>{x.carrier.name}</b>{x.broker && <span className="muted"> ← {x.broker.name}</span>}</div>
-                        <div className="mono" style={{ fontSize: 12, wordBreak: "break-all" }}>{x.file}</div>
-                        {x.programme && <div className="muted" style={{ fontSize: 12 }}>{x.programme}</div>}
-                      </td>
-                      <td style={{ ...L, whiteSpace: "nowrap" }}>
-                        {result(x)}
-                        {/* A replaced run is history: its problems are worked on the
-                            re-run that replaced it, which is listed as its own row. */}
-                        {x.result === "flagged" && x.current && (
-                          <div style={{ marginTop: 6 }}>
-                            <Link className="linkish" style={{ fontSize: 12.5 }} to={triage(x)}>See exceptions →</Link>
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-        {data && data.carriers.some(c => c.code) && (
-          <div className="drawer-f">
-            {data.carriers.filter(c => c.code).map(c => (
-              <Link key={c.id} className="btn sm" to={`/tenants/${c.code}?tab=runs&from=${data.day}&to=${data.day}`}>
-                Open {c.name}'s files for this day →
-              </Link>
-            ))}
-          </div>
-        )}
-      </aside>
-    </>
   );
 }
 
@@ -422,9 +307,17 @@ export default function KavachioAdminDashboard() {
             info="Still waiting on files run in this period. Pick All time for the whole backlog."
             tone={ox.critical > 0 ? "alert" : undefined}
             subtitle={ox.total ? `across ${plural(brokersWithOpen, "broker", "brokers")}` : "nothing waiting"} />
-          <StatCard title="Overdue Bordereaux" value={nf(d.overdue.total)} icon={CalendarX}
-            info="Bordereaux that fell due in this period and still have not arrived. Pick All time for every missed deadline."
-            subtitle={d.overdue.total ? `from ${plural(d.overdue.brokers, "broker", "brokers")}` : "nothing overdue"} />
+          <ArrivalsCard onTime={d.overdue.on_time} late={d.overdue.late} never={d.overdue.total}
+            info="Bordereaux that fell due in this period, by how they arrived. Pick All time for every deadline."
+            subtitle={d.overdue.total ? `Overdue from ${plural(d.overdue.brokers, "broker", "brokers")}` : "Nothing overdue"}
+            // Carries this card's own carrier/broker scope onto the calendar it
+            // opens, so the board reads the same filtered set these numbers do
+            // — not the whole platform when the dashboard is narrowed.
+            to={`/bordereau-calendar${carrier || broker
+              ? `?${new URLSearchParams({
+                  ...(carrier ? { carrier: String(carrier) } : {}),
+                  ...(broker ? { broker: String(broker) } : {}),
+                }).toString()}` : ""}`} />
           <StatCard title="Awaiting Signature" value={nf(d.signatures.awaiting)} icon={PenLine}
             info="Contracts sent for signing in this period and not yet signed by everyone."
             subtitle={d.signatures.over_7d
@@ -435,8 +328,7 @@ export default function KavachioAdminDashboard() {
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0,2fr) minmax(0,1fr)", gap: 18, marginBottom: 18 }}>
           <ChartCard title="Runs Overview (Daily)"
             info={<InfoTip text={"Bordereaux processed per day. Clean = passed every check; "
-              + "flagged = at least one exception was raised; not checked = the checks could not run. "
-              + "Click a day to see its files."} />}>
+              + "flagged = at least one exception was raised. Click a day to see its files."} />}>
             <RunTrend data={trend} onDayClick={setDay} />
           </ChartCard>
 
@@ -542,7 +434,12 @@ export default function KavachioAdminDashboard() {
           </ChartCard>
         </div>
 
-        <DayPanel day={day} carrier={carrier} broker={broker} onClose={() => setDay(null)} />
+        <DayFilesDrawer day={day} from="admin" platform
+          reloadKey={`${carrier}|${broker}`}
+          load={dd => api.get<DayRuns>("/dashboard/platform/runs", {
+            params: { day: dd, tz: TZ, carrier: carrier || undefined, broker: broker || undefined },
+          }).then(a => a.data)}
+          onClose={() => setDay(null)} />
       </div>
     </div>
   );

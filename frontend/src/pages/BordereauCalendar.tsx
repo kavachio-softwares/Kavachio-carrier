@@ -16,13 +16,14 @@
 // are all defined as `.proto .x` in proto.css, and without the wrapper this
 // markup renders as unstyled text.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, CalendarDays, Send, X } from "lucide-react";
 import {
-  chase, getBoard, getVersions,
+  chase, getBoard, getPlatformBoard, getVersions,
   type BoardResponse, type BoardRow, type BrokerContact,
   type CalendarStatus, type SubmissionVersionRow,
 } from "../api/calendar";
+import { isKavachioAdmin } from "../auth";
 import NotificationBell from "../components/NotificationBell";
 import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
@@ -77,6 +78,20 @@ const LIST: React.CSSProperties = {
 const LI: React.CSSProperties = { listStyle: "disc", marginBottom: 4 };
 
 export default function BordereauCalendar() {
+  // The Kavachio admin has no carrier of their own, so they get every
+  // carrier's board in one — the same numbers the platform dashboard's
+  // "Overdue Bordereaux" card already totals cross-tenant. It is read-only
+  // for them here too: only a broker amends a late file (canAmendExceptions),
+  // and nobody at Kavachio is the one who would send a reminder on a
+  // carrier's behalf, so chasing stays off this view entirely.
+  const platform = isKavachioAdmin();
+  // Only meaningful in platform mode — carried over from the dashboard's own
+  // carrier/broker filter (ArrivalsCard's `to`), so clicking through from a
+  // scoped "Overdue Bordereaux" card lands on that same scope here rather
+  // than snapping back to every carrier.
+  const [qs] = useSearchParams();
+  const scopeCarrier = platform ? Number(qs.get("carrier")) || undefined : undefined;
+  const scopeBroker = platform ? Number(qs.get("broker")) || undefined : undefined;
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [month, setMonth] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
@@ -92,11 +107,17 @@ export default function BordereauCalendar() {
   // "Chase them", every late row for "Chase what is late".
   const [chasing, setChasing] = useState<BoardRow[] | null>(null);
   const [schedPage, setSchedPage] = useState(1);
+  // Platform view only: the month's files and the deadlines behind them sit
+  // on two tabs, because across every carrier each list runs long.
+  const [tab, setTab] = useState<"month" | "deadlines">("month");
+  const [monthPage, setMonthPage] = useState(1);
 
   const load = useCallback(async (m?: string) => {
-    setLoading(true); setErr(null);
+    setLoading(true); setErr(null); setMonthPage(1);
     try {
-      const data = await getBoard(m);
+      const data = await (platform
+        ? getPlatformBoard(m, { carrier: scopeCarrier, broker: scopeBroker })
+        : getBoard(m));
       setBoard(data);
       setMonth(data.month);
     } catch (e: any) {
@@ -104,7 +125,7 @@ export default function BordereauCalendar() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [platform, scopeCarrier, scopeBroker]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -159,26 +180,41 @@ export default function BordereauCalendar() {
     });
   }, [rows]);
 
+  // Paged after the sort, so page 1 is always the worst of the whole month.
+  const monthPageCount = Math.max(1, Math.ceil(worstFirst.length / PAGE_SIZE));
+  const monthPageNow = Math.min(monthPage, monthPageCount);
+  const monthRows = platform
+    ? worstFirst.slice((monthPageNow - 1) * PAGE_SIZE, monthPageNow * PAGE_SIZE)
+    : worstFirst;
+
   return (
     <div className="proto">
       <div className="view full">
         <div className="page-head">
           <div className="t">
             <h2>
-              Bordereau Calendar
-              <InfoTip text={"What each broker owes you and when, what has actually "
-                + "turned up, and what you have sent on."} />
+              {platform ? "Bordereau Calendar — All Carriers" : "Bordereau Calendar"}
+              <InfoTip text={platform
+                ? "What every carrier is owed this month, across the whole "
+                  + "platform. Read-only here — chasing a late file is each "
+                  + "carrier's own call, made from their own calendar."
+                : "What each broker owes you and when, what has actually "
+                  + "turned up, and what you have sent on."} />
             </h2>
           </div>
           <div className="actions">
             <NotificationBell placement="inline" />
-            <Link className="btn" to="/files">Files received →</Link>
-            <button className="btn pri" onClick={() => setChasing(overdue)}
-              disabled={overdue.length === 0}
-              title={overdue.length === 0 ? "Nothing is late" : ""}>
-              {overdue.length === 0 ? "Nothing is late"
-                : `Remind on late files (${overdue.length})`}
-            </button>
+            {!platform && (
+              <>
+                <Link className="btn" to="/files">Files received →</Link>
+                <button className="btn pri" onClick={() => setChasing(overdue)}
+                  disabled={overdue.length === 0}
+                  title={overdue.length === 0 ? "Nothing is late" : ""}>
+                  {overdue.length === 0 ? "Nothing is late"
+                    : `Remind on late files (${overdue.length})`}
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -231,7 +267,19 @@ export default function BordereauCalendar() {
           </div>
         </div>
 
+        {platform && (
+          <div className="tabs">
+            <button className={tab === "month" ? "on" : ""} onClick={() => setTab("month")}>
+              {fmtMonth(month)} ({worstFirst.length})
+            </button>
+            <button className={tab === "deadlines" ? "on" : ""} onClick={() => setTab("deadlines")}>
+              Bordereau deadlines ({schedules.length})
+            </button>
+          </div>
+        )}
+
         {/* ---- one row per file somebody owes this month ------------------ */}
+        {(!platform || tab === "month") && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-h">
             <CalendarDays className="ci" />
@@ -254,6 +302,7 @@ export default function BordereauCalendar() {
             <table>
               <thead>
                 <tr>
+                  {platform && <th>Carrier</th>}
                   <th>Programme</th><th>Broker</th><th>Period</th><th>Due by</th>
                   <th>Turned up</th><th>How it went</th>
                   <th>Version</th><th>Action</th>
@@ -261,17 +310,17 @@ export default function BordereauCalendar() {
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td colSpan={8} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={platform ? 9 : 8} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">Loading…</td></tr>
                 )}
                 {!loading && worstFirst.length === 0 && (
-                  <tr><td colSpan={8} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={platform ? 9 : 8} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">
                     Nothing is due in this month.{" "}
                     <Link className="linkish" to="/programs">Set a programme's frequency →</Link>
                   </td></tr>
                 )}
-                {!loading && worstFirst.map(r => {
+                {!loading && monthRows.map(r => {
                   // A PROGRAMME WITH NO BROKER OWES NOTHING. It shows a blank
                   // row rather than an overdue one, because there is nobody to
                   // be late — and it stays in the list so the programme reads
@@ -279,6 +328,7 @@ export default function BordereauCalendar() {
                   if (r.unassigned) {
                     return (
                       <tr key={r.id}>
+                        {platform && <td className="muted">{r.carrier_name ?? "—"}</td>}
                         <td><b>{r.program_name}</b></td>
                         <td className="muted">no broker on it yet</td>
                         <td className="mono">{r.period}</td>
@@ -287,9 +337,11 @@ export default function BordereauCalendar() {
                         <td><span className="badge b-mut"><span className="d" />Nothing is owed</span></td>
                         <td className="muted">—</td>
                         <td>
-                          <Link className="linkish" to={`/programs/${r.program_id}/brokers`}>
-                            Add a broker →
-                          </Link>
+                          {!platform && (
+                            <Link className="linkish" to={`/programs/${r.program_id}/brokers`}>
+                              Add a broker →
+                            </Link>
+                          )}
                         </td>
                       </tr>
                     );
@@ -303,6 +355,7 @@ export default function BordereauCalendar() {
                     : r.days_late != null ? `${plural(r.days_late, "day")} late` : null;
                   return (
                     <tr key={r.id}>
+                      {platform && <td className="muted">{r.carrier_name ?? "—"}</td>}
                       <td>{r.program_name}</td>
                       <td><b>{r.broker_name ?? `Broker ${r.broker_party_id}`}</b></td>
                       <td className="mono">{r.period}</td>
@@ -338,7 +391,7 @@ export default function BordereauCalendar() {
                             Versions →
                           </span>
                         )}
-                        {r.status === "overdue" && (
+                        {!platform && r.status === "overdue" && (
                           <span className="linkish" style={{ marginLeft: 8 }}
                             onClick={() => setChasing([r])}>
                             Remind →
@@ -351,6 +404,11 @@ export default function BordereauCalendar() {
               </tbody>
             </table>
           </div>
+          {platform && (
+            <Pagination page={monthPageNow} pageCount={monthPageCount}
+              pageSize={PAGE_SIZE} totalItems={worstFirst.length}
+              onPageChange={setMonthPage} noun="files" />
+          )}
 
           <div className="note" style={{ margin: 0, border: 0,
             borderTop: "1px solid var(--p-border)", borderRadius: 0,
@@ -361,8 +419,10 @@ export default function BordereauCalendar() {
               + "is idle instead of forgetting it exists."} />
           </div>
         </div>
+        )}
 
         {/* ---- what fills the calendar ---------------------------------- */}
+        {(!platform || tab === "deadlines") && (
         <div className="card">
           <div className="card-h">
             <h3>Bordereau deadlines</h3>
@@ -371,16 +431,17 @@ export default function BordereauCalendar() {
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Programme</th><th>How often</th><th>Due</th>
+                <tr>{platform && <th>Carrier</th>}<th>Programme</th><th>How often</th><th>Due</th>
                   <th>Next one</th><th>Covered until</th><th>Action</th></tr>
               </thead>
               <tbody>
                 {schedules.length === 0 && (
-                  <tr><td colSpan={6} className="muted"
+                  <tr><td colSpan={platform ? 7 : 6} className="muted"
                     style={{ padding: "14px 12px" }}>No programmes yet.</td></tr>
                 )}
                 {schedRows.map(sch => (
                   <tr key={sch.program_id}>
+                    {platform && <td className="muted">{sch.carrier_name ?? "—"}</td>}
                     <td>
                       <b>{sch.program_name}</b>
                       <div className="sub">
@@ -404,8 +465,12 @@ export default function BordereauCalendar() {
                         : <span className="sub">no end date on the contract</span>}
                     </td>
                     <td>
-                      <Link className="linkish"
-                        to={`/calendar?program=${sch.program_id}`}>Change →</Link>
+                      {/* Changing a schedule is the carrier's own call — the
+                          platform admin reads this board, never edits it. */}
+                      {!platform && (
+                        <Link className="linkish"
+                          to={`/calendar?program=${sch.program_id}`}>Change →</Link>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -416,6 +481,7 @@ export default function BordereauCalendar() {
             pageSize={PAGE_SIZE} totalItems={schedules.length}
             onPageChange={setSchedPage} noun="programmes" />
         </div>
+        )}
       </div>
 
       {openRow && (
@@ -581,81 +647,119 @@ function ChaseModal({ rows, onClose, onConfirm }: {
     }
   }
 
+  const r0 = rows[0];
+  const initial = (n: string) => (n.trim()[0] ?? "?").toUpperCase();
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(16,20,28,.45)",
       display: "flex", alignItems: "center", justifyContent: "center",
       padding: 24, zIndex: 70 }}
       onClick={onClose}>
-      <div className="card" style={{ width: single ? "min(560px, 100%)" : "min(820px, 100%)",
-        maxHeight: "88vh", overflowY: "auto", margin: 0 }}
+      <div className="card" style={{ width: single ? "min(540px, 100%)" : "min(820px, 100%)",
+        maxHeight: "88vh", margin: 0, display: "flex", flexDirection: "column",
+        overflow: "hidden", borderRadius: 14,
+        boxShadow: "0 24px 48px -12px rgb(16 20 28 / .28)" }}
         role="dialog" aria-modal="true"
         onClick={e => e.stopPropagation()}>
-        <div className="card-h">
-          <h3>{single
-            ? `Remind ${rows[0].broker_name ?? "this broker"}`
-            : "Remind on all late files"}</h3>
-          <div className="right">
-            <span className="linkish" onClick={onClose}
-              role="button" aria-label="Close"><X size={14} /></span>
+
+        {/* ---- header -------------------------------------------------- */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12,
+          padding: "16px 20px", borderBottom: "1px solid var(--p-border)" }}>
+          <span style={{ width: 36, height: 36, borderRadius: 10, flex: "none",
+            background: "var(--p-primary-soft)", color: "var(--p-primary)",
+            display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Send size={16} />
+          </span>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--p-ink)" }}>
+              {single ? `Remind ${r0.broker_name ?? "this broker"}` : "Remind on all late files"}
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--p-muted)", marginTop: 2 }}>
+              {single
+                ? "An email asking for the missing file."
+                : "One reminder each, for the person who sends the file. Nothing goes to a broker who is up to date."}
+            </div>
           </div>
+          <button type="button" onClick={onClose} aria-label="Close"
+            style={{ width: 32, height: 32, borderRadius: 8, flex: "none",
+              border: "1px solid var(--p-border)", background: "var(--p-surface)",
+              color: "var(--p-muted)", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <X size={15} />
+          </button>
         </div>
 
-        <div style={{ padding: "16px 20px" }}>
+        {/* ---- body (scrolls; header and footer stay put) --------------- */}
+        <div style={{ padding: "18px 20px", overflowY: "auto", flex: 1 }}>
           {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
 
-          <div className="note" style={{ marginBottom: 14 }}>
-            {single ? (
-              <ul style={LIST}>
-                <li style={LI}>
-                  <b>{rows[0].period}</b> file for {rows[0].program_name} — due{" "}
-                  <b>{fmtFull(rows[0].due_date)}</b>.
-                </li>
-                <li style={LI}>Still not arrived.</li>
-                {/* <li style={LI}>This saves a note that you asked for it.</li> */}
-              </ul>
-            ) : (
-              <>
-                One reminder each, for the person who sends the file. Nothing goes
-                to a broker who is up to date.
-              </>
-            )}
-          </div>
-
-          {/* WHAT IS LATE. One row per period for a bulk chase; for a single
-              chase the facts are broken out the way the prototype does it. */}
           {single ? (
             <>
-              <div style={{ padding: "10px 0", borderBottom: "1px solid var(--p-border)", fontSize: 13 }}>
-                <div className="k" style={{ marginBottom: 6 }}>Goes to</div>
-                {recipients.length === 0
-                  ? <span className="muted">nobody on record</span>
-                  : recipients.map(c => (
-                    <div key={c.email} style={{ fontWeight: 600, marginBottom: 4 }}>
-                      <div>Name : {c.name}</div>
-                      <div>Email : {c.email}</div>
+              {/* WHAT IS LATE — the file, its deadline and how far over, in one card. */}
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 12,
+                padding: "14px 16px", borderRadius: 10,
+                background: "var(--p-crit-soft)", border: "1px solid #F3C6CD" }}>
+                <AlertTriangle size={18} style={{ color: "var(--p-crit)", flex: "none", marginTop: 1 }} />
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "var(--p-ink)" }}>
+                    {r0.program_name} <span style={{ color: "var(--p-muted)", fontWeight: 500 }}>· {r0.period}</span>
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--p-muted)", marginTop: 4,
+                    display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <CalendarDays size={13} />
+                    Due <b style={{ color: "var(--p-ink)" }}>{fmtFull(r0.due_date)}</b> · still not arrived
+                  </div>
+                </div>
+                <span style={{ flex: "none", whiteSpace: "nowrap", fontSize: 12, fontWeight: 700,
+                  color: "var(--p-crit-ink)", background: "var(--p-surface)",
+                  border: "1px solid #F3C6CD", borderRadius: 999, padding: "4px 10px" }}>
+                  {plural(r0.days_over ?? 0, "day")} overdue
+                </span>
+              </div>
+
+              {r0.chase_count > 0 && (
+                <div style={{ fontSize: 12.5, color: "var(--p-muted)", marginTop: 10 }}>
+                  Already followed up{" "}
+                  <b style={{ color: "var(--p-ink)" }}>
+                    {r0.chase_count === 1 ? "once" : `${r0.chase_count} times`}
+                  </b>
+                  {r0.chased_at && <>, last on {fmtFull(r0.chased_at)}</>}.
+                </div>
+              )}
+
+              {/* WHO HEARS ABOUT IT */}
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--p-muted)",
+                margin: "18px 0 8px" }}>Goes to</div>
+              {recipients.length === 0 ? (
+                <div style={{ fontSize: 13, color: "var(--p-muted)", padding: "10px 12px",
+                  border: "1px dashed var(--p-border-2)", borderRadius: 10 }}>
+                  Nobody on record
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {recipients.map(c => (
+                    <div key={c.email} style={{ display: "flex", alignItems: "center", gap: 12,
+                      padding: "10px 12px", border: "1px solid var(--p-border)",
+                      borderRadius: 10, background: "var(--p-surface-2)" }}>
+                      <span style={{ width: 34, height: 34, borderRadius: "50%", flex: "none",
+                        background: "var(--p-primary)", color: "#fff", fontWeight: 700, fontSize: 14,
+                        display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        {initial(c.name || c.email)}
+                      </span>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--p-ink)" }}>{c.name}</div>
+                        <div style={{ fontSize: 12.5, color: "var(--p-muted)",
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {c.email}
+                        </div>
+                      </div>
                       {/* An invited contact is the right address but an
                           unconfirmed one — say so before it is relied on. */}
                       {c.status === "invited" && (
-                        <span className="sub" style={{ fontWeight: 400 }}> · invited, not signed in yet</span>
+                        <span className="badge b-warn" style={{ flex: "none" }}>Invited, not signed in yet</span>
                       )}
                     </div>
                   ))}
-              </div>
-              <div className="kv">
-                <span className="k">About</span>
-                <span className="v">{rows[0].program_name} · {rows[0].period}</span>
-              </div>
-              <div className="kv">
-                <span className="k">Days overdue</span>
-                <span className="v">{rows[0].days_over ?? 0}</span>
-              </div>
-              {rows[0].chase_count > 0 && (
-                <div className="kv">
-                  <span className="k">Already followed up</span>
-                  <span className="v">
-                    {rows[0].chase_count === 1 ? "once" : `${rows[0].chase_count} times`}
-                    {rows[0].chased_at && `, last on ${fmtFull(rows[0].chased_at)}`}
-                  </span>
                 </div>
               )}
             </>
@@ -713,23 +817,27 @@ function ChaseModal({ rows, onClose, onConfirm }: {
             </div>
           )}
 
-          <div className="field" style={{ margin: "14px 0 0" }}>
-            <label>Anything to add?</label>
-            <input value={note} onChange={e => setNote(e.target.value)}
-              placeholder="Optional — e.g. we need this before month end" />
+          <div className="field" style={{ margin: "18px 0 0" }}>
+            <label>Anything to add? <span style={{ fontWeight: 400, color: "var(--p-faint)" }}>(optional)</span></label>
+            <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
+              style={{ resize: "vertical" }}
+              placeholder="e.g. we need this before month end" />
             <div className="hint">Kept with the reminder, so what you asked for is
               readable later.</div>
           </div>
+        </div>
 
-          <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-            <button className="btn pri" onClick={go} disabled={busy}>
-              <Send size={13} />{" "}
-              {busy ? "Recording…"
-                : single ? "Send the reminder"
-                : `Send ${plural(rows.length, "reminder")}`}
-            </button>
-            <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-          </div>
+        {/* ---- footer -------------------------------------------------- */}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10,
+          padding: "14px 20px", borderTop: "1px solid var(--p-border)",
+          background: "var(--p-surface-2)" }}>
+          <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn pri" onClick={go} disabled={busy}>
+            <Send size={13} />
+            {busy ? "Recording…"
+              : single ? "Send the reminder"
+              : `Send ${plural(rows.length, "reminder")}`}
+          </button>
         </div>
       </div>
     </div>
