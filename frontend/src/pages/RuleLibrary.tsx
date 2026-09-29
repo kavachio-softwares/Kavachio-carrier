@@ -4,8 +4,18 @@ import { isKavachioAdmin } from "../auth";
 import { Rule, listRulesPaged, toggleRule, deleteRule } from "../api/ruleLibrary";
 import { useServerList } from "../hooks/useServerList";
 import { Pagination } from "../components/Pagination";
+import { InfoTip } from "../components/InfoTip";
+import { Layers, RefreshCw, ShieldCheck } from "lucide-react";
 
 const PAGE_SIZE = 10;
+
+// How a rule takes effect, as three short steps — for the seats that can change
+// rules. Shown as a plain card, not a warning: nothing is wrong, it is how it works.
+const HOW_RULES_WORK: { icon: React.ElementType; text: React.ReactNode }[] = [
+  { icon: ShieldCheck, text: <>Rules validate broker-submitted files.</> },
+  { icon: RefreshCw, text: <>Rerun <b>Bordereau Setup</b> after any rule changes.</> },
+  { icon: Layers, text: <>Existing programmes must be set up again to apply updates.</> },
+];
 
 // Severity → badge class, mirroring the exception screens' colour language.
 function sevBadge(s: string): { cls: string; label: string } {
@@ -75,14 +85,14 @@ export default function RuleLibrary() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>{platform ? "Platform Generic Rules" : "Generic Rules"}</h2>
-            <p>
-              {platform
+            <h2>
+              {platform ? "Platform Generic Rules" : "Generic Rules"}{" "}
+              <InfoTip text={platform
                 ? "Generic checks that run on every broker's BDX files. Changes here affect all tenants."
                 : canManage
                   ? "Your generic rules. They run on all your BDX files and only your team can see them."
-                  : "The checks your company runs on every BDX file. Your carrier admin looks after this list."}
-            </p>
+                  : "The checks your company runs on every BDX file. Your carrier admin looks after this list."} />
+            </h2>
           </div>
           {canManage && (
             <div className="actions">
@@ -96,21 +106,41 @@ export default function RuleLibrary() {
 
         {/* How generic rules take effect — they are bound to a program during
             Bordereau Setup, not retroactively. Shown for both roles. */}
-        <div className="note warn" style={{ marginBottom: 16 }}>
-          <b>These generic rules run on {platform ? "every broker's" : "all your"} BDX files.</b>
-          <div style={{ marginTop: 6 }}>
-            {canManage ? (
-              <>A rule only starts working after you run <b>Bordereau Setup</b> for a program. Add or edit
-              rules here first, then run Bordereau Setup.</>
-            ) : (
-              <>You can read these rules but not change them — only your carrier admin can add, edit,
-              turn off or delete one. A rule starts working on a program when its <b>Bordereau Setup</b> is run.</>
-            )}
+        {canManage ? (
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div className="card-h" style={{ padding: "11px 18px" }}>
+              <h3 style={{ fontSize: 13.5 }}>How rules work</h3>
+            </div>
+            <div style={{
+              display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+              gap: 12, padding: "14px 18px",
+            }}>
+              {HOW_RULES_WORK.map(({ icon: Icon, text }, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 11 }}>
+                  <span aria-hidden="true" style={{
+                    width: 32, height: 32, borderRadius: 8, flex: "0 0 auto",
+                    display: "grid", placeItems: "center",
+                    background: "var(--p-primary-soft)", color: "var(--p-primary)",
+                  }}><Icon size={16} strokeWidth={2} /></span>
+                  <span style={{ fontSize: 13, color: "var(--p-ink)", lineHeight: 1.4 }}>{text}</span>
+                </div>
+              ))}
+            </div>
           </div>
-          <div style={{ marginTop: 6 }}>
-            If a program is already set up, it won't use a new rule until you run its setup again.
+        ) : (
+          <div className="note warn" style={{ marginBottom: 16 }}>
+            <>
+              <b>These generic rules run on all your BDX files.</b>
+              <div style={{ marginTop: 6 }}>
+                You can read these rules but not change them — only your carrier admin can add, edit,
+                turn off or delete one. A rule starts working on a program when its <b>Bordereau Setup</b> is run.
+              </div>
+              <div style={{ marginTop: 6 }}>
+                If a program is already set up, it won't use a new rule until you run its setup again.
+              </div>
+            </>
           </div>
-        </div>
+        )}
 
         <div className="card">
           <div className="tbl-wrap">

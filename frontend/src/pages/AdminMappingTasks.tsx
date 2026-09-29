@@ -8,6 +8,7 @@ import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { InfoTip } from "../components/InfoTip";
 
 type Task = {
   id: number; format_id: number | null; format_name: string | null;
@@ -113,8 +114,7 @@ export default function AdminMappingTasks() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Data Mapping Queue</h2>
-            <p>Unknown input formats waiting to be mapped into the canonical data model.</p>
+            <h2>Data Mapping Queue <InfoTip text="Unknown input formats waiting to be mapped into the canonical data model." /></h2>
           </div>
           <div className="actions">
             <div className="seg">

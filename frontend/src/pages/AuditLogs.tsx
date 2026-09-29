@@ -8,6 +8,7 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useServerList } from "../hooks/useServerList";
 import { Pagination } from "../components/Pagination";
 import { fmtDateTime } from "../utils/date";
+import { InfoTip } from "../components/InfoTip";
 
 const PAGE_SIZE = 15;
 
@@ -107,8 +108,7 @@ export default function AuditLogs() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Audit Logs</h2>
-            <p>{SUBTITLE[seat] ?? "Who did what, when, and how it ended."}</p>
+            <h2>Audit Logs <InfoTip text={SUBTITLE[seat] ?? "Who did what, when, and how it ended."} /></h2>
           </div>
           <div className="actions" style={{ display: "flex", gap: 8 }}>
             {/* Two formats because they are read two different ways: CSV feeds
