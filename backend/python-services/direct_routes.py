@@ -31,6 +31,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import text, func, or_
+from sqlalchemy.orm import aliased
 
 import direct_lane as dl
 import direct_mapper as dm
@@ -3775,6 +3776,9 @@ def direct_runs(
         if tid is None:
             return {"items": [], "total": 0, "page": page, "page_size": page_size} if page is not None else []
 
+        # A second alias of Party: the carrier's and the broker's names both
+        # live there.
+        BrokerParty = aliased(Party)
         # Select ONLY the columns this listing renders — never whole entities.
         # Each of these three tables carries multi-MB payload columns that the
         # list has no use for: OutputExport.exceptions (the full exception list,
@@ -3793,11 +3797,22 @@ def direct_runs(
                      DirectFormat.carrier_party_id, DirectFormat.program_id,
                      OutputExport.id, OutputExport.filename,
                      OutputExport.exception_count, OutputExport.status,
-                     Party.legal_name, Program.name)
+                     Party.legal_name, Program.name,
+                     OutputExport.broker_party_id, BrokerParty.legal_name,
+                     OutputExport.contract_id,
+                     func.coalesce(Contract.name, Contract.filename))
                  .join(DirectFormat, LandingRecord.format_id == DirectFormat.id)
                  .join(OutputExport, LandingRecord.output_export_id == OutputExport.id)
                  .outerjoin(Party, DirectFormat.carrier_party_id == Party.id)
                  .outerjoin(Program, DirectFormat.program_id == Program.id)
+                 # The broker the run was made for (stamped on the export). NULL
+                 # on exports written before broker_party_id existed, and on a
+                 # run Kavachio made with no broker scope.
+                 .outerjoin(BrokerParty, OutputExport.broker_party_id == BrokerParty.id)
+                 # The contract the file was validated against (stamped on the
+                 # export). Its name, or the uploaded file's name when none was
+                 # given.
+                 .outerjoin(Contract, OutputExport.contract_id == Contract.id)
                  .filter(LandingRecord.tenant_id == tid))
         if carrier_party_id is not None:
             query = query.filter(DirectFormat.carrier_party_id == carrier_party_id)
@@ -3835,6 +3850,8 @@ def direct_runs(
                 func.lower(func.coalesce(OutputExport.filename, "")).like(ql),
                 func.lower(func.coalesce(Party.legal_name, "")).like(ql),
                 func.lower(func.coalesce(Program.name, "")).like(ql),
+                func.lower(func.coalesce(BrokerParty.legal_name, "")).like(ql),
+                func.lower(func.coalesce(Contract.name, Contract.filename, "")).like(ql),
             ))
         df_, dt_ = _parse_client_dt(date_from), _parse_client_dt(date_to)
         if df_:
@@ -3862,6 +3879,10 @@ def direct_runs(
             "program_id": program_id_,
             "carrier_name": carrier_name,
             "program_name": program_name,
+            "broker_party_id": broker_party_id_,
+            "broker_name": broker_name,
+            "contract_id": contract_id_,
+            "contract_name": contract_name,
             "export_id": export_id,
             "filename": filename,
             "exception_count": exception_count or 0,
@@ -3869,7 +3890,8 @@ def direct_runs(
             "datamodel_status": datamodel_status,
         } for (landing_id, source_filename, row_count, created_at, datamodel_status,
                carrier_party_id_, program_id_, export_id, filename,
-               exception_count, status_, carrier_name, program_name) in rows]
+               exception_count, status_, carrier_name, program_name,
+               broker_party_id_, broker_name, contract_id_, contract_name) in rows]
 
         if page is not None:
             return {"items": items, "total": int(total), "page": page, "page_size": page_size or 20}

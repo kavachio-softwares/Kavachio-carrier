@@ -180,29 +180,28 @@ export default function Home() {
       .catch(() => setPendingSetups(null));
   }, [mga, seat, approvalsOn]);
 
-  // Everything on this side's desk. `contracts_waiting` is the superset the
-  // server derives through _whose_turn; pending_signatures is the part of it
-  // that is a signature. Falls back to the signatures alone on an older server
-  // that does not send the wider figure, so the tile never reads blank.
-  // The carrier ADMIN's grid is 20 columns: four tiles on the first row, the
-  // operational tiles on the second (four with the approval flow on, two
-  // without), and the two multi-count boxes (Overdue Bordereaux, Contract
-  // Review) half a row each on the third. Everyone else's grid is untouched —
+  // The carrier admin's dashboard is trimmed to the book counts, the two
+  // approval tiles (flag on) and the two multi-count boxes. Active Setups,
+  // Exceptions to Review, Files Runs This Week, the Pending Contract half of
+  // the contract box and the Exceptions Breakdown chart are not drawn for
+  // them. Keyed on the role, not the seat, so they do not flash in while the
+  // organisation loads. Kavachio staff keep the full set.
+  const carrierAdmin = role === "carrier_admin";
+  // The carrier ADMIN's grid is 12 columns: the three book counts and Pending
+  // Signatures a quarter of a row each, then the approval tiles (flag on) half
+  // a row each. Overdue Bordereaux is not in this grid — it sits at the foot
+  // of the page beside the two link cards. Everyone else's grid is untouched —
   // `cell` hands the tile back as it is.
-  const adminGrid = role === "carrier_admin" && addsCarrierUsers(seat);
+  const adminGrid = carrierAdmin && addsCarrierUsers(seat);
   const cell = (span: number, node: ReactNode) => adminGrid
     ? <div style={{ gridColumn: `span ${span}`, display: "grid" }}>{node}</div>
     : node;
 
-  const waitingTotal = stats?.contracts_waiting ?? stats?.pending_signatures ?? 0;
-  // The tile's two counts. The server splits the same rows it counted for
-  // waitingTotal, so these add up to it; an older server that sends neither
-  // falls back to putting everything under review, which is where a contract
-  // with no signature due belongs anyway.
+  // Contracts whose terms are settled and which now wait on the carrier's
+  // signature. Falls back to the older signatures-only figure on a server
+  // that does not send the split, so the tile never reads blank.
   const pendingSignature = stats?.contracts_pending_signature
     ?? stats?.pending_signatures ?? 0;
-  const pendingReview = stats?.contracts_pending_review
-    ?? Math.max(0, waitingTotal - pendingSignature);
 
   // /files is carrier-only (ROUTE_ACCESS), so only a carrier seat that can open
   // it gets the card — anyone else would be shown links that bounce them back.
@@ -306,6 +305,74 @@ export default function Home() {
     );
   }
 
+  // Signatures only. The box used to split into Pending Contract and Pending
+  // Signatures; the contract half was taken off the carrier admin's dashboard,
+  // so the number, the red edge and the ⓘ all speak about signatures and
+  // nothing else. Carrier ADMIN only (plus Kavachio staff) — signing is theirs.
+  const signaturesTile = addsCarrierUsers(seat) ? (
+    <StatCard
+      title="Pending Signatures"
+      value={fmt(pendingSignature)}
+      icon={FileText}
+      tone={pendingSignature ? "alert" : undefined}
+      subtitle={`${stats?.completed_signatures ?? 0} completed`}
+      onClick={() => nav("/contracts?waiting=mine")}
+      info={"Contracts whose terms the broker has agreed and which now "
+            + "need your signature. Only the carrier admin signs, and "
+            + "the carrier signs first."}
+    />
+  ) : null;
+
+  // Incoming files — the way into /files, which has no sidebar entry.
+  const incomingCard = showFiles && (
+    <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/files")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "var(--p-shadow)"; }}>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "var(--p-surface-2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+          </div>
+          <h3 style={{ margin: 0, fontSize: 18 }}>Incoming Files</h3>
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>{arrivals?.length ?? 0}</span>
+          <span style={{ color: "var(--p-muted)", fontSize: 14 }}>New Files</span>
+        </div>
+      </div>
+      <div style={{ opacity: 0.3 }}>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </div>
+    </div>
+  );
+
+  // Recent runs
+  const recentCard = (
+    <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", border: "none", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/runs?from=home")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgba(15,23,42,0.4), 0 4px 6px -4px rgba(15,23,42,0.4)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          </div>
+          <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Recent File Submissions</h3>
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span style={{ fontSize: 32, fontWeight: 600, color: "white" }}>
+            {runsTotal ?? runs.length}
+          </span>
+          {/* "Processed" rather than "Completed": a run in this count may
+              have come back with exceptions still open, and calling that
+              completed is the one reading a carrier must not take from
+              this card. The open work is the tile above. */}
+          <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 14 }}>
+            {(runsTotal ?? runs.length) === 1 ? "File Processed" : "Files Processed"}
+          </span>
+        </div>
+      </div>
+      <div style={{ opacity: 0.5, color: "white" }}>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </div>
+    </div>
+  );
+
   return (
     <div className="proto">
       <div className="view full">
@@ -328,8 +395,8 @@ export default function Home() {
             Setups and the three operational tiles on the second. Two separate
             grids sized the numbers differently row to row, which read as two
             unrelated components rather than one panel. */}
-        <div style={{ display: "grid", gridTemplateColumns: adminGrid ? "repeat(20, 1fr)" : seat === "user" ? "repeat(3, 1fr)" : (role === "kavachio_admin" ? "repeat(4, 1fr)" : "repeat(5, 1fr)"), gap: 20, marginBottom: 24 }}>
-          {seat !== "user" && cell(5,
+        <div style={{ display: "grid", gridTemplateColumns: adminGrid ? "repeat(12, 1fr)" : seat === "user" ? "repeat(3, 1fr)" : (role === "kavachio_admin" ? "repeat(4, 1fr)" : "repeat(5, 1fr)"), gap: 20, marginBottom: 24 }}>
+          {!carrierAdmin && seat !== "user" && (
             <StatCard
               title="Active Setups" value={fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}
               icon={LayoutDashboard} subtitle=""
@@ -338,24 +405,30 @@ export default function Home() {
 
           {carrierSeat && (
             <>
-              {cell(5, <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />)}
+              {cell(3, <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />)}
 
               {seat !== "user" && (
-                cell(5, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
+                cell(3, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
               )}
 
-              {cell(5, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="" />)}
+              {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="" />)}
+
+              {carrierAdmin && cell(3, signaturesTile)}
 
               {/* No Carrier Users tile: carrier users were retired on 29 Sep 2026. */}
             </>
           )}
 
-          {cell(approvalsOn ? 5 : 10, <StatCard
-            title="Exceptions to Review" value={fmt(stats?.pending_exceptions)}
-            icon={AlertCircle} tone="alert" subtitle=""
-          />)}
+          {!carrierAdmin && (
+            <>
+              <StatCard
+                title="Exceptions to Review" value={fmt(stats?.pending_exceptions)}
+                icon={AlertCircle} tone="alert" subtitle=""
+              />
 
-          {cell(approvalsOn ? 5 : 10, <StatCard title="Files Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} />)}
+              <StatCard title="Files Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} />
+            </>
+          )}
 
           {/* Kavachio staff only. This used to be a ternary whose other half
               was "Avg Turnaround Time" for the carrier seats; that box is
@@ -382,7 +455,7 @@ export default function Home() {
               Carrier ADMIN only, like the fetch that feeds it — approving a
               setup is theirs alone, so for a carrier user this would count
               work they cannot do. They are told through the bell instead. */}
-          {addsCarrierUsers(seat) && approvalsOn && cell(5,
+          {addsCarrierUsers(seat) && approvalsOn && cell(6,
             <StatCard
               title="BDX Setup Review"
               value={fmt(pendingSetups ?? 0)}
@@ -415,7 +488,7 @@ export default function Home() {
               Not folded into BDX Setup Review beside it: that one counts
               setups and opens the setups list. These are two decisions about
               two different things, taken weeks apart. */}
-          {addsCarrierUsers(seat) && approvalsOn && cell(5,
+          {addsCarrierUsers(seat) && approvalsOn && cell(6,
             <StatCard
               title="Broker Onboarding Pending"
               value={fmt(stats?.broker_requests_pending ?? 0)}
@@ -434,54 +507,10 @@ export default function Home() {
             />
           )}
 
-          {/* Third row on the carrier admin's grid: the two boxes that carry
-              more than one count get half the row each. */}
-          {role === "carrier_admin" && cell(10,
-            <ArrivalsCard onTime={board?.counts.on_time} late={board?.counts.late}
-              never={board?.counts.never}
-              subtitle={board ? `Due in ${new Date(`${board.month}-01T00:00:00`)
-                .toLocaleDateString("en-GB", { month: "long", year: "numeric" })}` : undefined}
-              info="Bordereaux your brokers owed this month, by how they arrived." />
-          )}
 
-          {/* ONE box, not two — but the number on it has to be the one that
-              asks for something. It read `pending_signatures` before, which is
-              0 for a contract waiting to be REVIEWED, so the thing the carrier
-              admin had come to find showed as a zero they would not click.
-              The headline is now everything on their desk and the subtitle
-              splits it, which is also why the title is no longer only about
-              signatures: a box called Pending Signatures reading 1 for a
-              contract nobody can sign yet is a box that lies.
-
-              Carrier ADMIN only. Signing and approving are both theirs alone,
-              so for a carrier user this counts work they cannot do — they are
-              told through the notification bell instead, which is addressed to
-              them by name. */}
-          {addsCarrierUsers(seat) && cell(10,
-            <StatCard
-              title="Contract Review"
-              value={fmt(waitingTotal)}
-              icon={FileText}
-              tone={waitingTotal ? "alert" : undefined}
-              // TWO counts, the same pair the broker's dashboard shows from
-              // the other side of the table. Deciding a contract and signing
-              // one are different jobs, and the second used to sit in grey
-              // subtitle text where it read as a footnote to the number above
-              // it. Contracts first: it is agreed before it is signed.
-              split={[
-                { label: "Pending Contract", value: fmt(pendingReview),
-                  hint: `${stats?.contracts_terms_agreed ?? 0} agreed` },
-                { label: "Pending Signatures", value: fmt(pendingSignature),
-                  hint: `${stats?.completed_signatures ?? 0} completed` },
-              ]}
-              onClick={() => nav("/contracts?waiting=mine")}
-              info={"Contracts it is your move on: terms the broker has agreed "
-                    + "and which need your signature, an uploaded contract to "
-                    + "accept, or one the broker has pushed back on. Only the "
-                    + "carrier admin signs and accepts, and the carrier signs "
-                    + "first."}
-            />
-          )}
+          {/* Kavachio staff keep the box where it always was; the carrier
+              admin has it on the first row. */}
+          {!carrierAdmin && signaturesTile}
 
         </div>
 
@@ -528,7 +557,12 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Exceptions Breakdown Pie Chart */}
+          {/* Carrier admin: Broker Performance sits beside Bordereau Status,
+              in place of the Exceptions Breakdown chart. How each broker
+              company is working and putting its issues right — the five that
+              most recently sent this carrier a file. */}
+          {carrierAdmin ? <BrokerPerformance mga={mga} /> : (
+          /* Exceptions Breakdown Pie Chart */
           <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
             <div className="card-h" style={{ marginBottom: 20 }}>
               <h3>Exceptions Breakdown</h3>
@@ -577,65 +611,40 @@ export default function Home() {
               </div>
             )}
           </div>
+          )}
         </div>
 
         {/* How each broker company is working and putting its issues right —
-            the five that most recently sent this carrier a file. */}
-        {carrierSeat && (
+            the five that most recently sent this carrier a file. The carrier
+            admin has it in the row above. */}
+        {carrierSeat && !carrierAdmin && (
           <div style={{ marginBottom: 24 }}>
             <BrokerPerformance mga={mga} />
           </div>
         )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
-          {/* Incoming files */}
-          {showFiles && (
-            <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/files")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "var(--p-shadow)"; }}>
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
-                  <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "var(--p-surface-2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
-                  </div>
-                  <h3 style={{ margin: 0, fontSize: 18 }}>Incoming Files</h3>
-                </div>
-                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                  <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>{arrivals?.length ?? 0}</span>
-                  <span style={{ color: "var(--p-muted)", fontSize: 14 }}>New Files</span>
-                </div>
-              </div>
-              <div style={{ opacity: 0.3 }}>
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-              </div>
+        {carrierAdmin ? (
+          /* Carrier admin's foot of the page: Overdue Bordereaux on the left,
+             the two link cards stacked on the right. */
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 18 }}>
+            <div style={{ display: "grid" }}>
+              <ArrivalsCard onTime={board?.counts.on_time} late={board?.counts.late}
+                never={board?.counts.never}
+                subtitle={board ? `Due in ${new Date(`${board.month}-01T00:00:00`)
+                  .toLocaleDateString("en-GB", { month: "long", year: "numeric" })}` : undefined}
+                info="Bordereaux your brokers owed this month, by how they arrived." />
             </div>
-          )}
-
-          {/* Recent runs */}
-          <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", border: "none", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/runs?from=home")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgba(15,23,42,0.4), 0 4px 6px -4px rgba(15,23,42,0.4)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
-                <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                </div>
-                <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Recent File Submissions</h3>
-              </div>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                <span style={{ fontSize: 32, fontWeight: 600, color: "white" }}>
-                  {runsTotal ?? runs.length}
-                </span>
-                {/* "Processed" rather than "Completed": a run in this count may
-                    have come back with exceptions still open, and calling that
-                    completed is the one reading a carrier must not take from
-                    this card. The open work is the tile above. */}
-                <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 14 }}>
-                  {(runsTotal ?? runs.length) === 1 ? "File Processed" : "Files Processed"}
-                </span>
-              </div>
-            </div>
-            <div style={{ opacity: 0.5, color: "white" }}>
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+              {incomingCard}
+              {recentCard}
             </div>
           </div>
-        </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
+            {incomingCard}
+            {recentCard}
+          </div>
+        )}
 
 
       </div >

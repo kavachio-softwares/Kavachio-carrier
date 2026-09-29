@@ -17,12 +17,12 @@ import {
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { fmtDate } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
-import { Activity, AlertCircle, Building2, Clock, FileCheck2, PenLine } from "lucide-react";
-import { RankedBars, RunTrend, UploaderBars } from "../components/BrokerCharts";
+import { AlertCircle, Building2, Clock, FileCheck2, PenLine } from "lucide-react";
+import { RunTrend } from "../components/BrokerCharts";
 import { InfoTip } from "../components/InfoTip";
 import { ChartCard, LinkCard, StatCard } from "../components/StatCard";
 
-/** The window both charts and the weekly tile describe. */
+/** The window the status chart and the recent-files card describe. */
 const DAYS = 30;
 
 export default function BrokerDashboard() {
@@ -137,36 +137,20 @@ export default function BrokerDashboard() {
           </div>
         )}
 
-        <div style={grid(3)}>
+        <div style={grid(4)}>
           <StatCard title="Carriers" value={c.carriers} icon={Building2}
                     subtitle={`${c.programmes} ${c.programmes === 1 ? "programme" : "programmes"}`} />
           <StatCard title="Active Contracts" value={c.live_contracts} icon={FileCheck2}
                     subtitle="In force"
                     onClick={() => nav("/broker/contracts?status=active")} />
-          {/* Two numbers, not one. A contract waiting to be AGREED and one
-              waiting to be SIGNED are different jobs, and the second used to
-              sit in grey subtitle text as "· 1 to agree" — which read as a
-              footnote to the zero above it, so nobody saw there was anything
-              to do. Both counts open the same drawer, which lists both. */}
           <StatCard title="Pending Signatures" value={c.signatures_pending} icon={PenLine}
-                    split={[
-                      // Contracts first: agreeing the terms comes BEFORE
-                      // signing them, so the pair reads left to right in the
-                      // order the work actually happens.
-                      { label: "Pending Contract", value: c.terms_to_agree,
-                        hint: `${c.terms_agreed} agreed` },
-                      { label: "Pending Signatures", value: c.signatures_pending,
-                        hint: `${c.signatures_completed} completed` },
-                    ]}
-                    info="Contracts waiting on you: ones where the terms still have to be agreed, and ones already agreed that are waiting for your signature."
-                    tone={c.waiting_on_me > 0 ? "alert" : undefined}
-                    onClick={c.waiting_on_me > 0 ? () => setWaitingOpen(true) : undefined} />
+                    subtitle={`${c.signatures_completed} completed`}
+                    info="Contracts whose terms are already agreed and are waiting for your signature."
+                    tone={c.signatures_pending > 0 ? "alert" : undefined}
+                    onClick={c.signatures_pending > 0 ? () => setWaitingOpen(true) : undefined} />
           <StatCard title="Exceptions to Review" value={c.agency_exceptions} icon={AlertCircle}
                     tone={c.agency_exceptions > 0 ? "alert" : undefined}
                     subtitle="Across your team" />
-          <StatCard title="Files Run This Week" value={ins ? ins.totals.runs_this_week : "—"}
-                    icon={Activity} subtitle="By your team and carriers" />
-          {/* No Team Members tile: broker users were retired on 29 Sep 2026. */}
         </div>
 
         {c.programmes === 0 ? (
@@ -183,42 +167,6 @@ export default function BrokerDashboard() {
               <ChartCard title="Bordereau Status"
                 info={<InfoTip text={`Your team's files over the last ${DAYS} days, by result: a clean file, or one with exceptions to review.`} />}>
                 {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} audience="broker" />}
-              </ChartCard>
-              <ChartCard title="Team Activity"
-                info={<InfoTip text={
-                  `What each person on your team sent in the last ${DAYS} days, and how much of it `
-                  + "is still waiting — you included, for the bordereaux you send yourself. "
-                  + "Each bar is the exceptions on that person's files: amber is "
-                  + "what is still open, green what has been put right, and a full grey bar means "
-                  + "nothing was flagged at all. An exception is one cell, not a whole row, so the "
-                  + "file's size is written beside the bar instead of being drawn. Bars are not "
-                  + "compared with each other; the counts on the right are. Showing the busiest 5 "
-                  + "— open the full list for everyone."} />}>
-                {!ins ? <div className="muted">Loading…</div> : (
-                  <UploaderBars cap={5}
-                    total={ins.people_total}
-                    onViewAll={() => nav("/broker/team-activity")}
-                    personTo={r => `/broker/team-activity/${r.id}`}
-                    empty="No one on your team yet."
-                    rows={(ins.by_person ?? []).map(u => ({
-                      id: u.id, name: u.name,
-                      note: u.role === "broker_admin" ? "admin" : undefined,
-                      files: u.files, uploads: u.uploads, resolved: u.resolved,
-                    }))} />
-                )}
-              </ChartCard>
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
-              <ChartCard title="Files by Carrier"
-                info={<InfoTip text={`Files run for each carrier in the last ${DAYS} days. Showing the top 5 — open the full list for every carrier.`} />}>
-                {!ins ? <div className="muted">Loading…</div> : (
-                  <RankedBars unit="files" cap={5}
-                    total={ins.carriers_total}
-                    onViewAll={() => nav("/broker/files-by-carrier")}
-                    empty="No files run in this period."
-                    rows={ins.by_carrier.map(x => ({ id: x.id, name: x.name, value: x.runs }))} />
-                )}
               </ChartCard>
               <LinkCard title="Recent File Submissions" dark icon={Clock}
                         value={ins ? ins.totals.runs_in_window : "—"}

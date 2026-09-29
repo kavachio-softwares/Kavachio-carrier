@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Search, ChevronDown, Check, X } from "lucide-react";
+import { Search } from "lucide-react";
 import { api, downloadFile } from "../api/client";
 import { currentMga } from "../auth";
 import { canAccessPath } from "../access";
@@ -9,6 +9,7 @@ import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { InfoTip } from "../components/InfoTip";
+import { PartyMultiSelect } from "../components/PartyMultiSelect";
 
 type Party = { id: number; legal_name: string };
 type Run = {
@@ -20,6 +21,15 @@ type Run = {
   program_id: number | null;
   carrier_name: string | null;
   program_name: string | null;
+  // The broker the file was run for. Null on runs made before the export
+  // recorded it, and on a run Kavachio made with no broker scope.
+  broker_party_id: number | null;
+  broker_name: string | null;
+  // The contract the file was validated against — its name, or the uploaded
+  // file's name when it has none. Null on runs made before the export
+  // recorded it.
+  contract_id: number | null;
+  contract_name: string | null;
   export_id: number;
   filename: string | null;
   exception_count: number;
@@ -148,10 +158,11 @@ export default function RecentRuns() {
           <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
             <div className="search">
               <Search className="ic" />
-              <input placeholder="Search by file, carrier or program…" value={q}
+              <input placeholder="Search by file, broker, program or contract…" value={q}
                 onChange={e => setQ(e.target.value)} />
             </div>
-            <CarrierMultiSelect carriers={carriers} selected={carrierIds} onChange={setCarrierIds} />
+            <PartyMultiSelect parties={carriers} selected={carrierIds} onChange={setCarrierIds}
+              noun="Carrier" nounPlural="Carriers" />
             <div className="seg sm">
               {RESULT_FILTERS.map(f => (
                 <button key={f.v} className={result === f.v ? "on" : ""}
@@ -190,17 +201,17 @@ export default function RecentRuns() {
               <table>
                 <thead>
                   <tr>
-                    <th>Input File</th><th>Carrier</th><th>Program</th>
-                    <th className="r">Policies</th><th>Result</th><th>Processed</th><th></th>
+                    <th>Input File</th><th>Broker</th><th>Program</th>
+                    <th>Contract</th><th>Result</th><th>Processed</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
                   {pageRows.map(r => (
                     <tr key={r.landing_id}>
                       <td><b>{r.source_filename ?? r.filename ?? `Run #${r.landing_id}`}</b></td>
-                      <td className="muted">{r.carrier_name ?? "—"}</td>
+                      <td className="muted">{r.broker_name ?? "—"}</td>
                       <td className="muted">{r.program_name ?? "—"}</td>
-                      <td className="r">{(r.row_count ?? 0).toLocaleString()}</td>
+                      <td className="muted">{r.contract_name ?? "—"}</td>
                       <td>
                         <span className={`badge ${notValidated(r) ? "b-warn" : hasExc(r) ? "b-crit" : "b-ok"}`}>
                           <span className="d" />
@@ -231,90 +242,6 @@ export default function RecentRuns() {
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-// Styled multi-select for carriers: a pill-style trigger that opens a
-// searchable checkbox list. Pick one or several carriers to filter the runs.
-function CarrierMultiSelect({
-  carriers, selected, onChange,
-}: {
-  carriers: Party[];
-  selected: number[];
-  onChange: (ids: number[]) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
-  const ref = useRef<HTMLDivElement>(null);
-
-  // Close when clicking outside.
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
-
-  const selectedSet = new Set(selected);
-  const toggle = (id: number) =>
-    onChange(selectedSet.has(id) ? selected.filter(x => x !== id) : [...selected, id]);
-
-  const needle = q.trim().toLowerCase();
-  const visible = needle
-    ? carriers.filter(c => c.legal_name.toLowerCase().includes(needle))
-    : carriers;
-
-  const label =
-    selected.length === 0 ? "All Carriers"
-    : selected.length === 1 ? (carriers.find(c => c.id === selected[0])?.legal_name ?? "1 Carrier")
-    : `${selected.length} Carriers`;
-
-  return (
-    <div className="ms" ref={ref}>
-      <button type="button" className={`ms-trigger${selected.length ? " active" : ""}`}
-        onClick={() => setOpen(o => !o)}>
-        <span className="ms-label">{label}</span>
-        {selected.length > 0 && (
-          <span className="ms-clear" role="button" aria-label="Clear carriers"
-            onClick={e => { e.stopPropagation(); onChange([]); }}>
-            <X size={13} />
-          </span>
-        )}
-        <ChevronDown size={15} className="ms-caret" />
-      </button>
-
-      {open && (
-        <div className="ms-pop">
-          <div className="ms-search">
-            <Search size={14} />
-            <input autoFocus placeholder="Search carriers…" value={q}
-              onChange={e => setQ(e.target.value)} />
-          </div>
-          <div className="ms-list">
-            {visible.length === 0 ? (
-              <div className="ms-empty">No carriers match.</div>
-            ) : visible.map(c => {
-              const on = selectedSet.has(c.id);
-              return (
-                <label key={c.id} className={`ms-opt${on ? " on" : ""}`}>
-                  <input type="checkbox" checked={on} onChange={() => toggle(c.id)} />
-                  <span className="ms-box">{on && <Check size={12} strokeWidth={3} />}</span>
-                  <span className="ms-name">{c.legal_name}</span>
-                </label>
-              );
-            })}
-          </div>
-          {selected.length > 0 && (
-            <div className="ms-foot">
-              <span className="linkish" onClick={() => onChange([])}>Clear Selection</span>
-              <span className="muted">{selected.length} Selected</span>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

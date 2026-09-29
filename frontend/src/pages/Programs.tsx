@@ -16,23 +16,38 @@
  * broker is inert, and saying so on the row is the difference between a list
  * you read and a list you act on.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { frequencyLabel } from "../constants/frequency";
 import { Link, useNavigate } from "react-router-dom";
-import { Layers, ChevronRight, Plus } from "lucide-react";
+import { Layers, ChevronRight, Plus, Search } from "lucide-react";
 import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Sk } from "../components/ui/Skeleton";
-import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
+import { getHierarchy, onProgramme, type HierarchyProgramme } from "../api/hierarchy";
 import { Pagination } from "../components/Pagination";
-import { ProgrammeStepper, flowUrl, nextStep } from "../components/ProgrammeStepper";
-import { fmtDate } from "../utils/date";
+import { PartyMultiSelect } from "../components/PartyMultiSelect";
+import { ProgrammeStepper, flowUrl, nextStep, programmeSteps } from "../components/ProgrammeStepper";
+import { fmtDate, localDayStart, localDayEnd } from "../utils/date";
 
 /** Rows per page — the same ten the other lists show. Paged client-side: the
  *  programmes arrive in one payload with the hierarchy, so no request is saved
  *  by asking the server for a page. */
 const PAGE_SIZE = 10;
+
+/** Filter by the step a programme is stuck on — the same step its row shows
+ *  in red. "ready" is every step done. */
+const STEP_FILTERS = [
+  { v: "", label: "All Steps" },
+  { v: "brokers", label: "Needs Broker" },
+  { v: "contract", label: "Needs Contract" },
+  { v: "setup", label: "Needs Setup" },
+  { v: "ready", label: "Ready" },
+] as const;
+type StepFilter = typeof STEP_FILTERS[number]["v"];
+
+const stuckOn = (p: HierarchyProgramme): StepFilter =>
+  (programmeSteps(p).find(s => s.state === "current")?.key as StepFilter | undefined) ?? "ready";
 
 export default function Programs() {
   const nav = useNavigate();
@@ -40,16 +55,59 @@ export default function Programs() {
   const [err, setErr] = useState<string | null>(null);
   const [page, setPage] = useState(1);
 
+  // Filters — all client-side, over the one hierarchy payload.
+  const [q, setQ] = useState("");
+  const [brokerIds, setBrokerIds] = useState<number[]>([]);
+  const [step, setStep] = useState<StepFilter>("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const filtersActive = q.trim() !== "" || brokerIds.length > 0 || step !== "" || dateFrom !== "" || dateTo !== "";
+  const clearFilters = () => { setQ(""); setBrokerIds([]); setStep(""); setDateFrom(""); setDateTo(""); };
+  // A new filter starts from its first page.
+  useEffect(() => { setPage(1); }, [q, brokerIds, step, dateFrom, dateTo]);
+
   useEffect(() => {
     getHierarchy().then(h => setRows(h.programmes))
       .catch(() => setErr("Could not load your programmes."));
   }, []);
 
-  const total = rows?.length ?? 0;
+  // Every broker on any programme, once each, for the broker picker.
+  const brokers = useMemo(() => {
+    const seen = new Map<number, string>();
+    for (const p of rows ?? [])
+      for (const b of p.brokers)
+        if (onProgramme(b.link_status) && !seen.has(b.id)) seen.set(b.id, b.legal_name);
+    return [...seen].map(([id, legal_name]) => ({ id, legal_name }))
+      .sort((a, b) => a.legal_name.localeCompare(b.legal_name));
+  }, [rows]);
+
+  // Filtered BEFORE the page slice, so the pager counts what you can see.
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const from = localDayStart(dateFrom);
+    const to = localDayEnd(dateTo);
+    const picked = new Set(brokerIds);
+    return (rows ?? []).filter(p => {
+      const on = p.brokers.filter(b => onProgramme(b.link_status));
+      if (needle && ![p.name, p.business_segment, p.product_line, ...on.map(b => b.legal_name)]
+            .some(t => t?.toLowerCase().includes(needle))) return false;
+      if (picked.size && !on.some(b => picked.has(b.id))) return false;
+      if (step && stuckOn(p) !== step) return false;
+      if (from || to) {
+        const created = p.created_at ? new Date(p.created_at) : null;
+        if (!created) return false;
+        if (from && created < from) return false;
+        if (to && created > to) return false;
+      }
+      return true;
+    });
+  }, [rows, q, brokerIds, step, dateFrom, dateTo]);
+
+  const total = filtered.length;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   // Clamped, so a list that shrinks never strands you on an empty page.
   const pageNow = Math.min(page, pageCount);
-  const pageRows = (rows ?? []).slice((pageNow - 1) * PAGE_SIZE, pageNow * PAGE_SIZE);
+  const pageRows = filtered.slice((pageNow - 1) * PAGE_SIZE, pageNow * PAGE_SIZE);
 
   return (
     <>
@@ -94,6 +152,51 @@ export default function Programs() {
         )}
 
         {rows && rows.length > 0 && (
+          // Same toolbar as File Submissions; its styles live under .proto.
+          // Its own card with overflow visible, so the broker dropdown is not
+          // clipped by the table card's rounded corners.
+          <div className="proto proto-embed">
+            <div className="card" style={{ overflow: "visible", marginBottom: 14, padding: "14px 20px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+                <div className="search">
+                  <Search className="ic" />
+                  <input placeholder="Search by programme or broker…" value={q}
+                    onChange={e => setQ(e.target.value)} />
+                </div>
+                <PartyMultiSelect parties={brokers} selected={brokerIds} onChange={setBrokerIds}
+                  noun="Broker" nounPlural="Brokers" />
+                <div className="seg sm">
+                  {STEP_FILTERS.map(f => (
+                    <button key={f.v} className={step === f.v ? "on" : ""}
+                      onClick={() => setStep(f.v)}>{f.label}</button>
+                  ))}
+                </div>
+                <div className="fbar-daterange">
+                  <input type="date" className="fbar-date" aria-label="Created from date"
+                    value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+                  <span className="sub">–</span>
+                  <input type="date" className="fbar-date" aria-label="Created to date"
+                    value={dateTo} onChange={e => setDateTo(e.target.value)} />
+                </div>
+                {filtersActive && (
+                  <span className="linkish" style={{ marginLeft: "auto" }} onClick={clearFilters}>
+                    Clear Filters
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {rows && rows.length > 0 && total === 0 && (
+          <Card>
+            <p className="py-8 text-center text-sm text-ink-muted">
+              No programmes match your search — try different filters.
+            </p>
+          </Card>
+        )}
+
+        {rows && total > 0 && (
           <Card>
             <div className="overflow-x-auto">
               <table>

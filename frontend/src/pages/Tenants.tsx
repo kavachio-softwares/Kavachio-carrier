@@ -127,7 +127,7 @@ export default function Tenants() {
             </h2>
           </div>
           <div className="actions">
-            <button className="btn pri" onClick={() => nav("/tenants/new")}>＋ Create Carrier</button>
+            <button className="btn pri" onClick={() => nav("/tenants/new")}>＋ Onboard Carrier</button>
           </div>
         </div>
 

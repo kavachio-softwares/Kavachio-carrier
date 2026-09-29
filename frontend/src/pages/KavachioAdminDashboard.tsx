@@ -12,9 +12,9 @@
 // matched to each current file), so every number here equals the screen it
 // leads to. Layout follows figma design/kavachio_admin_dashboard_v2.jpg.
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
-  AlertTriangle, Briefcase, Building2, CheckCircle2, PenLine, Zap,
+  AlertTriangle, Briefcase, Building2, CheckCircle2, Database, ListChecks, PenLine, Zap,
 } from "lucide-react";
 import { api } from "../api/client";
 import { InfoTip } from "../components/InfoTip";
@@ -77,6 +77,15 @@ type Platform = {
     oldest_open_days: number | null
   };
 };
+
+// TEMPORARILY HIDDEN (29 Sep 2026, at the user's request): the whole
+// "Bordereau work" half — filter row, file / exception / overdue / signature
+// tiles, the daily runs chart and the exceptions-by-carrier / by-broker cards.
+// That is the carriers' and brokers' own work, which Kavachio can only watch.
+// Flip this back to true to bring it all back unchanged.
+const SHOW_BORDEREAU_WORK = false;
+
+type Rule = { id: number; is_active: boolean };
 
 const nf = (n: number | null | undefined) => (n == null ? "—" : n.toLocaleString());
 /** The viewer's zone, so a bar's "7 Sep" is the 7 Sep they see everywhere else. */
@@ -147,13 +156,17 @@ function Chip({ v, k }: { v: number | string; k: string }) {
 
 // ---------- page ----------
 export default function KavachioAdminDashboard() {
-  const [range, setRange] = useState("30d");
+  const nav = useNavigate();
+  // With the filter row hidden nobody can pick a period, so the mapping queue
+  // reads the whole backlog rather than silently only the last 30 days.
+  const [range, setRange] = useState(SHOW_BORDEREAU_WORK ? "30d" : "all");
   const [carrier, setCarrier] = useState<number | "">("");
   const [broker, setBroker] = useState<number | "">("");
   const [d, setD] = useState<Platform | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [day, setDay] = useState<string | null>(null);
+  const [rules, setRules] = useState<Rule[] | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -171,6 +184,13 @@ export default function KavachioAdminDashboard() {
       .finally(() => setLoading(false));
   };
   useEffect(load, [range, carrier, broker]);
+  // The platform's own (global) rules — the list the Rule Library screen shows
+  // Kavachio staff. Not scoped by the filter row: rules belong to no carrier.
+  useEffect(() => {
+    api.get<{ items: Rule[] }>("/rule-library")
+      .then(a => setRules(a.data.items))
+      .catch(() => setRules(null));
+  }, []);
 
   const periodWords = range === "all" ? "all time"
     : range === "ytd" ? "this year"
@@ -239,14 +259,60 @@ export default function KavachioAdminDashboard() {
         <Section title=""
           right={<Link className="linkish" to="/admin/users">Open Users &amp; Roles →</Link>} />
         <div style={grid(220)}>
-          <StatCard title="Carrier Admins" value={nf(st.carrier_admins.total)} icon={Building2}
+          <StatCard title="Carrier" value={nf(st.carrier_admins.total)} icon={Building2}
+            onClick={() => nav("/tenants")}
             info={`Across ${plural(st.carrier_companies, "carrier company", "carrier companies")} — one admin per carrier.`}
             footer={<SignedUp s={st.carrier_admins} />} />
-          <StatCard title="Broker Admins" value={nf(st.broker_admins.total)} icon={Briefcase}
+          <StatCard title="Broker" value={nf(st.broker_admins.total)} icon={Briefcase}
             info={`Across ${plural(st.broker_companies, "broker company", "broker companies")} — one admin per broker.`}
             footer={<SignedUp s={st.broker_admins} />} />
         </div>
 
+        {/* ===== The Kavachio team's own work (never filtered by carrier/broker) ===== */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18, marginBottom: 24 }}>
+          <ChartCard title="Data Mapping Queue"
+            info={<InfoTip text={"Work for the Kavachio team: a file layout nobody has seen before waits here "
+              + "until its columns are mapped. Until then that layout cannot be processed automatically. "
+              + (SHOW_BORDEREAU_WORK
+                ? "Waiting / in progress = raised in this period; finished = finished in it."
+                : "Counts cover all time.")} />}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Chip v={nf(d.mapping_queue.open)} k="Waiting" />
+              <Chip v={nf(d.mapping_queue.in_progress)} k="In progress" />
+              <Chip v={nf(d.mapping_queue.resolved_window)} k="Finished" />
+            </div>
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              marginTop: "auto", paddingTop: 14, fontSize: 12.5, color: "var(--p-muted)"
+            }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <Database size={14} />
+                {d.mapping_queue.oldest_open_days == null ? "Nothing waiting"
+                  : `Oldest waiting: ${plural(d.mapping_queue.oldest_open_days, "day", "days")}`}</span>
+              <Link className="linkish" to="/admin/mapping-tasks">Open the queue →</Link>
+            </div>
+          </ChartCard>
+          <ChartCard title="Rule Library"
+            info={<InfoTip text={"The platform's own checks — the rules Kavachio keeps for every carrier. "
+              + "Turned-off rules stay in the library but are not applied to any file."} />}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Chip v={rules ? nf(rules.length) : "—"} k="Rules" />
+              <Chip v={rules ? nf(rules.filter(r => r.is_active).length) : "—"} k="Active" />
+              <Chip v={rules ? nf(rules.filter(r => !r.is_active).length) : "—"} k="Turned off" />
+            </div>
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              marginTop: "auto", paddingTop: 14, fontSize: 12.5, color: "var(--p-muted)"
+            }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <ListChecks size={14} />
+                {rules == null ? "Could not load the rules" : "Platform rules"}</span>
+              <Link className="linkish" to="/rule-library">Open the Rule Library →</Link>
+            </div>
+          </ChartCard>
+        </div>
+
+        {SHOW_BORDEREAU_WORK && (<>
         {/* ===== Bordereau work — one filter row scopes everything below ===== */}
         <Section title={
           <div style={{ display: "flex", alignItems: "center", gap: 10, textTransform: "none", letterSpacing: "normal" }}>
@@ -375,7 +441,7 @@ export default function KavachioAdminDashboard() {
           </ChartCard>
         </div>
 
-        {/* ===== Where the open exceptions are + the Kavachio team's own queue ===== */}
+        {/* ===== Where the open exceptions are ===== */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 18, marginBottom: 18 }}>
           <ChartCard title="Exceptions by Carrier"
             info={<InfoTip text={"Per carrier, most open first. Each bar is that carrier's own 100% — "
@@ -408,24 +474,6 @@ export default function KavachioAdminDashboard() {
               </div>
             )}
           </ChartCard>
-          <ChartCard title="Data Mapping Queue"
-            info={<InfoTip text={"Work for the Kavachio team: a file layout nobody has seen before waits here "
-              + "until its columns are mapped. Until then that layout cannot be processed automatically. "
-              + "Waiting / in progress = raised in this period; finished = finished in it."} />}>
-            <div style={{ display: "flex", gap: 8 }}>
-              <Chip v={nf(d.mapping_queue.open)} k="Waiting" />
-              <Chip v={nf(d.mapping_queue.in_progress)} k="In progress" />
-              <Chip v={nf(d.mapping_queue.resolved_window)} k="Finished" />
-            </div>
-            <div style={{
-              display: "flex", justifyContent: "space-between", alignItems: "center",
-              marginTop: "auto", paddingTop: 14, fontSize: 12.5, color: "var(--p-muted)"
-            }}>
-              <span>{d.mapping_queue.oldest_open_days == null ? "Nothing waiting"
-                : `Oldest waiting: ${plural(d.mapping_queue.oldest_open_days, "day", "days")}`}</span>
-              <Link className="linkish" to="/admin/mapping-tasks">Open the queue →</Link>
-            </div>
-          </ChartCard>
         </div>
 
         <DayFilesDrawer day={day} from="admin" platform
@@ -434,6 +482,7 @@ export default function KavachioAdminDashboard() {
             params: { day: dd, tz: TZ, carrier: carrier || undefined, broker: broker || undefined },
           }).then(a => a.data)}
           onClose={() => setDay(null)} />
+        </>)}
       </div>
     </div>
   );

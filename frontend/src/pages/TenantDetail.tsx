@@ -87,6 +87,11 @@ function itemStatus(s?: string | null) {
 // so filtering and pagination happen client-side after fetch, same as Tenants.tsx.
 const PAGE_SIZE = 10;
 
+// TEMPORARILY HIDDEN (29 Sep 2026, at the user's request): the Recent File
+// Submissions tab. `?tab=runs` falls back to Details while this is off. Flip
+// to true to bring the tab back unchanged.
+const SHOW_FILE_SUBMISSIONS = false;
+
 export default function TenantDetail() {
   const { mga = "" } = useParams();
   const nav = useNavigate();
@@ -98,7 +103,7 @@ export default function TenantDetail() {
   // stays where the user actually is.
   const [params, setParams] = useSearchParams();
   const [tab, setTabState] = useState<"details" | "users" | "pc" | "runs">(
-    () => (params.get("tab") === "runs" ? "runs" : "details"));
+    () => (SHOW_FILE_SUBMISSIONS && params.get("tab") === "runs" ? "runs" : "details"));
   const setTab = (next: "details" | "users" | "pc" | "runs") => {
     setTabState(next);
     if (params.has("tab") || params.has("from") || params.has("to")) {
@@ -312,9 +317,11 @@ export default function TenantDetail() {
           <button className={tab === "pc" ? "on" : ""} onClick={() => setTab("pc")}>
             Programs &amp; Contracts
           </button>
-          <button className={tab === "runs" ? "on" : ""} onClick={() => setTab("runs")}>
-            Recent File Submissions ({runTotal})
-          </button>
+          {SHOW_FILE_SUBMISSIONS && (
+            <button className={tab === "runs" ? "on" : ""} onClick={() => setTab("runs")}>
+              Recent File Submissions ({runTotal})
+            </button>
+          )}
         </div>
 
         {/* Details — the organization's own fields (captured at creation), editable */}

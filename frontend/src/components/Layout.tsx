@@ -380,8 +380,14 @@ export default function Layout() {
               && (!i.carrierAdminOnly || addsCarrierUsers(seat))),
         }))
         .filter(g => g.items.length > 0);
-  const roleLabel = !user ? ""
-    : seat === "user" ? "Carrier User" : ROLE_LABEL[normalizeRole(user.role)];
+  // The sidebar footer names the side, not the seat: "Carrier" / "Broker",
+  // never "… Admin". Other screens keep ROLE_LABEL's full wording.
+  const role = user ? normalizeRole(user.role) : null;
+  const roleLabel = !role ? ""
+    : seat === "user" ? "Carrier User"
+    : role === "carrier_admin" ? "Carrier"
+    : role === "broker_admin" ? "Broker"
+    : ROLE_LABEL[role];
   // The workspace card's contents — shared by its interactive (admin) and
   // static (Operator) forms below.
   const workspaceIdentity = brand?.legal_name ? (
