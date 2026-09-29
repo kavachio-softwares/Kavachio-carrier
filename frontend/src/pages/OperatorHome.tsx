@@ -54,10 +54,9 @@ export default function OperatorHome() {
   const head = (
     <div className="page-head">
       <div className="t">
-        <h2>Dashboard</h2>
-        <p>
-          {d ? `${d.broker.name} — your files, and what needs fixing.` : "Your files, and what needs fixing."}
-        </p>
+        <h2>Dashboard
+          <InfoTip text={d ? `${d.broker.name} — your files, and what needs fixing.` : "Your files, and what needs fixing."} />
+        </h2>
       </div>
       <div className="actions">
         <Link className="btn pri" to="/broker/bordereau">＋ Process Bordereau</Link>

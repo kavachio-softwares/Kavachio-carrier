@@ -1,6 +1,6 @@
 """Generic (contract-INDEPENDENT) validation rule library.
 
-`generic_rule_specification` holds Kavachio's standard BDX checks — the ones that
+`generic_rule_spec` holds Kavachio's standard BDX checks — the ones that
 are true for every program regardless of what the contract says (policy number
 present, zip format valid, paid <= incurred, …). They are NOT extracted from a
 contract, so they never pass through Call 1 (clause extraction) or Call 2 (intent
@@ -59,7 +59,7 @@ _SEVERITY = {"Critical": "critical", "Major": "critical", "Minor": "warning"}
 # literal; otherwise it stays None and the mapper works from rule_description
 # (e.g. the zip/NAICS/SIC patterns, which are stated in prose in validation_logic).
 #
-# Kept in CODE rather than as columns on generic_rule_specification so the table
+# Kept in CODE rather than as columns on generic_rule_spec so the table
 # stays the plain business-facing catalogue it was created as.
 _INTENT_BY_CLASS = {
     "NotNull":                          ("required",             None),
@@ -245,34 +245,51 @@ def is_supported_class(class_name):
 
 
 def load_generic_rules(tenant_id=None):
-    """Active rule-library rows in scope for this upload, schema-agnostic read.
+    """Active rule-library rows in scope for this upload.
 
     Loads GLOBAL rules (tenant_id IS NULL — Kavachio's platform baseline that
-    applies to every tenant) PLUS, when tenant_id is given, that tenant's OWN
-    active rules. A tenant never sees another tenant's rules. Only is_active
+    applies to every carrier) PLUS, when tenant_id is given, that carrier's OWN
+    active rules. A carrier never sees another carrier's rules. Only is_active
     rows are returned so a disabled rule stops firing without being deleted.
+
+    Read through the GenericRuleSpecification model — the SAME one the Rule
+    Library screen (/rule-library) writes — so the screen and Bordereau Setup
+    cannot drift onto different tables again. They did: the model moved to the
+    canonical `generic_rule_spec` and this read stayed on the pre-v4
+    `generic_rule_specification`, so nothing done on the screen ever ran.
+    Migration 30 copied the old rows across with their ids kept.
 
     Returns [] (and prints, rather than raising) when the table is absent, so a
     deployment that has not run the migration still generates contract rules.
     """
-    from sqlalchemy.sql import text
-    from db import canonical_engine
+    from sqlalchemy import or_
+    from db import SessionLocal, GenericRuleSpecification as G
 
+    in_scope = G.tenant_id.is_(None)
+    if tenant_id is not None:
+        in_scope = or_(in_scope, G.tenant_id == tenant_id)
     try:
-        with canonical_engine.connect() as conn:
-            rows = conn.execute(text("""
-                SELECT id, rule_name, severity, class_name, validation_logic, tenant_id
-                FROM generic_rule_specification
-                WHERE is_generic = TRUE
-                  AND is_active = TRUE
-                  AND (tenant_id IS NULL OR tenant_id = :tid)
-                ORDER BY tenant_id NULLS FIRST, id
-            """), {"tid": tenant_id}).mappings().all()
+        with SessionLocal() as s:
+            rows = (s.query(G)
+                     .filter(G.is_generic.is_(True), G.is_active.is_(True), in_scope)
+                     .order_by(G.tenant_id.is_(None).desc(), G.id)
+                     .all())
+            if not rows and not s.query(G.id).limit(1).first():
+                # An EMPTY library, not a disabled one. On a database that still
+                # has its rules only in the old table this is migration 30 not
+                # yet run — say so, because it is otherwise silent: every setup
+                # would simply get no standard checks.
+                print("[Generic] generic_rule_spec is empty — no standard checks "
+                      "will be added. If the rules are still in "
+                      "generic_rule_specification, run "
+                      "migrations/30_generic_rule_library_one_table.sql.")
     except Exception as exc:
-        print(f"[Generic] generic_rule_specification unavailable ({exc}); "
+        print(f"[Generic] generic_rule_spec unavailable ({exc}); "
               f"skipping the generic rule library.")
         return []
-    return [dict(r) for r in rows]
+    return [{"id": r.id, "rule_name": r.rule_name, "severity": r.severity,
+             "class_name": r.class_name, "validation_logic": r.validation_logic,
+             "tenant_id": r.tenant_id} for r in rows]
 
 
 def _build_intents(rules):

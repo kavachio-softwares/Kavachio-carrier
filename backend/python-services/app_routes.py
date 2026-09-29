@@ -5926,10 +5926,18 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
     1d / 7d / 30d (default) / 90d / ytd / 12m / all. Point-in-time counts
     (tenants, users, setups, programs) are NOT windowed.
 
-    The period also decides the bordereau-work cards: open exceptions are those
-    on files run in it, overdue = deadlines that fell due in it, awaiting
-    signature = contracts sent for signing in it, and the mapping queue's waiting
-    / in-progress = tasks raised in it. "All time" is the whole backlog.
+    The period also decides most of the bordereau-work cards: open exceptions
+    are those on files run in it, awaiting signature = contracts sent for
+    signing in it, and the mapping queue's waiting / in-progress = tasks
+    raised in it. "All time" is the whole backlog.
+
+    Overdue Bordereaux is the one exception: it is always the CURRENT due
+    month, never the `range` window. It routes straight to the Bordereau
+    Calendar, which is itself keyed on one due-month rather than a rolling day
+    count, so windowing it by `range` would make the two screens disagree
+    about "arrived on time" whenever the range didn't land on a month
+    boundary — which, for any range but the exact days left in this month,
+    it never does.
 
     `carrier` (tenant id) and `broker` (broker party id) narrow the bordereau
     work — runs, exceptions, overdue files, signatures, the carriers table and
@@ -6132,41 +6140,50 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
         # --- Open exceptions on files run in the period (put right = decided in it) ---
         ox = _platform_open_exceptions(s, dstart, carrier, broker)
 
-        # --- Overdue bordereaux, straight off the submission calendar ---
-        # Same test as the carrier's Program Management screen: 'overdue' is
-        # past due and not received ('late' is its retired spelling).
-        # Only deadlines that fell due in the period, counted in the viewer's
-        # days like the chart ("7 days" = today and the six days before).
-        oq = s.query(ExpectedSubmission.tenant_id, ExpectedSubmission.broker_party_id,
-                     func.count(ExpectedSubmission.id)).filter(
-            ExpectedSubmission.status.in_(("overdue", "late")),
-            ExpectedSubmission.due_date >= today - timedelta(days=days - 1))
+        # --- Overdue bordereaux, on the SAME window the card links to ---
+        # This card routes straight to the Bordereau Calendar, which is keyed
+        # on one calendar due-month, not on `range` — a rolling "last 30 days"
+        # window almost never lines up with a month's boundary (today=29 Sep
+        # → the window starts 31 Aug), so the two screens disagreed about
+        # what "arrived on time" even meant. Counting the current due-month
+        # here instead, with the calendar's own derive_status() rather than
+        # the periodically-swept `status` column (which can lag between
+        # sweeps), makes this tile always match what the calendar shows.
+        from submission_calendar import derive_status, DEFAULT_SOON_WINDOW_DAYS
+        from calendar import monthrange
+        month_start = today.replace(day=1)
+        month_end = today.replace(day=monthrange(today.year, today.month)[1])
+        due_q = s.query(ExpectedSubmission).filter(
+            ExpectedSubmission.due_date >= month_start,
+            ExpectedSubmission.due_date <= month_end,
+            # Nobody owes anything on a programme with no broker attributed —
+            # same exclusion the calendar itself makes from its counts.
+            ExpectedSubmission.broker_party_id.isnot(None))
         if carrier:
-            oq = oq.filter(ExpectedSubmission.tenant_id == carrier)
+            due_q = due_q.filter(ExpectedSubmission.tenant_id == carrier)
         if broker:
-            oq = oq.filter(ExpectedSubmission.broker_party_id == broker)
+            due_q = due_q.filter(ExpectedSubmission.broker_party_id == broker)
+        due_rows = due_q.all()
+        soon_by_program = dict(s.query(
+            SubmissionSchedule.program_id, SubmissionSchedule.soon_window_days
+        ).filter(SubmissionSchedule.program_id.in_(
+            {e.program_id for e in due_rows} or {-1})).all())
+
         overdue_by_tenant: dict = {}
         overdue_brokers: set = set()
-        for otid, obid, cnt in oq.group_by(ExpectedSubmission.tenant_id,
-                                           ExpectedSubmission.broker_party_id).all():
-            overdue_by_tenant[otid] = overdue_by_tenant.get(otid, 0) + int(cnt or 0)
-            if obid:
-                overdue_brokers.add(obid)
-
-        # The ones that DID arrive, over the same deadlines and filters, split
-        # the way the Bordereau Calendar splits them (derive_status: on or
-        # before the due date is on time).
-        aq = s.query(func.count(ExpectedSubmission.id).filter(
-                         ExpectedSubmission.received_at <= ExpectedSubmission.due_date),
-                     func.count(ExpectedSubmission.id).filter(
-                         ExpectedSubmission.received_at > ExpectedSubmission.due_date)).filter(
-            ExpectedSubmission.received_at.isnot(None),
-            ExpectedSubmission.due_date >= today - timedelta(days=days - 1))
-        if carrier:
-            aq = aq.filter(ExpectedSubmission.tenant_id == carrier)
-        if broker:
-            aq = aq.filter(ExpectedSubmission.broker_party_id == broker)
-        arrived_on_time, arrived_late = aq.one()
+        arrived_on_time = arrived_late = 0
+        for e in due_rows:
+            soon = soon_by_program.get(e.program_id)
+            status = derive_status(e.due_date, today,
+                                   soon if soon is not None else DEFAULT_SOON_WINDOW_DAYS,
+                                   e.received_at)
+            if status == "on_time":
+                arrived_on_time += 1
+            elif status == "received_late":
+                arrived_late += 1
+            elif status == "overdue":
+                overdue_by_tenant[e.tenant_id] = overdue_by_tenant.get(e.tenant_id, 0) + 1
+                overdue_brokers.add(e.broker_party_id)
 
         # --- Contracts sent for signature and not yet signed by everyone ---
         week_ago = now - timedelta(days=7)

@@ -15,7 +15,6 @@ import {
   type BrokerDashboard as Dash, type BrokerInsights, type BrokerInvitation,
 } from "../api/broker";
 import { useBrokerCarrierId } from "../brokerCarrier";
-import { canAccessPath } from "../access";
 import { fmtDate } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
 import { Activity, AlertCircle, Building2, Clock, FileCheck2, PenLine, Users } from "lucide-react";
@@ -95,19 +94,9 @@ export default function BrokerDashboard() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Dashboard</h2>
-            <p>{d.broker.name} — your team, your carriers, and what needs you today.</p>
-          </div>
-          {/* The admin runs bordereaux too, so the month's actual work is the
-              primary action here and staffing the team is the secondary one —
-              the same order the sidebar puts them in. Derived from
-              canAccessPath, not hardcoded, so the button can never offer a
-              screen ROUTE_ACCESS would bounce. */}
-          <div className="actions">
-            {canAccessPath("/broker/bordereau") && (
-              <Link className="btn pri" to="/broker/bordereau">＋ Process Bordereau</Link>
-            )}
-            <Link className="btn" to="/broker/users">＋ Add a user</Link>
+            <h2>Dashboard
+              <InfoTip text={`${d.broker.name} — your team, your carriers, and what needs you today.`} />
+            </h2>
           </div>
         </div>
 
@@ -152,7 +141,8 @@ export default function BrokerDashboard() {
           <StatCard title="Carriers" value={c.carriers} icon={Building2}
                     subtitle={`${c.programmes} ${c.programmes === 1 ? "programme" : "programmes"}`} />
           <StatCard title="Active Contracts" value={c.live_contracts} icon={FileCheck2}
-                    subtitle="In force" />
+                    subtitle="In force"
+                    onClick={() => nav("/broker/contracts?status=active")} />
           {/* Two numbers, not one. A contract waiting to be AGREED and one
               waiting to be SIGNED are different jobs, and the second used to
               sit in grey subtitle text as "· 1 to agree" — which read as a

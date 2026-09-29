@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { getBrokerRunHistory, type OperatorRun } from "../api/broker";
 import { canAccessPath } from "../access";
 import { Pagination } from "../components/Pagination";
+import { InfoTip } from "../components/InfoTip";
 import { fmtDateTime } from "../utils/date";
 
 const PAGE_SIZE = 20;
@@ -27,8 +28,9 @@ export default function BrokerRuns() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Recent File Submissions</h2>
-            <p>Every file run for your broker, newest first.</p>
+            <h2>Recent File Submissions
+              <InfoTip text="Every file run for your broker, newest first." />
+            </h2>
           </div>
           {canAccessPath("/broker/bordereau") && (
             <div className="actions">

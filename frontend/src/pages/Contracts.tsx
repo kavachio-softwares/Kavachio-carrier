@@ -29,6 +29,7 @@ import { useServerList } from "../hooks/useServerList";
 import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
 import AddContractModal from "../components/AddContractModal";
+import { InfoTip } from "../components/InfoTip";
 
 /** Rows per page. The server cuts the page in SQL, so this is what gets
  *  FETCHED — not what is shown out of a larger fetch. */
@@ -140,8 +141,9 @@ export default function Contracts() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Contracts</h2>
-            <p>Every contract you hold, across all your programmes and brokers.</p>
+            <h2>Contracts
+              <InfoTip text="Every contract you hold, across all your programmes and brokers." />
+            </h2>
           </div>
           <div className="actions">
             {/* Where the Signatures sidebar tab went. Watching a signing round

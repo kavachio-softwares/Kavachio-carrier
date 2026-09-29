@@ -86,7 +86,11 @@ export default function BrokerPerformance({ mga }: { mga: string }) {
           <div style={{ display: "flex", gap: 16, fontSize: 12, color: "var(--p-muted)", marginBottom: 14 }}>
             <Swatch color={RESOLVED} label="Resolved" />
             <Swatch color={OPEN} label="Still open" />
-            <Swatch color={CLEAN} label="Clean file" />
+            {/* Only when a grey bar is on the chart — a key for something not
+                drawn reads as a missing series. */}
+            {rows.some(r => r.work.files > 0 && r.work.exceptions === 0) && (
+              <Swatch color={CLEAN} label="Clean file" />
+            )}
             <span style={{ marginLeft: "auto", color: "var(--p-faint)" }}>
               Most recent {rows.length} · last {DAYS} days
             </span>

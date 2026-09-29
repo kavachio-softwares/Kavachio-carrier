@@ -146,7 +146,7 @@ export default function RuleLibrary() {
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Rule</th><th>Type</th><th>Severity</th><th>Status</th>{canManage && <th></th>}</tr>
+                <tr><th>Rule</th><th>Type</th><th>Severity</th><th>Status</th>{canManage && <th className="r">Action</th>}</tr>
               </thead>
               <tbody>
                 {rows.map(r => {
@@ -166,15 +166,16 @@ export default function RuleLibrary() {
                       </td>
                       {canManage && (
                       <td className="r">
-                        <span className="linkish" onClick={() => nav(`/rule-library/${r.id}/edit`)}>Edit</span>
-                        {" · "}
-                        <span className="linkish" aria-disabled={busyId === r.id}
-                          onClick={() => busyId === r.id ? undefined : onToggle(r)}>
-                          {r.is_active ? "Disable" : "Enable"}
-                        </span>
-                        {" · "}
-                        <span className="linkish" title="Delete this rule"
-                          onClick={() => setDelTarget(r)}>Delete</span>
+                        <div style={{ display: "flex", gap: 6, justifyContent: "center", flexWrap: "nowrap" }}>
+                          <button type="button" className="btn sm"
+                            onClick={() => nav(`/rule-library/${r.id}/edit`)}>Edit</button>
+                          <button type="button" className="btn sm" disabled={busyId === r.id}
+                            onClick={() => onToggle(r)}>
+                            {r.is_active ? "Disable" : "Enable"}
+                          </button>
+                          <button type="button" className="btn sm danger" title="Delete this rule"
+                            onClick={() => setDelTarget(r)}>Delete</button>
+                        </div>
                       </td>
                       )}
                     </tr>

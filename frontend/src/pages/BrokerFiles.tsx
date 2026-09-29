@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
 import { fmtDateTime } from "../utils/date";
+import { InfoTip } from "../components/InfoTip";
 
 const DAYS = 30;
 
@@ -66,11 +67,9 @@ export default function BrokerFiles() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>{data?.broker.name ?? "Broker"}</h2>
-            <p>
-              What they sent you in the last {DAYS} days, and what is still open —
-              by programme.
-            </p>
+            <h2>{data?.broker.name ?? "Broker"}
+              <InfoTip text={`What they sent you in the last ${DAYS} days, and what is still open — by programme.`} />
+            </h2>
           </div>
           <div className="actions">
             <button className="btn" type="button" onClick={() => nav(-1)}>← Back</button>

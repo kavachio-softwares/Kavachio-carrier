@@ -16,6 +16,7 @@ import DeadlineReminderCard from "./DeadlineReminderCard";
 import NotificationBell from "./NotificationBell";
 import IngestionDock from "./IngestionDock";
 import { initials } from "../branding";
+import { InfoTip as UiInfoTip } from "./ui/InfoTip";
 
 // Items carry no role of their own: whether one is visible is derived from the
 // destination's entry in ROUTE_ACCESS (access.ts), which is also what guards the
@@ -62,7 +63,8 @@ const GROUPS: {
       // submission here (not a self-check) both processes the file AND sends
       // it on — see RunResult's "Sent to the carrier" note.
       { to: "/broker/bordereau", label: "Process Bordereau", icon: Zap },
-      { to: "/broker/contracts", label: "My Contracts", icon: FileCheck },
+      // My Contracts has no entry here: the broker admin opens it from the
+      // dashboard's Active Contracts tile.
       // Admin-only inside the broker's own group: an operator is a seat in
       // this team, not a manager of it. canAccessPath() filters it out for
       // them (ROUTE_ACCESS marks the path `only: ["broker_admin"]`).
@@ -558,8 +560,10 @@ export default function Layout() {
   );
 }
 
-export function PageHeader({ title, subtitle, action }:
-  { title: string | null; subtitle?: string; action?: React.ReactNode }) {
+export function PageHeader({ title, subtitle, action, info }:
+  { title: string | null; subtitle?: string; action?: React.ReactNode;
+    /** An explanation behind an ⓘ beside the title, instead of a subtitle. */
+    info?: React.ReactNode }) {
   return (
     <div className="px-8 pt-7 pb-4 border-b border-border bg-white">
       <div className="flex items-start justify-between gap-6">
@@ -568,7 +572,10 @@ export function PageHeader({ title, subtitle, action }:
             until its label wrapped mid-phrase — the page's primary action,
             broken across two lines by a sentence of explanation. */}
         <div className="min-w-0">
-          <h1 className="text-[22px] font-semibold tracking-tight">{title}</h1>
+          <h1 className="text-[22px] font-semibold tracking-tight flex items-center gap-2">
+            {title}
+            {info && <UiInfoTip text={info} />}
+          </h1>
           {subtitle && (
             <p className="text-sm text-ink-muted mt-1 max-w-3xl leading-relaxed">{subtitle}</p>
           )}

@@ -68,10 +68,10 @@ export const ROUTE_ACCESS: {
   // No rule for /invitations: it is routed OUTSIDE the app shell (see App.tsx)
   // so RequireAccess never sees it, and a rule here would be config that looks
   // like a guard and enforces nothing. The seat check lives in the component.
-  // My Contracts: closed. The broker admin still agrees and signs contracts,
-  // but reaches each one from "Waiting on you" on their dashboard; an operator
-  // never sees a contract at all.
-  { pattern: "/broker/contracts", requires: "broker_admin", only: [] },
+  // My Contracts: the broker ADMIN's alone, opened from the dashboard's
+  // Active Contracts tile (it has no sidebar entry). An operator never sees a
+  // contract at all — same rule as /contracts/:contractId below.
+  { pattern: "/broker/contracts", requires: "broker_admin", only: ["broker_admin"] },
   // Running the bordereau is BOTH broker seats' — the operator's day-to-day
   // job, and the admin's when they do it themselves. It was the operator's
   // alone, which read as a division of labour and worked as a blocker: a small

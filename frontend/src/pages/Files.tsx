@@ -31,6 +31,7 @@ import { countNeedsYou, useDismissedRuns } from "../components/IngestionPanel";
 import { INGESTION_CHANGED } from "../components/IngestionDock";
 import InboxTab from "./FilesReceived";
 import WaysInTab, { AddRouteModal } from "./FilesArrive";
+import { InfoTip } from "../components/InfoTip";
 
 export default function Files() {
   const nav = useNavigate();
@@ -118,14 +119,15 @@ export default function Files() {
       <section className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Files</h2>
+            <h2>Files
+              <InfoTip text={"Every spreadsheet your brokers have sent, whichever way it came in, "
+                + "and what happened to it."} />
+            </h2>
             {/* The long explanation of what intake IS used to sit in a grey slab
                 above the title on every visit, on both of the old screens,
                 pushing the heading off the top of the viewport. It lives in the
                 empty state and the reference block now, where somebody who does
                 not know will actually be looking. */}
-            <p>Every spreadsheet your brokers have sent, whichever way it came in,
-              and what happened to it.</p>
           </div>
           <div className="actions">
             {/* Files has no sidebar entry — it is opened from the Dashboard's

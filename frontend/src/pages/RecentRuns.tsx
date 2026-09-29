@@ -8,6 +8,7 @@ import { fmtStamp, localDayStart, localDayEnd } from "../utils/date";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { InfoTip } from "../components/InfoTip";
 
 type Party = { id: number; legal_name: string };
 type Run = {
@@ -108,16 +109,16 @@ export default function RecentRuns() {
           <div className="t">
             {canAccessPath("/direct") ? (
               <>
-                <h2>Process Bordereau History</h2>
-                <p>Every bordereau you have processed, with its exceptions and its output.</p>
+                <h2>Process Bordereau History
+                  <InfoTip text="Every bordereau you have processed, with its exceptions and its output." />
+                </h2>
               </>
             ) : (
               <>
-                <h2>File Submissions</h2>
-                <p>
-                  Every bordereau run for you, whoever sent it — what it produced,
-                  what it flagged, and how much of that is still open.
-                </p>
+                <h2>File Submissions
+                  <InfoTip text={"Every bordereau run for you, whoever sent it — what it produced, "
+                    + "what it flagged, and how much of that is still open."} />
+                </h2>
               </>
             )}
           </div>

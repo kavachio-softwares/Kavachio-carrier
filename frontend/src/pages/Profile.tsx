@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import { getUser, normalizeRole, ROLE_LABEL, setUser } from "../auth";
 import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { PasswordInput } from "../components/ui/PasswordInput";
+import { InfoTip } from "../components/InfoTip";
 
 // Password policy — kept in sync with the backend (POST /auth/change-password).
 const RULES: { label: string; test: (p: string) => boolean }[] = [
@@ -85,8 +86,9 @@ export default function Profile() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>My Account</h2>
-            <p>Your personal details and sign-in security.</p>
+            <h2>My Account
+              <InfoTip text="Your personal details and sign-in security." />
+            </h2>
           </div>
           <div className="actions">
             <button className="btn" onClick={() => nav(-1)}>← Back</button>

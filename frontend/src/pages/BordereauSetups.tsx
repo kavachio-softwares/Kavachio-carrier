@@ -8,6 +8,7 @@ import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { InfoTip } from "../components/InfoTip";
 
 type SetupContract = { contract_id: number; sheet_key: string | null; filename: string | null };
 type Setup = {
@@ -108,8 +109,9 @@ export default function BordereauSetups() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Bordereau Setups</h2>
-            <p>Every setup created across your programmes — open one to review its mapping.</p>
+            <h2>Bordereau Setups
+              <InfoTip text="Every setup created across your programmes — open one to review its mapping." />
+            </h2>
           </div>
           <div className="actions">{newSetup}</div>
         </div>

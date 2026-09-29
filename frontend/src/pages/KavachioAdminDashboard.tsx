@@ -308,7 +308,7 @@ export default function KavachioAdminDashboard() {
             tone={ox.critical > 0 ? "alert" : undefined}
             subtitle={ox.total ? `across ${plural(brokersWithOpen, "broker", "brokers")}` : "nothing waiting"} />
           <ArrivalsCard onTime={d.overdue.on_time} late={d.overdue.late} never={d.overdue.total}
-            info="Bordereaux that fell due in this period, by how they arrived. Pick All time for every deadline."
+            info="Bordereaux due this calendar month, by how they arrived — the same month the Bordereau Calendar opens on, regardless of the period picked above."
             subtitle={d.overdue.total ? `Overdue from ${plural(d.overdue.brokers, "broker", "brokers")}` : "Nothing overdue"}
             // Carries this card's own carrier/broker scope onto the calendar it
             // opens, so the board reads the same filtered set these numbers do

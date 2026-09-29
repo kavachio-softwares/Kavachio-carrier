@@ -9,7 +9,7 @@
  * page was always really scanned for: whose move is it.
  */
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   getBrokerContractsPaged, getBrokerCarriers,
   type BrokerContract, type BrokerCarrier, type Lifecycle,
@@ -51,7 +51,10 @@ export default function BrokerContracts() {
   // is. This page used to carry its own filter as well; two carrier controls
   // on one screen was a puzzle, not a feature.
   const scopeCarrierId = useBrokerCarrierId();
-  const [status, setStatus] = useState("");
+  // Opens pre-filtered when linked with ?status= — the dashboard's Active
+  // Contracts tile arrives with ?status=active.
+  const [params] = useSearchParams();
+  const [status, setStatus] = useState(params.get("status") ?? "");
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => { getBrokerCarriers().then(setCarriers).catch(() => setCarriers([])); }, []);

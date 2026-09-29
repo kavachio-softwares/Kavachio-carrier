@@ -55,7 +55,7 @@ export default function Programs() {
     <>
       <PageHeader
         title="Programmes"
-        subtitle="One type of business you write — commercial motor, say — with your brokers and contracts underneath it."
+        info="One type of business you write — commercial motor, say — with your brokers and contracts underneath it."
         action={
           <Button onClick={() => nav("/programs/new")}>
             <Plus size={15} /> Configure Program

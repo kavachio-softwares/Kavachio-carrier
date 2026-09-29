@@ -54,6 +54,23 @@ const STATUS: Record<BrokerRequestStatus, { label: string; cls: string }> = {
   withdrawn: { label: "Withdrawn", cls: "b-mut" },
 };
 
+// The next step once a request is answered — there is nothing left to decide,
+// but there is somewhere to go. Approved: the broker, now in your directory.
+// Turned down or withdrawn: where a broker is added, to ask again.
+function answeredAction(r: BrokerOnboardingRequest) {
+  if (r.status === "approved") {
+    return r.broker_party_id
+      ? <Link className="linkish" to={`/brokers/${r.broker_party_id}`}>View broker →</Link>
+      : <span className="faint">Invitation sent</span>;
+  }
+  return (
+    <Link className="linkish"
+      to={r.program_id ? `/programs/${r.program_id}/brokers` : "/brokers"}
+      title="Nothing was created. Add the broker again to raise a new request.">
+      Ask again →</Link>
+  );
+}
+
 const person = (p: BrokerOnboardingRequest["requested_by"]) =>
   (p?.full_name || "").trim() || p?.email || "—";
 
@@ -234,7 +251,7 @@ export default function BrokerOnboardingRequests() {
         </td>
 
         <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-          {r.status !== "pending" ? <span className="faint">—</span>
+          {r.status !== "pending" ? answeredAction(r)
             : isAdmin ? (
               <>
                 <button className="btn pri sm" disabled={busy === r.id}
@@ -266,7 +283,7 @@ export default function BrokerOnboardingRequests() {
             <th>Programme</th>
             <th>Asked by</th>
             <th>Status</th>
-            <th style={{ width: 170 }} />
+            <th style={{ width: 170, textAlign: "right" }}>Actions</th>
           </tr>
         </thead>
         <tbody>{list.map(row)}</tbody>
