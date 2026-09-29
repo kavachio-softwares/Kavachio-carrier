@@ -1,42 +1,24 @@
 /**
- * Add someone — a CARRIER USER at this organisation, or a BROKER outside it.
+ * Invite a BROKER — an outside company and its broker admin.
  *
- * Two different acts behind one door, because both answer "who else works on
- * this". Which ones a person gets depends on their carrier seat
- * (hooks/useCarrierSeat; the API enforces the same rule):
- *
- *   Carrier   a colleague HERE, added by the CARRIER ADMIN only. They join
- *   user      this organisation and do the carrier's work — contracts,
- *             programmes, bordereaux — and they bring brokers in too. They do
- *             not add carrier users; only the carrier admin does that, and
- *             there is one of those per organisation (the owner pointer on
- *             `tenant`; see migration 18).
+ * This page used to add a carrier user as well. Carrier users were retired on
+ * 29 Sep 2026: the platform has three seats (Kavachio admin, carrier admin,
+ * broker admin), so the carrier admin adds nobody at their own organisation
+ * and the one act left here is inviting a broker.
  *
  *   Broker    the BROKER ADMIN — the first person at a broker, an outside
- *             company — invited by the carrier admin or any carrier user. They
- *             join the broker and no carrier at all, because the same broker produces
- *             for several carriers and cannot be pinned to one. The broker
+ *             company — invited by the carrier admin. They join the broker
+ *             and no carrier at all, because the same broker produces for
+ *             several carriers and cannot be pinned to one. The broker
  *             organisation does not exist yet, so this creates it in the same
- *             step — there is no "pick an existing broker" because every
- *             broker already HAS its first admin; choosing one could only mean
- *             adding a second, which is the broker admin's own job.
- *
- * ADDING A CARRIER HAPPENS HERE AND NOWHERE ELSE. It used to be possible from
- * the party directory, which added a carrier-shaped row to a COMPANY list —
- * a different thing wearing the same word, and a second front door to a list
- * of people that only Users & Roles is supposed to own.
- *
- * Operators are deliberately absent from both: they belong to the broker, and
- * the broker's own admin adds them.
+ *             step.
  */
-import { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import { currentMga, getTenantBrand } from "../auth";
-import { api } from "../api/client";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { InviteSentModal } from "../components/InviteSentModal";
 import { InfoTip } from "../components/InfoTip";
 import { inviteBroker } from "../api/hierarchy";
-import { addsCarrierUsers, invitesBrokers, useCarrierSeat } from "../hooks/useCarrierSeat";
+import { useCarrierSeat } from "../hooks/useCarrierSeat";
 
 // The four kinds of organisation that can produce business. A broker is the
 // usual one; the others occupy the same slot on the same terms.
@@ -45,39 +27,21 @@ const PARTY_TYPES: [string, string][] = [
 ];
 
 export default function AddUser() {
-  const mga = currentMga();
-  const brand = getTenantBrand();
   const nav = useNavigate();
-  // Opened from Brokers → "Invite a party" (and the other "invite a broker"
-  // links): that is about outside companies, so the form offers the broker only.
-  const brokerOnly = useSearchParams()[0].get("for") === "broker";
-
-  // Which of the two acts this person may do at all. Every carrier seat
-  // invites brokers; only the carrier admin (and Kavachio staff, or an
-  // organisation with no owner recorded) also adds carrier users, and so gets
-  // a choice.
   const seat = useCarrierSeat();
-  const canCarrier = addsCarrierUsers(seat);
-  const canBroker = invitesBrokers(seat);
-  // Which of the two acts this is. Asked first when there is a choice, because
-  // it changes what the rest of the form even means.
-  const [picked, setKind] = useState<"carrier" | "broker">(brokerOnly ? "broker" : "carrier");
-  const kind: "carrier" | "broker" =
-    canCarrier && canBroker ? picked : canBroker ? "broker" : "carrier";
 
   const [full_name, setName] = useState("");
   const [email, setEmail] = useState("");
 
-  // Broker side — the organisation this person will be the first admin of.
+  // The organisation this person will be the first admin of.
   const [brokerName, setBrokerName] = useState("");
   const [brokerType, setBrokerType] = useState("broker");
 
-
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  // `pending` is set when a carrier user's broker invite became a REQUEST for
-  // their carrier admin. Nothing was created and nothing was sent, so the
-  // confirmation below must not say either.
+  // `pending` is set when the invite became a REQUEST for the carrier admin
+  // (only while the approval flow is switched on). Nothing was created and
+  // nothing was sent, so the confirmation below must not say either.
   const [created, setCreated] = useState<{
     name: string; email: string; org: string;
     /** The organisation name as TYPED. `org` holds the server's sentence for
@@ -85,47 +49,30 @@ export default function AddUser() {
     orgTyped?: string; pending?: boolean;
   } | null>(null);
 
-  // Nothing to send until the form describes somebody. A broker admin ALSO
-  // needs the broker named, or there is no organisation for them to be admin
-  // of; a carrier joins the one you are already in, so there is nothing extra
-  // to say.
+  // Nothing to send until the form describes somebody, and the broker is
+  // named — or there is no organisation for them to be admin of.
   const canSend = full_name.trim().length > 0 && email.trim().length > 0
-    && (kind === "carrier" || brokerName.trim().length > 0) && !created;
+    && brokerName.trim().length > 0 && !created;
 
   async function send() {
     if (!canSend) { setErr("Fill in the name and email first."); return; }
     setErr(null); setBusy(true);
     try {
-      if (kind === "carrier") {
-        // Joins THIS organisation. `carrier_admin` is the DB role every
-        // carrier-side person holds — the column takes four values and the
-        // distinction that matters (who may add and remove) is the owner
-        // pointer, not a fifth role. So this adds a carrier, not a second
-        // carrier admin.
-        await api.post(`/users?mga=${encodeURIComponent(mga)}`, {
-          full_name: full_name.trim(),
-          email: email.trim(),
-          role: "carrier_admin",
-        });
-        setCreated({ name: full_name.trim(), email: email.trim(),
-                     org: brand?.legal_name || "your organisation" });
-      } else {
-        // One call: creates the broker organisation AND invites this person as
-        // its first admin. A taken email or a name you already use is refused
-        // before anything is created, so you never end up with half of it.
-        const r = await inviteBroker({
-          legal_name: brokerName.trim(),
-          party_type: brokerType,
-          admin_name: full_name.trim(),
-          admin_email: email.trim(),
-        });
-        // The organisation name is what WE typed, not something the server
-        // confirmed: if that address already belongs to a broker, no
-        // organisation was created and their real name is not ours to show.
-        setCreated({ name: full_name.trim(), email: email.trim(),
-                     org: r.message, orgTyped: brokerName.trim(),
-                     pending: r.pending ?? !r.invited });
-      }
+      // One call: creates the broker organisation AND invites this person as
+      // its first admin. A taken email or a name you already use is refused
+      // before anything is created, so you never end up with half of it.
+      const r = await inviteBroker({
+        legal_name: brokerName.trim(),
+        party_type: brokerType,
+        admin_name: full_name.trim(),
+        admin_email: email.trim(),
+      });
+      // The organisation name is what WE typed, not something the server
+      // confirmed: if that address already belongs to a broker, no
+      // organisation was created and their real name is not ours to show.
+      setCreated({ name: full_name.trim(), email: email.trim(),
+                   org: r.message, orgTyped: brokerName.trim(),
+                   pending: r.pending ?? !r.invited });
     } catch (e: any) {
       // `detail` is a string for simple refusals and an object for the ones
       // carrying a remedy. Rendering the object would crash the page, so it is
@@ -146,27 +93,17 @@ export default function AddUser() {
         <div className="page-head">
           <div className="t">
             <h2>
-              {kind === "carrier" ? "Add a carrier user" : "Invite a broker"}
-              <InfoTip text={kind === "carrier"
-                ? "They do the same daily work as you — contracts, "
-                  + "programmes, files and inviting broker companies — but "
-                  + "only you add or remove carrier users."
-                : "Name the broker company and its broker admin — the "
-                  + "person who runs it. Both are created together."} />
+              Invite a broker
+              <InfoTip text={"Name the broker company and its broker admin — the "
+                + "person who runs it. Both are created together."} />
             </h2>
-            <p>
-              {kind === "carrier"
-                ? "A colleague at your organisation."
-                : "An outside broker company and its admin."}
-            </p>
+            <p>An outside broker company and its admin.</p>
           </div>
           <div className="actions">
-            {brokerOnly || kind === "broker"
-              ? <button className="btn" onClick={() => nav("/brokers")}>← Brokers</button>
-              : <button className="btn" onClick={() => nav("/users")}>← Users &amp; Roles</button>}
+            <button className="btn" onClick={() => nav("/brokers")}>← Brokers</button>
             <button className="btn pri" onClick={send} disabled={busy || !canSend}
               title={canSend ? undefined : created ? "Invite already sent"
-                : (kind === "broker" && !brokerName.trim()) ? "Name the broker first"
+                : !brokerName.trim() ? "Name the broker first"
                 : "Enter a name and email first"}>
               {busy ? "Sending…" : "Send invite"}
             </button>
@@ -178,41 +115,6 @@ export default function AddUser() {
             {err}
           </div>
         )}
-
-        {/* Asked first, because it changes what the rest of the form means:
-            a carrier joins the organisation you are already in, a broker
-            arrives with a company that has to be created around them. */}
-        {/* <div className="card pad" style={{ marginBottom: 18 }}>
-          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Who are you adding?</h3>
-          
-          {canCarrier && canBroker && !brokerOnly ? (
-            <div className="segpick" style={{ marginTop: 12 }}>
-              <button type="button" className={kind === "carrier" ? "on" : ""}
-                      onClick={() => setKind("carrier")} disabled={!!created}>
-                A carrier user — a colleague here
-              </button>
-              <button type="button" className={kind === "broker" ? "on" : ""}
-                      onClick={() => setKind("broker")} disabled={!!created}>
-                A broker — an outside company
-              </button>
-            </div>
-          ) : (
-            <div style={{ marginTop: 8, fontWeight: 600 }}>
-              {kind === "carrier" ? "A carrier user — a colleague here"
-                                  : "A broker — an outside company"}
-            </div>
-          )}
-          <div className="hint" style={{ marginTop: 10 }}>
-            {kind === "carrier"
-              ? "They join " + (brand?.legal_name || "your organisation")
-                + " and work on its contracts, programmes and bordereaux, and "
-                + "they invite your brokers. They do not add or remove carrier "
-                + "users — only you do."
-              : "You invite its broker admin — the person who runs the broker "
-                + "company. They add their own broker users. The company can "
-                + "work with other carriers too, so it does not belong to you."}
-          </div>
-        </div> */}
 
         <div className="grid g-2">
           {/* Person */}
@@ -232,10 +134,8 @@ export default function AddUser() {
             {/* Sits with the person who is being invited, though it is SAVED on
                 the organisation (party.party_type) — one invitation creates
                 both, so which card it appears in is a question of where it
-                reads best, not of where the value lives. Meaningless for a
-                carrier, who joins an organisation that already exists. */}
-            <div className="field" style={{ marginBottom: 0 }}
-                 hidden={kind === "carrier"}>
+                reads best, not of where the value lives. */}
+            <div className="field" style={{ marginBottom: 0 }}>
               <label>Type</label>
               <select value={brokerType} onChange={e => setBrokerType(e.target.value)}>
                 {PARTY_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -244,71 +144,16 @@ export default function AddUser() {
             </div>
           </div>
 
-          {kind === "carrier" ? (
-            <div className="card pad">
-              <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>What they can do</h3>
-              <div className="kv">
-                <span className="k">
-                  <b style={{ color: "var(--p-ink)" }}>Do the daily work</b>
-                  <div className="sub">
-                    Create contracts, send files and see everything your company has.
-                  </div>
-                </span>
-              </div>
-              <div className="kv">
-                <span className="k">
-                  <b style={{ color: "var(--p-ink)" }}>Invite broker companies</b>
-                  <div className="sub">
-                    They invite the broker companies you work with. Each company
-                    adds its own staff.
-                  </div>
-                </span>
-              </div>
-              <div className="kv">
-                <span className="k">
-                  <b style={{ color: "var(--p-ink)" }}>Can&rsquo;t add or remove team members</b>
-                  <div className="sub">Only you can do that.</div>
-                </span>
-              </div>
-              <div className="note" style={{ marginBottom: 0 }}>
-                We&rsquo;ll email them a link to set their password. They can sign
-                in once it&rsquo;s set.
-              </div>
-            </div>
-          ) : (
-            /* The broker organisation itself, created with this invitation. */
-            <div className="card pad">
+          {/* The broker organisation itself, created with this invitation —
+              this person becomes its first admin. */}
+          <div className="card pad">
             <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>Broker Organisation</h3>
-            {/* The broker organisation itself. Created with this invitation —
-                this person becomes its first admin. */}
             <div className="field">
               <label>Broker Organisation name</label>
               <input value={brokerName} placeholder="e.g. Marlowe Broking Ltd"
                 onChange={e => setBrokerName(e.target.value)} />
-              {/* <div className="hint">
-                Used if they are new to the platform. If they already have a
-                login, they keep the organisation they have.
-              </div> */}
             </div>
-
-
-            {/* <div className="hint" style={{ marginBottom: 12 }}>
-              Broker users are not here on purpose: they belong to the broker,
-              and the broker&rsquo;s own admin adds them.
-            </div>
-
-            <div className="note" style={{ marginBottom: 0 }}>
-              <b>They have to accept.</b> If they are new they will be onboarded
-              first, and accepting happens as they finish. If they already work
-              with another carrier they keep the login they have and simply
-              accept — you will not be told which of the two it was.
-              <br /><br />
-              You are inviting them to work with <b>you</b>, not with one
-              programme. Put them on programmes afterwards, from{" "}
-              <b>Programmes</b> — as many as you like, whenever you like.
-            </div> */}
-            </div>
-          )}
+          </div>
         </div>
       </div>
 
@@ -317,25 +162,18 @@ export default function AddUser() {
           /* A green tick says "done", and it is read before the headline. On a
              request nothing has been done — it is waiting on somebody. */
           kind={created.pending ? "pending" : "sent"}
-          title={kind === "carrier" ? "Carrier user added"
-            : created.pending ? "Waiting for approval" : "Broker invited"}
-          message={kind === "carrier"
-            ? `${created.name} can set a password and sign in for ${created.org}.`
-            : created.pending
+          title={created.pending ? "Waiting for approval" : "Broker invited"}
+          message={created.pending
             ? <>Nothing is sent to <b>{created.orgTyped}</b> until your carrier
                 admin approves.</>
             : created.org}
           /* No envelope row on a request: nothing has been sent. */
           email={created.pending ? undefined : created.email}
-          note={kind === "carrier"
-            ? "They can work on everything this organisation holds and invite "
-              + "your brokers. Adding and removing carrier users stays with you."
-            : created.pending
+          note={created.pending
             ? "You will be told either way."
             : "They appear on your Brokers list once they accept."}
           doneLabel={created.pending ? "See my requests" : "Done"}
-          onDone={() => nav(kind === "carrier" ? "/users"
-            : created.pending ? "/brokers/requests" : "/brokers")}
+          onDone={() => nav(created.pending ? "/brokers/requests" : "/brokers")}
         />
       )}
     </div>

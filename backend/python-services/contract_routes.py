@@ -2411,7 +2411,9 @@ def submit_for_approval(contract_id: int, body: Note = Note(),
                 409, "this contract was written here, so it takes the ordinary "
                      "road: the broker agrees the terms, then your carrier "
                      "admin signs it.")
-        admin = _speaks_for_carrier(p)
+        # With the approval flow off (the default) nobody waits: accepted now.
+        from carrier_scope import carrier_approvals_enabled
+        admin = _speaks_for_carrier(p) or not carrier_approvals_enabled()
         blocked_by = None
         if admin:
             blocked_by = _accept_uploaded(s, c, p, body.note)

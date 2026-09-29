@@ -30,7 +30,7 @@ from auth_deps import require_role, current_principal, Principal
 # here: this one is used in a Depends() default, which FastAPI evaluates
 # when the module is imported. carrier_scope imports only auth_deps and db,
 # so there is no cycle to avoid.
-from carrier_scope import require_carrier_admin, is_carrier_admin_seat
+from carrier_scope import require_carrier_admin, is_carrier_admin_seat, carrier_approvals_enabled
 
 router = APIRouter()
 
@@ -565,6 +565,15 @@ def auth_login(body: LoginBody, request: Request):
                      user_agent=_ua, user_id=u.id, tenant_id=u.tenant_id,
                      details={"reason": "disabled"})
             raise HTTPException(403, "user disabled")
+        # Three seats now: a carrier user or broker user still in the table
+        # cannot sign in (carrier_scope.retired_seat).
+        from carrier_scope import retired_seat
+        retired = retired_seat(s, u)
+        if retired:
+            log_auth("login_failed", actor=email, ok=False, ip=_client_ip,
+                     user_agent=_ua, user_id=u.id, tenant_id=u.tenant_id,
+                     details={"reason": "retired_seat"})
+            raise HTTPException(403, retired)
         # Auto-upgrade legacy plain-text password to bcrypt on successful login.
         if not _is_bcrypt(u.password):
             u.password = hash_password(body.password)
@@ -608,6 +617,9 @@ def auth_refresh(body: RefreshBody, request: Request):
     with SessionLocal() as s:
         u = s.get(AppUser, int(claims["sub"]))
         if not u or (u.status or "active") != "active":
+            raise HTTPException(401, "user not found or disabled")
+        from carrier_scope import retired_seat
+        if retired_seat(s, u):
             raise HTTPException(401, "user not found or disabled")
         # Audit the refresh, but never let it gate the token mint: this endpoint
         # sits in front of user-facing requests, and an audit INSERT+commit is
@@ -754,6 +766,10 @@ def auth_reset(body: ResetBody, request: Request):
             exp = exp.replace(tzinfo=timezone.utc)
         if not u or exp is None or exp < datetime.now(timezone.utc):
             raise HTTPException(400, "This reset link is invalid or has expired.")
+        from carrier_scope import retired_seat
+        retired = retired_seat(s, u)
+        if retired:
+            raise HTTPException(403, retired)
         was_invited = (u.status or "") == "invited"
         u.password = hash_password(body.password)
         u.reset_token = None
@@ -921,6 +937,8 @@ def _tenant_dict(t: Tenant) -> dict:
     # fetch (TenantDetail) can render the header without pulling the whole list.
     return {"id": t.id, "mga": t.tenant_name, "legal_name": t.legal_name,
             "owner_user_id": t.owner_user_id,
+            # Whether the carrier admin's approval flow is on (default off).
+            "approvals_enabled": carrier_approvals_enabled(),
             "name": t.legal_name or (t.tenant_name or "").title(),
             "code": t.tenant_name, "is_active": bool(t.is_active),
             "tenant_type": t.tenant_type, "address": t.address,
@@ -2469,11 +2487,12 @@ async def program_contract_upload(
         # explicitly rather than left empty so nothing downstream has to infer
         # a lifecycle from status_ops again.
         try:
-            from carrier_scope import is_carrier_admin_seat
+            from carrier_scope import needs_carrier_approval
             _cid2 = (persist_result or {}).get("contract_id")
+            _admin = True
             if _cid2 and not principal.is_broker:
                 with SessionLocal() as _s:
-                    _admin = is_carrier_admin_seat(_s, principal)
+                    _admin = not needs_carrier_approval(_s, principal)
                     _c2 = _s.get(Contract, _cid2)
                     # Only a contract this upload has just put in force by
                     # default. One that already carries a considered lifecycle
@@ -6931,62 +6950,16 @@ def _assert_may_act_on(s, principal: Principal, u: AppUser) -> None:
 @router.post("/users")
 def users_create(mga: str, body: UserBody,
                  principal: Principal = Depends(require_role("tenant_admin"))):
-    """Add a carrier user: a colleague at this carrier. Carrier admin only.
+    """Retired 29 Sep 2026: carrier users no longer exist.
 
-    This endpoint adds carrier users and nothing else. A broker's first admin
-    is invited through POST /brokers (by the carrier admin or a carrier user),
-    which creates the broker organisation in the same step; operators are
-    added by their own broker admin. Both used to be possible here too, which
-    is how a carrier user could reach this form.
-
-    Two things the database insists on, which this endpoint used to get wrong
-    and fail with a 500 rather than a message:
-
-      * the role must be one of the four — a stored 'admin'/'ops' fails
-        chk_app_user_role, so the legacy value is normalized first;
-      * every login must record who invited it (trg_enforce_invitation_chain),
-        so invited_by_user_id is the signed-in admin.
+    The platform has three seats — Kavachio admin, carrier admin, broker
+    admin. This endpoint only ever added carrier users (broker admins come
+    through POST /brokers, a carrier's admin through POST /tenants), so it now
+    refuses. 410 rather than 405 so a stale screen still gets a sentence.
     """
-    from auth_utils import hash_password
-    from auth_deps import normalize_role
-
-    role = normalize_role(body.role)
-    if role == "operator":
-        raise HTTPException(
-            400, "Operators are added by the broker's own admin, not by you.")
-    if role == "broker_admin":
-        raise HTTPException(
-            400, "Broker companies are invited from Party → Invite a party.")
-    if role == "kavachio_admin":
-        raise HTTPException(403, "Kavachio staff accounts are not created here.")
-
-    with SessionLocal() as s:
-        tid = resolve_tenant_id(s, principal, mga)
-        _assert_is_carrier_admin(s, principal)
-        if s.query(AppUser).filter(AppUser.email == body.email.strip().lower()).first():
-            raise HTTPException(409, "Email already exists")
-
-        # No password supplied → this is an INVITE: create the user as "invited"
-        # and email a tokened set-password link (same page as password reset).
-        invited = not body.password
-        hashed = hash_password(body.password) if body.password else None
-        u = AppUser(email=body.email.strip().lower(),
-                    full_name=body.full_name, role=role,
-                    status="invited" if invited else (body.status or "active"),
-                    password=hashed,
-                    tenant_id=tid, broker_party_id=None,
-                    # Who let this person in. Without it the database refuses
-                    # the row outright.
-                    invited_by_user_id=principal.user_id)
-        s.add(u)
-        link = _make_invite_link(u) if invited else None
-        s.commit(); s.refresh(u)
-        if invited and link:
-            _send_invite_email(u.email, link, u.full_name, _tenant_display(s, u.tenant_id))
-        _log(mga, _actor(principal), "user_invited" if invited else "user_created", target=str(u.id),
-             details={"email": u.email, "full_name": u.full_name, "role": u.role,
-                      "status": u.status})
-        return _user_dict(u, mga)
+    raise HTTPException(
+        410, "Carrier users are no longer part of Kavachio: each carrier has "
+             "one carrier admin, who does all of the carrier's work.")
 
 
 @router.post("/users/{user_id}/resend-invite")

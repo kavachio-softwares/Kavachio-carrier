@@ -62,9 +62,6 @@ export const ROUTE_ACCESS: {
   // broker_admin and operator share a rank, so both reach these and neither
   // reaches anything above.
   { pattern: "/broker", requires: "broker_admin", only: ["broker_admin"] },
-  // An operator is a seat inside the broker, not a manager of it: their own
-  // landing screen, and no access to the admin views above.
-  { pattern: "/operator", requires: "operator", only: ["operator"] },
   // No rule for /invitations: it is routed OUTSIDE the app shell (see App.tsx)
   // so RequireAccess never sees it, and a rule here would be config that looks
   // like a guard and enforces nothing. The seat check lives in the component.
@@ -82,10 +79,6 @@ export const ROUTE_ACCESS: {
   // (carrier_scope resolves on `is_broker`, never on the role).
   { pattern: "/broker/bordereau", requires: "operator",
     only: ["broker_admin", "operator"] },
-  // The broker staffs itself here. An operator is a seat inside that team, not
-  // a manager of it, so this one is the admin's alone — the database says the
-  // same thing (only a broker admin may create an operator).
-  { pattern: "/broker/users", requires: "broker_admin", only: ["broker_admin"] },
   // Run history: both broker seats — the team's runs, whoever sent them.
   { pattern: "/broker/runs", requires: "operator", only: ["broker_admin", "operator"] },
   // The rest of the dashboard's Team Activity / Files by Carrier cards —
@@ -229,8 +222,7 @@ export const ROUTE_ACCESS: {
   { pattern: "/program-management", requires: "carrier_admin" },
   { pattern: "/tenant", requires: "carrier_admin" },
   { pattern: "/users", requires: "carrier_admin" },
-  // The one approval in the platform. Reading it is harmless, but only a
-  // carrier admin can decide — the API enforces that independently.
+  // Invite a broker (the page's only form since carrier users were retired).
   { pattern: "/users/new", requires: "carrier_admin" },
   { pattern: "/direct/setup", requires: "carrier_admin" },
   { pattern: "/direct/setups", requires: "carrier_admin" },
@@ -303,6 +295,8 @@ export function landingPath(role: Role | null = userRole()): string {
   // A broker seat has no carrier Home — every card on it reads carrier data
   // they are refused, so they would land on a page of blanks.
   if (role === "broker_admin") return "/broker";
-  if (role === "operator") return "/operator";
+  // Broker users were retired on 29 Sep 2026 and the server refuses their
+  // sign-in; a session left over from before lands somewhere that exists.
+  if (role === "operator") return "/broker/bordereau";
   return "/home";
 }

@@ -146,8 +146,12 @@ def _accept_invitation(s, inv, party_id: int, how: str) -> None:
     # programme handed the broker a live one the moment they accepted —
     # straight past the setup gate. Nothing in the UI sent `program_id`, so it
     # never fired; it was a hole waiting for the first caller that did.
-    from carrier_scope import LINK_PENDING, is_carrier_admin_user
-    status = ("active" if is_carrier_admin_user(s, inv.tenant_id, inv.by_user_id)
+    # With the approval flow off (the default since 29 Sep 2026) nothing
+    # waits, whoever sent it.
+    from carrier_scope import (LINK_PENDING, carrier_approvals_enabled,
+                               is_carrier_admin_user)
+    status = ("active" if (not carrier_approvals_enabled()
+                           or is_carrier_admin_user(s, inv.tenant_id, inv.by_user_id))
               else LINK_PENDING)
     link = (s.query(ProgramBroker)
             .filter(ProgramBroker.program_id == inv.program_id,
@@ -723,59 +727,22 @@ def broker_users(page: Optional[int] = Query(None, ge=1),
         }
 
 
+_BROKER_USERS_RETIRED = (
+    "Broker users are no longer part of Kavachio: each broker has one broker "
+    "admin, who agrees contracts and sends the bordereaux.")
+
+
 @router.post("/broker/users")
 def broker_user_invite(body: BrokerUserBody, p: Principal = Depends(current_principal)):
-    """Invite an OPERATOR into this broker organisation.
-
-    The role is not an input. A broker admin may create exactly one kind of
-    seat, so letting the client name it would only create a way to be refused
-    by the trigger. `invited_by_user_id` is the signed-in admin, which is what
-    makes "who let this person in?" a stored fact rather than a guess.
-    """
-    from app_routes import _make_invite_link, _send_invite_email
-
-    email = (body.email or "").strip().lower()
-    name = (body.full_name or "").strip()
-    if not email or not name:
-        raise HTTPException(400, "Name and email are required")
-
-    with SessionLocal() as s:
-        bid = _broker_admin(s, p)
-        if s.query(AppUser).filter(AppUser.email == email).first():
-            raise HTTPException(409, "Email already exists")
-        me = s.query(Party).filter(Party.id == bid).first()
-        u = AppUser(
-            email=email, full_name=name, role="operator",
-            # An operator belongs to the broker, to no carrier. Setting
-            # tenant_id here would break chk_app_user_scope.
-            tenant_id=None, broker_party_id=bid,
-            invited_by_user_id=p.user_id, status="invited",
-        )
-        s.add(u)
-        link = _make_invite_link(u)
-        s.commit(); s.refresh(u)
-        _send_invite_email(u.email, link, u.full_name, me.legal_name if me else None)
-        return _broker_user_dict(u)
+    """Retired 29 Sep 2026: a broker admin no longer adds broker users
+    (operators). 410 rather than 405 so a stale screen still gets a sentence."""
+    raise HTTPException(410, _BROKER_USERS_RETIRED)
 
 
 @router.post("/broker/users/{user_id}/resend-invite")
 def broker_user_resend(user_id: int, p: Principal = Depends(current_principal)):
-    """Re-issue the set-password link. The old one stops working."""
-    from app_routes import _make_invite_link, _send_invite_email
-    with SessionLocal() as s:
-        bid = _broker_admin(s, p)
-        u = s.get(AppUser, user_id)
-        # 404 rather than 403 on someone else's user: a wrong id must not tell
-        # a broker whether that id exists somewhere else on the platform.
-        if not u or u.broker_party_id != bid:
-            raise HTTPException(404, "user not found")
-        if u.status not in ("invited", "pending"):
-            raise HTTPException(409, "this user has already accepted their invite")
-        me = s.query(Party).filter(Party.id == bid).first()
-        link = _make_invite_link(u)
-        s.commit()
-        _send_invite_email(u.email, link, u.full_name, me.legal_name if me else None)
-        return {"ok": True}
+    """Retired with the invite above — there is no broker user to chase."""
+    raise HTTPException(410, _BROKER_USERS_RETIRED)
 
 
 @router.delete("/broker/users/{user_id}")

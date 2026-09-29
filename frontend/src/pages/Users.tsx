@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
-import { clearAuth, currentMga, getUser, normalizeRole, setTenantBrand } from "../auth";
+import { clearAuth, currentMga, getUser, normalizeRole } from "../auth";
 import { fmtDateTime } from "../utils/date";
 import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
@@ -34,22 +34,6 @@ const ROLE_LABEL: Record<string, string> = {
   operator: "Broker User",
 };
 
-// What each seat can actually do — the reason anyone reads this table.
-// Both carrier seats do the work and invite brokers; only the carrier admin
-// adds and removes carrier users.
-const CARRIER_CAN_DO = {
-  admin: "Everything, plus adding and removing carrier users",
-  member: "Contracts, programmes, bordereaux and inviting brokers",
-};
-
-const ROLE_CAN_DO: Record<string, string> = {
-  carrier_admin: "Everything you can, including approving contracts",
-  broker_admin: "Agrees and signs their contracts; adds their own broker users",
-  operator: "Sends files and sorts out their errors",
-};
-
-// Single source of truth for a user's displayed status bucket — used by both
-// the Status filter and the badge, so they can never drift out of sync.
 type StatusKey = "active" | "invited" | "inactive";
 const STATUS_LABEL: Record<StatusKey, string> = { active: "Active", invited: "Invited", inactive: "Inactive" };
 function statusKey(s: string): StatusKey {
@@ -106,8 +90,6 @@ export default function Users() {
   const pageRows = items;
   const totalItems = total;
   const adminCount = extra?.total_admins ?? 0;
-  const ownerId = extra?.owner_user_id ?? null;
-  const iAmOwner = !!me?.id && ownerId === me.id;
   // What is yours to act on: carrier users are the carrier admin's alone; a
   // broker admin is anyone's who has that broker on their list (the server
   // sends a carrier user only the brokers they invited). Same rule on the server.
@@ -133,11 +115,9 @@ export default function Users() {
    *  server enforces every one of these; this only explains it in place. */
   function whyNotRemovable(u: U): string {
     if (u.is_owner && u.id === me?.id)
-      return "You are the carrier admin. Make a carrier user the carrier "
-           + "admin first — then you can remove your own account.";
+      return "You are the carrier admin, so your account cannot be removed.";
     if (u.is_owner)
-      return "This is the carrier admin. Transfer the role to a carrier user "
-           + "first — then they can be removed.";
+      return "This is the carrier admin, so they cannot be removed.";
     if (!mayManage(u))
       return u.org_kind === "broker"
         ? "Broker admins are managed by the carrier people who invited them."
@@ -157,35 +137,6 @@ export default function Users() {
   const [removeTarget, setRemoveTarget] = useState<U | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeErr, setRemoveErr] = useState<string | null>(null);
-
-  // Handing the organisation on. A separate flow from removal on purpose: it
-  // is the step that MAKES removal possible, and doing both behind one button
-  // would mean a mis-click both transferred the organisation and deleted
-  // somebody.
-  const [xferTarget, setXferTarget] = useState<U | null>(null);
-  const [xferBusy, setXferBusy] = useState(false);
-  const [xferErr, setXferErr] = useState<string | null>(null);
-
-  function closeXfer() { if (!xferBusy) { setXferTarget(null); setXferErr(null); } }
-  async function confirmXfer() {
-    if (!xferTarget) return;
-    setXferBusy(true); setXferErr(null);
-    try {
-      const { data } = await api.post<{ message?: string; owner_user_id?: number }>(
-        `/tenants/${mga}/transfer-ownership`, { email: xferTarget.email });
-      // Your seat just changed with it — you are a carrier user now — so every
-      // screen reading useCarrierSeat has to see the new owner, not the cached one.
-      setTenantBrand({ mga, owner_user_id: data?.owner_user_id ?? xferTarget.id });
-      setMsg({ kind: "ok",
-               text: data?.message ?? `${xferTarget.email} now owns this organisation.` });
-      setXferTarget(null);
-      reload();
-    } catch (e: any) {
-      const d = e?.response?.data?.detail;
-      setXferErr((typeof d === "string" ? d : d?.message)
-        ?? "We couldn't transfer ownership. Please try again.");
-    } finally { setXferBusy(false); }
-  }
 
   function askRemove(u: U) {
     // The carrier admin's row opens a dialog that EXPLAINS rather than
@@ -267,19 +218,16 @@ export default function Users() {
             <h2>
               Users &amp; Roles
               <InfoTip text={
-                seat === "admin" ? "Your team, and the admins of the broker companies you work with."
+                seat === "admin" ? "You, and the admins of the broker companies you work with."
                 : seat === "user" ? "The broker companies you invited, shown by the person who runs each one."
                 : "Everyone who signs in on your side — your own team, and the admins at the brokers who send you files."} />
             </h2>
           </div>
-          {/* Every carrier seat brings in brokers; only the carrier admin also
-              adds carrier users. The server refuses anything else either way. */}
+          {/* Carrier users were retired on 29 Sep 2026: the carrier admin
+              adds nobody at their own organisation, and brings brokers in. */}
           <div className="actions">
-            {addsCarrierUsers(seat) && (
-              <button className="btn pri" onClick={() => nav("/users/new")}>＋ Add Carrier User</button>
-            )}
             {invitesBrokers(seat) && (
-              <button className={`btn${addsCarrierUsers(seat) ? "" : " pri"}`}
+              <button className="btn pri"
                       onClick={() => nav("/users/new?for=broker")}>＋ Invite a Broker</button>
             )}
           </div>
@@ -337,7 +285,6 @@ export default function Users() {
                 {pageRows.map(u => {
                   const sb = statusBadge(u.status);
                   const role = normalizeRole(u.role);
-                  const isAdminRow = role === "carrier_admin";
                   const invited = u.status === "pending" || u.status === "invited";
                   return (
                     <tr key={u.id}>
@@ -367,11 +314,6 @@ export default function Users() {
                             : u.is_owner ? "Carrier Admin" : "Carrier User"}
                         </span>
                       </td>
-                      {/* <td className="l">
-                        {u.org_kind === "broker"
-                          ? (ROLE_CAN_DO[role] ?? "—")
-                          : u.is_owner ? CARRIER_CAN_DO.admin : CARRIER_CAN_DO.member}
-                      </td> */}
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">
@@ -403,23 +345,6 @@ export default function Users() {
                               Reset Password
                             </button>
                           ))}
-                          {/* Handing the organisation on. Offered only BY the
-                              owner and only TO another admin of this
-                              organisation, which is exactly what the server
-                              allows — a button that 403s is worse than none.
-                              Only an ACTIVE carrier can take the role; the
-                              server refuses anyone still sitting on an
-                              unaccepted invitation. */}
-                          {iAmOwner && !u.is_owner && u.org_kind !== "broker"
-                            && isAdminRow && u.status === "active" && (
-                            <button
-                              type="button" className="btn sm"
-                              title={`Make ${u.full_name} the carrier admin of this organisation`}
-                              onClick={() => { setXferErr(null); setXferTarget(u); }}
-                            >
-                              Make carrier admin
-                            </button>
-                          )}
                           {/* Removing somebody is the one act here that cannot
                               be undone, so it is the one button that is not
                               the same colour as the others. */}
@@ -468,11 +393,8 @@ export default function Users() {
               is asked for by hand — the same as ProgramCalendar's notes. */}
           <ul style={{ margin: 0, padding: "0 0 0 16px", listStyle: "disc outside" }}>
             <li style={{ listStyle: "disc", marginBottom: 4 }}>Invite the company above.</li>
-            <li style={{ listStyle: "disc", marginBottom: 4 }}>
-              Add it to a programme — it can't send files until then.
-            </li>
             <li style={{ listStyle: "disc" }}>
-              Broker company adds its own staff, so they're not listed here.
+              Add it to a programme — it can't send files until then.
             </li>
           </ul>
         </div>
@@ -526,11 +448,7 @@ export default function Users() {
         <div className="proto-modal-overlay" onClick={() => setBlocked(null)}>
           <div className="proto-modal" onClick={e => e.stopPropagation()}>
             <div className="m-h">
-              <h3>
-                {blocked.id === me?.id
-                  ? "Transfer the role before you leave"
-                  : "This is the carrier admin"}
-              </h3>
+              <h3>This is the carrier admin</h3>
               <button className="x" onClick={() => setBlocked(null)}
                       aria-label="Close">×</button>
             </div>
@@ -538,60 +456,19 @@ export default function Users() {
               {blocked.id === me?.id ? (
                 <>
                   You are this organisation&rsquo;s carrier admin, so you cannot
-                  remove yourself yet — it would leave the organisation
+                  remove yourself — it would leave the organisation
                   accountable to nobody.
-                  <div className="sub" style={{ marginTop: 10 }}>
-                    Make an <b>active</b> carrier user the carrier admin using{" "}
-                    <b>Make carrier admin</b> on their row. You become a carrier
-                    user, and can then remove your own account from here.
-                  </div>
                 </>
               ) : (
                 <>
                   <b>{blocked.full_name || blocked.email}</b> is this
                   organisation&rsquo;s carrier admin, so they cannot be removed.
-                  <div className="sub" style={{ marginTop: 10 }}>
-                    Only they can hand the role on. Once a carrier user holds
-                    it, they can be removed like anyone else.
-                  </div>
                 </>
               )}
             </div>
             <div className="m-f">
               <button className="btn pri" onClick={() => setBlocked(null)}>
                 Got it
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {xferTarget && (
-        <div className="proto-modal-overlay" onClick={closeXfer}>
-          <div className="proto-modal" onClick={e => e.stopPropagation()}>
-            <div className="m-h">
-              <h3>Transfer the carrier admin role</h3>
-              <button className="x" onClick={closeXfer} aria-label="Close">×</button>
-            </div>
-            <div className="m-b">
-              Make <b>{xferTarget.full_name || xferTarget.email}</b>{" "}
-              ({xferTarget.email}) the carrier admin of this organisation?
-              <div className="sub" style={{ marginTop: 10 }}>
-                They become the one person accountable for it: the only one who
-                can add or remove carrier users, and the only one who can
-                transfer the role again. <b>You become a carrier user</b> — you keep
-                working on contracts, programmes and bordereaux and can invite
-                brokers, but no longer add or remove carrier users. If you are
-                leaving, they remove you afterwards.
-              </div>
-              {xferErr && (
-                <div style={{ marginTop: 10, color: "var(--p-crit)" }}>{xferErr}</div>
-              )}
-            </div>
-            <div className="m-f">
-              <button className="btn" onClick={closeXfer} disabled={xferBusy}>Cancel</button>
-              <button className="btn pri" onClick={confirmXfer} disabled={xferBusy}>
-                {xferBusy ? "Transferring…" : "Transfer the role"}
               </button>
             </div>
           </div>

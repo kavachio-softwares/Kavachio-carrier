@@ -9,7 +9,6 @@ import Tenants from "./pages/Tenants";
 import AddTenant from "./pages/AddTenant";
 import AdminUsers from "./pages/AdminUsers";
 import BrokerDashboard from "./pages/BrokerDashboard";
-import OperatorHome from "./pages/OperatorHome";
 import BrokerRuns from "./pages/BrokerRuns";
 import TeamActivity from "./pages/TeamActivity";
 import PersonActivity from "./pages/PersonActivity";
@@ -17,7 +16,6 @@ import FilesByCarrier from "./pages/FilesByCarrier";
 import BrokerContracts from "./pages/BrokerContracts";
 import BrokerInvitations from "./pages/BrokerInvitations";
 import BrokerBordereau from "./pages/BrokerBordereau";
-import BrokerUsers from "./pages/BrokerUsers";
 import TenantDetail from "./pages/TenantDetail";
 import Parties from "./pages/Parties";
 import PartyDetail from "./pages/PartyDetail";
@@ -148,12 +146,9 @@ export default function App() {
         <Route path="/tenant" element={<Tenant />} />      {/* Organization (this tenant's own settings) */}
         {/* Broker seats. Everything here is READ of what a carrier gave them. */}
         <Route path="/broker" element={<BrokerDashboard />} />
-        <Route path="/operator" element={<OperatorHome />} />   {/* the broker's day-to-day seat */}
         <Route path="/broker/contracts" element={<BrokerContracts />} />
-        {/* The broker's monthly run. Both broker seats reach it: an admin
-            submits, and an operator is the seat added to do exactly this. */}
+        {/* The broker's monthly run — the broker admin's. */}
         <Route path="/broker/bordereau" element={<BrokerBordereau />} />
-        <Route path="/broker/users" element={<BrokerUsers />} />   {/* The broker staffs itself */}
         <Route path="/broker/runs" element={<BrokerRuns />} />
         <Route path="/broker/team-activity" element={<TeamActivity />} />
         <Route path="/broker/team-activity/:userId" element={<PersonActivity />} />

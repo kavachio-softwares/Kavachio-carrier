@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck, UserCheck } from "lucide-react";
 import { api } from "../api/client";
-import { currentMga, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
+import { currentMga, getTenantBrand, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
 import { canAccessPath } from "../access";
 
 import { getBoard, getCalendar, type BoardResponse, type CalendarStatus } from "../api/calendar";
@@ -84,6 +84,9 @@ export default function Home() {
   const role = userRole() ?? "operator";
   // Same role, two seats at a carrier: only the owner is the Carrier Admin.
   const seat = useCarrierSeat();
+  // The carrier admin's approval flow (server flag, off by default). Off, the
+  // two approval tiles below are not drawn and their row closes up.
+  const approvalsOn = !!getTenantBrand()?.approvals_enabled;
   const [stats, setStats] = useState<Stats | null>(null);
   // The Bordereau Status day whose files are open in the side drawer.
   const [statusDay, setStatusDay] = useState<string | null>(null);
@@ -169,23 +172,23 @@ export default function Home() {
 
   // Only the carrier admin can decide on these, so only they are asked to.
   useEffect(() => {
-    if (!addsCarrierUsers(seat)) { setPendingSetups(null); return; }
+    if (!addsCarrierUsers(seat) || !approvalsOn) { setPendingSetups(null); return; }
     api.get<{ total: number }>("/pipelines", {
       params: { mga, status: "pending_approval", page: 1, page_size: 1 },
     })
       .then(r => setPendingSetups(r.data?.total ?? 0))
       .catch(() => setPendingSetups(null));
-  }, [mga, seat]);
+  }, [mga, seat, approvalsOn]);
 
   // Everything on this side's desk. `contracts_waiting` is the superset the
   // server derives through _whose_turn; pending_signatures is the part of it
   // that is a signature. Falls back to the signatures alone on an older server
   // that does not send the wider figure, so the tile never reads blank.
-  // The carrier ADMIN's tiles come to 11, which leaves an odd one over on a
-  // 5-wide grid. Their grid is 20 columns instead: five tiles on the first
-  // row, four on the second, and the two multi-count boxes (Overdue
-  // Bordereaux, Contract Review) half a row each on the third. Everyone else's
-  // grid is untouched — `cell` hands the tile back as it is.
+  // The carrier ADMIN's grid is 20 columns: four tiles on the first row, the
+  // operational tiles on the second (four with the approval flow on, two
+  // without), and the two multi-count boxes (Overdue Bordereaux, Contract
+  // Review) half a row each on the third. Everyone else's grid is untouched —
+  // `cell` hands the tile back as it is.
   const adminGrid = role === "carrier_admin" && addsCarrierUsers(seat);
   const cell = (span: number, node: ReactNode) => adminGrid
     ? <div style={{ gridColumn: `span ${span}`, display: "grid" }}>{node}</div>
@@ -326,7 +329,7 @@ export default function Home() {
             grids sized the numbers differently row to row, which read as two
             unrelated components rather than one panel. */}
         <div style={{ display: "grid", gridTemplateColumns: adminGrid ? "repeat(20, 1fr)" : seat === "user" ? "repeat(3, 1fr)" : (role === "kavachio_admin" ? "repeat(4, 1fr)" : "repeat(5, 1fr)"), gap: 20, marginBottom: 24 }}>
-          {seat !== "user" && cell(4,
+          {seat !== "user" && cell(5,
             <StatCard
               title="Active Setups" value={fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}
               icon={LayoutDashboard} subtitle=""
@@ -335,30 +338,24 @@ export default function Home() {
 
           {carrierSeat && (
             <>
-              {cell(4, <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />)}
+              {cell(5, <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />)}
 
               {seat !== "user" && (
-                cell(4, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
+                cell(5, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
               )}
 
-              {cell(4, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="" />)}
+              {cell(5, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="" />)}
 
-              {seat !== "user" && cell(4,
-                stats?.my_brokers != null ? (
-                  <StatCard title="Your Broker Companies" value={fmt(stats.my_brokers)} icon={Users} onClick={() => nav("/users")} subtitle={stats.my_brokers_pending ? `${stats.my_brokers_pending} not accepted yet` : undefined} />
-                ) : (
-                  <StatCard title="Carrier Users" value={fmt(stats?.users_total)} icon={Users} onClick={() => nav("/users")} subtitle={stats?.users_invited ? `${stats.users_invited} not signed up yet` : undefined} />
-                )
-              )}
+              {/* No Carrier Users tile: carrier users were retired on 29 Sep 2026. */}
             </>
           )}
 
-          {cell(5, <StatCard
+          {cell(approvalsOn ? 5 : 10, <StatCard
             title="Exceptions to Review" value={fmt(stats?.pending_exceptions)}
             icon={AlertCircle} tone="alert" subtitle=""
           />)}
 
-          {cell(5, <StatCard title="Files Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} />)}
+          {cell(approvalsOn ? 5 : 10, <StatCard title="Files Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} />)}
 
           {/* Kavachio staff only. This used to be a ternary whose other half
               was "Avg Turnaround Time" for the carrier seats; that box is
@@ -385,7 +382,7 @@ export default function Home() {
               Carrier ADMIN only, like the fetch that feeds it — approving a
               setup is theirs alone, so for a carrier user this would count
               work they cannot do. They are told through the bell instead. */}
-          {addsCarrierUsers(seat) && cell(5,
+          {addsCarrierUsers(seat) && approvalsOn && cell(5,
             <StatCard
               title="BDX Setup Review"
               value={fmt(pendingSetups ?? 0)}
@@ -418,7 +415,7 @@ export default function Home() {
               Not folded into BDX Setup Review beside it: that one counts
               setups and opens the setups list. These are two decisions about
               two different things, taken weeks apart. */}
-          {addsCarrierUsers(seat) && cell(5,
+          {addsCarrierUsers(seat) && approvalsOn && cell(5,
             <StatCard
               title="Broker Onboarding Pending"
               value={fmt(stats?.broker_requests_pending ?? 0)}

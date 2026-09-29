@@ -45,6 +45,7 @@ from db import (
 from auth_deps import current_principal, require_role, Principal, resolve_broker_party_id
 from carrier_scope import (
     LINK_PENDING, assert_can_invite_brokers, is_carrier_admin_seat,
+    needs_carrier_approval,
 )
 from app_routes import (
     resolve_tenant_id, assert_tenant_owns, _iso_utc, PRODUCER_PARTY_TYPES,
@@ -380,7 +381,7 @@ def programme_broker_add(program_id: int, body: BrokerAssignBody,
         _assert_programme(s, program_id, principal, tid)
         party = _assert_broker(s, body.broker_party_id, tid)
 
-        if not is_carrier_admin_seat(s, principal):
+        if needs_carrier_approval(s, principal):
             from broker_onboarding_routes import raise_request_for_existing_broker
             return raise_request_for_existing_broker(
                 s, tid, program_id, party, principal)
@@ -874,7 +875,7 @@ def broker_create(body: NewBrokerBody,
         if body.program_id:
             _assert_programme(s, body.program_id, principal, tid)
 
-        if not is_carrier_admin_seat(s, principal):
+        if needs_carrier_approval(s, principal):
             from broker_onboarding_routes import raise_request_to_invite
             return raise_request_to_invite(s, tid, body, name, email, principal)
 

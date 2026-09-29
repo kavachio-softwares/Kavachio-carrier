@@ -3429,8 +3429,11 @@ def pipeline_activate(pipeline_id: int,
 
     Re-clicking on a setup that is already live, or already waiting, is a
     no-op — as it has always been.
+
+    With the approval flow switched off (carrier_scope.carrier_approvals_enabled,
+    the default since 29 Sep 2026) every carrier seat takes the admin's road.
     """
-    from carrier_scope import is_carrier_admin_seat
+    from carrier_scope import needs_carrier_approval
     with SessionLocal() as s:
         p = s.get(Pipeline, pipeline_id)
         if not p:
@@ -3438,7 +3441,7 @@ def pipeline_activate(pipeline_id: int,
         assert_tenant_owns(principal, p.tenant_id)
         status = (p.status or "").strip().lower()
 
-        admin = is_carrier_admin_seat(s, principal)
+        admin = not needs_carrier_approval(s, principal)
 
         # ── the carrier admin: live, as before ──
         if admin:

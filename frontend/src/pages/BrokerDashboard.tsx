@@ -17,7 +17,7 @@ import {
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { fmtDate } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
-import { Activity, AlertCircle, Building2, Clock, FileCheck2, PenLine, Users } from "lucide-react";
+import { Activity, AlertCircle, Building2, Clock, FileCheck2, PenLine } from "lucide-react";
 import { RankedBars, RunTrend, UploaderBars } from "../components/BrokerCharts";
 import { InfoTip } from "../components/InfoTip";
 import { ChartCard, LinkCard, StatCard } from "../components/StatCard";
@@ -166,9 +166,7 @@ export default function BrokerDashboard() {
                     subtitle="Across your team" />
           <StatCard title="Files Run This Week" value={ins ? ins.totals.runs_this_week : "—"}
                     icon={Activity} subtitle="By your team and carriers" />
-          <StatCard title="Team Members" value={c.users} icon={Users}
-                    onClick={() => nav("/broker/users")}
-                    subtitle={c.users_invited ? `${c.users_invited} not signed up yet` : "All signed up"} />
+          {/* No Team Members tile: broker users were retired on 29 Sep 2026. */}
         </div>
 
         {c.programmes === 0 ? (

@@ -107,29 +107,19 @@ export default function AdminUsers() {
     
 
         {c && (
-          <div className="tiles five" style={{ marginBottom: 18 }}>
+          <div className="tiles three" style={{ marginBottom: 18 }}>
             <Tile k="Users" v={c.total}
-              info="Everyone with a login, across the four seats beside this one. Not Kavachio's own account — there is exactly one of those, and it is Us, not a seat to review." />
+              info="Everyone with a login, across the two seats beside this one. Not Kavachio's own account — there is exactly one of those, and it is Us, not a seat to review." />
             <Tile k="Carrier Admin" v={c.carrier_admins}
               info={`The one person accountable for each carrier — its recognised `
                 + `owner. Not every carrier has named one yet (${c.carriers} carriers `
                 + `have people at all; only ${c.carrier_admins} of them have an owner `
                 + `on record), which is why this can read lower than the number of `
                 + `carrier organisations beside it.`} />
-            <Tile k="Carrier User" v={c.carrier_users}
-              info={`Colleagues the carrier admin added at their own company. They `
-                + `do the carrier's work but do not decide who else is in it. Add `
-                + `the ${c.carrier_admins} carrier admins and ${c.carrier_admins + c.carrier_users} `
-                + `people work at carrier organisations in all.`} />
             <Tile k="Broker Admin" v={c.broker_admins}
               info={`The first person a carrier invited at a broker. Unlike carriers, `
                 + `every broker they work with currently has exactly one — which is `
                 + `why this matches the number of broker organisations beside it.`} />
-            <Tile k="Broker User" v={c.broker_users}
-              info={`Colleagues the broker admin added. They send the files and `
-                + `clear the exceptions. Add the ${c.broker_admins} broker admins `
-                + `and ${c.broker_admins + c.broker_users} people work at broker `
-                + `organisations in all.`} />
           </div>
         )}
 
@@ -139,8 +129,12 @@ export default function AdminUsers() {
             selects={[
               {
                 key: "role", ariaLabel: "Filter by role", value: role, onChange: setRole,
+                // Carrier users and broker users were retired on 29 Sep 2026;
+                // their labels stay in ROLE_LABEL only to name a leftover row.
                 options: [{ value: "", label: "All roles" },
-                  ...Object.entries(ROLE_LABEL).map(([value, label]) => ({ value, label }))],
+                  ...Object.entries(ROLE_LABEL)
+                    .filter(([value]) => value !== "carrier_user" && value !== "operator")
+                    .map(([value, label]) => ({ value, label }))],
               },
               {
                 key: "status", ariaLabel: "Filter by status", value: status, onChange: setStatus,

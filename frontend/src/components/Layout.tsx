@@ -50,11 +50,9 @@ const GROUPS: {
     title: "",
     only: ["broker_admin", "operator"],
     items: [
-      // Two landing screens, one per seat. canAccessPath() shows each role only
-      // its own — an admin asks "what is holding me up", an operator asks "what
-      // do I have to run". ROUTE_ACCESS marks both `only`, so neither leaks.
+      // The broker admin's landing screen. The operator's own (/operator) went
+      // with the broker user seat on 29 Sep 2026.
       { to: "/broker", label: "Dashboard", icon: LayoutDashboard },
-      { to: "/operator", label: "Dashboard", icon: LayoutDashboard },
       // The monthly run — the reason a broker has a login at all, so it sits
       // directly under the dashboards rather than below the reference screens.
       // BOTH broker seats see it: an admin runs the file as readily as an
@@ -65,10 +63,8 @@ const GROUPS: {
       { to: "/broker/bordereau", label: "Process Bordereau", icon: Zap },
       // My Contracts has no entry here: the broker admin opens it from the
       // dashboard's Active Contracts tile.
-      // Admin-only inside the broker's own group: an operator is a seat in
-      // this team, not a manager of it. canAccessPath() filters it out for
-      // them (ROUTE_ACCESS marks the path `only: ["broker_admin"]`).
-      { to: "/broker/users", label: "Users & Roles", icon: UserCog },
+      // No Users & Roles: broker users were retired on 29 Sep 2026, so the
+      // broker admin has no team to staff.
       // Audit Logs is NOT here any more — it is its own "Logs" section at the
       // foot of every sidebar (see the last group in this file).
     ],
@@ -330,9 +326,11 @@ export default function Layout() {
   useEffect(() => {
     if (!mga || mga === "default" || isKavachioAdmin()) return;
     let cancelled = false;
-    getDeduped<{ legal_name?: string | null; logo?: string | null; owner_user_id?: number | null }>(`/tenants/${mga}`)
+    getDeduped<{ legal_name?: string | null; logo?: string | null; owner_user_id?: number | null;
+                 approvals_enabled?: boolean }>(`/tenants/${mga}`)
       .then(r => { if (!cancelled) setTenantBrand({ mga, legal_name: r.data?.legal_name, logo: r.data?.logo ?? null,
-                                                    owner_user_id: r.data?.owner_user_id ?? null }); })
+                                                    owner_user_id: r.data?.owner_user_id ?? null,
+                                                    approvals_enabled: !!r.data?.approvals_enabled }); })
       .catch(() => { /* sidebar just falls back to the Kavachio mark */ });
     return () => { cancelled = true; };
   }, [mga]);

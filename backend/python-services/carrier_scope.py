@@ -19,6 +19,7 @@ exists, letting a caller enumerate other carriers' ids.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -175,6 +176,49 @@ def require_carrier_admin(what: str = "do this"):
                     403, f"Only your organisation's carrier admin can {what}.")
         return p
     return _dep
+
+
+# --- three seats, and the approval flow behind a flag -------------------------
+#
+# 29 Sep 2026: the platform has three seats — Kavachio admin, carrier admin,
+# broker admin. Carrier users and broker users (operators) are retired: nobody
+# creates them any more, and one still in the table cannot sign in.
+#
+# The carrier admin's approval flow (broker onboarding requests, Bordereau
+# Setup approval, accepting a carrier user's uploaded contract) existed only
+# for a carrier user's work. It is switched OFF by CARRIER_APPROVALS_ENABLED
+# rather than deleted: with it off every gate takes the admin's own road — the
+# carrier admin's act is the decision — and the approval screens stay hidden.
+
+def carrier_approvals_enabled() -> bool:
+    """CARRIER_APPROVALS_ENABLED (1/true/on/yes). Default OFF."""
+    return os.getenv("CARRIER_APPROVALS_ENABLED", "").strip().lower() in (
+        "1", "true", "on", "yes")
+
+
+def needs_carrier_approval(s, p: Principal) -> bool:
+    """Does this carrier seat's work wait for the carrier admin? Never while
+    the approval flow is off; otherwise only a carrier user's."""
+    return carrier_approvals_enabled() and not is_carrier_admin_seat(s, p)
+
+
+def retired_seat(s, u: AppUser) -> Optional[str]:
+    """Why this login may no longer be used, or None when it may.
+
+    A broker user (operator), or a carrier person who is not their
+    organisation's carrier admin. An organisation with no owner recorded keeps
+    every seat in it, as carrier_seat does — refusing them would lock the
+    company out of itself.
+    """
+    from auth_deps import normalize_role
+    role = normalize_role(u.role)
+    if role == "operator":
+        return ("Broker user accounts have been retired. Your broker admin "
+                "now does this work.")
+    if role == "carrier_admin" and not is_carrier_admin_user(s, u.tenant_id, u.id):
+        return ("Carrier user accounts have been retired. Your carrier admin "
+                "now does this work.")
+    return None
 
 
 

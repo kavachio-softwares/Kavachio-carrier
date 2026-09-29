@@ -155,12 +155,6 @@ export type BrokerUsers = {
 export const getBrokerUsers = (params?: { page?: number; page_size?: number }) =>
   api.get<BrokerUsers>("/broker/users", { params }).then(r => r.data);
 
-export const inviteBrokerOperator = (full_name: string, email: string) =>
-  api.post<BrokerUser>("/broker/users", { full_name, email }).then(r => r.data);
-
-export const resendBrokerInvite = (userId: number) =>
-  api.post(`/broker/users/${userId}/resend-invite`).then(r => r.data);
-
 export const removeBrokerUser = (userId: number) =>
   api.delete(`/broker/users/${userId}`).then(r => r.data);
 

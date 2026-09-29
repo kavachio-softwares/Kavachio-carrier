@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  AlertTriangle, Briefcase, Building2, CheckCircle2, PenLine, User, Users, Zap,
+  AlertTriangle, Briefcase, Building2, CheckCircle2, PenLine, Zap,
 } from "lucide-react";
 import { api } from "../api/client";
 import { InfoTip } from "../components/InfoTip";
@@ -242,15 +242,9 @@ export default function KavachioAdminDashboard() {
           <StatCard title="Carrier Admins" value={nf(st.carrier_admins.total)} icon={Building2}
             info={`Across ${plural(st.carrier_companies, "carrier company", "carrier companies")} — one admin per carrier.`}
             footer={<SignedUp s={st.carrier_admins} />} />
-          <StatCard title="Carrier Users" value={nf(st.carrier_users.total)} icon={Users}
-            info="Added by their carrier admins."
-            footer={<SignedUp s={st.carrier_users} />} />
           <StatCard title="Broker Admins" value={nf(st.broker_admins.total)} icon={Briefcase}
             info={`Across ${plural(st.broker_companies, "broker company", "broker companies")} — one admin per broker.`}
             footer={<SignedUp s={st.broker_admins} />} />
-          <StatCard title="Broker Users" value={nf(st.broker_users.total)} icon={User}
-            info="Added by their broker admins."
-            footer={<SignedUp s={st.broker_users} />} />
         </div>
 
         {/* ===== Bordereau work — one filter row scopes everything below ===== */}

@@ -22,6 +22,9 @@ export type TenantBrand = {
    *  the signed-in person holds (see hooks/useCarrierSeat). `undefined` until
    *  the organisation has been fetched; `null` for one with no owner recorded. */
   owner_user_id?: number | null;
+  /** Whether the carrier admin's approval flow is switched on (server flag
+   *  CARRIER_APPROVALS_ENABLED, off by default). */
+  approvals_enabled?: boolean;
 };
 
 export type AuthState = {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  CheckCircle2, Sparkles, ArrowRight, Building2, Users2, Layers,
+  CheckCircle2, Sparkles, ArrowRight, Building2, Layers,
 } from "lucide-react";
 import { api, getDeduped } from "../api/client";
 import { currentMga, getUser, setTenantBrand } from "../auth";
@@ -250,7 +250,6 @@ export default function Welcome() {
             <FinishPanel
               carrier={tenant?.legal_name || mga}
               onProgramme={() => nav("/programs/new")}
-              onCarrierUsers={() => nav("/users/new")}
               onDashboard={() => nav("/home")}
             />
           </>
@@ -277,14 +276,13 @@ export default function Welcome() {
 }
 
 /** The end of onboarding: what the carrier has set up, then what to do next.
- *  The carrier admin can do all of it themselves, or add carrier users to
- *  share the work. A broker is a relationship with another firm — it exists
+ *  The carrier admin does all of it themselves — carrier users were retired
+ *  on 29 Sep 2026. A broker is a relationship with another firm — it exists
  *  when there is one, not because a wizard demanded a name — so inviting one
  *  is a next step, not a wizard step. */
-function FinishPanel({ carrier, onProgramme, onCarrierUsers, onDashboard }: {
+function FinishPanel({ carrier, onProgramme, onDashboard }: {
   carrier: string;
   onProgramme: () => void;
-  onCarrierUsers: () => void;
   onDashboard: () => void;
 }) {
   const rows: { label: string; value: string }[] = [
@@ -292,15 +290,11 @@ function FinishPanel({ carrier, onProgramme, onCarrierUsers, onDashboard }: {
   ];
 
   // In plain words, for someone who has never seen the product: what they do
-  // next, alone or with the carrier users they add.
+  // next.
   const next: { title: string; body: string }[] = [
     {
       title: "Set up programmes and invite broker companies",
-      body: "You invite each company's broker admin, and they add their own staff.",
-    },
-    {
-      title: "Add carrier users, if you want help",
-      body: "Colleagues who can do the same daily work. Only you add or remove them.",
+      body: "You invite each company's broker admin, who runs it on Kavachio.",
     },
     {
       title: "Send contracts to the brokers",
@@ -363,10 +357,6 @@ function FinishPanel({ carrier, onProgramme, onCarrierUsers, onDashboard }: {
           <Button onClick={onProgramme}>
             <Layers size={14} /> Set up a programme <ArrowRight size={14} />
           </Button>
-          <button onClick={onCarrierUsers}
-            className="inline-flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink">
-            <Users2 size={13} /> Add carrier users
-          </button>
           <button onClick={onDashboard}
             className="inline-flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink">
             <Sparkles size={13} /> Go to Dashboard
