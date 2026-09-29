@@ -2383,6 +2383,24 @@ def init_db():
         _ensure_column(conn, inspector, "activity_events", "actor_role", "VARCHAR")
         _ensure_column(conn, inspector, "activity_events", "actor_broker_party_id", "INTEGER")
 
+        # Migration 29 — the run an arrival became, and the manual-upload
+        # columns. Same columns as migrations/29_arrival_run_link.sql, which
+        # owns them under RLS. The backlog stamp runs only on the boot that
+        # adds run_state, so old accepted files are never auto-run.
+        if inspector.has_table("file_arrival"):
+            _had_run_state = "run_state" in {
+                c["name"] for c in inspector.get_columns("file_arrival")}
+            for _c, _ddl in (("run_state", "VARCHAR"), ("run_landing_id", "BIGINT"),
+                             ("run_export_id", "BIGINT"), ("run_error", "TEXT"),
+                             ("run_at", "TIMESTAMP"), ("channel", "VARCHAR"),
+                             ("program_id", "BIGINT"),
+                             ("submitted_by_user_id", "BIGINT")):
+                _ensure_column(conn, inspector, "file_arrival", _c, _ddl)
+            if not _had_run_state:
+                conn.exec_driver_sql(
+                    "UPDATE file_arrival SET run_state = 'pre_autorun' "
+                    "WHERE run_state IS NULL AND outcome = 'accepted'")
+
         # v4 model: tables shared between the ops ORM and the canonical schema
         # (tenant, party, program, contract, app_user, upload, …) are created
         # by Base.metadata first, so canonical create_all skips them and any

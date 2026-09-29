@@ -76,12 +76,15 @@ export type { RunResp as BrokerRunResult } from "../components/RunResult";
  */
 export const runBrokerBordereau = (
   p: ContractPath, file: File,
-  opts: { checkOnly?: boolean; skipRows?: number } = {},
+  opts: { checkOnly?: boolean; skipRows?: number; confirmDuplicate?: boolean } = {},
 ) => {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("filename", file.name);
   fd.append("check_only", String(!!opts.checkOnly));
+  // Only after the broker has been asked "this exact file was sent before —
+  // send it anyway?" and said yes. Without it that case is a 409 question.
+  if (opts.confirmDuplicate) fd.append("confirm_duplicate", "true");
   fd.append("skip_rows", String(opts.skipRows ?? 0));
   return api.post<RunResp>(`${base(p)}/runs`, fd).then(r => r.data);
 };

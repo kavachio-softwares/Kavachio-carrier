@@ -58,6 +58,9 @@ export default function DirectRun() {
   const [result, setResult] = useState<RunResp | null>(null);
   // The multi-table refusal from /direct/run — shown as a modal, not the banner.
   const [multiTableModal, setMultiTableModal] = useState<string | null>(null);
+  // This exact file was loaded before. The person is right here, so they are
+  // asked — run it anyway, or stop — instead of the file being held for later.
+  const [duplicateMsg, setDuplicateMsg] = useState<string | null>(null);
   const [preview, setPreview] = useState<Sheet | null>(null);
   // Whether this tenant still needs first-time setup (carrier + Bordereau).
   const [needsSetup, setNeedsSetup] = useState(false);
@@ -213,7 +216,7 @@ export default function DirectRun() {
   // Shared submit for both actions. checkOnly=true is the pre-submission
   // self-check: the backend runs every validation but does NOT ingest or record
   // a run; checkOnly=false is the real, committing Generate BDX.
-  async function submit(checkOnly: boolean) {
+  async function submit(checkOnly: boolean, confirmDuplicate = false) {
     if (!file || carrierId === "" || programId === "") {
       setErr("Pick carrier, program and an input file."); return;
     }
@@ -237,6 +240,7 @@ export default function DirectRun() {
       if (scope.brokerPartyId !== "") fd.append("broker_party_id", String(scope.brokerPartyId));
       if (scope.contractId !== "") fd.append("contract_id", String(scope.contractId));
       if (checkOnly) fd.append("check_only", "true");
+      if (confirmDuplicate) fd.append("confirm_duplicate", "true");
       const { data } = await api.post<RunResp>(`/direct/run`, fd);
       setResult(data);
       // Best-effort output preview for the result card. marks=1 so the flagged
@@ -251,6 +255,13 @@ export default function DirectRun() {
       // to React as a child, which throws and blanks the page instead of saying
       // the run was refused.
       const detail = a?.response?.data?.detail;
+      // The one refusal that is a question, not an error.
+      if (detail && typeof detail === "object"
+          && (detail as { code?: string }).code === "duplicate_file") {
+        setDuplicateMsg((detail as { message?: string }).message
+          ?? "This exact file has already been loaded.");
+        return;
+      }
       const msg = typeof detail === "string" && detail.trim()
         ? detail : a?.message ?? "Run failed.";
       if (/multiple tables|more than one table/i.test(msg)) setMultiTableModal(msg);
@@ -325,6 +336,21 @@ export default function DirectRun() {
             Got It
           </button>}>
           <p className="text-sm">{multiTableModal}</p>
+        </Modal>
+
+        <Modal open={duplicateMsg != null}
+          title={<span className="flex items-center gap-2">
+            <AlertTriangle size={17} className="text-amber-500" /> Same File Already Loaded
+          </span>}
+          onClose={() => setDuplicateMsg(null)}
+          footer={<>
+            <button className="btn" onClick={() => setDuplicateMsg(null)}>Don’t run it</button>
+            <button className="btn pri" onClick={() => { setDuplicateMsg(null); submit(false, true); }}>
+              Run it anyway</button>
+          </>}>
+          <p className="text-sm">{duplicateMsg}</p>
+          <p className="text-sm" style={{ marginTop: 8, color: "var(--p-muted)" }}>
+            Running it anyway is recorded on the Files screen, with your name.</p>
         </Modal>
 
 

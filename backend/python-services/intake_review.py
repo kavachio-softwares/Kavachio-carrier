@@ -114,9 +114,8 @@ def release(session, arrival: FileArrival, *, user_id: Optional[int],
                        details={"filename": arrival.filename,
                                 "held_because": arrival.turned_away_reason,
                                 "note": arrival.resolution_note})
-    # NOT DONE HERE, and the same seam land_file leaves alone: handing the file
-    # to the processing pipeline. `bdx_upload_id` stays NULL. A released file is
-    # accepted and waiting, exactly like every other accepted file.
+    # Not run HERE: a released file is accepted and waiting, exactly like every
+    # other accepted file, and intake_autorun runs it (run_state stays NULL).
     return arrival
 
 

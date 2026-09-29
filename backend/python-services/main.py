@@ -195,6 +195,13 @@ sftp_poller.start(app)
 import email_poller  # noqa: E402
 email_poller.start(app)
 
+# Auto-run — an accepted file (email, SFTP, API, or a held file somebody
+# released) is run against its programme's live setup and the result linked
+# back to the arrival. Files accepted before this existed are left alone
+# (migration 29). Opt out with INTAKE_AUTORUN_ENABLED=0.
+import intake_autorun  # noqa: E402
+intake_autorun.start(app)
+
 # Feature 12.3 — the nightly retention sweep. Refused and held files are kept
 # so somebody can review them, not for ever; this is what forgets the bytes
 # and keeps the record.

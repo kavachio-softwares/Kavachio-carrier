@@ -127,7 +127,31 @@ export type Arrival = {
    *  the security scan — an infected file is never handed to anybody. */
   can_download: boolean;
   is_infected: boolean;
+  // ── What became of it once it was run (migration 29) ─────────────────────
+  /** One word for the run, in this screen's vocabulary. null while it has not
+   *  been run — or is being run right now. */
+  run_result: RunResult | null;
+  /** The raw state: null (waiting), running, done, failed, not_run, or
+   *  pre_autorun (arrived before auto-run existed). */
+  run_state: "running" | "done" | "failed" | "not_run" | "pre_autorun" | null;
+  /** Why a run failed, or why it could not be run automatically. */
+  run_error: string | null;
+  run_at: string | null;
+  /** The output the run produced — /uploads/:id/exceptions opens it. */
+  run_export_id: number | null;
+  run_exception_count: number | null;
+  run_rows: number | null;
+  /** The contract the file was checked against. */
+  contract_id: number | null;
+  contract_name: string | null;
+  /** Who uploaded it, for a manual upload. */
+  submitted_by_name: string | null;
 };
+
+/** ingested — every row passed · exceptions — clean rows in, the rest held for
+ *  a decision · not_checked — run, but the contract checks could not run ·
+ *  failed — stopped, nothing written · not_run — could not be run automatically. */
+export type RunResult = "ingested" | "exceptions" | "not_checked" | "failed" | "not_run";
 
 export type ArrivalsResponse = {
   rows: Arrival[];
@@ -204,6 +228,13 @@ export async function releaseArrival(arrivalId: number, note?: string): Promise<
   const { data } = await api.post(`/intake/arrivals/${arrivalId}/release`,
     { note: note || null }, { params: { mga: currentMga() } });
   return data;
+}
+
+/** Run a file that went through again — after a failed run, or one that could
+ *  not be run automatically. It goes back in the auto-run queue. */
+export async function rerunArrival(arrivalId: number): Promise<void> {
+  await api.post(`/intake/arrivals/${arrivalId}/rerun`, null,
+    { params: { mga: currentMga() } });
 }
 
 /** "Ignore this." The row and the reason stay; only the decision is added. */

@@ -33,7 +33,8 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { History, Download } from "lucide-react";
+import { History, Download, AlertTriangle } from "lucide-react";
+import { Modal } from "../components/ui/Modal";
 import { getBrokerContracts, type BrokerContract } from "../api/broker";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import {
@@ -76,6 +77,8 @@ export default function BrokerBordereau() {
   // Which action is running, so the overlay says the right thing.
   const [mode, setMode] = useState<"check" | "run">("run");
   const [err, setErr] = useState<string | null>(null);
+  // "This exact file was sent before" — asked on the spot, not refused.
+  const [duplicateMsg, setDuplicateMsg] = useState<string | null>(null);
   const [result, setResult] = useState<RunResp | null>(null);
   const [preview, setPreview] = useState<Sheet | null>(null);
   const [runs, setRuns] = useState<BrokerRun[] | null>(null);
@@ -166,12 +169,12 @@ export default function BrokerBordereau() {
   // whether this contract is ready to be run.
   useEffect(() => { loadRuns(); }, [loadRuns]);
 
-  async function submit(checkOnly: boolean) {
+  async function submit(checkOnly: boolean, confirmDuplicate = false) {
     if (!file || !path || !urls) return;
     setMode(checkOnly ? "check" : "run");
     setBusy(true); setErr(null); setResult(null); setPreview(null);
     try {
-      const r = await runBrokerBordereau(path, file, { checkOnly });
+      const r = await runBrokerBordereau(path, file, { checkOnly, confirmDuplicate });
       setResult(r);
       // Best-effort preview, exactly as the carrier's screen does it — a
       // missing preview must never make a good run look like a failure.
@@ -182,7 +185,14 @@ export default function BrokerBordereau() {
       // happened to have paged to.
       if (!checkOnly) { setRunsPage(1); loadRuns(); }
     } catch (e) {
-      setErr(errorText(e));
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      if (detail && typeof detail === "object"
+          && (detail as { code?: string }).code === "duplicate_file") {
+        setDuplicateMsg((detail as { message?: string }).message
+          ?? "This exact file has already been sent.");
+      } else {
+        setErr(errorText(e));
+      }
     } finally { setBusy(false); }
   }
 
@@ -194,6 +204,18 @@ export default function BrokerBordereau() {
 
   return (
     <div className="proto">
+      <Modal open={duplicateMsg != null}
+        title={<span className="flex items-center gap-2">
+          <AlertTriangle size={17} className="text-amber-500" /> Same File Already Sent
+        </span>}
+        onClose={() => setDuplicateMsg(null)}
+        footer={<>
+          <button className="btn" onClick={() => setDuplicateMsg(null)}>Don’t send it</button>
+          <button className="btn pri" onClick={() => { setDuplicateMsg(null); submit(false, true); }}>
+            Send it anyway</button>
+        </>}>
+        <p className="text-sm">{duplicateMsg}</p>
+      </Modal>
       {busy && <LoadingOverlay label={mode === "check"
         ? "Checking your bordereau — running every validation. Nothing is sent…"
         : "Processing bordereau — validating and generating output. This can take a few minutes…"} />}

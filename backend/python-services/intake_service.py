@@ -433,9 +433,9 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
     known, the programme is not, and the contract check falls back to "any
     active contract this broker holds".
 
-    NOT DONE HERE: handing an accepted file to the processing pipeline. The file
-    is checked, stored and recorded; `bdx_upload_id` stays NULL until that seam
-    is wired. Doing it here would change how existing uploads behave.
+    NOT DONE HERE: running an accepted file. It is left with run_state NULL and
+    intake_autorun runs it on its own thread, so a slow run never holds up the
+    email or SFTP collector that is calling this.
     """
     sha = hashlib.sha256(file_bytes).hexdigest()
 
@@ -532,6 +532,127 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
                         arrival.public_ref, exc_info=True)
 
     return arrival
+
+
+class DuplicateUpload(Exception):
+    """A hand-uploaded file we have already accepted. Not a refusal: the person
+    is right there, so they are ASKED — "run it anyway?" — instead of the file
+    being held for somebody to find later."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+def land_manual_upload(session, *, tenant_id: int, filename: str, file_bytes: bytes,
+                       user_id: Optional[int], broker_party_id: Optional[int],
+                       program_id: Optional[int], confirm_duplicate: bool = False,
+                       blob_ref: Optional[str] = None,
+                       max_bytes: Optional[int] = None) -> FileArrival:
+    """Record a file uploaded by hand on Process Bordereau as an arrival.
+
+    The same door as email, SFTP and API, with the checks that make sense for a
+    logged-in person who has already picked the programme and contract:
+
+      size · spreadsheet · safe to open · security scan · can open · has rows
+          refused exactly as land_file refuses them (turned_away, reason kept)
+      duplicate
+          raised as DuplicateUpload unless `confirm_duplicate` — the person
+          decides on the spot. A confirmed duplicate is recorded as released,
+          with the reason, so "who loaded this twice?" stays answerable.
+      sender, live contract
+          not asked: the sender is the login, and the contract was chosen on
+          the screen and is checked again by the run itself.
+
+    The caller commits. `run_state` starts as 'running' so the auto-run worker
+    never takes a file somebody is already running by hand.
+    """
+    sha = hashlib.sha256(file_bytes).hexdigest()
+    _counted: list = []
+
+    def rows() -> Optional[int]:
+        if not _counted:
+            _counted.append(safety.with_timeout(
+                lambda: count_rows(filename, file_bytes)))
+        return _counted[0]
+
+    reason: Optional[str] = None
+    for check in (
+        lambda: safety.check_size(file_bytes, max_bytes),
+        lambda: _check_is_spreadsheet(filename, file_bytes),
+        lambda: safety.check_safe_to_open(filename, file_bytes),
+        lambda: safety.scan_for_malware(filename, file_bytes),
+        lambda: _check_can_open(rows()),
+        lambda: _check_has_rows(rows()),
+    ):
+        reason = check()
+        if reason:
+            break
+
+    # "Held" has no meaning for a person who is still on the page: an empty
+    # file is simply refused, with the same words, and they fix it and retry.
+    if reason and reason.startswith("Held — "):
+        reason = reason[len("Held — "):]
+        reason = reason[:1].upper() + reason[1:]
+    duplicate = None if reason else _check_not_duplicate(session, tenant_id, sha, None)
+    if duplicate and not confirm_duplicate:
+        msg = duplicate.replace("Held — ", "", 1).replace(
+            "Loading it again", "Running it again")
+        raise DuplicateUpload(msg[:1].upper() + msg[1:])
+
+    arrival = FileArrival(
+        tenant_id=tenant_id,
+        route_id=None,
+        channel="upload",
+        program_id=program_id,
+        submitted_by_user_id=user_id,
+        matched_broker_party_id=broker_party_id,
+        claimed_sender=f"user:{user_id}" if user_id else None,
+        filename=filename,
+        file_size_bytes=len(file_bytes),
+        row_count=_counted[0] if _counted else None,
+        file_hash_sha256=sha,
+        received_at=datetime.now(timezone.utc),
+        outcome="turned_away" if reason else "accepted",
+        # A confirmed duplicate keeps the reason it would have been held for,
+        # alongside the decision — the same record a released held file has.
+        turned_away_reason=reason or duplicate,
+        public_ref=new_public_ref(),
+        blob_ref=blob_ref,
+        run_state=None if reason else "running",
+    )
+    if duplicate and not reason:
+        arrival.resolution = "released"
+        arrival.resolved_at = arrival.received_at
+        arrival.resolved_by_user_id = user_id
+        arrival.resolution_note = "Run anyway at upload"
+    session.add(arrival)
+    session.flush()
+    return arrival
+
+
+def mark_run(arrival_id: int, *, state: str, landing_id: Optional[int] = None,
+             export_id: Optional[int] = None, error: Optional[str] = None) -> None:
+    """Record how an arrival's run went. Its own session and commit, because it
+    is called from inside a run whose own sessions have long closed — and a
+    failure to record must never turn a finished run into an error."""
+    from db import SessionLocal
+    try:
+        with SessionLocal() as s:
+            a = s.get(FileArrival, arrival_id)
+            if a is None:
+                return
+            a.run_state = state
+            a.run_at = datetime.now(timezone.utc)
+            if landing_id is not None:
+                a.run_landing_id = landing_id
+            if export_id is not None:
+                a.run_export_id = export_id
+            # Cleared on success: an old error must not sit beside a clean run.
+            a.run_error = (error or "")[:2000] or None if state != "done" else None
+            s.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("could not record the run of arrival %s", arrival_id, exc_info=True)
 
 
 def month_counts(session, tenant_id: int) -> dict[int, int]:

@@ -38,6 +38,7 @@ import direct_render as dr
 import rule_scope as _rule_scope_mod
 import missing_columns as mc
 import validation_outcome as vo
+import intake_service as svc_intake
 import storage  # blob storage abstraction (Azure/Azurite; DB-blob fallback)
 from app_routes import _iso_utc, _parse_client_dt
 from db import (
@@ -2025,6 +2026,7 @@ async def _render_landing(
     check_only: bool = False, scope: Optional[dict] = None,
     rule_scope_pipeline_id: Optional[int] = None,
     run_by_user_id: Optional[int] = None,
+    mark_calendar: bool = True,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -2512,6 +2514,10 @@ async def _render_landing(
                 # is a look, not a submission, and must not tick off a deadline.
                 # Best-effort: the calendar is a side-feature and must never break
                 # delivery, so any failure here is swallowed.
+                #
+                # `mark_calendar` is False for an auto-run of a file that already
+                # ticked the calendar the moment it arrived (land_file) — ticking
+                # again would record one file as an original AND a correction.
                 try:
                     # WHICH programme: the one this run was made for. The input
                     # format is shared by every setup with the same layout and
@@ -2530,6 +2536,8 @@ async def _render_landing(
                     if cal_program_id is None and lr.format_id:
                         fmt = s.get(DirectFormat, lr.format_id)
                         cal_program_id = fmt.program_id if fmt else None
+                    if not mark_calendar:
+                        cal_program_id = None
                     if cal_program_id is not None:
                         from submission_calendar_service import mark_received
                         # WHICH period, and WHOSE. The uploaded file's name is
@@ -3877,47 +3885,22 @@ def _assert_run_contract(s, tid: int, program_id: int,
     return c
 
 
-@router.post("/direct/run")
-async def direct_run(
-    mga: str = Form(...),
-    carrier_party_id: int = Form(...),
-    program_id: int = Form(...),
-    file: UploadFile = File(...),
-    filename: Optional[str] = Form(default=None),
-    actor: Optional[str] = Form(default=None),
-    skip_rows: int = Form(default=0),
-    check_only: bool = Form(default=False),
-    # The broker and contract this bordereau is FOR. Both optional: a setup made
-    # before the broker level existed sends neither and behaves exactly as it
-    # always has. When they ARE sent, they pick the output template the four
-    # levels agreed on — see plan sections 18/19.
-    #
-    # `contract_id` also decides WHOSE TERMS the file is measured against. A
-    # broker with two live contracts has two different sets of terms, and which
-    # of them governs a given bordereau is a question only the person holding
-    # the file can answer. It used to be dropped the moment a setup was running
-    # — the setup's own pinned contract governed every run — so a bordereau
-    # written under the second contract was silently checked against the first.
-    broker_party_id: Optional[int] = Form(default=None),
-    contract_id: Optional[int] = Form(default=None),
-    principal: Principal = Depends(current_principal),
-):
-    """DATA step: ops uploads a real data file for a carrier + program. Uses the
-    active setup (DirectFormat) for that pair — no mapping review needed. If the
-    setup has a supplementary data file, its sheets are captured alongside the
-    BDX automatically (no per-run upload).
+async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
+                       file_bytes: bytes, source_filename: Optional[str],
+                       skip_rows: int = 0, broker_party_id: Optional[int] = None,
+                       contract_id: Optional[int] = None) -> dict:
+    """Everything a run does BEFORE validation: read the workbook, find the live
+    setup, refuse what cannot run, and write the landing record.
 
-    ``check_only`` is the broker pre-submission self-check (V-5): run every
-    validation and return the full row/field fix-list WITHOUT ingesting to the
-    data model, creating an admin task, or recording a run — a dry run to answer
-    "will this pass before I send it?"."""
-    file_bytes = await file.read()
+    Shared by /direct/run (a person uploading) and intake_autorun (a file that
+    arrived by email, SFTP or API), so both go through exactly one path. Every
+    refusal here is a real HTTPException raised before any output exists.
+    """
     sheets_dict = await run_in_threadpool(read_excel_all_sheets, file_bytes, skip_rows)
     if not sheets_dict:
         raise HTTPException(400, "workbook has no readable sheets")
 
     with SessionLocal() as s:
-        tid = resolve_tenant_id(s, principal, mga)
         if contract_id:
             _assert_run_contract(s, tid, program_id, broker_party_id, contract_id)
         # Resolve the active PIPELINE for this carrier+program — that's the
@@ -4014,7 +3997,7 @@ async def direct_run(
                 raise HTTPException(400, conflict)
 
         rec = LandingRecord(
-            tenant_id=tid, format_id=fmt.id, source_filename=file.filename,
+            tenant_id=tid, format_id=fmt.id, source_filename=source_filename,
             fingerprint=fp, data=landing, row_count=landing["row_count"],
             datamodel_status="pending")
         s.add(rec)
@@ -4023,24 +4006,142 @@ async def direct_run(
         landing_id = rec.id
         pipeline_id = pipe.id if pipe else None
 
+    return {"landing_id": landing_id, "pipeline_id": pipeline_id,
+            "contract_id": contract_id, "eff_contract_id": eff_contract_id,
+            "run_scope": run_scope, "drift": drift, "supp_stats": supp_stats}
+
+
+async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Optional[str],
+                           check_only: bool = False,
+                           run_by_user_id: Optional[int] = None,
+                           mark_calendar: bool = True) -> dict:
+    """Validation + output for a prepared run. With a pipeline, governing
+    contracts come from it (contract_id=None); on the fallback path the legacy
+    fallback contract is kept."""
+    governing = _run_contract_for_render(prep["contract_id"], prep["pipeline_id"],
+                                         prep["eff_contract_id"])
+    result = await _render_landing(
+        prep["landing_id"], governing,
+        filename, actor, {}, auto_ingest=not check_only,
+        pipeline_id=prep["pipeline_id"], check_only=check_only,
+        scope=prep["run_scope"], run_by_user_id=run_by_user_id,
+        mark_calendar=mark_calendar)
+    result["format_drift"] = prep["drift"]
+    if prep["supp_stats"] is not None:
+        result["supplement"] = prep["supp_stats"]
+    return result
+
+
+def _record_manual_arrival(tid: int, principal: Principal, file_bytes: bytes,
+                           filename: str, broker_party_id: Optional[int],
+                           program_id: int, confirm_duplicate: bool) -> Optional[int]:
+    """Land a hand-uploaded file as an arrival (channel 'upload') and return its
+    id. A refused file is still recorded, then refused here with its reason; a
+    duplicate the person has not confirmed is a 409 they answer on the spot."""
+    blob_ref = None
+    try:
+        blob_ref, _ = storage.store_or_keep("intake", tid, filename, file_bytes)
+    except Exception as e:  # noqa: BLE001 — a missing copy never blocks a run
+        log.warning("could not keep a copy of manual upload %s: %s", filename, e)
+    with SessionLocal() as s:
+        try:
+            arrival = svc_intake.land_manual_upload(
+                s, tenant_id=tid, filename=filename, file_bytes=file_bytes,
+                user_id=principal.user_id, broker_party_id=broker_party_id,
+                program_id=program_id, confirm_duplicate=confirm_duplicate,
+                blob_ref=blob_ref)
+        except svc_intake.DuplicateUpload as d:
+            raise HTTPException(409, {"code": "duplicate_file", "message": d.message})
+        s.commit()
+        if arrival.outcome != "accepted":
+            raise HTTPException(400, arrival.turned_away_reason
+                                or "The file did not pass the upload checks.")
+        return arrival.id
+
+
+@router.post("/direct/run")
+async def direct_run(
+    mga: str = Form(...),
+    carrier_party_id: int = Form(...),
+    program_id: int = Form(...),
+    file: UploadFile = File(...),
+    filename: Optional[str] = Form(default=None),
+    actor: Optional[str] = Form(default=None),
+    skip_rows: int = Form(default=0),
+    check_only: bool = Form(default=False),
+    # The broker and contract this bordereau is FOR. Both optional: a setup made
+    # before the broker level existed sends neither and behaves exactly as it
+    # always has. When they ARE sent, they pick the output template the four
+    # levels agreed on — see plan sections 18/19.
+    #
+    # `contract_id` also decides WHOSE TERMS the file is measured against. A
+    # broker with two live contracts has two different sets of terms, and which
+    # of them governs a given bordereau is a question only the person holding
+    # the file can answer. It used to be dropped the moment a setup was running
+    # — the setup's own pinned contract governed every run — so a bordereau
+    # written under the second contract was silently checked against the first.
+    broker_party_id: Optional[int] = Form(default=None),
+    contract_id: Optional[int] = Form(default=None),
+    # Set when the person has been told this exact file was loaded before and
+    # chose to run it anyway. Without it a duplicate comes back as a 409.
+    confirm_duplicate: bool = Form(default=False),
+    principal: Principal = Depends(current_principal),
+):
+    """DATA step: ops uploads a real data file for a carrier + program. Uses the
+    active setup (DirectFormat) for that pair — no mapping review needed. If the
+    setup has a supplementary data file, its sheets are captured alongside the
+    BDX automatically (no per-run upload).
+
+    ``check_only`` is the broker pre-submission self-check (V-5): run every
+    validation and return the full row/field fix-list WITHOUT ingesting to the
+    data model, creating an admin task, or recording a run — a dry run to answer
+    "will this pass before I send it?"."""
+    file_bytes = await file.read()
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+
+    # A real upload is an ARRIVAL too — the same door as email, SFTP and API, so
+    # the Files screen shows every file however it came in. A self-check is a
+    # dry run and is not a file arriving, so it is never recorded.
+    arrival_id = None
+    if not check_only:
+        arrival_id = _record_manual_arrival(
+            tid, principal, file_bytes, file.filename or filename or "upload.xlsx",
+            broker_party_id, program_id, confirm_duplicate)
+
+    try:
+        prep = await _prepare_run(
+            tid, carrier_party_id=carrier_party_id, program_id=program_id,
+            file_bytes=file_bytes, source_filename=file.filename,
+            skip_rows=skip_rows, broker_party_id=broker_party_id,
+            contract_id=contract_id)
+    except HTTPException as e:
+        if arrival_id:
+            svc_intake.mark_run(arrival_id, state="failed", error=str(e.detail))
+        raise
+
     # Validation + output generation can exceed the Azure ingress ~4-min idle
     # timeout, so run it under a heartbeat stream (whitespace bytes keep the
     # connection alive; the JSON result is the final chunk). Everything above
     # this line still returns real 4xx (no sheets / no active pipeline); a
     # failure past here arrives in the body and the frontend interceptor
-    # rethrows it. With a pipeline, governing contracts come from it (pass
-    # contract_id=None); on the fallback path keep the legacy fallback contract.
+    # rethrows it.
     async def _render():
-        governing = _run_contract_for_render(contract_id, pipeline_id,
-                                             eff_contract_id)
-        result = await _render_landing(
-            landing_id, governing,
-            filename, actor or mga, {}, auto_ingest=not check_only,
-            pipeline_id=pipeline_id, check_only=check_only, scope=run_scope,
-            run_by_user_id=principal.user_id)
-        result["format_drift"] = drift
-        if supp_stats is not None:
-            result["supplement"] = supp_stats
+        try:
+            result = await _render_prepared(prep, filename=filename, actor=actor or mga,
+                                            check_only=check_only,
+                                            run_by_user_id=principal.user_id)
+        except Exception as e:
+            if arrival_id:
+                svc_intake.mark_run(arrival_id, state="failed",
+                                    error=str(getattr(e, "detail", None) or e),
+                                    landing_id=prep["landing_id"])
+            raise
+        if arrival_id:
+            svc_intake.mark_run(arrival_id, state="done",
+                                landing_id=prep["landing_id"],
+                                export_id=result.get("export_id"))
+            result["arrival_id"] = arrival_id
         return result
 
     return heartbeat_stream_response(_render())

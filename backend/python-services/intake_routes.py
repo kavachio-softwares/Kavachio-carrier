@@ -412,6 +412,72 @@ def patch_route(route_id: int, body: RoutePatch, mga: Optional[str] = None,
                            svc.month_counts(s, route.tenant_id).get(route.id, 0))
 
 
+# What an arrival that has not been run reports. Keys match _run_facts.
+_NO_RUN = {"run_result": None, "run_state": None, "run_error": None, "run_at": None,
+           "run_export_id": None, "run_exception_count": None, "run_rows": None,
+           "contract_id": None, "contract_name": None, "submitted_by_name": None}
+
+
+def _run_result(state: Optional[str], export_status: Optional[str],
+                exception_count: Optional[int]) -> Optional[str]:
+    """One word for what the run did, in the Files screen's vocabulary:
+    ingested · exceptions · not_checked · failed · not_run. None while it has
+    not been run (or is being run right now)."""
+    if state == "failed":
+        return "failed"
+    if state == "not_run":
+        return "not_run"
+    if state != "done":
+        return None
+    if export_status == "not_validated":
+        return "not_checked"
+    if export_status == "clean" or not exception_count:
+        return "ingested"
+    return "exceptions"
+
+
+def _run_facts(s, rows) -> dict:
+    """{arrival_id: run facts} for a page of arrivals — three small queries,
+    never the export's multi-MB payload columns."""
+    from db import Contract, OutputExport
+    exp_ids = {a.run_export_id for a in rows if a.run_export_id}
+    exports = {}
+    if exp_ids:
+        exports = {e.id: e for e in s.query(
+            OutputExport.id, OutputExport.status, OutputExport.exception_count,
+            OutputExport.policy_count, OutputExport.contract_id,
+        ).filter(OutputExport.id.in_(exp_ids)).all()}
+    con_ids = {e.contract_id for e in exports.values() if e.contract_id}
+    contracts = {}
+    if con_ids:
+        contracts = {c.id: (c.name or c.filename or f"Contract #{c.id}")
+                     for c in s.query(Contract.id, Contract.name, Contract.filename)
+                     .filter(Contract.id.in_(con_ids)).all()}
+    user_ids = {a.submitted_by_user_id for a in rows if a.submitted_by_user_id}
+    users = {}
+    if user_ids:
+        users = {u.id: (u.full_name or u.email)
+                 for u in s.query(AppUser).filter(AppUser.id.in_(user_ids)).all()}
+    out = {}
+    for a in rows:
+        e = exports.get(a.run_export_id)
+        cid = e.contract_id if e else None
+        out[a.id] = {
+            "run_result": _run_result(a.run_state, e.status if e else None,
+                                      e.exception_count if e else None),
+            "run_state": a.run_state,
+            "run_error": a.run_error,
+            "run_at": _iso_utc(a.run_at),
+            "run_export_id": a.run_export_id,
+            "run_exception_count": e.exception_count if e else None,
+            "run_rows": e.policy_count if e else None,
+            "contract_id": cid,
+            "contract_name": contracts.get(cid),
+            "submitted_by_name": users.get(a.submitted_by_user_id),
+        }
+    return out
+
+
 @router.get("/arrivals")
 def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=500),
                   principal: Principal = Depends(current_principal)):
@@ -436,14 +502,18 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
         # and the screen shows that honestly rather than guessing.
         prog_names = {p.id: p.name for p in
                       s.query(Program).filter(Program.tenant_id == tid).all()}
+        runs = _run_facts(s, rows)
 
         out = []
         for a in rows:
             route = routes.get(a.route_id)
+            # A manual upload has no route; it carries its own channel and
+            # programme (migration 29).
+            prog_id = (getattr(route, "program_id", None) if route else None) or a.program_id
             out.append({
                 "arrival_id": a.id,
                 "filename": a.filename,
-                "channel": route.channel if route else None,
+                "channel": route.channel if route else a.channel,
                 "route_id": a.route_id,
                 "route_address": route.address if route else None,
                 "broker_party_id": a.matched_broker_party_id,
@@ -456,9 +526,8 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
                 "file_hash_sha256": a.file_hash_sha256,
                 # The programme the route is pinned to, so the screen does not
                 # have to join arrivals to routes itself.
-                "program_id": getattr(route, "program_id", None) if route else None,
-                "program_name": prog_names.get(
-                    getattr(route, "program_id", None)) if route else None,
+                "program_id": prog_id,
+                "program_name": prog_names.get(prog_id),
                 "received_at": _iso_utc(a.received_at),
                 "outcome": a.outcome,
                 "turned_away_reason": a.turned_away_reason,
@@ -481,6 +550,8 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
                     a.blob_ref and a.bytes_purged_at is None
                     and not review.is_infected(a)),
                 "is_infected": review.is_infected(a),
+                # ── migration 29 — what became of it once it was run ──
+                **runs.get(a.id, _NO_RUN),
             })
         counts = {
             "total": len(out),
@@ -513,6 +584,34 @@ def _arrival_for_review(s, arrival_id: int, principal: Principal) -> FileArrival
     return arrival
 
 
+@router.post("/arrivals/{arrival_id}/rerun")
+def rerun_arrival(arrival_id: int,
+                  principal: Principal = Depends(require_role("carrier_admin"))):
+    """Run a file that went through again — after its run failed, after it could
+    not be run automatically, or when it arrived before auto-run existed.
+
+    It does not run here: it goes back in the auto-run queue (run_state NULL),
+    so a retry takes exactly the path the first run took. The failed attempt's
+    landing record stays; the new run gets its own."""
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        if arrival.outcome != "accepted":
+            raise HTTPException(400, "Only a file that went through can be run.")
+        if arrival.run_state not in ("failed", "not_run", "pre_autorun"):
+            raise HTTPException(
+                400, "This file is being run now." if arrival.run_state == "running"
+                else "This file has already been run.")
+        arrival.run_state = None
+        arrival.run_error = None
+        s.commit()
+        _log(_tenant_name(s, arrival.tenant_id) or "", _actor(principal),
+             "intake_arrival_rerun", target=str(arrival.id),
+             details={"filename": arrival.filename})
+    import intake_autorun
+    intake_autorun.wake()
+    return {"arrival_id": arrival_id, "run_state": None}
+
+
 @router.post("/arrivals/{arrival_id}/release")
 def release_arrival(arrival_id: int, body: ReviewDecision = ReviewDecision(),
                     principal: Principal = Depends(require_role("carrier_admin"))):
@@ -524,6 +623,9 @@ def release_arrival(arrival_id: int, body: ReviewDecision = ReviewDecision(),
         except review.ReviewError as exc:
             raise HTTPException(400, str(exc))
         s.commit()
+        # Released means "load it": auto-run takes it now rather than next tick.
+        import intake_autorun
+        intake_autorun.wake()
         return {"arrival_id": arrival.id, "outcome": arrival.outcome,
                 "resolution": arrival.resolution,
                 "resolved_at": _iso_utc(arrival.resolved_at)}

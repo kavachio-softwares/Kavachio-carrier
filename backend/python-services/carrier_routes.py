@@ -505,6 +505,9 @@ async def contract_bordereau_run(
     # whole point of giving the broker the lane — they find out what is wrong
     # before the carrier does, not after.
     check_only: bool = Form(default=False),
+    # The broker was told this exact file was loaded before and chose to send
+    # it anyway. Without it a duplicate comes back as a 409 question.
+    confirm_duplicate: bool = Form(default=False),
     scope: CarrierScope = Depends(contract_scope),
 ):
     """Step 6 — submit a bordereau against this contract."""
@@ -524,6 +527,9 @@ async def contract_bordereau_run(
         check_only=check_only,
         broker_party_id=scope.broker_party_id,
         contract_id=scope.contract_id,
+        # Passed explicitly: called as a function, direct_run's own default is
+        # the Form() marker, which is truthy.
+        confirm_duplicate=confirm_duplicate,
         principal=scope.acting,
     )
 

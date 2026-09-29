@@ -121,6 +121,18 @@ class FileArrival(Base):
     # the file: "it arrived on the 5th and was refused because X" stays
     # answerable long after the file itself is gone.
     bytes_purged_at = Column(DateTime(timezone=True), nullable=True)
+    # ── Migration 29 — the run this arrival became ──────────────────────────
+    # NULL run_state on an accepted row is "not picked up yet": intake_autorun
+    # takes it. See migrations/29_arrival_run_link.sql for every value.
+    run_state = Column(Text, nullable=True)
+    run_landing_id = Column(BigInteger, nullable=True)
+    run_export_id = Column(BigInteger, nullable=True)
+    run_error = Column(Text, nullable=True)
+    run_at = Column(DateTime(timezone=True), nullable=True)
+    # A manual upload has no route, so it carries what a route would have said.
+    channel = Column(Text, nullable=True)
+    program_id = Column(BigInteger, nullable=True)
+    submitted_by_user_id = Column(BigInteger, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
 

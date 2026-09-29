@@ -257,7 +257,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
           read across. */}
       <div className="card">
         <div className="card-h">
-          <h3>Ways in</h3>
+          <h3>Ingestion options</h3>
           <span className="sub">grouped by how the file gets here</span>
         </div>
 

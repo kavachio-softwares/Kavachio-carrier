@@ -25,8 +25,9 @@
 // every link in an email, still lands somewhere sensible.
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Server } from "lucide-react";
-import { watchArrivals } from "../api/intake";
+import { Server, Inbox } from "lucide-react";
+import { watchArrivals, type Arrival } from "../api/intake";
+import { IngestionPanel, needsYou } from "../components/IngestionPanel";
 import InboxTab from "./FilesReceived";
 import WaysInTab, { AddRouteModal } from "./FilesArrive";
 
@@ -43,6 +44,19 @@ export default function Files() {
       return next;
     }, { replace: true });
   }, [setParams]);
+  // The Ingestion panel — what became of every file that was run. Same URL
+  // rule as the ways-in panel, so a link can open it (?panel=ingestion).
+  const ingestionOpen = params.get("panel") === "ingestion";
+  const setIngestion = useCallback((open: boolean) => {
+    setParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (open) next.set("panel", "ingestion"); else next.delete("panel");
+      return next;
+    }, { replace: true });
+  }, [setParams]);
+  // The rows the table fetched, shared with the panel — one fetch, one truth.
+  const [arrivals, setArrivals] = useState<Arrival[]>([]);
+  const needYou = arrivals.filter(needsYou).length;
 
   const [adding, setAdding] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -83,6 +97,12 @@ export default function Files() {
   // listens on the window too, so one press would close the dialog and the
   // panel under it, and Escape should only ever close the innermost thing.
   useEffect(() => {
+    if (!ingestionOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setIngestion(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [ingestionOpen, setIngestion]);
+  useEffect(() => {
     if (!panelOpen || dialogOpen || adding) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setPanel(false); };
     window.addEventListener("keydown", onKey);
@@ -111,12 +131,19 @@ export default function Files() {
               onClick={() => setPanel(true)}
               title="Where your brokers send their spreadsheets">
               <Server size={14} aria-hidden="true" />
-              Ways in
+              Ingestion options
               {summary && <span className="pcount">{summary.routes}</span>}
               {/* A way in that looks live and accepts nothing is the only thing
                   in here that ever needs somebody. Saying so on the closed
                   button is what makes not opening it a safe default. */}
               {!!summary?.needsAttention && <span className="pdot" aria-hidden="true" />}
+            </button>
+            <button className="btn" aria-expanded={ingestionOpen}
+              onClick={() => setIngestion(true)}
+              title="What happened to every file once it was run">
+              <Inbox size={14} aria-hidden="true" />
+              Ingestion panel
+              {needYou > 0 && <span className="pcount">{needYou}</span>}
             </button>
             <button className="btn" onClick={() => setRefreshKey(k => k + 1)}>Refresh</button>
             {/* Opens the dialog and nothing else. It used to open the panel too,
@@ -127,18 +154,22 @@ export default function Files() {
         </div>
 
         {/* The queue. Unchanged by the merge — this is the screen. */}
-        <InboxTab active refreshKey={refreshKey} liveTick={liveTick} />
+        <InboxTab active refreshKey={refreshKey} liveTick={liveTick} onRows={setArrivals} />
       </section>
+
+      <IngestionPanel open={ingestionOpen} rows={arrivals}
+        onClose={() => setIngestion(false)}
+        onChanged={() => setRefreshKey(k => k + 1)} />
 
       {/* ── Ways in ──
           Mounted whether or not it is open: the button above reads its summary,
           and reopening should not re-fetch a list you were halfway through. */}
       <div className={`scrim${panelOpen ? " on" : ""}`} onClick={() => setPanel(false)} />
       <aside id="ways-panel" className={`drawer wide${panelOpen ? " on" : ""}`}
-        role="dialog" aria-modal="true" aria-hidden={!panelOpen} aria-label="Ways in">
+        role="dialog" aria-modal="true" aria-hidden={!panelOpen} aria-label="Ingestion options">
         <div className="drawer-h">
           <div style={{ minWidth: 0 }}>
-            <h4>Ways in</h4>
+            <h4>Ingestion options</h4>
             <div className="ref" style={{ fontFamily: "inherit", fontSize: 12 }}>
               Where your brokers send their spreadsheets — set up once when a broker
               is onboarded, then rarely touched.
