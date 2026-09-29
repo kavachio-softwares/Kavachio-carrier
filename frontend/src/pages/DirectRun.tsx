@@ -4,6 +4,7 @@ import { History, AlertTriangle, Download } from "lucide-react";
 import { api, downloadFile, downloadErrorText } from "../api/client";
 import { LoadingOverlay } from "../components/Busy";
 import { Dropzone } from "../components/Dropzone";
+import { PeriodPicker } from "../components/PeriodPicker";
 import { Modal } from "../components/ui/Modal";
 import { currentMga, isTenantAdmin } from "../auth";
 import { type Sheet } from "../components/OutputRows";
@@ -11,6 +12,7 @@ import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
 import { useBrokerContractScope } from "../components/BrokerContractScope";
 import { resolveOutputTemplate, type ResolveResult } from "../api/outputTemplate";
 import { contractLabel } from "../utils/contractLabel";
+import { type BordereauPeriod } from "../api/brokerBordereau";
 import { InfoTip } from "../components/InfoTip";
 
 type Party = { id: number; legal_name: string; is_active?: boolean };
@@ -73,6 +75,26 @@ export default function DirectRun() {
   // than as a failure after the file has been uploaded.
   const [tpl, setTpl] = useState<ResolveResult | null>(null);
   const [tplLoading, setTplLoading] = useState(false);
+
+  // The reporting period this run is FOR — the same real calendar rows the
+  // broker's own Process Bordereau picks from (GET /direct/periods mirrors
+  // carrier_routes.contract_bordereau_periods). Only meaningful once a broker
+  // is picked — a period is always somebody's — and, like the broker/contract
+  // themselves, optional here: this route also serves runs made with neither,
+  // which keep behaving exactly as before.
+  const [periods, setPeriods] = useState<BordereauPeriod[] | null>(null);
+  const [period, setPeriod] = useState<string>("");
+  useEffect(() => {
+    setPeriod("");
+    if (programId === "" || scope.brokerPartyId === "") { setPeriods(null); return; }
+    api.get<{ periods: BordereauPeriod[] }>("/direct/periods", { params: {
+      mga: currentMga(), program_id: programId, broker_party_id: scope.brokerPartyId,
+    } }).then(r => {
+      setPeriods(r.data.periods);
+      const open = r.data.periods.find(p => !p.processed);
+      if (open) setPeriod(p => p || open.period);
+    }).catch(() => setPeriods([]));
+  }, [programId, scope.brokerPartyId]);
 
   /** The Bordereau Setup screen, opened on the selection made here. */
   function setupHref(): string {
@@ -239,6 +261,7 @@ export default function DirectRun() {
       // way it always has — from the programme's active setup.
       if (scope.brokerPartyId !== "") fd.append("broker_party_id", String(scope.brokerPartyId));
       if (scope.contractId !== "") fd.append("contract_id", String(scope.contractId));
+      if (period) fd.append("period", period);
       if (checkOnly) fd.append("check_only", "true");
       if (confirmDuplicate) fd.append("confirm_duplicate", "true");
       const { data } = await api.post<RunResp>(`/direct/run`, fd);
@@ -458,6 +481,19 @@ export default function DirectRun() {
                   )}
                 </div>
               </div>
+
+              {/* Which real calendar period this run is FOR, once a broker is
+                  picked — same idea as the contract picker above it: a real
+                  row from the calendar, never a typed month, so this run and
+                  the broker's own Bordereau Calendar can never disagree on
+                  which period it satisfied. */}
+              {scope.brokerPartyId !== "" && (
+                <div className="field">
+                  <label>Reporting Period</label>
+                  <PeriodPicker value={period} onChange={setPeriod} periods={periods}
+                    emptyLabel="No periods set up for this broker yet" />
+                </div>
+              )}
 
               {/* What the pick decides, said once and only where it is a
                   question. The terms are what the file is checked against, so

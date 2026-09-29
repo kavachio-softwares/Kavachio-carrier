@@ -57,6 +57,9 @@ const GROUPS: {
       // directly under the dashboards rather than below the reference screens.
       // BOTH broker seats see it: an admin runs the file as readily as an
       // operator does (ROUTE_ACCESS says so, and canAccessPath follows).
+      // Sending to the carrier is no longer a separate step: a real
+      // submission here (not a self-check) both processes the file AND sends
+      // it on — see RunResult's "Sent to the carrier" note.
       { to: "/broker/bordereau", label: "Process Bordereau", icon: Zap },
       { to: "/broker/contracts", label: "My Contracts", icon: FileCheck },
       // Admin-only inside the broker's own group: an operator is a seat in

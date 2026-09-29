@@ -323,6 +323,39 @@ def overdue_reminder_email_html(name: str | None, program_name: str, period: str
 </body></html>"""
 
 
+def bordereau_sent_email_html(program_name: str, period: str, due_date: str | None,
+                              sent_date: str) -> str:
+    """A broker sending a processed bordereau on to the carrier. The file
+    itself is the attachment; this is just the covering note.
+
+    Deliberately says nothing about on-time/late — that judgement belongs on
+    the carrier's own calendar and to the recipient reading the due date
+    themselves, not to a tone in the covering email.
+    """
+    due_txt = f" It was due on <b>{due_date}</b>." if due_date else ""
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
+        {program_name} — {period} bordereau
+      </h1>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        The <b>{period}</b> bordereau for <b>{program_name}</b> is attached, sent on
+        <b>{sent_date}</b>.{due_txt}
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        Sent from your broker on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
 def plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 

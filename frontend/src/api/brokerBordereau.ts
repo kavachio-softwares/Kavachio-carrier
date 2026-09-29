@@ -64,6 +64,22 @@ export type BordereauReadiness = {
 export const getBordereauReadiness = (p: ContractPath) =>
   api.get<BordereauReadiness>(`${base(p)}/bordereau`).then(r => r.data);
 
+/** One reporting period this contract's calendar actually expects — the same
+ *  rows the carrier's Bordereau Calendar and the broker's own Send Bordereau
+ *  screen read. Picking one of these (never typing a month by hand) is what
+ *  keeps all three screens pointed at exactly the same record. */
+export type BordereauPeriod = {
+  expected_id: number;
+  period: string;               // '2026-08' | '2026-Q3' | …, the programme's own label
+  due_date: string | null;
+  status: string;
+  processed: boolean;           // already has a BDX generated for it
+};
+
+export const getContractPeriods = (p: ContractPath) =>
+  api.get<{ periods: BordereauPeriod[] }>(`${base(p)}/periods`)
+    .then(r => r.data.periods);
+
 /** The run payload is IDENTICAL to the carrier's — same handler, same fields —
  *  so it is described once, next to the component that renders it. */
 export type { RunResp as BrokerRunResult } from "../components/RunResult";
@@ -76,7 +92,7 @@ export type { RunResp as BrokerRunResult } from "../components/RunResult";
  */
 export const runBrokerBordereau = (
   p: ContractPath, file: File,
-  opts: { checkOnly?: boolean; skipRows?: number; confirmDuplicate?: boolean } = {},
+  opts: { checkOnly?: boolean; skipRows?: number; confirmDuplicate?: boolean; period?: string } = {},
 ) => {
   const fd = new FormData();
   fd.append("file", file);
@@ -86,6 +102,10 @@ export const runBrokerBordereau = (
   // send it anyway?" and said yes. Without it that case is a 409 question.
   if (opts.confirmDuplicate) fd.append("confirm_duplicate", "true");
   fd.append("skip_rows", String(opts.skipRows ?? 0));
+  // Required by the server on a real submission (not a self-check) — see
+  // carrier_routes.contract_bordereau_run. Sent as the row's own period
+  // label, picked from getContractPeriods, never typed free-hand.
+  if (opts.period) fd.append("period", opts.period);
   return api.post<RunResp>(`${base(p)}/runs`, fd).then(r => r.data);
 };
 

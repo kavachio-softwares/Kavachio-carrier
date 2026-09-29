@@ -406,3 +406,48 @@ def derive_status(
     if today == due_date:
         return "due_today"
     return "overdue"
+
+
+# One of these five, for the broker's Send Bordereau screen — see
+# submission_calendar_service.broker_bordereau_rows.
+SEND_STATUSES = ("not_due", "not_arrived", "ready_to_send", "on_time", "late")
+
+
+def send_status(
+    due_date: date,
+    today: date,
+    processed_on: Optional[date] = None,
+    sent_on: Optional[date] = None,
+) -> str:
+    """The broker's own view of one period: has it been PROCESSED (a BDX was
+    generated — `processed_on` is ExpectedSubmission.received_at) and has it
+    been SENT (emailed to the carrier — `sent_on` is the released_at of the
+    version that satisfied it)? These are deliberately two different timestamps
+    on two different acts; conflating them was the bug this function exists to
+    avoid.
+
+    not_due       — due_date has not arrived yet. Nothing to do (folds
+                    scheduled/due_soon/due_today from derive_status into one
+                    bucket: a broker chasing their own send list does not need
+                    the three-stage early-warning ladder a carrier does, so
+                    there is no soon_window_days parameter here).
+    not_arrived   — due_date has passed and nothing has been processed at all.
+                    NEVER "processed but not sent" — see ready_to_send.
+    ready_to_send — processed (a BDX exists for this period) but not yet sent.
+                    The row the Send button is for.
+    on_time       — sent, and sent on or before due_date.
+    late          — sent, but after due_date.
+
+    `sent_on` is only meaningful once `processed_on` is set (you cannot send
+    what was never generated) — a caller that somehow has a release date with
+    no receipt date still reads correctly here (sent_on wins), but that state
+    should not occur in practice: record_release refuses when nothing has been
+    submitted yet.
+    """
+    if sent_on is not None:
+        return "on_time" if sent_on <= due_date else "late"
+    if processed_on is not None:
+        return "ready_to_send"
+    if today < due_date:
+        return "not_due"
+    return "not_arrived"

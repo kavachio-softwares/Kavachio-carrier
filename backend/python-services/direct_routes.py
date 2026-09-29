@@ -2027,6 +2027,7 @@ async def _render_landing(
     rule_scope_pipeline_id: Optional[int] = None,
     run_by_user_id: Optional[int] = None,
     mark_calendar: bool = True,
+    period: Optional[str] = None,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -2498,6 +2499,13 @@ async def _render_landing(
         s.commit()
         s.refresh(out)
         export_id = out.id
+        # Set below when this run both satisfies a period AND is a broker's own
+        # (out.broker_party_id set) — the outcome of the auto-send, surfaced on
+        # the response so the screen can say what happened without a second
+        # page or a second click. None means "not applicable" (no broker on
+        # this run, or mark_calendar=False — see received's own comment), never
+        # "failed silently".
+        sent_to_carrier = None
 
         # Link the uploaded file (landing) to the output it produced, so the run
         # history can show "uploaded X → generated Y (N exceptions)". A pre-submission
@@ -2518,6 +2526,13 @@ async def _render_landing(
                 # `mark_calendar` is False for an auto-run of a file that already
                 # ticked the calendar the moment it arrived (land_file) — ticking
                 # again would record one file as an original AND a correction.
+                #
+                # `received` is initialized before the try: `cal_program_id is
+                # None` (no programme attributed, or mark_calendar=False) skips
+                # the mark_received call entirely without raising, which would
+                # otherwise leave `received` undefined by the time the
+                # auto-send check below reads it.
+                received = None
                 try:
                     # WHICH programme: the one this run was made for. The input
                     # format is shared by every setup with the same layout and
@@ -2540,20 +2555,61 @@ async def _render_landing(
                         cal_program_id = None
                     if cal_program_id is not None:
                         from submission_calendar_service import mark_received
-                        # WHICH period, and WHOSE. The uploaded file's name is
-                        # the only statement of the period we have here, and it
-                        # is a better one than "whatever is oldest and open" —
-                        # a July file sent in September satisfies July. When the
-                        # name says nothing, mark_received falls back to the
-                        # oldest open period and records that it guessed.
-                        if mark_received(
-                                s, cal_program_id, export_id=export_id,
-                                broker_party_id=out.broker_party_id,
-                                source_filename=lr.source_filename) is not None:
+                        # WHICH period, and WHOSE. An explicit `period` (picked
+                        # from the real calendar — see /direct/periods and
+                        # carrier_routes.contract_bordereau_periods) is always
+                        # trusted over a guess. When none is given, the
+                        # uploaded file's name is the next best statement of
+                        # the period — a July file sent in September satisfies
+                        # July — and when the name says nothing either,
+                        # mark_received falls back to the oldest open period
+                        # and records that it guessed.
+                        received = mark_received(
+                            s, cal_program_id, export_id=export_id,
+                            broker_party_id=out.broker_party_id,
+                            source_filename=lr.source_filename,
+                            period=period)
+                        if received is not None:
                             s.commit()
                 except Exception as _e:  # noqa: BLE001
                     log.warning("submission-calendar mark_received failed: %s", _e)
                     s.rollback()
+                    received = None
+
+                # AUTOMATIC SEND — the whole point of folding Send Bordereau
+                # into this screen: a broker's own submission satisfying a
+                # period is what used to require a second visit to Send
+                # Bordereau and a second click. It now IS that act. Only for a
+                # BROKER's run (out.broker_party_id set) that actually ticked
+                # the calendar just above (`received is not None`) — a run
+                # with no broker has nobody's period to send on, Kavachio
+                # staff running on a carrier's own behalf via /direct never
+                # sets one either, and mark_calendar=False (an auto-arrived
+                # file already ticked elsewhere) naturally skips this too,
+                # since `received` stays None in that case.
+                #
+                # Reuses send_bordereau() UNCHANGED from the (now-removed)
+                # standalone Send Bordereau screen — same recipient
+                # resolution (carrier_contacts To, broker_contacts Cc,
+                # regardless of who is running the file), same attachment,
+                # same record_release() call, same audit event. Its own
+                # try/except already means a mail failure is recorded rather
+                # than raised (mirrors record_chase); this outer one is only
+                # for the RARE case that fails before it gets that far (e.g.
+                # the DB write itself), which must still never break the run
+                # the broker is looking at the result of.
+                if received is not None and out.broker_party_id is not None:
+                    try:
+                        from submission_calendar_service import send_bordereau
+                        sent_to_carrier = send_bordereau(
+                            s, received["expected_id"], out.broker_party_id,
+                            actor_email=actor, actor_user_id=run_by_user_id)
+                        s.commit()
+                    except Exception as _e:  # noqa: BLE001
+                        log.warning("auto-send to carrier failed: %s", _e)
+                        s.rollback()
+                        sent_to_carrier = {"mail_sent": False, "mail_error": str(_e),
+                                           "to": [], "cc": []}
 
         # DATA LANE trigger: if this format isn't mapped to the data model yet,
         # raise (or append to) a one-time admin task. Off the delivery path. A
@@ -2593,6 +2649,12 @@ async def _render_landing(
         "governing_contracts": governing_contracts,
         "preview": {k: v[:20] for k, v in projected.items()},
         "check_only": check_only,
+        # None when this run had no broker on it (nothing to send on anyone's
+        # behalf), was a self-check, or mark_calendar was False. Otherwise
+        # what the automatic send did — {"to", "cc", "mail_sent",
+        # "mail_error"} — so the screen can say what happened without a
+        # second page or a second click.
+        "sent_to_carrier": sent_to_carrier,
     }
 
 
@@ -4014,7 +4076,8 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
 async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Optional[str],
                            check_only: bool = False,
                            run_by_user_id: Optional[int] = None,
-                           mark_calendar: bool = True) -> dict:
+                           mark_calendar: bool = True,
+                           period: Optional[str] = None) -> dict:
     """Validation + output for a prepared run. With a pipeline, governing
     contracts come from it (contract_id=None); on the fallback path the legacy
     fallback contract is kept."""
@@ -4025,7 +4088,7 @@ async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Option
         filename, actor, {}, auto_ingest=not check_only,
         pipeline_id=prep["pipeline_id"], check_only=check_only,
         scope=prep["run_scope"], run_by_user_id=run_by_user_id,
-        mark_calendar=mark_calendar)
+        mark_calendar=mark_calendar, period=period)
     result["format_drift"] = prep["drift"]
     if prep["supp_stats"] is not None:
         result["supplement"] = prep["supp_stats"]
@@ -4059,6 +4122,36 @@ def _record_manual_arrival(tid: int, principal: Principal, file_bytes: bytes,
         return arrival.id
 
 
+@router.get("/direct/periods")
+def direct_periods(mga: str = Query(...), program_id: int = Query(...),
+                   broker_party_id: int = Query(...),
+                   principal: Principal = Depends(current_principal)):
+    """The same reporting periods carrier_routes.contract_bordereau_periods
+    lists for a broker's own lane, for KAVACHIO STAFF running a bordereau on a
+    carrier's behalf (the /direct route). Broker-scoped because a period is
+    always somebody's — see ExpectedSubmission.broker_party_id.
+
+    Excludes FUTURE periods the same way and for the same reason as the
+    broker's own listing — see contract_bordereau_periods."""
+    from db import ExpectedSubmission
+    today = datetime.utcnow().date()
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        rows = (s.query(ExpectedSubmission)
+                .filter(ExpectedSubmission.tenant_id == tid,
+                        ExpectedSubmission.program_id == program_id,
+                        ExpectedSubmission.broker_party_id == broker_party_id,
+                        ExpectedSubmission.period_end <= today)
+                .order_by(ExpectedSubmission.due_date.desc())
+                .limit(24).all())
+        return {"periods": [
+            {"expected_id": e.id, "period": e.period,
+             "due_date": e.due_date.isoformat() if e.due_date else None,
+             "status": e.status, "processed": e.received_at is not None}
+            for e in rows
+        ]}
+
+
 @router.post("/direct/run")
 async def direct_run(
     mga: str = Form(...),
@@ -4069,6 +4162,14 @@ async def direct_run(
     actor: Optional[str] = Form(default=None),
     skip_rows: int = Form(default=0),
     check_only: bool = Form(default=False),
+    # The reporting period this run is FOR, e.g. "2026-08" — passed straight
+    # to mark_received() as the EXPLICIT period (always trusted, never
+    # guessed). Optional here so a caller that predates this (an older UI
+    # build, a script) still behaves exactly as before: the guess-from-
+    # filename-or-oldest-open fallback is untouched. The broker's own lane
+    # (carrier_routes.contract_bordereau_run) requires it before it ever calls
+    # here.
+    period: Optional[str] = Form(default=None),
     # The broker and contract this bordereau is FOR. Both optional: a setup made
     # before the broker level existed sends neither and behaves exactly as it
     # always has. When they ARE sent, they pick the output template the four
@@ -4130,7 +4231,8 @@ async def direct_run(
         try:
             result = await _render_prepared(prep, filename=filename, actor=actor or mga,
                                             check_only=check_only,
-                                            run_by_user_id=principal.user_id)
+                                            run_by_user_id=principal.user_id,
+                                            period=period)
         except Exception as e:
             if arrival_id:
                 svc_intake.mark_run(arrival_id, state="failed",

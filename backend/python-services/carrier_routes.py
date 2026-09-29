@@ -495,6 +495,48 @@ def contract_bordereau_template(scope: CarrierScope = Depends(contract_scope)):
     return Response(content=data, media_type=bt.XLSX, headers=bt.attachment(name))
 
 
+@router.get(_T + "/periods")
+def contract_bordereau_periods(scope: CarrierScope = Depends(contract_scope)):
+    """The REAL reporting periods a broker can pick from when running a
+    bordereau against this contract — the Bordereau Calendar's own rows for
+    this (programme, broker), not a free-text month/year.
+
+    Picking one of these and sending it as `period` on /runs is what lets
+    Process Bordereau, Send Bordereau and the Bordereau Calendar all point at
+    exactly the same ExpectedSubmission row — see submission_calendar_service.
+    resolve_period_label (explicit is always trusted, never guessed).
+
+    Ordered most-recently-due first, with the currently open ones (nothing
+    processed yet) marked, since that is almost always what somebody running a
+    bordereau today wants — but a period already processed is still listed
+    (and still pickable), for a correction/resubmission.
+
+    FUTURE PERIODS ARE NOT LISTED — a period whose own reporting window has not
+    ended yet (`period_end` still ahead of today) is not something there can be
+    a real file for: the month it reports on has not finished. Filtered on
+    `period_end`, not `due_date`, on purpose — the due date is typically ~10
+    days AFTER the period ends, and a broker filing July's bordereau in early
+    August (before July's due date) is the NORMAL case, not an early one.
+    """
+    from datetime import datetime
+    from db import ExpectedSubmission
+    today = datetime.utcnow().date()
+    with SessionLocal() as s:
+        rows = (s.query(ExpectedSubmission)
+                .filter(ExpectedSubmission.tenant_id == scope.carrier_id,
+                        ExpectedSubmission.program_id == scope.program_id,
+                        ExpectedSubmission.broker_party_id == scope.broker_party_id,
+                        ExpectedSubmission.period_end <= today)
+                .order_by(ExpectedSubmission.due_date.desc())
+                .limit(24).all())
+        return {"periods": [
+            {"expected_id": e.id, "period": e.period,
+             "due_date": e.due_date.isoformat() if e.due_date else None,
+             "status": e.status, "processed": e.received_at is not None}
+            for e in rows
+        ]}
+
+
 @router.post(_T + "/runs")
 async def contract_bordereau_run(
     file: UploadFile = File(...),
@@ -508,10 +550,20 @@ async def contract_bordereau_run(
     # The broker was told this exact file was loaded before and chose to send
     # it anyway. Without it a duplicate comes back as a 409 question.
     confirm_duplicate: bool = Form(default=False),
+    # The reporting period this run is FOR — one of the labels /periods just
+    # listed, e.g. "2026-08". Required on a real submission (not on a
+    # self-check, which touches no calendar) so the file lands on the period
+    # it was actually filed for, never a guess. See resolve_period_label.
+    period: Optional[str] = Form(default=None),
     scope: CarrierScope = Depends(contract_scope),
 ):
     """Step 6 — submit a bordereau against this contract."""
     import direct_routes as _direct
+    if not check_only and not period:
+        raise HTTPException(
+            400, "Pick the reporting period this bordereau is for before "
+                 "submitting — see the periods this contract's calendar "
+                 "expects at GET .../periods.")
     with SessionLocal() as s:
         cpid = _carrier_party_id(s, scope.carrier_id)
     return await _direct.direct_run(
@@ -524,6 +576,7 @@ async def contract_bordereau_run(
         # than to a tenant code that means nothing on their side.
         actor=f"broker:{scope.broker_party_id}",
         skip_rows=skip_rows,
+        period=period,
         check_only=check_only,
         broker_party_id=scope.broker_party_id,
         contract_id=scope.contract_id,

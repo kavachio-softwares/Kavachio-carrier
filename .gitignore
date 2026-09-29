@@ -44,3 +44,5 @@ frontend/tsconfig.tsbuildinfo
 certs/
 *.p12
 *.pfx
+flow diagram/
+backend/python-services/pipeline_decisions.log

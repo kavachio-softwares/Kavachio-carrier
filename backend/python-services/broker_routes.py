@@ -27,7 +27,8 @@ from db import (
     CarrierBroker, link_carrier_broker,
     BrokerInvitation,
     Pipeline, PipelineContract,
-    SessionLocal, AppUser, Contract, Party, Program, ProgramBroker, Tenant,
+    SessionLocal, AppUser, Contract, Party, Program,
+    ProgramBroker, Tenant,
 )
 
 router = APIRouter(tags=["broker"])

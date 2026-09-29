@@ -9,6 +9,7 @@ Reused by the schedule/calendar endpoints now, and by the daily late-flip job la
 from __future__ import annotations
 
 import logging
+import os
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -26,6 +27,18 @@ from submission_calendar import (
     period_for_date, parse_period_hint, horizon_months_for,
     DEFAULT_DUE_OFFSET_DAYS, DEFAULT_SOON_WINDOW_DAYS,
 )
+
+# Send Bordereau's outbound email, OFF for now on request — everything ELSE
+# about a send (marking the period sent, on_time/late, the audit log) keeps
+# working exactly as before; only the actual SMTP call is skipped. Defaults to
+# disabled rather than being set in .env, so it takes effect the moment this
+# file reloads, with no dependence on whether an already-running process
+# picks up a later .env change. Turn it back on by setting
+# BORDEREAU_AUTO_SEND_EMAIL=true in the environment (no code change needed).
+def _auto_email_enabled() -> bool:
+    return (os.getenv("BORDEREAU_AUTO_SEND_EMAIL", "false") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
 
 # Keys we look for inside Contract.extracted for a contract inception/effective date.
 _INCEPTION_KEYS = (
@@ -651,6 +664,273 @@ def record_release(session, expected_id: int, *, released_on: Optional[date] = N
             "released_at": released_on.isoformat(), "released_to": released_to}
 
 
+# ---------------------------------------------------------------------------
+# Send Bordereau — the broker's screen. Programme → Contract → Reporting
+# Period → Process BDX → BDX Arrived → Ready to Send → Send BDX → carrier gets
+# the email. ExpectedSubmission/SubmissionVersion (above) are the ONLY source
+# of truth for the period; nothing here writes a second copy of it. "Sent" is
+# record_release() on the version that satisfied the period — the same act
+# the carrier's own "release to a reinsurer" already models, just aimed at the
+# carrier instead of a downstream recipient — so no migration and no new
+# state machine, only submission_calendar.send_status() layered on the
+# existing received_at (processed) / released_at (sent) timestamps.
+# ---------------------------------------------------------------------------
+
+def broker_bordereau_rows(session, broker_party_id: int,
+                          program_ids: Optional[list[int]] = None,
+                          today: Optional[date] = None,
+                          page: Optional[int] = None,
+                          page_size: Optional[int] = None):
+    """Every period this broker owes, across every carrier and programme it is
+    on, with the Send Bordereau status for each.
+
+    `program_ids` is how the caller enforces isolation — pass the programme
+    ids from the broker's own active ProgramBroker links (broker_routes._links)
+    and a period on a programme this broker was taken off, or never had,
+    cannot appear. Without it, every row with THIS broker_party_id is
+    returned — broker_party_id is still the primary filter, so this is never
+    unscoped, only unfiltered by programme.
+
+    PAGINATION IS OPT-IN, same rule as direct_routes.direct_runs: pass `page`
+    for true server-side paging — the count and the slice both happen in SQL,
+    on the SAME filtered query, before anything is joined or derived — and get
+    back `(items, total)`. Leave it out and get the full list back exactly as
+    before (a plain list), which is what the existing tests still call. The
+    ORDER BY drops the program-name tiebreak the old Python sort had (ties are
+    broken by id instead) — nothing here filters on a derived field, so moving
+    the order/slice into SQL changes nothing about which rows can appear,
+    only how many come back in one call.
+    """
+    from submission_calendar import send_status
+    today = today or datetime.utcnow().date()
+    q = session.query(ExpectedSubmission).filter(
+        ExpectedSubmission.broker_party_id == broker_party_id)
+    if program_ids is not None:
+        q = q.filter(ExpectedSubmission.program_id.in_(program_ids))
+
+    total = None
+    if page is not None:
+        total = q.order_by(None).with_entities(
+            func.count(ExpectedSubmission.id)).scalar() or 0
+        size = page_size or 20
+        rows = (q.order_by(ExpectedSubmission.due_date.asc(),
+                           ExpectedSubmission.id.asc())
+                .offset((page - 1) * size).limit(size).all())
+    else:
+        rows = q.all()
+
+    if not rows:
+        # A page past the end still reports the REAL total (e.g. "page 40 of
+        # 11 rows" is empty but the count is still 11, not 0) — total was
+        # already computed above, against the un-sliced query.
+        return ([], total or 0) if page is not None else []
+
+    # The version that would satisfy each period — the newest one, same rule
+    # record_release defaults to. One query for the lot, newest-first per
+    # period, first hit kept.
+    ids = [e.id for e in rows]
+    latest: dict[int, SubmissionVersion] = {}
+    for v in (session.query(SubmissionVersion)
+              .filter(SubmissionVersion.expected_id.in_(ids))
+              .order_by(SubmissionVersion.expected_id,
+                       SubmissionVersion.version_no.desc()).all()):
+        latest.setdefault(v.expected_id, v)
+
+    programs = {p.id: p for p in session.query(Program).filter(
+        Program.id.in_({e.program_id for e in rows})).all()}
+    tenant_ids = {e.tenant_id for e in rows if e.tenant_id is not None}
+    tenants = {t.id: t for t in session.query(Tenant).filter(
+        Tenant.id.in_(tenant_ids)).all()} if tenant_ids else {}
+
+    # The FILE this period's latest version was actually generated from — what
+    # the exceptions column reads. `received_export_id`, not `sent_at`: a file
+    # is clean or not the moment it is PROCESSED, before anyone has sent it,
+    # and sending must never be gated on this being clean (a broker is allowed
+    # to send a file with exceptions — the carrier decides what to do about
+    # them, same as every other lane in this app).
+    from db import OutputExport
+    export_ids = {lv.received_export_id for lv in latest.values()
+                 if lv and lv.received_export_id is not None}
+    exports = {x.id: x for x in session.query(OutputExport).filter(
+        OutputExport.id.in_(export_ids)).all()} if export_ids else {}
+
+    out = []
+    for e in rows:
+        lv = latest.get(e.id)
+        prog = programs.get(e.program_id)
+        tenant = tenants.get(e.tenant_id)
+        out_row = exports.get(lv.received_export_id) if lv else None
+        out.append({
+            "expected_id": e.id,
+            "program_id": e.program_id,
+            "program_name": prog.name if prog else f"Programme {e.program_id}",
+            "carrier_id": e.tenant_id,
+            "carrier_name": (tenant.legal_name or tenant.tenant_name)
+                            if tenant else "—",
+            "period": e.period,
+            "due_date": e.due_date.isoformat() if e.due_date else None,
+            "processed_at": e.received_at.isoformat() if e.received_at else None,
+            "version_no": lv.version_no if lv else None,
+            "version_count": e.version_count or 0,
+            "sent_at": lv.released_at.isoformat() if (lv and lv.released_at) else None,
+            "sent_to": lv.released_to if lv else None,
+            # For the Exceptions column and its link into /uploads/{export_id}
+            # /exceptions — the same route and the same export_id every other
+            # screen in the app links to a run's exceptions with.
+            "export_id": lv.received_export_id if lv else None,
+            "exception_count": (out_row.exception_count or 0) if out_row else 0,
+            "status": send_status(e.due_date, today,
+                                  processed_on=e.received_at,
+                                  sent_on=(lv.released_at if lv else None)),
+        })
+    if page is not None:
+        return out, int(total)
+    out.sort(key=lambda r: (r["due_date"] or "9999-99-99", r["program_name"]))
+    return out
+
+
+def send_bordereau(session, expected_id: int, broker_party_id: int, *,
+                   actor_email: Optional[str] = None,
+                   actor_principal=None,
+                   actor_user_id: Optional[int] = None,
+                   released_on: Optional[date] = None) -> dict:
+    """The Send action: email the already-processed file to the carrier, cc
+    the broker's own admins, and record the send as a release on the version
+    that satisfied this period.
+
+    Called from TWO places now: automatically, right after a broker's own run
+    satisfies a period (direct_routes._render_landing — Process Bordereau IS
+    Send Bordereau now, there is no second page or second click), and by
+    anything that still wants the action on its own. Only `broker_party_id`
+    is required to identify who this is for; `actor_email`/`actor_user_id`
+    are for the audit trail alone and are both optional, because the
+    automatic caller has a plain actor string and a user id, never a full
+    Principal (there is no request to build one from at that point).
+
+    The audit actor is always recorded as `broker:<broker_party_id>` — the
+    same convention contract_bordereau_run already uses for a broker-lane
+    run's `actor` — because this row is read by the CARRIER, who deals with
+    the broker COMPANY, never an individual broker user's email (see
+    audit.actor_for, which this mirrors without needing a Principal to call
+    it). `actor_user_id`, when given, still records the acting SEAT on the
+    row (actor_user_id/actor_role/actor_broker_party_id) so the broker's OWN
+    Audit Logs view can still name the person.
+
+    Raises ValueError with a short reason code for every refusal — the route
+    turns each into the right HTTP status:
+
+      not_found        — no such period, OR it belongs to a different broker.
+                          Deliberately the SAME error for both: a broker must
+                          not be able to tell "wrong id" from "someone else's
+                          period" apart by probing ids (mirrors
+                          contract_routes._contract_access).
+      not_processed     — BDX ARRIVED never happened for this period (no
+                          received_at, or no export tied to a version) — there
+                          is nothing generated to send.
+      no_carrier_contact — the carrier tenant has no active/invited
+                          carrier_admin-role user to send to.
+      file_missing       — a version and an export exist, but the bytes are not
+                          in storage. NOT recorded as sent: a release row here
+                          would claim a delivery that never happened.
+
+    A downstream email failure (SMTP down) is NOT one of these — like
+    record_chase, the send is still recorded (mail_sent=False, mail_error set)
+    because the broker DID take the action; only WHETHER it reached an inbox
+    is in question, and that has to stay visible rather than silently retried
+    away. Caller commits.
+
+    `released_on` defaults to today, like record_release's own parameter of
+    the same name — no HTTP route exposes it (a broker cannot backdate their
+    own send), it exists so tests can put a fixed clock behind "sent before
+    the due date" vs "sent after it" instead of racing the real date.
+    """
+    e = session.get(ExpectedSubmission, expected_id)
+    if e is None or e.broker_party_id != broker_party_id:
+        raise ValueError("not_found")
+    if e.received_at is None:
+        raise ValueError("not_processed")
+
+    v = (session.query(SubmissionVersion)
+         .filter(SubmissionVersion.expected_id == expected_id)
+         .order_by(SubmissionVersion.version_no.desc()).first())
+    if v is None or v.received_export_id is None:
+        raise ValueError("not_processed")
+
+    to_contacts = carrier_contacts(session, [e.tenant_id]).get(e.tenant_id, [])
+    if not to_contacts:
+        raise ValueError("no_carrier_contact")
+    cc_contacts = broker_contacts(session, [broker_party_id]).get(broker_party_id, [])
+
+    from db import OutputExport
+    import storage
+    out_row = session.get(OutputExport, v.received_export_id)
+    data = storage.resolve_bytes(out_row.blob_ref, out_row.blob) if out_row else None
+    if not data:
+        raise ValueError("file_missing")
+    filename = (out_row.filename if out_row else None) or f"bordereau-{e.period}.xlsx"
+
+    prog = session.query(Program).filter(Program.id == e.program_id).first()
+    program_name = prog.name if prog else f"Programme {e.program_id}"
+
+    to_emails = [c["email"] for c in to_contacts]
+    cc_emails = [c["email"] for c in cc_contacts]
+    released_on = released_on or datetime.utcnow().date()
+
+    mail_sent, mail_error = False, None
+    if not _auto_email_enabled():
+        # OUTBOUND EMAIL DISABLED (on request) — everything below this still
+        # runs: the version is still released, the period still moves to
+        # on_time/late, the audit event still fires. Only the SMTP call is
+        # skipped, and mail_error says so plainly rather than looking like a
+        # delivery failure.
+        mail_error = "outbound email is temporarily disabled"
+        log.info("bordereau send email SKIPPED for expected_id=%s (disabled)",
+                 expected_id)
+    else:
+        try:
+            from email_utils import send_email, bordereau_sent_email_html
+            from output_serializers import content_type_for_filename
+            send_email(
+                ", ".join(to_emails),
+                f"{program_name} · {e.period} bordereau",
+                bordereau_sent_email_html(
+                    program_name, e.period,
+                    e.due_date.isoformat() if e.due_date else None,
+                    released_on.isoformat()),
+                account="NOTIFY", cc=cc_emails,
+                attachments=[(filename, data, content_type_for_filename(filename))],
+            )
+            mail_sent = True
+        except Exception as ex:  # noqa: BLE001 — a dead mailbox must not lose the record
+            mail_error = str(ex)
+            log.warning("bordereau send email failed for expected_id=%s: %s",
+                       expected_id, ex)
+
+    record_release(session, expected_id, released_on=released_on,
+                   released_to=", ".join(to_emails), released_by=actor_email,
+                   release_ref=("mailed" if mail_sent
+                               else "mail_disabled" if not _auto_email_enabled()
+                               else "mail_failed"),
+                   note=(f"cc: {', '.join(cc_emails)}" if cc_emails else None),
+                   version_no=v.version_no)
+
+    from audit import log_activity
+    log_activity(
+        e.tenant_id, f"broker:{broker_party_id}",
+        "bordereau_sent", target=f"program:{e.program_id}",
+        details={"program_id": e.program_id, "period": e.period,
+                "expected_id": expected_id, "version_no": v.version_no,
+                "to": to_emails, "cc": cc_emails,
+                "mail_sent": mail_sent, "mail_error": mail_error},
+        actor_user_id=actor_user_id, principal=actor_principal)
+    session.flush()
+
+    return {"expected_id": expected_id, "period": e.period,
+           "version_no": v.version_no, "released_at": released_on.isoformat(),
+           "to": to_emails, "cc": cc_emails,
+           "mail_sent": mail_sent, "mail_error": mail_error}
+
+
 def record_chase(session, expected_ids: list[int], *, actor: Optional[str] = None,
                  note: Optional[str] = None,
                  today: Optional[date] = None) -> dict:
@@ -977,6 +1257,41 @@ def broker_contacts(session, broker_ids) -> dict:
     for bucket in out.values():
         bucket.sort(key=lambda c: (_CONTACT_STATUS_RANK.get(c.get("status"), 9),
                                    _CONTACT_ROLE_RANK.get(c.get("role"), 9),
+                                   (c.get("name") or "").lower()))
+    return out
+
+
+def carrier_contacts(session, tenant_ids) -> dict:
+    """{tenant_id: [{name, email, role, status}, ...]} — the mirror image of
+    broker_contacts, for the Send Bordereau email's To: line.
+
+    BOTH carrier seats, deliberately — they hold the same DB role
+    (carrier_admin) and "Carrier Admin/User recipient(s)" was asked for
+    literally, not "whoever owns the tenant". There is no per-programme
+    "who receives bordereaux" setting anywhere in the schema, so this is every
+    active/invited carrier_admin-role user at the tenant, same shape and same
+    status handling as broker_contacts.
+    """
+    ids = {i for i in tenant_ids if i is not None}
+    if not ids:
+        return {}
+    out: dict = {}
+    from auth_deps import db_role_values
+    rows = (session.query(AppUser)
+            .filter(AppUser.tenant_id.in_(ids),
+                    AppUser.role.in_(db_role_values("carrier_admin")),
+                    or_(AppUser.status.is_(None),
+                        AppUser.status.in_(_CONTACT_STATUSES)))
+            .all())
+    for u in rows:
+        out.setdefault(u.tenant_id, []).append({
+            "name": u.full_name or u.email,
+            "email": u.email,
+            "role": u.role,
+            "status": u.status or "active",
+        })
+    for bucket in out.values():
+        bucket.sort(key=lambda c: (_CONTACT_STATUS_RANK.get(c.get("status"), 9),
                                    (c.get("name") or "").lower()))
     return out
 

@@ -12,8 +12,14 @@
  *   Check My Bordereau   every validation runs, nothing is submitted, nothing
  *                        is recorded, and the carrier is never shown it. A
  *                        broker finds out what is wrong BEFORE the carrier does.
- *   Generate BDX         the real run: ingested, recorded, and visible to the
- *                        carrier with whatever exceptions it carries.
+ *   Generate BDX         the real run: ingested, recorded against the
+ *                        reporting period picked below, AND sent — emailed to
+ *                        the carrier (cc your own admin) the moment it
+ *                        processes, whatever exceptions it carries. There is
+ *                        no separate Send step or screen any more; this IS
+ *                        the send (see RunResult's "Sent to the carrier"
+ *                        note, and submission_calendar_service.send_bordereau
+ *                        on the server).
  *
  * WHAT DIFFERS FROM THE CARRIER'S SCREEN is only the scope, and only because
  * the two genuinely differ:
@@ -39,16 +45,19 @@ import { getBrokerContracts, type BrokerContract } from "../api/broker";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import {
   getBrokerMe, getBordereauReadiness, runBrokerBordereau, getBrokerRunsPaged,
-  brokerRunUrls, bordereauTemplatePath,
-  type ContractPath, type BordereauReadiness, type BrokerRun,
+  brokerRunUrls, bordereauTemplatePath, getContractPeriods,
+  type ContractPath, type BordereauReadiness, type BrokerRun, type BordereauPeriod,
 } from "../api/brokerBordereau";
 import { Dropzone } from "../components/Dropzone";
+import { PeriodPicker } from "../components/PeriodPicker";
+import { ContractPicker } from "../components/ContractPicker";
 import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
 import { type Sheet } from "../components/OutputRows";
 import { LoadingOverlay } from "../components/Busy";
 import { downloadFile, downloadErrorText } from "../api/client";
 import { fmtDate } from "../utils/date";
 import { Pagination } from "../components/Pagination";
+import { InfoTip } from "../components/InfoTip";
 
 /** Runs per page of the history. Server-side: the endpoint used to stop at the
  *  twentieth most recent file with no way to reach the twenty-first. */
@@ -61,9 +70,6 @@ function errorText(e: any): string {
   if (e?.response?.status === 413) return "That file is too large to upload.";
   return "The run could not be completed. Try again, and tell your carrier if it keeps happening.";
 }
-
-const label = (c: BrokerContract) =>
-  `${c.filename ?? `Contract ${c.id}`} — ${c.programme.name} (${c.carrier.name})`;
 
 export default function BrokerBordereau() {
   const nav = useNavigate();
@@ -81,6 +87,8 @@ export default function BrokerBordereau() {
   const [duplicateMsg, setDuplicateMsg] = useState<string | null>(null);
   const [result, setResult] = useState<RunResp | null>(null);
   const [preview, setPreview] = useState<Sheet | null>(null);
+  const [periods, setPeriods] = useState<BordereauPeriod[] | null>(null);
+  const [period, setPeriod] = useState<string>("");
   const [runs, setRuns] = useState<BrokerRun[] | null>(null);
   const [runsPage, setRunsPage] = useState(1);
   const [runsTotal, setRunsTotal] = useState(0);
@@ -143,9 +151,28 @@ export default function BrokerBordereau() {
   // changes, so a stale exception list can never be read as this one's.
   useEffect(() => {
     setResult(null); setPreview(null); setErr(null); setFile(null);
+    setPeriod("");
     // A different contract is a different history, so it is read from its start.
     setRunsPage(1);
   }, [contractId]);
+
+  // The real reporting periods this contract's calendar expects — never a
+  // free-text month/year, so what gets sent always matches an actual row (see
+  // GET .../periods). Re-fetched whenever the contract changes.
+  useEffect(() => {
+    if (!path) { setPeriods(null); return; }
+    getContractPeriods(path)
+      .then(rows => {
+        setPeriods(rows);
+        // The most recent NOT-YET-PROCESSED period is almost always what
+        // somebody dropping a file today means — pre-select it, but only if
+        // there is exactly one live contract's worth of ambiguity to resolve
+        // FOR them, not silently override a choice they are mid-way through.
+        const open = rows.find(r => !r.processed);
+        if (open) setPeriod(p => p || open.period);
+      })
+      .catch(() => setPeriods([]));
+  }, [path]);
 
   const loadRuns = useCallback(() => {
     if (!path) { setRuns(null); setRunsTotal(0); return; }
@@ -174,7 +201,7 @@ export default function BrokerBordereau() {
     setMode(checkOnly ? "check" : "run");
     setBusy(true); setErr(null); setResult(null); setPreview(null);
     try {
-      const r = await runBrokerBordereau(path, file, { checkOnly, confirmDuplicate });
+      const r = await runBrokerBordereau(path, file, { checkOnly, confirmDuplicate, period });
       setResult(r);
       // Best-effort preview, exactly as the carrier's screen does it — a
       // missing preview must never make a good run look like a failure.
@@ -200,7 +227,10 @@ export default function BrokerBordereau() {
     setFile(null); setResult(null); setPreview(null); setErr(null);
   }
 
-  const canSubmit = !!file && !!ready?.ready && !busy;
+  // Required on a real submission — see contract_bordereau_run. Not required
+  // to Check (there is no submit(true) button today, but the rule stays
+  // correct if it is ever restored).
+  const canSubmit = !!file && !!ready?.ready && !!period && !busy;
 
   return (
     <div className="proto">
@@ -222,9 +252,12 @@ export default function BrokerBordereau() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Process Bordereau</h2>
-            <p>Pick the contract the bordereau is for, drop the file, check it,
-              then send it.</p>
+            <h2>
+              Process Bordereau
+              <InfoTip text={"Pick the contract and reporting period, drop the "
+                + "file, and Generate BDX — it's sent to the carrier the "
+                + "moment it's processed, no second step needed."} />
+            </h2>
           </div>
         </div>
 
@@ -253,28 +286,34 @@ export default function BrokerBordereau() {
 
         <div className="card pad">
           <div className="field">
-            <label>Contract</label>
-            {live.length === 1 ? (
-              // Nothing to choose between: this is what the bordereau is for.
-              <input value={label(live[0])} readOnly disabled />
-            ) : (
-              <select
-                value={contractId}
-                disabled={live.length === 0}
-                onChange={e => setContractId(e.target.value ? Number(e.target.value) : "")}
-              >
-                <option value="">
-                  {live.length === 0 ? "No live contract yet" : "Select Contract…"}
-                </option>
-                {live.map(c => <option key={c.id} value={c.id}>{label(c)}</option>)}
-              </select>
-            )}
-            <div className="hint">
-              Each contract has its own rules, so the same spreadsheet can pass
-              under one and fail under another. Carrier and programme come with
-              it — there is nothing else to pick.
-            </div>
+            <label>
+              Contract
+              <InfoTip text={"Each contract has its own rules, so the same "
+                + "spreadsheet can pass under one and fail under another. "
+                + "Carrier and programme come with it — there is nothing "
+                + "else to pick."} />
+            </label>
+            <ContractPicker value={contractId}
+              onChange={id => setContractId(id)} contracts={live} />
           </div>
+
+          {/* Which month (or quarter, on a quarterly programme) this file is
+              FOR — the reporting period. A REAL row from this contract's own
+              calendar, never a free-text month/year, so it can only ever match
+              a period the carrier is actually expecting — see GET .../periods.
+              This is what both Generate BDX's automatic send and the
+              carrier's own Bordereau Calendar then read back. */}
+          {contract && (
+            <div className="field">
+              <label>
+                Reporting Period
+                <InfoTip text={"Which month this bordereau reports on — not "
+                  + "today's date. A July file sent in September is still "
+                  + "July's."} />
+              </label>
+              <PeriodPicker value={period} onChange={setPeriod} periods={periods} />
+            </div>
+          )}
 
           {/* Named rather than hidden: a broker looking for a contract they know
               they sent should find out WHY it is not selectable. */}
@@ -323,7 +362,7 @@ export default function BrokerBordereau() {
                   onClick={() => downloadFile(bordereauTemplatePath(path))
                     .catch(async e => setErr(await downloadErrorText(e,
                       "We couldn't download the bordereau template — please try again.")))}>
-                  <Download size={14} /> Bordereau Template
+                  <Download size={14} /> Bordereau Input Template
                 </button>
               )}
             </div>

@@ -68,6 +68,14 @@ export type RunResp = {
   rows_excluded?: number | null;
   rules_not_checked?: number;
   rules_partly_checked?: number;
+  /** What the automatic send-to-carrier did — Process Bordereau IS Send
+   *  Bordereau now, there is no separate screen or button. null/absent when
+   *  this run had no broker on it (nothing to send on anyone's behalf) or was
+   *  a self-check, which never sends. */
+  sent_to_carrier?: {
+    to: string[]; cc: string[];
+    mail_sent: boolean; mail_error?: string | null;
+  } | null;
 };
 
 export type RunUrls = {
@@ -204,6 +212,39 @@ export function RunResult({
         </button>
         {actions}
       </div>
+
+      {/* WHAT THE AUTOMATIC SEND DID. Process Bordereau IS Send Bordereau now
+          — there is no second screen and no second click, so this is the
+          only place the outcome is ever shown. Absent entirely for a
+          self-check or a run with no broker on it (nothing to send). */}
+      {result.sent_to_carrier && (
+        <div className={`note${result.sent_to_carrier.mail_sent
+          || result.sent_to_carrier.mail_error?.includes("disabled") ? "" : " warn"}`}
+          style={{ marginBottom: 18 }}>
+          {result.sent_to_carrier.mail_sent ? (
+            <>
+              <b>Sent to the carrier</b> — emailed to{" "}
+              <b>{result.sent_to_carrier.to.join(", ") || "—"}</b>
+              {result.sent_to_carrier.cc.length > 0 && (
+                <> (cc {result.sent_to_carrier.cc.join(", ")})</>
+              )}, and now visible to them on their own Bordereau Calendar.
+            </>
+          ) : result.sent_to_carrier.mail_error?.includes("disabled") ? (
+            <>
+              <b>Recorded — the carrier email is switched off for now.</b>{" "}
+              This period is already visible to the carrier in the portal;
+              no email went out.
+            </>
+          ) : (
+            <>
+              <b>Recorded, but the email could not be delivered</b>
+              {result.sent_to_carrier.mail_error ? ` (${result.sent_to_carrier.mail_error})` : ""}.
+              It is already visible to the carrier in the portal — send this
+              period again if you need to reach their inbox too.
+            </>
+          )}
+        </div>
+      )}
 
       {/* The findings, inline. Read-only in both cases: on a check because a
           check is a look, not a submission; on a real run because whoever sees
