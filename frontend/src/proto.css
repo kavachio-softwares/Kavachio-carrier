@@ -430,6 +430,19 @@
 }
 .proto .fbar-date:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
 
+/* An even filter row: every control 36px tall and centred on one line, the
+   search taking the spare width. Opt-in (Programmes), so the other lists that
+   use .search / .seg / .fbar-date keep their own sizing. */
+.proto .fbar-even{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.proto .fbar-even > *{flex:0 0 auto}
+.proto .fbar-even > .search{flex:1 1 260px;min-width:220px;height:36px;padding:0 12px;box-sizing:border-box}
+.proto .fbar-even > .seg{height:36px}
+.proto .fbar-even > .seg button{display:inline-flex;align-items:center;padding:0 14px;font-size:12.5px;white-space:nowrap}
+.proto .fbar-even .fbar-date{height:36px;box-sizing:border-box;padding:0 10px;width:148px}
+.proto .fbar-even .fbar-clear{height:36px;padding:0 4px;border:0;background:transparent;font:inherit;font-size:13px;font-weight:600;color:var(--p-primary);cursor:pointer;white-space:nowrap}
+.proto .fbar-even .fbar-clear:hover{text-decoration:underline}
+.proto .fbar-even .fbar-clear:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px;border-radius:4px}
+
 /* A labelled filter: the caption sits ABOVE its control rather than beside it.
    ListFilterBar's bare row works when a page has one or two dropdowns whose
    meaning is obvious from their values; Audit Logs has three whose values look

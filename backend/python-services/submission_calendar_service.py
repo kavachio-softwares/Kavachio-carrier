@@ -1399,7 +1399,8 @@ def _month_key(d: Optional[date]) -> Optional[str]:
 
 
 def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = None,
-                   today: Optional[date] = None, broker_id: Optional[int] = None) -> dict:
+                   today: Optional[date] = None, broker_id: Optional[int] = None,
+                   program_ids: Optional[list[int]] = None) -> dict:
     """The carrier's Bordereau Calendar for one due-month.
 
     Returns the rows (one per programme x broker x period due that month), the
@@ -1416,6 +1417,11 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
     `carrier_name`, which a single-tenant caller has no use for and gets `None`.
     `broker_id` narrows either view to one broker, the same as the platform
     dashboard's own broker filter.
+
+    `program_ids` is the BROKER'S OWN board (broker_routes.broker_calendar):
+    pass the programmes from its active ProgramBroker links, so a period on a
+    programme it was taken off cannot appear — the same isolation rule as
+    broker_bordereau_rows.
     """
     today = today or datetime.utcnow().date()
     prog_q = session.query(Program)
@@ -1427,6 +1433,10 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         rows_q = rows_q.filter(ExpectedSubmission.tenant_id == tenant_id)
     if broker_id is not None:
         rows_q = rows_q.filter(ExpectedSubmission.broker_party_id == broker_id)
+    if program_ids is not None:
+        prog_q = prog_q.filter(Program.id.in_(program_ids))
+        sched_q = sched_q.filter(SubmissionSchedule.program_id.in_(program_ids))
+        rows_q = rows_q.filter(ExpectedSubmission.program_id.in_(program_ids))
     programs = {p.id: p for p in prog_q.all()}
     schedules = {s.program_id: s for s in sched_q.all()}
     all_rows = rows_q.order_by(ExpectedSubmission.due_date.asc()).all()
@@ -1532,11 +1542,15 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
     for pid, p in sorted(programs.items(), key=lambda kv: (kv[1].name or "").lower()):
         sch = schedules.get(pid)
         resolved = resolve_for_schedule(session, sch)[0] if sch is not None else None
-        nxt = (session.query(ExpectedSubmission)
-               .filter(ExpectedSubmission.program_id == pid,
-                       ExpectedSubmission.received_at.is_(None),
-                       ExpectedSubmission.due_date >= today)
-               .order_by(ExpectedSubmission.due_date.asc()).first())
+        nxt_q = session.query(ExpectedSubmission).filter(
+            ExpectedSubmission.program_id == pid,
+            ExpectedSubmission.received_at.is_(None),
+            ExpectedSubmission.due_date >= today)
+        # On a broker-narrowed board "next one" is THAT broker's next file —
+        # another broker on the same programme may already have sent theirs.
+        if broker_id is not None:
+            nxt_q = nxt_q.filter(ExpectedSubmission.broker_party_id == broker_id)
+        nxt = nxt_q.order_by(ExpectedSubmission.due_date.asc()).first()
         schedule_rows.append({
             "program_id": pid,
             "program_name": p.name,

@@ -61,6 +61,8 @@ const GROUPS: {
       // submission here (not a self-check) both processes the file AND sends
       // it on — see RunResult's "Sent to the carrier" note.
       { to: "/broker/bordereau", label: "Process Bordereau", icon: Zap },
+      // What is owed and when — the list Process Bordereau works down.
+      { to: "/broker/calendar", label: "Bordereau Calendar", icon: CalendarDays },
       // My Contracts has no entry here: the broker admin opens it from the
       // dashboard's Active Contracts tile.
       // No Users & Roles: broker users were retired on 29 Sep 2026, so the

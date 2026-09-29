@@ -10,6 +10,8 @@ import AddTenant from "./pages/AddTenant";
 import AdminUsers from "./pages/AdminUsers";
 import BrokerDashboard from "./pages/BrokerDashboard";
 import BrokerRuns from "./pages/BrokerRuns";
+import BrokerCalendar from "./pages/BrokerCalendar";
+import BrokerExceptions from "./pages/BrokerExceptions";
 import TeamActivity from "./pages/TeamActivity";
 import PersonActivity from "./pages/PersonActivity";
 import FilesByCarrier from "./pages/FilesByCarrier";
@@ -150,6 +152,8 @@ export default function App() {
         {/* The broker's monthly run — the broker admin's. */}
         <Route path="/broker/bordereau" element={<BrokerBordereau />} />
         <Route path="/broker/runs" element={<BrokerRuns />} />
+        <Route path="/broker/calendar" element={<BrokerCalendar />} />
+        <Route path="/broker/exceptions" element={<BrokerExceptions />} />
         <Route path="/broker/team-activity" element={<TeamActivity />} />
         <Route path="/broker/team-activity/:userId" element={<PersonActivity />} />
         <Route path="/broker/files-by-carrier" element={<FilesByCarrier />} />

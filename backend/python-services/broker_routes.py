@@ -607,15 +607,40 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                         EsignEnvelope.status == "completed").scalar() or 0)
         terms_to_agree = sum(1 for w in on_me if w["lifecycle"] == "in_review")
 
-        agency_exceptions = 0
+        # OPEN exceptions on the files that are still live — the same list the
+        # tile opens (/broker/exceptions), so the number and the page behind it
+        # are one sum. It used to add up exception_count on every run, so a
+        # file that was fixed and re-run was counted twice and a put-right
+        # exception never left the number.
+        agency_exceptions = sum(f["open"] for f in _exception_files(s, bid, prog_ids))
+
+        # The files still to process, from the same rows the Bordereau Calendar
+        # reads. "Upcoming" is the next 30 days, not "this month": on the 29th
+        # of the month the file due on the 10th is the one that matters, and a
+        # month boundary would hide it.
+        from db import ExpectedSubmission
+        today = dt.datetime.utcnow().date()
+        files_upcoming = files_overdue = 0
+        next_due = first_overdue = None
         if prog_ids:
-            from db import OutputExport
-            import validation_outcome as vo
-            agency_exceptions = s.query(func.coalesce(func.sum(OutputExport.exception_count), 0)).filter(
-                OutputExport.broker_party_id == bid,
-                OutputExport.program_id.in_(prog_ids),
-                OutputExport.status == vo.HAS_EXCEPTIONS
-            ).scalar() or 0
+            owed = (s.query(ExpectedSubmission)
+                     .filter(ExpectedSubmission.broker_party_id == bid,
+                             ExpectedSubmission.program_id.in_(prog_ids),
+                             ExpectedSubmission.received_at.is_(None),
+                             ExpectedSubmission.due_date.isnot(None)))
+            files_overdue = owed.filter(ExpectedSubmission.due_date < today).count()
+            files_upcoming = owed.filter(
+                ExpectedSubmission.due_date >= today,
+                ExpectedSubmission.due_date <= today + dt.timedelta(days=30)).count()
+            nxt = (owed.filter(ExpectedSubmission.due_date >= today)
+                       .order_by(ExpectedSubmission.due_date.asc()).first())
+            next_due = nxt.due_date.isoformat() if nxt else None
+            # The oldest missed file, so the tile can open the calendar on its
+            # month — the calendar opens on the current month, and a file
+            # missed in June would otherwise never be on screen.
+            old = (owed.filter(ExpectedSubmission.due_date < today)
+                       .order_by(ExpectedSubmission.due_date.asc()).first())
+            first_overdue = old.due_date.isoformat() if old else None
 
         # "Users" tile — this broker's OWN people: its admins and its users
         # (operators), invited ones included. Not narrowed by carrier: a broker
@@ -637,6 +662,10 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 "users_invited": sum(n for st, n in user_rows
                                      if st in ("invited", "pending")),
                 "agency_exceptions": int(agency_exceptions),
+                "files_upcoming": files_upcoming,
+                "files_overdue": files_overdue,
+                "next_due": next_due,
+                "first_overdue": first_overdue,
                 "signatures_pending": len(on_me) - terms_to_agree,
                 "signatures_completed": int(signatures_completed),
                 "terms_to_agree": terms_to_agree,
@@ -1502,6 +1531,123 @@ def broker_insights_people(days: int = Query(30, ge=7, le=90),
         items, total = _team_ranking(s, bid, since, q=q,
                                      offset=(page - 1) * page_size, limit=page_size)
         return {"items": items, "total": total}
+
+
+def _exception_files(s, bid: int, prog_ids: list[int]) -> list[dict]:
+    """Every LIVE file of this broker that has exceptions, each one tallied.
+
+    Live = current_export_ids: a file that was fixed and re-run is counted
+    once, as it is now. Tallied by `_export_tally`, the function behind the
+    triage screen each row opens, so a row's "open" is the number that screen
+    shows. Behind both the dashboard's Exceptions to Review tile and the
+    /broker/exceptions list.
+    """
+    from db import OutputExport
+    from app_routes import _iso_utc
+    if not prog_ids:
+        return []
+    live = current_export_ids(s, broker_party_id=bid)
+    if not live:
+        return []
+    exports = (s.query(OutputExport)
+                .filter(OutputExport.broker_party_id == bid,
+                        OutputExport.program_id.in_(prog_ids),
+                        OutputExport.id.in_(live),
+                        OutputExport.exception_count > 0)
+                .order_by(OutputExport.created_at.desc(), OutputExport.id.desc())
+                .all())
+    carrier_of_prog = {l.program_id: l.tenant_id for l in _links(s, bid)}
+    cids = {c for c in carrier_of_prog.values() if c}
+    carrier_names = ({t.id: (t.legal_name or t.tenant_name) for t in
+                      s.query(Tenant).filter(Tenant.id.in_(cids)).all()}
+                     if cids else {})
+    pids = {e.program_id for e in exports if e.program_id}
+    prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
+                   .filter(Program.id.in_(pids)).all()} if pids else {})
+    out = []
+    for e in exports:
+        t = _export_tally(e)
+        if t["exceptions"] == 0:
+            continue
+        out.append({
+            "export_id": e.id,
+            "filename": e.filename,
+            "programme": prog_names.get(e.program_id),
+            "carrier": carrier_names.get(carrier_of_prog.get(e.program_id)),
+            "created_at": _iso_utc(e.created_at),
+            **t,
+        })
+    return out
+
+
+@router.get("/broker/exceptions")
+def broker_exceptions(carrier_id: Optional[int] = Query(None),
+                      p: Principal = Depends(current_principal)):
+    """What the Exceptions to Review tile counts, file by file: every live file
+    with exceptions, most still-open first, each one opening its own triage.
+
+    Both broker seats — anyone who runs the bordereau works these. `carrier_id`
+    only narrows, like every other broker read.
+    """
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        prog_ids = [l.program_id for l in _links(s, bid, carrier_id=carrier_id)]
+        items = _exception_files(s, bid, prog_ids)
+        # Most still-open first; ties keep the query's newest-first order.
+        items.sort(key=lambda f: -f["open"])
+        return {
+            "items": items,
+            "totals": {
+                "files": len(items),
+                "files_open": sum(1 for f in items if f["open"] > 0),
+                **{k: sum(f[k] for f in items)
+                   for k in ("exceptions", "open", "put_right")},
+            },
+        }
+
+
+@router.get("/broker/calendar")
+def broker_calendar(month: Optional[str] = Query(None),
+                    carrier_id: Optional[int] = Query(None),
+                    p: Principal = Depends(current_principal)):
+    """The broker's own Bordereau Calendar: every file it owes in one due-month,
+    and whether each one is done, late, or still to come.
+
+    The SAME board the carrier reads (calendar_board), narrowed to this broker
+    and to the programmes it is still on, so "arrived on time" on the carrier's
+    screen and "done on time" here are one fact read twice. `carrier_id` only
+    narrows, like every other broker read.
+
+    Read-only: no heal/sweep here. The carrier's own board and the daily
+    scheduler do those writes; a broker opening its calendar should not.
+    """
+    from submission_calendar_service import calendar_board
+    from db import SubmissionVersion
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        prog_ids = sorted({l.program_id for l in _links(s, bid, carrier_id=carrier_id)})
+        board = calendar_board(s, None, month=month, broker_id=bid,
+                               program_ids=prog_ids)
+        # The file behind each period's newest version, so a done row can open
+        # its exceptions — the same export the Process Bordereau result opens.
+        ids = [r["id"] for r in board["rows"]]
+        latest: dict[int, int] = {}
+        if ids:
+            for v in (s.query(SubmissionVersion)
+                      .filter(SubmissionVersion.expected_id.in_(ids))
+                      .order_by(SubmissionVersion.expected_id,
+                                SubmissionVersion.version_no.desc()).all()):
+                if v.received_export_id is not None:
+                    latest.setdefault(v.expected_id, v.received_export_id)
+        for r in board["rows"]:
+            # Who at the broker the carrier would email is the carrier's
+            # concern, not something the broker needs read back to it.
+            r.pop("contacts", None)
+            r["export_id"] = latest.get(r["id"])
+        for sch in board["schedules"]:
+            # How many OTHER brokers share a programme is the carrier's to know.
+            sch.pop("broker_count", None)
+        return board
 
 
 @router.get("/broker/runs")

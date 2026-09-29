@@ -17,7 +17,7 @@ import {
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { fmtDate } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
-import { AlertCircle, Building2, Clock, FileCheck2, PenLine } from "lucide-react";
+import { AlertCircle, Building2, CalendarClock, Clock, FileCheck2, PenLine } from "lucide-react";
 import { RunTrend } from "../components/BrokerCharts";
 import { InfoTip } from "../components/InfoTip";
 import { ChartCard, LinkCard, StatCard } from "../components/StatCard";
@@ -137,7 +137,7 @@ export default function BrokerDashboard() {
           </div>
         )}
 
-        <div style={grid(4)}>
+        <div style={grid(5)}>
           <StatCard title="Carriers" value={c.carriers} icon={Building2}
                     subtitle={`${c.programmes} ${c.programmes === 1 ? "programme" : "programmes"}`} />
           <StatCard title="Active Contracts" value={c.live_contracts} icon={FileCheck2}
@@ -150,7 +150,23 @@ export default function BrokerDashboard() {
                     onClick={c.signatures_pending > 0 ? () => setWaitingOpen(true) : undefined} />
           <StatCard title="Exceptions to Review" value={c.agency_exceptions} icon={AlertCircle}
                     tone={c.agency_exceptions > 0 ? "alert" : undefined}
-                    subtitle="Across your team" />
+                    subtitle="Still open on your files"
+                    onClick={() => nav("/broker/exceptions")} />
+          {/* What is owed next. Opens the calendar on the month that matters:
+              the oldest missed file's if there is one — the calendar itself
+              opens on the current month, where a June miss is not on screen —
+              otherwise the next one due. */}
+          <StatCard title="Upcoming Files" value={c.files_upcoming} icon={CalendarClock}
+                    subtitle={[
+                      c.files_overdue > 0 && `${c.files_overdue} overdue`,
+                      c.next_due ? `next due ${fmtDate(c.next_due)}` : "nothing scheduled",
+                    ].filter(Boolean).join(" · ")}
+                    info="Files still to process that are due in the next 30 days. Overdue ones are past their due date and not processed yet."
+                    tone={c.files_overdue > 0 ? "alert" : undefined}
+                    onClick={() => {
+                      const at = c.first_overdue ?? c.next_due;
+                      nav(at ? `/broker/calendar?month=${at.slice(0, 7)}` : "/broker/calendar");
+                    }} />
         </div>
 
         {c.programmes === 0 ? (

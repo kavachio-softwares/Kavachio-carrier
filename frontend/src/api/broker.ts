@@ -7,6 +7,7 @@
  * back inside the data.
  */
 import { api } from "./client";
+import type { CalendarStatus } from "./calendar";
 
 export type BrokerCarrier = { id: number; name: string; programme_count: number };
 
@@ -60,7 +61,16 @@ export type BrokerDashboard = {
      *  invited ones included. One team, whichever carrier is selected. */
     users: number;
     users_invited: number;
+    /** OPEN exceptions on this broker's live files — the sum of the "Still
+     *  open" column on /broker/exceptions. */
     agency_exceptions: number;
+    /** Files not yet processed, due in the next 30 days. */
+    files_upcoming: number;
+    /** Files not yet processed and already past their due date, any month. */
+    files_overdue: number;
+    /** Earliest due date still to come, and the oldest one missed (ISO). */
+    next_due: string | null;
+    first_overdue: string | null;
     /** Contracts waiting on this broker's signature. */
     signatures_pending: number;
     /** Contracts signed by everyone. */
@@ -87,6 +97,68 @@ export type BrokerDashboard = {
 export const getBrokerDashboard = (carrierId?: number | null) =>
   api.get<BrokerDashboard>("/broker/dashboard", {
     params: carrierId ? { carrier_id: carrierId } : {},
+  }).then(r => r.data);
+
+/** One file this broker owes — a row of the carrier's own Bordereau Calendar,
+ *  narrowed to this broker (GET /broker/calendar). */
+export type BrokerCalendarRow = {
+  id: number;
+  program_id: number;
+  program_name: string;
+  carrier_name: string | null;
+  period: string;
+  due_date: string | null;
+  /** When it was first processed — the date the carrier saw it arrive. */
+  received_at: string | null;
+  latest_received_at: string | null;
+  status: CalendarStatus;
+  days_over: number | null;
+  days_late: number | null;
+  version_count: number;
+  version_label: string;
+  /** The carrier's reminders about this file. */
+  chased_at: string | null;
+  chase_count: number;
+  /** The file behind the newest version, for its exceptions screen. */
+  export_id: number | null;
+};
+
+export type BrokerCalendar = {
+  month: string;
+  months: string[];
+  rows: BrokerCalendarRow[];
+  schedules: {
+    program_id: number; program_name: string; carrier_name: string | null;
+    frequency: string | null; frequency_label: string; due_rule: string;
+    next_due: string | null; covers_until: string | null;
+  }[];
+};
+
+/** One live file with exceptions (GET /broker/exceptions). */
+export type BrokerExceptionFile = {
+  export_id: number;
+  filename: string | null;
+  programme: string | null;
+  carrier: string | null;
+  created_at: string | null;
+  rows: number;
+  exceptions: number;
+  open: number;
+  put_right: number;
+};
+
+export const getBrokerExceptions = (carrierId?: number | null) =>
+  api.get<{
+    items: BrokerExceptionFile[];
+    totals: { files: number; files_open: number; exceptions: number;
+              open: number; put_right: number };
+  }>("/broker/exceptions", {
+    params: carrierId ? { carrier_id: carrierId } : {},
+  }).then(r => r.data);
+
+export const getBrokerCalendar = (month?: string, carrierId?: number | null) =>
+  api.get<BrokerCalendar>("/broker/calendar", {
+    params: { ...(month ? { month } : {}), ...(carrierId ? { carrier_id: carrierId } : {}) },
   }).then(r => r.data);
 
 export const getBrokerCarriers = () =>

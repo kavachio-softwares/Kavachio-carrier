@@ -81,6 +81,12 @@ export const ROUTE_ACCESS: {
     only: ["broker_admin", "operator"] },
   // Run history: both broker seats — the team's runs, whoever sent them.
   { pattern: "/broker/runs", requires: "operator", only: ["broker_admin", "operator"] },
+  // The broker's own Bordereau Calendar — what it owes and when. Whoever runs
+  // the bordereau needs it, so it follows /broker/bordereau.
+  { pattern: "/broker/calendar", requires: "operator", only: ["broker_admin", "operator"] },
+  // Every file still carrying exceptions — the dashboard's Exceptions to
+  // Review tile, file by file. Both seats, like the triage it opens.
+  { pattern: "/broker/exceptions", requires: "operator", only: ["broker_admin", "operator"] },
   // The rest of the dashboard's Team Activity / Files by Carrier cards —
   // broker admin only, same as the cards themselves.
   { pattern: "/broker/team-activity", requires: "broker_admin", only: ["broker_admin"] },
