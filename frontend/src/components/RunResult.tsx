@@ -18,6 +18,7 @@
  */
 import { useState } from "react";
 import { api, downloadFile } from "../api/client";
+import { InfoTip } from "./InfoTip";
 import {
   InlineAllRows, HighlightGrid, firstDataSheet, HL_BG, HL_BD,
   HL_WARN_BG, HL_WARN_BD, type Sheet,
@@ -217,7 +218,7 @@ export function RunResult({
           — there is no second screen and no second click, so this is the
           only place the outcome is ever shown. Absent entirely for a
           self-check or a run with no broker on it (nothing to send). */}
-      {result.sent_to_carrier && (
+      {/* {result.sent_to_carrier && (
         <div className={`note${result.sent_to_carrier.mail_sent
           || result.sent_to_carrier.mail_error?.includes("disabled") ? "" : " warn"}`}
           style={{ marginBottom: 18 }}>
@@ -244,7 +245,7 @@ export function RunResult({
             </>
           )}
         </div>
-      )}
+      )} */}
 
       {/* The findings, inline. Read-only in both cases: on a check because a
           check is a look, not a submission; on a real run because whoever sees
@@ -258,8 +259,7 @@ export function RunResult({
               {notChecked.columns?.length ? " — columns not mapped" : ""}.
             </strong>{" "}
             {notChecked.columns?.length
-              ? <>Map these in Bordereau Setup, or add or switch them on in the output template, to run them: {notChecked.columns.slice(0, 12).join(", ")}
-                  {notChecked.columns.length > 12 ? ` and ${notChecked.columns.length - 12} more` : ""}.</>
+              ? <InfoTip text={`Map these in Bordereau Setup, or add or switch them on in the output template, to run them: ${notChecked.columns.join(", ")}.`} />
               : notChecked.message}
           </>}
           {!!notChecked.partial?.length && (

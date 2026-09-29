@@ -14,6 +14,7 @@ import { GlobalLoadingOverlay } from "./Busy";
 import PlatformNotificationCard from "./PlatformNotificationCard";
 import DeadlineReminderCard from "./DeadlineReminderCard";
 import NotificationBell from "./NotificationBell";
+import IngestionDock from "./IngestionDock";
 import { initials } from "../branding";
 
 // Items carry no role of their own: whether one is visible is derived from the
@@ -527,6 +528,13 @@ export default function Layout() {
                 broker belongs to none, so for both it is a bell that can only
                 ever be empty. */}
             {!isKavachioAdmin() && !isBrokerSeat() && <NotificationBell />}
+            {/* The Ingestion panel — what became of every file once it was run.
+                Beside the bell because the footer is the one piece of the shell
+                on every screen. Same seats as the bell get the button; anyone
+                who can open Files gets the drawer, so its page button works. */}
+            {canAccessPath("/files") && (
+              <IngestionDock showButton={!isKavachioAdmin() && !isBrokerSeat()} />
+            )}
           </div>
           <button className="signout" title="Sign out" onClick={() => {
             // Send the refresh token in the body, read SYNCHRONOUSLY here. The
