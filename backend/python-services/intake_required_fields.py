@@ -236,5 +236,5 @@ def check(session, route, filename: str, file_bytes: bytes) -> Optional[str]:
     if len(missing) > _NAMES_SHOWN:
         shown += f" and {len(missing) - _NAMES_SHOWN} more"
     return (f"Held — the file is missing {len(missing)} column"
-            f"{'' if len(missing) == 1 else 's'} this programme reports on: "
+            f"{'' if len(missing) == 1 else 's'} required by this programme: "
             f"{shown}.")

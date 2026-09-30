@@ -44,12 +44,12 @@ function senderOf(a: Arrival): string | null {
 }
 
 function CameInBy({ a }: { a: Arrival }) {
-  if (!a.channel) return <span className="faint" style={{ fontSize: 11.5 }}>Way in not recorded</span>;
+  if (!a.channel) return <span className="faint" style={{ fontSize: 11.5 }}>Channel not recorded</span>;
   const Icon = CHANNEL_ICON[a.channel];
   const who = senderOf(a);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-      <span title={`Came in by ${CAME_IN_BY[a.channel].label}`} style={{
+      <span title={`Channel: ${CAME_IN_BY[a.channel].label}`} style={{
         display: "inline-flex", alignItems: "center", gap: 5, flex: "0 0 auto",
         padding: "2px 8px", borderRadius: 99, fontSize: 11, fontWeight: 600,
         background: "var(--p-primary-soft)", color: "var(--p-primary-h)",
@@ -186,10 +186,10 @@ export function IngestionPanel({ open, rows, onClose, onChanged }: {
     <>
       <div className={`scrim${open ? " on" : ""}`} onClick={onClose} />
       <aside className={`drawer${open ? " on" : ""}`} role="dialog" aria-modal="true"
-        aria-hidden={!open} aria-label="Ingestion panel">
+        aria-hidden={!open} aria-label="Processing Status">
         <div className="drawer-h">
           <div style={{ minWidth: 0 }}>
-            <h4>Ingestion panel</h4>
+            <h4>Processing Status</h4>
             <div className="ref" style={{ fontFamily: "inherit", fontSize: 12 }}>
               {attentionAll.length
                 ? `${attentionAll.length} need${attentionAll.length === 1 ? "s" : ""} you`
@@ -219,16 +219,16 @@ export function IngestionPanel({ open, rows, onClose, onChanged }: {
             one narrows the list and the tab counts above to that way in. */}
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
           padding: "0 18px 10px", borderBottom: "1px solid var(--p-border)" }}>
-          <span className="faint" style={{ fontSize: 11, fontWeight: 600, marginRight: 2 }}>Came in by</span>
+          <span className="faint" style={{ fontSize: 11, fontWeight: 600, marginRight: 2 }}>Channel</span>
           <button type="button" className="chip" aria-pressed={via === "all"}
             style={{ fontSize: 11.5, padding: "3px 9px" }}
-            onClick={() => setVia("all")}>Any way</button>
+            onClick={() => setVia("all")}>All</button>
           {viaCounts.map(([c, n]) => {
             const Icon = CHANNEL_ICON[c];
             return (
               <button key={c} type="button" className="chip" aria-pressed={via === c}
                 style={{ fontSize: 11.5, padding: "3px 9px" }}
-                title={`Only files that came in by ${CAME_IN_BY[c].label}`}
+                title={`Show ${CAME_IN_BY[c].label} files only`}
                 onClick={() => setVia(via === c ? "all" : c)}>
                 <Icon size={12} strokeWidth={2} aria-hidden="true" />
                 {CAME_IN_BY[c].label} <span className="n">{n}</span></button>);
@@ -241,7 +241,7 @@ export function IngestionPanel({ open, rows, onClose, onChanged }: {
             <div style={{ textAlign: "center", padding: "32px 12px", color: "var(--p-muted)", fontSize: 12.5 }}>
               Nothing here.<br />
               {via === "all" ? "Files appear here once they have been run."
-                : `No ${tab === "all" ? "" : tab === "attention" ? "files needing you " : "finished files "}came in by ${CAME_IN_BY[via].label}.`}
+                : `No ${tab === "all" ? "files" : tab === "attention" ? "files needing attention" : "finished files"} received via ${CAME_IN_BY[via].label}.`}
             </div>
           ) : groups.map(([contract, files]) => (
             <div key={contract} style={{ marginBottom: 16 }}>

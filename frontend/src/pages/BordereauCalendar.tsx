@@ -206,7 +206,7 @@ export default function BordereauCalendar() {
             <NotificationBell placement="inline" />
             {!platform && (
               <>
-                <Link className="btn" to="/files">Files received →</Link>
+                <Link className="btn" to="/files">Files Received →</Link>
                 <button className="btn pri" onClick={() => setChasing(overdue)}
                   disabled={overdue.length === 0}
                   title={overdue.length === 0 ? "Nothing is late" : ""}>

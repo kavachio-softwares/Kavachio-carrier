@@ -77,7 +77,7 @@ export function ContractPicker({
         background: "var(--p-surface-2)", padding: "9px 12px",
         fontSize: 13.5, color: "var(--p-faint)",
       }}>
-        No live contract yet
+        No active contract yet
       </div>
     );
   }

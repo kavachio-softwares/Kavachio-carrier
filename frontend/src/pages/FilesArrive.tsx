@@ -32,7 +32,7 @@ const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }
     // any more — Process Bordereau is the broker's screen now (access.ts) — so
     // this names the broker rather than leaving a carrier reading their own
     // intake page to conclude they are the someone.
-    title: "Manual upload", sub: "the broker signs in and uploads the file",
+    title: "Manual Upload", sub: "the broker signs in and uploads the file",
     hint: "their Process Bordereau screen",
   },
   email: {
@@ -40,15 +40,15 @@ const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }
     hint: "an address you give the broker",
   },
   sftp: {
-    title: "Secure folder (SFTP)", sub: "the broker uploads the file to a secure folder",
+    title: "SFTP", sub: "the broker uploads the file to a secure folder",
     hint: "a folder of their own",
   },
   api: {
-    title: "System connection (API)", sub: "the broker's system sends the file automatically",
+    title: "API", sub: "the broker's system sends the file automatically",
     hint: "POST /v1/bordereaux",
   },
   cloud_folder: {
-    title: "Shared folder", sub: "the broker saves the file in a folder we watch",
+    title: "Cloud Folder", sub: "the broker saves the file in a folder we watch",
     hint: "S3 · SharePoint · Google Drive",
   },
 };
@@ -56,7 +56,7 @@ const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }
 // A mark per channel, so four groups that are otherwise four identical grey
 // rows can be told apart by shape. The tones deliberately match CAME_IN_BY on
 // the Inbox tab: the same way in is the same colour on both tabs, which is what
-// makes "Secure folder (SFTP)" on a row and the same heading here read as
+// makes "SFTP" on a row and the same heading here read as
 // one thing rather than two.
 const CHANNEL_MARK: Record<Channel, { Icon: React.ElementType; tone: string }> = {
   upload: { Icon: Upload, tone: "ok" },
@@ -91,7 +91,7 @@ const CHANNEL_DETAIL: Partial<Record<Channel, [string, string][]>> = {
     ["When we pick it up", "The moment it reaches the mailbox"],
     ["After we take it", "Filed into /Processed so it cannot be read twice"],
     ["Attachments we ignore", "Signatures, logos and anything not a spreadsheet"],
-    ["If we cannot use it", "The sender CAN be told — email is the one way in with a reply path"],
+    ["If we cannot use it", "The sender can be notified — email is the only channel with a reply path"],
   ],
   api: [
     ["Where they send it", "POST /v1/bordereaux"],
@@ -219,7 +219,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
   // mis-click and a programme going quiet until month-end.
   async function toggle(route: IntakeRoute) {
     if (route.is_enabled && !window.confirm(
-      `Switch off this way in for ${route.broker_name ?? "this broker"}?\n\n`
+      `Switch off this channel for ${route.broker_name ?? "this broker"}?\n\n`
       + `Files sent to ${route.display_address} will stop being collected. `
       + `Nothing already received is affected, and you can switch it back on.`)) return;
     setBusy(true);
@@ -257,8 +257,8 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
           read across. */}
       <div className="card">
         <div className="card-h">
-          <h3>Ingestion options</h3>
-          <span className="sub">grouped by how the file gets here</span>
+          <h3>Submission Channels</h3>
+          <span className="sub">Grouped by channel</span>
         </div>
 
         {builtChannels.map(ch => {
@@ -283,7 +283,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                 <span className="meta">
                   {ch === "upload"
                     ? "always on · anyone with a login · nothing to set up"
-                    : routes.length === 0 ? "nobody sends this way yet"
+                    : routes.length === 0 ? "no brokers on this channel yet"
                     : `${brokers} broker${brokers === 1 ? "" : "s"} · ${files} file${files === 1 ? "" : "s"} this month${pickupNote(ch, data?.collector)}`}
                 </span>
               </button>
@@ -299,7 +299,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                     </div>
                   ) : routes.length === 0 ? (
                     <div className="note">
-                      No broker sends this way yet. Use <b>Add a way in</b> to give
+                      No broker uses this channel yet. Use <b>Add Channel</b> to give
                       one their own address on it.
                     </div>
                   ) : routes.map(r => (
@@ -383,7 +383,7 @@ function RouteCard({ route, busy, keys, onSettings, onToggle }: {
             sends from <span className="mono">{route.address}</span>
           </div>)}
         {isApi && (needsKey
-          ? <div className="route-sub warnt">Nothing can be sent this way until a key exists.</div>
+          ? <div className="route-sub warnt">Nothing can be sent through this channel until a key exists.</div>
           : keys === undefined
           ? <div className="route-sub">checking keys…</div>
           : <div className="route-sub">
@@ -406,7 +406,7 @@ function RouteCard({ route, busy, keys, onSettings, onToggle }: {
             was two controls saying one thing. */}
         <button type="button" className="sw" role="switch" aria-checked={route.is_enabled}
           disabled={busy} onClick={onToggle}
-          aria-label={`${route.is_enabled ? "Switch off" : "Switch on"} this way in for ${route.broker_name ?? "this broker"}`}
+          aria-label={`${route.is_enabled ? "Switch off" : "Switch on"} this channel for ${route.broker_name ?? "this broker"}`}
           title={route.is_enabled
             ? "Switch off — files sent here stop being collected"
             : "Switch on — start collecting from here again"}>
@@ -493,7 +493,7 @@ function SettingsModal({ route, onClose, onSaved }:
               <span className="mono" style={{ fontSize: 11.5 }}>{route.send_to}</span></div>)}
           {(CHANNEL_DETAIL[route.channel] ?? []).map(([k, v]) => (
             <div className="kv" key={k}><span className="k">{k}</span><span>{v}</span></div>))}
-          <div className="kv"><span className="k">Files this month</span>
+          <div className="kv"><span className="k">Received This Month</span>
             <span>{route.files_this_month}</span></div>
 
           {/* Keys are the API route's whole identity mechanism — the equivalent
@@ -581,7 +581,7 @@ function KeyPanel({ route }: { route: IntakeRoute }) {
       {keys === null ? <div className="muted" style={{ fontSize: 12.5 }}>Loading…</div>
         : keys.length === 0 ? (
           <div className="note" style={{ marginBottom: 12 }}>
-            No key yet, so nothing can send this way. Make one and give it to the broker.
+            No key yet, so nothing can be sent through this channel. Create one and give it to the broker.
           </div>
         ) : (
           <div className="tbl-wrap" style={{ marginBottom: 12 }}>
@@ -729,7 +729,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
   }, [brokerId, brokers, channel, mailbox]);
 
   return (
-    <Modal open={open} title="Give a broker their own way in" onClose={onClose} size="2xl"
+    <Modal open={open} title="Add Channel" onClose={onClose} size="2xl"
       footer={<div className="proto proto-embed" style={{ display: "flex", gap: 10 }}>
         {created
           ? <button className="btn pri" onClick={onCreated}>Done</button>
@@ -739,27 +739,25 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 disabled={saving || brokerId === "" ||
                   programId === "" ||
                   (channel === "email" && !senderEmail.includes("@"))}>
-                {saving ? "Configuring…" : "Configure it"}</button>
+                {saving ? "Creating…" : "Create"}</button>
             </>}
       </div>}>
       <div className="proto proto-embed">
         {created ? (
           <>
             <div className="note ok" style={{ marginBottom: 14 }}>
-              <b>{created.broker_name}</b> now has their own way in
+              <b>{created.broker_name}</b> now has their own channel
               {created.program_name ? <> on <b>{created.program_name}</b></> : null}.
             </div>
             <div className="drop filled" style={{ padding: "13px 15px", textAlign: "left" }}>
               <span className="mono" style={{ fontSize: 12.5 }}>{created.display_address}</span>
               <div style={{ fontSize: 12, marginTop: 5, color: "var(--p-muted)" }}>
                 {created.channel === "api"
-                  ? <>Every sender posts to this same address. What tells us it is{" "}
-                      {created.broker_name} is the key below.</>
+                  ? <>The key below identifies {created.broker_name}.</>
                   : created.channel === "email"
-                  ? <>This is the address they send FROM, and it is what identifies them.</>
-                  : <>They write into <span className="mono">/incoming</span>. Once we take a
-                      file it moves to <span className="mono">/processed</span>, so it can never
-                      be read twice.</>}
+                  ? <>The address they send from.</>
+                  : <>They upload to <span className="mono">/incoming</span>; collected files
+                      move to <span className="mono">/processed</span>.</>}
               </div>
             </div>
 
@@ -769,10 +767,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 <div className="mono" style={{ fontSize: 12.5, marginTop: 7 }}>
                   {created.send_to}</div>
                 <div style={{ fontSize: 12, marginTop: 8, color: "var(--p-muted)" }}>
-                  The tag after the <span className="mono">+</span> is what makes this
-                  {" "}<b>their</b> address rather than just the inbox — mail sent to it can
-                  only have come from someone who was told it. If their mail server strips the
-                  tag, the From: address above still identifies them.
+                  The <span className="mono">+</span> tag makes this address theirs alone.
                 </div>
               </div>)}
 
@@ -786,67 +781,55 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                   }}>{copied ? "Copied" : "Copy"}</button>
                 </div>
                 <div style={{ fontSize: 12, marginTop: 8, color: "var(--p-muted)" }}>
-                  Send it to {created.broker_name} over something private. We keep only a
-                  fingerprint, so if it is lost the only fix is to revoke it and make another.
+                  Send it to {created.broker_name} privately. If it is lost, revoke it and
+                  create a new one.
                 </div>
               </div>
             )}
             {created.channel === "api" && !minted && (
               <div className="note warn" style={{ marginTop: 14 }}>
-                The way in was made but its key was not. Open <b>Settings</b> on this route and
-                make one — nothing can be sent until there is a key.
+                The channel was created but its key was not. Create one from this channel's
+                {" "}<b>Settings</b> before they can send.
               </div>
             )}
           </>
         ) : (
           <>
             {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
-            <div className="note" style={{ marginBottom: 14 }}>
-              There are only four ways a file can reach you and you cannot invent a fifth. What
-              this does is give <b>one broker their own address</b> on one of them, so you never
-              have to work out who sent what.
-            </div>
-
             <div className="field">
-              <label>Which broker?</label>
+              <label>Select Broker</label>
               <select value={brokerId}
                 onChange={e => setBrokerId(e.target.value === "" ? "" : Number(e.target.value))}>
                 <option value="">Select a broker…</option>
                 {brokers.map(b => <option key={b.party_id} value={b.party_id}>{b.legal_name}</option>)}
               </select>
               {brokers.length === 0 && (
-                <div className="hint">No broker is on one of your programmes yet. A broker with
-                  no programme has nothing for their files to belong to.</div>)}
+                <div className="hint">No broker is on a programme yet.</div>)}
             </div>
 
             <div className="field">
-              <label>Which way in?</label>
+              <label>Select Channel</label>
               <select value={channel} onChange={e => setChannel(e.target.value as Channel)}>
                 {creatable.map(c => (
                   <option key={c} value={c}>{CHANNEL_COPY[c].title}</option>))}
               </select>
-              {/* One sentence each, all three built the same way: who sends it,
-                  how it travels, and what we do when it gets here. Read down the
-                  dropdown they now compare cleanly instead of each describing
-                  itself in its own terms. */}
+              {/* One short line each: how the file travels. */}
               <div className="hint">
                 {channel === "api"
-                  ? "The broker's software sends the file straight to ours, with nobody signing in at either end."
+                  ? "Their system sends the file to ours directly."
                   : channel === "email"
-                  ? "The broker emails the file as an attachment, and we take it off the email the moment it arrives."
-                  : "The broker saves the file into a private folder we give them, and we collect it the moment it lands."}
+                  ? "They email the file as an attachment."
+                  : "They upload the file to a private folder."}
               </div>
               {channel === "email" && !mailReady && (
                 <div className="hint" style={{ color: "var(--p-warn)" }}>
-                  No intake mailbox is configured yet, so nothing will be collected from this
-                  route until IMAP_HOST, IMAP_USER and IMAP_PASS are set. The route can be
-                  made now — it just will not do anything.
+                  No intake mailbox is set up yet, so nothing will be collected until it is.
                 </div>)}
             </div>
 
             {channel === "email" && (
               <div className="field">
-                <label>Which address do they send from?</label>
+                <label>Sender Email Address</label>
                 <input type="email" value={senderEmail} placeholder="ops@bridgebrokers.com"
                   onChange={e => setSenderEmail(e.target.value)} />
                 {/* Where the filled-in value came from, and the other addresses
@@ -866,14 +849,11 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                           <span className="muted"> ({k.status})</span>)}
                       </span>))}
                   </div>)}
-                <div className="hint">
-                  Use the <b>From:</b> address on their bordereau emails
-                  {knownEmails.length > 0 ? " — change it if that isn't their login." : "."}
-                </div>
+                <div className="hint">The <b>From:</b> address on their bordereau emails.</div>
               </div>)}
 
             <div className="field">
-              <label>Which programme?</label>
+              <label>Select Programme</label>
               <select value={programId} disabled={brokerId === ""}
                 onChange={e => setProgramId(e.target.value === "" ? "" : Number(e.target.value))}>
                 {/* Every way in is pinned to one programme, so the blank option is
@@ -882,24 +862,19 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 {progs.map(p => (
                   <option key={p.program_id} value={p.program_id}>{p.name}</option>))}
               </select>
-              <div className="hint">
-                {brokerId === "" ? "Pick a broker first."
-                  : progs.length === 0 ? "This broker is not on a programme yet."
-                  : programId === "" ? "Pick the programme their files are for."
-                  : channel === "api"
-                  ? "Their files go to this programme and nothing else. They send only the file — no programme, no broker, nothing to get wrong."
-                  : "Their files are checked against this programme's contract."}
-              </div>
+              {(brokerId === "" || progs.length === 0) && (
+                <div className="hint">
+                  {brokerId === "" ? "Select a broker first." : "This broker is not on a programme yet."}
+                </div>)}
             </div>
 
             <div className="field">
-              <label>The address they will use</label>
+              <label>Broker's Address</label>
               <div className="drop filled" style={{ padding: "13px 15px", textAlign: "left" }}>
                 <span className="mono" style={{ fontSize: 12.5 }}>
-                  {preview ?? "pick a broker to see their address"}</span>
+                  {preview ?? "Select a broker to see their address"}</span>
                 <div style={{ fontSize: 12, marginTop: 5, color: "var(--p-muted)" }}>
-                  Made for you. It has to match the folder we look in exactly, and one typo is a
-                  broker whose files are silently never picked up.
+                  Generated automatically.
                 </div>
               </div>
             </div>

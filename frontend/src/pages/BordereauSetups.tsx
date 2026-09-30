@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Boxes, FileSpreadsheet } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
@@ -98,8 +98,24 @@ export default function BordereauSetups() {
   const filtersActive = q !== "" || program !== "" || status !== "";
   function clearFilters() { setQ(""); setProgram(""); setStatus(""); }
 
+  // Does this carrier have ANY setup? Only learnt from an unfiltered answer —
+  // a filtered empty page says nothing about the rest. Null until known, so
+  // the button never flashes disabled while the first page loads.
+  const [hasAny, setHasAny] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!loading && !filtersActive) setHasAny(total > 0);
+  }, [loading, filtersActive, total]);
+
+  // Disabled until the first setup exists: the first one is made from the
+  // programme (Configure Program, step 4), where the programme, its broker and
+  // the contract are already in place — not from here, where none of them are.
+  const noSetups = hasAny === false;
   const newSetup = (
-    <button type="button" className="btn pri" onClick={() => nav("/direct/setup")}>
+    <button type="button" className="btn pri" onClick={() => nav("/direct/setup")}
+      disabled={noSetups}
+      title={noSetups
+        ? "Create your first setup from Programmes → Configure Program (step 4)."
+        : undefined}>
       <FileSpreadsheet size={15} /> Bordereau Setup
     </button>
   );
@@ -146,8 +162,12 @@ export default function BordereauSetups() {
                  from an unfiltered empty result rather than a full row fetch. */
               <div className="empty">
                 <Boxes size={26} style={{ margin: "0 auto 10px", display: "block" }} />
-                No setups yet — build one to map a programme's bordereau.
-                <div style={{ marginTop: 14 }}>{newSetup}</div>
+                No setups yet.
+                <div className="sub" style={{ marginTop: 6 }}>
+                  Your first setup is created from{" "}
+                  <Link to="/programs" className="linkish">Programmes</Link> — it is
+                  the last step of configuring a programme.
+                </div>
               </div>
             ) : total === 0 && status === "pending_approval"
                  && q === "" && program === "" ? (

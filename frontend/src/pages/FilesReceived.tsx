@@ -29,11 +29,11 @@ import { Pagination } from "../components/Pagination";
 // the one with a reply path so it reads as info, an upload was done by a person
 // so it reads as ok, and the two machine doors are quiet greys.
 export const CAME_IN_BY: Record<Channel, { label: string; tone: "ok" | "info" | "mut" }> = {
-  upload: { label: "Manual upload", tone: "ok" },
+  upload: { label: "Manual Upload", tone: "ok" },
   email: { label: "Email", tone: "info" },
-  sftp: { label: "Secure folder (SFTP)", tone: "mut" },
-  api: { label: "System connection (API)", tone: "mut" },
-  cloud_folder: { label: "Shared folder", tone: "mut" },
+  sftp: { label: "SFTP", tone: "mut" },
+  api: { label: "API", tone: "mut" },
+  cloud_folder: { label: "Cloud Folder", tone: "mut" },
 };
 
 // What became of a file once it was run — the second half of "What happened".
@@ -43,23 +43,30 @@ export const CAME_IN_BY: Record<Channel, { label: string; tone: "ok" | "info" | 
 export const RUN_META: Record<RunResult, {
   label: string; tone: "ok" | "warn" | "crit" | "mut"; meaning: string;
 }> = {
-  ingested: { label: "Ingested", tone: "ok",
-    meaning: "Every row passed. The figures are live." },
-  exceptions: { label: "Exceptions", tone: "warn",
-    meaning: "Clean rows are in; the rest are held for a decision." },
+  ingested: { label: "Clean", tone: "ok",
+    meaning: "All rows passed validation." },
+  exceptions: { label: "With Exceptions", tone: "warn",
+    meaning: "Valid rows loaded; exceptions awaiting review." },
   failed: { label: "Failed", tone: "crit",
-    meaning: "Stopped. Nothing was written, so a retry is safe." },
-  not_checked: { label: "Not checked", tone: "mut",
-    meaning: "It ran, but the contract checks could not run on it." },
-  not_run: { label: "Not run", tone: "mut",
-    meaning: "It could not be run automatically — open it to see why." },
+    meaning: "Processing stopped. No data was saved — safe to retry." },
+  not_checked: { label: "Not Validated", tone: "mut",
+    meaning: "Processed, but contract checks could not be applied." },
+  not_run: { label: "Not Processed", tone: "mut",
+    meaning: "Could not be processed automatically — open for details." },
 };
+
+/** Tooltips for the three result tiles, each of which filters to its own rows. */
+const RUN_TILE_HINT = {
+  ingested: "Show clean files only",
+  exceptions: "Show files with exceptions only",
+  failed: "Show failed files only",
+} as const;
 
 /** What an accepted file that has no result yet is doing. */
 function awaitingRun(a: Arrival): string {
-  if (a.run_state === "running") return "Being run now";
-  if (a.run_state === "pre_autorun") return "Arrived before auto-run — run it by hand";
-  return "Waiting to be run";
+  if (a.run_state === "running") return "Processing…";
+  if (a.run_state === "pre_autorun") return "Received before auto-processing — process manually";
+  return "Queued for processing";
 }
 
 // Every real way in, in the order the filter offers them. This is a fixed list
@@ -84,26 +91,26 @@ const PAGE_SIZE = 10;   // same page size as the other lists (Contracts, Parties
 // is deliberate (12.1), because opening a spreadsheet is the one step that runs
 // a stranger's choices through our parsers.
 const CHECKS: [string, string][] = [
-  ["Is it small enough to read?",
-   "A file far larger than a bordereau is a mistake, not a month of business."],
-  ["Is it a spreadsheet at all?",
-   "A PDF or a photo of a spreadsheet cannot be read."],
-  ["Is it safe to open?",
-   "A small file that unpacks to gigabytes is not a spreadsheet."],
-  ["Do we know who sent it?",
-   "Every file has to belong to a broker on one of your programmes."],
-  ["Is it the same file we already have?",
-   "Brokers often send twice. Loading it twice would double your premium."],
-  ["Does it pass the security scan?",
-   "Files from outside are scanned before anything opens them."],
-  ["Can we open it?",
-   "Half-uploaded and password-protected files look fine until you try."],
-  ["Does it have any rows in it?",
-   "An empty file usually means an export that silently failed."],
-  ["Does it have the columns we need?",
-   "The right file with the wrong layout produces a page of blanks."],
-  ["Is there a live contract to check it against?",
-   "There is nothing to check a file against until the contract is agreed."],
+  ["File size",
+   "The file must be within the size limit and not empty."],
+  ["File type",
+   "Only Excel, CSV, XML or JSON files are accepted."],
+  ["File safety",
+   "The file is checked for macros and abnormal compression."],
+  ["Sender verification",
+   "The sender must be a broker on one of your programmes."],
+  ["Duplicate check",
+   "Previously received files are not loaded again, preventing double-counted premium."],
+  ["Security scan",
+   "External files are scanned for malware before opening."],
+  ["File readability",
+   "Incomplete or password-protected files cannot be opened."],
+  ["Data present",
+   "The file must contain at least one data row."],
+  ["Required columns",
+   "The file must include the columns the programme reports on."],
+  ["Active contract",
+   "An active contract is required to validate the file."],
 ];
 
 // Which check produced this reason. The backend writes the sentence, not the
@@ -124,7 +131,7 @@ function failedCheck(reason: string | null): number {
   if (/could not open it/.test(r)) return 6;
   if (/no rows in it/.test(r)) return 7;
   if (/columns this programme reports on|missing \d+ column/.test(r)) return 8;
-  if (/no live contract/.test(r)) return 9;
+  if (/no (live|active) contract/.test(r)) return 9;
   return -1;
 }
 
@@ -167,21 +174,24 @@ function rowsOf(n: number | null): string {
   return n == null ? "—" : n.toLocaleString();
 }
 
+/** "1 file" / "3 files". */
+const nFiles = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+
 /** The action at the end of the row. Every one of them opens the drawer, so
  *  the word says what you will be doing there rather than naming the control:
  *  a held file needs a decision, a refused one needs an explanation. */
 function actionLabel(a: Arrival): string {
   const st = state(a);
-  if (a.resolution) return "Open →";       // already decided; nothing to do
-  return st === "held" ? "Decide →" : st === "away" ? "Why →" : "Open →";
+  if (a.resolution) return "View →";       // already decided; nothing to do
+  return st === "held" ? "Review →" : st === "away" ? "View Reason →" : "View →";
 }
 
 // A few words for each check a file can stop at, in the order of CHECKS. The
 // backend's full sentence is kept for the tooltip and the drawer.
 const SHORT_REASON = [
-  "Too large, or empty", "Not a spreadsheet", "Unsafe file",
-  "Sender not recognised", "Already loaded", "Failed the security scan",
-  "Could not be opened", "No rows in it", "Columns missing", "No live contract",
+  "Invalid file size", "Unsupported file type", "Unsafe file content",
+  "Unrecognised sender", "Duplicate file", "Failed security scan",
+  "Unable to open file", "No data rows", "Required columns missing", "No active contract",
 ];
 
 /** The line under the filename: what happened, in a few words. The full
@@ -196,16 +206,16 @@ function subline(a: Arrival): string {
       const first = (a.run_error ?? "").split(/(?<=\.)\s/)[0];
       return first.length > 60 ? first.slice(0, 57).trimEnd() + "…" : first;
     }
-    if (a.run_result) return a.resolution === "released" ? "Released by hand" : "";
+    if (a.run_result) return a.resolution === "released" ? "Manually released" : "";
     return a.resolution === "released"
-      ? `Released by hand — ${awaitingRun(a).toLowerCase()}` : awaitingRun(a);
+      ? `Manually released — ${awaitingRun(a).toLowerCase()}` : awaitingRun(a);
   }
   const reason = fullReason(a);
   const i = failedCheck(reason);
   if (i === 8) {
     const n = reason.match(/missing (\d+) column/i)?.[1];
-    if (n) return `${n} columns missing`;
-    if (/none of the columns/i.test(reason)) return "Wrong file — none of the columns match";
+    if (n) return `${n} required columns missing`;
+    if (/none of the columns/i.test(reason)) return "Unrecognised file layout";
   }
   if (i >= 0) return SHORT_REASON[i];
   // Nothing matched: the first sentence, cut short.
@@ -213,7 +223,12 @@ function subline(a: Arrival): string {
   return first.length > 60 ? first.slice(0, 57).trimEnd() + "…" : first;
 }
 
-const fullReason = (a: Arrival) => (a.turned_away_reason ?? "").replace(/^Held — /, "");
+// The backend writes held reasons as "Held — the file is …". The badge already
+// says On Hold, so the prefix goes and the sentence starts with a capital.
+const fullReason = (a: Arrival) => {
+  const r = (a.turned_away_reason ?? "").replace(/^Held — /, "");
+  return r.charAt(0).toUpperCase() + r.slice(1);
+};
 
 export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, liveTick = 0 }: {
   /** Every row fetched, reported up so the Ingestion panel reads the same list
@@ -433,7 +448,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
     setBusy(true); setBulkErr(null);
     const call = what === "release" ? releaseArrival : discardArrival;
     const note = targets.length > 1
-      ? `Decided together with ${targets.length - 1} other file${targets.length === 2 ? "" : "s"}`
+      ? `Bulk action with ${targets.length - 1} other file${targets.length === 2 ? "" : "s"}`
       : undefined;
     const results = await Promise.allSettled(
       targets.map(a => call(a.arrival_id, note)));
@@ -443,8 +458,9 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
     await load();
     if (failed > 0) {
       setBulkErr(failed === targets.length
-        ? "None of those went through. Nothing has changed."
-        : `${targets.length - failed} went through, ${failed} did not. The ones that failed are still here.`);
+        ? "The action could not be completed. No files were changed."
+        : `${nFiles(targets.length - failed)} updated; ${failed} could not be updated and `
+          + `${failed === 1 ? "remains" : "remain"} in the list.`);
     }
   }
 
@@ -465,34 +481,35 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
         <button type="button" className="tile" aria-pressed={range === "month"}
           onClick={() => setRange(range === "month" ? "all" : "month")}
           title={range === "month"
-            ? "Showing this month only — click to show every arrival"
-            : "Show only what arrived this month"}>
-          <div className="k">Files this month
-            {range === "month" && <span className="on">filtering</span>}</div>
+            ? "Filter applied — click to clear"
+            : "Show this month's files only"}>
+          <div className="k">Received This Month
+            {range === "month" && <span className="on">Filtered</span>}</div>
           <div className="v">{rows ? counts.month : "—"}</div>
-          <div className="foot">across every way in</div>
+          <div className="foot">All channels</div>
         </button>
 
         {([
-          ["today", "Arrived today", counts.today, "however they came in", ""],
-          ["ok", "Went through", counts.ok, "passed every check", ""],
-          ["held", "Waiting on you", counts.waiting,
+          ["today", "Received Today", counts.today, "Since midnight", "",
+            "Show today's files only"],
+          ["ok", "Accepted", counts.ok, "Passed all intake checks", "",
+            "Show accepted files only"],
+          ["held", "On Hold", counts.waiting,
             counts.waiting > 0 && counts.oldestWaitDays > 0
-              ? `oldest has waited ${counts.oldestWaitDays} day${counts.oldestWaitDays === 1 ? "" : "s"}`
-              : "a person has to decide",
-            counts.waiting > 0 ? "warnl" : ""],
-          ["away", "Turned away", counts.away, "never got as far as processing",
-            counts.away > 0 ? "alert" : ""],
-        ] as const).map(([f, label, n, foot, tone]) => {
+              ? `Oldest: ${counts.oldestWaitDays} day${counts.oldestWaitDays === 1 ? "" : "s"}`
+              : "Awaiting your decision",
+            counts.waiting > 0 ? "warnl" : "", "Show files on hold only"],
+          ["away", "Rejected", counts.away, "Failed intake checks",
+            counts.away > 0 ? "alert" : "", "Show rejected files only"],
+        ] as const).map(([f, label, n, foot, tone, hint]) => {
           const on = filter === f;
           const colour = tone === "warnl" ? "var(--p-warn)"
             : tone === "alert" ? "var(--p-crit)" : undefined;
           return (
             <button type="button" key={f} className={`tile ${tone}`} aria-pressed={on}
               onClick={() => setFilter(on ? "" : f)}
-              title={on ? "Showing only these — click to show everything"
-                        : `Show only ${label.toLowerCase()}`}>
-              <div className="k">{label}{on && <span className="on">filtering</span>}</div>
+              title={on ? "Filter applied — click to clear" : hint}>
+              <div className="k">{label}{on && <span className="on">Filtered</span>}</div>
               <div className="v" style={colour ? { color: colour } : undefined}>
                 {rows ? n : "—"}</div>
               <div className="foot">{foot}</div>
@@ -503,9 +520,9 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
       {/* Once inside — what the run did with the files that went through. The
           same toggle behaviour as the row above: a tile IS the filter. */}
       <div className="sub-h" style={{ margin: "0 0 8px", display: "flex", gap: 8, alignItems: "baseline" }}>
-        Once inside
+        Processing Results
         <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500, color: "var(--p-faint)" }}>
-          — of the {rows ? counts.through : "—"} that went through</span>
+          — of {rows ? `${counts.through} accepted file${counts.through === 1 ? "" : "s"}` : "—"}</span>
       </div>
       <div className="tiles three" style={{ marginBottom: 18 }}>
         {(["ingested", "exceptions", "failed"] as const).map(k => {
@@ -517,9 +534,8 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
           return (
             <button type="button" key={k} className="tile" aria-pressed={on}
               onClick={() => setFilter(on ? "" : f)}
-              title={on ? "Showing only these — click to show everything"
-                        : `Show only ${RUN_META[k].label.toLowerCase()}`}>
-              <div className="k">{RUN_META[k].label}{on && <span className="on">filtering</span>}</div>
+              title={on ? "Filter applied — click to clear" : RUN_TILE_HINT[k]}>
+              <div className="k">{RUN_META[k].label}{on && <span className="on">Filtered</span>}</div>
               <div className="v" style={colour ? { color: colour } : undefined}>{rows ? n : "—"}</div>
               <div className="foot">{RUN_META[k].meaning}</div>
             </button>);
@@ -533,35 +549,35 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
             <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
           <input type="search" value={q} onChange={e => setQ(e.target.value)}
-            placeholder="Search filename or sender…" aria-label="Search files" />
+            placeholder="Search by file, broker, sender or contract…" aria-label="Search files" />
         </label>
         <span className="spacer">
-          <select className="sel" value={range} aria-label="When it arrived"
+          <select className="sel" value={range} aria-label="Received"
             onChange={e => setRange(e.target.value as Range)}>
-            <option value="all">Any time</option>
-            <option value="month">This month</option>
-            <option value="30">Last 30 days</option>
-            <option value="90">Last 90 days</option>
+            <option value="all">All Time</option>
+            <option value="month">This Month</option>
+            <option value="30">Last 30 Days</option>
+            <option value="90">Last 90 Days</option>
           </select>
           <select className="sel" value={fChannel} onChange={e => setFChannel(e.target.value)}
-            aria-label="Way in">
-            <option value="">Any way in</option>
+            aria-label="Channel">
+            <option value="">All Channels</option>
             {options.channels.map(c => (
               <option key={c} value={c}>{CAME_IN_BY[c].label}</option>))}
           </select>
           <select className="sel" value={fBroker} onChange={e => setFBroker(e.target.value)}
             aria-label="Broker">
-            <option value="">Any broker</option>
+            <option value="">All Brokers</option>
             {options.brokers.map(b => <option key={b} value={b}>{b}</option>)}
           </select>
           <select className="sel" value={fProgramme} aria-label="Programme"
             onChange={e => setFProgramme(e.target.value)}>
-            <option value="">Any programme</option>
+            <option value="">All Programmes</option>
             {options.programmes.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
           {filtered && (
             <button type="button" className="linkbtn" onClick={clearFilters}>
-              Clear filters</button>)}
+              Clear Filters</button>)}
         </span>
       </div>
 
@@ -571,10 +587,10 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
         {pending && (
           <div className="newbar">
             <b>{pending.length - all.length > 0
-              ? `${pending.length - all.length} new file${pending.length - all.length === 1 ? "" : "s"} arrived`
-              : "Something changed"}</b>
+              ? `${pending.length - all.length} new file${pending.length - all.length === 1 ? "" : "s"} received`
+              : "Updates available"}</b>
             <button type="button" className="linkbtn"
-              onClick={() => { setRows(pending); setPending(null); }}>Show them →</button>
+              onClick={() => { setRows(pending); setPending(null); }}>Refresh List →</button>
           </div>)}
 
         {picked.size > 0 && (
@@ -582,14 +598,14 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
             <span>{picked.size} selected</span>
             {canDiscard.length !== picked.size && (
               <span style={{ fontWeight: 500, color: "var(--p-muted)" }}>
-                {picked.size - canDiscard.length} of them need no decision —
-                already dealt with, or they went straight through
+                {picked.size - canDiscard.length} selected{" "}
+                {picked.size - canDiscard.length === 1 ? "file requires" : "files require"} no action
               </span>)}
             <span className="sp">
               <button type="button" className="btn sm pri" disabled={busy || canRelease.length === 0}
                 onClick={() => decideMany("release")}
-                title="Held files only — a file we could not read cannot be released">
-                {busy ? "Working…" : `Load ${canRelease.length} anyway`}</button>
+                title="Only files on hold can be released">
+                {busy ? "Processing…" : `Release ${canRelease.length}`}</button>
               <button type="button" className="btn sm" disabled={busy || canDiscard.length === 0}
                 onClick={() => decideMany("discard")}>Discard {canDiscard.length}</button>
               <button type="button" className="btn sm" onClick={() => setPicked(new Set())}>
@@ -600,10 +616,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
         {bulkErr && <div className="note crit" style={{ margin: 0, borderRadius: 0 }}>{bulkErr}</div>}
 
         <div className="card-h">
-          <h3>What has come in</h3>
-          <span className="sub">
-            {sort === "queue" ? "needs a decision first, then newest"
-              : sort === "new" ? "newest first" : "oldest first"}</span>
+          <h3>Received Files</h3>
           {/* Counts stay visible while filtered, so nothing is ever hidden
               without saying how much. */}
           <span className="right faint" style={{
@@ -611,36 +624,36 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
           }}>
             <select className="sel" value={sort} aria-label="Sort order"
               onChange={e => setSort(e.target.value as Sort)}>
-              <option value="queue">Needs a decision first</option>
-              <option value="new">Newest first</option>
-              <option value="old">Oldest first</option>
+              <option value="queue">On Hold First</option>
+              <option value="new">Newest First</option>
+              <option value="old">Oldest First</option>
             </select>
             {!rows ? "" : filtered
-              ? `showing ${shown.length} of ${counts.all}`
-              : `showing all ${counts.all}`}
+              ? `${shown.length} of ${nFiles(counts.all)}`
+              : nFiles(counts.all)}
           </span>
         </div>
 
         {rows && counts.all === 0 ? (
           <div style={{ textAlign: "center", padding: "36px 20px", color: "var(--p-muted)" }}>
             <b style={{ display: "block", color: "var(--p-ink)", fontSize: 14, marginBottom: 4 }}>
-              Nothing has arrived yet</b>
+              No files received yet</b>
             {/* The long explanation of what this screen is lives HERE, in the
                 one state where somebody genuinely does not know — not in a grey
                 slab above the title on every visit. */}
             <p style={{ margin: "0 auto", fontSize: 12.5, maxWidth: 430, lineHeight: 1.6 }}>
-              By email, manual upload, secure folder (SFTP) or system connection (API) — every spreadsheet
-              that reaches you ends up here, in the order it arrived, and gets the same checks
-              whichever way it came. Set a broker up on <b>Ingestion options</b> first.
+              Files submitted by email, manual upload, SFTP or API appear here in order of
+              receipt, and each passes the same intake checks. To get started, set up a
+              channel for a broker under <b>Submission Channels</b>.
             </p>
           </div>
         ) : rows && shown.length === 0 ? (
           <div style={{ textAlign: "center", padding: "36px 20px", color: "var(--p-muted)" }}>
             <b style={{ display: "block", color: "var(--p-ink)", fontSize: 14, marginBottom: 4 }}>
-              Nothing matches these filters</b>
+              No files match the selected filters</b>
             <p style={{ margin: 0, fontSize: 12.5 }}>
-              <span className="linkish" onClick={clearFilters}>Clear them</span> to see
-              all {counts.all}.
+              <span className="linkish" onClick={clearFilters}>Clear filters</span> to view
+              all {nFiles(counts.all)}.
             </p>
           </div>
         ) : (
@@ -653,9 +666,9 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                       checked={shown.length > 0 && picked.size === shown.length}
                       onChange={e => toggleAll(e.target.checked)} />
                   </th>
-                  <th>File</th><th>Came in by</th><th>From</th><th>Programme</th>
-                  <th title="The contract the file was checked against">Contract</th>
-                  <th>Rows</th><th>What happened</th><th>When</th><th />
+                  <th>File Name</th><th>Channel</th><th>Broker</th><th>Programme</th>
+                  <th title="Contract used for validation">Contract</th>
+                  <th>Rows</th><th>Status</th><th>Received</th><th />
                 </tr>
               </thead>
               <tbody>
@@ -684,7 +697,8 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                               only ever on the tile, describing a file the sort
                               order then hid at the bottom of the table. */}
                           {isWaiting(a) && waitDays(a) > 0 &&
-                            <span className="aged">{waitDays(a)}d waiting</span>}
+                            <span className="aged">
+                              Pending {waitDays(a)} day{waitDays(a) === 1 ? "" : "s"}</span>}
                         </div>
                         {/* A few words; the whole sentence is the tooltip
                             and is in the drawer. */}
@@ -699,16 +713,16 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                         ? <Badge tone={CAME_IN_BY[a.channel].tone}>
                             {CAME_IN_BY[a.channel].label}</Badge>
                         : <span className="muted">—</span>}</td>
-                      <td>{a.broker_name ?? <span className="muted">unknown sender</span>}</td>
+                      <td>{a.broker_name ?? <span className="muted">Unidentified sender</span>}</td>
                       <td className="muted">
                         {a.program_name ?? <span className="faint">—</span>}</td>
                       <td>{a.contract_name ?? <span className="faint">—</span>}</td>
                       <td className="mono">{rowsOf(a.row_count)}</td>
                       <td>
                         {/* Two steps: did it get in, then what the run did. */}
-                        {st === "ok" ? <Badge tone="ok">Went through</Badge>
-                          : st === "held" ? <Badge tone="warn">Held</Badge>
-                          : <Badge tone="crit">Turned away</Badge>}
+                        {st === "ok" ? <Badge tone="ok">Accepted</Badge>
+                          : st === "held" ? <Badge tone="warn">On Hold</Badge>
+                          : <Badge tone="crit">Rejected</Badge>}
                         {st === "ok" && (
                           <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
                             <span className="faint" aria-hidden="true">↳</span>
@@ -739,9 +753,9 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
         <div className="note" style={{
           margin: 0, border: 0, borderTop: "1px solid var(--p-border)", borderRadius: 0,
         }}>
-          <b>Nothing here is lost.</b> A file that was turned away is kept exactly as it
-          arrived, and a held file has landed — it is only waiting on somebody. Click any row
-          to see which check decided it, or tick several to decide them together.
+          <b>All files are retained.</b> Rejected files are stored exactly as received, and
+          files on hold remain available until reviewed. Select a row to view its intake
+          checks, or select several to act on them together.
         </div>
       </div>
 
@@ -793,7 +807,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
     } catch (e) {
       const detail = (e as { response?: { data?: { detail?: string } } })
         ?.response?.data?.detail;
-      setErr(detail || "That did not work. Nothing has changed.");
+      setErr(detail || "The action could not be completed. No changes were made.");
     } finally {
       setBusy(false);
     }
@@ -810,7 +824,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
     } catch (e) {
       const detail = (e as { response?: { data?: { detail?: string } } })
         ?.response?.data?.detail;
-      setErr(detail || "That did not work. Nothing has changed.");
+      setErr(detail || "The action could not be completed. No changes were made.");
     } finally {
       setBusy(false);
     }
@@ -826,9 +840,9 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
             <div style={{ minWidth: 0 }}>
               <h4>{arrival.filename}</h4>
               <div className="ref">
-                arrival #{arrival.arrival_id}
+                Submission #{arrival.arrival_id}
                 {isWaiting(arrival) && waitDays(arrival) > 0
-                  && ` · waiting ${waitDays(arrival)} days`}
+                  && ` · Pending ${waitDays(arrival)} day${waitDays(arrival) === 1 ? "" : "s"}`}
               </div>
             </div>
             <button type="button" className="closeb" aria-label="Close"
@@ -836,13 +850,17 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
           </div>
 
           <div className="drawer-b">
-            <div className="kv"><span className="k">What happened</span>
+            {/* The INTAKE checks only — size, type, sender, duplicate, scan.
+                Named for that, because a green "Passed every check" sat above
+                a file that went on to fail its contract, and read as the
+                verdict on the file. The contract's verdict is below. */}
+            <div className="kv"><span className="k">Intake Status</span>
               <span className="v">
-                {st === "ok" ? <Badge tone="ok">Passed every check</Badge>
-                  : st === "held" ? <Badge tone="warn">Held</Badge>
-                  : <Badge tone="crit">Turned away</Badge>}
+                {st === "ok" ? <Badge tone="ok">Accepted</Badge>
+                  : st === "held" ? <Badge tone="warn">On Hold</Badge>
+                  : <Badge tone="crit">Rejected</Badge>}
               </span></div>
-            <div className="kv"><span className="k">Came in by</span>
+            <div className="kv"><span className="k">Channel</span>
               <span className="v">
                 {arrival.channel
                   ? <Badge tone={CAME_IN_BY[arrival.channel].tone}>
@@ -858,29 +876,29 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
               <div className="kv"><span className="k">Sender</span>
                 <span className="v mono" style={{ fontSize: 11 }}>
                   {arrival.claimed_sender ?? arrival.route_address ?? "—"}</span></div>)}
-            <div className="kv"><span className="k">From</span>
+            <div className="kv"><span className="k">Broker · Programme</span>
               <span className="v">
-                {arrival.broker_name ?? "unknown sender"}
+                {arrival.broker_name ?? "Unidentified sender"}
                 {arrival.program_name ? ` → ${arrival.program_name}` : ""}</span></div>
             {!arrival.program_name && (
               <div className="kv"><span className="k">Programme</span>
                 <span className="v faint" style={{ fontWeight: 500 }}>
-                  this way in is not tied to one</span></div>)}
+                  Not linked to a programme</span></div>)}
             <div className="kv"><span className="k">Received</span>
               <span className="v">{fmtStamp(arrival.received_at)}</span></div>
-            <div className="kv"><span className="k">Size · rows</span>
+            <div className="kv"><span className="k">File Size · Rows</span>
               <span className="v mono">{bytes(arrival.file_size_bytes)}
                 {" · "}{rowsOf(arrival.row_count)} rows</span></div>
             {arrival.sender_notified_at && (
-              <div className="kv"><span className="k">Sender told</span>
-                <span className="v">{arrival.sender_notified_via ?? "Told"}{" "}
+              <div className="kv"><span className="k">Sender Notified</span>
+                <span className="v">{arrival.sender_notified_via ?? "Notified"}{" "}
                   {fmtStamp(arrival.sender_notified_at)}</span></div>)}
 
             {/* ── Once inside: what the run did. Only a file that went through
                 gets here; for one still waiting, say so rather than go blank. */}
             {st === "ok" && (<>
-              <div className="sub-h">Once inside</div>
-              <div className="kv"><span className="k">Result</span>
+              <div className="sub-h">Processing</div>
+              <div className="kv"><span className="k">Processing Result</span>
                 <span className="v">
                   {run ? <Badge tone={run.tone}>{run.label}</Badge>
                     : <span className="faint" style={{ fontWeight: 500 }}>{awaitingRun(arrival)}</span>}
@@ -891,20 +909,31 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
                 <div className="kv"><span className="k">Contract</span>
                   <span className="v">{arrival.contract_name}</span></div>)}
               {arrival.run_at && arrival.run_state !== "running" && (
-                <div className="kv"><span className="k">Ran at</span>
+                <div className="kv"><span className="k">Processed At</span>
                   <span className="v">{fmtStamp(arrival.run_at)}</span></div>)}
               {arrival.run_state === "done" && (
-                <div className="kv"><span className="k">Rows · exceptions</span>
+                <div className="kv"><span className="k">Rows · Exceptions</span>
                   <span className="v mono">{rowsOf(arrival.run_rows)} rows
                     {" · "}{(arrival.run_exception_count ?? 0).toLocaleString()} exceptions</span></div>)}
+              {/* The file's real verdict, said in a sentence rather than left to
+                  a small badge — the arrival checks above passing does not mean
+                  the file did. */}
+              {arrival.run_result === "exceptions" && (arrival.run_exception_count ?? 0) > 0 && (
+                <div className="note warn" style={{ marginTop: 8 }}>
+                  <b>This file broke {(arrival.run_exception_count ?? 0).toLocaleString()} of
+                    its contract's rules.</b>{" "}
+                  It arrived safely, but its rows do not meet the contract
+                  {arrival.contract_name ? <> ({arrival.contract_name})</> : null}.
+                  Select View Results to see each one.
+                </div>)}
               {(arrival.run_state === "failed" || arrival.run_state === "not_run") && arrival.run_error && (
                 <div className={`note ${arrival.run_state === "failed" ? "crit" : "warn"}`} style={{ marginTop: 8 }}>
-                  <b>{arrival.run_state === "failed" ? "This run stopped." : "This file was not run."}</b>{" "}
+                  <b>{arrival.run_state === "failed" ? "Processing failed." : "This file was not processed."}</b>{" "}
                   {arrival.run_error}
                 </div>)}
             </>)}
 
-            <div className="sub-h">The checks, in the order they ran</div>
+            <div className="sub-h">Intake Checks</div>
             <ul className="checks">
               {CHECKS.map(([what, why], i) => {
                 // The checks stop at the first failure, so anything after it
@@ -921,10 +950,9 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
                     <span>
                       <span className="t">{what}</span>
                       {i === failed
-                        ? <span className="why">
-                            {arrival.turned_away_reason?.replace(/^Held — /, "")}</span>
+                        ? <span className="why">{fullReason(arrival)}</span>
                         : cls === "skip"
-                        ? <span className="why">not reached — an earlier check stopped it</span>
+                        ? <span className="why">Not run — an earlier check failed</span>
                         : <span className="why">{why}</span>}
                     </span>
                   </li>);
@@ -935,13 +963,13 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
                 the sentence on its own than to point at the wrong one. */}
             {failed === -1 && st !== "ok" && (
               <div className="note warn" style={{ marginTop: 12 }}>
-                {arrival.turned_away_reason ?? "No reason was recorded."}
+                {fullReason(arrival) || "No reason recorded."}
               </div>)}
 
             {st === "held" && !arrival.resolution && (
               <div className="note" style={{ marginTop: 12 }}>
-                <b>Held is not refused.</b> The file arrived and is kept exactly as it came in.
-                Letting it through, or discarding it, is a decision somebody has to make.
+                <b>On hold, not rejected.</b> The file has been received and stored as submitted.
+                Release it for processing or discard it.
               </div>)}
 
             {/* 12.3 — once somebody has decided, the decision IS the record.
@@ -952,21 +980,21 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
               <div className="note" style={{ marginTop: 12 }}>
                 <b>{arrival.resolution === "released" ? "Released" : "Discarded"}</b>
                 {arrival.resolved_at ? ` on ${fmtStamp(arrival.resolved_at)}` : ""}
-                {arrival.resolved_by_user_id ? ` by user ${arrival.resolved_by_user_id}` : ""}.
+                {arrival.resolved_by_name ? ` by ${arrival.resolved_by_name}`
+                  : arrival.resolved_by_user_id ? ` by user ${arrival.resolved_by_user_id}` : ""}.
                 {arrival.resolution_note ? ` “${arrival.resolution_note}”` : ""}
               </div>)}
 
             {arrival.is_infected && (
               <div className="note crit" style={{ marginTop: 12 }}>
-                <b>This file failed the security scan.</b> It is not kept where anybody
-                can open it, and it cannot be downloaded or released. Discarding it is
-                the only thing to do here.
+                <b>This file failed the security scan.</b> It has been quarantined and cannot
+                be downloaded or released. The only available action is to discard it.
               </div>)}
 
             {arrival.bytes_purged_at && (
               <div className="note" style={{ marginTop: 12 }}>
-                The file itself was deleted on {fmtStamp(arrival.bytes_purged_at)} under the
-                retention rule. This record of it stays.
+                The file was deleted on {fmtStamp(arrival.bytes_purged_at)} under the data
+                retention policy. This record is retained.
               </div>)}
 
             {/* Why somebody decided is the half of the record that is worth
@@ -976,7 +1004,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
               <label className="kv" style={{ marginTop: 12, display: "block" }}>
                 <span className="k">Note (optional)</span>
                 <input className="inp" value={note} disabled={busy}
-                  placeholder="Why are you letting this through, or dropping it?"
+                  placeholder="Reason for releasing or discarding this file"
                   onChange={e => setNote(e.target.value)} style={{ width: "100%" }} />
               </label>)}
 
@@ -987,7 +1015,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
             {arrival.can_download && (
               <button className="btn" disabled={busy}
                 onClick={() => downloadArrival(arrival.arrival_id, arrival.filename)}
-                title="Every download is recorded">Download</button>)}
+                title="All downloads are logged">Download</button>)}
 
             {/* Release is for HELD files only. A turned-away file is one we
                 could not read — releasing a PDF would hand processing something
@@ -995,7 +1023,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
             {st === "held" && !arrival.resolution && (
               <button className="btn pri" disabled={busy}
                 onClick={() => decide("release")}>
-                {busy ? "Working…" : "Load it anyway"}</button>)}
+                {busy ? "Processing…" : "Release File"}</button>)}
 
             {st !== "ok" && !arrival.resolution && (
               <button className="btn" disabled={busy}
@@ -1004,14 +1032,14 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
             {st === "ok" && (arrival.run_state === "failed" || arrival.run_state === "not_run"
               || arrival.run_state === "pre_autorun") && (
               <button className="btn" disabled={busy} onClick={runAgain}
-                title="Runs the same file against its programme's live setup">
-                {busy ? "Working…" : arrival.run_state === "pre_autorun" ? "Run it now" : "Run again"}</button>)}
+                title="Reprocess this file using the programme's current setup">
+                {busy ? "Processing…" : arrival.run_state === "pre_autorun" ? "Process Now" : "Reprocess"}</button>)}
 
             {arrival.run_export_id && (
               <button className="btn pri"
                 onClick={() => nav(`/uploads/${arrival.run_export_id}/exceptions?download=${arrival.run_export_id}&from=files`)}
-                title="The output and its exceptions">
-                View full result →</button>)}
+                title="View the output file and its exceptions">
+                View Results →</button>)}
 
             <button className="btn" onClick={onClose}
               style={{ marginLeft: "auto" }}>Close</button>

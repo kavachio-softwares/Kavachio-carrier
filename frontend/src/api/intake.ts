@@ -120,6 +120,8 @@ export type Arrival = {
   resolution: "released" | "discarded" | null;
   resolved_at: string | null;
   resolved_by_user_id: number | null;
+  /** That person's name, so the record says who rather than "user 12". */
+  resolved_by_name?: string | null;
   resolution_note: string | null;
   /** Set once retention has deleted the stored bytes. The row outlives them. */
   bytes_purged_at: string | null;

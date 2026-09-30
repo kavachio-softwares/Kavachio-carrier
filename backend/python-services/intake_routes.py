@@ -340,8 +340,8 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
         if existing is not None:
             # UNIQUE (tenant_id, channel, address) would raise anyway; saying
             # which broker already holds it is more use than a 500.
-            raise HTTPException(409, f"{broker.legal_name} already has a "
-                                     f"{body.channel} way in at {address}")
+            raise HTTPException(409, f"This channel already exists for "
+                                     f"{broker.legal_name}: {address}")
 
         route = IntakeRoute(
             tenant_id=tid,
@@ -415,7 +415,8 @@ def patch_route(route_id: int, body: RoutePatch, mga: Optional[str] = None,
 # What an arrival that has not been run reports. Keys match _run_facts.
 _NO_RUN = {"run_result": None, "run_state": None, "run_error": None, "run_at": None,
            "run_export_id": None, "run_exception_count": None, "run_rows": None,
-           "contract_id": None, "contract_name": None, "submitted_by_name": None}
+           "contract_id": None, "contract_name": None, "submitted_by_name": None,
+           "resolved_by_name": None}
 
 
 def _run_result(state: Optional[str], export_status: Optional[str],
@@ -453,7 +454,9 @@ def _run_facts(s, rows) -> dict:
         contracts = {c.id: (c.name or c.filename or f"Contract #{c.id}")
                      for c in s.query(Contract.id, Contract.name, Contract.filename)
                      .filter(Contract.id.in_(con_ids)).all()}
-    user_ids = {a.submitted_by_user_id for a in rows if a.submitted_by_user_id}
+    # Who uploaded it and who released or discarded it — one lookup for both.
+    user_ids = {uid for a in rows
+                for uid in (a.submitted_by_user_id, a.resolved_by_user_id) if uid}
     users = {}
     if user_ids:
         users = {u.id: (u.full_name or u.email)
@@ -474,6 +477,7 @@ def _run_facts(s, rows) -> dict:
             "contract_id": cid,
             "contract_name": contracts.get(cid),
             "submitted_by_name": users.get(a.submitted_by_user_id),
+            "resolved_by_name": users.get(a.resolved_by_user_id),
         }
     return out
 
@@ -596,7 +600,7 @@ def rerun_arrival(arrival_id: int,
     with SessionLocal() as s:
         arrival = _arrival_for_review(s, arrival_id, principal)
         if arrival.outcome != "accepted":
-            raise HTTPException(400, "Only a file that went through can be run.")
+            raise HTTPException(400, "Only accepted files can be processed.")
         if arrival.run_state not in ("failed", "not_run", "pre_autorun"):
             raise HTTPException(
                 400, "This file is being run now." if arrival.run_state == "running"
@@ -752,14 +756,14 @@ def create_key(route_id: int, body: KeyCreate,
             raise HTTPException(404, "route not found")
         assert_tenant_owns(principal, route.tenant_id)
         if route.channel != "api":
-            raise HTTPException(400, "only an API way in has keys")
+            raise HTTPException(400, "Only API channels have keys.")
 
         live = (s.query(IntakeCredential)
                 .filter(IntakeCredential.route_id == route_id,
                         IntakeCredential.revoked_at.is_(None)).count())
         if live >= MAX_LIVE_KEYS:
-            raise HTTPException(409, f"this way in already has {live} live keys "
-                                     "— revoke one before creating another")
+            raise HTTPException(409, f"This channel already has {live} active keys "
+                                     "— revoke one before creating another.")
 
         full, prefix, digest = mint_key()
         cred = IntakeCredential(

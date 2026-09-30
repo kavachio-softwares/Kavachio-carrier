@@ -271,7 +271,7 @@ async def receive_bordereau(
             # A refused file still has a row and a reference — nothing is
             # silently dropped, and the sender can quote it back at you.
             raise _err(422, "turned_away", arrival.turned_away_reason or
-                       "The file was turned away.", reference=arrival.public_ref,
+                       "The file was rejected.", reference=arrival.public_ref,
                        checks=body.get("checks"))
         return body
 

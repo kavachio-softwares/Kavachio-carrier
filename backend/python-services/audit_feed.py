@@ -368,10 +368,10 @@ ACTION_WORDS = {
     "output_template_fields_saved": "Saved the output template fields",
     "output_template_from_standard": "Created a template from a standard",
     "output_sources_analyzed":    "Analysed the source files",
-    "intake_route_created":       "Created a file route",
-    "intake_key_created":         "Issued a file-route key",
+    "intake_route_created":       "Created a submission channel",
+    "intake_key_created":         "Issued a channel API key",
     "mailbox_polled":             "Checked the mailbox for new files",
-    "file_arrival_released":      "Released a held file",
+    "file_arrival_released":      "Released a file on hold",
     "onboarding_skipped":         "Skipped onboarding",
     # access_log — reads and downloads of output / source data
     "download":         "Downloaded a file",
@@ -479,7 +479,7 @@ def _status_for(category: str, action: str, details: Any, ok: Any = None) -> tup
         if low in ("flagged", "exceptions"):
             return "Flagged", "warn"
         if low in ("not_validated", "not_checked"):
-            return "Not checked", "muted"
+            return "Not Validated", "muted"
     for tail, words, tone in (
         ("_uploaded", "File uploaded", "ok"),
         ("_generated", "Generated", "ok"),
@@ -875,7 +875,7 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "submission_schedule_updated", "submission_chased"), CARRIER_SEATS),
     # How files reach the CARRIER — mailboxes, routes and keys. The broker
     # sends; it is the carrier that sets up the ways in.
-    ("intake", "How files arrive",
+    ("intake", "Submission channels",
      ("intake_route_created", "intake_key_created", "mailbox_polled",
       "file_arrival_released"), CARRIER_SEATS),
     ("downloads", "Downloads and views", ("download", "read", "export"), ALL_SEATS),

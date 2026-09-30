@@ -266,21 +266,18 @@ export default function BrokerBordereau() {
         )}
 
         {contracts !== null && contracts.length === 0 && (
-          <div className="note warn" style={{ marginBottom: 18, maxWidth: 640 }}>
-            <b>You have no contracts yet.</b> A bordereau is checked against a
-            contract's rules, so there is nothing to submit until a carrier puts
-            you on a programme and a contract is in place. Ask your carrier
-            contact — none of it is something you can do from this side.
+          <div className="note warn" style={{ marginBottom: 18 }}>
+            <b>No contracts yet.</b> You can process a bordereau once your
+            carrier adds you to a programme and your contract is active. Please
+            contact your carrier to get started.
           </div>
         )}
 
         {contracts !== null && contracts.length > 0 && live.length === 0 && (
           <div className="note warn" style={{ marginBottom: 18, maxWidth: 640 }}>
-            <b>None of your contracts is live yet.</b> A contract governs
-            nothing until it is active, and it is the terms of a live contract
-            that create the rules your file is checked against. See{" "}
-            <Link to="/broker/contracts">My Contracts</Link> for where each one
-            has got to.
+            <b>No active contracts yet.</b> You can process a bordereau once one
+            of your contracts is active. Track their progress in{" "}
+            <Link to="/broker/contracts">My Contracts</Link>.
           </div>
         )}
 

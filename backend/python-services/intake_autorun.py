@@ -139,8 +139,9 @@ def run_one(arrival_id: int) -> None:
 
         if program_id is None:
             svc.mark_run(arrival_id, state="not_run", error=(
-                "This way in is not tied to one programme, so there is no setup "
-                "to run it on. Pin the way in to a programme, or run it by hand."))
+                "This channel is not linked to a programme, so there is no setup "
+                "to process it with. Link the channel to a programme, or process "
+                "the file manually."))
             return
         pipe = _live_pipeline(s, tenant_id, program_id, broker)
         if pipe is None:

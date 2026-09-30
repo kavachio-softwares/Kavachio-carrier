@@ -185,7 +185,7 @@ export default function BordereauSetupDetail() {
           + "approve it — the programme, the contract and the BDX template all "
           + "wait with it."
         : "Setup activated — your team can now process bordereaux for this "
-          + "carrier and program. Any previously active setup was superseded.");
+          + "programme and broker. Any previously active setup was superseded.");
     } catch (e: unknown) {
       setActivateErr(errText(e));
     } finally { setActivating(false); }

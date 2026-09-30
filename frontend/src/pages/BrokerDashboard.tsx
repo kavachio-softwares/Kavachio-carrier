@@ -229,7 +229,7 @@ export default function BrokerDashboard() {
             <p style={{ margin: 0, color: "var(--p-muted)" }}>
               {invites?.length
                 ? "Accept an invitation above and that carrier can put you on their programmes."
-                : "No programmes yet — a carrier has to put you on one before your team can send files."}
+                : "No programmes yet — a carrier has to put you on one before you can send files."}
             </p>
           </div>
         ) : (

@@ -73,8 +73,8 @@ export default function IngestionDock({ showButton }: {
     <>
       {showButton && (
         <button type="button" onClick={() => setOpen(!open)}
-          title="Ingestion panel"
-          aria-label={`Ingestion panel${need ? ` (${need} need you)` : ""}`}
+          title="Processing Status"
+          aria-label={`Processing Status${need ? ` (${need} need attention)` : ""}`}
           aria-expanded={open}
           style={{
             position: "relative", display: "inline-flex", alignItems: "center",

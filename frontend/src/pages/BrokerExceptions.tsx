@@ -49,7 +49,8 @@ export default function BrokerExceptions() {
           </div>
         </div>
 
-        <div className="tiles" style={{ marginBottom: 18 }}>
+        {/* Three tiles, not the grid's default four, so they fill the row. */}
+        <div className="tiles" style={{ marginBottom: 18, gridTemplateColumns: "repeat(3, 1fr)" }}>
           <div className={`tile${(t?.open ?? 0) > 0 ? " alert" : ""}`}>
             <div className="k">Still open</div>
             <div className="v" style={{ color: "var(--p-crit)" }}>{t ? t.open : "—"}</div>

@@ -119,9 +119,9 @@ export default function Files() {
       <section className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Files
-              <InfoTip text={"Every spreadsheet your brokers have sent, whichever way it came in, "
-                + "and what happened to it."} />
+            <h2>Files Received
+              <InfoTip text={"All bordereau files received from your brokers, across every channel, "
+                + "with their intake and processing status."} />
             </h2>
             {/* The long explanation of what intake IS used to sit in a grey slab
                 above the title on every visit, on both of the old screens,
@@ -135,9 +135,9 @@ export default function Files() {
             <button className="btn" onClick={() => nav("/home")}>← Dashboard</button>
             <button className="btn" aria-expanded={panelOpen} aria-controls="ways-panel"
               onClick={() => setPanel(true)}
-              title="Where your brokers send their spreadsheets">
+              title="Manage how brokers submit their files">
               <Server size={14} aria-hidden="true" />
-              Ingestion options
+              Submission Channels
               {summary && <span className="pcount">{summary.routes}</span>}
               {/* A way in that looks live and accepts nothing is the only thing
                   in here that ever needs somebody. Saying so on the closed
@@ -146,16 +146,16 @@ export default function Files() {
             </button>
             <button className="btn" aria-expanded={ingestionOpen}
               onClick={() => setIngestion(true)}
-              title="What happened to every file once it was run">
+              title="Processing outcome for every accepted file">
               <Inbox size={14} aria-hidden="true" />
-              Ingestion panel
+              Processing Status
               {needYou > 0 && <span className="pcount">{needYou}</span>}
             </button>
             <button className="btn" onClick={() => setRefreshKey(k => k + 1)}>Refresh</button>
             {/* Opens the dialog and nothing else. It used to open the panel too,
                 because the dialog lived inside it. */}
             <button className="btn pri" onClick={() => setAdding(true)}>
-              ＋ Add a way in</button>
+              ＋ Add Channel</button>
           </div>
         </div>
 
@@ -168,13 +168,13 @@ export default function Files() {
           and reopening should not re-fetch a list you were halfway through. */}
       <div className={`scrim${panelOpen ? " on" : ""}`} onClick={() => setPanel(false)} />
       <aside id="ways-panel" className={`drawer wide${panelOpen ? " on" : ""}`}
-        role="dialog" aria-modal="true" aria-hidden={!panelOpen} aria-label="Ingestion options">
+        role="dialog" aria-modal="true" aria-hidden={!panelOpen} aria-label="Submission Channels">
         <div className="drawer-h">
           <div style={{ minWidth: 0 }}>
-            <h4>Ingestion options</h4>
+            <h4>Submission Channels</h4>
             <div className="ref" style={{ fontFamily: "inherit", fontSize: 12 }}>
-              Where your brokers send their spreadsheets — set up once when a broker
-              is onboarded, then rarely touched.
+              How each broker submits files — typically set up once during broker
+              onboarding.
             </div>
           </div>
           <button type="button" className="closeb" aria-label="Close"
@@ -187,7 +187,7 @@ export default function Files() {
         </div>
 
         <div className="drawer-f">
-          <button className="btn pri" onClick={() => setAdding(true)}>＋ Add a way in</button>
+          <button className="btn pri" onClick={() => setAdding(true)}>＋ Add Channel</button>
           <button className="btn" style={{ marginLeft: "auto" }}
             onClick={() => setPanel(false)}>Done</button>
         </div>

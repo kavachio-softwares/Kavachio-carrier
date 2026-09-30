@@ -176,7 +176,7 @@ def current_intake_principal(
         if not route.is_enabled:
             raise HTTPException(403, {
                 "error": "route_disabled",
-                "message": "This way in has been switched off by the carrier. "
+                "message": "This channel has been switched off by the carrier. "
                            "Contact them before sending again."})
 
         # Throttled to once a minute: otherwise every request writes a row and

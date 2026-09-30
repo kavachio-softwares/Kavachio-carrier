@@ -1,6 +1,5 @@
 import { useMemo, useState, useEffect, useRef } from "react";
-import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, FileSpreadsheet, ShieldCheck, FileUp, FileText,
   FileSpreadsheet as FileOut, UploadCloud, ShieldAlert, ArrowRight,
@@ -73,20 +72,6 @@ type Pipeline = {
   broker_party_id: number | null; broker_name: string | null;
 };
 
-// Program metadata captured on inline create — mirrors the Programs screen.
-type ProgramForm = {
-  name: string; lead_carrier: string; admin_party: string; bdx_frequency: string;
-  business_segment: string; product_line: string; distribution_channel: string;
-  territory: string; status: string;
-};
-const EMPTY_PROGRAM: ProgramForm = {
-  name: "", lead_carrier: "", admin_party: "", bdx_frequency: "",
-  business_segment: "", product_line: "", distribution_channel: "", territory: "", status: "draft",
-};
-const PROGRAM_META_KEYS: (keyof ProgramForm)[] = [
-  "lead_carrier", "admin_party", "bdx_frequency", "business_segment",
-  "product_line", "distribution_channel", "territory", "status",
-];
 
 // External document(s) a contract defers rules to (halt payload shape). The
 // shape comes from the upload module that produces it, so the two cannot drift.
@@ -118,7 +103,41 @@ function buildLabel(step: string): string {
   return `${s} ${KEEP_OPEN}`;
 }
 
+/**
+ * The way in to this screen.
+ *
+ * A carrier's FIRST setup is made from its programme — Configure Program,
+ * step 4 — where the programme, its broker and the contract are already in
+ * place. Every link from a programme (the flow, the programme stepper, a
+ * broker row, a contract) names the programme in the address, so that is
+ * what lets the screen open. Reached any other way while the carrier has no
+ * setup at all — typed in, bookmarked — it goes back to the Bordereau Setups
+ * list, which says where the first one is made. Once one setup exists the
+ * screen opens as it always did.
+ */
 export default function DirectSetup() {
+  const [params] = useSearchParams();
+  const mga = currentMga();
+  const fromProgramme = !!params.get("program_id");
+  // Null while asking. Asked only when no programme is named — the one case
+  // the answer decides.
+  const [hasAny, setHasAny] = useState<boolean | null>(fromProgramme ? true : null);
+  useEffect(() => {
+    if (fromProgramme) { setHasAny(true); return; }
+    let cancelled = false;
+    api.get<{ total: number }>("/pipelines", { params: { mga, page: 1, page_size: 1 } })
+      .then(r => { if (!cancelled) setHasAny((r.data?.total ?? 0) > 0); })
+      // Fail open: a check that could not run must not lock the screen.
+      .catch(() => { if (!cancelled) setHasAny(true); });
+    return () => { cancelled = true; };
+  }, [mga, fromProgramme]);
+
+  if (hasAny === null) return null;
+  if (!hasAny) return <Navigate to="/direct/setups" replace />;
+  return <DirectSetupScreen />;
+}
+
+function DirectSetupScreen() {
   const mga = currentMga();
   const isAdmin = isTenantAdmin();
   // Which of the two CARRIER seats — isTenantAdmin() is the role, which both of
@@ -150,9 +169,9 @@ export default function DirectSetup() {
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   // The input template (DirectFormat) currently loaded in the editor.
   const [loadedSetupId, setLoadedSetupId] = useState<number | null>(null);
-  const [creatingProgram, setCreatingProgram] = useState(false);
-  const [programForm, setProgramForm] = useState<ProgramForm>(EMPTY_PROGRAM);
-  const [createBusy, setCreateBusy] = useState(false);
+  // Null until /programs has answered, so "no programme yet" is never said
+  // while the list is still on its way.
+  const [programsLoaded, setProgramsLoaded] = useState(false);
 
   // contracts already uploaded for the selected program (+ inline detail)
   // Per-schedule contracts: {output_sheet: contract_id}. A contract can govern
@@ -375,14 +394,15 @@ export default function DirectSetup() {
     // The carrier owns its programmes directly, so this is the whole scope
     // picker now: pick a programme of your own book.
     resetEditor();
-    setPrograms([]); setProgramId("");
+    setPrograms([]); setProgramId(""); setProgramsLoaded(false);
     api.get(`/programs`, { params: { mga } })
       // Inactive programs are hidden here — you can't build a setup on them.
       .then(r => {
         const list: Program[] = Array.isArray(r.data) ? r.data : (r.data?.items ?? []);
         setPrograms(list.filter(p => p.status !== "inactive"));
       })
-      .catch(() => setPrograms([]));
+      .catch(() => setPrograms([]))
+      .finally(() => setProgramsLoaded(true));
   }, [mga]);
 
   // Arriving from Process Bordereau with a selection already made. The screen
@@ -607,25 +627,6 @@ export default function DirectSetup() {
   const scopeIncomplete =
     programId === "" || (scope.hasBrokers !== true && pipelines.length === 0);
 
-  // ---- inline create of carrier / program ---------------------------------
-  async function createProgram() {
-    if (!programForm.name.trim() || carrierId === "") return;
-    setCreateBusy(true); setErr(null);
-    try {
-      const payload: Record<string, unknown> = { name: programForm.name.trim(), party_id: carrierId };
-      for (const k of PROGRAM_META_KEYS) {
-        const v = programForm[k]?.trim();
-        if (v) payload[k] = v;
-      }
-      const { data } = await api.post(`/programs`, payload, { params: { mga } });
-      setPrograms(prev => [...prev, { id: data.id, name: data.name }]);
-      setProgramId(data.id);
-      setCreatingProgram(false); setProgramForm(EMPTY_PROGRAM);
-    } catch (e: unknown) { setErr(errText(e)); } finally { setCreateBusy(false); }
-  }
-  function setProgramField<K extends keyof ProgramForm>(k: K, v: ProgramForm[K]) {
-    setProgramForm(prev => ({ ...prev, [k]: v }));
-  }
 
   // Populate the editor from an upload/editor response (shared by build + load).
   function applyMapping(upObj: UploadResp, fields: OutField[], cid: number | null, tid: number | null) {
@@ -803,7 +804,7 @@ export default function DirectSetup() {
     const existingTemplateId = resolved?.template?.id ?? 0;
     if (carrierId === "" || programId === "" || !inputFile || staged.length === 0) {
       setErr(carrierId === "" || programId === ""
-        ? "Pick a carrier and program first."
+        ? "Select a programme and broker first."
         : `Still needed: ${missingForBuild().join("; ")}.`);
       return;
     }
@@ -1491,27 +1492,38 @@ export default function DirectSetup() {
               {/* The carrier is who you are, not a choice, so it is not asked for
                   or shown here — it is already in the setup's name. */}
               <Field label="Program">
-                <Select value={creatingProgram ? "__new__" : programId} onChange={e => {
-                  if (e.target.value === "__new__") {
-                    // Clear the loaded setup + contracts for the previously-selected
-                    // program. setProgramId("") cascades through the scope effects
-                    // (resetEditor + refreshExisting/refreshContracts run on it).
-                    setCreatingProgram(true);
-                    setProgramId("");
-                    return;
-                  }
-                  setCreatingProgram(false);
-                  setProgramId(e.target.value ? Number(e.target.value) : "");
-                }}>
+                {/* Programmes are made on the Programmes screen (Configure
+                    Program), never here: a programme needs its brokers and a
+                    contract before a setup can be built on it, and a bare one
+                    made here had neither. */}
+                <Select value={programId} onChange={e =>
+                  setProgramId(e.target.value ? Number(e.target.value) : "")}>
                   <option value="" disabled>Select Program</option>
                   {programs.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                  <option value="__new__">➕ Add New Program…</option>
                 </Select>
               </Field>
               {/* The broker. The contract follows from it rather than being asked
                   for again — see BrokerContractScope for why. */}
               <BrokerSelect scope={scope} disabled={scopeIncomplete} />
             </div>
+            {programsLoaded && programs.length === 0 && (
+              <div className="max-w-2xl mt-3 rounded-md border border-amber-300
+                bg-amber-50 px-3 py-2.5 text-[12px] text-amber-800 leading-relaxed">
+                <div className="font-medium flex items-center gap-1.5">
+                  <AlertTriangle size={14} /> No programme yet
+                </div>
+                <p className="mt-1">
+                  A bordereau setup is the last step of configuring a programme.
+                  Create the programme, add its brokers and a contract, and the
+                  setup follows from there.
+                </p>
+                <button type="button"
+                  className="mt-2 rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark"
+                  onClick={() => navigate("/programs/new")}>
+                  Configure Program →
+                </button>
+              </div>
+            )}
             <div className="mt-3">
               {/* Which contract on file this setup runs on — ONE of them. The
                   radio and the "on file" chip on the Contracts field below are
@@ -1547,63 +1559,6 @@ export default function DirectSetup() {
               </div>
             )}
 
-            {creatingProgram && (
-              <div className="mt-4 max-w-3xl rounded-lg border border-border bg-surface-2 p-4 space-y-3">
-                <div className="text-sm font-medium">Add New Program</div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <Field label="Program Name *">
-                    <TextInput autoFocus value={programForm.name} placeholder="e.g. Property Binder 2025"
-                      onChange={e => setProgramField("name", e.target.value)}
-                      onKeyDown={e => { if (e.key === "Enter") createProgram(); }} />
-                  </Field>
-                  {/* <Field label="Lead carrier">
-                    <TextInput value={programForm.lead_carrier} placeholder="Optional"
-                      onChange={e => setProgramField("lead_carrier", e.target.value)} />
-                  </Field>
-                  <Field label="Admin party">
-                    <TextInput value={programForm.admin_party} placeholder="Optional"
-                      onChange={e => setProgramField("admin_party", e.target.value)} />
-                  </Field> */}
-                  <Field label="BDX Frequency">
-                    <Select value={programForm.bdx_frequency}
-                      onChange={e => setProgramField("bdx_frequency", e.target.value)}>
-                      <option value="">—</option>
-                      {PROGRAMME_FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-                    </Select>
-                  </Field>
-                  {/* <Field label="Business segment">
-                    <TextInput value={programForm.business_segment} placeholder="Optional"
-                      onChange={e => setProgramField("business_segment", e.target.value)} />
-                  </Field>
-                  <Field label="Product line">
-                    <TextInput value={programForm.product_line} placeholder="Optional"
-                      onChange={e => setProgramField("product_line", e.target.value)} />
-                  </Field>
-                  <Field label="Distribution channel">
-                    <TextInput value={programForm.distribution_channel} placeholder="Optional"
-                      onChange={e => setProgramField("distribution_channel", e.target.value)} />
-                  </Field>
-                  <Field label="Territory">
-                    <TextInput value={programForm.territory} placeholder="Optional"
-                      onChange={e => setProgramField("territory", e.target.value)} />
-                  </Field> */}
-                  <Field label="Status">
-                    <Select value={programForm.status}
-                      onChange={e => setProgramField("status", e.target.value)}>
-                      <option value="active">Active</option>
-                      <option value="inactive">Inactive</option>
-                    </Select>
-                  </Field>
-                </div>
-                <div className="flex gap-2">
-                  <Button onClick={createProgram} disabled={createBusy || !programForm.name.trim()}>
-                    Add Program
-                  </Button>
-                  <Button variant="ghost"
-                    onClick={() => { setCreatingProgram(false); setProgramForm(EMPTY_PROGRAM); }}>Cancel</Button>
-                </div>
-              </div>
-            )}
             {/* What the selection above adds up to. It was a small grey chip
                 with grey text inside it — the one line on the tab that states
                 a result, drawn fainter than the fields that produced it. */}
@@ -2368,7 +2323,7 @@ function FilePick({ label, icon, file, onPick, accept, hint, tone, required, dis
             onClick={e => { e.stopPropagation(); onPick(null); if (ref.current) ref.current.value = ""; }}>✕</button>
         </div>
       ) : disabled ? (
-        <div className="text-[11px] text-ink-muted">Select a carrier and program first</div>
+        <div className="text-[11px] text-ink-muted">Select a programme and broker first</div>
       ) : altAction ? (
         <div className="text-[11px] text-ink-muted">
           <div className="flex flex-wrap items-center justify-center gap-2">
@@ -2446,7 +2401,7 @@ function ReferencePick({ files, onAdd, onRemoveAt, disabled }: {
           </div>
         </div>
       ) : disabled ? (
-        <div className="text-[11px] text-ink-muted">Select a carrier and program first</div>
+        <div className="text-[11px] text-ink-muted">Select a programme and broker first</div>
       ) : (
         <div className="text-[11px] text-ink-muted">
           <span className={`inline-flex items-center gap-1 font-medium ${DROP_TONES.optional.cta}`}>
@@ -2557,7 +2512,7 @@ function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
           </div>
         </div>
       ) : disabled ? (
-        <div className="text-[11px] text-ink-muted">Select a carrier and program first</div>
+        <div className="text-[11px] text-ink-muted">Select a programme and broker first</div>
       ) : (
         <div className="text-[11px] text-ink-muted">
           <span className={`inline-flex items-center gap-1 font-medium ${DROP_TONES.required.cta}`}>

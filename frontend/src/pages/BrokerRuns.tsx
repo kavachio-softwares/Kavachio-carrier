@@ -68,7 +68,7 @@ export default function BrokerRuns() {
                             ? <span className="badge b-warn"><span className="d" />
                                 {r.exception_count} {r.exception_count === 1 ? "exception" : "exceptions"}</span>
                             : r.status === "not_validated"
-                              ? <span className="badge"><span className="d" />Not checked</span>
+                              ? <span className="badge"><span className="d" />Not Validated</span>
                               : <span className="badge b-ok"><span className="d" />Clean</span>}
                         </td>
                         <td className="muted">{fmtDateTime(r.created_at)}</td>

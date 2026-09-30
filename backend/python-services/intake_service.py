@@ -319,12 +319,12 @@ def _check_known_sender(route: Optional[IntakeRoute]) -> Optional[str]:
         return ("We do not recognise the sender. Every file has to come from a "
                 "broker on one of your programmes.")
     if route.broker_party_id is None:
-        noun = _WAY_IN_NOUN.get(route.channel, "way in")
+        noun = _WAY_IN_NOUN.get(route.channel, "channel")
         return (f"That {noun} is not linked to a broker yet, so there is "
                 f"nothing to check the file against.")
     if not route.is_enabled:
-        return ("That way in has been switched off. Anything sent this way is "
-                "turned away with a note.")
+        return ("That channel has been switched off. Files sent through it are "
+                "rejected with a note.")
     return None
 
 
@@ -404,7 +404,7 @@ def _check_live_contract(session, route: Optional[IntakeRoute]) -> Optional[str]
         q = q.filter(Contract.program_id == program_id)
     live = q.first()
     if live is None:
-        return ("Held — there is no live contract for this broker yet. There is "
+        return ("Held — there is no active contract for this broker yet. There is "
                 "nothing to check a file against until the contract is agreed.")
     return None
 

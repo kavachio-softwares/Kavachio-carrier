@@ -215,7 +215,7 @@ export default function RecentRuns() {
                       <td>
                         <span className={`badge ${notValidated(r) ? "b-warn" : hasExc(r) ? "b-crit" : "b-ok"}`}>
                           <span className="d" />
-                          {notValidated(r) ? "Not validated"
+                          {notValidated(r) ? "Not Validated"
                             : hasExc(r) ? `${r.exception_count.toLocaleString()} exceptions` : "Clean"}
                         </span>
                       </td>

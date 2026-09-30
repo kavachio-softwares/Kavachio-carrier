@@ -99,7 +99,7 @@ def release(session, arrival: FileArrival, *, user_id: Optional[int],
         raise ReviewError(f"Somebody already {arrival.resolution} this file.")
     if arrival.outcome != "held":
         raise ReviewError(
-            "Only a held file can be released. This one was turned away "
+            "Only files on hold can be released. This file was rejected "
             f"because: {arrival.turned_away_reason or 'no reason recorded'}")
 
     # The person has overruled the check, so the file IS accepted now. The

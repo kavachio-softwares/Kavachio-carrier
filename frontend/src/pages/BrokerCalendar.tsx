@@ -208,7 +208,7 @@ export default function BrokerCalendar() {
           <div className="card-h">
             <CalendarDays className="ci" />
             <h3>{fmtMonth(month)}</h3>
-            <span className="sub">every file you owe, by the date it is due</span>
+            <InfoTip text="Every file you owe, by the date it is due." />
             <div className="right">
               <select className="fbar-select" value={month ?? ""}
                 onChange={e => { setFilter("all"); load(e.target.value); }}
@@ -307,7 +307,7 @@ export default function BrokerCalendar() {
         <div className="card">
           <div className="card-h">
             <h3>Your deadlines</h3>
-            <span className="sub">how often each programme expects a file from you</span>
+            <InfoTip text="How often each programme expects a file from you." />
           </div>
           <div className="tbl-wrap">
             <table>
