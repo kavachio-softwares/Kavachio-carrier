@@ -248,7 +248,7 @@ def _open_invitation(s, p: Principal, invitation_id: int):
     broker's to know about.
     """
     if p.role != "broker_admin":
-        raise HTTPException(403, "only your broker admin can answer a carrier's invitation")
+        raise HTTPException(403, "only your broker can answer a carrier's invitation")
     bid = _broker_party_id(s, p)
     me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
     inv = s.get(BrokerInvitation, invitation_id)
@@ -552,6 +552,12 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
         # `pending` — contracts a broker had brought and the carrier had still
         # to approve — is gone with the upload flow that created them.
         on_me, live, terms_agreed = [], 0, 0
+        # In-force contracts whose term ends within 30 days — the Active
+        # Contracts tile warns about them. Read off expiry_dt, the same column
+        # _effective_lifecycle uses to call a contract expired, so a contract
+        # counted here is exactly one that tile will stop counting.
+        expiring, next_expiry = 0, None
+        soon_edge = contract_routes._today() + dt.timedelta(days=30)
         if prog_ids:
             rows = (s.query(Contract)
                       .filter(Contract.program_id.in_(prog_ids),
@@ -586,6 +592,10 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 # against, and counting it as live would say it is.
                 if state == "active":
                     live += 1
+                    if c.expiry_dt and c.expiry_dt <= soon_edge:
+                        expiring += 1
+                        if next_expiry is None or c.expiry_dt < next_expiry:
+                            next_expiry = c.expiry_dt
 
                 # The counterpart to terms_to_agree, for the tile that shows
                 # the two side by side: contracts whose terms are SETTLED,
@@ -622,6 +632,7 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
         today = dt.datetime.utcnow().date()
         files_upcoming = files_overdue = 0
         next_due = first_overdue = None
+        overdue_periods: list[str] = []
         if prog_ids:
             owed = (s.query(ExpectedSubmission)
                      .filter(ExpectedSubmission.broker_party_id == bid,
@@ -641,6 +652,12 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
             old = (owed.filter(ExpectedSubmission.due_date < today)
                        .order_by(ExpectedSubmission.due_date.asc()).first())
             first_overdue = old.due_date.isoformat() if old else None
+            # WHICH bordereaux are missing, oldest first — "3 overdue" does not
+            # say whether that is three programmes one month or one programme
+            # three months running, and those are different conversations.
+            overdue_periods = [e.period for e in owed.filter(
+                ExpectedSubmission.due_date < today)
+                .order_by(ExpectedSubmission.due_date.asc()).all()]
 
         # "Users" tile — this broker's OWN people: its admins and its users
         # (operators), invited ones included. Not narrowed by carrier: a broker
@@ -666,6 +683,9 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 "files_overdue": files_overdue,
                 "next_due": next_due,
                 "first_overdue": first_overdue,
+                "overdue_periods": overdue_periods,
+                "contracts_expiring": expiring,
+                "next_expiry": next_expiry.isoformat() if next_expiry else None,
                 "signatures_pending": len(on_me) - terms_to_agree,
                 "signatures_completed": int(signatures_completed),
                 "terms_to_agree": terms_to_agree,
@@ -701,7 +721,7 @@ def _broker_admin(s, p: Principal) -> int:
     them anyway. Failing here says why, instead of surfacing a database error.
     """
     if p.role != "broker_admin":
-        raise HTTPException(403, "only a broker admin can manage your team")
+        raise HTTPException(403, "only the broker can manage your team")
     return _broker_party_id(s, p)
 
 
@@ -757,8 +777,8 @@ def broker_users(page: Optional[int] = Query(None, ge=1),
 
 
 _BROKER_USERS_RETIRED = (
-    "Broker users are no longer part of Kavachio: each broker has one broker "
-    "admin, who agrees contracts and sends the bordereaux.")
+    "Broker users are no longer part of Kavachio: the broker itself "
+    "agrees contracts and sends the bordereaux.")
 
 
 @router.post("/broker/users")
@@ -1604,6 +1624,32 @@ def broker_exceptions(carrier_id: Optional[int] = Query(None),
                    for k in ("exceptions", "open", "put_right")},
             },
         }
+
+
+@router.get("/broker/runs-on-day")
+def broker_runs_on_day(day: dt.date = Query(..., description="YYYY-MM-DD"),
+                       p: Principal = Depends(current_principal)):
+    """The files behind one bar of the broker dashboard's Bordereau Status
+    chart — the carrier dashboard's day drawer, in this broker's scope.
+
+    Same scope and same day as /broker/insights' runs_by_day (this broker, the
+    programmes it is still on, the DB's own date of the run) and the same
+    three-way split, so the list always adds up to the bar clicked.
+    """
+    from db import OutputExport
+    import validation_outcome as vo
+    from app_routes import _day_runs_query, _day_runs_payload
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        prog_ids = [l.program_id for l in _links(s, bid)]
+        q = (_day_runs_query(s)
+             .filter(OutputExport.broker_party_id == bid,
+                     OutputExport.program_id.in_(prog_ids or [-1]),
+                     func.date(OutputExport.created_at) == day))
+        return _day_runs_payload(
+            s, q.order_by(OutputExport.created_at, OutputExport.id).all(), day, None,
+            lambda st: ("flagged" if st == vo.HAS_EXCEPTIONS
+                        else "clean" if st == vo.CLEAN else "not_checked"))
 
 
 @router.get("/broker/calendar")

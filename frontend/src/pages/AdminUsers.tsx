@@ -37,9 +37,9 @@ type Counts = {
 // and sends back "carrier_user" for the rest, so this screen (and its filter)
 // can name both.
 const ROLE_LABEL: Record<string, string> = {
-  carrier_admin: "Carrier Admin",
+  carrier_admin: "Carrier",
   carrier_user: "Carrier User",
-  broker_admin: "Broker Admin",
+  broker_admin: "Broker",
   operator: "Broker User",
 };
 const STATUS_LABEL: Record<string, string> = {
@@ -110,13 +110,13 @@ export default function AdminUsers() {
           <div className="tiles three" style={{ marginBottom: 18 }}>
             <Tile k="Users" v={c.total}
               info="Everyone with a login, across the two seats beside this one. Not Kavachio's own account — there is exactly one of those, and it is Us, not a seat to review." />
-            <Tile k="Carrier Admin" v={c.carrier_admins}
+            <Tile k="Carrier" v={c.carrier_admins}
               info={`The one person accountable for each carrier — its recognised `
                 + `owner. Not every carrier has named one yet (${c.carriers} carriers `
                 + `have people at all; only ${c.carrier_admins} of them have an owner `
                 + `on record), which is why this can read lower than the number of `
                 + `carrier organisations beside it.`} />
-            <Tile k="Broker Admin" v={c.broker_admins}
+            <Tile k="Broker" v={c.broker_admins}
               info={`The first person a carrier invited at a broker. Unlike carriers, `
                 + `every broker they work with currently has exactly one — which is `
                 + `why this matches the number of broker organisations beside it.`} />

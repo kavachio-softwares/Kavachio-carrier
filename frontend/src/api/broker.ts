@@ -71,6 +71,11 @@ export type BrokerDashboard = {
     /** Earliest due date still to come, and the oldest one missed (ISO). */
     next_due: string | null;
     first_overdue: string | null;
+    /** The reporting period of every overdue file, oldest first ("2026-05"). */
+    overdue_periods: string[];
+    /** In-force contracts whose term ends within 30 days, and the soonest end. */
+    contracts_expiring: number;
+    next_expiry: string | null;
     /** Contracts waiting on this broker's signature. */
     signatures_pending: number;
     /** Contracts signed by everyone. */

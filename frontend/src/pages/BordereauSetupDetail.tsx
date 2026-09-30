@@ -181,7 +181,7 @@ export default function BordereauSetupDetail() {
       setPipeline(data);
       setConfirmActivate(false);
       setActivateMsg(data.status === "pending_approval"
-        ? "Sent to your carrier admin. Nothing reaches the broker until they "
+        ? "Sent to the carrier. Nothing reaches the broker until they "
           + "approve it — the programme, the contract and the BDX template all "
           + "wait with it."
         : "Setup activated — your team can now process bordereaux for this "
@@ -353,7 +353,7 @@ export default function BordereauSetupDetail() {
                 ? "Waiting on you. Nothing here has reached the broker yet — "
                   + "the programme, the contract and the BDX template are all "
                   + "released together when you approve."
-                : "Sent to your carrier admin. Nothing reaches the broker "
+                : "Sent to the carrier. Nothing reaches the broker "
                   + "until they approve it."}
               {pipeline?.submitted_by
                 ? ` Sent by ${pipeline.submitted_by}`
@@ -721,8 +721,8 @@ export default function BordereauSetupDetail() {
               </>
             ) : (
               <>
-                <strong className="text-ink">{setupName || "This setup"}</strong> goes to your
-                carrier admin to approve. Nothing about it — the programme, the
+                <strong className="text-ink">{setupName || "This setup"}</strong> goes to the
+                carrier to approve. Nothing about it — the programme, the
                 contract or the BDX template — reaches the broker until they do.
               </>
             )}

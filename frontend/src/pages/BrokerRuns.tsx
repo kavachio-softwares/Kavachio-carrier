@@ -28,8 +28,8 @@ export default function BrokerRuns() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Recent File Submissions
-              <InfoTip text="Every file run for your broker, newest first." />
+            <h2>Processed Files
+              <InfoTip text="Every bordereau processed for your broker, newest first. Open one to see its exceptions." />
             </h2>
           </div>
           {canAccessPath("/broker/bordereau") && (

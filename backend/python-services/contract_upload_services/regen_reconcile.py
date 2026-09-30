@@ -96,13 +96,35 @@ def identity_payload(file_bytes=None, document_text=None) -> dict:
     return out
 
 
+# "Do not narrow by broker" — the lookups' original, tenant-wide behaviour.
+# A string rather than None because None is a real scope: a programme-wide
+# contract, held by no broker.
+ANY_BROKER = "__any_broker__"
+
+
+def _broker_scope(broker_party_id):
+    """SQL fragment + params narrowing a prior-version lookup to ONE broker.
+
+    A contract is (programme x broker). The same wording uploaded for a second
+    broker — "use the same contract as the sibling broker" — is that broker's
+    OWN contract, not a new version of the sibling's; matching it tenant-wide
+    made it inherit the sibling's rule decisions, including rules somebody had
+    switched off for the other broker only."""
+    if isinstance(broker_party_id, str) and broker_party_id == ANY_BROKER:
+        return "", {}
+    return ("AND c.contract_broker_party_id IS NOT DISTINCT FROM CAST(:bid AS INTEGER)",
+            {"bid": broker_party_id})
+
+
 def find_prior_contract(conn, tenant_id, content_fp=None, file_sha=None,
-                        doc_sha=None, exclude_contract_id=None):
+                        doc_sha=None, exclude_contract_id=None,
+                        broker_party_id=ANY_BROKER):
     """L1/L2/L2b lookup (pre-LLM). Returns
     {contract_id, level, output_template_id} or None.
 
     `conn` is a SQLAlchemy connection/engine-connect on the canonical DB.
-    Tenant-wide, most recent current non-failed match wins. L2 works
+    Tenant-wide unless `broker_party_id` is given (None = programme-wide
+    contracts only); most recent current non-failed match wins. L2 works
     retroactively (content_fingerprint has been stamped for a while); L1/L2b
     only match contracts uploaded after this module started stashing
     extracted['identity'].
@@ -110,6 +132,7 @@ def find_prior_contract(conn, tenant_id, content_fp=None, file_sha=None,
     if not _enabled() or not tenant_id:
         return None
     from sqlalchemy import text
+    scope_sql, scope_params = _broker_scope(broker_party_id)
 
     probes = []
     if file_sha:
@@ -128,10 +151,12 @@ def find_prior_contract(conn, tenant_id, content_fp=None, file_sha=None,
                   AND  {cond}
                   AND  COALESCE(c.status_ops, '') <> 'failed'
                   AND  (:skip IS NULL OR c.contract_id <> :skip)
+                  {scope_sql}
                 ORDER BY c.contract_id DESC
                 LIMIT 1
             """),
-            {"tid": tenant_id, "v": val, "skip": exclude_contract_id},
+            {"tid": tenant_id, "v": val, "skip": exclude_contract_id,
+             **scope_params},
         ).first()
         if row:
             return {"contract_id": row[0], "level": level,
@@ -144,7 +169,8 @@ def _norm_scalar(v):
 
 
 def find_prior_contract_l3(conn, tenant_id, program_metadata,
-                           exclude_contract_id=None):
+                           exclude_contract_id=None,
+                           broker_party_id=ANY_BROKER):
     """L3 (post-extraction): an AMENDED version of a known contract — the text
     changed, so no hash matches, but the business identity is the same.
 
@@ -166,8 +192,9 @@ def find_prior_contract_l3(conn, tenant_id, program_metadata,
         return None
 
     from sqlalchemy import text
+    scope_sql, scope_params = _broker_scope(broker_party_id)
     rows = conn.execute(
-        text("""
+        text(f"""
             SELECT c.contract_id, c.output_template_id,
                    c.extracted->'program_metadata' AS meta,
                    c.contract_inception_date::text AS inception
@@ -176,10 +203,11 @@ def find_prior_contract_l3(conn, tenant_id, program_metadata,
               AND  c.is_current_version IS TRUE
               AND  COALESCE(c.status_ops, '') <> 'failed'
               AND  (:skip IS NULL OR c.contract_id <> :skip)
+              {scope_sql}
             ORDER BY c.contract_id DESC
             LIMIT 200
         """),
-        {"tid": tenant_id, "skip": exclude_contract_id},
+        {"tid": tenant_id, "skip": exclude_contract_id, **scope_params},
     ).fetchall()
 
     for cid, tpl_id, meta, prior_inception in rows:

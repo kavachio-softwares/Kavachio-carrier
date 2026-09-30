@@ -8,7 +8,8 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
   value: string | number;
   icon: LucideIcon;
   trend?: string;
-  subtitle?: string;
+  /** Plain text, or a node when part of it has to stand out (a warning). */
+  subtitle?: ReactNode;
   tone?: "alert";
   onClick?: () => void;
   /** Anything that belongs under the numbers — e.g. a signed-up bar. */

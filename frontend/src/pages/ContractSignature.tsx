@@ -413,7 +413,7 @@ export default function ContractSignature() {
             Nothing is emailed and no envelope goes anywhere. A signature here
             records that a person who was logged in, was the right party and
             could see this contract typed their name against it. Both sides
-            signing is what puts the contract in force, and it is the only
+            signing is what makes the contract active, and it is the only
             thing that does.
           </div>
         )}
@@ -760,7 +760,7 @@ export default function ContractSignature() {
                 alignItems: "center", justifyContent: "space-between",
               }}>
                 <div style={{ maxWidth: "60ch" }}>
-                  <b>Both sides have signed and this contract is in force.</b>{" "}
+                  <b>Both sides have signed and this contract is active.</b>{" "}
                   Its checks run on every bordereau from here. To change it now,
                   endorse it — a running contract is not edited.
                 </div>
@@ -776,7 +776,7 @@ export default function ContractSignature() {
               </div>
             ) : rec.unsigned_sides.length === 0 ? (
               <div className="note warn" style={{ marginBottom: 14 }}>
-                <b>Both sides have signed, but it is not in force yet.</b>{" "}
+                <b>Both sides have signed, but it is not active yet.</b>{" "}
                 Something else is in the way — see the contract\u2019s page.
               </div>
             ) : round?.can_sign ? (
@@ -803,7 +803,7 @@ export default function ContractSignature() {
               </div>
             ) : (
               <div className="note" style={{ marginBottom: 14 }}>
-                <b>A contract goes in force when both sides have signed it.</b>{" "}
+                <b>A contract becomes active when both sides have signed it.</b>{" "}
                 There is no other way to make one live, and the second signature
                 normally does it on its own.{" "}
                 {round && !round.started && round.why
@@ -877,7 +877,7 @@ export default function ContractSignature() {
                     for {myS === "carrier" ? "the carrier"
                                            : rec.counterparty?.name ?? "your side"}.
                     It is recorded against you and dated, and if it is the
-                    second signature the contract goes in force immediately.
+                    second signature the contract becomes active immediately.
                   </div>
                 ) : (
                   <div className="hint" style={{ marginBottom: 10 }}>

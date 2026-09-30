@@ -94,10 +94,10 @@ export default function AddUser() {
           <div className="t">
             <h2>
               Invite a broker
-              <InfoTip text={"Name the broker company and its broker admin — the "
-                + "person who runs it. Both are created together."} />
+              <InfoTip text={"Name the broker company and the "
+                + "person who runs it on Kavachio. Both are created together."} />
             </h2>
-            <p>An outside broker company and its admin.</p>
+            <p>An outside broker company and the person who runs it.</p>
           </div>
           <div className="actions">
             <button className="btn" onClick={() => nav("/brokers")}>← Brokers</button>

@@ -173,7 +173,7 @@ def require_carrier_admin(what: str = "do this"):
         with SessionLocal() as s:
             if not is_carrier_admin_seat(s, p):
                 raise HTTPException(
-                    403, f"Only your organisation's carrier admin can {what}.")
+                    403, f"Only the carrier can {what}.")
         return p
     return _dep
 
@@ -213,10 +213,10 @@ def retired_seat(s, u: AppUser) -> Optional[str]:
     from auth_deps import normalize_role
     role = normalize_role(u.role)
     if role == "operator":
-        return ("Broker user accounts have been retired. Your broker admin "
+        return ("Broker user accounts have been retired. Your broker "
                 "now does this work.")
     if role == "carrier_admin" and not is_carrier_admin_user(s, u.tenant_id, u.id):
-        return ("Carrier user accounts have been retired. Your carrier admin "
+        return ("Carrier user accounts have been retired. Your carrier "
                 "now does this work.")
     return None
 

@@ -186,7 +186,7 @@ def reset_email_html(link: str, name: str | None = None) -> str:
                 box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
       <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
                   color:#0E1320;margin-bottom:6px">Kavachio</div>
-      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
       <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">Reset your password</h1>
       <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
       <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 22px">
@@ -221,7 +221,7 @@ def invite_email_html(link: str, name: str | None = None, org: str | None = None
                 box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
       <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
                   color:#0E1320;margin-bottom:6px">Kavachio</div>
-      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
       <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">You're invited</h1>
       <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
       <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 22px">
@@ -262,7 +262,7 @@ def carrier_invite_email_html(link: str, name: str | None = None,
                 box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
       <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
                   color:#0E1320;margin-bottom:6px">Kavachio</div>
-      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
       <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">{carrier or "A carrier"} wants to work with you</h1>
       <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
       <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 22px">
@@ -304,7 +304,7 @@ def overdue_reminder_email_html(name: str | None, program_name: str, period: str
                 box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
       <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
                   color:#0E1320;margin-bottom:6px">Kavachio</div>
-      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
       <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
         {program_name} — {period} bordereau is {plural(days_over, 'day')} overdue
       </h1>
@@ -340,7 +340,7 @@ def bordereau_sent_email_html(program_name: str, period: str, due_date: str | No
                 box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
       <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
                   color:#0E1320;margin-bottom:6px">Kavachio</div>
-      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
       <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
         {program_name} — {period} bordereau
       </h1>

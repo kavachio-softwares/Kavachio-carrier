@@ -109,8 +109,8 @@ export function programmeSteps(p: HierarchyProgramme): Step[] {
         ? `${plural(brokers.length, "broker")} on this programme.`
         : awaiting.length > 0
         ? `${awaiting.map(b => b.legal_name || "A broker").join(", ")} `
-          + `${awaiting.length === 1 ? "is" : "are"} waiting for your carrier `
-          + `admin to approve. Nothing is sent to the broker until then.`
+          + `${awaiting.length === 1 ? "is" : "are"} waiting for the carrier `
+          + `to approve. Nothing is sent to the broker until then.`
         : "No broker on this programme yet — add one so it can hold a contract.",
     },
     {
@@ -188,8 +188,8 @@ export function whatsMissing(p: HierarchyProgramme): string | null {
   // cannot send a file — but nobody is waiting on the person reading this, and
   // "has no setup" would send them looking for work that is already done.
   const waiting = brokers.filter(b => b.setup_status === "pending_approval");
-  if (waiting.length === 1) return `${waiting[0].legal_name}'s setup is waiting for your carrier admin to approve it`;
-  if (waiting.length > 1) return `${waiting.length} setups are waiting for your carrier admin to approve them`;
+  if (waiting.length === 1) return `${waiting[0].legal_name}'s setup is waiting for the carrier to approve it`;
+  if (waiting.length > 1) return `${waiting.length} setups are waiting for the carrier to approve them`;
   return null;
 }
 

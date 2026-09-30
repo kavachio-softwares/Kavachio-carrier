@@ -170,7 +170,7 @@ def test_user_add_existing_broker_makes_a_request_not_a_link(w):
     body = r.json()
     assert body["pending"] is True
     assert body["link_id"] is None
-    assert "carrier admin" in body["message"]
+    assert "your carrier to approve" in body["message"]
 
     # THE POINT: no link at all, not even a pending one.
     assert _links(w["prog"]) == []
@@ -608,7 +608,7 @@ def test_asking_twice_says_why_in_plain_words(w):
                         json={"broker_party_id": w["broker"]}, headers=w["user_h"])
     assert again.status_code == 409
     said = again.json()["detail"]["message"]
-    assert "already asked your carrier admin" in said
+    assert "already asked your carrier" in said
     assert "waiting on them" in said
 
 

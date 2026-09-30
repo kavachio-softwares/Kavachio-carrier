@@ -95,7 +95,7 @@ def test_the_refusal_names_the_act_and_who_may_do_it(with_owner):
     with pytest.raises(HTTPException) as e:
         _call(CARRIER_USER)
     msg = str(e.value.detail)
-    assert "carrier admin" in msg
+    assert "only the carrier can" in msg.lower()
     assert "rule library" in msg
 
 

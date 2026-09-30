@@ -76,11 +76,11 @@ class ContractTerms:
     carrier_name: str = "Insurisk Specialty"
     carrier_party_key: str = "tenant:1"
     carrier_signer: str = "Dana Alvarez"
-    carrier_signer_title: str = "Carrier Admin"
+    carrier_signer_title: str = "Carrier"
     broker_name: str = "CRC Insurisk"
     broker_party_key: str = "broker:1"
     broker_signer: str = "Marco Vance"
-    broker_signer_title: str = "Broker Admin"
+    broker_signer_title: str = "Broker"
     programme: str = "Spectrum Transportation"
     reference: str = "SCH-A"
     starts: date = date(2027, 1, 1)

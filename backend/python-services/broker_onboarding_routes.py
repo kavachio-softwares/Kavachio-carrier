@@ -146,7 +146,7 @@ def _guard_duplicate(s, tid: int, program_id: Optional[int],
                        BrokerOnboardingRequest.program_id == program_id).first()
         if row:
             raise HTTPException(409, {
-                "message": "Somebody here has already asked your carrier admin "
+                "message": "Somebody here has already asked your carrier "
                            "to put that broker on this programme. It is "
                            "waiting on them.",
                 "errors": {"broker_party_id": "already requested"}})
@@ -155,7 +155,7 @@ def _guard_duplicate(s, tid: int, program_id: Optional[int],
                    == (email or "").lower()).first()
     if row:
         raise HTTPException(409, {
-            "message": f"Somebody here has already asked your carrier admin to "
+            "message": f"Somebody here has already asked your carrier to "
                        f"bring {email} on board. It is waiting on them.",
             "errors": {"admin_email": "already requested"}})
 
@@ -197,7 +197,7 @@ def raise_request_for_existing_broker(s, tid: int, program_id: int, party: Party
     return {
         "ok": True, "pending": True, "request_id": rid,
         "reactivated": False, "link_id": None, "status": PENDING,
-        "message": f"{name} has gone to your carrier admin to approve. "
+        "message": f"{name} has gone to your carrier to approve. "
                    f"Nothing is sent to the broker until they do.",
     }
 
@@ -242,7 +242,7 @@ def raise_request_to_invite(s, tid: int, body, name: str, email: str,
     return {
         "ok": True, "pending": True, "invited": False, "email": email,
         "request_id": rid,
-        "message": f"{name} has gone to your carrier admin to approve. "
+        "message": f"{name} has gone to your carrier to approve. "
                    f"Nothing is sent to {email} until they do.",
     }
 
@@ -447,7 +447,7 @@ def _open_request(s, request_id: int, principal: Principal
         raise HTTPException(404, "request not found")
     if not is_carrier_admin_seat(s, principal):
         raise HTTPException(
-            403, "Only your organisation's carrier admin can decide on a "
+            403, "Only the carrier can decide on a "
                  "broker onboarding request.")
     if req.status != PENDING:
         raise HTTPException(409, {

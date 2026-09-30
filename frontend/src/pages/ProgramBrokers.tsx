@@ -216,7 +216,7 @@ export default function ProgramBrokers() {
       // broker's row.
       setMsg(r.pending
         ? (r.message
-           ?? "That broker has gone to your carrier admin to approve.")
+           ?? "That broker has gone to the carrier to approve.")
         : r.reactivated
         ? "That broker was put back on this programme — their earlier contracts are live again."
         : "Broker added to this programme.");
@@ -267,7 +267,7 @@ export default function ProgramBrokers() {
       setSent({
         pending: true, email,
         message: <>Nothing is sent to <b>{org || "this broker"}</b> until
-          your carrier admin approves.</>,
+          the carrier approves.</>,
         note: "You will be told either way.",
       });
       // The request names this programme, so it is now in brokers_awaiting —

@@ -45,7 +45,8 @@ type Programme = { id: number; name: string; status: string | null };
 
 export default function AddContractModal({
   open, onClose, broker, programmes, programId: initialProgramId,
-  brokerId: initialBrokerId, onAdded,
+  brokerId: initialBrokerId, onAdded, initialFile, initialRefFiles, copiedFrom,
+  copiedFilename,
 }: {
   open: boolean;
   onClose: () => void;
@@ -63,6 +64,17 @@ export default function AddContractModal({
    *  itself afterwards unless it still has something to report, so this should
    *  refresh the page rather than close it. */
   onAdded: (contractId: number, programId: number) => void;
+  /** Pre-attached documents — "use the same contract as <sibling broker>"
+   *  hands in that contract's own files. Still just a starting point: they
+   *  can be swapped before uploading. */
+  initialFile?: File | null;
+  initialRefFiles?: File[];
+  /** The sibling broker whose contract the files came from, named at the top
+   *  of the dialog. */
+  copiedFrom?: string;
+  /** That contract's file name — asked for by name when the server no longer
+   *  holds the file and it has to be picked again. */
+  copiedFilename?: string | null;
 }) {
   const mga = currentMga();
 
@@ -112,6 +124,13 @@ export default function AddContractModal({
     setFile(null); setRefFiles([]);
     setHalt(null); setSaved(null); setErr(null); setStep("");
   }, [open]);
+
+  // Files handed in by the opener, attached as the dialog opens.
+  useEffect(() => {
+    if (!open) return;
+    if (initialFile) setFile(initialFile);
+    if (initialRefFiles?.length) setRefFiles(initialRefFiles);
+  }, [open, initialFile, initialRefFiles]);
 
   // One programme means there is nothing to choose — choose it.
   useEffect(() => {
@@ -249,6 +268,21 @@ export default function AddContractModal({
           document is parsed and its clauses extracted and saved. A contract
           added here can be used by a setup later without being read again.
         </p>
+
+        {copiedFrom && (initialFile ? (
+          <Note>
+            The contract <b className="text-ink">{copiedFrom}</b> has is attached below.
+            {broker ? <> Uploading it gives <b className="text-ink">{broker.legal_name}</b> their
+              own copy, accepted and checked on its own.</> : null}
+          </Note>
+        ) : (
+          <Note tone="warn">
+            <b>{copiedFrom}</b>'s contract was uploaded
+            {copiedFilename ? <> as <b>{copiedFilename}</b></> : null}, and this
+            server does not keep the file. Pick that same file below to give
+            {broker ? <> <b>{broker.legal_name}</b></> : " this broker"} their own copy.
+          </Note>
+        ))}
 
         {noProgrammes ? (
           <Note tone="warn">

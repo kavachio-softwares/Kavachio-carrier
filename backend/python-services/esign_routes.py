@@ -484,13 +484,13 @@ def _resolve_carrier_signer(s, p: Principal, tenant_id: int,
            or "The insurer")
     if given and given.email:
         return SignerIn(side="insurer", name=given.name, email=given.email,
-                        title=given.title or "Carrier Admin", org=given.org or org,
+                        title=given.title or "Carrier", org=given.org or org,
                         order=1)
     me = s.get(AppUser, p.user_id)
     if not me or not me.email:
         raise HTTPException(400, "Who is signing for the insurer? Name a signer.")
     return SignerIn(side="insurer", name=me.full_name or me.email, email=me.email,
-                    title="Carrier Admin", org=org, order=1)
+                    title="Carrier", org=org, order=1)
 
 
 def _resolve_broker_signer(s, tenant_id: int, broker_party_id: int | None,
@@ -506,7 +506,7 @@ def _resolve_broker_signer(s, tenant_id: int, broker_party_id: int | None,
     org = party.legal_name or "The broker"
     if given and given.email:
         return SignerIn(side="broker", name=given.name, email=given.email,
-                        title=given.title or "Broker Admin", org=given.org or org,
+                        title=given.title or "Broker", org=given.org or org,
                         broker_party_id=bpid, order=2)
     admin = (s.query(AppUser)
              .filter(AppUser.broker_party_id == bpid,
@@ -515,10 +515,10 @@ def _resolve_broker_signer(s, tenant_id: int, broker_party_id: int | None,
              .order_by(AppUser.id).first())
     if not admin or not admin.email:
         raise HTTPException(
-            400, f"{org} has nobody who can sign — invite a broker admin first, "
+            400, f"{org} has nobody who can sign — invite the broker first, "
                  "or name a signer on this request.")
     return SignerIn(side="broker", name=admin.full_name or admin.email,
-                    email=admin.email, title="Broker Admin", org=org,
+                    email=admin.email, title="Broker", org=org,
                     broker_party_id=bpid, order=2)
 
 
@@ -793,11 +793,11 @@ def _build_document(s, body: EnvelopeIn, env: EsignEnvelope, insurer: SignerIn,
         carrier_name=insurer.org or "The insurer",
         carrier_party_key=insurer_key,
         carrier_signer=insurer.name,
-        carrier_signer_title=insurer.title or "Carrier Admin",
+        carrier_signer_title=insurer.title or "Carrier",
         broker_name=broker.org or "The broker",
         broker_party_key=broker_key,
         broker_signer=broker.name,
-        broker_signer_title=broker.title or "Broker Admin",
+        broker_signer_title=broker.title or "Broker",
         programme=_programme_name(env, s) or meta.get("program_name") or "Programme",
         reference=(contract.schedule_key if contract else None) or "—",
         initials_every_page=body.initials_every_page,
@@ -956,7 +956,7 @@ def _assert_terms_settled(c: Contract) -> None:
                      "or ask for changes, and it comes back here to sign.",
         "changes_requested": "the broker has asked for changes. Answer those "
                              "and send the terms out again first.",
-        "active": "it is already in force.",
+        "active": "it is already active.",
         "expired": "its term has run out.",
         "terminated": "it was ended early.",
         "superseded": "it has been replaced by a renewal.",
@@ -1229,7 +1229,7 @@ def contract_round(contract_id: int, p: Principal = Depends(current_principal)):
             "waiting_on": (turn.side if turn else None),
             "waiting_on_name": (turn.org or turn.name) if turn else None,
             "why": (None if mine else
-                    ("only your broker admin can sign for your company"
+                    ("only your broker can sign for your company"
                      if not may_sign else
                      "everybody has signed" if turn is None else
                      f"waiting on {turn.org or turn.name}")),
@@ -1301,8 +1301,8 @@ def signer_lookup(contract_id: int,
                    or getattr(ten, "tenant_name", None))
         return SignerLookup(
             email=email, known=True, name=u.full_name or u.email,
-            role={"carrier_admin": "Carrier Admin",
-                  "broker_admin": "Broker Admin",
+            role={"carrier_admin": "Carrier",
+                  "broker_admin": "Broker",
                   "kavachio_admin": "Kavachio Admin",
                   "operator": "Operator"}.get(normalize_role(u.role), "User"),
             org=org, side="counterparty" if broker else "carrier",

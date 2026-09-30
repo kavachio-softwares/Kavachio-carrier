@@ -457,7 +457,7 @@ function label(type: string): string {
     declined: "Asked for a change",
     completed: "Everybody has signed",
     sealed: "Sealed against later changes",
-    in_force: "The contract went in force",
+    in_force: "The contract became active",
     signed_not_in_force: "Signed, but something is holding it up",
     reminded: "Reminder sent",
     voided: "Withdrawn",

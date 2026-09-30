@@ -88,7 +88,7 @@ export default function AddTenant() {
           <div className="card pad">
             <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>
               Carrier organisation
-              <InfoTip text="A brand new carrier is empty until its own admin signs in. They add the programmes and the brokers, not us." />
+              <InfoTip text="A brand new carrier is empty until the carrier signs in. They add the programmes and the brokers, not us." />
             </h3>
             <div className="field">
               <label>Name <span style={{ color: "var(--p-crit)" }}>*</span></label>
@@ -122,7 +122,7 @@ export default function AddTenant() {
             </div>
             <div className="field">
               <label>Email <span style={{ color: "var(--p-crit)" }}>*</span></label>
-              <input type="email" value={f.admin_email} placeholder="admin@carrier.com"
+              <input type="email" value={f.admin_email} placeholder="name@carrier.com"
                 onChange={e => set("admin_email", e.target.value)} />
             </div>
             {/* <div className="note" style={{ marginTop: 4 }}>

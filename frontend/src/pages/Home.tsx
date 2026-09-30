@@ -53,6 +53,10 @@ type Stats = {
   contracts_pending_signature?: number;
   /** Terms already settled — the "done" count beside the review half. */
   contracts_terms_agreed?: number;
+  /** Contracts in force whose term ends within the next
+   *  `contracts_expiring_soon_days` days (30). */
+  contracts_expiring_soon?: number;
+  contracts_expiring_soon_days?: number;
   /** Broker onboarding requests waiting on the carrier admin. Null for a
    *  carrier user, who is not the one being asked. */
   broker_requests_pending?: number | null;
@@ -96,11 +100,10 @@ export default function Home() {
   // on the dedicated Run history page (/runs).
   const RUNS_PAGE = 5;
   const [runs, setRuns] = useState<Run[]>([]);
-  // How many files have been run for this carrier ALTOGETHER. The card below
-  // used to print `runs.length`, which is this snapshot's size and therefore
-  // stopped at 5 however many files had actually come in — a carrier with
-  // ninety submissions read "5 Completed". Counted by the same endpoint the
-  // File Submissions screen pages through, so the two can never disagree.
+  // How many files have been run for this carrier THIS MONTH. Counted by the
+  // same endpoint the File Submissions screen pages through (with the same
+  // date range), so the two can never disagree. Never `runs.length`, which is
+  // the 5-row snapshot below and stopped at 5 however many files came in.
   const [runsTotal, setRunsTotal] = useState<number | null>(null);
   // Group 3: deadline counts for the "Deadlines" tile (own submission calendar).
   const [calCounts, setCalCounts] = useState<Partial<Record<CalendarStatus, number>>>({});
@@ -123,11 +126,21 @@ export default function Home() {
   // here is a broker who cannot send a file yet, so it belongs on the first
   // screen they see rather than somewhere they have to think to look.
   const [pendingSetups, setPendingSetups] = useState<number | null>(null);
-  // Files no longer has a sidebar entry — the dashboard is its way in. A short
-  // snapshot of the latest arrivals; the counts, filters and decisions all
+  // Files no longer has a sidebar entry — the dashboard is its way in. The
+  // card counts the files received this month; the filters and decisions all
   // stay on /files, so they are not repeated here.
-  const FILES_PAGE = 5;
+  // /intake/arrivals has no date filter, so the newest ones are fetched (its
+  // cap, 500) and the month is counted here. It used to fetch 5 and print how
+  // many came back, which could never read more than 5.
+  const ARRIVALS_FETCH = 500;
   const [arrivals, setArrivals] = useState<Arrival[] | null>(null);
+
+  // Both link cards count the current calendar month and say which one, the
+  // way Overdue Bordereaux says "Due in September 2026".
+  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 1, 0, 0, 0, -1);
+  const monthLabel = monthStart.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  const monthKey = monthStart.toISOString();
 
   useEffect(() => {
     api.get<Stats>(`/dashboard/stats`, { params: { mga } }).then(r => setStats(r.data));
@@ -202,16 +215,23 @@ export default function Home() {
   // that does not send the split, so the tile never reads blank.
   const pendingSignature = stats?.contracts_pending_signature
     ?? stats?.pending_signatures ?? 0;
+  const expiringSoon = stats?.contracts_expiring_soon ?? 0;
+  const expiringDays = stats?.contracts_expiring_soon_days ?? 30;
 
   // /files is carrier-only (ROUTE_ACCESS), so only a carrier seat that can open
   // it gets the card — anyone else would be shown links that bounce them back.
   const showFiles = canAccessPath("/files") && !isKavachioAdmin();
   useEffect(() => {
     if (!showFiles) return;
-    listArrivals(FILES_PAGE)
+    listArrivals(ARRIVALS_FETCH)
       .then(r => setArrivals(r.rows))
       .catch(() => setArrivals([]));
   }, [mga, showFiles]);
+  // Every file that reached the carrier this month, accepted or not.
+  const receivedThisMonth = arrivals?.filter(a => {
+    const t = a.received_at ? new Date(a.received_at) : null;
+    return !!t && t >= monthStart && t <= monthEnd;
+  }).length;
 
   // Can the operator actually work yet? That hinges on there being an approved
   // Bordereau Setup to process against (`bordereau_ready`) — NOT on the full
@@ -233,14 +253,18 @@ export default function Home() {
   }, [mga]);
 
   // The total, bought for one row: `page` makes /direct/runs answer with
-  // {items, total}, and the total is counted over the whole tenant rather than
-  // over the page, so page_size 1 still yields the real figure. Same trick the
-  // book-count tiles above use.
+  // {items, total}, and the total is counted over the whole date range rather
+  // than over the page, so page_size 1 still yields the real figure. Same
+  // trick the book-count tiles above use.
   useEffect(() => {
-    api.get<{ total: number }>(`/direct/runs`, { params: { mga, page: 1, page_size: 1 } })
+    api.get<{ total: number }>(`/direct/runs`, { params: {
+      mga, page: 1, page_size: 1,
+      date_from: monthStart.toISOString(), date_to: monthEnd.toISOString(),
+    } })
       .then(r => setRunsTotal(r.data?.total ?? null))
       .catch(() => setRunsTotal(null));
-  }, [mga]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mga, monthKey]);
 
   const fmt = (v: number | null | undefined) => (v == null ? "—" : v);
   // A not-validated run is never clean: its checks did not run (it carries one
@@ -310,16 +334,18 @@ export default function Home() {
   // so the number, the red edge and the ⓘ all speak about signatures and
   // nothing else. Carrier ADMIN only (plus Kavachio staff) — signing is theirs.
   const signaturesTile = addsCarrierUsers(seat) ? (
+    // Named for the thing and the action ("Contracts to Sign"), not the bare
+    // "Pending Signatures", which did not say whose signature or on what.
     <StatCard
-      title="Pending Signatures"
+      title="Contracts to Sign"
       value={fmt(pendingSignature)}
       icon={FileText}
       tone={pendingSignature ? "alert" : undefined}
-      subtitle={`${stats?.completed_signatures ?? 0} completed`}
+      subtitle={`${stats?.completed_signatures ?? 0} fully signed`}
       onClick={() => nav("/contracts?waiting=mine")}
-      info={"Contracts whose terms the broker has agreed and which now "
-            + "need your signature. Only the carrier admin signs, and "
-            + "the carrier signs first."}
+      info={"Contracts whose terms your broker has agreed and which are now "
+            + "waiting for your signature as the carrier. \"Fully signed\" "
+            + "counts the contracts both you and the broker have signed."}
     />
   ) : null;
 
@@ -331,11 +357,16 @@ export default function Home() {
           <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "var(--p-surface-2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
           </div>
-          <h3 style={{ margin: 0, fontSize: 18 }}>Incoming Files</h3>
+          <h3 style={{ margin: 0, fontSize: 18 }}>Files Received</h3>
+          <InfoTip text={"Every bordereau your brokers sent you this month — by "
+            + "upload, email, SFTP or API — including any that were held or "
+            + "turned away before checking. Click to see them all."} />
         </div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>{arrivals?.length ?? 0}</span>
-          <span style={{ color: "var(--p-muted)", fontSize: 14 }}>New Files</span>
+          <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>{fmt(receivedThisMonth)}</span>
+          <span style={{ color: "var(--p-muted)", fontSize: 14 }}>
+            {receivedThisMonth === 1 ? "file" : "files"} in {monthLabel}
+          </span>
         </div>
       </div>
       <div style={{ opacity: 0.3 }}>
@@ -352,18 +383,22 @@ export default function Home() {
           <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
           </div>
-          <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Recent File Submissions</h3>
-        </div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontSize: 32, fontWeight: 600, color: "white" }}>
-            {runsTotal ?? runs.length}
-          </span>
           {/* "Processed" rather than "Completed": a run in this count may
               have come back with exceptions still open, and calling that
               completed is the one reading a carrier must not take from
-              this card. The open work is the tile above. */}
+              this card. */}
+          <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Files Processed</h3>
+          <span className="on-dark">
+            <InfoTip text={"Bordereaux checked against their contract this month, "
+              + "clean or with exceptions. Click for the results, file by file."} />
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span style={{ fontSize: 32, fontWeight: 600, color: "white" }}>
+            {fmt(runsTotal)}
+          </span>
           <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 14 }}>
-            {(runsTotal ?? runs.length) === 1 ? "File Processed" : "Files Processed"}
+            {runsTotal === 1 ? "file" : "files"} in {monthLabel}
           </span>
         </div>
       </div>
@@ -411,7 +446,12 @@ export default function Home() {
                 cell(3, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
               )}
 
-              {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")} subtitle="" />)}
+              {/* The sub-line appears only when something is about to run out
+                  — a "0 expiring" line would be one more thing to read past. */}
+              {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")}
+                subtitle={expiringSoon
+                  ? `${expiringSoon} ${expiringSoon === 1 ? "contract" : "contracts"} expiring in the next ${expiringDays} days`
+                  : ""} />)}
 
               {carrierAdmin && cell(3, signaturesTile)}
 

@@ -40,7 +40,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { FileText, Plus, Upload, UserPlus } from "lucide-react";
+import { Copy, FileText, Plus, Upload, UserPlus } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
 import { PageBody, PageHeader } from "../components/Layout";
@@ -56,6 +56,7 @@ import { OnboardingBadge } from "../components/OnboardingBadge";
 import { InviteBrokerModal } from "../components/InviteBrokerModal";
 import { InviteSentModal } from "../components/InviteSentModal";
 import AddContractModal from "../components/AddContractModal";
+import { fetchContractOriginal, fetchDocument, getContract } from "../api/contractRecord";
 import { Pagination } from "../components/Pagination";
 import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { getSegments, addSegment, type Segment } from "../api/segments";
@@ -182,6 +183,14 @@ export default function AddProgram() {
   // Step 3. Who the upload dialog is open for, and how many contracts each
   // broker has had uploaded here — so a row can say it is done.
   const [uploadFor, setUploadFor] = useState<BrokerSummary | null>(null);
+  // "Use the same contract as <sibling broker>" on an UPLOADED contract: the
+  // sibling's files, handed to the upload dialog opened for this broker. Null
+  // for a plain upload.
+  const [copyFiles, setCopyFiles] = useState<
+    { from: string; file: File | null; refs: File[]; filename: string | null } | null>(null);
+  // The broker row whose copy is being fetched, and why it failed if it did.
+  const [copyBusy, setCopyBusy] = useState<number | null>(null);
+  const [copyErr, setCopyErr] = useState<{ broker: number; msg: string } | null>(null);
   const [uploaded, setUploaded] = useState<Record<number, number>>({});
   // Set when the open upload dialog has actually saved a contract. Its Done
   // button then carries on to Bordereau Setup instead of just closing.
@@ -313,7 +322,7 @@ export default function AddProgram() {
       // present a contract step for somebody who is not on the programme yet.
       setApprovalNote(
         `${asked.map(name).join(", ")} ${asked.length === 1 ? "has" : "have"} `
-        + `gone to your carrier admin to approve. Nothing is sent to `
+        + `gone to the carrier to approve. Nothing is sent to `
         + `${asked.length === 1 ? "them" : "any of them"} until then, and you can `
         + `add ${asked.length === 1 ? "their" : "the"} contract once it is through.`);
     }
@@ -352,8 +361,8 @@ export default function AddProgram() {
     setSent({
       email, pending,
       message: pending
-        ? <>Nothing is sent to <b>{org || "this broker"}</b> until your
-            carrier admin approves.</>
+        ? <>Nothing is sent to <b>{org || "this broker"}</b> until the
+            carrier approves.</>
         : message,
     });
     if (pending) {
@@ -400,6 +409,60 @@ export default function AddProgram() {
   const onProg = (id: number) => prog?.brokers.find(b => b.id === id);
   const contractsOf = (id: number) =>
     Math.max(openContracts(onProg(id)).length, uploaded[id] ?? 0);
+
+  // "Use the same contract as <sibling broker>". A contract is (programme x
+  // broker) — one row per broker, agreed and signed by that broker — so this
+  // is a COPY, never a contract two brokers share: the other broker could not
+  // open a shared one, and one broker agreeing would read as both agreeing.
+  // The siblings offered: other brokers on this programme holding an open
+  // contract, the settled one first, as each row shows it.
+  const siblingContracts = (id: number) => assignedBrokers.flatMap(s => {
+    if (s.id === id) return [];
+    const mine = openContracts(onProg(s.id));
+    const c = mine.find(x => x.settled) ?? mine[0];
+    return c ? [{ broker: s, contractId: c.id }] : [];
+  });
+
+  // A raised contract is copied by opening the Raise form filled in from it.
+  // An uploaded one by uploading the same document for this broker — attached
+  // for them when the server still has the file, asked for by name when not.
+  async function copySiblingContract(
+    b: BrokerSummary, sib: { broker: BrokerSummary; contractId: number },
+  ) {
+    if (programId == null) return;
+    setCopyErr(null);
+    setCopyBusy(b.id);
+    try {
+      const rec = await getContract(sib.contractId);
+      if (!rec.is_uploaded) {
+        nav(`/contracts/new?program_id=${programId}&broker_party_id=${b.id}`
+            + `&flow=1&copy_from=${rec.id}`);
+        return;
+      }
+      const toFile = (blob: Blob, name: string | null | undefined) =>
+        new File([blob], name || "contract.pdf", { type: blob.type });
+      const docs = (rec.documents ?? []).filter(d => d.is_active && d.has_file);
+      const main = docs.find(d => d.kind === "contract");
+      let file: File | null = null;
+      if (main) {
+        file = toFile(await fetchDocument(rec.id, main.id), main.filename);
+      } else {
+        const orig = await fetchContractOriginal(rec.id);
+        if (orig) file = toFile(orig.blob, orig.filename ?? rec.filename);
+      }
+      const refs = await Promise.all(docs.filter(d => d.kind === "reference")
+        .map(async d => toFile(await fetchDocument(rec.id, d.id), d.filename)));
+      setCopyFiles({ from: sib.broker.legal_name, file, refs,
+                     filename: rec.filename });
+      setContractSaved(false);
+      setUploadFor(b);
+    } catch (e: any) {
+      setCopyErr({ broker: b.id,
+                   msg: e?.response?.data?.detail ?? "Could not load that contract." });
+    } finally {
+      setCopyBusy(null);
+    }
+  }
   // HAS A CONTRACT vs HAS ONE READY TO BUILD ON — two different questions.
   // `contractsOf` (above) answers the first and stays as it was, for the plain
   // count in the per-broker line. `withContract` used to be built from it,
@@ -685,7 +748,7 @@ export default function AddProgram() {
                           <span className="block font-medium">{b.legal_name}</span>
                           <span className="block text-xs text-ink-muted">
                             {waiting
-                              ? "Waiting for your carrier admin to approve"
+                              ? "Waiting for the carrier to approve"
                               : b.programmes.length === 0
                               ? "On no programme yet"
                               : `Already on ${b.programmes.map(p => p.name).join(", ")}`}
@@ -723,8 +786,8 @@ export default function AddProgram() {
                   {pending > 0
                     ? `${pending} broker${pending === 1 ? "" : "s"} will be put on this programme.`
                     : requested.size > 0 && assigned.size === 0
-                    ? `${requested.size} broker${requested.size === 1 ? "" : "s"} waiting for your `
-                      + `carrier admin. Nothing is sent to them until it is approved.`
+                    ? `${requested.size} broker${requested.size === 1 ? "" : "s"} waiting for the `
+                      + `carrier. Nothing is sent to them until it is approved.`
                     : assigned.size > 0
                     ? `${assigned.size} broker${assigned.size === 1 ? "" : "s"} assigned — add their contracts next.`
                     : "No brokers picked — the programme will start empty."}
@@ -780,7 +843,7 @@ export default function AddProgram() {
                         <span className={`block text-xs ${!n ? "text-ink-muted" : ready || !shown ? "text-ok" : "text-warn"}`}>
                           {!n ? "No contract on this programme yet"
                             : !shown ? `${plural(n, "contract")} uploaded`
-                            : live ? `${plural(n, "contract")} · in force`
+                            : live ? `${plural(n, "contract")} · active`
                             // Settled but not yet fully executed — the carrier
                             // has signed, the broker has not, and a bordereau
                             // setup can be built on it regardless.
@@ -792,6 +855,9 @@ export default function AddProgram() {
                               ? `${plural(n, "contract")} · waiting on your signature`
                             : `${plural(n, "contract")} · not signed yet (${(shown.lifecycle ?? "").replace(/_/g, " ")})`}
                         </span>
+                        {copyErr?.broker === b.id && (
+                          <span className="block text-xs text-danger">{copyErr.msg}</span>
+                        )}
                       </span>
                       <OnboardingBadge status={b.onboarding_status} />
                       <div className="flex shrink-0 items-center gap-2">
@@ -814,7 +880,38 @@ export default function AddProgram() {
                               ? "Review contract" : "Open the contract"}
                           </Link>
                         )}
-                        <button type="button" onClick={() => { setContractSaved(false); setUploadFor(b); }}
+                        {/* Only while this broker has no contract of its own:
+                            a copy is how a row gets its FIRST contract. One
+                            sibling is a button; several are a pick-list. */}
+                        {!shown && (() => {
+                          const sibs = siblingContracts(b.id);
+                          if (sibs.length === 0) return null;
+                          const cls = "inline-flex items-center gap-1.5 rounded border border-navy/40 px-3 py-1.5 text-xs font-medium text-navy hover:bg-navy/5 disabled:opacity-60";
+                          const busy = copyBusy === b.id;
+                          return sibs.length === 1 ? (
+                            <button type="button" className={cls} disabled={busy}
+                              title={`Start ${b.legal_name}'s contract from the one ${sibs[0].broker.legal_name} has — same terms, their own copy to agree and sign`}
+                              onClick={() => copySiblingContract(b, sibs[0])}>
+                              <Copy size={13} />
+                              {busy ? "Loading…" : `Use ${sibs[0].broker.legal_name}'s contract`}
+                            </button>
+                          ) : (
+                            <select className={`${cls} bg-white`} disabled={busy} value=""
+                              aria-label="Use another broker's contract"
+                              onChange={e => {
+                                const sib = sibs.find(x => String(x.broker.id) === e.target.value);
+                                if (sib) copySiblingContract(b, sib);
+                              }}>
+                              <option value="">{busy ? "Loading…" : "Use another broker's contract…"}</option>
+                              {sibs.map(x => (
+                                <option key={x.broker.id} value={x.broker.id}>
+                                  {x.broker.legal_name}'s contract
+                                </option>
+                              ))}
+                            </select>
+                          );
+                        })()}
+                        <button type="button" onClick={() => { setContractSaved(false); setCopyFiles(null); setUploadFor(b); }}
                           className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-2">
                           <Upload size={13} /> Upload contract
                         </button>
@@ -885,7 +982,7 @@ export default function AddProgram() {
                         : settled ? "text-warn" : "text-ink-muted"}`}>
                         {setup === "active" ? "Setup in use — their files can be checked"
                           : setup === "pending_approval"
-                            ? "Setup sent to your carrier admin — their files can be checked once it is approved"
+                            ? "Setup sent to the carrier — their files can be checked once it is approved"
                           : setup === "draft" ? "Setup started, not finished yet"
                           : settled ? "No setup yet, so their file can't be checked"
                           : hasContract ? "Their contract is not signed yet"
@@ -949,8 +1046,13 @@ export default function AddProgram() {
                 if (allHave) setStage(4);
               }
               setUploadFor(null);
+              setCopyFiles(null);
             }}
             broker={uploadFor}
+            initialFile={copyFiles?.file}
+            initialRefFiles={copyFiles?.refs}
+            copiedFrom={copyFiles?.from}
+            copiedFilename={copyFiles?.filename}
             programmes={[{ id: programId, name: name.trim(), status }]}
             onAdded={() => {
               setUploaded(u => ({ ...u, [uploadFor.id]: (u[uploadFor.id] ?? 0) + 1 }));

@@ -168,10 +168,10 @@ TENANT_ADMIN_FOOTER = (
     "You're receiving this because you're an administrator on this Kavachio "
     "account. Submission deadlines are set per program under My Calendar.")
 CARRIER_ADMIN_FOOTER = (
-    "You're receiving this because you're the carrier admin for this Kavachio "
+    "You're receiving this because you're the carrier for this Kavachio "
     "account — bordereau setups your colleagues build wait for your approval.")
 CARRIER_USER_FOOTER = (
-    "You're receiving this because you sent this work to your carrier admin "
+    "You're receiving this because you sent this work to your carrier "
     "for approval.")
 
 
@@ -267,7 +267,7 @@ def notification_email_html(title: str, body: Optional[str],
             <tr>
               <td style="vertical-align:middle">
                 <div style="font-size:19px;font-weight:700;color:#0E1320;letter-spacing:-.2px">Kavachio</div>
-                <div style="font-size:12px;color:#8B93A2;margin-top:3px">Bordereau validation &amp; reporting</div>
+                <div style="font-size:12px;color:#8B93A2;margin-top:3px">Bordereau Management</div>
               </td>
               <td align="right" style="vertical-align:middle">
                 <span style="display:inline-block;background:#FFF4E5;color:#B26A00;font-size:10.5px;

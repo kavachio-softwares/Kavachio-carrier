@@ -594,7 +594,7 @@ export default function DirectRun() {
                     <>There is no program for this carrier yet.{" "}
                       <span className="linkish" onClick={() => nav(`/programs/new?party=${carrierId}`)}>Create a Program →</span></>
                   ) : (
-                    <>There is no program for this carrier. <b>Ask your admin to add one.</b></>
+                    <>There is no program for this carrier. <b>Ask the carrier to add one.</b></>
                   )}
                 </div>
               )}
@@ -615,7 +615,7 @@ export default function DirectRun() {
                     <>No active setup for this carrier + program.{" "}
                       <span className="linkish" onClick={() => nav(setupHref())}>Configure It →</span></>
                   ) : (
-                    <>No setup for this carrier. <b>Ask your admin to configure it.</b></>
+                    <>No setup for this carrier. <b>Ask the carrier to set it up.</b></>
                   )}
                 </div>
               )}
@@ -693,7 +693,7 @@ export default function DirectRun() {
                   // that bounces them back to the dashboard.
                   admin
                     ? <span className="linkish" onClick={() => nav(setupHref())}>Review the Setup →</span>
-                    : <b>Ask your admin to review the setup.</b>
+                    : <b>Ask the carrier to review the setup.</b>
                 }
               />
             )}
@@ -701,7 +701,7 @@ export default function DirectRun() {
             {admin ? (
               <div className="note" style={{ marginTop: 14 }}>Missing a setup? <span className="linkish" onClick={() => nav(setupHref())}>Configure It →</span></div>
             ) : (
-              <div className="note" style={{ marginTop: 14 }}>No setup for a carrier? <b>Ask your admin to configure it.</b></div>
+              <div className="note" style={{ marginTop: 14 }}>No setup for a carrier? <b>Ask the carrier to set it up.</b></div>
             )}
           </div>
         </div>

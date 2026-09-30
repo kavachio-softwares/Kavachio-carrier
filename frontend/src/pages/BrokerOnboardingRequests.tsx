@@ -303,13 +303,13 @@ export default function BrokerOnboardingRequests() {
                   + "sent to any of them — they hear from Kavachio only once you "
                   + "approve. Approving sends the invitation; what they may send "
                   + "you is still settled by the bordereau setup approval."
-                : "Brokers you asked to bring on, and what your carrier admin "
+                : "Brokers you asked to bring on, and what the carrier "
                   + "decided. Nothing reaches a broker until they approve it."} />
             </h2>
             <p>
               {isAdmin
                 ? ""
-                : "What you asked for, and what your carrier admin said."}
+                : "What you asked for, and what the carrier said."}
             </p>
           </div>
         </div>
@@ -335,7 +335,7 @@ export default function BrokerOnboardingRequests() {
                     + "board, it will wait here for you. They will not have been "
                     + "sent anything."
                   : "Add a broker to one of your programmes and it will appear "
-                    + "here while your carrier admin looks at it."}
+                    + "here while the carrier looks at it."}
               </div>
             </div>
           </div>
@@ -344,7 +344,7 @@ export default function BrokerOnboardingRequests() {
             {waiting.total > 0 && (
               <div className="card" style={{ marginBottom: 16 }}>
                 <div className="card-h">
-                  <b>{isAdmin ? "Waiting on you" : "Waiting on your carrier admin"}</b>
+                  <b>{isAdmin ? "Waiting on you" : "Waiting on the carrier"}</b>
                   {/* The WHOLE queue's count, from the server — not
                       `items.length`, which would say 10 for ever once there
                       were eleven. */}

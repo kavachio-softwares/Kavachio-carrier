@@ -62,8 +62,8 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   // exist for it. See draftNote().
   draft: { label: "Draft", cls: "b-mut", note: "" },
   pending: { label: "Awaiting review", cls: "b-warn",
-             note: "One of your users raised this. It is with the carrier "
-                   + "admin, who reads the terms before they go to the broker." },
+             note: "One of your users raised this. It is with the carrier, "
+                   + "who reads the terms before they go to the broker." },
   in_review: { label: "Out for review", cls: "b-warn",
                note: "The terms are with the broker. They can agree them or "
                    + "ask for changes." },
@@ -78,8 +78,8 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
             note: "Both sides have settled the terms." },
   signed: { label: "Signed", cls: "b-ok",
             note: "The broker signed and returned it. It is with the carrier "
-                + "to place and put in force." },
-  active: { label: "In force", cls: "b-ok",
+                + "to place and activate." },
+  active: { label: "Active", cls: "b-ok",
             note: "Signed by both sides and running. Bordereaux can be "
                 + "produced against it." },
   expired: { label: "Expired", cls: "b-mut",
@@ -987,7 +987,7 @@ export default function ContractRecord() {
               </div>
               {rec.unsigned_sides.length > 0 && (
                 <div className="hint" style={{ marginTop: 10 }}>
-                  A contract goes in force when both sides have signed it — the
+                  A contract becomes active when both sides have signed it — the
                   second signature normally does it on its own.
                 </div>
               )}
@@ -1168,7 +1168,7 @@ export default function ContractRecord() {
             {rec.lifecycle === "agreed" && !isUploaded && (
               <div className="hint">
                 {rec.whose_turn === "broker"
-                  ? "The carrier has signed. The broker signs and returns it, then the carrier puts it in force."
+                  ? "The carrier has signed. The broker signs and returns it, then the carrier activates it."
                   : "Terms are settled. The carrier signs first, then the broker signs and returns it."}{" "}
                 {canSignHere && (
                   <Link to={`/contracts/${rec.id}/signature`} className="linkish">
@@ -1181,8 +1181,8 @@ export default function ContractRecord() {
               <div className="hint">
                 Signed and returned{rec.executed_date
                   ? ` on ${fmtDate(rec.executed_date)}` : ""}. The carrier places
-                it and puts it in force — <b>placement is not built in Kavachio
-                yet</b>, so for now it goes straight to in force.
+                it and activates it — <b>placement is not built in Kavachio
+                yet</b>, so for now it goes straight to active.
               </div>
             )}
             {/* In force is where a raised contract's flow picks up again:
@@ -1199,7 +1199,7 @@ export default function ContractRecord() {
               }}>
                 <div>
                   <b style={{ color: "var(--p-primary-h)" }}>
-                    Contract is in force. Next: set up this broker's bordereaux.
+                    Contract is active. Next: set up this broker's bordereaux.
                   </b>
                   <div style={{ marginTop: 4 }}>
                     Programme <b>{rec.programme.name}</b> · Broker{" "}
@@ -1252,14 +1252,14 @@ export default function ContractRecord() {
                 <b>
                   {a.carrier_admin_seat
                     ? "This one is waiting on you."
-                    : "Waiting on your carrier admin."}
+                    : "Waiting on the carrier."}
                 </b>{" "}
                 {rec.lifecycle === "pending" && isUploaded
                   // The uploaded road. Nothing to negotiate, nothing to sign.
                   ? (a.carrier_admin_seat
                       ? "This contract was signed before it got here, so there "
                         + "is nothing to negotiate and nothing to sign. Read it "
-                        + "and either accept it — which puts it in force — or "
+                        + "and either accept it — which makes it active — or "
                         + "send it back."
                       : "They read an uploaded contract before it goes in "
                         + "force. They can accept it, or send it back to you "
@@ -1280,9 +1280,9 @@ export default function ContractRecord() {
                   : (a.carrier_admin_seat
                       ? "The broker has agreed these terms, so nothing is "
                         + "moving any more. Read them and sign — a contract "
-                        + "goes in force when both sides have signed, and the "
+                        + "becomes active when both sides have signed, and the "
                         + "carrier signs first."
-                      : "The broker has agreed the terms. Your carrier admin "
+                      : "The broker has agreed the terms. The carrier "
                         + "signs for the company, so it sits with them now. "
                         + "Once they have, you can build the bordereau setup "
                         + "on it.")}
@@ -1307,8 +1307,8 @@ export default function ContractRecord() {
                   {a.carrier_admin_seat
                     // Their own act IS the approval — there is nobody left to
                     // ask — so the button says what it will actually do.
-                    ? "Accept it and put it in force"
-                    : "Send to your carrier admin"}
+                    ? "Accept it and make it active"
+                    : "Send to the carrier"}
                 </button>
               )}
               {a.accept_contract && (
@@ -1401,7 +1401,7 @@ export default function ContractRecord() {
                   className="btn pri" type="button" disabled={!!busy}
                   onClick={() => run("activate", () => activateContract(id))}
                 >
-                  <CheckCircle2 size={13} /> Put in force
+                  <CheckCircle2 size={13} /> Activate
                 </button>
               )}
               {a.renew && (
@@ -2086,7 +2086,7 @@ export default function ContractRecord() {
                       a contract with a template and no checks is one nobody has
                       bound, and it looks identical to a finished one until this
                       says otherwise. */}
-                  <Row label="Checks in force">
+                  <Row label="Active checks">
                     <ChecksInForce checks={rec.checks} />
                   </Row>
                   {/* WHICH SHEET, AND WHY IT IS THAT ONE. A term says
@@ -2115,7 +2115,7 @@ export default function ContractRecord() {
                     <div className="divider" />
                     <div className="hint" style={{ marginTop: 0 }}>
                       This contract is still {rec.lifecycle}, so its terms can be
-                      corrected. Once it is in force they cannot — a contract
+                      corrected. Once it is active they cannot — a contract
                       that is live is changed by an endorsement, so what it said
                       when a bordereau was checked against it stays on the record.
                     </div>
@@ -2704,7 +2704,7 @@ export default function ContractRecord() {
                       {a.upload_documents && (
                         <button
                           className="btn sm" type="button" disabled={!!busy}
-                          title="Retire it — never deleted, because the rules in force were read from it"
+                          title="Retire it — never deleted, because the active rules were read from it"
                           onClick={() => run("retire", async () => {
                             const r = await deactivateDocument(id, d.id);
                             if (r.rules_stale) setRulesStale(true);

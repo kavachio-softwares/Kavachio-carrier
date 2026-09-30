@@ -277,7 +277,7 @@ export default function BrokerBordereau() {
         {contracts !== null && contracts.length > 0 && live.length === 0 && (
           <div className="note warn" style={{ marginBottom: 18, maxWidth: 640 }}>
             <b>None of your contracts is live yet.</b> A contract governs
-            nothing until it is in force, and it is the terms of a live contract
+            nothing until it is active, and it is the terms of a live contract
             that create the rules your file is checked against. See{" "}
             <Link to="/broker/contracts">My Contracts</Link> for where each one
             has got to.
@@ -322,9 +322,9 @@ export default function BrokerBordereau() {
               {waiting.length === 1
                 ? <><b>{waiting[0].name ?? waiting[0].filename
                         ?? `Contract ${waiting[0].id}`}</b> is not listed — it is
-                    not in force yet.</>
+                    not active yet.</>
                 : <><b>{waiting.length} of your contracts</b> are not listed —
-                    they are not in force yet.</>}
+                    they are not active yet.</>}
             </div>
           )}
 

@@ -2323,10 +2323,14 @@ async def program_contract_upload(
                     _regen_text("SELECT program_tenant_id FROM program WHERE program_id = :pid"),
                     {"pid": program_id},
                 ).scalar()
+                # THIS broker's contracts only. The same wording uploaded for
+                # a sibling broker is that broker's own contract, not a new
+                # version of the other one's (regen_reconcile._broker_scope).
                 prior_contract = find_prior_contract(
                     _regen_conn, _tid, content_fp=content_fp,
                     file_sha=(regen_identity or {}).get("file_sha256"),
-                    doc_sha=(regen_identity or {}).get("doc_sha256"))
+                    doc_sha=(regen_identity or {}).get("doc_sha256"),
+                    broker_party_id=broker_party_id)
             if prior_contract:
                 print(f"[Regen] prior version found: contract "
                       f"{prior_contract['contract_id']} "
@@ -2430,6 +2434,7 @@ async def program_contract_upload(
                 entity_fingerprint=entity_fp,
                 identity=regen_identity,
                 prior_contract=prior_contract,
+                prior_broker_party_id=broker_party_id,
                 # Correlation id from the caller that made this upload. Recorded
                 # so that caller can still identify THIS contract if the response
                 # never reaches it — extraction can outlive the request, and the
@@ -4916,9 +4921,20 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         contracts_pending_signature = 0
         contracts_pending_review = 0
         contracts_terms_agreed = 0
+        # Contracts in force (signed or active) whose term ends within the next
+        # EXPIRING_SOON_DAYS — the "N expiring soon" line under the Contracts
+        # tile. Counted over every contract, not only the ones waiting on the
+        # carrier. An already-expired one is not "soon"; it is gone.
+        EXPIRING_SOON_DAYS = 30
+        _today_d = _cr._today()
+        _soon_d = _today_d + timedelta(days=EXPIRING_SOON_DAYS)
+        contracts_expiring_soon = 0
         for _c in waiting_rows:
             _uns = _cr._unsigned_sides(_cr._signatures(s, _c.id))
             _state = _cr._effective_lifecycle(_c)
+            if (_state in ("signed", "active") and _c.expiry_dt
+                    and _today_d <= _c.expiry_dt <= _soon_d):
+                contracts_expiring_soon += 1
             # The counterpart to the review queue: terms this carrier has
             # settled, whatever is left to do about signing them. Counted over
             # every contract, not only the ones waiting on the carrier.
@@ -5090,6 +5106,10 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             # Terms already settled — the "done" count beside the review half,
             # the carrier's mirror of the broker's terms_agreed.
             "contracts_terms_agreed": contracts_terms_agreed,
+            # In force and ending within the next 30 days (and the window it
+            # was counted over, so the screen never restates the number).
+            "contracts_expiring_soon": contracts_expiring_soon,
+            "contracts_expiring_soon_days": EXPIRING_SOON_DAYS,
             # Of those, the ones only the carrier admin can move. The tile uses
             # it to say "2 to sign" rather than leaving the reader to subtract.
             "contracts_awaiting_admin": contracts_awaiting_admin,
@@ -6823,7 +6843,7 @@ def _assert_is_carrier_admin(s, principal: Principal) -> None:
     if t.owner_user_id != principal.user_id:
         raise HTTPException(
             403,
-            "only your organisation's carrier admin can add or remove carrier "
+            "only the carrier can add or remove carrier "
             "users. If they have left, ownership has to be transferred first.")
 
 
@@ -6958,8 +6978,8 @@ def users_create(mga: str, body: UserBody,
     refuses. 410 rather than 405 so a stale screen still gets a sentence.
     """
     raise HTTPException(
-        410, "Carrier users are no longer part of Kavachio: each carrier has "
-             "one carrier admin, who does all of the carrier's work.")
+        410, "Carrier users are no longer part of Kavachio: the carrier "
+             "now does all of its own work.")
 
 
 @router.post("/users/{user_id}/resend-invite")
@@ -7005,7 +7025,7 @@ def users_update(user_id: int, body: UserBody,
                 body.password or ("status" in body.model_fields_set and body.status
                                   and body.status != u.status)):
             raise HTTPException(
-                403, "A broker admin's sign-in belongs to their broker. You can "
+                403, "A broker's sign-in belongs to that broker. You can "
                      "resend their invitation or remove them.")
         u.full_name = body.full_name
         # Only what the caller actually sent. UserBody DEFAULTS role to "ops"
@@ -7074,15 +7094,15 @@ def users_delete(user_id: int,
             if t and t.owner_user_id == u.id:
                 if u.id == principal.user_id:
                     raise HTTPException(409, {
-                        "message": "You are the carrier admin, so you cannot "
-                                   "remove yourself yet. Make another carrier "
-                                   "the carrier admin first — then you can "
+                        "message": "You are the carrier, so you cannot "
+                                   "remove yourself yet. Make someone else "
+                                   "the carrier first — then you can "
                                    "remove your own account.",
                         "errors": {"owner": "transfer first"}})
                 raise HTTPException(409, {
-                    "message": f"{u.email} is the carrier admin, so they "
+                    "message": f"{u.email} is the carrier, so they "
                                f"cannot be removed. Transfer the role to "
-                               f"another carrier first — then remove them.",
+                               f"someone else first — then remove them.",
                     "errors": {"owner": "transfer first"}})
 
         # A broker's only ACTIVE admin stays: removing them would leave that

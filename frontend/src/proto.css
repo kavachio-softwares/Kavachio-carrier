@@ -369,6 +369,9 @@
 .proto .info-tip{position:relative;display:inline-flex;vertical-align:middle;margin-left:7px;outline:none}
 .proto .info-tip .ic{width:15px;height:15px;color:var(--p-faint);cursor:help}
 .proto .info-tip:hover .ic,.proto .info-tip:focus-within .ic{color:var(--p-primary)}
+/* On a dark card (the dashboard's navy Files Processed card). */
+.proto .on-dark .info-tip .ic{color:rgba(255,255,255,.6)}
+.proto .on-dark .info-tip:hover .ic,.proto .on-dark .info-tip:focus-within .ic{color:#fff}
 .info-tip-bubble{
   position:fixed;
   width:230px;background:#0E1320;color:#fff;font-size:12px;font-weight:500;line-height:1.5;

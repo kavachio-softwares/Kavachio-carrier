@@ -29,8 +29,8 @@ type U = {
 // vocabulary (kavachio_admin rows are filtered out server-side, so a tenant
 // never sees the platform account in its own list).
 const ROLE_LABEL: Record<string, string> = {
-  carrier_admin: "Carrier Admin",
-  broker_admin: "Broker Admin",
+  carrier_admin: "Carrier",
+  broker_admin: "Broker",
   operator: "Broker User",
 };
 
@@ -115,14 +115,14 @@ export default function Users() {
    *  server enforces every one of these; this only explains it in place. */
   function whyNotRemovable(u: U): string {
     if (u.is_owner && u.id === me?.id)
-      return "You are the carrier admin, so your account cannot be removed.";
+      return "You run this carrier on Kavachio, so your account cannot be removed.";
     if (u.is_owner)
-      return "This is the carrier admin, so they cannot be removed.";
+      return "This person runs the carrier on Kavachio, so they cannot be removed.";
     if (!mayManage(u))
       return u.org_kind === "broker"
-        ? "Broker admins are managed by the carrier people who invited them."
-        : "Only the carrier admin removes carrier users.";
-    return "This is the only admin — add another before removing this one.";
+        ? "Brokers are managed by the carrier people who invited them."
+        : "Only the carrier removes carrier users.";
+    return "This is the only account left — add another before removing this one.";
   }
 
   const filtersActive = q !== "" || roleFilter !== "" || statusFilter !== "";
@@ -311,7 +311,7 @@ export default function Users() {
                           <span className="d" />
                           {u.org_kind === "broker"
                             ? (ROLE_LABEL[role] ?? role)
-                            : u.is_owner ? "Carrier Admin" : "Carrier User"}
+                            : u.is_owner ? "Carrier" : "Carrier User"}
                         </span>
                       </td>
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
@@ -448,21 +448,21 @@ export default function Users() {
         <div className="proto-modal-overlay" onClick={() => setBlocked(null)}>
           <div className="proto-modal" onClick={e => e.stopPropagation()}>
             <div className="m-h">
-              <h3>This is the carrier admin</h3>
+              <h3>This account cannot be removed</h3>
               <button className="x" onClick={() => setBlocked(null)}
                       aria-label="Close">×</button>
             </div>
             <div className="m-b">
               {blocked.id === me?.id ? (
                 <>
-                  You are this organisation&rsquo;s carrier admin, so you cannot
+                  You run this organisation on Kavachio, so you cannot
                   remove yourself — it would leave the organisation
                   accountable to nobody.
                 </>
               ) : (
                 <>
                   <b>{blocked.full_name || blocked.email}</b> is this
-                  organisation&rsquo;s carrier admin, so they cannot be removed.
+                  organisation&rsquo;s main account, so they cannot be removed.
                 </>
               )}
             </div>

@@ -294,7 +294,7 @@ function FinishPanel({ carrier, onProgramme, onDashboard }: {
   const next: { title: string; body: string }[] = [
     {
       title: "Set up programmes and invite broker companies",
-      body: "You invite each company's broker admin, who runs it on Kavachio.",
+      body: "You invite the person who runs each broker company on Kavachio.",
     },
     {
       title: "Send contracts to the brokers",

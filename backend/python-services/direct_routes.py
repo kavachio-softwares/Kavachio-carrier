@@ -1300,8 +1300,8 @@ def _pipeline_ready(s, p: Pipeline) -> tuple[bool, str]:
             + ", ".join(unsettled)
             + ". A bordereau is produced UNDER a contract, so the contract has "
               "to be finished first. One written here is finished when the "
-              "broker has agreed the terms and your carrier admin has signed "
-              "it; one that was uploaded, when your carrier admin has accepted "
+              "broker has agreed the terms and your carrier has signed "
+              "it; one that was uploaded, when your carrier has accepted "
               "it. Open the contract to see which of the two it is waiting "
               "for, then come back here.")
     return True, ""
@@ -3499,7 +3499,7 @@ def pipeline_approve(pipeline_id: int,
         assert_tenant_owns(principal, p.tenant_id)
         if not is_carrier_admin_seat(s, principal):
             raise HTTPException(
-                403, "only your organisation's carrier admin can approve a "
+                403, "only the carrier can approve a "
                      "bordereau setup.")
         if (p.status or "").strip().lower() != PENDING_APPROVAL:
             raise HTTPException(
@@ -3552,7 +3552,7 @@ def pipeline_reject(pipeline_id: int, body: SetupRejectBody = SetupRejectBody(),
         assert_tenant_owns(principal, p.tenant_id)
         if not is_carrier_admin_seat(s, principal):
             raise HTTPException(
-                403, "only your organisation's carrier admin can decide on a "
+                403, "only the carrier can decide on a "
                      "bordereau setup.")
         if (p.status or "").strip().lower() != PENDING_APPROVAL:
             raise HTTPException(
@@ -3650,7 +3650,7 @@ def _notify_setup_decided(result: dict, submitted_by, principal, *,
     try:
         from notifications import (CARRIER_USER_FOOTER, notify_people,
                                    user_recipients)
-        who = _principal_name(principal) or _principal_email(principal) or "Your carrier admin"
+        who = _principal_name(principal) or _principal_email(principal) or "Your carrier"
         name = result.get("name") or f"Setup {result.get('id')}"
         facts = [("Setup", name)] + _setup_facts(result) + [("Decided by", who)]
         if note:

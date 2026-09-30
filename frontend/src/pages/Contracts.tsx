@@ -51,7 +51,7 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   // force. A contract WRITTEN here never passes through this state — it goes
   // straight to the broker and meets the admin afterwards, at the signature.
   pending: { label: "Awaiting acceptance", cls: "b-warn",
-             note: "with your carrier admin" },
+             note: "with the carrier" },
   in_review: { label: "Out for review", cls: "b-warn", note: "with the broker" },
   changes_requested: { label: "Changes requested", cls: "b-warn",
                        note: "the broker pushed back — your move" },
@@ -60,13 +60,13 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   // state on its own cannot say who is being waited on.
   agreed: { label: "Terms agreed", cls: "b-ok", note: "terms settled" },
   signed: { label: "Signed", cls: "b-ok",
-            note: "returned — yours to place and put in force" },
+            note: "returned — yours to place and activate" },
   // "In force", not "Live". Live is what a website is: it says the row is
   // switched on and nothing about the contract. In force is the state an
   // insurance contract is actually in — signed, running, and the only state a
   // bordereau can be produced against — and it is the phrase the wording, the
   // lifecycle and the rest of this app already use.
-  active: { label: "In force", cls: "b-ok",
+  active: { label: "Active", cls: "b-ok",
             note: "cover is running — bordereaux can be produced against it" },
   expired: { label: "Expired", cls: "b-mut", note: "its term has run out" },
   terminated: { label: "Terminated", cls: "b-crit", note: "ended early" },
@@ -177,7 +177,7 @@ export default function Contracts() {
               that has not been supplied.
             </b>{" "}
             Until it is, some of their clauses cannot be checked — so they
-            cannot be submitted or put in force.
+            cannot be submitted or made active.
           </div>
         )}
 
@@ -293,7 +293,7 @@ export default function Contracts() {
                     "is anything waiting on me?". */}
                 {waiting && !programme && !lifecycle && !type && !q
                   ? "Nothing is waiting on you. Every contract here is either "
-                    + "with the broker or already in force."
+                    + "with the broker or already active."
                   : filtersActive
                   ? "No contracts match those filters."
                   : "No contracts yet. Upload a wording you already have, or raise "

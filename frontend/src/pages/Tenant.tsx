@@ -108,7 +108,7 @@ export default function TenantPage() {
       <div className="proto"><div className="view full">
         <div className="page-head"><div className="t"><h2>Company</h2></div></div>
         <div className="note warn" style={{ maxWidth: 560 }}>
-          Your carrier admin looks after the company's details. Ask them if the
+          The carrier looks after the company's details. Ask them if the
           name, logo, currency or address needs changing.
         </div>
       </div></div>

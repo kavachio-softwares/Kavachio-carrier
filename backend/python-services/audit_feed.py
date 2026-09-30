@@ -223,9 +223,9 @@ def scope_for(s, v: Viewer) -> Scope:
 
 ROLE_WORDS = {
     "kavachio_admin": "Kavachio Admin",
-    "carrier_admin":  "Carrier Admin",
+    "carrier_admin":  "Carrier",
     "carrier_user":   "Carrier User",
-    "broker_admin":   "Broker Admin",
+    "broker_admin":   "Broker",
     "operator":       "Broker User",
 }
 
@@ -311,11 +311,11 @@ ACTION_WORDS = {
     "contract_submitted":         "Submitted a contract",
     "contract_sent_for_review":   "Sent a contract for review",
     "contract_sent_back":         "Sent a contract back to be changed",
-    "contract_awaiting_review":   "Sent a contract up to the carrier admin",
+    "contract_awaiting_review":   "Sent a contract up to the carrier",
     # The gate that matters: the broker has agreed, and the contract is now on
     # the carrier admin's desk for signature and nobody else's.
     "contract_awaiting_signature": "Agreed the terms — waiting on the carrier "
-                                   "admin to sign",
+                                   "to sign",
     "contract_accepted":          "Accepted an uploaded contract",
     "contract_pushed_back":       "The broker asked for changes",
     "contract_signed_off":        "Signed the contract for the carrier",

@@ -650,8 +650,8 @@ def _assert_speaks_for_broker(p: Principal, what: str) -> None:
     """Refuse a broker USER an act that commits the broker company."""
     if p.is_broker and not _speaks_for_broker(p):
         raise HTTPException(
-            403, f"only your broker admin can {what} — broker users send the "
-                 f"files, the admin agrees and signs the contract")
+            403, f"only your broker can {what} — broker users send the "
+                 f"files, the broker agrees and signs the contract")
 
 
 def _speaks_for_carrier(p: Principal | None) -> bool:
@@ -679,8 +679,8 @@ def _assert_speaks_for_carrier(p: Principal, what: str) -> None:
     """Refuse a carrier USER an act that commits the carrier."""
     if not p.is_broker and not _speaks_for_carrier(p):
         raise HTTPException(
-            403, f"only your carrier admin can {what} — carrier users raise "
-                 f"the contract, the carrier admin signs it")
+            403, f"only your carrier can {what} — carrier users raise "
+                 f"the contract, the carrier signs it")
 
 
 def _is_uploaded(c: Contract) -> bool:
@@ -1455,9 +1455,9 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
         mode = body.create_as or ("review" if body.send_for_review else "draft")
         if mode == "live":
             raise HTTPException(400, {
-                "message": "a contract cannot be created in force. Both "
+                "message": "a contract cannot be created active. Both "
                            "sides sign it, and the second signature is "
-                           "what puts it in force.",
+                           "what makes it active.",
                 "errors": {"create_as": "not allowed"}})
         if mode not in ("draft", "review"):
             raise HTTPException(400, {
@@ -1593,7 +1593,7 @@ def _notify_contract_raised(s, c: Contract, p: Principal) -> None:
                   "It is with the broker to read and agree first. It comes back "
                   "to you for signature once they have."
                   if with_broker else
-                  "It is waiting for your signature — a contract goes in force "
+                  "It is waiting for your signature — a contract becomes active "
                   "when both sides have signed it."),
             facts=[f for f in (
                 ("Contract", name),
@@ -1863,7 +1863,7 @@ def update_contract(contract_id: int, body: dict,
             raise HTTPException(
                 409,
                 f"this contract is {state}, so its terms cannot be edited. "
-                f"A contract in force is changed by an endorsement, so that "
+                f"An active contract is changed by an endorsement, so that "
                 f"what it said when a bordereau was checked against it stays "
                 f"on the record.")
 
@@ -2410,7 +2410,7 @@ def submit_for_approval(contract_id: int, body: Note = Note(),
             raise HTTPException(
                 409, "this contract was written here, so it takes the ordinary "
                      "road: the broker agrees the terms, then your carrier "
-                     "admin signs it.")
+                     "signs it.")
         # With the approval flow off (the default) nobody waits: accepted now.
         from carrier_scope import carrier_approvals_enabled
         admin = _speaks_for_carrier(p) or not carrier_approvals_enabled()
@@ -2435,7 +2435,7 @@ def submit_for_approval(contract_id: int, body: Note = Note(),
             _log_contract_event(s, c, p, "contract_awaiting_review", body.note)
             _notify_contract_for_acceptance(s, c, p)
         if blocked_by:
-            rec["signature_note"] = ("Accepted, but it cannot go in force while "
+            rec["signature_note"] = ("Accepted, but it cannot become active while "
                                      + blocked_by + ".")
         return rec
 
@@ -2460,9 +2460,9 @@ def accept_contract(contract_id: int, body: Note = Note(),
         _log_contract_event(s, c, p, "contract_accepted", body.note)
         _notify_contract_accepted(s, c, p, author)
         rec["signature_note"] = (
-            "Accepted, but it cannot go in force while " + blocked_by + "."
+            "Accepted, but it cannot become active while " + blocked_by + "."
             if blocked_by else
-            "Accepted and in force. Bordereau setup can be built on it now.")
+            "Accepted and active. Bordereau setup can be built on it now.")
         return rec
 
 
@@ -2480,7 +2480,7 @@ def _notify_contract_for_acceptance(s, c: Contract, p: Principal) -> None:
             f"{who} has sent you a contract to accept",
             body="It was signed before it got here, so there is nothing to "
                  "negotiate and nothing to sign. Read it and either accept it "
-                 "— which puts it in force — or send it back.",
+                 "— which makes it active — or send it back.",
             facts=[f for f in (
                 ("Contract", name),
                 ("With", getattr(party, "legal_name", None)),
@@ -2535,7 +2535,7 @@ def _notify_contract_accepted(s, c: Contract, p: Principal, author) -> None:
         notify_people(
             user_recipients(author),
             f"{who} accepted the contract you sent up",
-            body="It is in force. You can build the bordereau setup on it now.",
+            body="It is active. You can build the bordereau setup on it now.",
             facts=[("Contract", name), ("Accepted by", who)],
             link_path=f"/contracts/{c.id}",
             link_label="Open the contract",
@@ -2860,7 +2860,7 @@ def _notify_terms_agreed(s, c: Contract, p: Principal,
                   "this contract will get."
                   if skipped else
                   "The terms are settled and nobody is waiting on the broker "
-                  "any more. Read them and sign: a contract goes in force when "
+                  "any more. Read them and sign: a contract becomes active when "
                   "both sides have signed, and the carrier signs first."),
             facts=[f for f in (
                 ("Contract", name),
@@ -3400,9 +3400,9 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
             f"Signed for the {'carrier' if side == 'carrier' else 'counterparty'}"
             f" by {name}."
             + ("" if not both else
-               (f" Both sides have now signed, but it cannot go in force while "
+               (f" Both sides have now signed, but it cannot become active while "
                 f"{blocked_by}." if blocked_by
-                else " Both sides have signed — the contract is in force."))
+                else " Both sides have signed — the contract is active."))
             + ("" if both else
                f" Waiting on the {_unsigned_sides(sigs)[0]}.")) 
         return rec
@@ -3422,7 +3422,7 @@ def unsign_contract(contract_id: int, signature_id: int,
         if _effective_lifecycle(c) in ("active", "expired", "terminated",
                                        "superseded"):
             raise HTTPException(
-                409, "this contract is already in force on the strength of "
+                409, "this contract is already active on the strength of "
                      "these signatures. Terminate it instead — an active "
                      "contract nobody signed is not a state worth having.")
         sg = s.get(ContractSignature, signature_id)
@@ -3475,7 +3475,7 @@ def activate_contract(contract_id: int, p: Principal = Depends(current_principal
                                else "the counterparty" for u in unsigned)
             raise HTTPException(409, {
                 "message": f"this contract has not been signed by {who}, so it "
-                           f"cannot be put in force. A contract goes live "
+                           f"cannot be made active. A contract becomes active "
                            f"because both sides signed it.",
                 "errors": {"signatures": ", ".join(unsigned)}})
 
@@ -3771,6 +3771,28 @@ def deactivate_document(contract_id: int, document_id: int,
         return {"document": _doc_dict(doc),
                 "missing_references": _missing_references(c, docs),
                 "rules_stale": doc.kind in ("contract", "endorsement")}
+
+
+@router.get("/contracts/{contract_id}/original")
+def download_original(contract_id: int,
+                      p: Principal = Depends(current_principal)):
+    """The file an UPLOADED contract was read from, as it arrived.
+
+    What "use the same contract as the sibling broker" attaches to the other
+    broker's upload. Kept only where blob storage is configured (see the upload
+    route), so a 404 here is the normal answer on a machine without it — the
+    screen then asks for the same file to be picked again rather than failing.
+    """
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        data = storage.resolve_bytes(c.blob_ref, c.blob)
+        if data is None:
+            raise HTTPException(
+                404, "the original file for this contract is not stored")
+        return Response(
+            content=data, media_type=_media_type(c.filename),
+            headers={"Content-Disposition":
+                     _content_disposition(c.filename or "contract")})
 
 
 @router.get("/contracts/{contract_id}/documents/{document_id}/download")

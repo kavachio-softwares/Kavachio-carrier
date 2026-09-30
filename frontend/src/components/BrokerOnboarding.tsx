@@ -50,7 +50,7 @@ export function brokerOnboardingSteps(
     {
       label: "Signed in",
       done: st === "active",
-      waiting: "Their admin hasn't used the invite link — worth chasing",
+      waiting: "They haven't used the invite link yet — worth chasing",
     },
     {
       label: "On programme",

@@ -535,6 +535,7 @@ def persist_pipeline_output(
     prior_contract=None,
     existing_contract_id=None,
     record_defaults=None,
+    prior_broker_party_id="__any_broker__",
 ):
     """
     Persist `final_output` into the canonical Postgres tables.
@@ -558,6 +559,9 @@ def persist_pipeline_output(
     hit triggers reconcile-and-carry-forward over `validation_rules` BEFORE
     anything is inserted — see regen_reconcile.reconcile. Fail-open: any error
     in that path falls back to persisting the generated set unchanged.
+
+    `prior_broker_party_id` narrows that L3 probe to the broker this contract
+    is for (regen_reconcile.ANY_BROKER, the default, keeps it tenant-wide).
 
     `existing_contract_id` writes the extraction INTO a contract that already
     exists instead of creating one. Two flows need it and neither can use the
@@ -638,7 +642,8 @@ def persist_pipeline_output(
                 prior = prior_contract
                 if not prior:
                     prior = _rr.find_prior_contract_l3(
-                        conn, tenant_id, program_metadata)
+                        conn, tenant_id, program_metadata,
+                        broker_party_id=prior_broker_party_id)
                 if prior and prior.get("contract_id"):
                     prior_cid = prior["contract_id"]
                     # Same template ⇔ the prior row's content_fingerprint (doc

@@ -25,8 +25,8 @@ import { useBrokerCarrierId } from "../brokerCarrier";
  *  in `in_review` is one the carrier has sent over for them to read — the
  *  negotiation is waiting on THEM, which is the thing they need to see. */
 const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
-  draft: { label: "Not in force yet", cls: "b-mut",
-           note: "no signatures on it yet — it comes into force when both "
+  draft: { label: "Not active yet", cls: "b-mut",
+           note: "no signatures on it yet — it becomes active when both "
                + "sides sign" },
   pending: { label: "Pending", cls: "b-warn", note: "waiting on the carrier" },
   in_review: { label: "For your review", cls: "b-warn",
@@ -35,7 +35,7 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
                        note: "you pushed back — the carrier is revising" },
   agreed: { label: "Terms agreed", cls: "b-ok", note: "yours to sign" },
   signed: { label: "Signed", cls: "b-ok", note: "waiting on the carrier to sign" },
-  active: { label: "In force", cls: "b-ok",
+  active: { label: "Active", cls: "b-ok",
             note: "cover is running — you can produce against it" },
   expired: { label: "Expired", cls: "b-mut", note: "its term has run out" },
   terminated: { label: "Terminated", cls: "b-crit", note: "ended early" },
@@ -135,7 +135,7 @@ export default function BrokerContracts() {
         <div className="note" style={{ marginBottom: 16 }}>
           <b>State is whose move it is</b> — terms sent for you to read, changes
           you asked for, yours to sign. A contract is not live until both sides
-          have signed it, so one can be fully agreed and still not in force.
+          have signed it, so one can be fully agreed and still not active.
         </div>
 
         <div className="card">
@@ -152,7 +152,7 @@ export default function BrokerContracts() {
                   { value: "mine", label: "Waiting on me" },
                   { value: "in_review", label: "Terms to read" },
                   { value: "agreed", label: "Terms agreed" },
-                  { value: "active", label: "In force" },
+                  { value: "active", label: "Active" },
                   { value: "expired", label: "Expired" },
                 ],
               },

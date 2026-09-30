@@ -839,10 +839,27 @@ export const deactivateDocument = (id: number, documentId: number) =>
  * back "missing bearer token". Going through the client means the interceptor
  * attaches the token (and refreshes it) exactly as it does everywhere else.
  */
-async function fetchDocument(id: number, documentId: number): Promise<Blob> {
+export async function fetchDocument(id: number, documentId: number): Promise<Blob> {
   const r = await api.get(`/contracts/${id}/documents/${documentId}/download`,
                           { responseType: "blob" });
   return r.data as Blob;
+}
+
+/** The file an UPLOADED contract was read from, or null when it is not
+ *  stored (blob storage is off on this server, or the file predates it). */
+export async function fetchContractOriginal(
+  id: number,
+): Promise<{ blob: Blob; filename: string | null } | null> {
+  try {
+    const r = await api.get(`/contracts/${id}/original`, { responseType: "blob" });
+    const cd = String(r.headers?.["content-disposition"] ?? "");
+    const m = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(cd);
+    const filename = m ? decodeURIComponent(m[1] ?? m[2]) : null;
+    return { blob: r.data as Blob, filename };
+  } catch (e: any) {
+    if (e?.response?.status === 404) return null;
+    throw e;
+  }
 }
 
 /** Save it to disk. */

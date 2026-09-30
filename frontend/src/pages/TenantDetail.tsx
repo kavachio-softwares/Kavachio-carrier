@@ -58,8 +58,8 @@ const CURRENCIES: [string, string][] = [
 // tenant vocabulary (kavachio_admin rows are filtered out server-side —
 // never surfaced on a tenant's own Users screen).
 const ROLE_LABEL: Record<string, string> = {
-  carrier_admin: "Carrier Admin",
-  broker_admin: "Broker Admin",
+  carrier_admin: "Carrier",
+  broker_admin: "Broker",
   operator: "Broker User",
 };
 

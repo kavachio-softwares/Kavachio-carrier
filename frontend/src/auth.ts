@@ -189,8 +189,8 @@ export function isTenantAdmin(): boolean {
 // organisation on every screen it appeared on.
 export const ROLE_LABEL: Record<Role, string> = {
   kavachio_admin: "Kavachio Admin",
-  carrier_admin:  "Carrier Admin",
-  broker_admin:   "Broker Admin",
+  carrier_admin:  "Carrier",
+  broker_admin:   "Broker",
   operator:       "Broker User",
 };
 

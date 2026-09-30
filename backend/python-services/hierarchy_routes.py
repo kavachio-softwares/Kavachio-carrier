@@ -862,7 +862,7 @@ def broker_create(body: NewBrokerBody,
 
         if not email:
             raise HTTPException(400, {
-                "message": "Give the broker admin's email — the invitation "
+                "message": "Give the broker's email — the invitation "
                            "goes to a person, not to an organisation.",
                 "errors": {"admin_email": "required"}})
         # NO PROGRAMME. A broker is invited to work with the CARRIER, not with

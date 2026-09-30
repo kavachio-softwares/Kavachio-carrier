@@ -53,7 +53,7 @@ const ONBOARDING: Record<string, { label: string; cls: string; title: string }> 
   not_invited: { label: "Not invited", cls: "b-mut",
     title: "This broker is on your list but nobody there has a login yet." },
   invited: { label: "Invited", cls: "b-warn",
-    title: "Their admin was invited and hasn't used the link yet — worth chasing." },
+    title: "They were invited and haven't used the link yet — worth chasing." },
   active: { label: "Active", cls: "b-ok",
     title: "Someone there has set a password and signed in." },
   suspended: { label: "Suspended", cls: "b-crit",

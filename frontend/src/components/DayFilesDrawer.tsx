@@ -35,7 +35,7 @@ export function DayFilesDrawer({ day, load, reloadKey = "", from, platform = fal
   /** Changes whenever the chart's scope does, so an open drawer refetches. */
   reloadKey?: string;
   /** Where the exceptions screen's back link returns to. */
-  from: "admin" | "home";
+  from: "admin" | "home" | "broker";
   platform?: boolean;
   onClose: () => void;
 }) {
@@ -88,7 +88,8 @@ export function DayFilesDrawer({ day, load, reloadKey = "", from, platform = fal
           {data && items.length > 0 && (
             <div className="tbl-wrap">
               <table>
-                <thead><tr>{["Time", platform ? "Carrier ← Broker · File" : "Broker · File", "Result"].map(h =>
+                <thead><tr>{["Time", platform ? "Carrier ← Broker · File"
+                  : from === "broker" ? "Carrier · File" : "Broker · File", "Result"].map(h =>
                   <th key={h} style={L}>{h}</th>)}</tr></thead>
                 <tbody>
                   {items.map(x => (
@@ -98,6 +99,10 @@ export function DayFilesDrawer({ day, load, reloadKey = "", from, platform = fal
                       <td style={L}>
                         {platform ? (
                           <div><b>{x.carrier.name}</b>{x.broker && <span className="muted"> ← {x.broker.name}</span>}</div>
+                        ) : from === "broker" ? (
+                          // A broker's own drawer: every row is theirs, so the
+                          // useful name is the carrier the file went to.
+                          <div><b>{x.carrier.name}</b></div>
                         ) : (
                           <div><b>{x.broker?.name ?? "No broker"}</b></div>
                         )}

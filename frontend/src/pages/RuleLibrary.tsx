@@ -91,7 +91,7 @@ export default function RuleLibrary() {
                 ? "Generic checks that run on every broker's BDX files. Changes here affect all tenants."
                 : canManage
                   ? "Your generic rules. They run on all your BDX files and only your team can see them."
-                  : "The checks your company runs on every BDX file. Your carrier admin looks after this list."} />
+                  : "The checks your company runs on every BDX file. The carrier looks after this list."} />
             </h2>
           </div>
           {canManage && (
@@ -132,7 +132,7 @@ export default function RuleLibrary() {
             <>
               <b>These generic rules run on all your BDX files.</b>
               <div style={{ marginTop: 6 }}>
-                You can read these rules but not change them — only your carrier admin can add, edit,
+                You can read these rules but not change them — only the carrier can add, edit,
                 turn off or delete one. A rule starts working on a program when its <b>Bordereau Setup</b> is run.
               </div>
               <div style={{ marginTop: 6 }}>
@@ -187,7 +187,7 @@ export default function RuleLibrary() {
               <div className="empty">
                 {canManage
                   ? <>No rules yet. {platform ? "Add a platform-wide check" : "Create your first rule"} to get started.</>
-                  : "No rules yet. Your carrier admin hasn't added any."}
+                  : "No rules yet. The carrier hasn't added any."}
               </div>
             )}
             {loading && <div className="empty">Loading…</div>}
@@ -201,7 +201,7 @@ export default function RuleLibrary() {
           {canManage
             ? <>Disabled rules stop running but are kept, so you can turn them back on any time. Changes take
               effect after you run Bordereau Setup again.</>
-            : <>Disabled rules are kept but do not run. A change your carrier admin makes takes effect the
+            : <>Disabled rules are kept but do not run. A change the carrier makes takes effect the
               next time a program's Bordereau Setup is run.</>}
         </div>
       </div>

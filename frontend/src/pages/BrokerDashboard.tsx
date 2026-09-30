@@ -10,20 +10,49 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
-  getBrokerDashboard, getBrokerInsights, getBrokerInvitations,
+  getBrokerDashboard, getBrokerInsights, getBrokerInvitations, getBrokerRunHistory,
   acceptBrokerInvitation, declineBrokerInvitation,
-  type BrokerDashboard as Dash, type BrokerInsights, type BrokerInvitation,
+  type BrokerDashboard as Dash, type BrokerInsights, type BrokerInvitation, type OperatorRun,
 } from "../api/broker";
 import { useBrokerCarrierId } from "../brokerCarrier";
-import { fmtDate } from "../utils/date";
+import { fmtDate, fmtDateTime } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
-import { AlertCircle, Building2, CalendarClock, Clock, FileCheck2, PenLine } from "lucide-react";
+import { AlertCircle, Building2, CalendarClock, FileCheck2, PenLine } from "lucide-react";
 import { RunTrend } from "../components/BrokerCharts";
+import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
+import { api } from "../api/client";
 import { InfoTip } from "../components/InfoTip";
-import { ChartCard, LinkCard, StatCard } from "../components/StatCard";
+import { ChartCard, StatCard } from "../components/StatCard";
 
-/** The window the status chart and the recent-files card describe. */
+/** The window the status chart describes. */
 const DAYS = 30;
+
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Which bordereaux are overdue, in words that fit under a tile.
+ *
+ *  Periods are "YYYY-MM" for monthly programmes; anything else (a quarter) is
+ *  shown as it is. Two programmes owing the same month are one month here —
+ *  the count beside it already says how many files. Up to three months are
+ *  named ("May, Jun 2026"); more than that becomes a range, because a list of
+ *  seven months under a tile is a paragraph, not a hint. */
+function overdueMonths(periods: string[]): string {
+  const uniq = [...new Set(periods)];
+  const parsed = uniq.map(p => {
+    const m = /^(\d{4})-(\d{2})$/.exec(p);
+    return m ? { y: m[1], m: MON[Number(m[2]) - 1] ?? m[2] } : { y: "", m: p };
+  });
+  if (parsed.length === 0) return "";
+  const full = (x: typeof parsed[number]) => (x.y ? `${x.m} ${x.y}` : x.m);
+  if (parsed.length > 3) {
+    return `${full(parsed[0])} – ${full(parsed[parsed.length - 1])}`;
+  }
+  const oneYear = parsed.every(x => x.y && x.y === parsed[0].y);
+  return oneYear
+    ? `${parsed.map(x => x.m).join(", ")} ${parsed[0].y}`
+    : parsed.map(full).join(", ");
+}
 
 export default function BrokerDashboard() {
   const nav = useNavigate();
@@ -67,6 +96,9 @@ export default function BrokerDashboard() {
 
   const [ins, setIns] = useState<BrokerInsights | null>(null);
   const [waitingOpen, setWaitingOpen] = useState(false);
+  // The day whose files are open in the side drawer — a click on a bar of
+  // Bordereau Status, same as the carrier dashboard.
+  const [statusDay, setStatusDay] = useState<string | null>(null);
   useEffect(() => {
     getBrokerInsights(DAYS).then(setIns).catch(() => setIns(null));
   }, []);
@@ -140,12 +172,24 @@ export default function BrokerDashboard() {
         <div style={grid(5)}>
           <StatCard title="Carriers" value={c.carriers} icon={Building2}
                     subtitle={`${c.programmes} ${c.programmes === 1 ? "programme" : "programmes"}`} />
+          {/* A contract ending within 30 days is the one thing about the book
+              a broker has to act on ahead of time — renew, or stop producing
+              against it — so it replaces the plain "In force" when there is one. */}
           <StatCard title="Active Contracts" value={c.live_contracts} icon={FileCheck2}
-                    subtitle="In force"
+                    subtitle={c.contracts_expiring > 0 ? (
+                      <span style={{ color: "var(--p-warn)", fontWeight: 600 }}>
+                        {c.contracts_expiring === 1
+                          ? `1 expires on ${fmtDate(c.next_expiry)}`
+                          : `${c.contracts_expiring} expire within 30 days`}
+                      </span>
+                    ) : "No upcoming expiries"}
                     onClick={() => nav("/broker/contracts?status=active")} />
-          <StatCard title="Pending Signatures" value={c.signatures_pending} icon={PenLine}
-                    subtitle={`${c.signatures_completed} completed`}
-                    info="Contracts whose terms are already agreed and are waiting for your signature."
+          {/* Named for WHAT is signed. "Pending Signatures" left a new broker
+              asking whose signature, on what — it is always a contract with a
+              carrier, agreed and waiting for this broker to sign it. */}
+          <StatCard title="Contracts to Sign" value={c.signatures_pending} icon={PenLine}
+                    subtitle={`${c.signatures_completed} already signed`}
+                    info="Contracts with your carriers whose terms are agreed and now need your signature before they become active. Click to open and sign them."
                     tone={c.signatures_pending > 0 ? "alert" : undefined}
                     onClick={c.signatures_pending > 0 ? () => setWaitingOpen(true) : undefined} />
           <StatCard title="Exceptions to Review" value={c.agency_exceptions} icon={AlertCircle}
@@ -156,12 +200,23 @@ export default function BrokerDashboard() {
               the oldest missed file's if there is one — the calendar itself
               opens on the current month, where a June miss is not on screen —
               otherwise the next one due. */}
-          <StatCard title="Upcoming Files" value={c.files_upcoming} icon={CalendarClock}
-                    subtitle={[
-                      c.files_overdue > 0 && `${c.files_overdue} overdue`,
-                      c.next_due ? `next due ${fmtDate(c.next_due)}` : "nothing scheduled",
-                    ].filter(Boolean).join(" · ")}
-                    info="Files still to process that are due in the next 30 days. Overdue ones are past their due date and not processed yet."
+          <StatCard title="Bordereaux Due" value={c.files_upcoming} icon={CalendarClock}
+                    subtitle={
+                      <>
+                        {c.files_overdue > 0 && (
+                          <div style={{ color: "var(--p-crit)", fontWeight: 600 }}
+                               title={c.overdue_periods.join(", ")}>
+                            {c.files_overdue} overdue · {overdueMonths(c.overdue_periods)}
+                          </div>
+                        )}
+                        <div>
+                          {c.files_upcoming > 0 || c.next_due
+                            ? `in the next 30 days${c.next_due ? ` · next ${fmtDate(c.next_due)}` : ""}`
+                            : "nothing scheduled"}
+                        </div>
+                      </>
+                    }
+                    info="Bordereaux you still have to process that are due in the next 30 days. Overdue ones are past their due date, named by the month they report on. Click to open your Bordereau Calendar."
                     tone={c.files_overdue > 0 ? "alert" : undefined}
                     onClick={() => {
                       const at = c.first_overdue ?? c.next_due;
@@ -182,19 +237,74 @@ export default function BrokerDashboard() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
               <ChartCard title="Bordereau Status"
                 info={<InfoTip text={`Your team's files over the last ${DAYS} days, by result: a clean file, or one with exceptions to review.`} />}>
-                {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} audience="broker" />}
+                {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} audience="broker" onDayClick={setStatusDay} />}
               </ChartCard>
-              <LinkCard title="Recent File Submissions" dark icon={Clock}
-                        value={ins ? ins.totals.runs_in_window : "—"}
-                        label={`files run in ${DAYS} days`}
-                        onClick={() => nav("/broker/runs")} />
+              <RecentFiles />
             </div>
           </>
         )}
+        <DayFilesDrawer day={statusDay} from="broker"
+          load={dd => api.get<DayRuns>("/broker/runs-on-day", { params: { day: dd } })
+            .then(a => a.data)}
+          onClose={() => setStatusDay(null)} />
         <WaitingDrawer open={waitingOpen} items={d.waiting_on_me}
                        onClose={() => setWaitingOpen(false)} />
       </div>
     </div>
+  );
+}
+
+/** The last few bordereaux processed, each one opening its exceptions.
+ *
+ *  Replaces a dark link card that held one number ("8 files run in 30 days")
+ *  and nothing to act on. The list answers what that number could not: which
+ *  file, for which programme, and did it come out clean. */
+function RecentFiles() {
+  const nav = useNavigate();
+  const [data, setData] = useState<{ items: OperatorRun[]; total: number } | null>(null);
+  const [err, setErr] = useState(false);
+  useEffect(() => {
+    getBrokerRunHistory(1, 5).then(setData).catch(() => setErr(true));
+  }, []);
+  const open = (r: OperatorRun) =>
+    nav(`/uploads/${r.export_id}/exceptions?download=${r.export_id}&from=broker`);
+
+  return (
+    <ChartCard title="Recently Processed Files"
+      info={<InfoTip text="The last five bordereaux processed for you, newest first. Click one to see its exceptions." />}>
+      {err ? <div className="muted">Could not load your files.</div>
+        : !data ? <div className="muted">Loading…</div>
+        : data.items.length === 0 ? <div className="muted">No files processed yet.</div>
+        : (
+          <div style={{ display: "flex", flexDirection: "column", flex: 1 }}>
+            {data.items.map(r => (
+              <div key={r.export_id} role="link" tabIndex={0}
+                onClick={() => open(r)}
+                onKeyDown={e => { if (e.key === "Enter") open(r); }}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px",
+                         borderBottom: "1px solid var(--p-border)", cursor: "pointer" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden",
+                                textOverflow: "ellipsis" }} title={r.filename}>
+                    {r.filename}
+                  </div>
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    {r.programme ?? "—"} · {fmtDateTime(r.created_at)}
+                  </div>
+                </div>
+                {r.exception_count > 0
+                  ? <span className="badge b-crit"><span className="d" />{r.exception_count} exceptions</span>
+                  : <span className="badge b-ok"><span className="d" />Clean</span>}
+              </div>
+            ))}
+            <div style={{ marginTop: "auto", paddingTop: 12, textAlign: "right" }}>
+              <Link className="linkish" to="/broker/runs">
+                View all {data.total} processed files →
+              </Link>
+            </div>
+          </div>
+        )}
+    </ChartCard>
   );
 }
 
@@ -287,7 +397,7 @@ function WaitingDrawer({ open, items, onClose }: {
           {toAgree.length > 0 && toSign.length > 0 && (
             <div style={{ borderTop: "1px solid var(--p-border)", margin: "18px 0 0" }} />
           )}
-          <WaitingGroup heading="Pending Signatures" items={toSign} action="sign"
+          <WaitingGroup heading="Contracts to Sign" items={toSign} action="sign"
                         note="Terms already settled — these need your signature." />
         </div>
       </aside>

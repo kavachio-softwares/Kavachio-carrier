@@ -323,6 +323,52 @@ export default function ContractNew() {
     }
   }
 
+  /** "Use the same contract as <sibling broker>": start from a contract a
+   *  sibling broker on the same programme already has — its type, term,
+   *  limits and wording — for the broker in the link. Not a renewal (no
+   *  renews_contract_id) and never the sibling's broker: the programme and
+   *  broker stay as the link addressed them. This broker still agrees and
+   *  signs its own copy. */
+  const [copyFrom] = useState(() => params.get("copy_from"));
+  const [copyFromName, setCopyFromName] = useState<string | null>(null);
+  const [copyLoaded, setCopyLoaded] = useState(false);
+  useEffect(() => {
+    if (!copyFrom || copyLoaded || !specs) return;
+    setCopyLoaded(true);
+    setBusy("copy");
+    getContract(Number(copyFrom))
+      .then(prior => {
+        if (prior.contract_type && specs.some(t => t.key === prior.contract_type)) {
+          setTypeKey(prior.contract_type);
+        }
+        setCopyFromName(prior.counterparty?.name ?? null);
+        const str = (v: string | number | null | undefined) => (v == null ? "" : String(v));
+        // Everything that makes it the same contract. Not executed_date — this
+        // copy has not been signed by anyone yet.
+        setValues(v => ({
+          ...v,
+          name: prior.name || v.name || "",
+          schedule_key: str(prior.schedule_key) || v.schedule_key || "",
+          inception_dt: str(prior.inception_dt) || v.inception_dt || "",
+          expiry_dt: str(prior.expiry_dt) || v.expiry_dt || "",
+          class_of_business: str(prior.class_of_business) || v.class_of_business || "",
+          year_of_account: str(prior.year_of_account) || v.year_of_account || "",
+          notice_period_days: str(prior.notice_period_days) || v.notice_period_days || "",
+          premium_cap_amount: str(prior.premium_cap_amount) || v.premium_cap_amount || "",
+          premium_cap_currency: str(prior.premium_cap_currency) || v.premium_cap_currency || "",
+          earnings_pattern: str(prior.earnings_pattern) || v.earnings_pattern || "",
+        }));
+        if (prior.agreed_limits) setLimits(prior.agreed_limits);
+        if (prior.wording_sections?.length) {
+          setSections(prior.wording_sections);
+          setWordingVersion(v => v + 1);
+        }
+      })
+      .catch(e => setMessage(fieldErrors(e).message))
+      .finally(() => setBusy(""));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [copyFrom, copyLoaded, specs]);
+
   const spec = useMemo(
     () => (specs ?? []).find(t => t.key === typeKey) ?? null, [specs, typeKey]);
 
@@ -518,7 +564,7 @@ export default function ContractNew() {
       desc: "Kavachio can place them for you, or you can drop them where your "
             + "broker's lawyers want them." },
     { heading: "What you are about to create",
-      desc: "None of the three ways to finish puts the contract in force: both "
+      desc: "None of the three ways to finish makes the contract active: both "
             + "signatures do that, on its own signature page." },
   ];
 
@@ -963,7 +1009,7 @@ export default function ContractNew() {
       desc: "Exactly what the broker will open, with every live value filled in." },
     { key: "checks", heading: "The checks it will run",
       desc: "From the moment both parties sign. These do nothing until the "
-            + "contract is created and in force — a draft never checks anything." },
+            + "contract is created and active — a draft never checks anything." },
   ];
   // Clamped: the flags part disappears once nothing is flagged, and the rail
   // must not point past the end of its own list.
@@ -982,6 +1028,16 @@ export default function ContractNew() {
      of this screen, and has only ever had two parts. */
   const secKind = (
     <>
+        {copyFrom && (
+          <div className="note" style={{ marginBottom: 12 }}>
+            {busy === "copy" ? "Bringing the contract's terms across…" : <>
+              <b>Started from {copyFromName ? `${copyFromName}'s` : "the other broker's"} contract.</b>{" "}
+              Its terms, limits and wording are filled in for{" "}
+              {flowBroker ?? "this broker"}. Change anything that differs —
+              this broker agrees and signs their own copy.
+            </>}
+          </div>
+        )}
         <div className="fh">
           What are you making?
           <InfoTip text="They end in different places, so this is the first question." />
@@ -1033,7 +1089,7 @@ export default function ContractNew() {
               An endorsement is not a new contract. This one keeps
               running, keeps its id and keeps every bordereau already
               checked against it — you change some of its terms from a
-              date, and both documents stay in force together.
+              date, and both documents stay active together.
             </p>
             <div className="grid g-3">
               <div className="field" style={{ marginBottom: 0 }}>
@@ -1050,7 +1106,7 @@ export default function ContractNew() {
                 </select>
                 {endorsable.length === 0 && (
                   <div className="hint">
-                    Nothing is running yet. Only a contract in force can
+                    Nothing is running yet. Only an active contract can
                     be endorsed.
                   </div>
                 )}
@@ -1360,7 +1416,7 @@ export default function ContractNew() {
               </div>
             ))}
             <div className="note">
-              <b>Both documents stay in force.</b> The endorsement is
+              <b>Both documents stay active.</b> The endorsement is
               attached beside the wording, not instead of it — so the
               contract still says what it always said, and this says
               what changed. Its rules are rebuilt from the pair when
@@ -2033,8 +2089,8 @@ export default function ContractNew() {
                 <h2>
                   Set up the signing
                   <InfoTip text={"Choose what each side has to fill in when "
-                    + "they sign. None of these buttons puts the contract in "
-                    + "force — it goes in force when both sides have signed it, "
+                    + "they sign. None of these buttons makes the contract "
+                    + "active — it becomes active when both sides have signed it, "
                     + "on its own signature page."} />
                 </h2>
                 {/* Kept on screen, not in the (i): see the note above this step

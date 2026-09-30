@@ -126,7 +126,7 @@ export function InviteBrokerModal({ open, onClose, onInvited, programId }: {
         </section>
 
         <section className="space-y-3">
-          <h3 className="text-sm font-semibold">Their first admin</h3>
+          <h3 className="text-sm font-semibold">Who runs it</h3>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <label className={LABEL}>Full name</label>
@@ -143,7 +143,7 @@ export function InviteBrokerModal({ open, onClose, onInvited, programId }: {
           </div>
           <p className="text-xs text-ink-muted">
             {needsApproval
-              ? "Nothing is sent to this address yet — your carrier admin "
+              ? "Nothing is sent to this address yet — the carrier "
                 + "approves it first."
               : "The invitation and a password-setup link are sent to this address."}
           </p>
@@ -157,7 +157,7 @@ export function InviteBrokerModal({ open, onClose, onInvited, programId }: {
             one fact that is true now instead. */}
         <p className="rounded border border-border bg-surface-2 px-3 py-2 text-xs leading-relaxed text-ink-muted">
           {needsApproval
-            ? "This goes to your carrier admin first. Nothing at all is sent to "
+            ? "This goes to the carrier first. Nothing at all is sent to "
               + "the broker until they approve it, so if it is turned down the "
               + "broker never knows it was asked."
             : "A broker new to the platform can be put on this programme straight "

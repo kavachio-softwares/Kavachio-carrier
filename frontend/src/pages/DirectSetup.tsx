@@ -699,7 +699,7 @@ export default function DirectSetup() {
       const { data } = await api.post<{ status?: string }>(
         `/pipelines/${pipelineId}/activate`);
       setMsg(data?.status === "pending_approval"
-        ? "Sent to your carrier admin. Nothing reaches the broker until they "
+        ? "Sent to the carrier. Nothing reaches the broker until they "
           + "approve it — the programme, the contract and the BDX template all "
           + "wait with it."
         : "Setup activated — bordereaux can now be processed for this carrier + program.");
@@ -1925,7 +1925,7 @@ export default function DirectSetup() {
                     when you run <b>Set Up Bordereau Pipeline</b>. Nothing has
                     read the file yet, so there are no columns to review here
                     until then — and the template{" "}
-                    {resolved?.found ? <>in force in the meantime</> : <>that applies</>}{" "}
+                    {resolved?.found ? <>active in the meantime</> : <>that applies</>}{" "}
                     is not shown, because it is not the file you chose.
                   </p>
                   <div className="mt-2.5 flex flex-wrap gap-2">
