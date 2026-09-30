@@ -2986,6 +2986,10 @@ def direct_output_fields(template_id: int, contract_id: Optional[int] = None,
         if is_reference_sheet(sh):
             continue          # reference/lookup tab — no rule fields shown for it
         for c in sorted(sh.get("columns", []), key=lambda x: x.get("column_index", 0)):
+            # A column removed from the template (active False) is never
+            # delivered, so it is not a mapping target and not "unsourced".
+            if c.get("active") is False:
+                continue
             name = c.get("column_name")
             if name:
                 fields.append({"sheet": sh.get("sheet_name", ""), "field": name})
@@ -3040,6 +3044,8 @@ def direct_format_editor(format_id: int,
         if is_reference_sheet(sh):
             continue          # reference/lookup tab — no rule fields shown for it
         for c in sorted(sh.get("columns", []), key=lambda x: x.get("column_index", 0)):
+            if c.get("active") is False:
+                continue      # removed from the template — see direct_output_fields
             nm = c.get("column_name")
             if nm:
                 fields.append({"sheet": sh.get("sheet_name", ""), "field": nm})

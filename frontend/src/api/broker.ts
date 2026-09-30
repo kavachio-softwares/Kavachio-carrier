@@ -126,12 +126,16 @@ export type BrokerCalendarRow = {
   chase_count: number;
   /** The file behind the newest version, for its exceptions screen. */
   export_id: number | null;
+  /** When the newest version was uploaded — exact time, UTC ISO. */
+  uploaded_at: string | null;
 };
 
 export type BrokerCalendar = {
   month: string;
   months: string[];
   rows: BrokerCalendarRow[];
+  /** The carrier calendar's own headline counts, for this broker only. */
+  counts: { due: number; on_time: number; late: number; never: number };
   schedules: {
     program_id: number; program_name: string; carrier_name: string | null;
     frequency: string | null; frequency_label: string; due_rule: string;
@@ -160,6 +164,12 @@ export const getBrokerExceptions = (carrierId?: number | null) =>
   }>("/broker/exceptions", {
     params: carrierId ? { carrier_id: carrierId } : {},
   }).then(r => r.data);
+
+/** Every file sent for one period of this broker's calendar. */
+export const getBrokerCalendarVersions = (expectedId: number) =>
+  api.get<{ expected_id: number; period: string;
+            versions: import("./calendar").SubmissionVersionRow[] }>(
+    `/broker/calendar/${expectedId}/versions`).then(r => r.data);
 
 export const getBrokerCalendar = (month?: string, carrierId?: number | null) =>
   api.get<BrokerCalendar>("/broker/calendar", {

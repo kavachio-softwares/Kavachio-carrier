@@ -571,10 +571,15 @@ function mergeSheetPages(prev: Map<string, SheetState>, activeSheet: string, raw
   return next;
 }
 
-export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose, readOnly = false }: {
+export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose, readOnly = false,
+  readOnlyNote = "View only — the broker who sent this file makes these decisions." }: {
   exportId: string;
   /** Kavachio staff: the whole workbook and every flagged cell, no decisions. */
   readOnly?: boolean;
+  /** What the cell popover says in read-only mode. The default is for a
+   *  carrier or Kavachio viewer; the broker's own "View file" window passes
+   *  its own, since there the viewer IS the broker. */
+  readOnlyNote?: string;
   exceptions: StoredException[];
   /** Called after a successful save so the parent can reload exceptions. */
   onSaved: (saved: number) => void;
@@ -1308,7 +1313,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
           ))}
           {saveErr && <p className="text-[11px] text-danger mt-2">{saveErr}</p>}
           <p className="text-[10px] text-ink-soft mt-2">
-            {readOnly ? "View only — the broker who sent this file makes these decisions."
+            {readOnly ? readOnlyNote
                       : <>Saved immediately — the corrected value reaches the output on Fix &amp; Validate.</>}
           </p>
         </div>

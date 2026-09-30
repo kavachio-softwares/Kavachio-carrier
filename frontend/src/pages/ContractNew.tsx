@@ -992,27 +992,19 @@ export default function ContractNew() {
 
   const active = sections?.[activeSection];
 
-  /** Step 3's parts. Both flavours of flag are counted together, the way the
-   *  tile already counted them. */
-  const flagCount = (preview?.warnings.length ?? 0)
-    + (preview?.uncheckable.length ?? 0);
+  /** Step 3's parts. The "Worth a look" part (terms that produce no check,
+   *  and term combinations to double-check) was taken out of this step; the
+   *  preview still returns both lists. */
   const readParts = [
     { key: "sum", heading: "Summary",
       desc: "What this contract adds up to, before you read it." },
-    ...(flagCount > 0 ? [{
-      key: "flags", heading: "Two things worth knowing",
-      desc: "Neither stops you sending it. Both are the kind of thing somebody "
-            + "notices three months later and asks about, so it is cheaper to "
-            + "see them now.",
-    }] : []),
     { key: "doc", heading: "The document",
       desc: "Exactly what the broker will open, with every live value filled in." },
-    { key: "checks", heading: "The checks it will run",
+    { key: "checks", heading: "Rules to be set up",
       desc: "From the moment both parties sign. These do nothing until the "
             + "contract is created and active — a draft never checks anything." },
   ];
-  // Clamped: the flags part disappears once nothing is flagged, and the rail
-  // must not point past the end of its own list.
+  // Clamped, so the rail never points past the end of its own list.
   const readAt = Math.min(readPane, readParts.length - 1);
   // Named in the nested step row: "Contract for Test Org".
   const flowBroker = counterparties?.find(c => String(c.id) === String(brokerId))?.name;
@@ -1909,24 +1901,20 @@ export default function ContractNew() {
               </div>
             </div>
 
-            {/* Four cards down a long page became four parts of one: the rail
-                says how big each is — 2 worth a look, 8 checks — before it is
-                opened, and the buttons above never scroll away. */}
+            {/* Cards down a long page became parts of one: the rail says how
+                big each is — 8 sections, 10 checks — before it is opened, and
+                the buttons above never scroll away. */}
             <WizardStep
               cap="What to look at"
               at={readAt}
               onPick={setReadPane}
               parts={[
                 { key: "sum", title: "Summary", state: "done" as const,
-                  meta: `${preview.pages} pages · ${preview.checks.length} checks` },
-                ...(flagCount > 0 ? [{
-                  key: "flags", title: "Worth a look", state: "warn" as const,
-                  meta: `${flagCount} thing${flagCount === 1 ? "" : "s"}`,
-                }] : []),
+                  meta: `${preview.pages} pages · ${preview.checks.length} rule${preview.checks.length === 1 ? "" : "s"}` },
                 { key: "doc", title: "The document", state: "done" as const,
                   meta: `${preview.sections.length} sections` },
-                { key: "checks", title: "The checks it will run", state: "done" as const,
-                  meta: `${preview.checks.length} check${preview.checks.length === 1 ? "" : "s"}` },
+                { key: "checks", title: "Rules to be set up", state: "done" as const,
+                  meta: `${preview.checks.length} rule${preview.checks.length === 1 ? "" : "s"}` },
               ]}
               title={readParts[readAt]?.heading}
               desc={readParts[readAt]?.desc}
@@ -1947,7 +1935,7 @@ export default function ContractNew() {
             >
               {readParts[readAt]?.key === "sum" && (
                 <>
-                  <div className="tiles">
+                  <div className="tiles t3">
                     <div className="tile">
                       <div className="k">Pages</div>
                       <div className="v">{preview.pages}</div>
@@ -1962,17 +1950,9 @@ export default function ContractNew() {
                       </div>
                     </div>
                     <div className="tile">
-                      <div className="k">Checks it will run</div>
+                      <div className="k">Rules to be set up</div>
                       <div className="v">{preview.checks.length}</div>
                       <div className="foot">on every row of every file</div>
-                    </div>
-                    <div className={`tile ${flagCount ? "warnl" : ""}`}>
-                      <div className="k">Worth a look first</div>
-                      <div className="v" style={flagCount
-                        ? { color: "var(--p-warn)" } : undefined}>
-                        {flagCount}
-                      </div>
-                      <div className="foot">neither one blocks you</div>
                     </div>
                   </div>
                   <div className="note">
@@ -1980,33 +1960,6 @@ export default function ContractNew() {
                     as a PDF — that copy is not saved anywhere and nobody is
                     told about it.
                   </div>
-                </>
-              )}
-
-              {readParts[readAt]?.key === "flags" && (
-                <>
-                  {preview.uncheckable.map((u, i) => (
-                    <div className="kv" key={`u${i}`} style={{ alignItems: "flex-start" }}>
-                      <span className="k">
-                        <b style={{ color: "var(--p-ink)" }}>
-                          {u.title} will not be checked
-                        </b>
-                        <div className="sub">
-                          It is a real term and it stays in the contract, but it
-                          quotes nothing a spreadsheet can be compared against,
-                          so no check comes out of it.
-                        </div>
-                      </span>
-                    </div>
-                  ))}
-                  {preview.warnings.map((w, i) => (
-                    <div className="kv" key={`w${i}`} style={{ alignItems: "flex-start" }}>
-                      <span className="k">
-                        <b style={{ color: "var(--p-ink)" }}>{w.title}</b>
-                        <div className="sub">{w.detail}</div>
-                      </span>
-                    </div>
-                  ))}
                 </>
               )}
 
@@ -2328,19 +2281,29 @@ export default function ContractNew() {
                       <span className="v">{sections?.length ?? 0}</span>
                     </div>
                     <div className="kv">
-                      <span className="k">Checks</span>
+                      <span className="k">Rules to be set up</span>
                       <span className="v">{preview?.checks.length ?? 0}</span>
                     </div>
                   </div>
-                  <div className="hint">
-                    <b>Save as a draft</b> keeps it to yourself.{" "}
-                    <b>Create and send it for review</b> puts it in the{" "}
-                    {spec?.counterparty_label?.toLowerCase() ?? "broker"}'s queue
-                    here — no email goes out. <b>Create and sign it now</b> skips
-                    their reading of the terms, and is recorded as review skipped
-                    under your name. None of the three puts the contract in
-                    force: both signatures do that, on its own signature page.
-                  </div>
+                  {/* Named, never "they": the other side is a specific
+                      company, and the reader should not have to work out who. */}
+                  {(() => {
+                    const other = counterparty?.name
+                      ?? `the ${spec?.counterparty_label?.toLowerCase() ?? "broker"}`;
+                    return (
+                      <ul className="hint" style={{ paddingLeft: 18, listStyle: "disc" }}>
+                        <li><b>Save as a draft</b> — only you can see it. {other} is
+                          not shown it yet.</li>
+                        <li><b>Create and send it for review</b> — {other} can review
+                          and agree the terms in Kavachio. No email is sent.</li>
+                        <li><b>Create and sign it now</b> — you sign straight away and
+                          {" "}{other} does not review the terms first. The skipped
+                          review is recorded under your name.</li>
+                        <li>None of these makes the contract active. It becomes
+                          active once both you and {other} have signed it.</li>
+                      </ul>
+                    );
+                  })()}
                   <div className="rowacts">
                     <button className="btn" type="button"
                             disabled={!!busy || blocksUnplaced}

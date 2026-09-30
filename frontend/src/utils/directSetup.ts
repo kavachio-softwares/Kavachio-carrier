@@ -214,12 +214,32 @@ export type MissingColumnsResp = {
   skipped_reason?: string | null;
 };
 
-export type TemplateField = { name: string; sheet?: string | null };
+export type TemplateField = { name: string; sheet?: string | null;
+  /** False once the column was removed from the template. Kept in the list so
+   *  a rule already on it can still be labelled, but never offered again. */
+  active?: boolean };
 export type FieldMapping = { contract_field: string; output_field: string; rule_names: (string | null)[] };
 export type ClauseRouting = {
   clause_id: number | null; bucket: string; rule_name?: string | null;
   clause_text?: string | null; source_page?: number | null; reason?: string | null;
+  /** The clause's own title ("Fees"), from the extraction. Null on standard
+   *  (library) rules and on servers that do not send it. */
+  clause_title?: string | null;
 };
+
+/** What to call a clause that has no rule yet: its rule name if one was
+ *  proposed, else its own title, else the opening words of its text. Never a
+ *  bare "Unmapped Clause" when there is anything better to say. */
+export function clauseHeading(item: {
+  rule_name?: string | null; clause_title?: string | null; clause_text?: string | null;
+}): string {
+  if (item.rule_name) return item.rule_name;
+  if (item.clause_title) return item.clause_title;
+  const text = (item.clause_text ?? "").replace(/^\[Generic rule\]\s*/, "").trim();
+  if (!text) return "Clause";
+  const head = text.split(/\s+—\s+|\.\s/)[0];
+  return head.length > 90 ? `${head.slice(0, 87)}…` : head;
+}
 export type ContractDetailT = {
   contract: { id: number; filename: string | null; status: string; created_at: string | null };
   output_template: { name: string; version: number; fields?: TemplateField[] } | null;

@@ -120,8 +120,8 @@ export default function OutputTemplateState({
               )}
             </div>
             <div className="text-[10.5px] opacity-80 mt-0.5">
-              {SOURCE_LABEL[t.source_kind] ?? t.source_kind} — nothing you upload
-              here is needed unless you want to replace it.
+              {SOURCE_LABEL[t.source_kind] ?? t.source_kind} — nothing to upload
+              unless you want to use a new template.
             </div>
             {broader && !mismatch && (
               <div className="mt-1">
@@ -153,7 +153,7 @@ export default function OutputTemplateState({
               </Button>
             )}
             <Button variant="secondary" onClick={onCreate}>
-              <Plus size={14} /> {broader ? "Create one for this scope" : "Replace it"}
+              <Plus size={14} /> {broader ? "Create one for this scope" : "Upload a new template"}
             </Button>
           </div>
         )}

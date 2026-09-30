@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck, UserCheck } from "lucide-react";
@@ -57,6 +57,8 @@ type Stats = {
    *  `contracts_expiring_soon_days` days (30). */
   contracts_expiring_soon?: number;
   contracts_expiring_soon_days?: number;
+  /** Contracts a broker sent back asking for changes — the carrier's move. */
+  contracts_changes_requested?: number;
   /** Broker onboarding requests waiting on the carrier admin. Null for a
    *  carrier user, who is not the one being asked. */
   broker_requests_pending?: number | null;
@@ -80,6 +82,33 @@ const SUBTITLE: Record<Role, string> = {
   broker_admin: "Your contracts and the files you have sent.",
   operator: "The files you have sent, and anything that needs fixing.",
 };
+
+// The month + year filter over the three cards at the foot of the page. What
+// it picks is a PERIOD: "YYYY-MM" (one month), "YYYY" (a whole year) or ALL
+// (every year) — the same three the calendar board takes
+// (submission_calendar_service.ALL_MONTHS and a bare year). Months are local
+// time, the same way the cards always counted "this month".
+const ALL = "all";
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const monthKeyOf = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+const isYear = (p: string) => /^\d{4}$/.test(p);
+/** First and last instant of a period, local time; null for every year. */
+function periodRange(p: string): [Date, Date] | null {
+  if (p === ALL) return null;
+  if (isYear(p)) {
+    const y = Number(p);
+    return [new Date(y, 0, 1), new Date(y + 1, 0, 1, 0, 0, 0, -1)];
+  }
+  const [y, m] = p.split("-").map(Number);
+  return [new Date(y, m - 1, 1), new Date(y, m, 1, 0, 0, 0, -1)];
+}
+/** "September 2026", "2026", or "all years". */
+const periodName = (p: string) => p === ALL ? "all years" : isYear(p) ? p
+  : new Date(Number(p.slice(0, 4)), Number(p.slice(5, 7)) - 1, 1)
+      .toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+/** January … December, for the month dropdown. */
+const MONTH_NAMES = Array.from({ length: 12 }, (_, i) =>
+  new Date(2000, i, 1).toLocaleDateString("en-GB", { month: "long" }));
 
 export default function Home() {
   const mga = currentMga();
@@ -108,8 +137,11 @@ export default function Home() {
   // Group 3: deadline counts for the "Deadlines" tile (own submission calendar).
   const [calCounts, setCalCounts] = useState<Partial<Record<CalendarStatus, number>>>({});
   // The Bordereau Calendar's own counts, so the Overdue Bordereaux box and the
-  // page it opens always show the same numbers.
-  const [board, setBoard] = useState<BoardResponse | null>(null);
+  // page it opens always show the same numbers. Kept with the month it was
+  // asked for, so a month still loading never shows the last one's figures.
+  const [board, setBoard] = useState<{ period: string; data: BoardResponse } | null>(null);
+  // Every due-month the calendar has — part of what the month filter offers.
+  const [boardMonths, setBoardMonths] = useState<string[]>([]);
   // "How big is my book" — the two directory sizes, each read from the SAME
   // endpoint its own screen reads. /dashboard/stats already carries a programme
   // count (`open_bdx_cycles`) but it counts only app-managed ACTIVE ones, so a
@@ -135,12 +167,19 @@ export default function Home() {
   const ARRIVALS_FETCH = 500;
   const [arrivals, setArrivals] = useState<Arrival[] | null>(null);
 
-  // Both link cards count the current calendar month and say which one, the
-  // way Overdue Bordereaux says "Due in September 2026".
-  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-  const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 1, 0, 0, 0, -1);
-  const monthLabel = monthStart.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
-  const monthKey = monthStart.toISOString();
+  // ONE period for the three cards at the foot of the page — Overdue
+  // Bordereaux, Files Received and Files Processed — picked as a month and a
+  // year in the bar above them. "All Months" takes the whole year, "All Years"
+  // everything. It opens on the current month, which is what all three
+  // counted before there was a pick.
+  const [year, setYear] = useState<string>(String(new Date().getFullYear()));
+  const [month, setMonth] = useState<string>(pad2(new Date().getMonth() + 1));
+  const period = year === ALL ? ALL : month === ALL ? year : `${year}-${month}`;
+  const everyMonth = period === ALL;
+  const [monthStart, monthEnd] = periodRange(period) ?? [null, null];
+  // How the cards name the pick.
+  const countWhen = everyMonth ? "across all years" : `in ${periodName(period)}`;
+  const infoWhen = everyMonth ? "" : ` in ${periodName(period)}`;
 
   useEffect(() => {
     api.get<Stats>(`/dashboard/stats`, { params: { mga } }).then(r => setStats(r.data));
@@ -153,8 +192,19 @@ export default function Home() {
   // Both carrier seats; Kavachio staff have the box on their own dashboard.
   useEffect(() => {
     if (role !== "carrier_admin") return;
-    getBoard().then(setBoard).catch(() => setBoard(null));
-  }, [mga, role]);
+    let live = true;
+    getBoard(period)
+      .then(b => { if (live) { setBoard({ period, data: b }); setBoardMonths(b.months ?? []); } })
+      .catch(() => { if (live) setBoard(null); });
+    return () => { live = false; };
+  }, [mga, role, period]);
+  // The board answers with ANOTHER month when nothing fell due in the one
+  // asked for (the calendar opens on real work) — for this box, that month
+  // simply owed nothing.
+  const boardNow = board?.period === period ? board.data : null;
+  const due = boardNow
+    ? (boardNow.month === period ? boardNow.counts : { on_time: 0, late: 0, never: 0 })
+    : null;
 
   // Both directories are carrier-scoped. A broker seat carries no tenant, so
   // these routes answer "no tenant bound to this user" for them — don't ask.
@@ -216,6 +266,7 @@ export default function Home() {
   const pendingSignature = stats?.contracts_pending_signature
     ?? stats?.pending_signatures ?? 0;
   const expiringSoon = stats?.contracts_expiring_soon ?? 0;
+  const changesRequested = stats?.contracts_changes_requested ?? 0;
   const expiringDays = stats?.contracts_expiring_soon_days ?? 30;
 
   // /files is carrier-only (ROUTE_ACCESS), so only a carrier seat that can open
@@ -227,11 +278,35 @@ export default function Home() {
       .then(r => setArrivals(r.rows))
       .catch(() => setArrivals([]));
   }, [mga, showFiles]);
-  // Every file that reached the carrier this month, accepted or not.
-  const receivedThisMonth = arrivals?.filter(a => {
+  // Every file that reached the carrier in the picked month, accepted or not.
+  const receivedInPeriod = arrivals?.filter(a => {
     const t = a.received_at ? new Date(a.received_at) : null;
-    return !!t && t >= monthStart && t <= monthEnd;
+    if (!t) return false;
+    return everyMonth || (!!monthStart && !!monthEnd && t >= monthStart && t <= monthEnd);
   }).length;
+  // Only the newest ARRIVALS_FETCH come back. When that many did, a pick that
+  // reaches back past the oldest of them may hold more than are counted, and
+  // the number says so ("500+") rather than passing for the whole of it.
+  const oldestArrival = arrivals && arrivals.length >= ARRIVALS_FETCH
+    ? arrivals.reduce<Date | null>((m, a) => {
+        const t = a.received_at ? new Date(a.received_at) : null;
+        return t && (!m || t < m) ? t : m;
+      }, null)
+    : null;
+  const receivedMore = !!oldestArrival
+    && (everyMonth || (!!monthStart && monthStart < oldestArrival));
+
+  // The years the filter offers: this one back to the first with anything in
+  // it — a due date on the calendar or a file received — at most ten. Every
+  // year offers all twelve months.
+  const yearOptions = useMemo(() => {
+    const thisYear = new Date().getFullYear();
+    const seen = [...boardMonths,
+      ...(arrivals ?? []).flatMap(a => a.received_at ? [monthKeyOf(new Date(a.received_at))] : [])]
+      .map(k => Number(k.slice(0, 4))).filter(y => y > 0 && y <= thisYear);
+    const first = Math.max(seen.length ? Math.min(...seen) : thisYear, thisYear - 9);
+    return Array.from({ length: thisYear - first + 1 }, (_, i) => String(thisYear - i));
+  }, [boardMonths, arrivals]);
 
   // Can the operator actually work yet? That hinges on there being an approved
   // Bordereau Setup to process against (`bordereau_ready`) — NOT on the full
@@ -256,15 +331,20 @@ export default function Home() {
   // {items, total}, and the total is counted over the whole date range rather
   // than over the page, so page_size 1 still yields the real figure. Same
   // trick the book-count tiles above use.
+  // No date range for All Years: the total is then every file ever run.
   useEffect(() => {
+    let live = true;
+    setRunsTotal(null);
     api.get<{ total: number }>(`/direct/runs`, { params: {
       mga, page: 1, page_size: 1,
-      date_from: monthStart.toISOString(), date_to: monthEnd.toISOString(),
+      ...(monthStart && monthEnd
+        ? { date_from: monthStart.toISOString(), date_to: monthEnd.toISOString() } : {}),
     } })
-      .then(r => setRunsTotal(r.data?.total ?? null))
-      .catch(() => setRunsTotal(null));
+      .then(r => { if (live) setRunsTotal(r.data?.total ?? null); })
+      .catch(() => { if (live) setRunsTotal(null); });
+    return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mga, monthKey]);
+  }, [mga, period]);
 
   const fmt = (v: number | null | undefined) => (v == null ? "—" : v);
   // A not-validated run is never clean: its checks did not run (it carries one
@@ -340,12 +420,22 @@ export default function Home() {
       title="Contracts to Sign"
       value={fmt(pendingSignature)}
       icon={FileText}
-      tone={pendingSignature ? "alert" : undefined}
+      // A broker asking for changes is on this desk too — nothing can be
+      // signed until the carrier answers it — so it lights the tile as well.
+      tone={pendingSignature || changesRequested ? "alert" : undefined}
       subtitle={`${stats?.completed_signatures ?? 0} fully signed`}
+      footer={changesRequested > 0 ? (
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--p-crit)" }}>
+          {changesRequested} {changesRequested === 1 ? "contract has" : "contracts have"}
+          {" "}changes requested by the broker
+        </div>
+      ) : undefined}
       onClick={() => nav("/contracts?waiting=mine")}
       info={"Contracts whose terms your broker has agreed and which are now "
             + "waiting for your signature as the carrier. \"Fully signed\" "
-            + "counts the contracts both you and the broker have signed."}
+            + "counts the contracts both you and the broker have signed. A "
+            + "contract the broker has sent back with changes requested is "
+            + "shown in red below — answer it before it can be signed."}
     />
   ) : null;
 
@@ -358,14 +448,16 @@ export default function Home() {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
           </div>
           <h3 style={{ margin: 0, fontSize: 18 }}>Files Received</h3>
-          <InfoTip text={"All bordereau files your brokers sent this month, across "
+          <InfoTip text={`All bordereau files your brokers sent${infoWhen}, across `
             + "every channel — including files on hold or rejected at intake. "
             + "Click to view them all."} />
         </div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>{fmt(receivedThisMonth)}</span>
+          <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>
+            {fmt(receivedInPeriod)}{receivedMore ? "+" : ""}
+          </span>
           <span style={{ color: "var(--p-muted)", fontSize: 14 }}>
-            {receivedThisMonth === 1 ? "file" : "files"} in {monthLabel}
+            {receivedInPeriod === 1 && !receivedMore ? "file" : "files"} {countWhen}
           </span>
         </div>
       </div>
@@ -389,7 +481,7 @@ export default function Home() {
               this card. */}
           <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Files Processed</h3>
           <span className="on-dark">
-            <InfoTip text={"Bordereaux checked against their contract this month, "
+            <InfoTip text={`Bordereaux checked against their contract${infoWhen}, `
               + "clean or with exceptions. Click for the results, file by file."} />
           </span>
         </div>
@@ -398,7 +490,7 @@ export default function Home() {
             {fmt(runsTotal)}
           </span>
           <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 14 }}>
-            {runsTotal === 1 ? "file" : "files"} in {monthLabel}
+            {runsTotal === 1 ? "file" : "files"} {countWhen}
           </span>
         </div>
       </div>
@@ -663,16 +755,44 @@ export default function Home() {
           </div>
         )}
 
+        {/* ONE month for the cards below — Overdue Bordereaux (carrier admin),
+            Files Received and Files Processed. They used to count the current
+            month only; this lets a carrier look back a month at a time, or at
+            every month together. The cards still open their full lists. */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                      gap: 12, marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center" }}>
+            <h3 style={{ margin: 0, fontSize: 16 }}>Monthly Activity</h3>
+            <InfoTip text={(carrierAdmin ? "Overdue Bordereaux, Files Received and Files Processed"
+              : "The cards below") + " count the month and year picked here. All Months "
+              + "counts the whole year; All Years counts everything."} />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* With All Years there is no one year to take a month of. */}
+            <select className="fbar-select" aria-label="Month"
+              value={year === ALL ? ALL : month} disabled={year === ALL}
+              onChange={e => setMonth(e.target.value)}>
+              <option value={ALL}>All Months</option>
+              {MONTH_NAMES.map((name, i) => (
+                <option key={name} value={pad2(i + 1)}>{name}</option>
+              ))}
+            </select>
+            <select className="fbar-select" aria-label="Year"
+              value={year} onChange={e => setYear(e.target.value)}>
+              <option value={ALL}>All Years</option>
+              {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        </div>
+
         {carrierAdmin ? (
           /* Carrier admin's foot of the page: Overdue Bordereaux on the left,
              the two link cards stacked on the right. */
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 18 }}>
             <div style={{ display: "grid" }}>
-              <ArrivalsCard onTime={board?.counts.on_time} late={board?.counts.late}
-                never={board?.counts.never}
-                subtitle={board ? `Due in ${new Date(`${board.month}-01T00:00:00`)
-                  .toLocaleDateString("en-GB", { month: "long", year: "numeric" })}` : undefined}
-                info="Bordereaux your brokers owed this month, by how they arrived." />
+              <ArrivalsCard onTime={due?.on_time} late={due?.late} never={due?.never}
+                subtitle={due ? `Due in ${periodName(period)}` : undefined}
+                info={`Bordereaux your brokers owed${infoWhen}, by how they arrived.`} />
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
               {incomingCard}

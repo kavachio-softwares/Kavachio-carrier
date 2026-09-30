@@ -24,6 +24,7 @@ import {
 } from "../api/intake";
 import { fmtStamp } from "../utils/date";
 import { Pagination } from "../components/Pagination";
+import { InfoTip } from "../components/InfoTip";
 
 // Each door gets a name and a tone, as in the carrier-centric design: email is
 // the one with a reply path so it reads as info, an upload was done by a person
@@ -55,12 +56,13 @@ export const RUN_META: Record<RunResult, {
     meaning: "Could not be processed automatically — open for details." },
 };
 
-/** Tooltips for the three result tiles, each of which filters to its own rows. */
-const RUN_TILE_HINT = {
-  ingested: "Show clean files only",
-  exceptions: "Show files with exceptions only",
-  failed: "Show failed files only",
-} as const;
+/** The Status filter. Five boxes at most on the page, so the processing
+ *  results (Clean / With Exceptions / Failed) are filtered from here instead
+ *  of from boxes of their own. Values are the same ones the boxes set. */
+const STATUS_OPTIONS = [
+  ["ok", "Accepted"], ["held", "On Hold"], ["away", "Rejected"],
+  ["run:ingested", "Clean"], ["run:exceptions", "With Exceptions"], ["run:failed", "Failed"],
+] as const;
 
 /** What an accepted file that has no result yet is doing. */
 function awaitingRun(a: Arrival): string {
@@ -341,14 +343,6 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
       // queue, and one number that says "eleven days" is what makes somebody
       // open it.
       oldestWaitDays: Math.max(0, ...all.filter(isWaiting).map(waitDays)),
-      // Once inside — only files that went through can be here, so this row
-      // does not add up to the one above, and is not meant to.
-      through: all.filter(a => state(a) === "ok").length,
-      run: {
-        ingested: all.filter(a => a.run_result === "ingested").length,
-        exceptions: all.filter(a => a.run_result === "exceptions").length,
-        failed: all.filter(a => a.run_result === "failed").length,
-      },
     };
   }, [all]);
 
@@ -517,31 +511,6 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
         })}
       </div>
 
-      {/* Once inside — what the run did with the files that went through. The
-          same toggle behaviour as the row above: a tile IS the filter. */}
-      <div className="sub-h" style={{ margin: "0 0 8px", display: "flex", gap: 8, alignItems: "baseline" }}>
-        Processing Results
-        <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500, color: "var(--p-faint)" }}>
-          — of {rows ? `${counts.through} accepted file${counts.through === 1 ? "" : "s"}` : "—"}</span>
-      </div>
-      <div className="tiles three" style={{ marginBottom: 18 }}>
-        {(["ingested", "exceptions", "failed"] as const).map(k => {
-          const f = `run:${k}` as const;
-          const on = filter === f;
-          const n = counts.run[k];
-          const colour = n === 0 ? undefined
-            : k === "ingested" ? "var(--p-ok)" : k === "exceptions" ? "var(--p-warn)" : "var(--p-crit)";
-          return (
-            <button type="button" key={k} className="tile" aria-pressed={on}
-              onClick={() => setFilter(on ? "" : f)}
-              title={on ? "Filter applied — click to clear" : RUN_TILE_HINT[k]}>
-              <div className="k">{RUN_META[k].label}{on && <span className="on">Filtered</span>}</div>
-              <div className="v" style={colour ? { color: colour } : undefined}>{rows ? n : "—"}</div>
-              <div className="foot">{RUN_META[k].meaning}</div>
-            </button>);
-        })}
-      </div>
-
       <div className="filters">
         <label className="searchbox">
           <svg className="si" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -558,6 +527,12 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
             <option value="month">This Month</option>
             <option value="30">Last 30 Days</option>
             <option value="90">Last 90 Days</option>
+          </select>
+          <select className="sel" aria-label="Status"
+            value={STATUS_OPTIONS.some(([v]) => v === filter) ? filter : ""}
+            onChange={e => setFilter(e.target.value as Filter)}>
+            <option value="">All Statuses</option>
+            {STATUS_OPTIONS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
           </select>
           <select className="sel" value={fChannel} onChange={e => setFChannel(e.target.value)}
             aria-label="Channel">
@@ -644,7 +619,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
             <p style={{ margin: "0 auto", fontSize: 12.5, maxWidth: 430, lineHeight: 1.6 }}>
               Files submitted by email, manual upload, SFTP or API appear here in order of
               receipt, and each passes the same intake checks. To get started, set up a
-              channel for a broker under <b>Submission Channels</b>.
+              channel for a broker under <b>Ingestion Channels</b>.
             </p>
           </div>
         ) : rows && shown.length === 0 ? (
@@ -767,6 +742,33 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
 // ── the row drawer ──────────────────────────────────────────────────────────
 // The decision sits directly beneath the evidence for it, which is the whole
 // reason this is a drawer and not a tooltip.
+/** One headline and one sentence: what happened to this file, in the words
+ *  the reader needs first. Everything else in the drawer is supporting detail. */
+function verdict(a: Arrival, st: "ok" | "held" | "away"):
+    { tone: "ok" | "warn" | "crit" | ""; title: string; text: string } {
+  if (st === "away") return { tone: "crit", title: "Rejected at intake",
+    text: fullReason(a) || "No reason recorded." };
+  if (st === "held") return { tone: "warn",
+    title: a.resolution === "discarded" ? "Discarded" : "On hold — needs your decision",
+    text: fullReason(a) || "Release it for processing or discard it." };
+  const n = a.run_exception_count ?? 0;
+  switch (a.run_result) {
+    case "exceptions": return { tone: "warn",
+      title: `${n.toLocaleString()} exception${n === 1 ? "" : "s"} found`,
+      text: "Some rows don't meet the contract rules. Open View Results to review them." };
+    case "ingested": return { tone: "ok", title: "All rows passed",
+      text: "No exceptions were found in this file." };
+    case "failed": return { tone: "crit", title: "Processing failed",
+      text: a.run_error || RUN_META.failed.meaning };
+    case "not_run": return { tone: "warn", title: "Not processed",
+      text: a.run_error || RUN_META.not_run.meaning };
+    case "not_checked": return { tone: "", title: "Not validated",
+      text: RUN_META.not_checked.meaning };
+    default: return { tone: "", title: awaitingRun(a),
+      text: "The result will appear here once processing finishes." };
+  }
+}
+
 function ArrivalDrawer({ arrival, onClose, onResolved }: {
   arrival: Arrival | null; onClose: () => void; onResolved: () => void;
 }) {
@@ -778,10 +780,15 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  // The checklist and the minor facts start folded away: the verdict at the
+  // top is what a first-time reader needs, the rest is one click down.
+  const [showMore, setShowMore] = useState(false);
 
-  // A fresh drawer must not inherit the last file's half-typed note or its
-  // error — they belong to the row that is gone.
-  useEffect(() => { setNote(""); setErr(null); setBusy(false); }, [arrival?.arrival_id]);
+  // A fresh drawer must not inherit the last file's half-typed note, its
+  // error or its open sections — they belong to the row that is gone.
+  useEffect(() => {
+    setNote(""); setErr(null); setBusy(false); setShowMore(false);
+  }, [arrival?.arrival_id]);
 
   // Escape closes the drawer, and the scrim behind it is clickable — the two
   // ways out people try first.
@@ -839,151 +846,122 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
           <div className="drawer-h">
             <div style={{ minWidth: 0 }}>
               <h4>{arrival.filename}</h4>
-              <div className="ref">
-                Submission #{arrival.arrival_id}
-                {isWaiting(arrival) && waitDays(arrival) > 0
-                  && ` · Pending ${waitDays(arrival)} day${waitDays(arrival) === 1 ? "" : "s"}`}
-              </div>
             </div>
             <button type="button" className="closeb" aria-label="Close"
               onClick={onClose}>×</button>
           </div>
 
           <div className="drawer-b">
-            {/* The INTAKE checks only — size, type, sender, duplicate, scan.
-                Named for that, because a green "Passed every check" sat above
-                a file that went on to fail its contract, and read as the
-                verdict on the file. The contract's verdict is below. */}
-            <div className="kv"><span className="k">Intake Status</span>
-              <span className="v">
-                {st === "ok" ? <Badge tone="ok">Accepted</Badge>
-                  : st === "held" ? <Badge tone="warn">On Hold</Badge>
-                  : <Badge tone="crit">Rejected</Badge>}
-              </span></div>
-            <div className="kv"><span className="k">Channel</span>
-              <span className="v">
-                {arrival.channel
-                  ? <Badge tone={CAME_IN_BY[arrival.channel].tone}>
-                      {CAME_IN_BY[arrival.channel].label}</Badge>
-                  : "—"}</span></div>
-            {/* Which key or which folder, not just which channel — it is how
-                you tell two of a broker's systems apart. A manual upload's
-                sender is the person who uploaded it. */}
-            {arrival.channel === "upload" ? (
-              <div className="kv"><span className="k">Uploaded by</span>
-                <span className="v">{arrival.submitted_by_name ?? "—"}</span></div>
-            ) : (
-              <div className="kv"><span className="k">Sender</span>
-                <span className="v mono" style={{ fontSize: 11 }}>
-                  {arrival.claimed_sender ?? arrival.route_address ?? "—"}</span></div>)}
-            <div className="kv"><span className="k">Broker · Programme</span>
-              <span className="v">
-                {arrival.broker_name ?? "Unidentified sender"}
-                {arrival.program_name ? ` → ${arrival.program_name}` : ""}</span></div>
-            {!arrival.program_name && (
-              <div className="kv"><span className="k">Programme</span>
-                <span className="v faint" style={{ fontWeight: 500 }}>
-                  Not linked to a programme</span></div>)}
-            <div className="kv"><span className="k">Received</span>
-              <span className="v">{fmtStamp(arrival.received_at)}</span></div>
-            <div className="kv"><span className="k">File Size · Rows</span>
-              <span className="v mono">{bytes(arrival.file_size_bytes)}
-                {" · "}{rowsOf(arrival.row_count)} rows</span></div>
-            {arrival.sender_notified_at && (
-              <div className="kv"><span className="k">Sender Notified</span>
-                <span className="v">{arrival.sender_notified_via ?? "Notified"}{" "}
-                  {fmtStamp(arrival.sender_notified_at)}</span></div>)}
+            {/* The verdict, first and alone: one headline and one sentence. */}
+            {(() => {
+              const v = verdict(arrival, st);
+              return (
+                <div className={`note ${v.tone}`} style={{ marginTop: 0 }}>
+                  <b style={{ display: "block", fontSize: 14, marginBottom: 3 }}>{v.title}</b>
+                  {v.text}
+                  {arrival.resolution && (
+                    <div className="faint" style={{ fontSize: 11.5, marginTop: 6 }}>
+                      {arrival.resolution === "released" ? "Released" : "Discarded"}
+                      {arrival.resolved_by_name ? ` by ${arrival.resolved_by_name}` : ""}
+                      {arrival.resolved_at ? ` on ${fmtStamp(arrival.resolved_at)}` : ""}
+                      {arrival.resolution_note ? ` · “${arrival.resolution_note}”` : ""}
+                    </div>)}
+                </div>);
+            })()}
 
-            {/* ── Once inside: what the run did. Only a file that went through
-                gets here; for one still waiting, say so rather than go blank. */}
-            {st === "ok" && (<>
-              <div className="sub-h">Processing</div>
-              <div className="kv"><span className="k">Processing Result</span>
-                <span className="v">
-                  {run ? <Badge tone={run.tone}>{run.label}</Badge>
-                    : <span className="faint" style={{ fontWeight: 500 }}>{awaitingRun(arrival)}</span>}
-                </span></div>
-              {run && (
-                <div className="faint" style={{ fontSize: 12, margin: "-2px 0 8px" }}>{run.meaning}</div>)}
+            {/* Four facts a reader actually looks for. */}
+            <div style={{ marginTop: 14 }}>
+              <div className="kv"><span className="k">Programme</span>
+                <span className="v">{arrival.program_name ?? "Not linked to a programme"}</span></div>
+              <div className="kv"><span className="k">Broker</span>
+                <span className="v">{arrival.broker_name ?? "Unidentified sender"}</span></div>
               {arrival.contract_name && (
                 <div className="kv"><span className="k">Contract</span>
                   <span className="v">{arrival.contract_name}</span></div>)}
-              {arrival.run_at && arrival.run_state !== "running" && (
-                <div className="kv"><span className="k">Processed At</span>
-                  <span className="v">{fmtStamp(arrival.run_at)}</span></div>)}
-              {arrival.run_state === "done" && (
-                <div className="kv"><span className="k">Rows · Exceptions</span>
-                  <span className="v mono">{rowsOf(arrival.run_rows)} rows
-                    {" · "}{(arrival.run_exception_count ?? 0).toLocaleString()} exceptions</span></div>)}
-              {/* The file's real verdict, said in a sentence rather than left to
-                  a small badge — the arrival checks above passing does not mean
-                  the file did. */}
-              {arrival.run_result === "exceptions" && (arrival.run_exception_count ?? 0) > 0 && (
-                <div className="note warn" style={{ marginTop: 8 }}>
-                  <b>This file broke {(arrival.run_exception_count ?? 0).toLocaleString()} of
-                    its contract's rules.</b>{" "}
-                  It arrived safely, but its rows do not meet the contract
-                  {arrival.contract_name ? <> ({arrival.contract_name})</> : null}.
-                  Select View Results to see each one.
-                </div>)}
-              {(arrival.run_state === "failed" || arrival.run_state === "not_run") && arrival.run_error && (
-                <div className={`note ${arrival.run_state === "failed" ? "crit" : "warn"}`} style={{ marginTop: 8 }}>
-                  <b>{arrival.run_state === "failed" ? "Processing failed." : "This file was not processed."}</b>{" "}
-                  {arrival.run_error}
-                </div>)}
-            </>)}
+              <div className="kv"><span className="k">Channel</span>
+                <span className="v">
+                  {arrival.channel
+                    ? <Badge tone={CAME_IN_BY[arrival.channel].tone}>
+                        {CAME_IN_BY[arrival.channel].label}</Badge>
+                    : "—"}</span></div>
+              <div className="kv"><span className="k">Received</span>
+                <span className="v">{fmtStamp(arrival.received_at)}</span></div>
+              <div className="kv"><span className="k">Rows</span>
+                <span className="v mono">{rowsOf(arrival.run_rows ?? arrival.row_count)}</span></div>
+            </div>
 
+            {/* The ten intake checks as a stepper, in the order they ran. They
+                stop at the first failure, so anything after it never ran — a
+                tick there would be a lie. Each description sits behind an ⓘ;
+                only the failed step's reason is written out. */}
             <div className="sub-h">Intake Checks</div>
-            <ul className="checks">
+            <ol style={{ listStyle: "none", margin: "4px 0 0", padding: 0 }}>
               {CHECKS.map(([what, why], i) => {
-                // The checks stop at the first failure, so anything after it
-                // genuinely never ran. A tick there would be a lie.
-                const cls = failed === -1 ? (st === "ok" ? "pass" : "")
+                const cls = failed === -1 ? (st === "ok" ? "pass" : "todo")
                   : i < failed ? "pass"
                   : i === failed ? (st === "held" ? "fail" : "stop")
                   : "skip";
+                const colour = cls === "pass" ? "var(--p-ok)" : cls === "fail" ? "var(--p-warn)"
+                  : cls === "stop" ? "var(--p-crit)" : "var(--p-faint)";
+                const last = i === CHECKS.length - 1;
                 return (
-                  <li key={what} className={cls}>
-                    <span className="m" aria-hidden="true">
-                      {cls === "pass" ? "✓" : cls === "skip" ? "·"
-                        : cls === "" ? "·" : "▲"}</span>
-                    <span>
-                      <span className="t">{what}</span>
-                      {i === failed
-                        ? <span className="why">{fullReason(arrival)}</span>
-                        : cls === "skip"
-                        ? <span className="why">Not run — an earlier check failed</span>
-                        : <span className="why">{why}</span>}
-                    </span>
+                  <li key={what} style={{ display: "flex", gap: 12 }}>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 18 }}>
+                      <span aria-hidden="true" style={{
+                        width: 18, height: 18, borderRadius: 99, flex: "0 0 auto",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 10, fontWeight: 700, color: "#fff",
+                        background: cls === "skip" || cls === "todo" ? "transparent" : colour,
+                        border: `1.5px solid ${colour}`,
+                      }}>
+                        {cls === "pass" ? "✓" : cls === "fail" || cls === "stop" ? "!" : ""}
+                      </span>
+                      {!last && <span style={{ width: 1.5, flex: 1, minHeight: 18, margin: "3px 0",
+                        background: cls === "pass" ? "var(--p-ok)" : "var(--p-border)" }} />}
+                    </div>
+                    <div style={{ paddingBottom: last ? 0 : 18, minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, lineHeight: "18px",
+                        color: cls === "skip" ? "var(--p-faint)" : "var(--p-ink)",
+                        fontWeight: cls === "fail" || cls === "stop" ? 600 : 500 }}>
+                        {what}
+                        <InfoTip text={cls === "skip" ? `${why} Not run — an earlier check failed.` : why} />
+                      </div>
+                      {i === failed && (
+                        <div style={{ fontSize: 12, color: colour, marginTop: 2 }}>{fullReason(arrival)}</div>)}
+                    </div>
                   </li>);
               })}
-            </ul>
+            </ol>
 
-            {/* Only when the reason matches none of the checks — better to show
-                the sentence on its own than to point at the wrong one. */}
-            {failed === -1 && st !== "ok" && (
-              <div className="note warn" style={{ marginTop: 12 }}>
-                {fullReason(arrival) || "No reason recorded."}
-              </div>)}
-
-            {st === "held" && !arrival.resolution && (
-              <div className="note" style={{ marginTop: 12 }}>
-                <b>On hold, not rejected.</b> The file has been received and stored as submitted.
-                Release it for processing or discard it.
-              </div>)}
-
-            {/* 12.3 — once somebody has decided, the decision IS the record.
-                Shown above the buttons so a resolved file cannot be re-worked
-                by accident, and so "who let this through?" is answered on the
-                same screen that asked the question. */}
-            {arrival.resolution && (
-              <div className="note" style={{ marginTop: 12 }}>
-                <b>{arrival.resolution === "released" ? "Released" : "Discarded"}</b>
-                {arrival.resolved_at ? ` on ${fmtStamp(arrival.resolved_at)}` : ""}
-                {arrival.resolved_by_name ? ` by ${arrival.resolved_by_name}`
-                  : arrival.resolved_by_user_id ? ` by user ${arrival.resolved_by_user_id}` : ""}.
-                {arrival.resolution_note ? ` “${arrival.resolution_note}”` : ""}
-              </div>)}
+            {/* Everything else, one click down. */}
+            <div className="sub-h" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              More Details
+              <button type="button" className="linkbtn" style={{ marginLeft: "auto", textTransform: "none", letterSpacing: 0 }}
+                onClick={() => setShowMore(o => !o)}>{showMore ? "Hide" : "Show"}</button>
+            </div>
+            {showMore && (<>
+              <div className="kv"><span className="k">Submission</span>
+                <span className="v mono">#{arrival.arrival_id}</span></div>
+              {/* A manual upload's sender is the person who uploaded it; for
+                  the other channels, which key or folder tells two of a
+                  broker's systems apart. */}
+              {arrival.channel === "upload" ? (
+                <div className="kv"><span className="k">Uploaded by</span>
+                  <span className="v">{arrival.submitted_by_name ?? "—"}</span></div>
+              ) : (
+                <div className="kv"><span className="k">Sender</span>
+                  <span className="v mono" style={{ fontSize: 11 }}>
+                    {arrival.claimed_sender ?? arrival.route_address ?? "—"}</span></div>)}
+              <div className="kv"><span className="k">File Size</span>
+                <span className="v mono">{bytes(arrival.file_size_bytes)}</span></div>
+              {arrival.run_at && arrival.run_state !== "running" && (
+                <div className="kv"><span className="k">Processed At</span>
+                  <span className="v">{fmtStamp(arrival.run_at)}</span></div>)}
+              {arrival.sender_notified_at && (
+                <div className="kv"><span className="k">Sender Notified</span>
+                  <span className="v">{arrival.sender_notified_via ?? "Notified"}{" "}
+                    {fmtStamp(arrival.sender_notified_at)}</span></div>)}
+            </>)}
 
             {arrival.is_infected && (
               <div className="note crit" style={{ marginTop: 12 }}>

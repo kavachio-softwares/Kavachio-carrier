@@ -875,7 +875,7 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "submission_schedule_updated", "submission_chased"), CARRIER_SEATS),
     # How files reach the CARRIER — mailboxes, routes and keys. The broker
     # sends; it is the carrier that sets up the ways in.
-    ("intake", "Submission channels",
+    ("intake", "Ingestion channels",
      ("intake_route_created", "intake_key_created", "mailbox_polled",
       "file_arrival_released"), CARRIER_SEATS),
     ("downloads", "Downloads and views", ("download", "read", "export"), ALL_SEATS),

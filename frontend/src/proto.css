@@ -193,7 +193,8 @@
 
 /* ---------------- dashboard: tiles ---------------- */
 .proto .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
-@media(max-width:1000px){.proto .tiles{grid-template-columns:1fr 1fr}}
+.proto .tiles.t3{grid-template-columns:repeat(3,1fr)}
+@media(max-width:1000px){.proto .tiles,.proto .tiles.t3{grid-template-columns:1fr 1fr}}
 /* A ranked-bar row that opens the detail behind its own number. */
 .proto .rb-row{display:block;border-radius:8px;padding:2px 6px;margin:-2px -6px}
 .proto .rb-row:hover{background:var(--p-surface-2)}
@@ -372,6 +373,12 @@
 /* On a dark card (the dashboard's navy Files Processed card). */
 .proto .on-dark .info-tip .ic{color:rgba(255,255,255,.6)}
 .proto .on-dark .info-tip:hover .ic,.proto .on-dark .info-tip:focus-within .ic{color:#fff}
+/* On a Bordereau Setup tab (components/SetupTabs.tsx). Those tabs are
+   Tailwind, outside .proto, so the icon is sized here; it takes the tab's own
+   text colour — white on the open (dark) tab, grey on the rest. */
+.setup-tab .info-tip{display:inline-flex;vertical-align:middle;outline:none}
+.setup-tab .info-tip .ic{width:14px;height:14px;cursor:help;opacity:.6}
+.setup-tab .info-tip:hover .ic,.setup-tab .info-tip:focus .ic{opacity:1}
 .info-tip-bubble{
   position:fixed;
   width:230px;background:#0E1320;color:#fff;font-size:12px;font-weight:500;line-height:1.5;
@@ -445,6 +452,11 @@
 .proto .fbar-even .fbar-clear{height:36px;padding:0 4px;border:0;background:transparent;font:inherit;font-size:13px;font-weight:600;color:var(--p-primary);cursor:pointer;white-space:nowrap}
 .proto .fbar-even .fbar-clear:hover{text-decoration:underline}
 .proto .fbar-even .fbar-clear:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px;border-radius:4px}
+/* A caption beside its control ("Status [Show all ▾]") — kept visible, on the
+   control's own line, so every piece of the bar sits at the one height. */
+.proto .fbar-even .fbar-pair{display:flex;align-items:center;gap:8px}
+.proto .fbar-even .fbar-cap{font-size:12.5px;font-weight:500;color:var(--p-muted);white-space:nowrap}
+.proto .fbar-even .fbar-select{height:36px;box-sizing:border-box;padding-top:0;padding-bottom:0}
 
 /* A labelled filter: the caption sits ABOVE its control rather than beside it.
    ListFilterBar's bare row works when a page has one or two dropdowns whose

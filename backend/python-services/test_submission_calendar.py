@@ -656,7 +656,7 @@ def test_a_second_file_for_a_period_is_a_corrected_version():
     assert again["version_no"] == 2 and again["kind"] == "corrected"
     e = s.get(db.ExpectedSubmission, first["expected_id"])
     assert e.version_count == 2
-    assert svc._version_label(e) == "Corrected once"
+    assert svc._version_label(e) == "Version 2"
 
 
 def test_a_regenerated_export_never_ticks_a_second_period():

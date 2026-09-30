@@ -136,6 +136,10 @@ export type BoardRow = {
   carrier_name: string | null;
   broker_party_id: number | null;
   broker_name: string | null;
+  /** The contract this period answers to — the one its file was checked
+   *  against, or the programme x broker contract covering the period. */
+  contract_id?: number | null;
+  contract_name?: string | null;
   /** True when the programme has no broker on it — it owes nothing. */
   unassigned: boolean;
   period: string;
@@ -198,7 +202,10 @@ export type SubmissionVersionRow = {
   id: number;
   version_no: number;
   kind: "original" | "corrected";
+  /** The DATE it arrived — what the deadline verdict is decided on. */
   received_at: string | null;
+  /** The exact moment it was uploaded (UTC ISO), for showing the time. */
+  uploaded_at?: string | null;
   received_export_id: number | null;
   source_filename: string | null;
   /** How the period was decided: explicit | date | filename | oldest_open.

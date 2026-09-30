@@ -6,6 +6,8 @@ import {
   Save, Trash2, Sparkles,
 } from "lucide-react";
 import { api, downloadFile, downloadErrorText } from "../api/client";
+import { getHierarchy } from "../api/hierarchy";
+import { readyForSetupUrl } from "../components/ProgrammeStepper";
 import { currentMga, isTenantAdmin } from "../auth";
 import { PageBody, PageHeader } from "../components/Layout";
 import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
@@ -111,9 +113,10 @@ function buildLabel(step: string): string {
  * place. Every link from a programme (the flow, the programme stepper, a
  * broker row, a contract) names the programme in the address, so that is
  * what lets the screen open. Reached any other way while the carrier has no
- * setup at all — typed in, bookmarked — it goes back to the Bordereau Setups
- * list, which says where the first one is made. Once one setup exists the
- * screen opens as it always did.
+ * setup at all AND no programme ready for one (a broker with a settled
+ * contract) — typed in, bookmarked — it goes back to the Bordereau Setups
+ * list, which says what is missing. Once a setup exists, or a programme is
+ * ready for one, the screen opens as it always did.
  */
 export default function DirectSetup() {
   const [params] = useSearchParams();
@@ -125,8 +128,13 @@ export default function DirectSetup() {
   useEffect(() => {
     if (fromProgramme) { setHasAny(true); return; }
     let cancelled = false;
-    api.get<{ total: number }>("/pipelines", { params: { mga, page: 1, page_size: 1 } })
-      .then(r => { if (!cancelled) setHasAny((r.data?.total ?? 0) > 0); })
+    Promise.all([
+      api.get<{ total: number }>("/pipelines", { params: { mga, page: 1, page_size: 1 } }),
+      getHierarchy(),
+    ])
+      .then(([r, h]) => {
+        if (!cancelled) setHasAny((r.data?.total ?? 0) > 0 || !!readyForSetupUrl(h.programmes));
+      })
       // Fail open: a check that could not run must not lock the screen.
       .catch(() => { if (!cancelled) setHasAny(true); });
     return () => { cancelled = true; };
@@ -1894,7 +1902,9 @@ function DirectSetupScreen() {
                   <OutputTemplateState
                     resolving={resolving} resolved={resolved}
                     onCreate={openCreateTemplate}
-                    onDownload={downloadTemplate} />
+                    // The editor below has its own Download Template; one
+                    // button for the same file, not two.
+                    onDownload={reviewTemplateId ? undefined : downloadTemplate} />
                   {reviewTemplateId && (
                     <OutputTemplateEditor
                       key={reviewTemplateId}

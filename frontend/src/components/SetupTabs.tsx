@@ -1,5 +1,5 @@
 // The tabs across a saved Bordereau Setup — the read-only view and its Edit
-// screen share the same ones (Edit leaves out "Needs attention", whose fixes
+// screen share the same ones (Edit leaves out "Missing Items", whose fixes
 // are made on its other tabs), so moving between the two lands on the same
 // section. The open tab lives in the URL (?tab=), which is how View's Edit
 // button carries it across and how a refresh keeps it.
@@ -7,6 +7,7 @@
 // SheetChips is the second level inside Field mapping: one input sheet at a
 // time instead of a stack of collapsed cards.
 import { useSearchParams } from "react-router-dom";
+import { InfoTip } from "./InfoTip";
 
 // "details" and "documents" belong to the unsaved Bordereau Setup screen
 // (pages/DirectSetup.tsx), which splits the same one-card form into tabs;
@@ -21,6 +22,8 @@ export type SetupTab = {
   count?: number;
   /** Amber when the count is something to fix. */
   warn?: boolean;
+  /** What the tab is for, behind an ⓘ on the tab — shown on hover. */
+  info?: string;
   /** Its place in an order worth showing, on the screens that have one. The
    *  saved-setup screens are a set of views and number nothing; the unsaved
    *  Bordereau Setup is a form read front to back, and saying so is half of
@@ -59,7 +62,7 @@ export function SetupTabs({ tabs, current, onChange }: {
         return (
           <button key={t.key} type="button" role="tab" aria-selected={on}
             onClick={() => onChange(t.key)}
-            className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3.5 py-2 text-[13.5px] font-semibold transition-all
+            className={`setup-tab inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3.5 py-2 text-[13.5px] font-semibold transition-all
               ${on ? "bg-ink text-white shadow-sm"
                    : "text-ink-muted hover:bg-white/70 hover:text-ink"}
               focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy`}>
@@ -80,6 +83,7 @@ export function SetupTabs({ tabs, current, onChange }: {
                 {t.count}
               </span>
             )}
+            {t.info && <InfoTip text={t.info} />}
           </button>
         );
       })}
@@ -106,7 +110,7 @@ export function SheetChips({ sheets, current, onPick, unsourced }: {
               focus-visible:outline focus-visible:outline-2 focus-visible:outline-navy`}>
             {s}
             {n > 0 && (
-              <span className="rounded-full bg-amber-50 px-1.5 text-[10.5px] text-amber-700">{n} unsourced</span>
+              <span className="rounded-full bg-amber-50 px-1.5 text-[10.5px] text-amber-700">{n} not matched</span>
             )}
           </button>
         );

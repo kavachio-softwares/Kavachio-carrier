@@ -24,6 +24,7 @@ import {
   type CalendarStatus, type SubmissionVersionRow,
 } from "../api/calendar";
 import { isKavachioAdmin } from "../auth";
+import { parseUtc } from "../utils/date";
 import NotificationBell from "../components/NotificationBell";
 import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
@@ -48,6 +49,15 @@ function fmtDay(iso?: string | null): string {
   const d = new Date(`${iso}T00:00:00`);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
+/** "30 Sept 2026, 14:18" — the moment a file came in, in the viewer's own
+ *  time. A server timestamp (UTC), unlike the date-only strings above. */
+function fmtFullTime(iso?: string | null): string {
+  const d = parseUtc(iso);
+  if (!d) return "—";
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+    + ", " + d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 }
 
 function fmtFull(iso?: string | null): string {
@@ -199,7 +209,7 @@ export default function BordereauCalendar() {
                   + "platform. Read-only here — chasing a late file is each "
                   + "carrier's own call, made from their own calendar."
                 : "What each broker owes you and when, what has actually "
-                  + "turned up, and what you have sent on."} />
+                  + "arrived, and what you have sent on."} />
             </h2>
           </div>
           <div className="actions">
@@ -303,18 +313,18 @@ export default function BordereauCalendar() {
               <thead>
                 <tr>
                   {platform && <th>Carrier</th>}
-                  <th>Programme</th><th>Broker</th><th>Period</th><th>Due by</th>
-                  <th>Turned up</th><th>How it went</th>
+                  <th>Programme</th><th>Broker</th><th>Contract</th><th>Period</th><th>Due by</th>
+                  <th>Received On</th><th>Arrival Status</th>
                   <th>Version</th><th>Action</th>
                 </tr>
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td colSpan={platform ? 9 : 8} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={platform ? 10 : 9} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">Loading…</td></tr>
                 )}
                 {!loading && worstFirst.length === 0 && (
-                  <tr><td colSpan={platform ? 9 : 8} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={platform ? 10 : 9} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">
                     Nothing is due in this month.{" "}
                     <Link className="linkish" to="/programs">Set a programme's frequency →</Link>
@@ -331,6 +341,7 @@ export default function BordereauCalendar() {
                         {platform && <td className="muted">{r.carrier_name ?? "—"}</td>}
                         <td><b>{r.program_name}</b></td>
                         <td className="muted">no broker on it yet</td>
+                        <td className="muted">—</td>
                         <td className="mono">{r.period}</td>
                         <td className="muted">—</td>
                         <td className="muted">—</td>
@@ -358,6 +369,16 @@ export default function BordereauCalendar() {
                       {platform && <td className="muted">{r.carrier_name ?? "—"}</td>}
                       <td>{r.program_name}</td>
                       <td><b>{r.broker_name ?? `Broker ${r.broker_party_id}`}</b></td>
+                      {/* The contract this period answers to: the one its file
+                          was checked against, or — still waiting — the
+                          programme x broker contract covering the period.
+                          Kavachio staff read it only; the contract page is the
+                          carrier's own. */}
+                      <td>
+                        {r.contract_id == null ? <span className="muted">—</span>
+                          : platform ? r.contract_name
+                          : <Link className="linkish" to={`/contracts/${r.contract_id}`}>{r.contract_name}</Link>}
+                      </td>
                       <td className="mono">{r.period}</td>
                       <td className="mono">{fmtDay(r.due_date)}</td>
                       <td className="mono">
@@ -431,8 +452,12 @@ export default function BordereauCalendar() {
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr>{platform && <th>Carrier</th>}<th>Programme</th><th>How often</th><th>Due</th>
-                  <th>Next one</th><th>Covered until</th><th>Action</th></tr>
+                <tr>{platform && <th>Carrier</th>}<th>Programme</th><th>Reporting Frequency</th><th>Due</th>
+                  <th>Next Due Date</th>
+                  <th>Contract Ends On
+                    <InfoTip text={"The day this programme's contract ends. Deadlines are set up to "
+                    + "this date and stop after it."} />
+                  </th><th>Action</th></tr>
               </thead>
               <tbody>
                 {schedules.length === 0 && (
@@ -556,10 +581,10 @@ function VersionPanel({ row, onClose }: {
                 flexWrap: "wrap", marginBottom: 6 }}>
                 <span className={`badge ${v.kind === "original" ? "b-mut" : "b-warn"}`}>
                   <span className="d" />
-                  {v.kind === "original" ? "First version" : `Correction ${v.version_no - 1}`}
+                  {`Version ${v.version_no}`}
                 </span>
                 <span className="mono" style={{ fontSize: 12.5 }}>
-                  arrived {fmtFull(v.received_at)}
+                  arrived {v.uploaded_at ? fmtFullTime(v.uploaded_at) : fmtFull(v.received_at)}
                 </span>
                 {/* "the file said July" and "we assumed July" are different
                     levels of confidence, and an operator checking a wrong month

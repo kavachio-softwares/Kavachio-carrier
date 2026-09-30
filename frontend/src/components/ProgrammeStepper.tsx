@@ -48,6 +48,21 @@ export const STAGE: Record<Step["key"], number> = { programme: 1, brokers: 2, co
 export const flowUrl = (programId: number, key: Step["key"]) =>
   `/programs/${programId}/setup?stage=${STAGE[key]}`;
 
+/** Where the NEXT bordereau setup can be built: the first programme with a
+ *  broker who has a settled contract and no finished setup — the same broker
+ *  the stepper's Setup step (below) sends you to. Null when nothing is ready,
+ *  which is what keeps a Bordereau Setup button shut before a programme has
+ *  what a setup is built from. */
+export function readyForSetupUrl(programmes: HierarchyProgramme[]): string | null {
+  for (const p of programmes) {
+    if (p.status === "inactive") continue;
+    const b = p.brokers.filter(x => onProgramme(x.link_status))
+      .find(x => hasSettledContract(x) && !setupFinished(x.setup_status));
+    if (b) return `/direct/setup?program_id=${p.id}&broker_party_id=${b.id}`;
+  }
+  return null;
+}
+
 export function programmeSteps(p: HierarchyProgramme): Step[] {
   const brokers = p.brokers.filter(b => onProgramme(b.link_status));
   const withContract = brokers.filter(hasSettledContract);

@@ -197,9 +197,9 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
     return () => { dead = true; };
   }, [data]);
 
-  // Collapsed by broker-less channel, not by default: a group you cannot see
-  // into is a group you forget exists.
-  const [collapsed, setCollapsed] = useState<Set<Channel>>(new Set());
+  // Every channel starts collapsed; the header line already says how many
+  // brokers use it, so the detail opens only when someone asks for it.
+  const [expanded, setExpanded] = useState<Set<Channel>>(new Set());
 
   // Two things count: a way in switched off, and an API route with no key.
   // Both look like nothing is wrong and neither will take a file.
@@ -257,20 +257,20 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
           read across. */}
       <div className="card">
         <div className="card-h">
-          <h3>Submission Channels</h3>
+          <h3>Ingestion Channels</h3>
           <span className="sub">Grouped by channel</span>
         </div>
 
         {builtChannels.map(ch => {
           const routes = byChannel.get(ch) ?? [];
-          const open = !collapsed.has(ch);
+          const open = expanded.has(ch);
           const files = routes.reduce((n, r) => n + r.files_this_month, 0);
           const brokers = new Set(routes.map(r => r.broker_party_id)).size;
           return (
             <div className="chan-grp" key={ch}>
               <button type="button" className="chan-hd" aria-expanded={open}
                 aria-controls={`grp-${ch}`}
-                onClick={() => setCollapsed(prev => {
+                onClick={() => setExpanded(prev => {
                   const next = new Set(prev);
                   if (next.has(ch)) next.delete(ch); else next.add(ch);
                   return next;
@@ -299,7 +299,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                     </div>
                   ) : routes.length === 0 ? (
                     <div className="note">
-                      No broker uses this channel yet. Use <b>Add Channel</b> to give
+                      No broker uses this channel yet. Use <b>Configure Ingestion Channel</b> to give
                       one their own address on it.
                     </div>
                   ) : routes.map(r => (
@@ -729,7 +729,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
   }, [brokerId, brokers, channel, mailbox]);
 
   return (
-    <Modal open={open} title="Add Channel" onClose={onClose} size="2xl"
+    <Modal open={open} title="Configure Ingestion Channel" onClose={onClose} size="2xl"
       footer={<div className="proto proto-embed" style={{ display: "flex", gap: 10 }}>
         {created
           ? <button className="btn pri" onClick={onCreated}>Done</button>

@@ -22,7 +22,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
+  Bar, BarChart, CartesianGrid, ComposedChart, Legend, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 
@@ -292,8 +292,17 @@ export function clickedDayIndex(st: any, e: any): number | null {
   return Number.isInteger(i) ? i : null;
 }
 
-export function RunTrend({ data, onDayClick, audience = "platform" }: {
-  data: { date: string; clean: number; flagged: number; not_checked: number }[];
+/** The carrier Home chart's blue line — the same colour there and here. */
+const RESOLVED_LINE = "#3b82f6";
+
+export function RunTrend({ data, onDayClick, audience = "platform", showResolved = false }: {
+  data: { date: string; clean: number; flagged: number; not_checked: number; resolved?: number }[];
+  /** Adds the carrier dashboard's "Resolved Exceptions In Files" line, on its
+   *  own right-hand axis exactly as the carrier Home draws it — a day's
+   *  resolved exceptions run to tens while its files are single digits, so
+   *  one shared axis would flatten the bars. The broker dashboard asked for
+   *  this chart to match the carrier's, so it follows that chart's choice. */
+  showResolved?: boolean;
   /** When given, clicking anywhere in a day's column reports that day. */
   onDayClick?: (date: string) => void;
   /** Which outcomes to draw, and what to call them. See SERIES above. */
@@ -303,12 +312,15 @@ export function RunTrend({ data, onDayClick, audience = "platform" }: {
   // Counted over the series actually DRAWN: on the broker's chart a day of
   // nothing but unchecked files has nothing to show, and "no files have been
   // run" is a truer answer than an empty plot.
-  const any = data.some(d => series.some(b => (d[b.key] ?? 0) > 0));
+  const any = data.some(d => series.some(b => (d[b.key] ?? 0) > 0)
+    || (showResolved && (d.resolved ?? 0) > 0));
   if (!any) return <div className="empty">No files have been run in this period.</div>;
+  const Chart: any = showResolved ? ComposedChart : BarChart;
+  const axisId = showResolved ? { yAxisId: "left" } : {};
   return (
     <div style={{ width: "100%", height: 260 }}>
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}
+        <Chart data={data} margin={{ top: 6, right: showResolved ? -10 : 8, left: -18, bottom: 0 }}
           style={onDayClick ? { cursor: "pointer" } : undefined}
           onClick={onDayClick ? (st: any, e: any) => {
             // The whole column is the target, not just the painted bar, so a
@@ -319,7 +331,11 @@ export function RunTrend({ data, onDayClick, audience = "platform" }: {
           <CartesianGrid vertical={false} stroke={GRID} />
           <XAxis dataKey="date" tickFormatter={shortDay} interval={tickEvery(data.length)}
                  axisLine={false} tickLine={false} tick={axisTick} />
-          <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
+          <YAxis {...axisId} allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
+          {showResolved && (
+            <YAxis yAxisId="right" orientation="right" allowDecimals={false}
+                   axisLine={false} tickLine={false} tick={axisTick} />
+          )}
           <Tooltip {...TIP} cursor={{ fill: "#F7F8FB" }}
                    labelFormatter={dayLabel} />
           <Legend verticalAlign="bottom" height={30} iconType="circle"
@@ -328,11 +344,24 @@ export function RunTrend({ data, onDayClick, audience = "platform" }: {
               split reads without a border darkening the fill. The rounded cap
               belongs to whichever series is on TOP, which differs by audience. */}
           {series.map((b, i) => (
-            <Bar key={b.key} dataKey={b.key} name={b.name} stackId="r" fill={b.fill}
+            <Bar key={b.key} {...axisId} dataKey={b.key} name={b.name} stackId="r" fill={b.fill}
                  maxBarSize={26}
                  radius={i === series.length - 1 ? [3, 3, 0, 0] : undefined} />
           ))}
-        </BarChart>
+          {showResolved && (
+            <Line yAxisId="right" type="monotone" dataKey="resolved"
+                  name="Resolved Exceptions In Files" stroke={RESOLVED_LINE}
+                  strokeWidth={3} activeDot={{ r: 6 }}
+                  // A dot only where something WAS resolved. Over a 30-day
+                  // window a dot on every day is a bead chain along zero that
+                  // hides the days that matter; the carrier's 7-day chart can
+                  // afford one per day, this one cannot. Hover still marks any day.
+                  dot={(pt: any) => pt.value > 0
+                    ? <circle key={pt.key} cx={pt.cx} cy={pt.cy} r={4}
+                              fill="#fff" stroke={RESOLVED_LINE} strokeWidth={2} />
+                    : <g key={pt.key} />} />
+          )}
+        </Chart>
       </ResponsiveContainer>
     </div>
   );

@@ -1626,6 +1626,28 @@ def broker_exceptions(carrier_id: Optional[int] = Query(None),
         }
 
 
+@router.get("/broker/calendar/{expected_id}/versions")
+def broker_calendar_versions(expected_id: int,
+                             p: Principal = Depends(current_principal)):
+    """Every file sent for one period this broker owes — the carrier calendar's
+    version history, for the broker's own calendar.
+
+    404 unless the period is THIS broker's, on a programme it is still on:
+    the carrier's /calendar/{id}/versions is tenant-scoped and refuses a
+    broker token, and must stay that way.
+    """
+    from db import ExpectedSubmission
+    from submission_calendar_service import submission_versions
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        e = s.get(ExpectedSubmission, expected_id)
+        prog_ids = {l.program_id for l in _links(s, bid)}
+        if e is None or e.broker_party_id != bid or e.program_id not in prog_ids:
+            raise HTTPException(404, "period not found")
+        return {"expected_id": expected_id, "period": e.period,
+                "versions": submission_versions(s, expected_id)}
+
+
 @router.get("/broker/runs-on-day")
 def broker_runs_on_day(day: dt.date = Query(..., description="YYYY-MM-DD"),
                        p: Principal = Depends(current_principal)):
@@ -1667,7 +1689,7 @@ def broker_calendar(month: Optional[str] = Query(None),
     Read-only: no heal/sweep here. The carrier's own board and the daily
     scheduler do those writes; a broker opening its calendar should not.
     """
-    from submission_calendar_service import calendar_board
+    from submission_calendar_service import calendar_board, submission_versions
     from db import SubmissionVersion
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
@@ -1690,6 +1712,12 @@ def broker_calendar(month: Optional[str] = Query(None),
             # concern, not something the broker needs read back to it.
             r.pop("contacts", None)
             r["export_id"] = latest.get(r["id"])
+            # When the newest version was actually uploaded — date AND time,
+            # which `latest_received_at` (a date) cannot say. The same value
+            # the Versions panel shows on its newest entry. A month holds a
+            # handful of rows per broker, so one lookup each is cheap.
+            vs = submission_versions(s, r["id"]) if r.get("version_count") else []
+            r["uploaded_at"] = vs[-1].get("uploaded_at") if vs else None
         for sch in board["schedules"]:
             # How many OTHER brokers share a programme is the carrier's to know.
             sch.pop("broker_count", None)

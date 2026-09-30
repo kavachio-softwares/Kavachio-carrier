@@ -3358,6 +3358,13 @@ def program_contract_detail(program_id: int, contract_id: int,
                 # needs that column's data-model label.
                 template_fields = _template_fields_from_structure(
                     tmpl.structure, include_inactive=True)
+                # …but a column removed from the template must not be OFFERED
+                # again. Flagged rather than dropped, so an existing rule on it
+                # still finds its label while the pickers leave it out.
+                _live = {(f["sheet"], f["name"]) for f in
+                         _template_fields_from_structure(tmpl.structure)}
+                template_fields = [{**f, "active": (f["sheet"], f["name"]) in _live}
+                                   for f in template_fields]
                 template = {
                     "id": tmpl.id,
                     "name": tmpl.name,
@@ -3521,12 +3528,17 @@ def program_contract_detail(program_id: int, contract_id: int,
         clause_routing: list[dict] = []
         try:
             routing_rows = s.execute(
+                # The clause's own title rides along (clauses_extracted), so a
+                # clause no rule was made from is named by what it IS — "Fees",
+                # "Termination for Loss of Key Employee" — rather than by the
+                # rule name it never got.
                 text("""
-                    SELECT clause_id, bucket, rule_name, clause_text,
-                           source_page, reason
-                    FROM contract_clause_routing
-                    WHERE contract_id = :cid
-                    ORDER BY bucket, routing_id
+                    SELECT r.clause_id, r.bucket, r.rule_name, r.clause_text,
+                           r.source_page, r.reason, ce.title AS clause_title
+                    FROM contract_clause_routing r
+                    LEFT JOIN clauses_extracted ce ON ce.clause_id = r.clause_id
+                    WHERE r.contract_id = :cid
+                    ORDER BY r.bucket, r.routing_id
                 """),
                 {"cid": contract_id},
             ).mappings().all()
@@ -4929,6 +4941,10 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         _today_d = _cr._today()
         _soon_d = _today_d + timedelta(days=EXPIRING_SOON_DAYS)
         contracts_expiring_soon = 0
+        # Of the contracts it is the carrier's move on, the ones a BROKER has
+        # sent back asking for changes — shown on the Contracts to Sign tile,
+        # where a contract the carrier cannot sign until it answers belongs.
+        contracts_changes_requested = 0
         for _c in waiting_rows:
             _uns = _cr._unsigned_sides(_cr._signatures(s, _c.id))
             _state = _cr._effective_lifecycle(_c)
@@ -4952,6 +4968,8 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
                     contracts_pending_signature += 1
                 else:
                     contracts_pending_review += 1
+                    if _state == "changes_requested":
+                        contracts_changes_requested += 1
 
         # The subtitle beside it, counted in the same units: contracts both
         # sides have signed. An envelope count here would have said "1
@@ -5109,6 +5127,9 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
             # In force and ending within the next 30 days (and the window it
             # was counted over, so the screen never restates the number).
             "contracts_expiring_soon": contracts_expiring_soon,
+            # Broker pushed back; the carrier has to answer. Part of
+            # contracts_pending_review.
+            "contracts_changes_requested": contracts_changes_requested,
             "contracts_expiring_soon_days": EXPIRING_SOON_DAYS,
             # Of those, the ones only the carrier admin can move. The tile uses
             # it to say "2 to sign" rather than leaving the reader to subtract.
@@ -7298,6 +7319,10 @@ def rule_library_classes(
 @router.get("/rule-library")
 def rule_library_list(page: Optional[int] = Query(None, ge=1),
                       page_size: Optional[int] = Query(None, ge=1, le=200),
+                      q: Optional[str] = Query(None),
+                      severity: Optional[str] = Query(None),
+                      status: Optional[str] = Query(None),
+                      class_name: Optional[str] = Query(None),
                       principal: Principal = Depends(require_role("carrier_admin"))):
     """Rules in the caller's scope. kavachio_admin sees the platform's GLOBAL
     rules; a tenant_admin sees only their own tenant's rules (globals are hidden
@@ -7306,24 +7331,47 @@ def rule_library_list(page: Optional[int] = Query(None, ge=1),
     Pagination is OPT-IN and the response shape does not change either way — it
     was already {"items", "total"}. Without `page` every rule comes back, which
     the edit form depends on: there is no GET-one endpoint, so it reads the list
-    and picks its rule out of it by id."""
+    and picks its rule out of it by id.
+
+    Filters are opt-in too (the Rule Library screen's filter row): `q` matches
+    the rule name or its description, `severity` / `class_name` are exact, and
+    `status` is active | disabled. They narrow BEFORE the page slice, so
+    `total` counts what matches. `types` lists every rule type present in
+    scope (unfiltered), legacy class names included, for the Type dropdown."""
+    G = GenericRuleSpecification
     with SessionLocal() as s:
         can_manage = is_carrier_admin_seat(s, principal)
-        q = s.query(GenericRuleSpecification)
+        scoped = s.query(G)
         if principal.is_platform_admin:
-            q = q.filter(GenericRuleSpecification.tenant_id.is_(None))
+            scoped = scoped.filter(G.tenant_id.is_(None))
         else:
-            q = q.filter(GenericRuleSpecification.tenant_id == principal.tenant_id)
-        ordered = q.order_by(GenericRuleSpecification.id.desc())
+            scoped = scoped.filter(G.tenant_id == principal.tenant_id)
+        types = sorted(
+            ({"class_name": c, "label": _rule_label_for_class(c)}
+             for (c,) in scoped.with_entities(G.class_name).distinct() if c),
+            key=lambda t: (t["label"] or t["class_name"]).lower())
+        rq = scoped
+        if q and q.strip():
+            like = f"%{q.strip().lower()}%"
+            rq = rq.filter(or_(func.lower(G.rule_name).like(like),
+                               func.lower(func.coalesce(G.validation_logic, "")).like(like)))
+        if severity:
+            rq = rq.filter(func.lower(G.severity) == severity.strip().lower())
+        if status in ("active", "disabled"):
+            rq = rq.filter(G.is_active.is_(status == "active"))
+        if class_name:
+            rq = rq.filter(G.class_name == class_name)
+        ordered = rq.order_by(G.id.desc())
         if page is None:
             rows = ordered.all()
             return {"items": [_rule_dict(r) for r in rows], "total": len(rows),
-                    "can_manage": can_manage}
+                    "can_manage": can_manage, "types": types}
         size = page_size or 10
-        total = q.order_by(None).count()
+        total = rq.order_by(None).count()
         rows = ordered.offset((page - 1) * size).limit(size).all()
         return {"items": [_rule_dict(r) for r in rows], "total": int(total),
-                "page": page, "page_size": size, "can_manage": can_manage}
+                "page": page, "page_size": size, "can_manage": can_manage,
+                "types": types}
 
 
 @router.post("/rule-library")

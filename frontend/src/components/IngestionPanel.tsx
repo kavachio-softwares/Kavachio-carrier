@@ -186,10 +186,10 @@ export function IngestionPanel({ open, rows, onClose, onChanged }: {
     <>
       <div className={`scrim${open ? " on" : ""}`} onClick={onClose} />
       <aside className={`drawer${open ? " on" : ""}`} role="dialog" aria-modal="true"
-        aria-hidden={!open} aria-label="Processing Status">
+        aria-hidden={!open} aria-label="Ingestion Panel">
         <div className="drawer-h">
           <div style={{ minWidth: 0 }}>
-            <h4>Processing Status</h4>
+            <h4>Ingestion Panel</h4>
             <div className="ref" style={{ fontFamily: "inherit", fontSize: 12 }}>
               {attentionAll.length
                 ? `${attentionAll.length} need${attentionAll.length === 1 ? "s" : ""} you`

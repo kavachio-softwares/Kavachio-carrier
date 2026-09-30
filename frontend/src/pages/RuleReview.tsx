@@ -4,13 +4,69 @@ import {
   getUploadExceptions, getDownloadExceptions, type UploadExceptionsResponse,
 } from "../api/validation";
 import { groupByRule, tallyDecisions, type RuleGroup } from "../components/ExceptionCards";
-import ExceptionDecisionTable from "../components/ExceptionDecisionTable";
+import ExceptionDecisionTable, { recoParts } from "../components/ExceptionDecisionTable";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { canAmendExceptions } from "../auth";
 import RuleExplanationBlock, { hasExplanation } from "../components/RuleExplanation";
 
 const SEV_SPINE: Record<string, string> = { critical: "crit", warning: "warn", info: "info" };
 const SEV_BADGE: Record<string, string> = { critical: "b-crit", warning: "b-warn", info: "b-info" };
 const SEV_LABEL: Record<string, string> = { critical: "Critical", warning: "Warning", info: "Info" };
+
+/** Remembers that this browser has seen the full rule details once, so they
+ *  open on the first visit and start collapsed after that. */
+const SEEN_KEY = "kav.ruleDetailsSeen";
+function detailsSeen(): boolean {
+  try { return localStorage.getItem(SEEN_KEY) === "1"; } catch { return true; }
+}
+function markDetailsSeen() {
+  try { localStorage.setItem(SEEN_KEY, "1"); } catch { /* storage blocked */ }
+}
+
+/** The two lines a first-time reviewer actually needs, built from THIS file's
+ *  rows: what the flagged value is, what it should be, and which button to
+ *  press. The rule's full explanation stays one click away — nothing is lost,
+ *  it just no longer has to be read before anything can be done.
+ *
+ *  Falls back to the rule's own "what's wrong" sentence whenever the rows do
+ *  not support a precise sentence (different recommendations per row, a format
+ *  rule with no value to recommend), rather than guessing. */
+function ruleSummary(group: RuleGroup, canAct: boolean): { problem: string; action: string | null } | null {
+  const items = group.items;
+  if (items.length === 0) return null;
+  const n = group.count;
+  const who = `${n} ${n === 1 ? "policy has" : "policies have"}`;
+  const field = group.fieldPath ?? "this field";
+  const allows = group.explanation?.origin === "contract" ? "the contract only allows" : "the rule only allows";
+
+  const actuals = [...new Set(items.map(e => (e.actual_value ?? "").toString().trim()))];
+  const recos = items.map(e => recoParts(e));
+  const recoVals = [...new Set(recos.map(r => r?.value ?? ""))];
+  const reco = recoVals.length === 1 ? recos[0] : null;
+  // A value the reviewer can accept as-is: one per rule, not a shape, not a
+  // list of choices.
+  const fixed = reco && !reco.illustrative && !reco.note && !reco.value.includes(" · ") ? reco.value : null;
+
+  let problem: string;
+  if (actuals.length === 1 && actuals[0] === "") {
+    problem = `${who} no ${field}.`;
+  } else if (actuals.length === 1 && fixed) {
+    problem = `${who} ${field} "${actuals[0]}", but ${allows} "${fixed}".`;
+  } else if (actuals.length === 1) {
+    problem = `${who} ${field} "${actuals[0]}", which is not allowed.`;
+  } else {
+    problem = `${who} a ${field} that is not allowed.`;
+  }
+  if (!fixed && actuals.length !== 1 && group.explanation?.problem) {
+    problem = `${n} ${n === 1 ? "policy" : "policies"}: ${group.explanation.problem}`;
+  }
+
+  const action = !canAct ? null
+    : fixed ? `Approve all to replace it with "${fixed}", or Dismiss if the bordereau is right.`
+    : reco && reco.value.includes(" · ") ? "Choose the right value for each row with Fix, or Dismiss if the bordereau is right."
+    : "Use Fix to enter the right value, or Dismiss if the bordereau is right.";
+  return { problem, action };
+}
 
 /** SCREEN B — Review table for one rule. route: /uploads/:uploadId/exceptions/rule/:ruleId */
 export default function RuleReview() {
@@ -24,6 +80,10 @@ export default function RuleReview() {
   // The back-navigation "Fix & Validate" reminder is gated on this so it never
   // fires for a look-only visit to a rule whose decisions were saved earlier.
   const [savedThisSession, setSavedThisSession] = useState(false);
+  // Full rule text: open the first time this browser sees a rule, collapsed
+  // after that — the summary above it is what gets read every time.
+  const [showDetails, setShowDetails] = useState(() => !detailsSeen());
+  useEffect(() => { markDetailsSeen(); }, []);
 
   async function load() {
     setErr(null);
@@ -133,13 +193,46 @@ export default function RuleReview() {
               </div>
               {/* What the rule requires, why these rows failed and what to do —
                   the contract wording sits behind "Where this comes from". */}
-              {hasExplanation(group.explanation) || group.contractClause ? (
-                <RuleExplanationBlock
-                  explanation={group.explanation}
-                  clauseFallback={group.contractClause}
-                  clausePage={group.clausePage}
-                />
-              ) : (
+              {hasExplanation(group.explanation) || group.contractClause ? (() => {
+                const sum = ruleSummary(group, canAmendExceptions());
+                return (
+                  <>
+                    {/* Chips stay on top: what KIND of rule this is. */}
+                    <RuleExplanationBlock explanation={group.explanation} chipsOnly />
+                    {/* Layer 1 — read every time. */}
+                    {sum && (
+                      <div style={{ marginTop: 10 }}>
+                        <div style={{ fontSize: 15, fontWeight: 600, color: "var(--p-ink)", lineHeight: 1.45 }}>
+                          {sum.problem}
+                        </div>
+                        {sum.action && (
+                          <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 4 }}>
+                            {sum.action}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {/* Layer 2 — every word of the rule, one click away. */}
+                    <button type="button" className="linkish"
+                      onClick={() => setShowDetails(o => !o)}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 10,
+                               background: "none", border: 0, padding: 0, fontSize: 12.5, cursor: "pointer" }}>
+                      {showDetails ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                      {showDetails ? "Hide rule details" : "Show rule details"}
+                    </button>
+                    {showDetails && (
+                      <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--p-border)" }}>
+                        <RuleExplanationBlock
+                          explanation={group.explanation}
+                          clauseFallback={group.contractClause}
+                          clausePage={group.clausePage}
+                          noChips
+                        />
+                      </div>
+                    )}
+                  </>
+                );
+              })() : (
                 group.errorMessage && (
                   <div style={{ color: "var(--p-muted)", fontSize: 13 }}>{group.errorMessage}</div>
                 )

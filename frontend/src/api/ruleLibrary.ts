@@ -47,11 +47,18 @@ export async function listRules() {
 /** One page of them. Kept separate from listRules above, which must go on
  *  returning every rule: getRule below has no GET-one endpoint to call and
  *  finds its rule by reading the whole list. */
-export async function listRulesPaged(page: number, pageSize: number) {
+/** The Rule Library screen's filters. Empty values are not sent. */
+export type RuleFilters = { q?: string; severity?: string; status?: string; class_name?: string };
+
+export async function listRulesPaged(page: number, pageSize: number, filters: RuleFilters = {}) {
   // can_manage: false for a carrier user, who may read the library but not
-  // change it.
-  const r = await api.get<{ items: Rule[]; total: number; can_manage?: boolean }>(
-    "/rule-library", { params: { page, page_size: pageSize } });
+  // change it. `types`: every rule type in scope, for the Type filter.
+  const params: Record<string, string | number> = { page, page_size: pageSize };
+  for (const [k, v] of Object.entries(filters)) if (v) params[k] = v;
+  const r = await api.get<{
+    items: Rule[]; total: number; can_manage?: boolean;
+    types?: { class_name: string; label: string | null }[];
+  }>("/rule-library", { params });
   return r.data;
 }
 

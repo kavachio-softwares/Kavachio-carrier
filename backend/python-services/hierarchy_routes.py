@@ -209,14 +209,18 @@ class BrokerAssignBody(BaseModel):
 
 
 @router.get("/programs/{program_id}/brokers")
-def programme_brokers(program_id: int, principal: Principal = Depends(current_principal)):
+def programme_brokers(program_id: int, mga: Optional[str] = None,
+                      principal: Principal = Depends(current_principal)):
     """Every broker on this programme, with how much each one holds.
 
     The counts are what make the screen answerable: "can I take this broker
     off?" is really "what happens to their contracts?".
+
+    `mga` names the carrier for Kavachio staff (read-only, from a carrier's
+    Programs & Contracts tab); resolve_tenant_id ignores it for everyone else.
     """
     with SessionLocal() as s:
-        tid = resolve_tenant_id(s, principal)
+        tid = resolve_tenant_id(s, principal, mga)
         _assert_programme(s, program_id, principal, tid)
 
         rows = (
@@ -442,8 +446,12 @@ def broker_directory(q: Optional[str] = None,
                      page: Optional[int] = Query(None, ge=1),
                      page_size: Optional[int] = Query(None, ge=1, le=200),
                      mine: bool = Query(False),
+                     mga: Optional[str] = None,
                      principal: Principal = Depends(current_principal)):
     """Every broker this carrier works with, and how far each one reaches.
+
+    `mga` names the carrier for Kavachio staff (read-only, from a carrier's
+    Programs & Contracts tab); resolve_tenant_id ignores it for everyone else.
 
     Sourced from program_broker, not from party.tenant_id: a broker the carrier
     did not create still belongs on this list the moment it is put on one of
@@ -467,7 +475,7 @@ def broker_directory(q: Optional[str] = None,
     colleague's broker must stay assignable.
     """
     with SessionLocal() as s:
-        tid = resolve_tenant_id(s, principal)
+        tid = resolve_tenant_id(s, principal, mga)
 
         links = (
             s.query(ProgramBroker, Program, Party)

@@ -12,7 +12,7 @@ import { Modal } from "./ui/Modal";
 import { ClauseText } from "./ClauseText";
 import {
   ClauseRouting, ContractDetailT, ContractRule, VariationDecision, VariationRemoval,
-  errText,
+  clauseHeading, errText,
 } from "../utils/directSetup";
 
 // Templates whose matching is widened by a surface SPELLING of a value the
@@ -251,7 +251,9 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
   const rules = detail.rules ?? [];
   const terms = detail.terms ?? [];
   const maps = detail.field_mappings ?? [];
+  // Columns removed from the template are never offered (active false).
   const fieldOptions = Array.from(new Set((detail.output_template?.fields ?? [])
+    .filter(f => f.active !== false)
     .map(f => f.name).filter(Boolean)));
   // Rule-bearing clauses that couldn't be auto-mapped to any output field,
   // split so the contract's own come first and the house rules fold away.
@@ -933,7 +935,7 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
         <div>
           <p className="mb-2 text-[12.5px] text-ink-muted">
             Rules check your <b className="text-ink">BDX output columns</b>, not the broker's own column
-            names. Each broker's file is first mapped into your BDX layout on the Field mapping tab, so
+            names. Each broker's file is first mapped into your BDX layout on the Map Input &amp; Output Columns tab, so
             one rule works for every broker.
           </p>
           <div className="overflow-x-auto rounded-md border border-border bg-white">
@@ -1260,7 +1262,8 @@ function ReviewClauseRow({ item, n, fieldOptions, onResolve, readOnly = false }:
       </span>
       <div className="min-w-0">
         <div className="text-[13.5px] font-semibold text-ink">
-          {item.rule_name || "Unmapped Clause"}
+          {clauseHeading(item)}
+          <span className="ml-2 inline-flex rounded-full bg-amber-50 px-2 py-0.5 align-middle text-[10.5px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">Unmapped Clause</span>
           {item.source_page ? <span className="ml-1.5 text-[11px] font-normal text-ink-soft">page {item.source_page}</span> : null}
         </div>
         {item.reason && <p className="mt-0.5 text-[12.5px] text-ink-muted">{item.reason}</p>}

@@ -124,15 +124,13 @@ export default function Programs() {
                 <Layers size={20} className="text-ink-soft" />
               </div>
               <p className="text-sm font-medium">No programmes yet</p>
+              {/* No second button here — Configure Program at the top right
+                  is the one way to start. */}
               <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">
-                Create one, then put at least one broker on it — a programme with
-                no broker cannot hold a contract.
+                Use <b className="font-medium text-ink">Configure Program</b> at the
+                top right to create one, then put at least one broker on it — a
+                programme with no broker cannot hold a contract.
               </p>
-              <div className="mt-4">
-                <Button onClick={() => nav("/programs/new")}>
-                  <Plus size={15} /> Configure Program
-                </Button>
-              </div>
             </div>
           </Card>
         )}

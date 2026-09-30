@@ -339,6 +339,29 @@ def add_field(structure: dict, sheet_name: str, field: dict,
         name = str(field.get("display_name") or "").strip()
         if not name:
             return structure, "a new field needs a name"
+        # Adding back a column that was REMOVED brings that column back rather
+        # than making a second one of the same name beside it: the removed one
+        # is still in the list (inactive, keeping its key and its place), and a
+        # duplicate would leave two columns answering to one heading.
+        lowered = name.lower()
+        removed = next((c for c in cols if c.get("active") is False and
+                        str(c.get("display_name") or c.get("column_name") or "")
+                        .strip().lower() == lowered), None)
+        if removed is not None:
+            removed["active"] = True
+            if position is not None:
+                ordered = sorted(
+                    (c for c in cols if c is not removed),
+                    key=lambda c: (c.get("display_order")
+                                   if c.get("display_order") is not None
+                                   else c.get("column_index") or 0))
+                live = [c for c in ordered if c.get("active", True)]
+                at = max(0, min(int(position), len(live)))
+                slot = ordered.index(live[at]) if at < len(live) else len(ordered)
+                ordered.insert(slot, removed)
+                for i, c in enumerate(ordered):
+                    c["display_order"] = i
+            return structure, None
         col = {
             "column_index": max([c.get("column_index") or 0 for c in cols], default=-1) + 1,
             "column_name": name,

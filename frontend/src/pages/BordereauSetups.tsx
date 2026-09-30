@@ -9,6 +9,8 @@ import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { InfoTip } from "../components/InfoTip";
+import { getHierarchy } from "../api/hierarchy";
+import { readyForSetupUrl } from "../components/ProgrammeStepper";
 
 type SetupContract = { contract_id: number; sheet_key: string | null; filename: string | null };
 type Setup = {
@@ -106,15 +108,28 @@ export default function BordereauSetups() {
     if (!loading && !filtersActive) setHasAny(total > 0);
   }, [loading, filtersActive, total]);
 
-  // Disabled until the first setup exists: the first one is made from the
-  // programme (Configure Program, step 4), where the programme, its broker and
-  // the contract are already in place — not from here, where none of them are.
+  // A programme ready for its setup — a broker on it with a settled contract
+  // and no finished setup. Read from the same /hierarchy payload the
+  // Programmes list works its steps out from, so the two screens agree.
+  const [readyUrl, setReadyUrl] = useState<string | null>(null);
+  useEffect(() => {
+    getHierarchy().then(h => setReadyUrl(readyForSetupUrl(h.programmes)))
+      .catch(() => setReadyUrl(null));
+  }, [mga]);
+
+  // Shut only while there is nothing to build a setup FROM: no setup yet and
+  // no programme with a broker and a settled contract. Once a programme is
+  // ready it opens, and — while there is no setup yet — goes straight to that
+  // programme and broker, the same place the Programmes list's button goes.
   const noSetups = hasAny === false;
+  const shut = noSetups && !readyUrl;
   const newSetup = (
-    <button type="button" className="btn pri" onClick={() => nav("/direct/setup")}
-      disabled={noSetups}
-      title={noSetups
-        ? "Create your first setup from Programmes → Configure Program (step 4)."
+    <button type="button" className="btn pri"
+      onClick={() => nav(noSetups && readyUrl ? readyUrl : "/direct/setup")}
+      disabled={shut}
+      title={shut
+        ? "Finish a programme first — it needs a broker and a signed contract "
+          + "(Programmes → Configure Program)."
         : undefined}>
       <FileSpreadsheet size={15} /> Bordereau Setup
     </button>
@@ -164,9 +179,12 @@ export default function BordereauSetups() {
                 <Boxes size={26} style={{ margin: "0 auto 10px", display: "block" }} />
                 No setups yet.
                 <div className="sub" style={{ marginTop: 6 }}>
-                  Your first setup is created from{" "}
-                  <Link to="/programs" className="linkish">Programmes</Link> — it is
-                  the last step of configuring a programme.
+                  {readyUrl
+                    ? <>A programme is ready for its setup — use <b>Bordereau
+                        Setup</b> at the top right.</>
+                    : <>A setup needs a programme with a broker and a signed
+                        contract. Finish one in{" "}
+                        <Link to="/programs" className="linkish">Programmes</Link> first.</>}
                 </div>
               </div>
             ) : total === 0 && status === "pending_approval"

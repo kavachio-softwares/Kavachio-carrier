@@ -9,6 +9,7 @@ import { fmtStamp } from "../utils/date";
 import Card from "../components/ui/Card";
 import { PageBody, PageHeader } from "../components/Layout";
 import { LoadingOverlay } from "../components/Busy";
+import { clauseHeading } from "../utils/directSetup";
 
 type Rule = {
   validation_rule_id: number;
@@ -59,6 +60,7 @@ type ClauseRouting = {
   clause_text?: string | null;
   source_page?: number | null;
   reason?: string | null;
+  clause_title?: string | null;
 };
 
 const SEV: Record<string, string> = {
@@ -134,6 +136,8 @@ export default function ContractDetail() {
     const seen = new Set<string>();
     const out: string[] = [];
     for (const f of data?.output_template?.fields ?? []) {
+      // A column removed from the template is not offered again.
+      if ((f as { active?: boolean }).active === false) continue;
       if (f.name && !seen.has(f.name)) { seen.add(f.name); out.push(f.name); }
     }
     return out.sort((a, b) => a.localeCompare(b));
@@ -474,7 +478,8 @@ function ReviewQueueRow({
       <div className="flex items-center gap-2">
         <AlertTriangle size={13} className="text-amber-500 shrink-0" />
         <span className="font-medium text-sm">
-          {item.rule_name || "Unmapped Clause"}
+          {clauseHeading(item)}
+          <span className="ml-2 inline-flex rounded-full bg-amber-50 px-2 py-0.5 align-middle text-[10.5px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">Unmapped Clause</span>
         </span>
         {item.source_page && (
           <span className="text-[11px] text-ink-soft">p.{item.source_page}</span>

@@ -3,7 +3,9 @@ import { useNavigate } from "react-router-dom";
 import { isKavachioAdmin } from "../auth";
 import { Rule, listRulesPaged, toggleRule, deleteRule } from "../api/ruleLibrary";
 import { useServerList } from "../hooks/useServerList";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { Pagination } from "../components/Pagination";
+import { ListFilterBar } from "../components/ListFilterBar";
 import { InfoTip } from "../components/InfoTip";
 import { Layers, RefreshCw, ShieldCheck } from "lucide-react";
 
@@ -38,20 +40,34 @@ export default function RuleLibrary() {
   // so nobody sees a button flash that they cannot use.
   const [canManage, setCanManage] = useState(false);
 
+  // Filters — applied by the server before the page slice, so the pager counts
+  // only what matches. The search is debounced: one request, not one per key.
+  const [q, setQ] = useState("");
+  const [type, setType] = useState("");
+  const [severity, setSeverity] = useState("");
+  const [status, setStatus] = useState("");
+  const dq = useDebouncedValue(q, 300);
+  const filtersActive = q.trim() !== "" || !!type || !!severity || !!status;
+  const clearFilters = () => { setQ(""); setType(""); setSeverity(""); setStatus(""); };
+  const [types, setTypes] = useState<{ class_name: string; label: string | null }[]>([]);
+
   // One page, counted by the server. The edit form still reads the WHOLE list
   // through listRules(): there is no GET-one endpoint, so it finds its rule by
   // id out of the full set — which is why paging here had to be opt-in.
   const {
     items: rows, total, page, pageCount, loading, setPage, reload,
   } = useServerList<Rule>(
-    (pg, size) => listRulesPaged(pg, size).then(d => {
+    (pg, size) => listRulesPaged(pg, size, {
+      q: dq.trim(), severity, status, class_name: type,
+    }).then(d => {
       setCanManage(d.can_manage !== false);
+      if (d.types) setTypes(d.types);
       return d;
     }).catch(e => {
       setErr(e?.response?.data?.detail ?? "Couldn't load rules. Please try again.");
       throw e;
     }),
-    "", PAGE_SIZE,
+    [dq.trim(), type, severity, status].join("|"), PAGE_SIZE,
   );
 
   async function onToggle(r: Rule) {
@@ -143,6 +159,21 @@ export default function RuleLibrary() {
         )}
 
         <div className="card">
+          <ListFilterBar
+            search={{ value: q, onChange: setQ, placeholder: "Search rules…" }}
+            selects={[
+              { key: "type", ariaLabel: "Filter by type", value: type, onChange: setType,
+                options: [{ value: "", label: "All types" },
+                  ...types.map(t => ({ value: t.class_name, label: t.label || t.class_name }))] },
+              { key: "severity", ariaLabel: "Filter by severity", value: severity, onChange: setSeverity,
+                options: [{ value: "", label: "All severities" },
+                  { value: "critical", label: "Critical" }, { value: "major", label: "Major" },
+                  { value: "minor", label: "Minor" }] },
+              { key: "status", ariaLabel: "Filter by status", value: status, onChange: setStatus,
+                options: [{ value: "", label: "All statuses" },
+                  { value: "active", label: "Active" }, { value: "disabled", label: "Disabled" }] },
+            ]}
+            onClear={clearFilters} active={filtersActive} />
           <div className="tbl-wrap">
             <table>
               <thead>
@@ -183,7 +214,10 @@ export default function RuleLibrary() {
                 })}
               </tbody>
             </table>
-            {!loading && rows.length === 0 && (
+            {!loading && rows.length === 0 && filtersActive && (
+              <div className="empty">No rules match these filters.</div>
+            )}
+            {!loading && rows.length === 0 && !filtersActive && (
               <div className="empty">
                 {canManage
                   ? <>No rules yet. {platform ? "Add a platform-wide check" : "Create your first rule"} to get started.</>

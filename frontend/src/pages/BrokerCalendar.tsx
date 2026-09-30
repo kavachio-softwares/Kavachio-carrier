@@ -14,13 +14,16 @@
 // defined as `.proto .x` in proto.css.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { CalendarDays } from "lucide-react";
-import { getBrokerCalendar, type BrokerCalendar as Board,
+import { CalendarDays, X } from "lucide-react";
+import { getBrokerCalendar, getBrokerCalendarVersions, type BrokerCalendar as Board,
          type BrokerCalendarRow } from "../api/broker";
+import type { SubmissionVersionRow } from "../api/calendar";
+import { ExportFileViewer } from "../components/ExportFileViewer";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { canAccessPath } from "../access";
 import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
+import { fmtDateTime } from "../utils/date";
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
@@ -56,13 +59,13 @@ function daysUntil(iso: string | null): number | null {
 }
 
 const DONE = new Set(["on_time", "received_late"]);
-const UPCOMING = new Set(["scheduled", "due_soon", "due_today"]);
 
-/** What the row says, in the broker's words rather than the carrier's. */
+/** "Arrival Status" — the carrier calendar's wording, so both sides read one
+ *  row the same way. */
 function statusBadge(r: BrokerCalendarRow): { label: string; cls: string } {
   switch (r.status) {
     case "overdue":
-      return { label: `${plural(r.days_over ?? 0, "day")} overdue`, cls: "b-crit" };
+      return { label: `${plural(r.days_over ?? 0, "day")} over, nothing yet`, cls: "b-crit" };
     case "due_today":
       return { label: "Due today", cls: "b-warn" };
     case "due_soon": {
@@ -72,16 +75,14 @@ function statusBadge(r: BrokerCalendarRow): { label: string; cls: string } {
     case "scheduled":
       return { label: "Not due yet", cls: "b-mut" };
     case "on_time":
-      return { label: "Done on time", cls: "b-ok" };
+      return { label: "On time", cls: "b-ok" };
     case "received_late":
-      return { label: r.days_late != null ? `Done ${plural(r.days_late, "day")} late` : "Done late",
+      return { label: r.days_late != null ? `${plural(r.days_late, "day")} late` : "Arrived late",
                cls: "b-warn" };
     default:
       return { label: String(r.status), cls: "b-mut" };
   }
 }
-
-type Filter = "all" | "pending" | "upcoming" | "done";
 
 // Same page size as the carrier's calendar.
 const PAGE_SIZE = 10;
@@ -97,7 +98,11 @@ export default function BrokerCalendar() {
   const [month, setMonth] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
+  // The period whose version history is open — one at a time, as on the
+  // carrier's calendar.
+  const [openRow, setOpenRow] = useState<BrokerCalendarRow | null>(null);
+  // The period whose processed file is open in the viewer.
+  const [viewRow, setViewRow] = useState<BrokerCalendarRow | null>(null);
   const [schedPage, setSchedPage] = useState(1);
   const canProcess = canAccessPath("/broker/bordereau");
 
@@ -118,12 +123,8 @@ export default function BrokerCalendar() {
   useEffect(() => { load(askedMonth); }, [load, askedMonth]);
 
   const rows = board?.rows ?? [];
-  const counts = useMemo(() => ({
-    due: rows.length,
-    done: rows.filter(r => DONE.has(r.status)).length,
-    pending: rows.filter(r => r.status === "overdue").length,
-    upcoming: rows.filter(r => UPCOMING.has(r.status)).length,
-  }), [rows]);
+  // The server's counts — the same four the carrier's calendar shows.
+  const counts = board?.counts;
 
   // What needs doing first: overdue, then due today, then soonest; done last.
   const sorted = useMemo(() => {
@@ -138,11 +139,7 @@ export default function BrokerCalendar() {
     });
   }, [rows]);
 
-  const shown = sorted.filter(r =>
-    filter === "all" ? true
-    : filter === "done" ? DONE.has(r.status)
-    : filter === "pending" ? r.status === "overdue"
-    : UPCOMING.has(r.status));
+  const shown = sorted;
 
   const schedules = board?.schedules ?? [];
   const schedPageCount = Math.max(1, Math.ceil(schedules.length / PAGE_SIZE));
@@ -154,12 +151,6 @@ export default function BrokerCalendar() {
   const showCarrier = carrierId == null;
   const cols = showCarrier ? 8 : 7;
 
-  const chip = (key: Filter, label: string, n: number) => (
-    <button type="button" className={`btn sm${filter === key ? " pri" : ""}`}
-            onClick={() => setFilter(key)}>
-      {label} ({n})
-    </button>
-  );
 
   return (
     <div className="proto">
@@ -173,33 +164,34 @@ export default function BrokerCalendar() {
                 + "that is when your carrier sees it arrive."} />
             </h2>
           </div>
-          {canProcess && (
-            <div className="actions">
+          <div className="actions">
+            {/* The carrier's "Files received →", from the sending side. */}
+            <Link className="btn" to="/broker/runs">Processed files →</Link>
+            {canProcess && (
               <Link className="btn pri" to="/broker/bordereau">＋ Process Bordereau</Link>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
 
-        {/* ---- the four headline counts, each one a filter ---------------- */}
+        {/* ---- the four headline counts, as on the carrier's calendar ------ */}
         <div className="tiles" style={{ marginBottom: 18 }}>
-          <div className="tile" style={{ cursor: "pointer" }} onClick={() => setFilter("all")}>
+          <div className="tile">
             <div className="k">Due this month</div>
-            <div className="v">{board ? counts.due : "—"}</div>
+            <div className="v">{counts?.due ?? "—"}</div>
           </div>
-          <div className="tile" style={{ cursor: "pointer" }} onClick={() => setFilter("done")}>
-            <div className="k">Done</div>
-            <div className="v" style={{ color: "var(--p-ok)" }}>{board ? counts.done : "—"}</div>
+          <div className="tile">
+            <div className="k">Sent on time</div>
+            <div className="v" style={{ color: "var(--p-ok)" }}>{counts?.on_time ?? "—"}</div>
           </div>
-          <div className={`tile${counts.pending > 0 ? " alert" : ""}`}
-               style={{ cursor: "pointer" }} onClick={() => setFilter("pending")}>
-            <div className="k">Overdue</div>
-            <div className="v" style={{ color: "var(--p-crit)" }}>{board ? counts.pending : "—"}</div>
+          <div className="tile">
+            <div className="k">Sent late</div>
+            <div className="v" style={{ color: "var(--p-warn)" }}>{counts?.late ?? "—"}</div>
           </div>
-          <div className="tile" style={{ cursor: "pointer" }} onClick={() => setFilter("upcoming")}>
-            <div className="k">Upcoming</div>
-            <div className="v">{board ? counts.upcoming : "—"}</div>
+          <div className={`tile${(counts?.never ?? 0) > 0 ? " alert" : ""}`}>
+            <div className="k">Never sent</div>
+            <div className="v" style={{ color: "var(--p-crit)" }}>{counts?.never ?? "—"}</div>
           </div>
         </div>
 
@@ -211,7 +203,7 @@ export default function BrokerCalendar() {
             <InfoTip text="Every file you owe, by the date it is due." />
             <div className="right">
               <select className="fbar-select" value={month ?? ""}
-                onChange={e => { setFilter("all"); load(e.target.value); }}
+                onChange={e => load(e.target.value)}
                 disabled={loading || (board?.months?.length ?? 0) === 0}>
                 {(board?.months ?? []).map(m =>
                   <option key={m} value={m}>{fmtMonth(m)}</option>)}
@@ -220,20 +212,13 @@ export default function BrokerCalendar() {
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 8, padding: "12px 20px 4px", flexWrap: "wrap" }}>
-            {chip("all", "All", counts.due)}
-            {chip("pending", "Overdue", counts.pending)}
-            {chip("upcoming", "Upcoming", counts.upcoming)}
-            {chip("done", "Done", counts.done)}
-          </div>
-
           <div className="tbl-wrap">
             <table>
               <thead>
                 <tr>
                   {showCarrier && <th>Carrier</th>}
                   <th>Programme</th><th>Period</th><th>Due by</th>
-                  <th>Processed</th><th>Status</th><th>Version</th><th>Action</th>
+                  <th>Sent On</th><th>Arrival Status</th><th>Version</th><th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -244,9 +229,7 @@ export default function BrokerCalendar() {
                 {!loading && shown.length === 0 && (
                   <tr><td colSpan={cols} className="muted"
                     style={{ padding: "18px 12px", textAlign: "center" }}>
-                    {rows.length === 0
-                      ? "Nothing is due from you in this month."
-                      : "No files in this group."}
+                    Nothing is due from you in this month.
                   </td></tr>
                 )}
                 {!loading && shown.map(r => {
@@ -268,7 +251,7 @@ export default function BrokerCalendar() {
                         <span className={`badge ${b.cls}`}><span className="d" />{b.label}</span>
                         {/* The carrier's reminder, read back to the one it was
                             about — the most direct "this one is wanted" there is. */}
-                        {r.chase_count > 0 && !done && (
+                        {r.chase_count > 0 && (
                           <div className="sub" style={{ marginTop: 3 }}>
                             carrier reminded you {r.chase_count > 1 ? `${r.chase_count}× · ` : ""}
                             {fmtDay(r.chased_at)}
@@ -279,21 +262,30 @@ export default function BrokerCalendar() {
                         {r.version_count === 0
                           ? <span className="muted">—</span>
                           : (
-                            <span className={`badge ${r.version_count > 1 ? "b-warn" : "b-mut"}`}>
-                              <span className="d" />{r.version_label}
-                            </span>
+                            <>
+                              <span className={`badge ${r.version_count > 1 ? "b-warn" : "b-mut"}`}>
+                                <span className="d" />{r.version_label}
+                              </span>
+                              {r.uploaded_at && (
+                                <div className="sub" style={{ marginTop: 3 }}>
+                                  uploaded {fmtDateTime(r.uploaded_at)}
+                                </div>
+                              )}
+                            </>
                           )}
                       </td>
                       <td style={{ whiteSpace: "nowrap" }}>
+                        <span style={{ display: "inline-flex", gap: 10 }}>
+                        {r.version_count > 0 && (
+                          <span className="linkish" onClick={() => setOpenRow(r)}>Versions →</span>
+                        )}
                         {done && r.export_id != null && (
-                          <Link className="linkish"
-                            to={`/uploads/${r.export_id}/exceptions?download=${r.export_id}&from=broker`}>
-                            View file →
-                          </Link>
+                          <span className="linkish" onClick={() => setViewRow(r)}>View file →</span>
                         )}
                         {!done && canProcess && r.status !== "scheduled" && (
                           <Link className="linkish" to="/broker/bordereau">Process →</Link>
                         )}
+                        </span>
                       </td>
                     </tr>
                   );
@@ -312,8 +304,12 @@ export default function BrokerCalendar() {
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr>{showCarrier && <th>Carrier</th>}<th>Programme</th><th>How often</th>
-                  <th>Due</th><th>Next one</th><th>Covered until</th></tr>
+                <tr>{showCarrier && <th>Carrier</th>}<th>Programme</th><th>Reporting Frequency</th>
+                  <th>Due</th><th>Next Due Date</th>
+                  <th>Contract Ends On
+                    <InfoTip text={"The day this programme's contract ends. Deadlines are set up to "
+                    + "this date and stop after it."} />
+                  </th></tr>
               </thead>
               <tbody>
                 {schedules.length === 0 && (
@@ -348,6 +344,111 @@ export default function BrokerCalendar() {
             onPageChange={setSchedPage} noun="programmes" />
         </div>
       </div>
+
+      {openRow && <VersionPanel row={openRow} onClose={() => setOpenRow(null)} />}
+      {viewRow?.export_id != null && (
+        <ExportFileViewer exportId={viewRow.export_id}
+          title={`${viewRow.program_name} · ${viewRow.period}`}
+          reviewTo={`/uploads/${viewRow.export_id}/exceptions?download=${viewRow.export_id}&from=broker`}
+          onClose={() => setViewRow(null)} />
+      )}
+    </div>
+  );
+}
+
+/** Every file sent for one period — the carrier calendar's version panel,
+ *  read-only, from GET /broker/calendar/{id}/versions. */
+function VersionPanel({ row, onClose }: { row: BrokerCalendarRow; onClose: () => void }) {
+  const [versions, setVersions] = useState<SubmissionVersionRow[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  // The ONE version whose file is open. The viewer mounts only when a version
+  // is clicked and streams just the rows on screen, so the panel itself costs
+  // one small request however many versions — or rows — there are.
+  const [viewing, setViewing] = useState<SubmissionVersionRow | null>(null);
+  useEffect(() => {
+    getBrokerCalendarVersions(row.id).then(d => setVersions(d.versions))
+      .catch(e => setErr(e?.response?.data?.detail ?? "Could not load the versions."));
+  }, [row.id]);
+  useEffect(() => {
+    // While a file is open, Escape belongs to the viewer: it closes the file
+    // and leaves this list where it was, rather than closing both at once.
+    if (viewing) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, viewing]);
+
+  const label = (v: SubmissionVersionRow) =>
+    `Version ${v.version_no}`;
+  // The newest version is the file that counts; every earlier one was replaced.
+  const newest = versions?.length ? versions[versions.length - 1] : null;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(16,20,28,.45)",
+      display: "flex", justifyContent: "flex-end", zIndex: 60 }} onClick={onClose}>
+      <div className="card" style={{ width: "min(560px, 100%)", height: "100%",
+        borderRadius: 0, overflowY: "auto", margin: 0 }} onClick={e => e.stopPropagation()}>
+        <div className="card-h">
+          <h3>{row.program_name} · {row.period}</h3>
+          <span className="sub">{row.carrier_name ?? ""}</span>
+          <div className="right">
+            <span className="linkish" onClick={onClose} role="button" aria-label="Close"><X size={14} /></span>
+          </div>
+        </div>
+        <div style={{ padding: "16px 20px" }}>
+          {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
+          <h4 style={{ margin: "0 0 10px", fontSize: 13 }}>Every file you sent for this period</h4>
+          <p className="muted" style={{ fontSize: 12.5, margin: "0 0 12px" }}>
+            The newest one is the file that counts — the earlier ones are kept
+            so a correction can be told apart from the original.
+          </p>
+          {versions === null && !err && <p className="muted" style={{ fontSize: 13 }}>Loading…</p>}
+          {versions?.length === 0 && <div className="note">Nothing has been sent for this period yet.</div>}
+          {versions?.map(v => (
+            <div key={v.id} className="card" style={{ marginBottom: 12, padding: "12px 14px", boxShadow: "none" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                <span className={`badge ${v.kind === "original" ? "b-mut" : "b-warn"}`}>
+                  <span className="d" />{label(v)}
+                </span>
+                <span className="mono" style={{ fontSize: 12.5 }}>
+                  uploaded {v.uploaded_at ? fmtDateTime(v.uploaded_at) : fmtFull(v.received_at)}
+                </span>
+                {v.period_source === "oldest_open" && (
+                  <span className="sub" title="No period could be read from the file, so this was matched to the oldest period still open.">
+                    period assumed
+                  </span>
+                )}
+              </div>
+              {v.source_filename && <div className="sub">{v.source_filename}</div>}
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+                {newest && v.id !== newest.id ? (
+                  <span className="badge b-mut"><span className="d" />Replaced by {label(newest)}</span>
+                ) : (
+                  <span className="badge b-ok"><span className="d" />The file that counts</span>
+                )}
+                {v.received_export_id != null && (
+                  <span className="linkish" style={{ marginLeft: "auto" }}
+                    onClick={() => setViewing(v)}>View file →</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      {viewing?.received_export_id != null && (
+        // Outside the drawer's click-to-close area, so closing the file never
+        // closes the list behind it.
+        <div onClick={e => e.stopPropagation()}>
+          <ExportFileViewer exportId={viewing.received_export_id}
+            title={`${row.program_name} · ${row.period} · ${label(viewing)}`}
+            // A replaced version is history: its problems are worked on the
+            // newest file, so only that one offers the exceptions screen.
+            reviewTo={viewing.id === newest?.id
+              ? `/uploads/${viewing.received_export_id}/exceptions?download=${viewing.received_export_id}&from=broker`
+              : undefined}
+            onClose={() => setViewing(null)} />
+        </div>
+      )}
     </div>
   );
 }

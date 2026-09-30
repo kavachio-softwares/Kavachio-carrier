@@ -21,6 +21,7 @@ log = logging.getLogger("bdx.calendar")
 from db import (
     Program, Contract, SubmissionSchedule, ExpectedSubmission, ActivityEvent,
     SubmissionVersion, ProgramBroker, Party, AppUser, Tenant,
+    OutputExport, LandingRecord,
 )
 from submission_calendar import (
     resolve_schedule, generate_expected, derive_status, ResolvedSchedule, _add_months,
@@ -1008,20 +1009,49 @@ def record_chase(session, expected_ids: list[int], *, actor: Optional[str] = Non
             "emailed": mailed, "mail_failed": mail_failed}
 
 
+def _utc_iso(dt: Optional[datetime]) -> Optional[str]:
+    """A stored timestamp as explicit-UTC ISO ("...Z"), for display. Naive ones
+    hold UTC by this codebase's convention (the datetime.utcnow() writers)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        from datetime import timezone
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.isoformat() + "Z"
+
+
 def submission_versions(session, expected_id: int) -> list[dict]:
     """Every file ever submitted for one period, oldest first.
 
     The original is kept exactly as it was even after a correction replaces it
     in practice, because replacing it would quietly rewrite history — anybody
     looking back later would see numbers that never actually went out.
+
+    `received_at` is the DATE (what the deadline verdict uses). `uploaded_at`
+    is the exact moment the file came in — when its upload landed, or, for a
+    run with no landing record, when its output was made.
     """
+    versions = (session.query(SubmissionVersion)
+                .filter(SubmissionVersion.expected_id == expected_id)
+                .order_by(SubmissionVersion.version_no.asc()).all())
+    export_ids = {v.received_export_id for v in versions if v.received_export_id}
+    uploaded: dict = {}
+    if export_ids:
+        for eid, created in (session.query(OutputExport.id, OutputExport.created_at)
+                             .filter(OutputExport.id.in_(export_ids)).all()):
+            uploaded[eid] = created
+        for eid, landed in (session.query(LandingRecord.output_export_id,
+                                          func.min(LandingRecord.created_at))
+                            .filter(LandingRecord.output_export_id.in_(export_ids))
+                            .group_by(LandingRecord.output_export_id).all()):
+            if landed is not None:
+                uploaded[eid] = landed
     out = []
-    for v in (session.query(SubmissionVersion)
-              .filter(SubmissionVersion.expected_id == expected_id)
-              .order_by(SubmissionVersion.version_no.asc()).all()):
+    for v in versions:
         out.append({
             "id": v.id, "version_no": v.version_no, "kind": v.kind,
             "received_at": v.received_at.isoformat() if v.received_at else None,
+            "uploaded_at": _utc_iso(uploaded.get(v.received_export_id)),
             "received_export_id": v.received_export_id,
             "source_filename": v.source_filename,
             "period_source": v.period_source,
@@ -1297,15 +1327,13 @@ def carrier_contacts(session, tenant_ids) -> dict:
 
 
 def _version_label(e) -> str:
-    """How the calendar names a period's version, in the words the screen uses."""
+    """How the calendar names a period's version, in the words the screen uses:
+    "Version N", where N is how many files have been sent for it — the same
+    numbering as the Versions panel, so the badge names the file that counts."""
     n = e.version_count or 0
     if n == 0:
         return "—"
-    if n == 1:
-        return "First version"
-    if n == 2:
-        return "Corrected once"
-    return f"Corrected {n - 1} times"
+    return f"Version {n}"
 
 
 def calendar_rows(session, tenant_id: Optional[int], today: Optional[date] = None,
@@ -1398,6 +1426,72 @@ def _month_key(d: Optional[date]) -> Optional[str]:
     return f"{d.year:04d}-{d.month:02d}" if d else None
 
 
+# `month` value for every due-month together (see calendar_board). A bare
+# year ("2026") is taken the same way, for the twelve months of that year.
+ALL_MONTHS = "all"
+
+
+def _is_year(month: Optional[str]) -> bool:
+    return bool(month) and len(month) == 4 and month.isdigit()
+
+
+def _in_force(c: Contract) -> bool:
+    """Signed or active — the same reading the dashboard's contract counts use
+    (contract_routes._effective_lifecycle), without the expiry test, which the
+    cover check in _row_contracts already makes."""
+    state = (c.lifecycle or "").strip() or ("active" if (c.status or "") == "active" else "")
+    return state in ("active", "signed")
+
+
+def _row_contracts(session, rows) -> dict:
+    """{expected_submission id: (contract id, contract name)} — the contract
+    each period on the board answers to.
+
+    A period a file arrived for says so outright: that file's run was checked
+    against one contract (OutputExport.contract_id). A period still waiting has
+    no run, so it takes its programme x broker contract whose cover takes in
+    the period — one in force before one that is not, the newest after that.
+    """
+    if not rows:
+        return {}
+    export_ids = {e.received_export_id for e in rows if e.received_export_id}
+    run_contract = {}
+    if export_ids:
+        run_contract = {eid: cid for eid, cid in
+                        session.query(OutputExport.id, OutputExport.contract_id)
+                        .filter(OutputExport.id.in_(export_ids)).all() if cid}
+    prog_ids = {e.program_id for e in rows if e.program_id is not None}
+    contracts = (session.query(Contract).filter(Contract.program_id.in_(prog_ids)).all()
+                 if prog_ids else [])
+    by_id = {c.id: c for c in contracts}
+    missing = set(run_contract.values()) - set(by_id)
+    if missing:
+        by_id.update({c.id: c for c in
+                      session.query(Contract).filter(Contract.id.in_(missing)).all()})
+    by_pair: dict = {}
+    for c in contracts:
+        by_pair.setdefault((c.program_id, c.broker_party_id), []).append(c)
+
+    def covers(c: Contract, e: ExpectedSubmission) -> bool:
+        start, end = _contract_inception(c), _contract_expiry(c)
+        return ((start is None or start <= e.period_end)
+                and (end is None or end >= e.period_start))
+
+    out = {}
+    for e in rows:
+        c = by_id.get(run_contract.get(e.received_export_id)) if e.received_export_id else None
+        if c is None and e.broker_party_id is not None:
+            # Contracts hang off the programme x broker pair; one written before
+            # that (no broker on it) is the fallback for its programme.
+            cands = (by_pair.get((e.program_id, e.broker_party_id))
+                     or by_pair.get((e.program_id, None)) or [])
+            if cands:
+                c = max(cands, key=lambda k: (covers(k, e), _in_force(k), k.id))
+        if c is not None:
+            out[e.id] = (c.id, c.name or c.filename or f"Contract #{c.id}")
+    return out
+
+
 def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = None,
                    today: Optional[date] = None, broker_id: Optional[int] = None,
                    program_ids: Optional[list[int]] = None) -> dict:
@@ -1458,7 +1552,21 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
 
     months = sorted({_month_key(e.due_date) for e in all_rows if e.due_date},
                     reverse=True)
-    if month not in months:
+    # ALL_MONTHS counts every period at once, and a bare year the twelve months
+    # of it — the dashboard's "All Years" and "All Months" picks. No screen
+    # sends either by default, so every other caller is unchanged.
+    every_month = month == ALL_MONTHS
+    whole_year = _is_year(month)
+
+    def shown(e) -> bool:
+        k = _month_key(e.due_date)
+        if every_month:
+            return True
+        if whole_year:
+            return bool(k) and k.startswith(f"{month}-")
+        return k == month
+
+    if not every_month and not whole_year and month not in months:
         # Default to the month being worked on: the current one if it has
         # anything in it, otherwise the most recent month that does — so the
         # screen opens on real work rather than on an empty heading.
@@ -1468,13 +1576,14 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
     names = _party_names(session, [e.broker_party_id for e in all_rows])
     contacts = broker_contacts(session, [e.broker_party_id for e in all_rows])
     latest_sent = _latest_release_state(
-        session, [e.id for e in all_rows if _month_key(e.due_date) == month])
+        session, [e.id for e in all_rows if shown(e)])
+    contract_of = _row_contracts(session, [e for e in all_rows if shown(e)])
     rows, counts = [], {"due": 0, "on_time": 0, "late": 0, "never": 0,
                         "released": 0, "unsent_correction": 0}
     programmes_in_month = set()
 
     for e in all_rows:
-        if _month_key(e.due_date) != month:
+        if not shown(e):
             continue
         sch = schedules.get(e.program_id)
         soon = sch.soon_window_days if sch and sch.soon_window_days is not None else DEFAULT_SOON_WINDOW_DAYS
@@ -1494,6 +1603,9 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             "carrier_name": carrier_name.get(e.tenant_id),
             "broker_party_id": e.broker_party_id,
             "broker_name": names.get(e.broker_party_id),
+            # The contract this period answers to (see _row_contracts).
+            "contract_id": (contract_of.get(e.id) or (None, None))[0],
+            "contract_name": (contract_of.get(e.id) or (None, None))[1],
             "unassigned": unassigned,
             "period": e.period,
             "due_date": e.due_date.isoformat() if e.due_date else None,

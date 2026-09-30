@@ -751,15 +751,18 @@ export default function ProgramCalendar({
             </div>
           ) : (
             <div className="card" style={{ marginTop: 18 }}>
-              {/* Header laid out on the SAME column grid as the table, so the Due
-                  date filter sits over Due date, Status over Status, and Clear
-                  over the right (Sent) column.
+              {/* ONE line: the title on the left, the filters on the right, every
+                  control the same height and centred on it (fbar-even — the bar
+                  the Programmes list uses). It used to sit on the table's column
+                  grid with the captions stacked above the boxes, which left the
+                  title, the captions and the boxes at three different heights.
 
-                  Each filter carries a VISIBLE caption. They used to be labelled
-                  by aria-label alone, so a sighted reader saw two bare date boxes
-                  with a dash between them and no way to tell what they filtered. */}
-              <div className="card-h" style={{ display: "grid",
-                gridTemplateColumns: "36% 26% 22% 16%", alignItems: "end", gap: 0 }}>
+                  Each filter still carries a VISIBLE caption, now beside it.
+                  They used to be labelled by aria-label alone, so a sighted
+                  reader saw two bare date boxes with a dash between them and no
+                  way to tell what they filtered. */}
+              <div className="card-h" style={{ flexWrap: "wrap", justifyContent: "space-between",
+                gap: 12 }}>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
                   <h3 style={{ margin: 0 }}>{programName || "Deadlines"}</h3>
                   {/* Always says how many of the whole set is on screen when that
@@ -772,33 +775,37 @@ export default function ProgramCalendar({
                       : `${rows.length} deadlines`}
                   </span>
                 </div>
-                <div style={{ paddingLeft: 12 }}>
-                  <div className="sub" style={{ marginBottom: 3 }}>Due between</div>
-                  <div className="fbar-daterange">
-                    <input type="date" className="fbar-date" aria-label="Due on or after"
-                      value={dueFrom} onChange={e => setDueFrom(e.target.value)} />
-                    <span className="sub">–</span>
-                    <input type="date" className="fbar-date" aria-label="Due on or before"
-                      value={dueTo} onChange={e => setDueTo(e.target.value)} />
+                <div className="fbar-even" style={{ justifyContent: "flex-end" }}>
+                  <div className="fbar-pair">
+                    <span className="fbar-cap">Due between</span>
+                    <div className="fbar-daterange">
+                      <input type="date" className="fbar-date" aria-label="Due on or after"
+                        value={dueFrom} onChange={e => setDueFrom(e.target.value)} />
+                      <span className="sub">–</span>
+                      <input type="date" className="fbar-date" aria-label="Due on or before"
+                        value={dueTo} onChange={e => setDueTo(e.target.value)} />
+                    </div>
                   </div>
-                </div>
-                <div style={{ paddingLeft: 12 }}>
-                  <div className="sub" style={{ marginBottom: 3 }}>Status</div>
-                  <select className="fbar-select" aria-label="Filter by status"
-                    value={statusFilter}
-                    onChange={e => setStatusFilter(e.target.value as CalendarStatus | "")}>
-                    <option value="">Show all ({rows.length})</option>
-                    {presentStatuses.map(st => (
-                      <option key={st} value={st}>
-                        {STATUS_META[st].label} ({counts[st] ?? 0})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  {filtersActive && (
-                    <span className="linkish" onClick={clearFilters}>Clear filters</span>
-                  )}
+                  <div className="fbar-pair">
+                    <span className="fbar-cap">Status</span>
+                    <select className="fbar-select" aria-label="Filter by status"
+                      value={statusFilter}
+                      onChange={e => setStatusFilter(e.target.value as CalendarStatus | "")}>
+                      <option value="">Show all ({rows.length})</option>
+                      {presentStatuses.map(st => (
+                        <option key={st} value={st}>
+                          {STATUS_META[st].label} ({counts[st] ?? 0})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {/* Always in the row, only hidden, so the controls beside it do
+                      not jump when a filter is first set. */}
+                  <button type="button" className="fbar-clear" onClick={clearFilters}
+                    style={{ visibility: filtersActive ? "visible" : "hidden" }}
+                    aria-hidden={!filtersActive} tabIndex={filtersActive ? 0 : -1}>
+                    Clear Filters
+                  </button>
                 </div>
               </div>
               <div style={{ padding: "6px 8px" }}>

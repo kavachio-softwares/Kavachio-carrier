@@ -137,7 +137,7 @@ export default function Files() {
               onClick={() => setPanel(true)}
               title="Manage how brokers submit their files">
               <Server size={14} aria-hidden="true" />
-              Submission Channels
+              Ingestion Channels
               {summary && <span className="pcount">{summary.routes}</span>}
               {/* A way in that looks live and accepts nothing is the only thing
                   in here that ever needs somebody. Saying so on the closed
@@ -148,14 +148,13 @@ export default function Files() {
               onClick={() => setIngestion(true)}
               title="Processing outcome for every accepted file">
               <Inbox size={14} aria-hidden="true" />
-              Processing Status
+              Ingestion Panel
               {needYou > 0 && <span className="pcount">{needYou}</span>}
             </button>
-            <button className="btn" onClick={() => setRefreshKey(k => k + 1)}>Refresh</button>
             {/* Opens the dialog and nothing else. It used to open the panel too,
                 because the dialog lived inside it. */}
             <button className="btn pri" onClick={() => setAdding(true)}>
-              ＋ Add Channel</button>
+              ＋ Configure Ingestion Channel</button>
           </div>
         </div>
 
@@ -168,14 +167,14 @@ export default function Files() {
           and reopening should not re-fetch a list you were halfway through. */}
       <div className={`scrim${panelOpen ? " on" : ""}`} onClick={() => setPanel(false)} />
       <aside id="ways-panel" className={`drawer wide${panelOpen ? " on" : ""}`}
-        role="dialog" aria-modal="true" aria-hidden={!panelOpen} aria-label="Submission Channels">
+        role="dialog" aria-modal="true" aria-hidden={!panelOpen} aria-label="Ingestion Channels">
         <div className="drawer-h">
           <div style={{ minWidth: 0 }}>
-            <h4>Submission Channels</h4>
-            <div className="ref" style={{ fontFamily: "inherit", fontSize: 12 }}>
-              How each broker submits files — typically set up once during broker
-              onboarding.
-            </div>
+            <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              Ingestion Channels
+              <InfoTip text={"How each broker submits files — typically set up once "
+                + "during broker onboarding."} />
+            </h4>
           </div>
           <button type="button" className="closeb" aria-label="Close"
             onClick={() => setPanel(false)}>×</button>
@@ -187,7 +186,7 @@ export default function Files() {
         </div>
 
         <div className="drawer-f">
-          <button className="btn pri" onClick={() => setAdding(true)}>＋ Add Channel</button>
+          <button className="btn pri" onClick={() => setAdding(true)}>＋ Configure Ingestion Channel</button>
           <button className="btn" style={{ marginLeft: "auto" }}
             onClick={() => setPanel(false)}>Done</button>
         </div>

@@ -56,7 +56,7 @@ export function hasExplanation(e?: Explanation | null): boolean {
 
 export default function RuleExplanation({
   explanation, variant = "proto", clauseFallback, clausePage, compact = false,
-  chipsOnly = false,
+  chipsOnly = false, noChips = false,
 }: {
   explanation?: Explanation | null;
   variant?: "proto" | "tw";
@@ -69,6 +69,9 @@ export default function RuleExplanation({
    *  is a list of rules to pick from, not the place the rule is read. The full
    *  explanation is one click away on the rule's own review screen. */
   chipsOnly?: boolean;
+  /** Everything EXCEPT the chips — for Rule Review, which shows the chips
+   *  above its summary and this block behind "Show rule details". */
+  noChips?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const e = explanation ?? {};
@@ -103,7 +106,7 @@ export default function RuleExplanation({
 
       {/* provenance chip, plus the rule KIND when it is not a plain compliance
           check — a referral trigger is not a breach and must not read like one */}
-      {(e.origin_label || e.kind_label) && (
+      {!noChips && (e.origin_label || e.kind_label) && (
         <div style={tw ? undefined : {
               marginBottom: chipsOnly ? 0 : 6,
               display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center",

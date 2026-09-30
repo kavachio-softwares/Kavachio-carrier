@@ -16,6 +16,7 @@ import { Button } from "../components/ui/Button";
 import { Banner } from "../components/ui/Banner";
 import { Select, TextInput } from "../components/ui/Field";
 import { Sk } from "../components/ui/Skeleton";
+import { Modal } from "../components/ui/Modal";
 import {
   ContractInline, ContractStatusChip, ScoreChip, SevBadge, ClauseMatchChip, Combo, TagPill,
 } from "../components/DirectMappingWidgets";
@@ -79,6 +80,10 @@ export default function BordereauSetupEdit() {
   const [notFound, setNotFound] = useState(false);
 
   const [busy, setBusy] = useState(false);
+  // "Activate with empty columns?" — see save().
+  const [confirmUnsourced, setConfirmUnsourced] = useState(false);
+  // "Delete this draft?" — see deleteSetup().
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -153,15 +158,21 @@ export default function BordereauSetupEdit() {
     // missing-columns note so it drops that entry without a page reload.
     setNoteKey(k => k + 1);
     // The rule just edited may belong to the field-mapping editor's clauses too.
-    if (editor && pipeline?.input_format_id) {
-      try {
-        const of = await api.get<{ fields: OutField[] }>(`/direct/output-fields`, {
-          params: { template_id: pipeline.output_template_id ?? undefined,
-                    contract_id: contractId ?? undefined, format_id: pipeline.input_format_id },
-        });
-        setEditor(prev => prev && { ...prev, fields: of.data.fields });
-      } catch { /* leave clauses as-is on failure */ }
-    }
+    await reloadOutputFields();
+  }
+  /** Re-read the output columns the Field mapping tab lists (and the
+   *  "Field(s) Unsourced" count is worked out from). Also run on its own when
+   *  coming back from Output BDX, where a column may have been added or
+   *  removed — whether or not a contract is open. */
+  async function reloadOutputFields() {
+    if (!editor || !pipeline?.input_format_id) return;
+    try {
+      const of = await api.get<{ fields: OutField[] }>(`/direct/output-fields`, {
+        params: { template_id: pipeline.output_template_id ?? undefined,
+                  contract_id: contractId ?? undefined, format_id: pipeline.input_format_id },
+      });
+      setEditor(prev => prev && { ...prev, fields: of.data.fields });
+    } catch { /* leave the list as-is on failure */ }
   }
 
   const clauseByField = useMemo(() => {
@@ -217,6 +228,19 @@ export default function BordereauSetupEdit() {
     const used = new Set(Object.entries(sel).filter(([k]) => k.startsWith(`${outSheet}||`)).map(([, v]) => v));
     return outFieldsFor(outSheet).filter(f => !used.has(f) && !extra[sheetFieldKey(outSheet, f)]);
   }
+  // The amber list: every output column no input column feeds — the unsourced
+  // ones AND those filled by a Constant / Source Tab Name, so that choice stays
+  // on screen and can be changed back. Only the unsourced ones are counted.
+  function columnsWithoutInput(outSheet: string): string[] {
+    const used = new Set(Object.entries(sel).filter(([k]) => k.startsWith(`${outSheet}||`)).map(([, v]) => v));
+    return outFieldsFor(outSheet).filter(f => {
+      if (used.has(f)) return false;
+      const kind = extra[sheetFieldKey(outSheet, f)]?.kind;
+      // Any other saved kind (e.g. a calculation) has no choice in this
+      // dropdown to show, so it stays out of the list as before.
+      return !kind || kind === "const" || kind === "source_sheet";
+    });
+  }
   const unsourcedFields = useMemo(() => {
     const used = new Set<string>();
     for (const [k, v] of Object.entries(sel)) used.add(`${k.split("||")[0]}::${v}`);
@@ -235,6 +259,9 @@ export default function BordereauSetupEdit() {
     const otherKey = Object.entries(sel).find(([k, v]) => k !== key && k.startsWith(`${sheet}||`) && v === field);
     if (otherKey) { setConflict({ sheet, col, field, other: otherKey[0].split("||")[1] }); return; }
     setSel(p => ({ ...p, [key]: field }));
+    // A real input column wins: drop any Constant / Source Tab Name set on
+    // this output column, which buildMapping would otherwise let override it.
+    setExtraRule(sheet, field, null);
   }
   function resolveConflict(mode: "move" | "both" | "cancel") {
     if (!conflict) return;
@@ -246,6 +273,7 @@ export default function BordereauSetupEdit() {
         n[sheetFieldKey(sheet, col)] = field;
         return n;
       });
+      setExtraRule(sheet, field, null);   // same as chooseOutput
     }
     setConflict(null);
   }
@@ -309,15 +337,15 @@ export default function BordereauSetupEdit() {
     return out;
   }
 
-  async function save(activate: boolean) {
+  async function save(activate: boolean, confirmed = false) {
     if (!pipeline || !editor) return;
-    if (activate && unsourcedFields.length > 0) {
-      const preview = unsourcedFields.slice(0, 8).map(f => `• ${f.field}`).join("\n");
-      const more = unsourcedFields.length > 8 ? `\n…and ${unsourcedFields.length - 8} more` : "";
-      const ok = window.confirm(
-        `${unsourcedFields.length} output column(s) are still unsourced:\n${preview}${more}\n\n`
-        + `Activate anyway? These fields will be blank in the output until they're sourced.`);
-      if (!ok) return;
+    // Activating while output columns have nothing feeding them asks first —
+    // in the dialog at the foot of this page, not the browser's own pop-up.
+    // Its "Activate Anyway" comes back here with `confirmed`; closing it does
+    // nothing, exactly as Cancel on the old pop-up did.
+    if (activate && !confirmed && unsourcedFields.length > 0) {
+      setConfirmUnsourced(true);
+      return;
     }
     setBusy(true); setErr(null); setMsg(null);
     try {
@@ -388,13 +416,15 @@ export default function BordereauSetupEdit() {
     navigate(`/direct?${q.toString()}`);
   }
 
-  async function deleteSetup() {
+  async function deleteSetup(confirmed = false) {
     if (!pipeline?.input_format_id) return;
     if (pipeline.status === "active") {
       setErr("This setup is active — activate a different setup for this carrier + program before deleting it.");
       return;
     }
-    if (!window.confirm("Discard this setup? This cannot be undone.")) return;
+    // Asked in the dialog at the foot of this page, not the browser's pop-up;
+    // its Delete Draft comes back here with `confirmed`, Cancel does nothing.
+    if (!confirmed) { setConfirmDelete(true); return; }
     setBusy(true); setErr(null);
     try {
       await api.delete(`/direct/format/${pipeline.input_format_id}`);
@@ -446,20 +476,33 @@ export default function BordereauSetupEdit() {
     );
   };
 
-  // ── the tabs ── the same as the read-only view's, less "Needs attention":
-  // its fixes are made here on Setup & documents and Field mapping.
-  // "Setup & documents" sits second to last, not first: View's Overview is the
-  // summary you land on, and its Edit counterpart is the paperwork you finish
-  // with, after the mapping and the rules.
+  // ── the tabs ── the same as the read-only view's, less "Missing Items":
+  // its fixes are made here on Summary & Missing Items and Map Input & Output Columns.
+  // "Summary & Missing Items" sits second to last, not first: View's Setup
+  // Summary is what you land on, and its Edit counterpart is the paperwork you
+  // finish with, after the mapping and the rules. Named for what is done on
+  // each; the ⓘ on the tab says the rest on hover.
   const tabs: SetupTab[] = [
-    { key: "mapping", label: "Field mapping",
+    { key: "mapping", label: "Map Input & Output Columns",
+      info: "Match each input column (from the broker's file) to an output "
+        + "column (in your BDX). The amber number is how many output columns "
+        + "have no input column yet.",
       ...(unsourcedFields.length ? { count: unsourcedFields.length, warn: true } : {}) },
-    { key: "contracts", label: "Contracts & rules", count: ruleCount },
-    { key: "output", label: "Output BDX" },
-    { key: "overview", label: "Setup & documents",
+    { key: "contracts", label: "Contract Rules", count: ruleCount,
+      info: "The rules taken from the contract, and the BDX column each one "
+        + "checks. The number is how many rules there are." },
+    { key: "output", label: "Output BDX Template",
+      info: "The layout of your BDX: its sheets and columns. Add or remove "
+        + "columns here." },
+    { key: "overview", label: "Summary & Missing Items",
+      info: "The programme and templates this setup uses, and anything the "
+        + "contract needs that is missing: a document it refers to, or a column "
+        + "for one of its rules. The amber number is how many documents are missing.",
       ...(refDocs.missing.length ? { count: refDocs.missing.length, warn: true } : {}) },
     ...(pipeline?.program_id != null
-      ? [{ key: "calendar" as const, label: "Submission calendar" }] : []),
+      ? [{ key: "calendar" as const, label: "Due Dates",
+           info: "How often the broker must send a bordereau, the day each one "
+             + "is due, and how early you are reminded." }] : []),
   ];
   const [tab, setTab] = useSetupTab(tabs);
   // A setup with a single contract opens it on Contracts & rules.
@@ -469,6 +512,16 @@ export default function BordereauSetupEdit() {
       toggleContract(pipeline.contracts[0].contract_id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, pipeline, contracts]);
+
+  // Leaving a tab re-reads what the next one lists. Columns are added and
+  // removed on Output BDX, and both the Contracts & rules column picker and the
+  // Field mapping list (with its Unsourced count) were copies taken earlier —
+  // an added column was missing from them and a removed one lingered.
+  useEffect(() => {
+    if (tab === "contracts") reloadContractDetail();
+    else if (tab !== "output") reloadOutputFields();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   if (loading) {
     return (
@@ -603,7 +656,7 @@ export default function BordereauSetupEdit() {
 
         {tab === "calendar" && pipeline.program_id != null && (
           <Card title={<span className="flex items-center gap-2">
-            <CalendarDays size={16} className="text-navy" /> Submission Calendar</span>}>
+            <CalendarDays size={16} className="text-navy" /> Due Dates</span>}>
             <ProgramCalendar
               programId={pipeline.program_id}
               programName={pipeline.program_name}
@@ -722,10 +775,10 @@ export default function BordereauSetupEdit() {
                   </span>}
                   action={sheetUnsourced > 0
                     ? <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2.5 py-1 bg-amber-50 text-amber-700">
-                        <AlertTriangle size={12} /> {sheetUnsourced} Unsourced</span>
+                        <AlertTriangle size={12} /> {sheetUnsourced} Not Matched</span>
                     : outs.length > 0
                       ? <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2.5 py-1 bg-emerald-50 text-emerald-700">
-                          <CheckCircle2 size={12} /> All Sourced</span>
+                          <CheckCircle2 size={12} /> All Matched</span>
                       : undefined}>
                   {outs.length === 0 ? (
                     <p className="text-sm text-ink-muted">
@@ -805,17 +858,23 @@ export default function BordereauSetupEdit() {
                         </div>
                       </div>
 
-                      {outs.map(outSheet => unmappedOutputs(outSheet).length > 0 && (
+                      {outs.map(outSheet => columnsWithoutInput(outSheet).length > 0 && (
                         <div key={outSheet} className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 overflow-hidden">
                           <div className="flex items-center gap-1.5 text-sm font-medium px-4 py-2.5 border-b border-amber-200 text-amber-800">
-                            <AlertTriangle size={14} /> Output Columns Not Yet Sourced
+                            <AlertTriangle size={14} />
+                            {unmappedOutputs(outSheet).length > 0
+                              ? "Output Columns Not Matched Yet"
+                              : "Output Columns Filled Without an Input Column"}
                             {multi && <span className="font-mono text-xs">· {outSheet}</span>}
                           </div>
                           <div className="divide-y divide-amber-200/70">
-                            {unmappedOutputs(outSheet).map(f => (
+                            {columnsWithoutInput(outSheet).map(f => (
                               <div key={f} className="flex items-center gap-2 text-sm px-4 py-2.5">
                                 <span className="w-56 truncate font-medium">{f}</span>
-                                <Select className="!py-1 !w-44" onChange={e => {
+                                <Select className="!py-1 !w-44"
+                                  value={extra[sheetFieldKey(outSheet, f)]?.kind === "const" ? "const"
+                                    : extra[sheetFieldKey(outSheet, f)]?.kind === "source_sheet" ? "tab" : ""}
+                                  onChange={e => {
                                   const v = e.target.value;
                                   if (v === "const") setExtraRule(outSheet, f, { kind: "const", value: "" });
                                   else if (v === "tab") setExtraRule(outSheet, f, { kind: "source_sheet" });
@@ -865,7 +924,7 @@ export default function BordereauSetupEdit() {
             </Button>
             <Button variant="secondary" onClick={() => save(false)} disabled={busy}>Save Draft</Button>
             {isAdmin && (
-              <Button variant="danger" onClick={deleteSetup}
+              <Button variant="danger" onClick={() => deleteSetup()}
                 disabled={busy || pipeline.status === "active"}
                 title={pipeline.status === "active" ? "This setup is active — activate a different setup before deleting it" : undefined}>
                 <Trash2 size={15} /> Delete Draft
@@ -874,11 +933,94 @@ export default function BordereauSetupEdit() {
             {unsourcedFields.length > 0 && (
               <button type="button" onClick={() => setTab("mapping")}
                 className="ml-auto inline-flex items-center gap-1 text-xs text-amber-600 hover:underline">
-                <AlertTriangle size={13} /> {unsourcedFields.length} Field(s) Unsourced · show me
+                <AlertTriangle size={13} /> {unsourcedFields.length} Output Column{unsourcedFields.length === 1 ? "" : "s"} Not Matched · show me
               </button>
             )}
           </div>
         </div>
+
+        {/* Activate while output columns have nothing feeding them. It used to
+            be the browser's own pop-up — a bare list of eight names under
+            "localhost says", with no way to see the rest or get to where they
+            are fixed. The choice is unchanged: go back, or activate anyway. */}
+        {confirmUnsourced && (() => {
+          const n = unsourcedFields.length;
+          const one = n === 1;
+          // Columns a contract rule checks first — an empty one means that
+          // rule is skipped, which is the part worth reading before choosing.
+          const ruled = unsourcedFields.filter(f => (f.clauses?.length ?? 0) > 0);
+          const listed = [...ruled, ...unsourcedFields.filter(f => !(f.clauses?.length ?? 0))];
+          const multiSheet = (editor?.output_sheets.length ?? 0) > 1;
+          return (
+            <Modal open title={`${n} output column${one ? "" : "s"} not mapped to any input column`} size="lg"
+              onClose={() => setConfirmUnsourced(false)}
+              footer={<>
+                <Button variant="ghost" onClick={() => setConfirmUnsourced(false)}>Cancel</Button>
+                <Button variant="secondary"
+                  onClick={() => { setConfirmUnsourced(false); setTab("mapping"); }}>
+                  Match Columns First
+                </Button>
+                <Button disabled={busy}
+                  onClick={() => { setConfirmUnsourced(false); save(true, true); }}>
+                  <CheckCircle2 size={15} /> Activate Anyway
+                </Button>
+              </>}>
+              <div className="space-y-3 text-sm text-ink-muted">
+                <p>
+                  {one ? "This output column has" : "These output columns have"} no matching input column,
+                  so {one ? "it" : "they"} will be <b className="text-ink">empty in every BDX</b>.
+                </p>
+                {ruled.length > 0 && (
+                  <Banner kind="warn">
+                    <AlertTriangle size={15} />
+                    <span>
+                      Contract checks on <b>{ruled.length}</b> of {one ? "it" : "them"} will be skipped.
+                    </span>
+                  </Banner>
+                )}
+                <ul className="max-h-64 divide-y divide-border overflow-y-auto rounded-lg border border-border">
+                  {listed.map(f => (
+                    <li key={`${f.sheet}::${f.field}`}
+                      className="flex items-center gap-2 px-3 py-2 text-[13px] text-ink">
+                      <span className="min-w-0 truncate">{f.field}</span>
+                      {multiSheet && <span className="shrink-0 text-[11px] text-ink-soft">· {f.sheet}</span>}
+                      {(f.clauses?.length ?? 0) > 0 && (
+                        <span className="ml-auto shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+                          title={f.clauses!.map(c => c.text).filter(Boolean).join("\n")}>
+                          Contract rules skipped
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </Modal>
+          );
+        })()}
+
+        {/* Delete Draft — the app's own dialog, not the browser's pop-up. The
+            choice is the one it always was: Cancel, or delete. What goes is the
+            input side of the setup (the DirectFormat the delete removes); the
+            programme, contracts, rules, template and due dates are their own
+            records and stay. */}
+        <Modal open={confirmDelete} title="Delete this draft?" size="md"
+          onClose={() => setConfirmDelete(false)}
+          footer={<>
+            <Button variant="secondary" onClick={() => setConfirmDelete(false)}>Cancel</Button>
+            <Button variant="danger" disabled={busy}
+              onClick={() => { setConfirmDelete(false); deleteSetup(true); }}>
+              <Trash2 size={15} /> Delete Draft
+            </Button>
+          </>}>
+          <div className="space-y-2 text-sm text-ink-muted">
+            <p>
+              Everything set up on <b className="text-ink">Map Input &amp; Output Columns</b> for{" "}
+              <b className="text-ink">{setupName}</b> is deleted. Your programme, contracts,
+              rules, output BDX template and due dates are not affected.
+            </p>
+            <p className="font-medium text-danger">This can't be undone.</p>
+          </div>
+        </Modal>
       </div>
     </div>
   );

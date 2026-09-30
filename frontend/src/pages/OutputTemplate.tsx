@@ -290,7 +290,11 @@ export function OutputTemplateEditor({ templateId, embedded, onVersioned }: {
         <Select
           className="!py-1 !w-auto"
           value={t.output_format ?? "xlsx"}
-          onChange={e => setT(prev => prev ? { ...prev, output_format: e.target.value } : prev)}
+          onChange={e => {
+            // A format change is a change like any other — it has to be saved.
+            setDirty(true);
+            setT(prev => prev ? { ...prev, output_format: e.target.value } : prev);
+          }}
         >
           {OUTPUT_FORMATS.map(f => (
             <option key={f.value} value={f.value}>{f.label}</option>
@@ -316,10 +320,16 @@ export function OutputTemplateEditor({ templateId, embedded, onVersioned }: {
           <AlertTriangle size={11} /> Unsaved changes
         </span>
       )}
-      <Button onClick={() => save(false)} variant="secondary" disabled={busy}>
+      {/* Each button only when it would do something. Save Draft needs an
+          unsaved change. Save & Activate needs a change OR a template that is
+          not active yet — an active template with nothing changed has nothing
+          left to save or to activate. */}
+      <Button onClick={() => save(false)} variant="secondary" disabled={busy || !dirty}
+        title={!dirty ? "No changes to save" : undefined}>
         Save Draft
       </Button>
-      <Button onClick={() => save(true)} disabled={busy}>
+      <Button onClick={() => save(true)} disabled={busy || (t.approved && !dirty)}
+        title={t.approved && !dirty ? "Already active — nothing has changed" : undefined}>
         Save & Activate
       </Button>
     </div>
@@ -367,11 +377,11 @@ export function OutputTemplateEditor({ templateId, embedded, onVersioned }: {
               <span className={`pill ${t.approved ? "pill-green" : "pill-amber"}`}>
                 {t.approved ? "Approved" : "Draft"}
               </span>
-              <span className="text-sm text-ink-muted">
+              {/* <span className="text-sm text-ink-muted">
                 Map every output column to a canonical or extra field. The
                 sample workbook's fonts, fills, merges &amp; widths are
                 preserved on generation.
-              </span>
+              </span> */}
             </div>
             {msg && <span className="text-sm text-emerald-700">{msg}</span>}
             {downloadErr && <span className="text-sm text-red-700">{downloadErr}</span>}

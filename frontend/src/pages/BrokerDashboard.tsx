@@ -188,10 +188,23 @@ export default function BrokerDashboard() {
               asking whose signature, on what — it is always a contract with a
               carrier, agreed and waiting for this broker to sign it. */}
           <StatCard title="Contracts to Sign" value={c.signatures_pending} icon={PenLine}
-                    subtitle={`${c.signatures_completed} already signed`}
-                    info="Contracts with your carriers whose terms are agreed and now need your signature before they become active. Click to open and sign them."
-                    tone={c.signatures_pending > 0 ? "alert" : undefined}
-                    onClick={c.signatures_pending > 0 ? () => setWaitingOpen(true) : undefined} />
+                    subtitle={
+                      <>
+                        {/* A contract still in REVIEW comes before any
+                            signature, and is just as much waiting on this
+                            broker — without this line a broker with terms to
+                            read saw "0" and nothing to do. */}
+                        {c.terms_to_agree > 0 && (
+                          <div style={{ color: "var(--p-crit)", fontWeight: 600 }}>
+                            {c.terms_to_agree} {c.terms_to_agree == 1 ? 'contract' : 'contracts' } waiting for your review
+                          </div>
+                        )}
+                        <div>{c.signatures_completed} already signed</div>
+                      </>
+                    }
+                    info="Contracts with your carriers that need you. Waiting for your review: read the terms and agree them or ask for changes. To sign: terms are agreed and your signature is needed before the contract becomes active. Click to open them."
+                    tone={c.waiting_on_me > 0 ? "alert" : undefined}
+                    onClick={c.waiting_on_me > 0 ? () => setWaitingOpen(true) : undefined} />
           <StatCard title="Exceptions to Review" value={c.agency_exceptions} icon={AlertCircle}
                     tone={c.agency_exceptions > 0 ? "alert" : undefined}
                     subtitle="Still open on your files"
@@ -236,8 +249,8 @@ export default function BrokerDashboard() {
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
               <ChartCard title="Bordereau Status"
-                info={<InfoTip text={`Your team's files over the last ${DAYS} days, by result: a clean file, or one with exceptions to review.`} />}>
-                {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} audience="broker" onDayClick={setStatusDay} />}
+                info={<InfoTip text={`Your files over the last ${DAYS} days, by result: a clean file, or one with exceptions to review. The blue line (right-hand scale) is how many exceptions were resolved each day. Click a day to see its files.`} />}>
+                {!ins ? <div className="muted">Loading…</div> : <RunTrend data={ins.runs_by_day} audience="broker" showResolved onDayClick={setStatusDay} />}
               </ChartCard>
               <RecentFiles />
             </div>

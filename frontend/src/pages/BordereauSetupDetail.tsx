@@ -273,16 +273,30 @@ export default function BordereauSetupDetail() {
     : "";
 
   // ── the tabs ── one per section of what used to be one long page.
+  // Named for what each one shows; the ⓘ on the tab says the rest on hover.
   const tabs: SetupTab[] = [
-    { key: "overview", label: "Overview" },
-    { key: "mapping", label: "Field mapping",
+    { key: "overview", label: "Setup Summary",
+      info: "The programme, templates and status of this setup, with counts "
+        + "that open the other tabs." },
+    { key: "mapping", label: "Map Input & Output Columns",
+      info: "Which input column (from the broker's file) fills each output "
+        + "column (in your BDX). The amber number is how many output columns "
+        + "have no input column yet.",
       ...(unsourcedFields.length ? { count: unsourcedFields.length, warn: true } : {}) },
-    { key: "contracts", label: "Contracts & rules", count: ruleCount },
-    { key: "output", label: "Output BDX" },
-    { key: "attention", label: "Needs attention",
+    { key: "contracts", label: "Contract Rules", count: ruleCount,
+      info: "The rules taken from the contract, and the BDX column each one "
+        + "checks. The number is how many rules there are." },
+    { key: "output", label: "Output BDX Template",
+      info: "The layout of your BDX: its sheets and columns. Change it from Edit." },
+    { key: "attention", label: "Missing Items",
+      info: "Documents the contract refers to that were never added, and "
+        + "contract rules with no BDX column to check. Fix them from Edit. "
+        + "The amber number is how many documents are missing.",
       ...(refDocs.missing.length ? { count: refDocs.missing.length, warn: true } : {}) },
     ...(pipeline?.program_id != null
-      ? [{ key: "calendar" as const, label: "Submission calendar" }] : []),
+      ? [{ key: "calendar" as const, label: "Due Dates",
+           info: "How often the broker must send a bordereau, the day each one "
+             + "is due, and how early you are reminded. Change it from Edit." }] : []),
   ];
   const [tab, setTab] = useSetupTab(tabs);
   // A setup with a single contract opens it on Contracts & rules — there is
@@ -293,7 +307,7 @@ export default function BordereauSetupDetail() {
       toggleContract(pipeline.contracts[0].contract_id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, pipeline, contracts]);
-  // Edit has no "Needs attention" tab — its fixes are made on Field mapping.
+  // Edit has no "Missing Items" tab — its fixes are made on Map Input & Output Columns.
   // "Overview" has no Edit counterpart to land on either: Edit's first tab is
   // Field mapping, so that is where the summary sends you.
   const editTab = tab === "attention" || tab === "overview" ? "mapping" : tab;
@@ -381,7 +395,7 @@ export default function BordereauSetupDetail() {
                   <Info size={14} className="shrink-0" /> Read-only. Press Edit to change anything.
                 </p>
                 <Card title={<span className="flex items-center gap-2">
-                  <ShieldCheck size={16} className="text-navy" /> Setup Overview</span>}>
+                  <ShieldCheck size={16} className="text-navy" /> Setup Summary</span>}>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                     <div>
                       <div className="text-[11px] uppercase text-ink-muted mb-1">Carrier</div>
@@ -527,7 +541,7 @@ export default function BordereauSetupDetail() {
                           return (
                             <div key={outSheet} className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 overflow-hidden">
                               <div className="flex items-center gap-1.5 text-sm font-medium px-4 py-2.5 border-b border-amber-200 text-amber-800">
-                                <AlertTriangle size={14} /> Not Sourced From This Sheet
+                                <AlertTriangle size={14} /> Output Columns Not Matched From This Sheet
                                 {outs.length > 1 && <span className="font-mono text-xs">· {outSheet}</span>}
                               </div>
                               <div className="divide-y divide-amber-200/70">
@@ -637,7 +651,7 @@ export default function BordereauSetupDetail() {
                  this page — the schedule is changed from Edit, so a deadline only
                  ever moves in one place. */
               <Card title={<span className="flex items-center gap-2">
-                <CalendarDays size={16} className="text-navy" /> Submission Calendar</span>}>
+                <CalendarDays size={16} className="text-navy" /> Due Dates</span>}>
                 <ProgramCalendar
                   programId={pipeline.program_id}
                   programName={pipeline.program_name}
@@ -739,10 +753,11 @@ export default function BordereauSetupDetail() {
               <AlertTriangle size={15} />
               <span>
                 {unsourcedFields.length} output column{unsourcedFields.length === 1 ? "" : "s"} still
-                {unsourcedFields.length === 1 ? " has" : " have"} no source
+                {unsourcedFields.length === 1 ? " has" : " have"} no input column matched
                 ({unsourcedFields.slice(0, 5).map(f => f.field).join(", ")}
                 {unsourcedFields.length > 5 ? `, and ${unsourcedFields.length - 5} more` : ""}).
-                {" "}They will be blank in the output until they are mapped in Edit.
+                {" "}{unsourcedFields.length === 1 ? "It" : "They"} will be empty in every BDX
+                until matched in Edit.
               </span>
             </Banner>
           )}
