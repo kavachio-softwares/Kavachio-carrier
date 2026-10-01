@@ -137,11 +137,28 @@ function failedCheck(reason: string | null): number {
   return -1;
 }
 
-// "" is every row. The four values are the four tiles, and a tile is a toggle:
-// pressing the one you are already in clears it.
-type Filter = "" | "today" | "ok" | "held" | "away" | `run:${RunResult}`;
+// "" is every row. The three outcome values are three of the tiles, and a tile
+// is a toggle: pressing the one you are already in clears it.
+type Filter = "" | "ok" | "held" | "away" | `run:${RunResult}`;
 type Sort = "queue" | "new" | "old";
-type Range = "all" | "30" | "90" | "month";
+type Range = "all" | "today" | "30" | "90" | "month";
+
+/** What the Received filter keeps, and the words the Total tile says it. */
+const RANGE_FOOT: Record<Range, string> = {
+  all: "All time", today: "Since midnight", month: "This month",
+  "30": "Last 30 days", "90": "Last 90 days",
+};
+
+function inRange(a: Arrival, range: Range): boolean {
+  if (range === "all") return true;
+  if (!a.received_at) return false;
+  const t = new Date(a.received_at);
+  if (range === "today") return t.toDateString() === new Date().toDateString();
+  const cutoff = range === "30" ? Date.now() - 30 * 86400000
+    : range === "90" ? Date.now() - 90 * 86400000
+    : new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+  return t.getTime() >= cutoff;
+}
 
 export function state(a: Arrival): "ok" | "held" | "away" {
   return a.outcome === "accepted" ? "ok" : isHeld(a) ? "held" : "away";
@@ -318,35 +335,29 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
   const all = rows ?? [];
   useEffect(() => { if (rows) onRows?.(rows); }, [rows, onRows]);
 
+  // The tiles count over the Received period, so "Today" in the filter is what
+  // the old Received Today tile was, and Total Files is every file in it.
   const counts = useMemo(() => {
-    const today = new Date().toDateString();
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    const ranged = all.filter(a => inRange(a, range));
     return {
-      // Same definition the routes endpoint uses for tiles.files_this_month —
-      // received_at on or after the first of this calendar month. It used to be
-      // a tile on the Ways in panel, which is the wrong place for it: it counts
-      // files, and this is the screen about files.
-      month: all.filter(a => a.received_at &&
-        new Date(a.received_at).getTime() >= monthStart).length,
-      today: all.filter(a => a.received_at &&
-        new Date(a.received_at).toDateString() === today).length,
       all: all.length,
-      ok: all.filter(a => state(a) === "ok").length,
-      held: all.filter(a => state(a) === "held").length,
-      away: all.filter(a => state(a) === "away").length,
+      total: ranged.length,
+      ok: ranged.filter(a => state(a) === "ok").length,
+      away: ranged.filter(a => state(a) === "away").length,
       // 12.3 — the queue is HELD AND UNRESOLVED. A held file somebody has
       // already decided is finished, and counting it keeps a tile amber for
       // work that is done.
-      waiting: all.filter(isWaiting).length,
+      waiting: ranged.filter(isWaiting).length,
       // The oldest thing still waiting. A queue nobody opens is the same as no
       // queue, and one number that says "eleven days" is what makes somebody
       // open it.
-      oldestWaitDays: Math.max(0, ...all.filter(isWaiting).map(waitDays)),
+      oldestWaitDays: Math.max(0, ...ranged.filter(isWaiting).map(waitDays)),
     };
-  }, [all]);
+  }, [all, range]);
 
-  useEffect(() => { onWaitingCount?.(counts.waiting); }, [counts.waiting, onWaitingCount]);
+  // The badge elsewhere is the whole queue, whatever period is picked here.
+  const waitingAll = useMemo(() => all.filter(isWaiting).length, [all]);
+  useEffect(() => { onWaitingCount?.(waitingAll); }, [waitingAll, onWaitingCount]);
 
   // Brokers and programmes come from the rows — those are open sets, and a
   // filter naming a broker who has never sent anything is just noise. The ways
@@ -360,17 +371,10 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
   }), [all]);
 
   const shown = useMemo(() => {
-    const today = new Date().toDateString();
-    const cutoff = range === "all" ? 0
-      : range === "30" ? Date.now() - 30 * 86400000
-      : range === "90" ? Date.now() - 90 * 86400000
-      : new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
     const needle = q.trim().toLowerCase();
 
     const list = all.filter(a => {
-      if (filter === "today") {
-        if (!a.received_at || new Date(a.received_at).toDateString() !== today) return false;
-      } else if (filter === "held") {
+      if (filter === "held") {
         // The tile above counts held AND UNDECIDED, so the filter has to mean
         // the same thing — a tile that is a control must hand you the rows it
         // counted. A held file somebody has already dealt with is reachable
@@ -379,7 +383,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
       } else if (filter.startsWith("run:")) {
         if (a.run_result !== filter.slice(4)) return false;
       } else if (filter && state(a) !== filter) return false;
-      if (cutoff && (!a.received_at || new Date(a.received_at).getTime() < cutoff)) return false;
+      if (!inRange(a, range)) return false;
       if (fChannel && a.channel !== fChannel) return false;
       if (fBroker && a.broker_name !== fBroker) return false;
       if (fProgramme && a.program_name !== fProgramme) return false;
@@ -465,27 +469,20 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
     <>
       {err && <div className="note warn" style={{ marginBottom: 18 }}>{err}</div>}
 
-      {/* Four tiles, and they ARE the filter. The chip row underneath used to
-          repeat these same four counts one row down, and only the chips did
-          anything — the tiles were decoration on top of the control. */}
-      <div className="tiles five" style={{ marginBottom: 18 }}>
-        {/* Not an outcome like the four beside it — it is the period the rest
-            are read against — so it drives the date range rather than the
-            outcome filter, and shows as pressed when that range is on. */}
-        <button type="button" className="tile" aria-pressed={range === "month"}
-          onClick={() => setRange(range === "month" ? "all" : "month")}
-          title={range === "month"
-            ? "Filter applied — click to clear"
-            : "Show this month's files only"}>
-          <div className="k">Received This Month
-            {range === "month" && <span className="on">Filtered</span>}</div>
-          <div className="v">{rows ? counts.month : "—"}</div>
-          <div className="foot">All channels</div>
+      {/* Four tiles, and they ARE the filter. All four count over the Received
+          period picked below (Today / This Month / …), so the period lives in
+          one place instead of as tiles of its own. */}
+      <div className="tiles" style={{ marginBottom: 18 }}>
+        {/* Every file in the period — accepted, on hold and rejected. Pressing
+            it clears the outcome filter rather than toggling one. */}
+        <button type="button" className="tile" aria-pressed={false}
+          onClick={() => setFilter("")} title="Show every file in this period">
+          <div className="k">Total Files</div>
+          <div className="v">{rows ? counts.total : "—"}</div>
+          <div className="foot">{RANGE_FOOT[range]}</div>
         </button>
 
         {([
-          ["today", "Received Today", counts.today, "Since midnight", "",
-            "Show today's files only"],
           ["ok", "Accepted", counts.ok, "Passed all intake checks", "",
             "Show accepted files only"],
           ["held", "On Hold", counts.waiting,
@@ -524,6 +521,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
           <select className="sel" value={range} aria-label="Received"
             onChange={e => setRange(e.target.value as Range)}>
             <option value="all">All Time</option>
+            <option value="today">Today</option>
             <option value="month">This Month</option>
             <option value="30">Last 30 Days</option>
             <option value="90">Last 90 Days</option>

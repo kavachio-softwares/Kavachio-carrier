@@ -409,6 +409,66 @@ def _check_live_contract(session, route: Optional[IntakeRoute]) -> Optional[str]
     return None
 
 
+# ── the stored copy, when there is no blob storage ──────────────────────────
+#
+# With STORAGE_BACKEND=db, storage.store_or_keep hands the bytes BACK instead of
+# a blob ref, and file_arrival has no bytes column — so a file that came in by
+# API, SFTP or email was checked, recorded and then had nothing left to run.
+# The copy goes in its own table (migration 31) and the arrival's blob_ref is
+# set to DB_COPY_REF, so every existing "is there a copy?" test keeps working.
+#
+# A WAITING ROOM, not a second store: the copy only bridges arrival → run (auto
+# run, a held file released days later, Run again after a failure). Once a run
+# succeeds, mark_run deletes it — the rows are in landing_record by then, which
+# is all a broker's own Process Bordereau run leaves behind too. Manual uploads
+# never use it: they are run there and then from the bytes in hand.
+#
+# Best-effort on purpose: before migration 31 is run the table is missing, and
+# a file must still be recorded exactly as it was before.
+
+DB_COPY_REF = "db:file_arrival_file"
+
+
+def keep_copy(session, arrival: FileArrival, file_bytes: bytes) -> None:
+    """Keep the file's bytes in the database when blob storage kept none."""
+    if arrival.blob_ref or not file_bytes:
+        return
+    from sqlalchemy import text
+    try:
+        with session.begin_nested():
+            session.execute(text(
+                "INSERT INTO file_arrival_file (arrival_id, tenant_id, file_bytes) "
+                "VALUES (:a, :t, :b) ON CONFLICT (arrival_id) DO NOTHING"),
+                {"a": arrival.id, "t": arrival.tenant_id, "b": file_bytes})
+        arrival.blob_ref = DB_COPY_REF
+    except Exception as exc:   # noqa: BLE001 — no traceback: it would print the file
+        log.warning("could not keep a copy of arrival %s (is migration 31 run?): %s",
+                    arrival.public_ref, str(exc).splitlines()[0][:200])
+
+
+def read_copy(blob_ref: Optional[str], arrival_id: int) -> Optional[bytes]:
+    """The stored bytes of an arrival, wherever they were kept, or None."""
+    if not blob_ref:
+        return None
+    if blob_ref != DB_COPY_REF:
+        import storage
+        return storage.resolve_bytes(blob_ref, None)
+    from sqlalchemy import text
+    from db import SessionLocal
+    with SessionLocal() as s:
+        row = s.execute(text("SELECT file_bytes FROM file_arrival_file "
+                             "WHERE arrival_id = :a"), {"a": arrival_id}).first()
+    return bytes(row[0]) if row else None
+
+
+def drop_copy(session, arrival_id: int) -> None:
+    """Delete an arrival's database copy (retention). The row stays."""
+    from sqlalchemy import text
+    with session.begin_nested():
+        session.execute(text("DELETE FROM file_arrival_file WHERE arrival_id = :a"),
+                        {"a": arrival_id})
+
+
 # ── the landing pipeline ────────────────────────────────────────────────────
 
 def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
@@ -508,6 +568,7 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
     )
     session.add(arrival)
     session.flush()
+    keep_copy(session, arrival, file_bytes)
 
     # THE CALENDAR'S "turned up" MOMENT (requirement 17.2). An accepted file on a
     # route pinned to a programme satisfies that programme's period for this
@@ -661,6 +722,15 @@ def mark_run(arrival_id: int, *, state: str, landing_id: Optional[int] = None,
                 a.run_export_id = export_id
             # Cleared on success: an old error must not sit beside a clean run.
             a.run_error = (error or "")[:2000] or None if state != "done" else None
+            # Processed: the database copy has done its job (see DB_COPY_REF).
+            # A failed run keeps it, so Run again still has a file to run.
+            if state == "done" and a.blob_ref == DB_COPY_REF:
+                try:
+                    drop_copy(s, a.id)
+                    a.blob_ref = None
+                except Exception:  # noqa: BLE001 — never lose the "done" itself
+                    log.warning("could not delete the copy of arrival %s",
+                                arrival_id, exc_info=True)
             s.commit()
     except Exception:  # noqa: BLE001
         log.warning("could not record the run of arrival %s", arrival_id, exc_info=True)

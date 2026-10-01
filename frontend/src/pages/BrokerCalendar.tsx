@@ -104,6 +104,10 @@ export default function BrokerCalendar() {
   // The period whose processed file is open in the viewer.
   const [viewRow, setViewRow] = useState<BrokerCalendarRow | null>(null);
   const [schedPage, setSchedPage] = useState(1);
+  // The month's files and the deadlines behind them on two tabs, as on the
+  // carrier's calendar. ?tab=deadlines opens the second one.
+  const [tab, setTab] = useState<"month" | "deadlines">(
+    () => (qs.get("tab") === "deadlines" ? "deadlines" : "month"));
   const canProcess = canAccessPath("/broker/bordereau");
 
   const load = useCallback(async (m?: string) => {
@@ -195,7 +199,22 @@ export default function BrokerCalendar() {
           </div>
         </div>
 
+        <div className="tabs" style={{ alignItems: "center" }}>
+          <button className={tab === "month" ? "on" : ""} onClick={() => setTab("month")}>
+            My Month-wise Calendar ({shown.length})
+          </button>
+          <button className={tab === "deadlines" ? "on" : ""} onClick={() => setTab("deadlines")}>
+            My Programmes Calendar ({schedules.length})
+          </button>
+          <InfoTip text={tab === "month"
+            ? "Every file you owe in the month you pick: when it is due, whether you "
+              + "have sent it, and what to do next."
+            : "Your programmes only: how often each one expects a file from you, the "
+              + "next due date and when the deadlines stop. Your carrier sets these."} />
+        </div>
+
         {/* ---- one row for every file this broker owes this month --------- */}
+        {tab === "month" && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-h">
             <CalendarDays className="ci" />
@@ -277,13 +296,21 @@ export default function BrokerCalendar() {
                       <td style={{ whiteSpace: "nowrap" }}>
                         <span style={{ display: "inline-flex", gap: 10 }}>
                         {r.version_count > 0 && (
-                          <span className="linkish" onClick={() => setOpenRow(r)}>Versions →</span>
+                          <span className="linkish" onClick={() => setOpenRow(r)}
+                            title="Every file you sent for this period">View Versions →</span>
                         )}
                         {done && r.export_id != null && (
-                          <span className="linkish" onClick={() => setViewRow(r)}>View file →</span>
+                          <span className="linkish" onClick={() => setViewRow(r)}
+                            title="Open the processed bordereau your carrier received">View File →</span>
                         )}
                         {!done && canProcess && r.status !== "scheduled" && (
-                          <Link className="linkish" to="/broker/bordereau">Process →</Link>
+                          <Link className="linkish" to="/broker/bordereau"
+                            title="Upload and process this period's bordereau">Process File →</Link>
+                        )}
+                        {/* No action yet: say so rather than leave a blank cell. */}
+                        {r.version_count === 0 && !(done && r.export_id != null)
+                          && !(!done && canProcess && r.status !== "scheduled") && (
+                          <span className="muted">—</span>
                         )}
                         </span>
                       </td>
@@ -294,12 +321,15 @@ export default function BrokerCalendar() {
             </table>
           </div>
         </div>
+        )}
 
         {/* ---- what fills the calendar ------------------------------------ */}
+        {tab === "deadlines" && (
         <div className="card">
           <div className="card-h">
-            <h3>Your deadlines</h3>
-            <InfoTip text="How often each programme expects a file from you." />
+            <CalendarDays className="ci" />
+            <h3>My Programmes</h3>
+            <InfoTip text="How often each of your programmes expects a file from you." />
           </div>
           <div className="tbl-wrap">
             <table>
@@ -343,6 +373,7 @@ export default function BrokerCalendar() {
             pageSize={PAGE_SIZE} totalItems={schedules.length}
             onPageChange={setSchedPage} noun="programmes" />
         </div>
+        )}
       </div>
 
       {openRow && <VersionPanel row={openRow} onClose={() => setOpenRow(null)} />}

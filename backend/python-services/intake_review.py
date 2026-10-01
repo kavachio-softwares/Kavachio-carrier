@@ -170,9 +170,13 @@ def fetch_bytes(arrival: FileArrival, *, user_id: Optional[int],
             f"{arrival.bytes_purged_at.strftime('%d %b %Y')} under the "
             f"{retention_days()}-day retention rule. The record of it remains.")
     if not arrival.blob_ref:
+        if arrival.run_state == "done":
+            raise ReviewError("This file has been processed. Its rows are kept "
+                              "with the run; the original file is not stored.")
         raise ReviewError("No copy of this file was kept.")
 
-    data = storage.resolve_bytes(arrival.blob_ref, None)
+    from intake_service import read_copy
+    data = read_copy(arrival.blob_ref, arrival.id)
     if data is None:
         raise ReviewError("The stored copy could not be read.")
 
@@ -221,10 +225,12 @@ def purge_expired(session, *, now: Optional[datetime] = None) -> dict:
         if arrival.bytes_purged_at is not None:
             continue                      # already collected by the first pass
         try:
-            # Only Azure mode has a blob to delete. In DB mode store_or_keep
-            # never hands back a ref at all, so a call here would be a pointless
-            # round trip to a container that is not configured.
-            if storage.is_azure():
+            # A database copy (STORAGE_BACKEND=db, migration 31) is a row to
+            # delete; otherwise only Azure mode has a blob to delete.
+            from intake_service import DB_COPY_REF, drop_copy
+            if arrival.blob_ref == DB_COPY_REF:
+                drop_copy(session, arrival.id)
+            elif storage.is_azure():
                 storage.delete_blob(arrival.blob_ref)
         except Exception as exc:
             # Stamp it anyway. A blob we cannot delete twice is a smaller

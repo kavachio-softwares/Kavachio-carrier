@@ -118,7 +118,6 @@ def _detail(e: BaseException) -> str:
 
 def run_one(arrival_id: int) -> None:
     """Run one claimed arrival and record the outcome on it."""
-    import storage
     import intake_service as svc
     from db import SessionLocal
     from intake_models import FileArrival, IntakeRoute
@@ -152,7 +151,7 @@ def run_one(arrival_id: int) -> None:
         carrier_party_id = pipe.carrier_party_id
         contract_id = _live_contract_id(s, tenant_id, program_id, broker)
 
-    data = storage.resolve_bytes(blob_ref, None) if blob_ref else None
+    data = svc.read_copy(blob_ref, arrival_id)
     if not data:
         svc.mark_run(arrival_id, state="not_run",
                      error="No copy of this file was kept, so it cannot be run.")
