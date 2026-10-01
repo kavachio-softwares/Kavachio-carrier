@@ -470,6 +470,9 @@ def _handle_message(session, raw: bytes, summary: dict):
             # matched nobody.
             claimed_sender=parsed.from_addr or None,
             idempotency_key=key,
+            # "Bordereau – July 2026" in the subject names the reporting period
+            # when the attachment's own name does not.
+            period_hint=parsed.subject,
         )
         notify_sender(session, arrival, parsed)
         session.commit()

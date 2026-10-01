@@ -10,24 +10,32 @@
 // "Clear ingested" and ✕ hide a row HERE only, in this browser. The file and
 // its run stay on the Files screen; a failed run or open exceptions are never
 // cleared in bulk, because they are the reason to open this at all.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Cloud, Mail, MonitorUp, Plug, Server } from "lucide-react";
 import { rerunArrival, type Arrival, type Channel } from "../api/intake";
 import { Badge, CAME_IN_BY, RUN_META } from "../pages/FilesReceived";
 import { fmtStamp } from "../utils/date";
 import { InfoTip } from "./InfoTip";
+import { Pagination } from "./Pagination";
 
 type Tab = "all" | "attention" | "done";
 
-// What each tab holds. Behind the ⓘ, not printed under the tabs.
+// What each tab holds. Behind the ⓘ, not printed under the tabs. The two
+// narrower tabs do not overlap, so their counts add up to All's: a file is
+// either waiting on somebody or it is not. ("Finished" used to take in files
+// with exceptions as well, so every tab could show the same number.)
 const TAB_MEANING: Record<Tab, string> = {
   all: "Every file that has been run.",
   attention: "A person has to act: the run failed, could not run on its own, "
     + "or found exceptions waiting for a decision.",
-  done: "The run completed — clean, or with exceptions. A file with exceptions "
-    + "is in both Needs you and Finished.",
+  done: "Processed, with nothing waiting on you: clean files, and files whose "
+    + "contract checks could not be applied.",
 };
+
+// Files per page. The list is in memory already (the sidebar's one fetch), so
+// the pages are cut here; filtering always comes first, then the page.
+const PAGE_SIZE = 10;
 
 // How the file reached us, so a row says where it came from at a glance. The
 // words are the Files table's own (CAME_IN_BY); only the icon is added here.
@@ -118,6 +126,10 @@ export function IngestionPanel({ open, rows, onClose, onChanged }: {
   const nav = useNavigate();
   const [tab, setTab] = useState<Tab>("all");
   const [via, setVia] = useState<Channel | "all">("all");
+  const [page, setPage] = useState(1);
+  // A new filter starts from its first page.
+  useEffect(() => { setPage(1); }, [tab, via]);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const [dismissed, saveDismissed] = useDismissedRuns();
   const [busyId, setBusyId] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -130,29 +142,47 @@ export function IngestionPanel({ open, rows, onClose, onChanged }: {
   // The tabs count within the way in picked below, so a number matches the list.
   const ran = via === "all" ? ranAll : ranAll.filter(a => a.channel === via);
   const attention = ran.filter(needsYou);
-  // Finished = the run completed, whatever it found. Exceptions are both
-  // finished AND needing you, so they sit in both tabs.
-  const isFinished = (a: Arrival) => a.run_result === "ingested"
-    || a.run_result === "exceptions" || a.run_result === "not_checked";
-  const finished = ran.filter(isFinished);
-  const shown = tab === "all" ? ran : tab === "attention" ? attention : finished;
+  // Done = processed with nothing waiting on anyone — everything Needs You is
+  // not. A file with exceptions is Needs You only, so All = Needs You + Done.
+  const isDone = (a: Arrival) => !needsYou(a);
+  const done = ran.filter(isDone);
+  const shown = tab === "all" ? ran : tab === "attention" ? attention : done;
 
   // Ways in present in the current tab, with how many files each brought.
-  const inTab = (a: Arrival) => tab === "all" ? true : tab === "attention" ? needsYou(a) : isFinished(a);
+  const inTab = (a: Arrival) => tab === "all" ? true : tab === "attention" ? needsYou(a) : isDone(a);
   const viaTally = new Map<Channel, number>();
   for (const a of ranAll) if (a.channel && inTab(a)) viaTally.set(a.channel, (viaTally.get(a.channel) ?? 0) + 1);
-  const viaCounts = CHANNEL_ORDER.filter(c => viaTally.has(c)).map(c => [c, viaTally.get(c)!] as const);
+  // The picked one stays listed even at nought, so the dropdown never shows a
+  // value it has no option for.
+  const viaCounts = CHANNEL_ORDER.filter(c => viaTally.has(c) || c === via)
+    .map(c => [c, viaTally.get(c) ?? 0] as const);
+  const inTabAll = ranAll.filter(inTab).length;
+  // Only worth offering when files came in more than one way — with one, it
+  // filters nothing. Kept while a pick is set, so it can always be undone.
+  const channelsSeen = new Set(ranAll.map(a => a.channel).filter(Boolean));
+  const showChannel = channelsSeen.size > 1 || via !== "all";
+
+  // This page of the filtered list. Clamped, so a list that shrinks (a row
+  // hidden with ✕) never strands you on an empty page.
+  const pageCount = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  const pageNow = Math.min(page, pageCount);
+  const pageRows = shown.slice((pageNow - 1) * PAGE_SIZE, pageNow * PAGE_SIZE);
+  function goToPage(n: number) {
+    setPage(n);
+    bodyRef.current?.scrollTo({ top: 0 });
+  }
 
   // Grouped by contract, the way the reference groups by binder: the contract
-  // is what the file was answerable to.
+  // is what the file was answerable to. Grouped within the page, after it is cut.
   const groups = useMemo(() => {
     const m = new Map<string, Arrival[]>();
-    for (const a of shown) {
+    for (const a of pageRows) {
       const key = a.contract_name ?? a.program_name ?? "No contract recorded";
       m.set(key, [...(m.get(key) ?? []), a]);
     }
     return [...m.entries()];
-  }, [shown]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shown, pageNow]);
 
   function dismiss(ids: number[]) {
     const next = new Set(dismissed);
@@ -204,44 +234,51 @@ export function IngestionPanel({ open, rows, onClose, onChanged }: {
           <button type="button" className="closeb" aria-label="Close" onClick={onClose}>×</button>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 18px 8px" }}>
-          {([["all", "All", ran.length], ["attention", "Needs you", attention.length],
-             ["done", "Finished", finished.length],
-          ] as const).map(([k, label, n]) => (
-            <button key={k} type="button" className="chip" aria-pressed={tab === k}
-              title={TAB_MEANING[k]}
-              onClick={() => setTab(k)}>{label} <span className="n">{n}</span></button>
-          ))}
-          <InfoTip text={`Needs you — ${TAB_MEANING.attention}  Finished — ${TAB_MEANING.done}`} />
+        {/* The filters: one control per line, each the full width. The first
+            splits the run files in two — what needs somebody and what does
+            not — so its counts add up. The second, where the files came from
+            (the web portal, email, SFTP, API…), narrows the list and those
+            counts to one way in; it only appears when there is a choice. */}
+        <div style={{ display: "grid", gap: 10, padding: "12px 20px",
+          borderBottom: "1px solid var(--p-border)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div className="seg full" role="group" aria-label="Show">
+              {([["all", "All", ran.length], ["attention", "Needs You", attention.length],
+                 ["done", "Done", done.length],
+              ] as const).map(([k, label, n]) => (
+                <button key={k} type="button" className={tab === k ? "on" : ""}
+                  aria-pressed={tab === k} title={TAB_MEANING[k]}
+                  onClick={() => setTab(k)}>{label}<span className="n">{n}</span></button>
+              ))}
+            </div>
+            <InfoTip text={`All — ${TAB_MEANING.all}\nNeeds You — ${TAB_MEANING.attention}\n`
+              + `Done — ${TAB_MEANING.done}`} />
+          </div>
+          {showChannel && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 500, color: "var(--p-muted)",
+                whiteSpace: "nowrap" }}>Channel</span>
+              <select className="fbar-select" aria-label="Channel" value={via}
+                style={{ flex: 1, height: 34, paddingTop: 0, paddingBottom: 0 }}
+                onChange={e => setVia(e.target.value as Channel | "all")}>
+                <option value="all">All channels ({inTabAll})</option>
+                {viaCounts.map(([c, n]) => (
+                  <option key={c} value={c}>{CAME_IN_BY[c].label} ({n})</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
-        {/* Where the files came from: the web portal, email, SFTP, API… Picking
-            one narrows the list and the tab counts above to that way in. */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
-          padding: "0 18px 10px", borderBottom: "1px solid var(--p-border)" }}>
-          <span className="faint" style={{ fontSize: 11, fontWeight: 600, marginRight: 2 }}>Channel</span>
-          <button type="button" className="chip" aria-pressed={via === "all"}
-            style={{ fontSize: 11.5, padding: "3px 9px" }}
-            onClick={() => setVia("all")}>All</button>
-          {viaCounts.map(([c, n]) => {
-            const Icon = CHANNEL_ICON[c];
-            return (
-              <button key={c} type="button" className="chip" aria-pressed={via === c}
-                style={{ fontSize: 11.5, padding: "3px 9px" }}
-                title={`Show ${CAME_IN_BY[c].label} files only`}
-                onClick={() => setVia(via === c ? "all" : c)}>
-                <Icon size={12} strokeWidth={2} aria-hidden="true" />
-                {CAME_IN_BY[c].label} <span className="n">{n}</span></button>);
-          })}
-        </div>
-
-        <div className="drawer-b">
+        <div className="drawer-b" ref={bodyRef}>
           {err && <div className="note crit" style={{ marginBottom: 12 }}>{err}</div>}
           {groups.length === 0 ? (
             <div style={{ textAlign: "center", padding: "32px 12px", color: "var(--p-muted)", fontSize: 12.5 }}>
               Nothing here.<br />
-              {via === "all" ? "Files appear here once they have been run."
-                : `No ${tab === "all" ? "files" : tab === "attention" ? "files needing attention" : "finished files"} received via ${CAME_IN_BY[via].label}.`}
+              {tab === "attention" && via === "all" ? "Nothing is waiting on you."
+                : tab === "done" && via === "all" ? "No files are done yet."
+                : via === "all" ? "Files appear here once they have been run."
+                : `No ${tab === "all" ? "files" : tab === "attention" ? "files needing attention" : "done files"} received via ${CAME_IN_BY[via].label}.`}
             </div>
           ) : groups.map(([contract, files]) => (
             <div key={contract} style={{ marginBottom: 16 }}>
@@ -283,6 +320,10 @@ export function IngestionPanel({ open, rows, onClose, onChanged }: {
             </div>
           ))}
         </div>
+
+        {/* Outside the scrolling list, so it is always in reach. */}
+        <Pagination page={pageNow} pageCount={pageCount} pageSize={PAGE_SIZE}
+          totalItems={shown.length} onPageChange={goToPage} noun="files" />
 
         <div className="drawer-f">
           <span className="faint" style={{ fontSize: 11.5 }}>Every file that has been run, by contract.</span>

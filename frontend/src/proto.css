@@ -423,6 +423,11 @@
 .proto .seg button:last-child{border-right:0}
 .proto .seg button.on{background:var(--p-primary-soft);color:var(--p-primary)}
 .proto .seg.sm button{padding:5px 10px;font-size:11.5px}
+/* A segmented control that fills its row in equal parts, each with a count
+   (the Ingestion Panel's All / Needs You / Done). */
+.proto .seg.full{display:flex;flex:1;min-width:0}
+.proto .seg.full button{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 10px;white-space:nowrap}
+.proto .seg .n{font-family:var(--p-mono);font-size:11px;opacity:.75}
 
 /* list filter bar: compact dropdown + date-range inputs (components/ListFilterBar) */
 .proto .fbar-select{

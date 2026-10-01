@@ -417,7 +417,9 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
               idempotency_key: Optional[str] = None,
               public_ref: Optional[str] = None,
               blob_ref: Optional[str] = None,
-              max_bytes: Optional[int] = None) -> FileArrival:
+              max_bytes: Optional[int] = None,
+              period: Optional[str] = None,
+              period_hint: Optional[str] = None) -> FileArrival:
     """Record one arriving file and decide whether it may go on.
 
     Always returns a FileArrival — including for a file we refuse. That is the
@@ -513,19 +515,28 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
     # was due. Only ACCEPTED files count: a turned-away file did not arrive, and
     # a held one has not been decided yet, so neither may tick a deadline off.
     #
-    # The period is read from the file NAME, so July's bordereau arriving in
-    # September lands on July. When the name says nothing, mark_received falls
-    # back to the oldest open period and records that it guessed.
+    # Which period: one the sender STATED (the API's `period`, already checked
+    # against the calendar) is trusted outright. Otherwise a hint the sender
+    # wrote (an email subject such as "July 2026 bordereau"), then the file
+    # NAME — so July's bordereau arriving in September still lands on July.
+    # When none says anything, mark_received falls back to the oldest open
+    # period and records that it guessed.
     #
     # Best-effort on purpose: the calendar is a side-feature, and nothing here
     # may stop a file being recorded as arrived.
     if outcome == "accepted" and route is not None and route.program_id is not None:
         try:
+            from submission_calendar import parse_period_hint
             from submission_calendar_service import mark_received
-            mark_received(session, route.program_id,
-                          received_on=arrival.received_at.date(),
-                          broker_party_id=route.broker_party_id,
-                          source_filename=filename)
+            received = mark_received(
+                session, route.program_id,
+                received_on=arrival.received_at.date(),
+                broker_party_id=route.broker_party_id,
+                source_filename=filename, period=period or None,
+                covering_date=None if period else parse_period_hint(period_hint))
+            # Not a column: handed back so the API receipt can say which period
+            # the file was recorded against.
+            arrival.reporting_period = received["period"] if received else None
             session.flush()
         except Exception:   # noqa: BLE001
             log.warning("submission-calendar mark_received failed for arrival %s",

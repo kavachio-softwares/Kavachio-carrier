@@ -51,25 +51,20 @@ function fmtDay(iso?: string | null) {
   return Number.isNaN(d.getTime()) ? iso
     : d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
-// A broker the carrier works with. Two sources, one shape: the carrier's whole
-// directory (GET /brokers — `programmes`, `relationship`) or, with a programme
-// picked, that programme's brokers (GET /programs/{id}/brokers — `status` is
-// the broker's link to that programme).
-type Broker = {
-  id: number; legal_name: string; dba_name?: string | null;
-  contract_count?: number;
-  programmes?: { id: number; name: string; status?: string | null }[];
-  relationship?: "active" | "invited";
-  status?: string | null;
-};
-function brokerBadge(s?: string | null) {
+// A broker from the carrier's directory (GET /brokers?mga=) — read only for
+// the programme → broker names shown in the Brokers column.
+type DirBroker = { id: number; legal_name: string; programmes?: { id: number; name: string }[] };
+// One broker on one programme (GET /programs/{id}/brokers?mga=) — `status` is
+// its link to that programme.
+type ProgBroker = { id: number; legal_name: string; status?: string | null; contract_count?: number };
+function linkBadge(s?: string | null) {
   const v = (s ?? "").toLowerCase();
   if (v === "active") return { cls: "b-ok", label: "Active" };
-  if (v === "invited") return { cls: "b-warn", label: "Invited" };
   if (v === "pending_approval") return { cls: "b-warn", label: "Awaiting approval" };
   if (v === "ended") return { cls: "b-mut", label: "Ended" };
   return { cls: "b-mut", label: s || "—" };
 }
+const DRAWER_PAGE = 5;
 type Run = {
   landing_id: number; source_filename?: string | null; program_name?: string | null;
   created_at?: string | null; exception_count?: number; status?: string | null;
@@ -161,10 +156,43 @@ export default function TenantDetail() {
   // the list behind it would look like the contracts had gone.
   const [selected, setSelected] = useState<{ id: number; name: string } | null>(null);
   const selectedProgramId = selected?.id ?? null;
-  // A broker picked inside the picked programme narrows the contracts to it.
-  // Cleared whenever the programme changes — it belonged to that programme.
-  const [selBroker, setSelBroker] = useState<{ id: number; name: string } | null>(null);
-  useEffect(() => { setSelBroker(null); }, [selectedProgramId]);
+  // The viewed programme's brokers, for the drawer — a short whole list,
+  // paged here.
+  const {
+    page: brkPage, setPage: setBrkPage, items: brkItems, total: brkTotal,
+    pageCount: brkPageCount, loading: brkLoading,
+  } = useServerList<ProgBroker>(
+    (page, pageSize) =>
+      selectedProgramId == null
+        ? Promise.resolve({ items: [], total: 0 })
+        : api.get<ProgBroker[]>(`/programs/${selectedProgramId}/brokers`, { params: { mga } })
+            .then(r => ({ items: r.data.slice((page - 1) * pageSize, page * pageSize),
+                          total: r.data.length })),
+    isAdmin ? `pbrokers|${selectedProgramId ?? ""}` : "disabled",
+    DRAWER_PAGE,
+  );
+  // Escape closes the drawer.
+  useEffect(() => {
+    if (selectedProgramId == null) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setSelected(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedProgramId]);
+
+  // Programme id → the brokers on it, for the table's Brokers column. The
+  // carrier's whole directory in one read (a carrier holds a handful).
+  const [brokersByProg, setBrokersByProg] = useState<Record<number, string[]>>({});
+  useEffect(() => {
+    if (!isAdmin || !mga) return;
+    api.get<DirBroker[]>("/brokers", { params: { mga } })
+      .then(r => {
+        const m: Record<number, string[]> = {};
+        for (const b of r.data)
+          for (const p of b.programmes ?? []) (m[p.id] ??= []).push(b.legal_name);
+        setBrokersByProg(m);
+      })
+      .catch(() => setBrokersByProg({}));
+  }, [isAdmin, mga]);
 
   // Users tab filters — independent of the Recent runs tab's own filters below.
   const [userQ, setUserQ] = useState("");
@@ -263,40 +291,19 @@ export default function TenantDetail() {
   // for, and the panel says so rather than showing the last programme's.
   const {
     page: conPage, setPage: setConPage, items: conItems, total: conTotal,
-    pageCount: conPageCount,
+    pageCount: conPageCount, loading: conLoading,
   } = useServerList<Contract>(
     (page, pageSize) =>
       selectedProgramId == null
         ? Promise.resolve({ items: [], total: 0 })
         : api.get<{ items: Contract[]; total: number }>(
             `/programs/${selectedProgramId}/contracts`,
-            { params: { page, page_size: pageSize,
-                        ...(selBroker ? { broker_party_id: selBroker.id } : {}) } },
+            { params: { page, page_size: pageSize } },
           ).then(r => r.data),
-    isAdmin ? `contracts|${selectedProgramId ?? ""}|${selBroker?.id ?? ""}` : "disabled",
-    PAGE_SIZE,
+    isAdmin ? `contracts|${selectedProgramId ?? ""}` : "disabled",
+    DRAWER_PAGE,
   );
 
-  // Brokers follow the selection the same way contracts do: nothing picked →
-  // every broker the carrier works with (server-paged); a programme picked →
-  // that programme's brokers (a short, whole list, paged here).
-  const {
-    page: brkPage, setPage: setBrkPage, items: brkItems, total: brkTotal,
-    pageCount: brkPageCount,
-  } = useServerList<Broker>(
-    (page, pageSize) =>
-      selectedProgramId == null
-        ? api.get<{ items: Broker[]; total: number }>("/brokers", {
-            params: { mga, page, page_size: pageSize },
-          }).then(r => r.data)
-        : api.get<Broker[]>(`/programs/${selectedProgramId}/brokers`, { params: { mga } })
-            .then(r => ({
-              items: r.data.slice((page - 1) * pageSize, page * pageSize),
-              total: r.data.length,
-            })),
-    isAdmin ? `brokers|${selectedProgramId ?? ""}` : "disabled",
-    PAGE_SIZE,
-  );
 
   const runFilterKey = `${runDq}|${runDateFrom}|${runDateTo}`;
   const {
@@ -485,164 +492,130 @@ export default function TenantDetail() {
         )}
 
         {/* Programs & contracts */}
-        {/* Programs & contracts — read top-down: pick a programme (left), see
-            its brokers (right), and its contracts underneath. A broker picked
-            on the right narrows the contracts to that broker. */}
+        {/* Programs & contracts — ONE table of programmes. "View" opens a
+            right-hand drawer with that programme's contracts and brokers,
+            each paged on its own. */}
         {tab === "pc" && (() => {
-          const selectedProgram = selected;
-          const clearAll = () => { setSelected(null); setSelBroker(null); };
+          const L: React.CSSProperties = { textAlign: "left" };
           return (
           <>
-          <div className="grid g-2" style={{ alignItems: "stretch" }}>
-            {/* ---- Programs ---- */}
-            <div className="card">
-              <div className="card-h">
-                <h3>Programs</h3><span className="sub">{progTotal}</span>
-                <div className="right"><span className="sub">Select one to see its brokers and contracts</span></div>
-              </div>
-              <div className="tbl-wrap">
-                <table>
-                  <thead>
-                    <tr><th>Program</th><th className="r">Contracts</th><th className="r">Status</th></tr>
-                  </thead>
-                  <tbody>
-                    {progItems.map(p => {
-                      const st = itemStatus(p.status);
-                      const count = p.contract_count ?? 0;
-                      const isSel = p.id === selectedProgramId;
-                      return (
-                        <tr key={p.id} className={`click${isSel ? " sel" : ""}`}
-                          aria-selected={isSel}
-                          onClick={() => setSelected(cur =>
-                            cur?.id === p.id ? null : { id: p.id, name: p.name })}>
-                          <td><b>{p.name}</b>{p.product_line && <div className="sub">{p.product_line}</div>}</td>
-                          <td className="r muted">{count}</td>
-                          <td className="r"><span className={`badge ${st.cls}`}><span className="d" />{st.label}</span></td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                {progTotal === 0 && <div className="empty">No programs yet.</div>}
-              </div>
-              {progTotal > 0 && (
-                <Pagination page={progPage} pageCount={progPageCount} pageSize={PAGE_SIZE}
-                  totalItems={progTotal} onPageChange={setProgPage} noun="programs" />
-              )}
+          <div className="card">
+            <div className="card-h">
+              <h3>Programs &amp; Contracts</h3><span className="sub">{progTotal} programs</span>
             </div>
-
-            {/* ---- Brokers: the carrier's whole list, or the picked programme's ---- */}
-            <div className="card">
-              <div className="card-h">
-                <h3>Brokers</h3>
-                <span className="sub">{brkTotal} · {selectedProgram ? selectedProgram.name : "all programs"}</span>
-                {selectedProgram && (
-                  <div className="right"><span className="sub">Select one to see only its contracts</span></div>
-                )}
-              </div>
-              <div className="tbl-wrap">
-                <table>
-                  <thead>
-                    <tr><th>Broker</th><th className="r">Contracts</th><th className="r">Status</th></tr>
-                  </thead>
-                  <tbody>
-                    {brkItems.map(b => {
-                      const st = brokerBadge(selectedProgram ? b.status : b.relationship);
-                      const n = b.contract_count ?? 0;
-                      const progs = b.programmes ?? [];
-                      const isSel = selBroker?.id === b.id;
-                      return (
-                        <tr key={b.id}
-                          className={selectedProgram ? `click${isSel ? " sel" : ""}` : undefined}
-                          aria-selected={selectedProgram ? isSel : undefined}
-                          onClick={selectedProgram ? () => setSelBroker(cur =>
-                            cur?.id === b.id ? null : { id: b.id, name: b.legal_name }) : undefined}>
-                          <td><b>{b.legal_name}</b>
-                            {!selectedProgram && (
-                              <div className="sub">
-                                {progs.length === 0 ? "Not on a program yet"
-                                  : progs.map(p => p.name).join(", ")}
-                              </div>
-                            )}</td>
-                          <td className="r muted">{n}</td>
-                          <td className="r"><span className={`badge ${st.cls}`}><span className="d" />{st.label}</span></td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                {brkTotal === 0 && (
-                  <div className="empty">
-                    {selectedProgram ? "No brokers on this program yet." : "This carrier has no brokers yet."}
-                  </div>
-                )}
-              </div>
-              {brkTotal > 0 && (
-                <Pagination page={brkPage} pageCount={brkPageCount} pageSize={PAGE_SIZE}
-                  totalItems={brkTotal} onPageChange={setBrkPage} noun="brokers" />
-              )}
+            <div className="tbl-wrap">
+              <table>
+                <thead>
+                  <tr><th>Program</th><th>Brokers</th>
+                    <th className="r">Contracts</th><th className="r">Status</th><th className="r" /></tr>
+                </thead>
+                <tbody>
+                  {progItems.map(p => {
+                    const st = itemStatus(p.status);
+                    const count = p.contract_count ?? 0;
+                    const brokers = brokersByProg[p.id] ?? [];
+                    return (
+                      <tr key={p.id} className={p.id === selectedProgramId ? "sel" : undefined}>
+                        <td><b>{p.name}</b>{p.product_line && <div className="sub">{p.product_line}</div>}</td>
+                        <td>{brokers.length ? brokers.join(", ")
+                          : <span className="muted">No broker yet</span>}</td>
+                        <td className="r">{count}</td>
+                        <td className="r"><span className={`badge ${st.cls}`}><span className="d" />{st.label}</span></td>
+                        <td className="r">
+                          <button type="button" className="btn sm"
+                            onClick={() => setSelected({ id: p.id, name: p.name })}>View</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {progTotal === 0 && <div className="empty">No programs yet.</div>}
             </div>
+            {progTotal > 0 && (
+              <Pagination page={progPage} pageCount={progPageCount} pageSize={PAGE_SIZE}
+                totalItems={progTotal} onPageChange={setProgPage} noun="programs" />
+            )}
           </div>
 
-          {/* ---- Contracts: the picked programme's, optionally one broker's ---- */}
-          <div className="card" style={{ marginTop: 18 }}>
-            <div className="card-h">
-              <h3>Contracts</h3>
-              {selectedProgram && (
-                <span className="sub">
-                  {conTotal} · {selectedProgram.name}{selBroker ? ` › ${selBroker.name}` : ""}
-                </span>
-              )}
-              {selectedProgram && (
-                <div className="right">
-                  <span className="linkish" onClick={clearAll}>Clear Selection</span>
+          {/* ---- The programme drawer ---- */}
+          <div className={`scrim${selected ? " on" : ""}`} onClick={() => setSelected(null)} />
+          <aside className={`drawer wide${selected ? " on" : ""}`} aria-hidden={!selected}
+            aria-label={selected ? `${selected.name} — contracts and brokers` : undefined}>
+            <div className="drawer-h">
+              <div>
+                <h4>{selected?.name ?? ""}</h4>
+                <div style={{ fontSize: 12.5, color: "var(--p-muted)" }}>
+                  {selected ? `${conTotal} contract${conTotal === 1 ? "" : "s"} · ${brkTotal} broker${brkTotal === 1 ? "" : "s"}` : " "}
                 </div>
-              )}
+              </div>
+              <button type="button" className="closeb" aria-label="Close" onClick={() => setSelected(null)}>×</button>
             </div>
-            {!selectedProgram ? (
-              <div className="empty">Select a program above to see its contracts.</div>
-            ) : (
-              <>
+            <div className="drawer-b" style={{ padding: 0 }}>
+              {/* Contracts */}
+              <div className="card-h" style={{ borderTop: 0 }}>
+                <h3>Contracts</h3><span className="sub">{conTotal}</span>
+              </div>
+              {conLoading ? <div className="muted" style={{ padding: "14px 20px" }}>Loading…</div>
+                : conTotal === 0 ? <div className="empty">No contracts on this program yet.</div> : (
                 <div className="tbl-wrap">
                   <table>
-                    <thead>
-                      <tr><th>Contract</th><th>Broker</th><th>Term</th>
-                        <th className="r">Clauses</th><th>Created</th><th className="r">Status</th></tr>
-                    </thead>
+                    <thead><tr><th style={L}>Contract</th><th style={L}>Broker</th><th className="r">Status</th></tr></thead>
                     <tbody>
                       {conItems.map(c => {
-                        const st = contractBadge(c.status);
+                        const cs = contractBadge(c.status);
                         const from = fmtDay(c.inception_dt), to = fmtDay(c.expiry_dt);
                         return (
                           <tr key={c.id}>
-                            <td><b>{c.name || c.filename || `Contract #${c.id}`}</b>
-                              {c.name && c.filename && c.filename !== c.name && (
-                                <div className="sub">{c.filename}</div>
-                              )}</td>
-                            <td>{c.broker_name ?? <span className="muted">Held by the carrier</span>}</td>
-                            <td className="muted">{from || to ? `${from ?? "—"} – ${to ?? "—"}` : "—"}</td>
-                            <td className="r muted">{c.clause_count ?? 0}</td>
-                            <td className="muted">{fmtDay(c.created_at) ?? "—"}</td>
-                            <td className="r"><span className={`badge ${st.cls}`}><span className="d" />{st.label}</span></td>
+                            <td style={L}><b>{c.name || c.filename || `Contract #${c.id}`}</b>
+                              <div className="sub">
+                                {from || to ? `${from ?? "—"} – ${to ?? "—"}` : "No term set"}
+                                {" · "}{c.clause_count ?? 0} clause{(c.clause_count ?? 0) === 1 ? "" : "s"}
+                              </div></td>
+                            <td style={L}>{c.broker_name ?? <span className="muted">Held by the carrier</span>}</td>
+                            <td className="r"><span className={`badge ${cs.cls}`}><span className="d" />{cs.label}</span></td>
                           </tr>
                         );
                       })}
                     </tbody>
                   </table>
-                  {conTotal === 0 && (
-                    <div className="empty">
-                      {selBroker ? `No contracts with ${selBroker.name} on this program.`
-                        : "No contracts on this program yet."}
-                    </div>
-                  )}
                 </div>
-                {conTotal > 0 && (
-                  <Pagination page={conPage} pageCount={conPageCount} pageSize={PAGE_SIZE}
-                    totalItems={conTotal} onPageChange={setConPage} noun="contracts" />
-                )}
-              </>
-            )}
-          </div>
+              )}
+              {conTotal > DRAWER_PAGE && (
+                <Pagination page={conPage} pageCount={conPageCount} pageSize={DRAWER_PAGE}
+                  totalItems={conTotal} onPageChange={setConPage} noun="contracts" />
+              )}
+
+              {/* Brokers */}
+              <div className="card-h" style={{ marginTop: 10, borderTop: "1px solid var(--p-border)" }}>
+                <h3>Brokers</h3><span className="sub">{brkTotal}</span>
+              </div>
+              {brkLoading ? <div className="muted" style={{ padding: "14px 20px" }}>Loading…</div>
+                : brkTotal === 0 ? <div className="empty">No brokers on this program yet.</div> : (
+                <div className="tbl-wrap">
+                  <table>
+                    <thead><tr><th style={L}>Broker</th><th className="r">Contracts</th><th className="r">Status</th></tr></thead>
+                    <tbody>
+                      {brkItems.map(b => {
+                        const bs = linkBadge(b.status);
+                        return (
+                          <tr key={b.id}>
+                            <td style={L}><b>{b.legal_name}</b></td>
+                            <td className="r muted">{b.contract_count ?? 0}</td>
+                            <td className="r"><span className={`badge ${bs.cls}`}><span className="d" />{bs.label}</span></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {brkTotal > DRAWER_PAGE && (
+                <Pagination page={brkPage} pageCount={brkPageCount} pageSize={DRAWER_PAGE}
+                  totalItems={brkTotal} onPageChange={setBrkPage} noun="brokers" />
+              )}
+            </div>
+          </aside>
           </>
           );
         })()}

@@ -125,6 +125,26 @@ def resolve_programme(s, p: IntakePrincipal, declared_ref: Optional[str]):
                choices=sorted(by_ref))
 
 
+def reporting_periods(s, tenant_id: int, program_id: Optional[int],
+                      broker_party_id) -> list[str]:
+    """The reporting periods a sender may name — the same list the broker's
+    Process Bordereau picker offers: this programme's calendar rows for this
+    broker whose period has ended, most recently due first. Empty when the
+    carrier has no calendar for the programme."""
+    if program_id is None:
+        return []
+    from datetime import datetime
+    from db import ExpectedSubmission
+    rows = (s.query(ExpectedSubmission.period)
+            .filter(ExpectedSubmission.tenant_id == tenant_id,
+                    ExpectedSubmission.program_id == program_id,
+                    ExpectedSubmission.broker_party_id == broker_party_id,
+                    ExpectedSubmission.period_end <= datetime.utcnow().date())
+            .order_by(ExpectedSubmission.due_date.desc())
+            .limit(24).all())
+    return [r.period for r in rows]
+
+
 def _receipt(s, arrival: FileArrival, base: str, replayed: bool = False) -> dict:
     """Carrier, broker and programme come back as NAMES on purpose: if someone
     pastes the wrong key into the wrong script they see the wrong broker in the
@@ -168,6 +188,9 @@ async def receive_bordereau(
     # disagree. There is deliberately no broker or carrier field: a
     # client-supplied broker would let anyone with any key file as anyone else.
     program_ref: Optional[str] = Form(default=None),
+    # The reporting period the file is FOR, e.g. "2026-07" — one of the
+    # labels GET /v1/whoami lists. Optional: without it the period is read
+    # from the file name, and failing that the oldest open period is assumed.
     period: Optional[str] = Form(default=None),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     p: IntakePrincipal = Depends(current_intake_principal),
@@ -217,6 +240,18 @@ async def receive_bordereau(
                        "This sender is not currently set up on that programme. "
                        "Contact the carrier.")
 
+        # A stated period must be one the carrier's calendar expects — the same
+        # rule Process Bordereau's picker enforces. Refused rather than guessed:
+        # a wrong period marks the wrong month as delivered.
+        period = (period or "").strip() or None
+        if period:
+            allowed = reporting_periods(s, p.tenant_id, program_id, p.broker_party_id)
+            if allowed and period not in allowed:
+                raise _err(400, "unknown_period",
+                           f"'{period}' is not a reporting period this programme "
+                           "expects from you. Send one of the listed periods.",
+                           choices=allowed)
+
         # Store BEFORE the checks. When a broker rings about the file turned
         # away at 02:00, "we have the bytes and here is which check failed" is a
         # two-minute conversation; "we rejected something" is a two-day one.
@@ -237,7 +272,8 @@ async def receive_bordereau(
             arrival = svc.land_file(
                 s, tenant_id=p.tenant_id, filename=fname, file_bytes=data,
                 route=route, claimed_sender=f"api:{p.credential_id}",
-                idempotency_key=idempotency_key, blob_ref=blob_ref)
+                idempotency_key=idempotency_key, blob_ref=blob_ref,
+                period=period)
             s.commit()
         except IntegrityError:
             # Two identical POSTs racing each other — the DB arbitrated, so
@@ -267,6 +303,9 @@ async def receive_bordereau(
         s.refresh(arrival)
 
         body = _receipt(s, arrival, base)
+        # Which period the file was recorded against, so a wrong one shows up
+        # on the first night rather than at month-end.
+        body["period"] = getattr(arrival, "reporting_period", None) or period
         if arrival.outcome == "turned_away":
             # A refused file still has a row and a reference — nothing is
             # silently dropped, and the sender can quote it back at you.
@@ -326,6 +365,11 @@ def whoami(p: IntakePrincipal = Depends(current_intake_principal)):
             "programme_pinned": p.program_id is not None,
             # When the key is NOT pinned these are the refs a caller may send.
             "programme_options": sorted(_programme_ref(x) for x in options),
+            # The values `period` may take on POST /v1/bordereaux.
+            "reporting_periods": reporting_periods(
+                s, p.tenant_id,
+                p.program_id or (options[0].id if len(options) == 1 else None),
+                p.broker_party_id),
             "channel": route.channel if route else "api",
             "enabled": bool(route.is_enabled) if route else False,
             "key": mask(cred.key_prefix, cred.last4) if cred else None,

@@ -26,6 +26,8 @@ import { Modal } from "../components/ui/Modal";
 
 // Copy lives here, not in the API, because it is interface language rather than
 // data — the backend has no opinion on what "the old-fashioned way" means.
+const API_BASE: string = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+
 const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }> = {
   upload: {
     // "someone" was accurate while a carrier seat could upload too. It cannot
@@ -84,6 +86,7 @@ const CHANNEL_DETAIL: Partial<Record<Channel, [string, string][]>> = {
     ["After we take it", "Moved into /processed so it cannot be read twice"],
     ["If the file is still being written", "We wait until it stops growing"],
     ["If we do not know the folder", "Kept and shown on Files Received — but there is nobody to tell"],
+    ["Reporting period", "Read from the file name, e.g. Premium_BDX_2026-07.xlsx"],
   ],
   email: [
     ["Where they send it", "The intake mailbox, at their own +address"],
@@ -92,6 +95,7 @@ const CHANNEL_DETAIL: Partial<Record<Channel, [string, string][]>> = {
     ["After we take it", "Filed into /Processed so it cannot be read twice"],
     ["Attachments we ignore", "Signatures, logos and anything not a spreadsheet"],
     ["If we cannot use it", "The sender can be notified — email is the only channel with a reply path"],
+    ["Reporting period", "Read from the subject line or file name, e.g. \"Bordereau – July 2026\""],
   ],
   api: [
     ["Where they send it", "POST /v1/bordereaux"],
@@ -99,6 +103,7 @@ const CHANNEL_DETAIL: Partial<Record<Channel, [string, string][]>> = {
     ["When it happens", "The moment they send — nothing is polled"],
     ["What they get back", "A reference, and whether it was accepted, straight away"],
     ["If it fails", "They are told at once in the reply, so they can retry"],
+    ["Reporting period", "Sent as period, e.g. 2026-07 — GET /v1/whoami lists the valid ones"],
   ],
 };
 
@@ -784,6 +789,25 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                   Send it to {created.broker_name} privately. If it is lost, revoke it and
                   create a new one.
                 </div>
+                {/* What their system actually sends. `period` is the reporting
+                    period the file is for — GET /v1/whoami lists the values
+                    this key may use. */}
+                {(() => {
+                  const d = new Date(); d.setDate(0);     // last day of last month
+                  const eg = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+                  const curl = `curl -X POST ${API_BASE}/v1/bordereaux \\\n`
+                    + `  -H "X-API-Key: ${minted.api_key}" \\\n`
+                    + `  -F "file=@bordereau.xlsx" \\\n`
+                    + `  -F "period=${eg}"`;
+                  return (<>
+                    <b style={{ display: "block", marginTop: 12 }}>Example request</b>
+                    <div className="keybox" style={{ marginTop: 6, alignItems: "flex-start" }}>
+                      <code style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{curl}</code>
+                      <button type="button" className="btn sm"
+                        onClick={() => navigator.clipboard?.writeText(curl)}>Copy</button>
+                    </div>
+                  </>);
+                })()}
               </div>
             )}
             {created.channel === "api" && !minted && (
