@@ -23,7 +23,7 @@ import os
 import re
 import threading
 from difflib import SequenceMatcher
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 import pandas as pd
@@ -1195,19 +1195,21 @@ def _apply_asof_contracts(s, landing_data, pipe, fmt, sheet_contracts, eff_contr
     question §7 adds — which VERSION of it applied on these dates — and swaps
     only the version, keeping the pin's choice of contract lineage.
 
-    Returns (sheet_contracts, eff_contract_id, note). Every failure path returns
-    the inputs unchanged, so a run can never break because as-of resolution was
-    unavailable or misconfigured.
+    Returns (sheet_contracts, eff_contract_id, note, extra_ids, uncovered).
+    `uncovered` is None, or {"contract_id", "dates", "label"} when some rows
+    carry a date no version covers — see the per-row block below. Every failure
+    path returns the inputs unchanged, so a run can never break because as-of
+    resolution was unavailable or misconfigured.
     """
     from contract_upload_services import contract_asof as _asof
     from contract_upload_services import contract_asof_config as _cfg
 
     if not _cfg.enabled(pipe, fmt):
-        return sheet_contracts, eff_contract_id, None
+        return sheet_contracts, eff_contract_id, None, [], None
 
     governing, note = _asof_governing_date(landing_data, pipe, fmt)
     if governing is None:
-        return sheet_contracts, eff_contract_id, note
+        return sheet_contracts, eff_contract_id, note, [], None
 
     on_unresolved = _cfg.setting("on_unresolved", _cfg.ON_UNRESOLVED, pipe, fmt)
 
@@ -1243,22 +1245,55 @@ def _apply_asof_contracts(s, landing_data, pipe, fmt, sheet_contracts, eff_contr
     # file's dates actually touch; each one's rules then run, and
     # _asof_filter_exceptions discards the ones that fired outside their own
     # window. Off (`row_scoped: false`) keeps the single-version behaviour.
-    extra_ids = []
+    extra_ids, uncovered = [], None
     if _cfg.setting("row_scoped", "true", pipe, fmt) not in ("false", "0", "no"):
         anchor = new_eff or eff_contract_id
         lineage = _asof.lineage_of(s, int(anchor)) if anchor else None
         if lineage is not None:
             seen = {int(c) for c in list((new_sheets or {}).values()) + [new_eff] if c}
+            missing = set()
             for row_date in sorted({d for d in _row_dates_of(landing_data, pipe, fmt)}):
                 cid = _asof.resolve_as_of(s, lineage, row_date)
-                if cid and int(cid) not in seen:
+                if cid is None:
+                    missing.add(row_date)
+                elif int(cid) not in seen:
                     seen.add(int(cid))
                     extra_ids.append(int(cid))
+            # A row whose date NO version covers is checked against the
+            # contract in force today (the pinned one if none is in force) —
+            # the agreed behaviour, 1 Oct 2026 — and its exceptions name that
+            # contract and its period. Without this, the window filter dropped
+            # every exception on such a row, so it was not checked at all.
+            # 'skip' keeps its meaning: no contract for those rows.
+            if missing and on_unresolved != "skip":
+                today_cid = int(_asof.resolve_as_of(s, lineage, date.today()) or anchor)
+                if today_cid not in seen:
+                    seen.add(today_cid)
+                    extra_ids.append(today_cid)
+                uncovered = {"contract_id": today_cid, "dates": missing,
+                             "label": _asof_contract_label(s, lineage, today_cid)}
+                swaps.append(f"{len(missing)} date(s) covered by no version → "
+                             f"checked against contract {today_cid}")
             if extra_ids:
                 swaps.append(f"row-scoped: also governing {extra_ids}")
 
     note = note + ("; " + "; ".join(swaps) if swaps else "; no version change")
-    return new_sheets, new_eff, note, extra_ids
+    return new_sheets, new_eff, note, extra_ids, uncovered
+
+
+def _asof_contract_label(s, lineage, contract_id: int) -> str:
+    """'"Spectrum Binder" (Endorsement 1, from 1 Apr 2025)' — the name and the
+    period a fallback exception points the reader at."""
+    from contract_upload_services import contract_asof as _asof
+    try:
+        row = next((r for r in _asof.timeline(s, lineage)
+                    if int(r["contract_id"]) == int(contract_id)), None)
+    except Exception:      # noqa: BLE001 — a label must never fail a run
+        row = None
+    c = s.get(Contract, int(contract_id))
+    name = (getattr(c, "name", None) or getattr(c, "filename", None)
+            or f"Contract #{contract_id}")
+    return _asof.describe_version(name, row)
 
 
 def _row_dates_of(landing_data, *cfg_sources):
@@ -2120,12 +2155,12 @@ async def _render_landing(
         #
         # Fail-open: on any error the run keeps the contracts the pin gave it,
         # so this can never be the reason a bordereau fails to process.
-        asof_note, asof_extra_ids = None, []
+        asof_note, asof_extra_ids, asof_uncovered = None, [], None
         try:
-            sheet_contracts, eff_contract_id, asof_note, asof_extra_ids = (
-                _apply_asof_contracts(
+            (sheet_contracts, eff_contract_id, asof_note, asof_extra_ids,
+             asof_uncovered) = _apply_asof_contracts(
                     s, rec.data, contracts_pipe, fmt, sheet_contracts,
-                    eff_contract_id))
+                    eff_contract_id)
             if asof_note:
                 log.info(f"[AsOf] {asof_note}")
         except Exception as _asof_exc:  # noqa: BLE001 — fail-open by design
@@ -2150,7 +2185,7 @@ async def _render_landing(
         asof_windows = {}
         asof_cfg = [_AsofCfg(x) for x in (contracts_pipe, fmt) if x is not None]
         try:
-            if asof_extra_ids:
+            if asof_extra_ids or asof_uncovered:
                 asof_windows = _asof_contract_windows(s, governing_ids)
         except Exception:      # noqa: BLE001 — fail-open: no filter, no harm
             asof_windows = {}
@@ -2301,11 +2336,11 @@ async def _render_landing(
         # scoping each rule's SQL means the compiler and the engine are
         # untouched — the multi-contract machinery that already serves
         # per-schedule contracts does the work.
-        if asof_windows:
+        if asof_windows or asof_uncovered:
             try:
                 _rd = _asof_row_dates(blocks, *asof_cfg)
                 exceptions, _dropped = _asof_filter_exceptions(
-                    exceptions, _rd, asof_windows)
+                    exceptions, _rd, asof_windows, fallback=asof_uncovered)
                 if _dropped:
                     log.info(f"[AsOf] row-scoped: dropped {_dropped} exception(s) "
                              f"raised by a version that did not govern the row")

@@ -1281,7 +1281,14 @@ export default function ExceptionDecisionTable({
                       );
                     })()}
                   </td>
-                  <td className="px-3 py-2 text-ink-muted max-w-[260px]">{e.error_message ?? "—"}</td>
+                  <td className="px-3 py-2 text-ink-muted max-w-[260px]">
+                    {e.error_message ?? "—"}
+                    {/* Row dated outside every contract version: checked
+                        against the current contract — name it and its period. */}
+                    {e.contract_period_note && (
+                      <div className="text-[10px] text-ink-soft break-words mt-1">{e.contract_period_note}</div>
+                    )}
+                  </td>
                   <td className="px-3 py-2">
                     <DecisionCell e={e} decision={d} onChange={nd => setDecision(e.exception_id, nd)} />
                     <DecidedBy by={e.decided_by} at={e.decided_at} />

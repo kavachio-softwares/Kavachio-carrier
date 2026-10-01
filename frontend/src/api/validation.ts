@@ -183,6 +183,9 @@ export type StoredException = {
   /** Set when `actual_value` is a TOTAL rather than this cell's own value —
    *  see AggregateMarker. */
   aggregate?: AggregateMarker | null;
+  /** Set when this row's date is covered by no version of the contract, so it
+   *  was checked against the current one — names that contract and its period. */
+  contract_period_note?: string | null;
 };
 
 export type StoredRun = {
@@ -300,6 +303,8 @@ export type OutputException = {
   reason?: string; error_class?: string;
   /** Present only on an aggregate rule — see AggregateMarker. */
   aggregate?: AggregateMarker | null;
+  /** See StoredException.contract_period_note. */
+  contract_period_note?: string | null;
   contract_id?: number; contract_clause_text?: string | null;
   contract_clause_page?: number | null;
   policy_number?: string | null; actual_value?: string | null;
@@ -365,6 +370,7 @@ export function outputExcToStored(x: OutputException, i: number): StoredExceptio
     source_row: x.row ?? null,
     source_sheet: x.sheet ?? null,
     aggregate: x.aggregate ?? aggregateFromReason(x.reason, x.policy_number),
+    contract_period_note: x.contract_period_note ?? null,
     // Hand-enumerated mapper: a field missing here is silently dropped for the
     // whole output lane (every ?download=<id> screen), so it must be listed.
     explanation: x.explanation ?? null,

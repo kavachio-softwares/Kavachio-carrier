@@ -243,3 +243,88 @@ def test_open_ended_window_admits_later_dates():
         [{"sheet": "Sheet1", "row": 4, "contract_id": 214}],
         _dr.row_dates_from_blocks(BLOCKS), {214: (_date(2026, 2, 15), None)})
     assert len(kept) == 1
+
+
+# ── Rows dated outside every version → checked against the current contract ─
+# Agreed behaviour (1 Oct 2026): such a row is NOT sent to review; it is
+# checked against the contract in force today, and every exception it raises
+# says which contract and period it was measured against. Before this, the
+# window filter dropped those exceptions, so the row was not checked at all.
+
+EARLY_ROWS = MIXED_ROWS + [
+    {"PolicyNumber": "TEST-2024-E", "PolicyTermBeginDate": "2024-06-01T00:00:00", "OccurrenceLimit": 5_000_000},
+]
+EARLY_BLOCKS = [{"sheet": "Sheet1", "records": EARLY_ROWS}]
+FALLBACK = {"contract_id": 214, "dates": {_date(2024, 6, 1)},
+            "label": '"Demo Binder" (Endorsement 1, from 15 Feb 2026)'}
+
+
+def _early_exceptions():
+    out = []
+    for cid, cap in ((213, 2_000_000), (214, 4_000_000)):
+        for i, r in enumerate(EARLY_ROWS, start=1):
+            if r["OccurrenceLimit"] > cap:
+                out.append({"sheet": "Sheet1", "row": i, "contract_id": cid,
+                            "policy_number": r["PolicyNumber"],
+                            "message": f"Over the {cap:,} limit"})
+    return out
+
+
+def test_uncovered_row_is_checked_against_the_current_contract_and_says_so():
+    kept, _ = _dr.filter_exceptions_by_window(
+        _early_exceptions(), _dr.row_dates_from_blocks(EARLY_BLOCKS), WINDOWS,
+        fallback=FALLBACK)
+    e = [x for x in kept if x["policy_number"] == "TEST-2024-E"]
+    assert [x["contract_id"] for x in e] == [214]          # current one only
+    note = e[0]["contract_period_note"]
+    assert "1 Jun 2024" in note and '"Demo Binder" (Endorsement 1' in note
+    assert e[0]["message"].startswith("Over the 4,000,000 limit") and note in e[0]["message"]
+    assert e[0]["contract_period"] == {"contract_id": 214, "row_date": "2024-06-01",
+                                       "reason": "no_version_covers_date"}
+
+
+def test_without_the_fallback_an_uncovered_row_loses_its_exceptions():
+    """The old behaviour, kept as the control: proves the fallback is what
+    keeps the row checked."""
+    kept, _ = _dr.filter_exceptions_by_window(
+        _early_exceptions(), _dr.row_dates_from_blocks(EARLY_BLOCKS), WINDOWS)
+    assert not [x for x in kept if x["policy_number"] == "TEST-2024-E"]
+
+
+def test_covered_rows_are_untouched_by_the_fallback():
+    kept, _ = _dr.filter_exceptions_by_window(
+        _early_exceptions(), _dr.row_dates_from_blocks(EARLY_BLOCKS), WINDOWS,
+        fallback=FALLBACK)
+    covered = [x for x in kept if x["policy_number"] != "TEST-2024-E"]
+    assert [(x["policy_number"], x["contract_id"]) for x in covered] == [
+        ("TEST-2025-A", 213), ("TEST-2026-D", 214)]
+    assert not any("contract_period_note" in x for x in covered)
+
+
+def test_the_note_is_added_once_even_if_filtered_twice():
+    rd = _dr.row_dates_from_blocks(EARLY_BLOCKS)
+    kept, _ = _dr.filter_exceptions_by_window(_early_exceptions(), rd, WINDOWS, fallback=FALLBACK)
+    kept, _ = _dr.filter_exceptions_by_window(kept, rd, WINDOWS, fallback=FALLBACK)
+    e = next(x for x in kept if x["policy_number"] == "TEST-2024-E")
+    assert e["message"].count("No version of this contract covers") == 1
+
+
+def test_fallback_works_when_the_current_contract_has_no_window():
+    """A current contract with no effective dates is not in `windows`; its
+    exceptions on uncovered rows are still kept and labelled."""
+    kept, _ = _dr.filter_exceptions_by_window(
+        [{"sheet": "Sheet1", "row": 5, "contract_id": 214, "message": "x"}],
+        _dr.row_dates_from_blocks(EARLY_BLOCKS), {}, fallback=FALLBACK)
+    assert len(kept) == 1 and kept[0]["contract_period_note"]
+
+
+def test_describe_version_names_the_contract_and_its_period():
+    row = {"contract_version_label": "Original",
+           "contract_effective_from": _date(2025, 1, 1),
+           "contract_effective_to": _date(2025, 4, 1)}
+    assert _dr.describe_version("Spectrum Binder", row) == \
+        '"Spectrum Binder" (Original, from 1 Jan 2025 until 1 Apr 2025)'
+    assert _dr.describe_version("Spectrum Binder",
+                                {"contract_effective_from": _date(2025, 4, 1)}) == \
+        '"Spectrum Binder" (from 1 Apr 2025)'
+    assert _dr.describe_version("Spectrum Binder") == '"Spectrum Binder"'

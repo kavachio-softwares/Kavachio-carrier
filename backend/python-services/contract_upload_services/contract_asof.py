@@ -168,11 +168,12 @@ def resolve_as_of(conn, lineage: Lineage, on_date: date) -> Optional[int]:
     """§7.1 — the contract_id of the version in force on `on_date`, or None.
 
     None means NO version covers that date: a transaction dated before the
-    contract incepted, or falling in a gap between versions. The caller MUST
-    route that row to exceptions. It must NOT fall back to the current version,
-    which would be the silent wrong-rules answer §7 exists to prevent — so this
-    returns None rather than a best guess, and the distinction between "no
-    version" and "the current version" stays visible to the caller.
+    contract incepted, or falling in a gap between versions. This returns None
+    rather than a best guess, so the distinction between "no version" and "the
+    current version" stays visible to the caller. The run then checks that row
+    against the current contract — the agreed behaviour (1 Oct 2026) — and the
+    row's exceptions say so (fallback_note), so it is never SILENTLY judged by
+    terms from another period.
 
     TWO CANDIDATES (an overlap). Migration 20_2 makes this impossible, but it
     is not applied everywhere, so the case has to be handled rather than
@@ -526,9 +527,67 @@ def row_dates_from_blocks(blocks, *cfg_sources):
     return out
 
 
-def filter_exceptions_by_window(exceptions, row_dates, windows):
+def _fmt_day(d) -> str:
+    """1 Apr 2025 — the date as people write it, no leading zero."""
+    return f"{d.day} {d.strftime('%b %Y')}"
+
+
+def describe_version(name, row=None) -> str:
+    """'"Spectrum Binder" (Endorsement 1, from 1 Apr 2025 until 1 Jan 2026)'.
+
+    `row` is one entry of timeline(). The period is the version's own
+    business window — contract_effective_to is exclusive, hence "until"."""
+    out = f'"{name}"'
+    if not row:
+        return out
+    bits = []
+    label = (row.get("contract_version_label") or "").strip()
+    if label:
+        bits.append(label)
+    start, end = row.get("contract_effective_from"), row.get("contract_effective_to")
+    if start and end:
+        bits.append(f"from {_fmt_day(start)} until {_fmt_day(end)}")
+    elif start:
+        bits.append(f"from {_fmt_day(start)}")
+    return f"{out} ({', '.join(bits)})" if bits else out
+
+
+def fallback_note(contract_label: str, row_date) -> str:
+    """The sentence an exception carries when its row's date is covered by no
+    version of the contract, and the row was therefore checked against the
+    current one. Falling back is intended (decided 1 Oct 2026); what was
+    missing was saying so — without it a broker reads the breach as measured
+    against the terms of the period the row belongs to."""
+    when = _fmt_day(row_date) if row_date else "this row's date"
+    return (f"No version of this contract covers {when}, so this row was "
+            f"checked against the current contract: {contract_label}.")
+
+
+def _mark_fallback(exc: dict, note: str, contract_id: int, row_date) -> None:
+    """Attach the fallback note to one exception, once. `message` is what the
+    delivered workbook's cell comment shows; `contract_period_note` is what the
+    review screen shows next to the rule."""
+    exc["contract_period_note"] = note
+    exc["contract_period"] = {"contract_id": contract_id,
+                              "row_date": row_date.isoformat(),
+                              "reason": "no_version_covers_date"}
+    msg = exc.get("message") or exc.get("reason")
+    if not msg:
+        exc["message"] = note
+    elif note not in msg:
+        exc["message"] = f"{msg} {note}"
+
+
+def filter_exceptions_by_window(exceptions, row_dates, windows, fallback=None):
     """§7.1 "resolve EACH TRANSACTION" — drop every exception raised by a
     contract version that did not govern that row's date.
+
+    `fallback` — {"contract_id", "dates", "label"} — covers rows whose date NO
+    version covers (before inception, or a gap between versions). Those rows
+    are checked against the current contract rather than sent to review, so its
+    exceptions on them are KEPT, and each says which contract and period it was
+    measured against (fallback_note). Exceptions other versions raised on those
+    rows are dropped as usual: none of them governed the date either.
 
     Why filter here rather than scope each rule's SQL: the engine already runs
     several governing contracts over the whole file and merges their exceptions
@@ -542,11 +601,20 @@ def filter_exceptions_by_window(exceptions, row_dates, windows):
     alone, so this can only ever remove a violation of a rule that provably did
     not apply to that row.
     """
-    if not windows or not row_dates:
+    fb_cid = int(fallback["contract_id"]) if fallback and fallback.get("contract_id") else None
+    fb_dates = set((fallback or {}).get("dates") or ())
+    fb_note_label = (fallback or {}).get("label") or (f'"Contract #{fb_cid}"' if fb_cid else "")
+    if not row_dates or (not windows and fb_cid is None):
         return exceptions, 0
     kept, dropped = [], 0
     for exc in exceptions or []:
         cid = exc.get("contract_id")
+        if fb_cid is not None and cid and int(cid) == fb_cid:
+            d = row_dates.get((exc.get("sheet"), exc.get("row")))
+            if d is not None and d in fb_dates:
+                _mark_fallback(exc, fallback_note(fb_note_label, d), fb_cid, d)
+                kept.append(exc)
+                continue
         win = windows.get(int(cid)) if cid else None
         if win is None:
             kept.append(exc)

@@ -367,6 +367,13 @@ function ExcDetail({ e, saving, onDecide, readOnly = false }: {
             {agg.note}
           </span>
         )}
+        {/* No contract version covers this row's date, so it was checked
+            against the current contract — say which one, and its period. */}
+        {e.contract_period_note && (
+          <span className="col-span-2 text-[11px] text-ink-soft leading-relaxed">
+            {e.contract_period_note}
+          </span>
+        )}
         {/* A format rule has no recommended value — the row shows an EXAMPLE of
             the required shape, so it is labelled as one rather than as the value
             to accept. */}

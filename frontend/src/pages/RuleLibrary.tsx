@@ -106,7 +106,8 @@ export default function RuleLibrary() {
               <InfoTip text={platform
                 ? "Generic checks that run on every broker's BDX files. Changes here affect all tenants."
                 : canManage
-                  ? "Your generic rules. They run on all your BDX files and only your team can see them."
+                  ? "Your own generic rules. They run on all your BDX files, alongside Kavachio's "
+                    + "standard checks, and only your team can see them."
                   : "The checks your company runs on every BDX file. The carrier looks after this list."} />
             </h2>
           </div>
@@ -220,7 +221,10 @@ export default function RuleLibrary() {
             {!loading && rows.length === 0 && !filtersActive && (
               <div className="empty">
                 {canManage
-                  ? <>No rules yet. {platform ? "Add a platform-wide check" : "Create your first rule"} to get started.</>
+                  ? platform
+                    ? <>No rules yet. Add a platform-wide check to get started.</>
+                    : <>No rules of your own yet. Kavachio's standard checks already run on all your
+                      files — add a rule here for anything specific to your business.</>
                   : "No rules yet. The carrier hasn't added any."}
               </div>
             )}
@@ -233,8 +237,8 @@ export default function RuleLibrary() {
 
         <div className="note" style={{ marginTop: 14}}>
           {canManage
-            ? <>Disabled rules stop running but are kept, so you can turn them back on any time. Changes take
-              effect after you run Bordereau Setup again.</>
+            ? <>A disabled rule is kept, so you can turn it back on at any time. Adding, editing, disabling
+              or deleting a rule takes effect on a programme the next time its Bordereau Setup is run.</>
             : <>Disabled rules are kept but do not run. A change the carrier makes takes effect the
               next time a program's Bordereau Setup is run.</>}
         </div>
@@ -248,12 +252,13 @@ export default function RuleLibrary() {
               <button className="x" onClick={() => !delBusy && setDelTarget(null)} aria-label="Close">×</button>
             </div>
             <div className="m-b">
-              Delete <b>{delTarget.rule_name}</b>? This can't be undone. Existing results are unaffected;
-              the rule just won't run on future uploads.
+              Delete <b>{delTarget.rule_name}</b>? This can't be undone. Files already processed
+              are unaffected. Programmes already set up keep this check until their{" "}
+              <b>Bordereau Setup</b> is run again.
             </div>
             <div className="m-f">
               <button className="btn" onClick={() => setDelTarget(null)} disabled={delBusy}>Cancel</button>
-              <button className="btn pri" onClick={confirmDelete} disabled={delBusy}>
+              <button className="btn danger" onClick={confirmDelete} disabled={delBusy}>
                 {delBusy ? "Deleting…" : "Delete Rule"}
               </button>
             </div>
