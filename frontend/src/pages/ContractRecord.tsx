@@ -188,6 +188,9 @@ export default function ContractRecord() {
   const [showRenew, setShowRenew] = useState(false);
   const [renewFrom, setRenewFrom] = useState("");
   const [renewTo, setRenewTo] = useState("");
+  // Asked only when this contract has none (an uploaded one) — the type
+  // requires it, so the successor could not be saved without it.
+  const [renewClass, setRenewClass] = useState("");
   const [termSpec, setTermSpec] = useState<TermSpec | null>(null);
 
   // Editing the terms. The inputs are built from the SERVER's field spec, the
@@ -1757,13 +1760,25 @@ export default function ContractRecord() {
                     )}
                   </div>
                 </div>
+                {!rec.class_of_business && (
+                  <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
+                    <label>Class of business</label>
+                    <input value={renewClass} placeholder="e.g. Commercial Property"
+                           onChange={e => setRenewClass(e.target.value)} />
+                    <div className="hint">
+                      This contract has none on record, and the new one needs it.
+                    </div>
+                  </div>
+                )}
                 <div className="rowacts">
                   <button
                     className="btn pri" type="button"
-                    disabled={!renewFrom || !renewTo || !!busy}
+                    disabled={!renewFrom || !renewTo || !!busy
+                              || (!rec.class_of_business && !renewClass.trim())}
                     onClick={() => run("renew", async () => {
                       const created = await renewContract(id, {
-                        inception_dt: renewFrom, expiry_dt: renewTo });
+                        inception_dt: renewFrom, expiry_dt: renewTo,
+                        ...(rec.class_of_business ? {} : { class_of_business: renewClass.trim() }) });
                       nav(`/contracts/${created.id}`);
                     })}
                   >

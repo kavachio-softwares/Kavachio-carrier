@@ -1,0 +1,25 @@
+-- 35 — An SFTP route can collect from SOMEBODY ELSE'S server.
+--
+-- Until now an SFTP route was a folder on Kavachio's own server that a broker
+-- uploaded into (sftp_poller). The new kind is the other way round: the carrier
+-- enters the details of an SFTP server that already exists — the broker's or
+-- their own — and Kavachio logs in to it as a client every 5, 15 or 60 minutes,
+-- collects the finished files and moves them to a processed folder (sftp_pull).
+--
+-- One nullable JSONB column holds that server's settings:
+--   host, port, username, auth (password | key),
+--   secret_enc / passphrase_enc   Fernet-encrypted (INTAKE_SECRET_KEY), never returned
+--   remote_dir, after (move | delete), processed_dir, interval_minutes,
+--   host_key {type, fingerprint_sha256, key_b64}   pinned when the route is created,
+--   last_checked_at, last_error, last_collected    written by each check.
+-- NULL on every existing route: they are local-folder routes and behave
+-- exactly as before.
+--
+-- The application reads and writes this column with raw SQL behind an
+-- information_schema check; the ORM never maps it. So the code is safe to run
+-- before this migration (pull routes simply cannot be created yet) and starts
+-- using the column the moment it exists — no restart needed.
+--
+-- Additive and safe to re-run.
+
+ALTER TABLE intake_route ADD COLUMN IF NOT EXISTS route_sftp_config JSONB;

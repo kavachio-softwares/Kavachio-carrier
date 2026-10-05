@@ -14,12 +14,15 @@
 // prototype without a visual seam. The page wraps itself in `.proto .view.full`
 // the way Calendar.tsx does; modal bodies use `.proto.proto-embed` so they
 // resolve .field/.kv/.badge without painting a grey slab inside the dialog.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createKey, createRoute, emailRouteGuide, listKeys, listRoutes, patchRoute, revokeKey,
+  testSftp,
   type BrokerEmail, type BrokerLite, type Channel, type IntakeKey, type IntakeRoute,
   type GuideSent, type NewIntakeKey,
   type ProgrammeLite, type RoutesResponse,
+  type SftpAfter, type SftpAuth, type SftpConnection, type SftpInterval, type SftpRouteInfo,
+  type SftpTestResult,
 } from "../api/intake";
 import { Check, ChevronDown, ChevronUp, Mail, Server, Upload, Zap } from "lucide-react";
 import { Modal } from "../components/ui/Modal";
@@ -138,6 +141,55 @@ function pickupNote(ch: Channel, collector: RoutesResponse["collector"]): string
   }
 }
 
+// ── external SFTP pull ──────────────────────────────────────────────────────
+// A pull route is Kavachio signing in to somebody else's server on a timer, so
+// what identifies it is that server, not a folder of ours.
+
+/** How a pull route is written everywhere: sftp://user@host:port/dir. */
+function sftpUrl(s: Pick<SftpRouteInfo, "host" | "port" | "username" | "remote_dir">): string {
+  const dir = s.remote_dir.startsWith("/") ? s.remote_dir : `/${s.remote_dir}`;
+  return `sftp://${s.username}@${s.host}:${s.port}${dir}`;
+}
+
+/** The address a route shows: the server it is collected from, for a pull route. */
+function routeAddress(r: IntakeRoute): string {
+  return r.sftp ? sftpUrl(r.sftp) : r.display_address;
+}
+
+/** "sftp.example.com/outgoing", for a sentence. */
+/** A test-connection note that only reports what was done, not a problem. */
+function isInfoNote(w: string): boolean {
+  return w.startsWith("We created the folder");
+}
+
+function hostAndFolder(host: string, dir: string): string {
+  return `${host}${dir.startsWith("/") ? "" : "/"}${dir}`;
+}
+
+/** Offered as the processed folder until somebody types their own. */
+function defaultProcessed(dir: string): string {
+  return `${dir.trim().replace(/\/+$/, "")}/processed`;
+}
+
+const PULL_BLURB = "Kavachio signs in to this SFTP server on a schedule and collects finished "
+  + "files from one folder.";
+
+/** What a pull route does, read from what the server kept — never the secret. */
+function pullDetail(s: SftpRouteInfo): [string, string][] {
+  const shared = (CHANNEL_DETAIL.sftp ?? []).filter(([k]) =>
+    k === "Reporting period" || k === "Programme & contract" || k === "A later file for the same month");
+  return [
+    ["How we sign in", `${s.auth === "key" ? "Private key" : "Password"} — stored encrypted, never shown`],
+    ["After we take it", s.after === "delete" ? "Deleted from the server"
+      : `Moved to ${s.processed_dir || defaultProcessed(s.remote_dir)} so it cannot be collected twice`],
+    ["How often we check", `Every ${s.interval_minutes} minutes`],
+    ["Last checked", s.last_checked_at ? new Date(s.last_checked_at).toLocaleString() : "Not yet"],
+    ["Server fingerprint", s.fingerprint ?? "—"],
+    ["If the file is still being written", "We wait until it stops changing"],
+    ...shared,
+  ];
+}
+
 export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshKey, liveTick = 0 }: {
   /** Reported up for the button that opens this panel: how many ways in exist,
    *  and whether any of them looks live and accepts nothing. */
@@ -210,10 +262,10 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
   // brokers use it, so the detail opens only when someone asks for it.
   const [expanded, setExpanded] = useState<Set<Channel>>(new Set());
 
-  // Two things count: a way in switched off, and an API route with no key.
-  // Both look like nothing is wrong and neither will take a file.
+  // Three things count: a way in switched off, an API route with no key, and an
+  // SFTP server we last failed to reach. Each looks fine and takes no file.
   const needsAttention = useMemo(() => (data?.routes ?? []).filter(r =>
-    !r.is_enabled ||
+    !r.is_enabled || !!r.sftp?.last_error ||
     (r.channel === "api" && keys[r.route_id] !== undefined &&
      keys[r.route_id].every(k => !k.is_live))).length, [data, keys]);
 
@@ -229,7 +281,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
   async function toggle(route: IntakeRoute) {
     if (route.is_enabled && !window.confirm(
       `Switch off this channel for ${route.broker_name ?? "this broker"}?\n\n`
-      + `Files sent to ${route.display_address} will stop being collected. `
+      + `Files sent to ${routeAddress(route)} will stop being collected. `
       + `Nothing already received is affected, and you can switch it back on.`)) return;
     setBusy(true);
     try { await patchRoute(route.route_id, { is_enabled: !route.is_enabled }); await load(); }
@@ -294,7 +346,10 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                   {ch === "upload"
                     ? "always on · anyone with a login · nothing to set up"
                     : routes.length === 0 ? "no brokers on this channel yet"
-                    : `${brokers} broker${brokers === 1 ? "" : "s"} · ${files} file${files === 1 ? "" : "s"} this month${pickupNote(ch, data?.collector)}`}
+                    : `${brokers} broker${brokers === 1 ? "" : "s"} · ${files} file${files === 1 ? "" : "s"} this month${
+                      /* The watcher's mode describes our own folder; a pull
+                         route says its own schedule on its card. */
+                      ch === "sftp" && routes.every(r => r.sftp) ? "" : pickupNote(ch, data?.collector)}`}
                 </span>
               </button>
 
@@ -354,16 +409,17 @@ function RouteCard({ route, busy, cc = null, keys, onSettings, onToggle }: {
   // Only claim "no key" once we have actually looked. Before that the honest
   // answer is that we do not know yet.
   const needsKey = isApi && keys !== undefined && live.length === 0;
+  const pull = route.sftp ?? null;
   // Email is the one channel where the address you HAND a broker and the
   // address they send FROM are different things.
   const handOut = route.channel === "email"
-    ? (route.send_to ?? route.display_address) : route.display_address;
+    ? (route.send_to ?? route.display_address) : routeAddress(route);
   const lastUsed = live
     .map(k => k.last_used_at).filter((d): d is string => !!d)
     .sort().pop();
 
   return (
-    <div className={`route${needsKey ? " needs" : ""}`}>
+    <div className={`route${needsKey || pull?.last_error ? " needs" : ""}`}>
       {/* ── who ── */}
       <div className="route-id">
         <div className="idtop">
@@ -388,9 +444,20 @@ function RouteCard({ route, busy, cc = null, keys, onSettings, onToggle }: {
         </div>
 
         {/* The one extra true thing about this route, if there is one. Nothing
-            for SFTP: "picked up the moment it lands" is true of every server
-            folder and the group heading already says it, so repeating it on
-            each row is noise, not information. */}
+            for a folder of ours: "picked up the moment it lands" is true of
+            every one and the group heading already says it. A server we PULL
+            from is different — each has its own schedule, and can fail. */}
+        {pull && (
+          <div className="route-sub">
+            checked every {pull.interval_minutes} minutes{" · "}
+            {pull.last_checked_at
+              ? `last checked ${new Date(pull.last_checked_at).toLocaleString()}`
+              : "not checked yet"}
+            {pull.last_collected
+              ? ` · ${pull.last_collected} file${pull.last_collected === 1 ? "" : "s"} on the last check` : ""}
+          </div>)}
+        {pull?.last_error && (
+          <div className="route-sub warnt">Last check failed: {pull.last_error}</div>)}
         {route.channel === "email" && (
           <div className="route-sub">
             sends from <span className="mono">{route.address}</span>
@@ -542,8 +609,13 @@ function SettingsModal({ route, onClose, onSaved }:
       {route && (
         <div className="proto proto-embed">
           {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
+          {route.sftp?.last_error && (
+            <div className="note warn" style={{ marginBottom: 14 }}>
+              <b>The last check failed.</b> {route.sftp.last_error}
+            </div>)}
           <div className="note" style={{ marginBottom: 14 }}>
-            {CHANNEL_BLURB[route.channel] ?? CHANNEL_COPY[route.channel].sub}
+            {route.sftp ? PULL_BLURB
+              : CHANNEL_BLURB[route.channel] ?? CHANNEL_COPY[route.channel].sub}
           </div>
           <div className="kv"><span className="k">Broker</span><span>{route.broker_name}</span></div>
           <div className="kv">
@@ -556,9 +628,10 @@ function SettingsModal({ route, onClose, onSaved }:
             )}</span>
           </div>
           <div className="kv">
-            <span className="k">{route.channel === "sftp" ? "Folder"
+            <span className="k">{route.sftp ? "Server" : route.channel === "sftp" ? "Folder"
               : route.channel === "email" ? "They send from" : "Address"}</span>
-            <span className="mono" style={{ fontSize: 11.5 }}>{route.display_address}</span></div>
+            <span className="mono" style={{ fontSize: 11.5, overflowWrap: "anywhere" }}>
+              {routeAddress(route)}</span></div>
           {/* Email is the one channel where "their address" is two addresses:
               who the mail comes FROM identifies them, and the +address is what
               you actually hand them. Showing only one of the two is what makes
@@ -567,8 +640,10 @@ function SettingsModal({ route, onClose, onSaved }:
             <div className="kv">
               <span className="k">They send to</span>
               <span className="mono" style={{ fontSize: 11.5 }}>{route.send_to}</span></div>)}
-          {(CHANNEL_DETAIL[route.channel] ?? []).map(([k, v]) => (
-            <div className="kv" key={k}><span className="k">{k}</span><span>{v}</span></div>))}
+          {(route.sftp ? pullDetail(route.sftp) : CHANNEL_DETAIL[route.channel] ?? []).map(([k, v]) => (
+            <div className="kv" key={k}><span className="k">{k}</span>
+              <span className={k === "Server fingerprint" ? "mono" : undefined}
+                style={{ overflowWrap: "anywhere" }}>{v}</span></div>))}
           <div className="kv"><span className="k">Received This Month</span>
             <span>{route.files_this_month}</span></div>
 
@@ -804,7 +879,9 @@ function CodeChip({ code }: { code: string }) {
 /** What one bordereau looks like on its way in — the email to write, or the
  *  file to drop — filled from the choices in the dialog, for last month. */
 function ChannelExample({ channel, from, to, cc = null, folder, programmes, shared }: {
-  channel: "email" | "sftp"; from: string; to: string; folder: string;
+  channel: "email" | "sftp"; from: string; to: string;
+  /** SFTP: the folder on the server the file is written to. */
+  folder: string;
   /** Email only: the carrier address the broker must copy. */
   cc?: string | null;
   /** The programme(s) this address takes; the example uses the first. */
@@ -829,7 +906,10 @@ function ChannelExample({ channel, from, to, cc = null, folder, programmes, shar
       + `Cc:       ${cc || "<your email>"}\n`
       + `Subject:  ${programme} - ${contract ? `${contract} - ` : ""}${month}\n`
       + `Attach:   the bordereau (.xlsx or .csv)`
-    : `${folder}/incoming/${slug(programme)}_${contract ? `${slug(contract)}_` : ""}${ym}.xlsx`;
+    // Just the file name — what Copy hands over. The folder is shown in front
+    // of it, quietly, so it is clear where the file goes.
+    : `${slug(programme)}_${contract ? `${slug(contract)}_` : ""}${ym}.xlsx`;
+  const dir = channel === "sftp" ? `${folder.trim().replace(/\/+$/, "")}/` : "";
   const where = channel === "email" ? "The subject or the file name" : "The file name";
   return (
     <div className="field">
@@ -839,7 +919,8 @@ function ChannelExample({ channel, from, to, cc = null, folder, programmes, shar
         <span style={{ fontWeight: 400, color: "var(--p-muted)" }}> — follow this example</span>
       </label>
       <div className="keybox" style={{ alignItems: "flex-start" }}>
-        <code style={{ whiteSpace: "pre-wrap", wordBreak: "normal", overflowWrap: "anywhere" }}>{text}</code>
+        <code style={{ whiteSpace: "pre-wrap", wordBreak: "normal", overflowWrap: "anywhere" }}>
+          {dir && <span style={{ color: "var(--p-faint)" }}>{dir}</span>}{text}</code>
         <button type="button" className="btn sm" onClick={() => {
           navigator.clipboard?.writeText(text); setCopied(true);
         }}>{copied ? "Copied" : "Copy"}</button>
@@ -904,6 +985,233 @@ function ChannelExample({ channel, from, to, cc = null, folder, programmes, shar
   );
 }
 
+// ── the SFTP server a pull route collects from ─────────────────────────────
+type SftpForm = {
+  host: string; port: string; username: string; auth: SftpAuth;
+  password: string; privateKey: string; passphrase: string;
+  remoteDir: string; after: SftpAfter;
+  /** null: follow the folder ("<folder>/processed") until somebody types one. */
+  processedDir: string | null;
+  every: SftpInterval;
+};
+const SFTP_BLANK: SftpForm = {
+  host: "", port: "22", username: "", auth: "password", password: "", privateKey: "",
+  passphrase: "", remoteDir: "/outgoing", after: "move", processedDir: null, every: 15,
+};
+
+/** A request error in plain words. FastAPI sends a string for a refusal but a
+ *  list for a malformed body — rendering the list as-is would crash the page. */
+function detailText(e: any, fallback: string): string {
+  const d = e?.response?.data?.detail;
+  if (typeof d === "string" && d) return d;
+  if (Array.isArray(d)) {
+    const msgs = d.map((x: any) => x?.msg).filter(Boolean);
+    if (msgs.length) return msgs.join("; ");
+  }
+  return fallback;
+}
+
+/** A field label, with its explanation behind an ⓘ rather than in grey under it. */
+function Lbl({ htmlFor, tip, children }: { htmlFor?: string; tip?: string; children: React.ReactNode }) {
+  return tip
+    ? <label htmlFor={htmlFor} style={{ display: "inline-flex", alignItems: "center" }}>
+        {children}<InfoTip text={tip} /></label>
+    : <label htmlFor={htmlFor}>{children}</label>;
+}
+
+/** Where Kavachio signs in, how, which folder it takes files from, and what
+ *  it does with them after — and the test that has to pass before any of it
+ *  is saved. The secret goes one way: typed here, never shown back. */
+function SftpServerSection({ sf, put, processedDir, testing, result, canTest, onTest }: {
+  sf: SftpForm; put: (patch: Partial<SftpForm>) => void;
+  /** The processed folder as it will be sent (the default until edited). */
+  processedDir: string;
+  testing: boolean;
+  /** The last test, only while it still describes what is typed. */
+  result: SftpTestResult | null;
+  canTest: boolean; onTest: () => void;
+}) {
+  const keyFile = useRef<HTMLInputElement>(null);
+  const [keyNote, setKeyNote] = useState<string | null>(null);
+
+  async function loadKey(f: File | undefined) {
+    if (!f) return;
+    // A private key is a few KB at most; anything bigger is the wrong file.
+    if (f.size > 64 * 1024) { setKeyNote("That file is too large to be a private key."); return; }
+    try { put({ privateKey: await f.text() }); setKeyNote(null); }
+    catch { setKeyNote("That file could not be read."); }
+  }
+
+  const found = result?.files_found ?? 0;
+  const warnings = result?.warnings ?? [];
+  return (
+    <div style={{ border: "1px solid var(--p-border)", borderRadius: "var(--p-r)",
+                  padding: "14px 16px 16px", marginBottom: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--p-ink)", marginBottom: 12 }}>
+        SFTP Server Connection
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 110px", gap: 16 }}>
+        <div className="field">
+          <Lbl htmlFor="sftp-host" tip={"The SFTP server Kavachio signs in to — yours or the "
+            + "broker's. A name such as sftp.example.com, or an IP address."}>Host</Lbl>
+          <input id="sftp-host" value={sf.host} placeholder="sftp.example.com"
+            autoComplete="off" spellCheck={false}
+            onChange={e => put({ host: e.target.value })} />
+        </div>
+        <div className="field">
+          <Lbl htmlFor="sftp-port">Port</Lbl>
+          <input id="sftp-port" inputMode="numeric" value={sf.port}
+            onChange={e => put({ port: e.target.value.replace(/\D/g, "").slice(0, 5) })} />
+        </div>
+      </div>
+
+      <div className="row2">
+        <div className="field">
+          <Lbl htmlFor="sftp-user">Username</Lbl>
+          <input id="sftp-user" value={sf.username} autoComplete="off" spellCheck={false}
+            onChange={e => put({ username: e.target.value })} />
+        </div>
+        <div className="field">
+          <Lbl htmlFor="sftp-auth" tip={"The password or key is stored encrypted, and is never "
+            + "shown again — not here, and not to anyone else."}>Login Method</Lbl>
+          <select id="sftp-auth" value={sf.auth}
+            onChange={e => put({ auth: e.target.value as SftpAuth })}>
+            <option value="password">Password</option>
+            <option value="key">Private Key</option>
+          </select>
+        </div>
+      </div>
+
+      {sf.auth === "password" ? (
+        <div className="field">
+          <Lbl htmlFor="sftp-pass">Password</Lbl>
+          <input id="sftp-pass" type="password" autoComplete="new-password" value={sf.password}
+            onChange={e => put({ password: e.target.value })} />
+        </div>
+      ) : (
+        <>
+          <div className="field">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                          gap: 10, marginBottom: 6 }}>
+              <label htmlFor="sftp-key" style={{ display: "inline-flex", alignItems: "center", margin: 0 }}>
+                Private Key
+                <InfoTip text={"Paste the private key, or upload the key file. OpenSSH, RSA, "
+                  + "Ed25519 and ECDSA keys work; a PuTTY .ppk key must first be exported in "
+                  + "OpenSSH format."} />
+              </label>
+              <button type="button" className="btn sm" onClick={() => keyFile.current?.click()}>
+                Upload Key File</button>
+              <input ref={keyFile} type="file" style={{ display: "none" }}
+                onChange={e => { loadKey(e.target.files?.[0]); e.target.value = ""; }} />
+            </div>
+            <textarea id="sftp-key" rows={5} spellCheck={false} autoComplete="off"
+              value={sf.privateKey} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+              // Masked like a password once there is something in it — a private
+              // key is a secret, and the screen may be shared.
+              style={{ fontFamily: "var(--p-mono)", fontSize: 11.5, resize: "vertical",
+                       ...(sf.privateKey ? { WebkitTextSecurity: "disc" } as React.CSSProperties : {}) }}
+              onChange={e => put({ privateKey: e.target.value })} />
+            {keyNote && <div className="hint" style={{ color: "var(--p-warn)" }}>{keyNote}</div>}
+          </div>
+          <div className="field">
+            <Lbl htmlFor="sftp-phrase">Key Passphrase (Optional)</Lbl>
+            <input id="sftp-phrase" type="password" autoComplete="new-password"
+              value={sf.passphrase} onChange={e => put({ passphrase: e.target.value })} />
+          </div>
+        </>
+      )}
+
+      <div className="row2">
+        <div className="field">
+          <Lbl htmlFor="sftp-dir" tip={"The folder the broker's finished files are written to. "
+            + "Kavachio takes only complete files, and skips anything still being written."}>
+            Folder to Collect From</Lbl>
+          <input id="sftp-dir" value={sf.remoteDir} placeholder="/outgoing" spellCheck={false}
+            onChange={e => put({ remoteDir: e.target.value })} />
+        </div>
+        <div className="field">
+          <Lbl htmlFor="sftp-every">Check Every</Lbl>
+          <select id="sftp-every" value={sf.every}
+            onChange={e => put({ every: Number(e.target.value) as SftpInterval })}>
+            {([5, 15, 60] as const).map(m => <option key={m} value={m}>{m} minutes</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="row2">
+        <div className="field">
+          <Lbl htmlFor="sftp-after" tip={"Moving keeps a copy on the server and means a file is "
+            + "never collected twice."}>After Collecting</Lbl>
+          <select id="sftp-after" value={sf.after}
+            onChange={e => put({ after: e.target.value as SftpAfter })}>
+            <option value="move">Move to Processed (Recommended)</option>
+            <option value="delete">Delete from server</option>
+          </select>
+        </div>
+        {sf.after === "move" && (
+          <div className="field">
+            <Lbl htmlFor="sftp-processed" tip="Created on the server if it does not exist yet.">
+              Processed Folder</Lbl>
+            <input id="sftp-processed" value={processedDir} spellCheck={false}
+              onChange={e => put({ processedDir: e.target.value })} />
+          </div>)}
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center" }}>
+        <button type="button" className="btn" disabled={!canTest || testing} onClick={onTest}>
+          {testing ? "Testing…" : "Test Connection"}</button>
+        <InfoTip text={"Kavachio signs in, looks in the folder and records the server's "
+          + "fingerprint. Create is available once the test succeeds; changing the server, "
+          + "login or folder means testing again."} />
+      </div>
+
+      {result && (result.ok ? (
+        <>
+          <div className="note ok" style={{ marginTop: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
+              <Check size={15} strokeWidth={2.5} />
+              <span title={result.sample?.length ? result.sample.join("\n") : undefined}>
+                Connected · {found} file{found === 1 ? "" : "s"} found</span>
+            </div>
+            {result.fingerprint ? (
+              <div style={{ marginTop: 9 }}>
+                <div style={{ display: "flex", alignItems: "center", fontSize: 11.5, fontWeight: 600 }}>
+                  Server Fingerprint
+                  <InfoTip text={"Confirm this matches your server. Kavachio remembers it, and "
+                    + "will refuse to connect if the server's key ever changes."} />
+                </div>
+                <div className="mono" style={{ fontSize: 11.5, marginTop: 3, color: "var(--p-ink)",
+                                               overflowWrap: "anywhere" }}>
+                  {result.key_type && <>{result.key_type} </>}{result.fingerprint}
+                </div>
+              </div>
+            ) : (
+              <div style={{ marginTop: 6 }}>
+                The server did not report its fingerprint, so this channel cannot be saved.
+              </div>)}
+          </div>
+          {/* "We created the folder …" is news, not a problem — shown as
+              information; everything else the test reports is a real warning. */}
+          {[{ tone: "ok", list: warnings.filter(isInfoNote) },
+            { tone: "warn", list: warnings.filter(w => !isInfoNote(w)) }]
+            .filter(g => g.list.length > 0).map(g => (
+            <div key={g.tone} className={`note ${g.tone}`} style={{ marginTop: 10 }}>
+              {g.list.length === 1 ? g.list[0] : (
+                <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 3, listStyle: "disc" }}>
+                  {g.list.map((w, i) => <li key={i}>{w}</li>)}
+                </ul>)}
+            </div>))}
+        </>
+      ) : (
+        <div className="note crit" style={{ marginTop: 12 }}>
+          {result.error || "Could not connect to the server."}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroker,
                                creatable, mailbox, carrierCc = null,
                         mailReady, onClose, onCreated }: {
@@ -933,15 +1241,35 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
   const [created, setCreated] = useState<IntakeRoute | null>(null);
   const [minted, setMinted] = useState<NewIntakeKey | null>(null);
   const [copied, setCopied] = useState(false);
+  const errRef = useRef<HTMLDivElement>(null);
 
+  // SFTP: the server we will collect from, and the last test — kept with
+  // exactly what it was run against, so editing the server, login or folder
+  // retires it without anyone having to remember to.
+  const [sf, setSf] = useState<SftpForm>(SFTP_BLANK);
+  const putSf = useCallback((patch: Partial<SftpForm>) => setSf(prev => ({ ...prev, ...patch })), []);
+  const [sftpTest, setSftpTest] = useState<{ sig: string; result: SftpTestResult } | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  // Keyed on the channel LIST, not the array: the panel behind this dialog
+  // re-reads whenever a file lands, and a fresh array used to wipe the form
+  // mid-typing.
   useEffect(() => {
     if (open) {
-      setChannel(creatable[0] ?? "sftp"); setBrokerId(""); setProgramId("");
+      // Email first: it is the way most brokers already send.
+      setChannel(creatable.includes("email") ? "email" : creatable[0] ?? "sftp");
+      setBrokerId(""); setProgramId("");
       setSenderEmail("");
       setErr(null); setCreated(null); setMinted(null);
       setCopied(false);
     }
-  }, [open, creatable]);
+  }, [open, creatable.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Opening or closing clears the server details — a typed password or key
+  // does not outlive the dialog.
+  useEffect(() => { setSf(SFTP_BLANK); setSftpTest(null); setTesting(false); }, [open]);
+  useEffect(() => {
+    if (err) errRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [err]);
 
   const progs = programmesByBroker[String(brokerId)] ?? [];
   const knownEmails = emailsByBroker[String(brokerId)] ?? [];
@@ -966,23 +1294,63 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
     if (programId === "" && sharedWayIn && progs.length > 1) setProgramId("any");
   }, [channel]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const processedDir = sf.processedDir ?? defaultProcessed(sf.remoteDir);
+  const sftpSecret = sf.auth === "password" ? sf.password : sf.privateKey;
+  const sftpConn: SftpConnection = {
+    host: sf.host.trim(), port: Number(sf.port), username: sf.username.trim(), auth: sf.auth,
+    ...(sf.auth === "password" ? { password: sf.password }
+      : { private_key: sf.privateKey, ...(sf.passphrase ? { passphrase: sf.passphrase } : {}) }),
+    remote_dir: sf.remoteDir.trim(), after: sf.after,
+    ...(sf.after === "move" ? { processed_dir: processedDir.trim() } : {}),
+  };
+  // What a test result is only good for: change any of these and it is gone.
+  const sftpSig = JSON.stringify([sftpConn.host, sf.port.trim(), sftpConn.username, sf.auth,
+    sftpSecret, sf.auth === "key" ? sf.passphrase : "", sftpConn.remote_dir,
+    // The test also tries the move, so where files go after collecting counts too.
+    sf.after, sf.after === "move" ? processedDir.trim() : ""]);
+  const sftpResult = sftpTest && sftpTest.sig === sftpSig ? sftpTest.result : null;
+  const portOk = Number.isInteger(sftpConn.port) && sftpConn.port >= 1 && sftpConn.port <= 65535;
+  const canTestSftp = !!sftpConn.host && !!sftpConn.username && portOk && !!sftpSecret.trim()
+    && !!sftpConn.remote_dir && (sf.after === "delete" || !!processedDir.trim());
+  const sftpReady = canTestSftp && !!sftpResult?.ok && !!sftpResult.fingerprint;
+
+  async function runSftpTest() {
+    const sig = sftpSig;
+    setTesting(true);
+    try { setSftpTest({ sig, result: await testSftp(sftpConn) }); }
+    catch (e: any) {
+      setSftpTest({ sig, result: {
+        ok: false, fingerprint: null, key_type: null, files_found: null, sample: [],
+        can_write: null, warnings: [], error_code: null,
+        error: detailText(e, "The connection could not be tested. Try again in a moment."),
+      } });
+    } finally { setTesting(false); }
+  }
+
   async function create() {
     if (brokerId === "" || programId === "") return;
-    setSaving(true);
+    if (channel === "sftp" && !(sftpReady && sftpResult?.fingerprint)) return;
+    setSaving(true); setErr(null);
     try {
       const route = await createRoute({
         channel, broker_party_id: Number(brokerId),
         program_id: programId === "any" ? null : programId,
         ...(channel === "email" ? { sender_email: senderEmail.trim() } : {}),
+        ...(channel === "sftp" && sftpResult?.fingerprint ? { sftp: {
+          ...sftpConn, after: sf.after, interval_minutes: sf.every,
+          fingerprint: sftpResult.fingerprint,
+        } } : {}),
       });
       setCreated(route);
+      // Saved and encrypted server-side; no reason to keep it in the page.
+      if (channel === "sftp") putSf({ password: "", privateKey: "", passphrase: "" });
       // An API route with no key cannot receive anything, so minting the first
       // one here is part of creating it rather than a second errand.
       if (channel === "api") {
         try { setMinted(await createKey(route.route_id, "first key")); }
         catch { /* the route exists; the key can be made from Settings */ }
       }
-    } catch (e: any) { setErr(e?.response?.data?.detail ?? "Could not create it."); }
+    } catch (e: any) { setErr(detailText(e, "Could not create it.")); }
     finally { setSaving(false); }
   }
 
@@ -994,15 +1362,14 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
     // Every API sender posts to the SAME endpoint — what differs between them
     // is the key, not the address. So there is nothing per-broker to preview.
     if (channel === "api") return "POST /v1/bordereaux";
-    const slug = b.legal_name.normalize("NFKD").replace(/[^\w\s-]/g, "")
-      .trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     // Email: Kavachio's intake mailbox, the same for every broker — who sent
     // it and the carrier in Cc say whose file it is.
     if (channel === "email") {
       if (!mailbox || !mailbox.includes("@")) return "no intake mailbox configured yet";
       return mailbox;
     }
-    return `sftp://…/${slug}`;
+    // SFTP: nothing to preview — the server is typed in below, not made up.
+    return null;
   }, [brokerId, brokers, channel, mailbox]);
 
   return (
@@ -1013,9 +1380,12 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
           : <>
               <button className="btn" onClick={onClose}>Cancel</button>
               <button className="btn pri" onClick={create}
+                title={channel === "sftp" && !sftpReady
+                  ? "Test the connection first" : undefined}
                 disabled={saving || brokerId === "" ||
                   programId === "" ||
-                  (channel === "email" && !senderEmail.includes("@"))}>
+                  (channel === "email" && !senderEmail.includes("@")) ||
+                  (channel === "sftp" && !sftpReady)}>
                 {saving ? "Creating…" : "Create"}</button>
             </>}
       </div>}>
@@ -1025,7 +1395,10 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
           // inbox there is nothing for the carrier to pass on — just say it
           // is done. Only when the email could NOT go does the screen fall
           // back to the details, so the carrier can pass them on by hand.
-          guideEmailed(created.channel === "api" ? minted?.guide : created.guide) ? (
+          // SFTP: Kavachio collects from a server, so there is nothing to hand
+          // over — it is always done.
+          created.channel === "sftp"
+          || guideEmailed(created.channel === "api" ? minted?.guide : created.guide) ? (
           <div style={{ textAlign: "center", padding: "18px 8px 6px" }}>
             <div style={{ width: 52, height: 52, borderRadius: 999, margin: "0 auto 14px",
                           background: "var(--p-ok-bg, #DCFCE7)", color: "var(--p-ok, #16A34A)",
@@ -1037,13 +1410,26 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
             </div>
             <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 8, lineHeight: 1.6,
                           overflowWrap: "anywhere" }}>
+              {created.channel === "sftp" ? (
+                // A pull route: the broker sends nothing — Kavachio collects.
+                <>Kavachio will collect <b style={{ color: "var(--p-ink)" }}>{created.broker_name}</b>'s
+                  {" "}bordereaux from{" "}
+                  <span className="mono" style={{ color: "var(--p-ink)" }}>
+                    {hostAndFolder(
+                      `${created.sftp?.host ?? sf.host.trim()}:${created.sftp?.port ?? sf.port.trim()}`,
+                      created.sftp?.remote_dir ?? sf.remoteDir.trim())}</span>{" "}
+                  every {created.sftp?.interval_minutes ?? sf.every} minutes.
+                  {guideEmailed(created.guide)
+                    && <><br />The file-name rules have been emailed to them.</>}</>
+              ) : (<>
               <b style={{ color: "var(--p-ink)" }}>{created.broker_name}</b> can now send
               bordereaux by <b style={{ color: "var(--p-ink)" }}>{
-                created.channel === "email" ? "Email" : created.channel === "sftp" ? "SFTP" : "API"}</b>.
+                created.channel === "email" ? "Email" : "API"}</b>.
               <br />
               {created.channel === "api"
                 ? "Their API key and sending instructions have been emailed to them."
                 : "The sending instructions and required format have been emailed to them."}
+              </>)}
             </div>
           </div>
           ) : (
@@ -1078,7 +1464,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
 
             {created.guide && <GuideNote guide={created.guide} broker={created.broker_name} />}
 
-            {(created.channel === "email" || created.channel === "sftp") && (
+            {created.channel === "email" && (
               <div style={{ marginTop: 14 }}>
                 {(() => {
                   const all = programmesByBroker[String(created.broker_party_id)] ?? [];
@@ -1136,7 +1522,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
           )
         ) : (
           <>
-            {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
+            {err && <div ref={errRef} className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
             <div className="field">
               <label>Select Broker</label>
               <select value={brokerId}
@@ -1160,7 +1546,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                   ? "Their system sends the file to ours directly."
                   : channel === "email"
                   ? "They email the file as an attachment."
-                  : "They upload the file to a private folder."}
+                  : "Kavachio collects the file from an SFTP server."}
               </div>
               {channel === "email" && !mailReady && (
                 <div className="hint" style={{ color: "var(--p-warn)" }}>
@@ -1203,11 +1589,16 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 </div>)}
             </div>
 
+            {channel === "sftp" ? (
+              <SftpServerSection sf={sf} put={putSf} processedDir={processedDir}
+                testing={testing} result={sftpResult} canTest={canTestSftp}
+                onTest={runSftpTest} />
+            ) : (
             <div className="field">
               {/* Email: not the broker's address — Kavachio's intake mailbox,
                   where every broker sends, with the carrier copied. */}
               <label>{channel === "email" ? "Send To (Kavachio Intake Mailbox)"
-                : channel === "sftp" ? "Broker's Folder" : "Broker's Address"}</label>
+                : "Broker's Address"}</label>
               <div className="drop filled" style={{ padding: "13px 15px", textAlign: "left" }}>
                 <span className="mono" style={{ fontSize: 12.5 }}>
                   {preview ?? "Select a broker to see their address"}</span>
@@ -1227,10 +1618,12 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 </div>
               </div>
             </div>
+            )}
 
-            {sharedWayIn && brokerId !== "" && programId !== "" && preview && (
+            {sharedWayIn && brokerId !== "" && programId !== "" && (channel === "sftp" || preview) && (
               <ChannelExample channel={channel as "email" | "sftp"} from={senderEmail.trim()}
-                to={preview} cc={carrierCc} folder={preview} shared={programId === "any"}
+                to={preview ?? ""} cc={carrierCc} folder={sf.remoteDir.trim() || "/"}
+                shared={programId === "any"}
                 programmes={programId === "any" ? progs : progs.filter(p => p.program_id === programId)} />)}
 
           </>

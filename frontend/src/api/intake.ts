@@ -47,9 +47,76 @@ export type IntakeRoute = {
   /** Only returned by create (email / SFTP): who is being emailed the
    *  instructions, and whether broker emails are switched on at all. */
   guide?: GuideSent;
+  /** SFTP pull routes only: the server Kavachio collects from. The password
+   *  or key is never sent back — `has_secret` only says one is stored. Absent
+   *  (or null) on an older local-folder SFTP route. */
+  sftp?: SftpRouteInfo | null;
 };
 
 export type GuideSent = { recipients: string[]; sending: boolean };
+
+// ── external SFTP pull ──────────────────────────────────────────────────────
+// Kavachio signs in to the carrier's (or the broker's) own SFTP server as a
+// client, collects finished files from one folder, then moves or deletes them.
+
+export type SftpAuth = "password" | "key";
+export type SftpAfter = "move" | "delete";
+export type SftpInterval = 5 | 15 | 60;
+
+/** What the server keeps about a pull route — never the secret itself. */
+export type SftpRouteInfo = {
+  host: string;
+  port: number;
+  username: string;
+  auth: SftpAuth;
+  remote_dir: string;
+  after: SftpAfter;
+  processed_dir: string | null;
+  interval_minutes: number;
+  fingerprint: string | null;
+  last_checked_at: string | null;
+  last_error: string | null;
+  last_collected: number | null;
+  has_secret: boolean;
+};
+
+/** The connection details as typed in the dialog. Exactly one of `password`
+ *  / `private_key` is sent, matching `auth`. */
+export type SftpConnection = {
+  host: string;
+  port: number;
+  username: string;
+  auth: SftpAuth;
+  password?: string;
+  private_key?: string;
+  passphrase?: string;
+  remote_dir: string;
+  after?: SftpAfter;
+  processed_dir?: string;
+};
+
+export type SftpTestResult = {
+  ok: boolean;
+  /** SHA256 of the server's host key — pinned on create. */
+  fingerprint: string | null;
+  key_type: string | null;
+  files_found: number | null;
+  sample: string[];
+  /** Whether we could write to the processed folder (null: not checked). */
+  can_write: boolean | null;
+  warnings: string[];
+  /** Plain words, when ok is false. */
+  error: string | null;
+  error_code: "dns" | "refused" | "timeout" | "auth" | "host_key" | "no_dir"
+    | "permission" | "protocol" | null;
+};
+
+/** Try the connection without saving anything. Never throws for a connection
+ *  problem — `ok: false` with a plain-words `error` instead. */
+export async function testSftp(body: SftpConnection): Promise<SftpTestResult> {
+  const { data } = await api.post("/intake/sftp/test", body, { params: { mga: currentMga() } });
+  return data;
+}
 
 export type BrokerLite = { party_id: number; legal_name: string };
 
@@ -216,6 +283,12 @@ export async function createRoute(body: {
    *  broker emails the same inbox, so the mailbox cannot tell routes apart —
    *  who the mail comes from is what does. */
   sender_email?: string;
+  /** REQUIRED for channel "sftp": the server to collect from. `fingerprint`
+   *  must be the one the last successful test returned — it is pinned, and the
+   *  server re-tests before it saves. */
+  sftp?: SftpConnection & {
+    after: SftpAfter; interval_minutes: SftpInterval; fingerprint: string;
+  };
   display_name?: string; file_style?: FileStyle; note?: string;
 }): Promise<IntakeRoute> {
   const { data } = await api.post("/intake/routes", body, { params: { mga: currentMga() } });

@@ -24,6 +24,7 @@ from sqlalchemy import func
 import intake_events
 import intake_review as review
 import intake_service as svc
+import sftp_pull
 from app_routes import (
     _actor, _iso_utc, _log, _tenant_name, assert_tenant_owns, resolve_tenant_id,
 )
@@ -53,6 +54,30 @@ CREATABLE_CHANNELS = ("sftp", "api", "email")
 
 # ── request bodies ──────────────────────────────────────────────────────────
 
+class SftpTestBody(BaseModel):
+    """An EXTERNAL SFTP server Kavachio logs in to and collects from (see
+    sftp_pull). The password / key comes in here and is never sent back out.
+    Everything has a default so a half-filled form gets a plain-words answer
+    from the test rather than a validation error."""
+    host: str = ""
+    port: Optional[int] = 22
+    username: str = ""
+    auth: str = "password"                 # password | key
+    password: Optional[str] = None
+    private_key: Optional[str] = None
+    passphrase: Optional[str] = None
+    remote_dir: str = ""                   # "" = the folder the login starts in
+    processed_dir: Optional[str] = None    # default "<remote_dir>/processed"
+    after: str = "move"                    # move | delete
+
+
+class SftpSettings(SftpTestBody):
+    interval_minutes: int = 15             # 5 | 15 | 60
+    # The fingerprint /intake/sftp/test showed. It is PINNED: the route trusts
+    # that server key and no other, so it must still be the one presented now.
+    fingerprint: Optional[str] = None
+
+
 class RouteCreate(BaseModel):
     channel: str
     broker_party_id: int
@@ -69,6 +94,10 @@ class RouteCreate(BaseModel):
     # from another; who the mail comes from is what does. See
     # email_intake_service.build_email_address.
     sender_email: Optional[str] = None
+    # SFTP — the server Kavachio collects FROM (sftp_pull). Without it an SFTP
+    # route is the old kind, a folder on Kavachio's own server (sftp_poller):
+    # still supported, no longer offered on the screen.
+    sftp: Optional[SftpSettings] = None
 
 
 class KeyCreate(BaseModel):
@@ -112,7 +141,8 @@ def _collector_status() -> dict:
     """
     import email_poller
     import sftp_poller
-    return {"sftp": sftp_poller.status(), "email": email_poller.status()}
+    return {"sftp": sftp_poller.status(), "email": email_poller.status(),
+            "sftp_pull": sftp_pull.status()}
 
 
 def _send_to(r: IntakeRoute) -> Optional[str]:
@@ -136,7 +166,8 @@ def _carrier_cc(s, tenant_id: int) -> Optional[str]:
 
 def _route_dict(r: IntakeRoute, broker_name: Optional[str],
                 files_this_month: int = 0,
-                program_name: Optional[str] = None) -> dict:
+                program_name: Optional[str] = None,
+                sftp: Optional[dict] = None) -> dict:
     return {
         "route_id": r.id,
         "channel": r.channel,
@@ -158,6 +189,9 @@ def _route_dict(r: IntakeRoute, broker_name: Optional[str],
         "collecting": r.channel in COLLECTING_CHANNELS,
         "created_at": _iso_utc(r.created_at),
         "disabled_at": _iso_utc(r.disabled_at),
+        # An SFTP route that collects from someone else's server: its settings
+        # and last check (sftp_pull.public_view) — never the password or key.
+        "sftp": sftp,
     }
 
 
@@ -187,8 +221,13 @@ def list_routes(mga: Optional[str] = None,
         counts = svc.month_counts(s, tid)
         _prog_names = {p.id: p.name for p in
                        s.query(Program).filter(Program.tenant_id == tid).all()}
+        # One query for every pull route's settings; none at all when the
+        # carrier has none (or before migration 35 — then it returns {}).
+        pull = (sftp_pull.configs_for_tenant(s, tid)
+                if any(svc.is_external_sftp(r) for r in rows) else {})
         routes = [_route_dict(r, names.get(r.broker_party_id), counts.get(r.id, 0),
-                              _prog_names.get(getattr(r, "program_id", None)))
+                              _prog_names.get(getattr(r, "program_id", None)),
+                              sftp=sftp_pull.public_view(pull.get(r.id)))
                   for r in rows]
 
         # Brokers that may be given a way in: those actually on one of this
@@ -292,6 +331,20 @@ def list_routes(mga: Optional[str] = None,
         }
 
 
+@router.post("/sftp/test")
+def test_sftp(body: SftpTestBody,
+              principal: Principal = Depends(require_role("carrier_admin"))):
+    """The Configure dialog's Test button for an external SFTP server.
+
+    Connects, shows the server's fingerprint (what the route will trust), lists
+    the folder and checks that a collected file can be moved or deleted — with
+    a tiny test file of our own, never a real one. Always 200: a server that
+    cannot be reached is ok=false with plain words and an error_code, because
+    "it did not work, and this is why" IS the answer.
+    """
+    return sftp_pull.test_connection(body.model_dump())
+
+
 @router.post("/routes")
 def create_route(body: RouteCreate, mga: Optional[str] = None,
                  principal: Principal = Depends(require_role("carrier_admin"))):
@@ -309,6 +362,21 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
                                  f"you can create {' or '.join(CREATABLE_CHANNELS)}")
     if body.file_style not in ("whole_book", "changes_only"):
         raise HTTPException(400, "file_style must be whole_book or changes_only")
+
+    # SFTP from someone else's server: test it again — against the fingerprint
+    # the carrier was shown, which is what gets pinned — before anything is
+    # written, and outside the database session so a slow server never holds a
+    # connection open.
+    pull_address, pull_cfg = None, None
+    if body.channel == "sftp" and body.sftp is not None:
+        if not sftp_pull.column_ready(fresh=True):
+            raise HTTPException(503, "Collecting from an SFTP server needs database update 35 "
+                                     "(migrations/35_intake_route_sftp_config.sql). Ask your "
+                                     "administrator to run it, then try again.")
+        try:
+            pull_address, pull_cfg = sftp_pull.prepare_route(body.sftp.model_dump())
+        except sftp_pull.SetupRefused as exc:
+            raise HTTPException(400, str(exc))
 
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
@@ -341,6 +409,9 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
                 address = mailsvc.build_email_address(body.sender_email or "")
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
+        elif pull_address is not None:
+            # "sftp://user@host:port/folder" — the server we collect from.
+            address = pull_address
         else:
             address = svc.build_sftp_address(carrier_name, broker.legal_name)
 
@@ -381,13 +452,17 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
         )
         s.add(route)
         s.flush()
+        if pull_cfg is not None:
+            # Raw SQL, same transaction: the column is never mapped on the
+            # model (see sftp_pull), so a database without it still works.
+            sftp_pull.save_config(s, route.id, pull_cfg)
 
         # Create the folders now, not on first file. A broker given an address
         # will test it immediately, and an SFTP put into a folder that does not
         # exist fails with a permission error that looks like a credential
         # problem — the hardest kind of support call to answer.
         created_dir = None
-        if route.channel == "sftp":
+        if route.channel == "sftp" and pull_cfg is None:
             try:
                 created_dir = str(svc.ensure_route_dirs(route))
             except OSError as exc:
@@ -398,8 +473,12 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
         _log(_tenant_name(s, tid) or "", _actor(principal), "intake_route_created",
              target=str(route.id),
              details={"channel": route.channel, "address": route.address,
-                      "broker_party_id": route.broker_party_id})
-        out = _route_dict(route, broker.legal_name, 0)
+                      "broker_party_id": route.broker_party_id,
+                      # Which server key was trusted, and by whom (the actor).
+                      **({"host_key": pull_cfg["host_key"]["fingerprint_sha256"]}
+                         if pull_cfg else {})})
+        out = _route_dict(route, broker.legal_name, 0,
+                          sftp=sftp_pull.public_view(pull_cfg))
         out["folder"] = created_dir
         out["cc"] = _carrier_cc(s, tid) if route.channel == "email" else None
         # The broker is told how to name what they send — the same example
@@ -466,7 +545,9 @@ def patch_route(route_id: int, body: RoutePatch, mga: Optional[str] = None,
              "intake_route_updated", target=str(route.id),
              details=body.model_dump(exclude_unset=True))
         return _route_dict(route, names.get(route.broker_party_id),
-                           svc.month_counts(s, route.tenant_id).get(route.id, 0))
+                           svc.month_counts(s, route.tenant_id).get(route.id, 0),
+                           sftp=(sftp_pull.public_view(sftp_pull.load_config(s, route.id))
+                                 if svc.is_external_sftp(route) else None))
 
 
 # What an arrival that has not been run reports. Keys match _run_facts.
@@ -810,6 +891,9 @@ def poll_route(route_id: int, principal: Principal = Depends(require_role("carri
         # rather than there being one that understands both.
         if route.channel == "email":
             from email_poller import collect_route
+        elif svc.is_external_sftp(route):
+            # Someone else's server: log in and collect now (sftp_pull).
+            from sftp_pull import collect_route
         else:
             from sftp_poller import collect_route
         result = collect_route(s, route)

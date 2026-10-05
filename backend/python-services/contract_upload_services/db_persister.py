@@ -446,6 +446,13 @@ def normalize_upload_token(token):
     return token
 
 
+def _coded_type(requested):
+    """A contract type contract_types.py knows, never free text: the one asked
+    for when it is valid, else DEFAULT_TYPE."""
+    import contract_types as ct
+    return requested if requested in ct.CONTRACT_TYPES else ct.DEFAULT_TYPE
+
+
 def build_extracted_payload(document_type, program_name, program_metadata,
                             upload_token=None, reference_documents=None,
                             identity=None, regen_report=None, extraction=None):
@@ -886,11 +893,14 @@ def persist_pipeline_output(
                     "program_id":         program_id,
                     "umr":                umr,
                     "contract_name":      contract_name,
-                    # The CODED type when the route knows it (insurer_broker /
-                    # insurer_reinsurer — see contract_types.py). Falling back to
-                    # the document type the model read off the page keeps every
-                    # caller that predates coded types working unchanged.
-                    "contract_type":      _defaults.get("contract_type") or document_type,
+                    # Always a CODED type (insurer_broker / insurer_reinsurer —
+                    # see contract_types.py): the route's when it names a valid
+                    # one, else the default. The document type the model read
+                    # off the page ("Program Schedule G") is a heading, not a
+                    # contract type — stored here it failed every later
+                    # validate(), so Renew and Edit were refused with a 400.
+                    # It is kept in `extracted.document_type`.
+                    "contract_type":      _coded_type(_defaults.get("contract_type")),
                     "inception_dt":       inception,
                     "expiry_dt":          expiry,
                     "filename":           source_file or contract_name,

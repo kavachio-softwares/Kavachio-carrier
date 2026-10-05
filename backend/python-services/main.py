@@ -193,6 +193,14 @@ intake_events.start(app)
 import sftp_poller  # noqa: E402
 sftp_poller.start(app)
 
+# 10.1 — external SFTP pull. Kavachio logs in to a broker's (or the carrier's)
+# OWN SFTP server on each such route's interval (5/15/60 min), collects the
+# finished files and moves them to a processed folder there. Idle until
+# migration 35 adds intake_route.route_sftp_config. Opt out with
+# SFTP_PULL_ENABLED=0; POST /intake/routes/{id}/poll still collects on request.
+import sftp_pull  # noqa: E402
+sftp_pull.start(app)
+
 # 10.3 — email collector. Waits on the intake mailbox with IMAP IDLE and reads
 # it the moment mail arrives; falls back to a timer on a server without IDLE.
 # ON by default, but ONLY where a mailbox is configured — start() returns early

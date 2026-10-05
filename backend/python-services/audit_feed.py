@@ -370,7 +370,9 @@ ACTION_WORDS = {
     "output_sources_analyzed":    "Analysed the source files",
     "intake_route_created":       "Created a submission channel",
     "intake_key_created":         "Issued a channel API key",
-    "mailbox_polled":             "Checked the mailbox for new files",
+    # The same button collects from a mailbox, a folder or an SFTP server.
+    "mailbox_polled":             "Checked a channel for new files",
+    "intake_sftp_tested":         "Tested an SFTP server connection",
     "intake_guide_sent":          "Sent a broker their channel instructions",
     "intake_guide_emailed":       "Emailed a broker their channel instructions",
     "file_arrival_released":      "Released a file on hold",

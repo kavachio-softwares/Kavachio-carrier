@@ -115,17 +115,23 @@ def _av_fail_open() -> bool:
 
 # ── 12.1a — size ────────────────────────────────────────────────────────────
 
-def check_size(file_bytes: bytes, cap: Optional[int] = None) -> Optional[str]:
+def check_size(file_bytes: bytes, cap: Optional[int] = None,
+               size: Optional[int] = None) -> Optional[str]:
     """First question, and the only one that costs nothing at all.
 
     Before this existed the API capped uploads at 200 MB, email capped
     attachments at 25 MB by silently dropping them, and SFTP capped nothing —
     so the one door with no human watching it was the one that would hand a
     3 GB file to openpyxl.
+
+    `size` is the size a channel was TOLD without reading the file — a remote
+    SFTP listing (sftp_pull). An oversize remote file is refused on that alone,
+    so it is never downloaded.
     """
     cap = cap or max_bytes()
-    if len(file_bytes) > cap:
-        return (f"The file is {len(file_bytes) // (1024 * 1024)} MB. "
+    n = len(file_bytes) if size is None else max(int(size), len(file_bytes))
+    if n > cap:
+        return (f"The file is {n // (1024 * 1024)} MB. "
                 f"We can accept files up to {cap // (1024 * 1024)} MB. "
                 f"Splitting the month into separate files usually fixes this.")
     if not file_bytes:

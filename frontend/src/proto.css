@@ -475,6 +475,9 @@
 .proto .note{font-size:12.5px;color:var(--p-muted);background:var(--p-surface-2);border:1px solid var(--p-border);border-radius:var(--p-r-sm);padding:11px 13px;line-height:1.5}
 .proto .note.warn{background:var(--p-warn-soft);border-color:#EAD7AE;color:var(--p-warn-ink)}
 .proto .note.ok{background:var(--p-ok-soft);border-color:#C5E7D3;color:var(--p-ok-ink)}
+/* Used by several screens for a failure, but never defined — it rendered as a
+   plain grey note. */
+.proto .note.crit{background:var(--p-crit-soft);border-color:#F2C4CB;color:var(--p-crit-ink)}
 .proto .tag-pill{font-family:var(--p-mono);font-size:11px;background:var(--p-surface-3);border:1px solid var(--p-border);border-radius:5px;padding:2px 7px;color:var(--p-muted)}
 .proto .divider{height:1px;background:var(--p-border);margin:18px 0}
 .proto .muted{color:var(--p-muted)}

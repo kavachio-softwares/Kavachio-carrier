@@ -165,10 +165,21 @@ def build_sftp_address(carrier_name: str, broker_name: str) -> str:
     return f"{slugify(carrier_name)}/{slugify(broker_name)}"
 
 
+def is_external_sftp(route) -> bool:
+    """An SFTP route Kavachio PULLS from someone else's server (sftp_pull), as
+    opposed to a folder on our own (sftp_poller). Told apart by the address
+    alone — "sftp://user@host:port/folder" against a bare "carrier/broker" path —
+    so it needs no database column to answer."""
+    return (getattr(route, "channel", None) == "sftp"
+            and str(getattr(route, "address", "") or "").startswith("sftp://"))
+
+
 def display_address(route: IntakeRoute) -> str:
     """What the screen shows. Composed at read time so moving hosts does not
     strand every stored address."""
     if route.channel == "sftp":
+        if is_external_sftp(route):
+            return route.address          # already the remote server's full address
         return f"sftp://{sftp_host()}/{route.address}"
     return route.address
 
@@ -592,27 +603,57 @@ def identify(session, route: Optional[IntakeRoute], *, filename: str,
         if not label and named_date is not None and not _has_calendar(session, pid):
             label = f"{named_date:%Y-%m}"         # said, and no calendar to hold it to
             source = "date" if parse_period_hint(period_hint) else "filename"
+    allowed = reporting_periods(session, tenant, pid, broker)
     if not label:
         if named_date is None:
             return found, (f"No reporting period. Say which period the file is for in "
                            f"{where}, for example Bordereau_2026-09.xlsx or "
                            f"\"September 2026\".")
+        if _month_not_over(f"{named_date:%Y-%m}"):
+            return found, _not_ended_reason(f"{named_date:%Y-%m}", allowed)
         return found, (f"{named_date:%B %Y} is not a reporting period of this "
                        f"programme. Name one of its periods in {where}.")
-    allowed = reporting_periods(session, tenant, pid, broker)
     if allowed and label not in allowed:
         from db import ExpectedSubmission
         later = (session.query(ExpectedSubmission.id)
                  .filter(ExpectedSubmission.program_id == pid,
                          ExpectedSubmission.period == label).first())
-        if later is not None:
-            return found, (f"Reporting period {label} has not ended yet. A period's "
-                           f"file can be sent once it is over — the latest is "
-                           f"{allowed[0]}.")
+        # A month still running is "not yet", never "not a period": the
+        # calendar only holds months that have started, so the current one
+        # (or a later one) can be missing from it and still be perfectly real.
+        if later is not None or _month_not_over(label):
+            return found, _not_ended_reason(label, allowed)
         return found, (f"{label} is not a reporting period of this programme. "
                        f"Name one of its periods in {where}, e.g. {allowed[0]}.")
     found["period"], found["period_source"] = label, source
     return found, None
+
+
+def _period_name(label: str) -> str:
+    """"2026-10" -> "October 2026"; any other label (a quarter, say) as it is."""
+    try:
+        return datetime.strptime(label, "%Y-%m").strftime("%B %Y")
+    except ValueError:
+        return label
+
+
+def _month_not_over(label: str) -> bool:
+    """True for a "YYYY-MM" month that has not ended yet (this month or later)."""
+    try:
+        month = datetime.strptime(label, "%Y-%m")
+    except ValueError:
+        return False
+    now = datetime.utcnow()
+    return (month.year, month.month) >= (now.year, now.month)
+
+
+def _not_ended_reason(label: str, allowed: list[str]) -> str:
+    """Why a file for a period still running is refused, in plain words."""
+    unit = "month" if re.fullmatch(r"\d{4}-\d{2}", label) else "period"
+    latest = (f" — the latest open period is {_period_name(allowed[0])}"
+              if allowed else "")
+    return (f"{_period_name(label)} has not ended yet. A bordereau can be sent once "
+            f"the {unit} is over{latest}.")
 
 
 def _has_calendar(session, program_id: int) -> bool:
@@ -803,11 +844,16 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
               replaces: Optional[str] = None,
               program_id: Optional[int] = None,
               contract_id: Optional[int] = None,
-              refusal: Optional[str] = None) -> FileArrival:
+              refusal: Optional[str] = None,
+              declared_size: Optional[int] = None) -> FileArrival:
     """Record one arriving file and decide whether it may go on.
 
     `refusal` is a reason the channel has already found (an email that did not
     copy the carrier): it is checked right after the sender, like any check.
+
+    `declared_size` is a size the channel knows WITHOUT having read the file (a
+    remote SFTP listing — sftp_pull). Over the cap, the file is refused on it
+    with its real size and `file_bytes` may be empty: it was never downloaded.
 
     `period`, `program_id` and `contract_id` are what the sender STATED (the
     API's fields, the secure link's corrected data). Whatever is not stated is
@@ -866,7 +912,7 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
     reason: Optional[str] = None
     for check in (
         # ── settled without opening the file ────────────────────────────────
-        lambda: safety.check_size(file_bytes, max_bytes),
+        lambda: safety.check_size(file_bytes, max_bytes, size=declared_size),
         lambda: _check_is_spreadsheet(filename, file_bytes),
         lambda: safety.check_safe_to_open(filename, file_bytes),
         lambda: _check_known_sender(route),
@@ -905,7 +951,8 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
         matched_broker_party_id=route.broker_party_id if route else None,
         claimed_sender=claimed_sender,
         filename=filename,
-        file_size_bytes=len(file_bytes),
+        file_size_bytes=(len(file_bytes) if declared_size is None
+                         else max(int(declared_size), len(file_bytes))),
         row_count=row_count,
         file_hash_sha256=sha,
         received_at=datetime.now(timezone.utc),

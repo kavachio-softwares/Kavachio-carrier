@@ -66,6 +66,16 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
              for p in progs]
     shared = not route.program_id
 
+    # An SFTP route that COLLECTS from a server the broker already uses
+    # (sftp_pull). That server's address is between the carrier and the broker,
+    # so the email never names Kavachio's server or folders — only how often
+    # files are collected and how to name them.
+    pull = svc.is_external_sftp(route)
+    every = None
+    if pull:
+        import sftp_pull
+        every = (sftp_pull.load_config(s, route.id) or {}).get("interval_minutes")
+
     d = _example_month()
     month, ym = d.strftime("%B %Y"), d.strftime("%Y-%m")
     prog, pcode, cons = plist[0] if plist else ("Programme", "PRG-XXXXXX", [])
@@ -92,6 +102,9 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
                    f"  -F \"period={ym}\" \\\n"
                    f"  -F \"program_ref={pcode}\""
                    + (f" \\\n  -F \"contract_ref={ccode}\"" if ccode else ""))
+    elif pull:
+        where = "the file name"
+        example = f"{pcode}_{f'{ccode}_' if ccode else ''}{ym}.xlsx"
     else:
         where = "the file name"
         example = (f"{svc.display_address(route)}/incoming/"
@@ -138,6 +151,11 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
                  f"if you contact {carrier}.",
                  f"Keep the key secret: anyone who has it can send files as you. If it is "
                  f"lost or exposed, ask {carrier} to revoke it and issue a new one."]
+    elif pull:
+        more.append(f"{carrier} collects finished files from the agreed SFTP location "
+                    + (f"every {every} minutes" if every else "regularly")
+                    + ". Put each file there in one piece; a file still being uploaded "
+                      "is left until it is complete.")
     elif route.channel == "sftp":
         more.append("Your SFTP login (user name and password, or key) is shared with you "
                     "separately.")
@@ -148,13 +166,15 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
         where_to = ("Endpoint", f"POST {(api_base or '').rstrip('/')}/v1/bordereaux")
     elif route.channel == "email":
         where_to = ("Send to", send_to)
+    elif pull:
+        where_to = ("Collected from", "The agreed SFTP location")
     else:
         where_to = ("Upload to", f"{svc.display_address(route)}/incoming")
     facts = [("Channel", _CHANNEL_WORD.get(route.channel, route.channel)),
              where_to,
              ("API key", api_key if api else None),
              ("Server", f"{svc.sftp_host()} (port {svc.sftp_port()})"
-              if route.channel == "sftp" else None),
+              if route.channel == "sftp" and not pull else None),
              ("Send from", route.address if route.channel == "email" else None),
              ("Cc", cc),
              ("Programme" if len(plist) == 1 else "Programmes",

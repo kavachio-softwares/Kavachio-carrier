@@ -788,6 +788,7 @@ export const renewContract = (id: number, body: {
   inception_dt: string; expiry_dt: string; name?: string;
   premium_cap_amount?: number | null; notice_period_days?: number | null;
   year_of_account?: string | null; schedule_key?: string | null;
+  class_of_business?: string | null;
 }) => api.post<ContractRecord>(`/contracts/${id}/renew`, body).then(r => r.data);
 
 export type DocumentsPayload = {

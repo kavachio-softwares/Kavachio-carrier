@@ -30,6 +30,11 @@ defusedxml==0.7.1
 # SFTP intake: notices a file the moment it lands in a broker's folder
 # (FSEvents / inotify). See sftp_watch.py.
 watchdog==6.0.0
+# External SFTP pull: Kavachio logs in to a broker's own SFTP server as a
+# client (sftp_pull.py). Brings pynacl (Ed25519) and uses `cryptography`,
+# which also encrypts the saved logins (intake_secrets.py). Paramiko 5 has no
+# SHA-1 algorithms: a server offering only ssh-rsa / *-sha1 is refused.
+paramiko==5.0.0
 # Test-only. The contract as-of suites (test_contract_asof*.py) are
 # pytest-based and cannot run without it.
 pytest==9.1.1

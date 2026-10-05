@@ -3565,6 +3565,10 @@ class Renewal(BaseModel):
     notice_period_days: Optional[int] = None
     year_of_account: Optional[str] = None
     schedule_key: Optional[str] = None
+    # Only for a contract that never had one — an UPLOADED contract does not
+    # (extraction does not fill it), yet the type requires it, so without
+    # this its renewal could not be saved at all. One that has it carries it.
+    class_of_business: Optional[str] = None
 
 
 @router.post("/contracts/{contract_id}/renew")
@@ -3616,6 +3620,8 @@ def renew_contract(contract_id: int, body: Renewal,
         new.inception_dt = _as_date(body.inception_dt)
         new.expiry_dt = _as_date(body.expiry_dt)
         new.year_of_account = body.year_of_account or old.year_of_account
+        new.class_of_business = (old.class_of_business
+                                 or (body.class_of_business or "").strip() or None)
         new.notice_period_days = (body.notice_period_days
                                   if body.notice_period_days is not None
                                   else old.notice_period_days)

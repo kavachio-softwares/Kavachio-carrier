@@ -507,7 +507,9 @@ def _next_version_no(s, ref: str) -> int:
 
 # ── recipients ──────────────────────────────────────────────────────────────
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# No ":" or "/" anywhere: an SFTP login ("sftp://user@host") is not an address
+# anybody can be emailed at, but the looser pattern took it for one.
+_EMAIL_RE = re.compile(r"^[^@\s/:]+@[^@\s/:]+\.[^@\s/:]+$")
 
 
 def route_contacts(route) -> list[str]:
@@ -1671,6 +1673,12 @@ def _receipt_doc(th, ver, arrival) -> dict:
 
 
 def _queue_sftp(s, th, ver, route, kind: str, doc: dict) -> None:
+    # A route Kavachio pulls from someone else's server (sftp_pull) has no
+    # `outbound/` folder of ours to write a receipt into — and writing back to
+    # their server is not something it was given permission to do. The broker
+    # hears by email, as on every other channel.
+    if str(route.address or "").startswith("sftp://"):
+        return
     ver_no = ver.no if ver is not None else th.current.no
     _queue(s, {"key": f"v{ver_no}:{kind}:{doc.get('status')}:sftp", "ref": th.ref,
                "tenant_id": th.tenant_id, "version": ver_no, "event": kind,

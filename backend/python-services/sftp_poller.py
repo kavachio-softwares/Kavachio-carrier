@@ -140,6 +140,13 @@ def collect_route(session, route: IntakeRoute) -> dict:
     nothing to find it by. Doing it in this order can at worst re-read a file
     after a crash, and the duplicate check catches that.
     """
+    # A route that PULLS from someone else's server has no folder here at all —
+    # its address is "sftp://user@host/…", and making local folders from it
+    # would be nonsense. sftp_pull collects it.
+    if svc.is_external_sftp(route):
+        import sftp_pull
+        return sftp_pull.collect_route(session, route)
+
     # Creates any folder this route is missing, so a route made before `held`
     # and `quarantine` existed grows them on its next poll (12.3).
     svc.ensure_route_dirs(route)
@@ -284,9 +291,13 @@ def collect_all() -> dict:
     totals = {"routes": 0, "accepted": 0, "held": 0, "turned_away": 0,
               "skipped_still_writing": 0}
     with SessionLocal() as s:
+        # Local folders only. Pull routes (address "sftp://…") are collected
+        # by sftp_pull on their own interval — not every time a local folder
+        # stirs, and not by this thread.
         routes = (s.query(IntakeRoute)
                   .filter(IntakeRoute.channel == "sftp",
-                          IntakeRoute.is_enabled.is_(True))
+                          IntakeRoute.is_enabled.is_(True),
+                          ~IntakeRoute.address.like("sftp://%"))
                   .order_by(IntakeRoute.id).all())
         for route in routes:
             try:
