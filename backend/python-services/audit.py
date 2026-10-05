@@ -326,6 +326,7 @@ _FRIENDLY = {
     ("POST",   "/intake/routes"):                    "intake_route_created",
     ("POST",   "/intake/routes/{id}/keys"):          "intake_key_created",
     ("POST",   "/intake/routes/{id}/poll"):          "mailbox_polled",
+    ("POST",   "/intake/routes/{id}/guide"):         "intake_guide_sent",
     ("POST",   "/intake/arrivals/{id}/release"):     "file_arrival_released",
     ("POST",   "/v1/bordereaux"):                    "bdx_uploaded",
     # --- the rest

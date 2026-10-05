@@ -89,10 +89,14 @@ def resolve_programme(s, p: IntakePrincipal, declared_ref: Optional[str]):
     """
     options = _broker_programmes(s, p.tenant_id, p.broker_party_id)
     by_ref = {_programme_ref(x): x.id for x in options}
+    # The short code (PRG-7K3QMA) names a programme as well as its ref does.
+    by_code = {svc._plain(f): x.id for x in options
+               for f in svc._code_forms(svc.programme_code(x))}
 
     declared_id = None
     if declared_ref:
-        declared_id = by_ref.get(declared_ref.strip().lower())
+        declared_id = (by_ref.get(declared_ref.strip().lower())
+                       or by_code.get(svc._plain(declared_ref)))
         if declared_id is None:
             raise _err(400, "unknown_programme",
                        f"There is no programme called '{declared_ref}' for this "
@@ -139,7 +143,9 @@ def resolve_contract(s, p: IntakePrincipal, program_id: int,
     if declared_ref:
         want = svc._plain(declared_ref)
         hit = [c.id for c in options
-               if want in (svc._plain(svc.contract_ref(c)), svc._plain(c.name))]
+               if want in (svc._plain(svc.contract_ref(c)), svc._plain(c.name),
+                           svc._plain(svc.contract_label(c)),
+                           *(svc._plain(f) for f in svc._code_forms(svc.contract_code(c))))]
         if len(hit) != 1:
             raise _err(400, "unknown_contract",
                        f"There is no contract called '{declared_ref}' for this "
@@ -154,13 +160,16 @@ def resolve_contract(s, p: IntakePrincipal, program_id: int,
 
 
 def _receipt(s, arrival: FileArrival, base: str, replayed: bool = False) -> dict:
-    """Carrier, broker and programme come back as NAMES on purpose: if someone
-    pastes the wrong key into the wrong script they see the wrong broker in the
-    reply on the very first night, instead of you finding out three months later
-    that files were filed against the wrong programme."""
+    """The reply to one file: did it get in, and what was it filed as. Short
+    on purpose — no links, and one reference only (this file's), which every
+    endpoint and the `replaces` field also accept.
+
+    Broker and programme come back as NAMES on purpose: if someone pastes the
+    wrong key into the wrong script they see the wrong broker in the reply on
+    the very first night, instead of you finding out three months later that
+    files were filed against the wrong programme."""
     from db import Contract
     route = s.get(IntakeRoute, arrival.route_id) if arrival.route_id else None
-    tenant = s.get(Tenant, arrival.tenant_id)
     broker = (s.get(Party, arrival.matched_broker_party_id)
               if arrival.matched_broker_party_id else None)
     # The programme the FILE was recorded against — the route's pin, or the one
@@ -173,36 +182,34 @@ def _receipt(s, arrival: FileArrival, base: str, replayed: bool = False) -> dict
     out = {
         "reference": arrival.public_ref,
         "status": _EXTERNAL.get(arrival.outcome, arrival.outcome),
-        "received_at": arrival.received_at.isoformat() if arrival.received_at else None,
-        "file": {"name": arrival.filename, "bytes": arrival.file_size_bytes,
-                 "sha256": arrival.file_hash_sha256},
-        "carrier": (tenant.legal_name or tenant.tenant_name) if tenant else None,
-        "broker": broker.legal_name if broker else None,
-        # What the file was recorded as — programme, contract and period, the
-        # three things Process Bordereau asks a person to pick. A wrong one
-        # shows up on the first night rather than at month-end.
-        "programme": prog.name if prog else None,
-        "programme_ref": _programme_ref(prog) if prog else None,
-        "contract": (con.name or con.filename) if con else None,
-        "contract_ref": svc.contract_ref(con) if con else None,
-        "period": arrival.reporting_period,
-        "status_url": f"{base}/v1/bordereaux/{arrival.public_ref}",
     }
     if arrival.turned_away_reason:
         out["message"] = arrival.turned_away_reason
+    out.update({
+        "received_at": arrival.received_at.isoformat() if arrival.received_at else None,
+        "file": arrival.filename,
+        # What the file was recorded as — the three things Process Bordereau
+        # asks a person to pick. A wrong one shows up on the first night.
+        "broker": broker.legal_name if broker else None,
+        "programme": prog.name if prog else None,
+        "contract": svc.contract_label(con) if con else None,
+        "period": arrival.reporting_period,
+    })
     if replayed:
         out["replayed"] = True
-    # The submission this file belongs to — the reference to quote on a
-    # correction (`replaces`), its version and where it stands now.
+    # Where this programme + contract + period stands as a whole: its current
+    # version may not be this file (a held copy, or a later correction).
     try:
         import submission_service as subs
         th, ver = subs.thread_for_arrival(s, arrival.id)
         if th is not None and ver is not None:
-            doc = subs.status_json(s, th)
-            doc["this_file_version"] = ver.no
-            doc["this_file_status"] = ver.status
-            doc["exceptions_url"] = f"{base}/v1/submissions/{th.ref}/exceptions"
-            out["submission"] = doc
+            out["version"] = ver.no
+            summary = {"current_version": th.current.no, "status": th.status}
+            # Only once the newest file has been checked: while it is still
+            # processing, the count would be the PREVIOUS version's.
+            if th.status not in ("processing", "received"):
+                summary["open_exceptions"] = subs.progress(s, th)["remaining"]
+            out["period_summary"] = summary
     except Exception:  # noqa: BLE001 — the receipt never fails on it
         log.warning("no submission block for %s", arrival.public_ref, exc_info=True)
     return out
@@ -234,9 +241,9 @@ async def receive_bordereau(
     # Optional in the signature so a missing one gets this API's own error
     # (period_required, with the valid choices) rather than a bare 422.
     period: Optional[str] = Form(default=None),
-    # A correction: the reference of the submission this file replaces (from
-    # the result email, the status endpoint or the SFTP status file). Without
-    # it a file for the same programme + period is still matched to it.
+    # A correction: the reference of the file it replaces (or of its
+    # submission). Rarely needed — a file for the same programme, contract and
+    # period is matched to it anyway.
     replaces: Optional[str] = Form(default=None),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     p: IntakePrincipal = Depends(current_intake_principal),
@@ -378,19 +385,16 @@ def get_bordereau(reference: str, request: Request,
                            FileArrival.route_id == p.route_id).first())
         if arrival is None:
             raise _err(404, "not_found", "No submission with that reference.")
-        out = _receipt(s, arrival, _base_url(request))
-        # How many rows were loaded, but never WHAT was flagged: exception
-        # detail is the carrier's and goes out through their review flow, not to
-        # whoever holds an API key.
-        out["result"] = {"upload_id": arrival.bdx_upload_id}
-        return out
+        # The same short reply as the upload; the month's history and its
+        # exceptions are at the submission's URL.
+        return _receipt(s, arrival, _base_url(request))
 
 
 def _own_submission(s, reference: str, p: IntakePrincipal):
     """A submission this key's BROKER sent to this key's carrier — whichever
     channel each version came through."""
     import submission_service as subs
-    th = subs.load(s, subs.find_reference(reference))
+    th = subs.load(s, subs.thread_ref(s, reference))
     if th is None or th.tenant_id != p.tenant_id \
             or th.broker_party_id != p.broker_party_id:
         raise _err(404, "not_found", "No submission with that reference.")
@@ -458,8 +462,10 @@ def whoami(p: IntakePrincipal = Depends(current_intake_principal)):
         shown = [prog] if prog is not None else options
         programmes = [{
             "ref": _programme_ref(x),
+            "code": svc.programme_code(x),
             "name": x.name,
-            "contracts": [{"ref": svc.contract_ref(c), "name": c.name or c.filename}
+            "contracts": [{"ref": svc.contract_ref(c), "code": svc.contract_code(c),
+                           "name": c.name or c.filename}
                           for c in svc.live_contracts(s, p.tenant_id, x.id,
                                                       p.broker_party_id)],
             "reporting_periods": reporting_periods(s, p.tenant_id, x.id,

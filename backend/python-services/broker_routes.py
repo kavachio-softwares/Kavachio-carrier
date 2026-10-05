@@ -455,6 +455,7 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
         # must not take the first one off their list.
         held = _contracts_awaiting_approval(s, prog_ids)
 
+        from intake_service import contract_code, programme_code
         out = []
         for c in rows:
             if c.id in held:
@@ -467,6 +468,8 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
                 # An AUTHORED contract has no file, so a list keyed on filename
                 # shows it as "Contract 462". The name is what it is called.
                 "name": c.name or c.filename or f"Contract {c.id}",
+                # What the broker writes in a subject or file name instead.
+                "code": contract_code(c),
                 "contract_type": c.contract_type,
                 "lifecycle": state,
                 # Who the contract is waiting on. The SAME function the
@@ -479,7 +482,8 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
                 "has_wording": bool((c.wording_sections or {}).get("sections"))
                                or bool(c.blob_ref or c.blob),
                 "programme": {"id": c.program_id,
-                              "name": progs[c.program_id].name if c.program_id in progs else "—"},
+                              "name": progs[c.program_id].name if c.program_id in progs else "—",
+                              "code": programme_code(c.program_id) if c.program_id else None},
                 "carrier": {"id": cid, "name": carriers.get(cid, "—")},
                 "inception_dt": c.inception_dt.isoformat() if c.inception_dt else None,
                 "expiry_dt": c.expiry_dt.isoformat() if c.expiry_dt else None,
@@ -1081,12 +1085,16 @@ def _run_rows(s, exports) -> list[dict]:
     contract_names = ({cid: (name or fname) for cid, name, fname in
                        s.query(Contract.id, Contract.name, Contract.filename)
                        .filter(Contract.id.in_(cids)).all()} if cids else {})
+    bids = {e.broker_party_id for e in exports if e.broker_party_id}
+    broker_names = ({bid: name for bid, name in s.query(Party.id, Party.legal_name)
+                     .filter(Party.id.in_(bids)).all()} if bids else {})
     return [{
         "export_id": e.id,
         "filename": e.filename,
         "programme": prog_names.get(e.program_id),
         "contract": contract_names.get(e.contract_id),
         "contract_id": e.contract_id if e.contract_id in contract_names else None,
+        "broker_name": broker_names.get(e.broker_party_id),
         "rows": e.policy_count,
         "status": e.status,
         # A run through the broker's own lane is recorded as the broker

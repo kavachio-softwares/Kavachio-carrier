@@ -320,7 +320,7 @@ export function RunTrend({ data, onDayClick, audience = "platform", showResolved
   return (
     <div style={{ width: "100%", height: 260 }}>
       <ResponsiveContainer width="100%" height="100%">
-        <Chart data={data} margin={{ top: 6, right: showResolved ? -10 : 8, left: -18, bottom: 0 }}
+        <Chart data={data} margin={{ top: 6, right: showResolved ? 6 : 8, left: 0, bottom: 0 }}
           style={onDayClick ? { cursor: "pointer" } : undefined}
           onClick={onDayClick ? (st: any, e: any) => {
             // The whole column is the target, not just the painted bar, so a
@@ -331,10 +331,16 @@ export function RunTrend({ data, onDayClick, audience = "platform", showResolved
           <CartesianGrid vertical={false} stroke={GRID} />
           <XAxis dataKey="date" tickFormatter={shortDay} interval={tickEvery(data.length)}
                  axisLine={false} tickLine={false} tick={axisTick} />
-          <YAxis {...axisId} allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick} />
+          {/* Each scale is named: the bars count files, the line counts
+              exceptions — two different units, so neither side is guessable. */}
+          <YAxis {...axisId} allowDecimals={false} axisLine={false} tickLine={false} tick={axisTick}
+                 label={{ value: "Files processed", angle: -90, position: "insideLeft",
+                          offset: 14, style: { ...axisTick, textAnchor: "middle" } }} />
           {showResolved && (
             <YAxis yAxisId="right" orientation="right" allowDecimals={false}
-                   axisLine={false} tickLine={false} tick={axisTick} />
+                   axisLine={false} tickLine={false} tick={axisTick}
+                   label={{ value: "Exceptions resolved", angle: 90, position: "insideRight",
+                            offset: 4, style: { ...axisTick, textAnchor: "middle" } }} />
           )}
           <Tooltip {...TIP} cursor={{ fill: "#F7F8FB" }}
                    labelFormatter={dayLabel} />

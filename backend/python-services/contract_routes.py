@@ -339,6 +339,13 @@ def _wording_context(s, c: Contract) -> dict:
     }
 
 
+def _codes():
+    """intake_service, imported late: it is heavy, and only its two short-code
+    functions are wanted here."""
+    import intake_service
+    return intake_service
+
+
 def _record(s, c: Contract, *, with_docs: bool = True,
             p: Principal | None = None,
             rule_counts: dict[int, dict] | None = None) -> dict:
@@ -401,7 +408,11 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         "contract_type_label": (ct.CONTRACT_TYPES[ctype]["label"]
                                 if known_type else (ctype or None)),
         "filename": c.filename,
-        "programme": {"id": prog.id, "name": prog.name} if prog else None,
+        # The short codes a broker writes in an email subject or file name
+        # instead of the names (intake_service.programme_code).
+        "code": _codes().contract_code(c),
+        "programme": ({"id": prog.id, "name": prog.name,
+                       "code": _codes().programme_code(prog)} if prog else None),
         "counterparty": ({
             "id": counterparty.id,
             "name": counterparty.legal_name,

@@ -1274,6 +1274,9 @@ def hierarchy(principal: Principal = Depends(current_principal)):
         for link, party in links:
             by_prog.setdefault(link.program_id, []).append((link, party))
 
+        # The short codes a broker writes in an email subject or file name
+        # instead of a long name (intake_service.programme_code).
+        from intake_service import contract_code, programme_code
         tree = []
         for p in programmes:
             brokers = []
@@ -1289,6 +1292,7 @@ def hierarchy(principal: Principal = Depends(current_principal)):
                     "setup_status": setup_status(p.id, party.id),
                     "contracts": [
                         {"id": c.id, "filename": c.filename, "status": c.status,
+                         "code": contract_code(c),
                          # The business state (draft … active), which is what
                          # "is this contract live" means; `status` is extraction.
                          "lifecycle": c.lifecycle,
@@ -1311,6 +1315,7 @@ def hierarchy(principal: Principal = Depends(current_principal)):
             tree.append({
                 "id": p.id,
                 "name": p.name,
+                "code": programme_code(p),
                 "status": p.status,
                 # What kind of business it is, so the Programmes list can say
                 # more than a name — the same two fields the create screen asks.

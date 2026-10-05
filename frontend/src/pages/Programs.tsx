@@ -19,7 +19,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { frequencyLabel } from "../constants/frequency";
 import { Link, useNavigate } from "react-router-dom";
-import { Layers, ChevronRight, Plus, Search } from "lucide-react";
+import { Layers, ChevronRight, Plus, Search, Copy, Check } from "lucide-react";
+import { InfoTip } from "../components/ui/InfoTip";
 import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
@@ -33,6 +34,36 @@ import { fmtDate, localDayStart, localDayEnd } from "../utils/date";
  *  programmes arrive in one payload with the hierarchy, so no request is saved
  *  by asking the server for a page. */
 const PAGE_SIZE = 10;
+
+/** The programme's short code, labelled so a first-time reader knows what it
+ *  is: a "Code" tag, the code itself, a copy button and an ⓘ with the why.
+ *  Clicks stay here so they do not open the row. */
+function ProgrammeCode({ code }: { code: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <span className="mr-2 inline-flex items-center gap-1 align-middle" onClick={e => e.stopPropagation()}>
+      <span className="inline-flex items-center overflow-hidden rounded-md border border-border bg-surface-2 text-[11px] leading-none">
+        <span className="bg-border px-1.5 py-1 font-semibold uppercase tracking-wide text-ink-muted">Code</span>
+        <span className="px-1.5 py-1 font-mono text-ink">{code}</span>
+        <button type="button" aria-label="Copy code"
+          title={done ? "Copied" : "Copy code"}
+          className="border-l border-border px-1.5 py-1 text-ink-soft transition hover:text-navy"
+          onClick={() => {
+            navigator.clipboard?.writeText(code);
+            setDone(true); window.setTimeout(() => setDone(false), 1500);
+          }}>
+          {done ? <Check size={11} className="text-success" /> : <Copy size={11} />}
+        </button>
+      </span>
+      <InfoTip text={<>
+        This programme's short code. Brokers can put it in an email subject or
+        a file name (e.g. <span className="font-mono">{code}_Oct2026.xlsx</span>)
+        instead of typing the full programme name, so their file reaches the
+        right programme. It never changes.
+      </>} />
+    </span>
+  );
+}
 
 /** Filter by the step a programme is stuck on — the same step its row shows
  *  in red. "ready" is every step done. */
@@ -223,8 +254,10 @@ export default function Programs() {
                           {p.name}
                         {/* </Link> */}
                         <div className="mt-0.5 text-xs text-ink-muted">
-                          {p.created_at ? `Created ${fmtDate(p.created_at)} · ` : ""}
-                          {frequencyLabel(p.bdx_frequency).toLowerCase()}
+                          {p.code && <ProgrammeCode code={p.code} />}
+                          {[p.created_at ? `Created ${fmtDate(p.created_at)}` : "",
+                            p.bdx_frequency ? frequencyLabel(p.bdx_frequency).toLowerCase() : ""]
+                            .filter(Boolean).join(" · ")}
                         </div>
                       </td>
                       <td className="align-middle">

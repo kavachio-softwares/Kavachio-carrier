@@ -181,7 +181,8 @@ def notification_email_html(title: str, body: Optional[str],
                             link_label: str = "Open Kavachio",
                             greeting_name: Optional[str] = None,
                             action: Optional[str] = None,
-                            footer: str = PLATFORM_ADMIN_FOOTER) -> str:
+                            footer: str = PLATFORM_ADMIN_FOOTER,
+                            extra_html: str = "") -> str:
     """Branded HTML body for a notification email.
 
     Renders whatever labelled facts the caller passes and, when given, the ONE
@@ -284,6 +285,7 @@ def notification_email_html(title: str, body: Optional[str],
           {facts_block}
           {action_block}
           {button}
+          {extra_html}
         </td></tr>
         <tr><td style="padding:18px 40px 26px;border-top:1px solid #EDEFF4;background:#FAFBFD">
           <div style="font-size:12px;color:#8B93A2;line-height:1.6">

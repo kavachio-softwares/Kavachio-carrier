@@ -18,6 +18,8 @@ import { fmtDate } from "../utils/date";
 export type BrokerProgramme = {
   id: number;
   name: string;
+  /** Short code for email subjects and file names, e.g. PRG-5QSH84. */
+  code?: string | null;
   carrier: string;
   contracts: BrokerContract[];
 };
@@ -155,7 +157,9 @@ export function ProgrammePicker({ value, onChange, programmes }: {
       placeholder="Select Programme…" empty="No programme yet"
       render={p => (
         <Row title={p.name}
-          sub={`${p.carrier} · ${p.contracts.length} ${p.contracts.length === 1 ? "contract" : "contracts"}`} />
+          sub={[p.code, p.carrier,
+            `${p.contracts.length} ${p.contracts.length === 1 ? "contract" : "contracts"}`]
+            .filter(Boolean).join(" · ")} />
       )} />
   );
 }
@@ -176,7 +180,7 @@ export function ContractPicker({ value, onChange, contracts }: {
       placeholder="Select Contract…" empty="No active contract yet"
       render={c => (
         <Row title={c.name || c.filename || `Contract ${c.id}`}
-          sub={[c.carrier.name, termOf(c)].filter(Boolean).join(" · ")}
+          sub={[c.code, c.carrier.name, termOf(c)].filter(Boolean).join(" · ")}
           badge={c.lifecycle === "expired"
             ? <span className="badge b-warn" style={{ flex: "none" }}><span className="d" />Ended</span>
             : null} />

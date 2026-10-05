@@ -371,6 +371,8 @@ ACTION_WORDS = {
     "intake_route_created":       "Created a submission channel",
     "intake_key_created":         "Issued a channel API key",
     "mailbox_polled":             "Checked the mailbox for new files",
+    "intake_guide_sent":          "Sent a broker their channel instructions",
+    "intake_guide_emailed":       "Emailed a broker their channel instructions",
     "file_arrival_released":      "Released a file on hold",
     "onboarding_skipped":         "Skipped onboarding",
     # access_log — reads and downloads of output / source data
@@ -877,6 +879,7 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     # sends; it is the carrier that sets up the ways in.
     ("intake", "Ingestion channels",
      ("intake_route_created", "intake_key_created", "mailbox_polled",
+      "intake_guide_sent", "intake_guide_emailed",
       "file_arrival_released"), CARRIER_SEATS),
     ("downloads", "Downloads and views", ("download", "read", "export"), ALL_SEATS),
     # The browser silently renewing its token. Kept out of the default feed

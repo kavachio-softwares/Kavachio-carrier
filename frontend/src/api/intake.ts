@@ -41,7 +41,12 @@ export type IntakeRoute = {
   disabled_at: string | null;
   /** Only returned by create — the folder that was made on disk. */
   folder?: string | null;
+  /** Only returned by create (email / SFTP): who is being emailed the
+   *  instructions, and whether broker emails are switched on at all. */
+  guide?: GuideSent;
 };
+
+export type GuideSent = { recipients: string[]; sending: boolean };
 
 export type BrokerLite = { party_id: number; legal_name: string };
 
@@ -49,7 +54,13 @@ export type BrokerLite = { party_id: number; legal_name: string };
  *  the mailbox their export job sends as. Offered as a suggestion the user can
  *  overwrite, never taken on trust. */
 export type BrokerEmail = { email: string; name: string | null; status: string };
-export type ProgrammeLite = { program_id: number; name: string };
+export type ProgrammeLite = {
+  program_id: number; name: string;
+  /** Short code a sender can write instead of the name, e.g. PRG-7K3QMA. */
+  code?: string;
+  /** The contracts this broker's files on it can be written under. */
+  contracts?: { contract_id: number; name: string; code?: string }[];
+};
 
 export type RoutesResponse = {
   routes: IntakeRoute[];
@@ -203,6 +214,13 @@ export async function createRoute(body: {
   display_name?: string; file_style?: FileStyle; note?: string;
 }): Promise<IntakeRoute> {
   const { data } = await api.post("/intake/routes", body, { params: { mga: currentMga() } });
+  return data;
+}
+
+/** Email the broker this channel's "How They Send It" again. */
+export async function emailRouteGuide(routeId: number): Promise<GuideSent> {
+  const { data } = await api.post(`/intake/routes/${routeId}/guide`, null,
+    { params: { mga: currentMga() } });
   return data;
 }
 

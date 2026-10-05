@@ -87,8 +87,8 @@ CHECKS = (
     ("is_spreadsheet",   "turned_away", "Is it a spreadsheet at all?"),
     ("safe_to_open",     "turned_away", "Is it safe to open?"),
     ("known_sender",     "turned_away", "Do we know who sent it?"),
-    ("not_duplicate",    "held",        "Is it the same file we already have?"),
     ("malware",          "turned_away", "Does it pass the security scan?"),
+    ("not_duplicate",    "held",        "Is it the same file we already have?"),
     ("can_open",         "turned_away", "Can we open it?"),
     ("has_rows",         "held",        "Does it have any rows in it?"),
     ("required_columns", "held",        "Does it have the columns we need?"),
@@ -356,10 +356,70 @@ def programme_ref(prog) -> str:
     return "-".join((prog.name or f"programme-{prog.id}").lower().split())
 
 
+# ── short codes ─────────────────────────────────────────────────────────────
+# A programme or contract name can be long, and one misspelt word in a subject
+# line turns a file away. So each has a short code a sender can write instead —
+# PRG-7K3QMA, CTR-9XW2AB. Derived from the row id, never stored: a keyed
+# shuffle (4-round Feistel over 28 bits) makes it unique and stable without
+# exposing the id or its sequence. The alphabet has no 0, 1, I, L, O or U, so a
+# code is never misread and can never contain a year or a month ("2026", "09")
+# that the period reader would pick up.
+
+_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"          # 30 symbols
+_CODE_LEN = 6                                               # 30**6 > 2**28
+
+
+def _shuffle28(n: int, salt: str) -> int:
+    left, right = n >> 14, n & 0x3FFF
+    for i in range(4):
+        f = int.from_bytes(hashlib.sha256(f"kavachio:{salt}:{i}:{right}".encode())
+                           .digest()[:2], "big") & 0x3FFF
+        left, right = right, left ^ f
+    return (left << 14) | right
+
+
+def _short_code(n: int, salt: str) -> str:
+    if not 0 <= n < (1 << 28):
+        return str(n)
+    v, out = _shuffle28(n, salt), []
+    for _ in range(_CODE_LEN):
+        v, r = divmod(v, len(_CODE_ALPHABET))
+        out.append(_CODE_ALPHABET[r])
+    return "".join(reversed(out))
+
+
+def programme_code(prog) -> str:
+    """The programme's short code for subjects and file names: PRG-XXXXXX.
+    Takes the programme or its id."""
+    pid = prog if isinstance(prog, int) else prog.id
+    return f"PRG-{_short_code(int(pid), 'programme')}"
+
+
+def contract_code(contract) -> str:
+    """The contract's short code for subjects and file names: CTR-XXXXXX."""
+    return f"CTR-{_short_code(int(contract.id), 'contract')}"
+
+
+def _code_forms(code: str) -> tuple[str, str]:
+    """"PRG-7K3QMA" as written with and without the dash."""
+    return code, code.replace("-", "")
+
+
 def contract_ref(contract) -> str:
     """A contract as a sender names it: a slug of its name."""
     return "-".join((contract.name or contract.filename
                      or f"contract-{contract.id}").lower().split())
+
+
+_DOC_EXT = re.compile(r"\.(pdf|docx?|rtf|txt)$", re.I)
+
+
+def contract_label(contract) -> str:
+    """The contract's name as a sender writes it — a contract named after its
+    uploaded file ("aug-13-Contract_Demoshield.pdf") is named without the
+    ".pdf"; nobody types a file extension into an email subject."""
+    name = (contract.name or contract.filename or f"Contract {contract.id}").strip()
+    return _DOC_EXT.sub("", name) or name
 
 
 def broker_programmes(session, tenant_id: int, broker_party_id) -> list:
@@ -464,10 +524,12 @@ def identify(session, route: Optional[IntakeRoute], *, filename: str,
         if len(progs) == 1:
             pid = progs[0].id
         elif progs:
-            named = _named_in(text, progs, lambda p: (programme_ref(p), p.name))
+            named = _named_in(text, progs, lambda p: (programme_ref(p), p.name,
+                                                      *_code_forms(programme_code(p))))
             if len(named) != 1:
                 return found, (f"Which programme? This broker reports on {len(progs)}: "
-                               f"{_listed(p.name for p in progs)}. Name one in {where}.")
+                               f"{_listed(f'{p.name} ({programme_code(p)})' for p in progs)}. "
+                               f"Name one, or its code, in {where}.")
             pid = named[0].id
         else:
             return found, None          # on no programme: no contract, so it is held
@@ -485,12 +547,13 @@ def identify(session, route: Optional[IntakeRoute], *, filename: str,
     elif len(cons) <= 1:
         cid = cons[0].id if cons else None        # none: held by the contract check
     else:
-        named = _named_in(text, cons, lambda c: (contract_ref(c), c.name))
+        named = _named_in(text, cons, lambda c: (contract_ref(c), c.name, contract_label(c),
+                                                 *_code_forms(contract_code(c))))
         if len(named) != 1:
             return found, (f"Which contract? {prog.name if prog else 'This programme'} has "
                            f"{len(cons)} contracts for this broker: "
-                           f"{_listed(c.name or c.filename for c in cons)}. "
-                           f"Name one in {where}.")
+                           f"{_listed(f'{contract_label(c)} ({contract_code(c)})' for c in cons)}. "
+                           f"Name one, or its code, in {where}.")
         cid = named[0].id
     found["contract_id"] = cid
 
@@ -589,10 +652,8 @@ def _check_not_duplicate(session, tenant_id: int, sha: str,
     if sender is not None and prior.matched_broker_party_id == sender:
         when = (prior.received_at.strftime("%d %b %Y")
                 if prior.received_at else "earlier")
-        return (f"Held — exactly the same file we already loaded on {when}. "
-                f"Loading it again would count the premium twice.")
-    return ("Held — exactly the same file has already been loaded. Loading it "
-            "again would count the premium twice.")
+        return f"Held — exactly the same file we already loaded on {when}."
+    return "Held — exactly the same file has already been loaded."
 
 
 def _check_has_rows(rows: Optional[int]) -> Optional[str]:
@@ -784,10 +845,10 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
         lambda: safety.check_safe_to_open(filename, file_bytes),
         lambda: _check_known_sender(route),
         _identified,
-        # Before the scan on purpose: a file we have already accepted has
-        # already been scanned, and there is no sense paying for it twice.
-        lambda: _check_not_duplicate(session, tenant_id, sha, route, scope=ident),
+        # Scanned before anything else is decided about it — the same order as
+        # a manual upload, and the order Files Received shows.
         lambda: safety.scan_for_malware(filename, file_bytes),
+        lambda: _check_not_duplicate(session, tenant_id, sha, route, scope=ident),
         # ── from here on the file gets opened ───────────────────────────────
         lambda: _check_can_open(rows()),
         lambda: _check_has_rows(rows()),
@@ -962,8 +1023,7 @@ def land_manual_upload(session, *, tenant_id: int, filename: str, file_bytes: by
         session, tenant_id, sha, None,
         scope={"program_id": program_id, "contract_id": contract_id, "period": period})
     if duplicate and not confirm_duplicate:
-        msg = duplicate.replace("Held — ", "", 1).replace(
-            "Loading it again", "Running it again")
+        msg = duplicate.replace("Held — ", "", 1)
         raise DuplicateUpload(msg[:1].upper() + msg[1:])
 
     arrival = FileArrival(

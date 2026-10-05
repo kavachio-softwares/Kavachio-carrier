@@ -141,6 +141,7 @@ export default function BrokerBordereau() {
     for (const c of live) {
       if (c.programme.id == null) continue;
       const p = m.get(c.programme.id) ?? { id: c.programme.id, name: c.programme.name,
+                                           code: c.programme.code,
                                            carrier: c.carrier.name, contracts: [] };
       p.contracts.push(c);
       m.set(c.programme.id, p);

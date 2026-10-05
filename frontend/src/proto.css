@@ -1552,3 +1552,18 @@
      buttons, which exist nowhere else on a narrow screen. */
   .proto .wiz-rail .tail{border-top:0;border-left:1px solid var(--p-border);margin:0;align-content:center}
 }
+
+/* Files Received → Broker Follow-Up: version history timeline (newest first). */
+.proto .ver-tl{list-style:none;margin:4px 0 6px;padding:2px 0 2px 18px;position:relative;border-bottom:1px solid var(--p-border)}
+.proto .ver-tl::before{content:"";position:absolute;left:5px;top:12px;bottom:18px;width:2px;background:var(--p-border)}
+.proto .ver-tl li{position:relative;padding:8px 10px;margin:0 0 6px;border-radius:var(--p-r-sm);font-size:12.5px}
+.proto .ver-tl li.here{background:var(--p-surface-2,rgba(0,0,0,.03));box-shadow:inset 0 0 0 1px var(--p-border)}
+.proto .ver-tl .dot{position:absolute;left:-17px;top:13px;width:10px;height:10px;border-radius:50%;background:var(--p-muted);box-shadow:0 0 0 2px var(--p-surface)}
+.proto .ver-tl .dot.ok{background:var(--p-ok,#16a34a)}
+.proto .ver-tl .dot.warn{background:var(--p-warn,#d97706)}
+.proto .ver-tl .dot.crit{background:var(--p-crit,#dc2626)}
+.proto .ver-tl .dot.info{background:var(--p-info,#2563eb)}
+.proto .ver-tl .row1{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.proto .ver-tl .row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:3px;color:var(--p-muted);font-size:12px}
+.proto .ver-tl .lnk{margin-left:auto;border:0;background:none;padding:0;color:var(--p-info,#2563eb);font-weight:600;font-size:12px;cursor:pointer}
+.proto .ver-tl .lnk:hover{text-decoration:underline}

@@ -19,6 +19,9 @@ export type BrokerProgramme = {
 export type BrokerContract = {
   id: number;
   filename: string | null;
+  /** Short code a broker can write in an email subject or file name instead
+   *  of the name, e.g. CTR-7824YC. */
+  code?: string;
   /** What it is called. An AUTHORED contract has no file, so a list keyed on
    *  filename shows it as "Contract 462". */
   name: string;
@@ -29,7 +32,7 @@ export type BrokerContract = {
   /** Who it is waiting on — the question this list is actually scanned for. */
   whose_turn: "carrier" | "broker" | null;
   has_wording: boolean;
-  programme: { id: number | null; name: string };
+  programme: { id: number | null; name: string; code?: string | null };
   carrier: { id: number | null; name: string };
   inception_dt: string | null;
   expiry_dt: string | null;
@@ -111,6 +114,8 @@ export type BrokerCalendarRow = {
   program_id: number;
   program_name: string;
   carrier_name: string | null;
+  /** This broker's own name, as the carrier's calendar shows it. */
+  broker_name?: string | null;
   period: string;
   due_date: string | null;
   /** When it was first processed — the date the carrier saw it arrive. */
@@ -144,7 +149,7 @@ export type BrokerCalendar = {
     frequency: string | null; frequency_label: string; due_rule: string;
     next_due: string | null; covers_until: string | null;
     /** This broker's own entry only (the server drops everyone else's). */
-    brokers?: { contract_id: number | null; contract_name: string | null }[];
+    brokers?: { broker_name?: string | null; contract_id: number | null; contract_name: string | null }[];
   }[];
 };
 
@@ -288,6 +293,8 @@ export type OperatorRun = {
   /** "broker" — sent through the broker's own lane; "carrier" — the carrier
    *  ran it for this broker. */
   sent_by: "broker" | "carrier";
+  /** The broker the file was processed for. */
+  broker_name?: string | null;
   created_at: string | null;
   /** Which version of its submission this file is — each submission is
    *  listed once, as its newest version — and the month it is for. */

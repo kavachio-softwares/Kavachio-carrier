@@ -10,6 +10,7 @@ the interesting work happens in intake_service and sftp_poller.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -31,6 +32,7 @@ from intake_auth import mask, mint_key
 from intake_models import FileArrival, IntakeCredential, IntakeRoute
 
 router = APIRouter(prefix="/intake", tags=["intake"])
+log = logging.getLogger(__name__)
 
 # The five ways in. Fixed on purpose — "you cannot invent a sixth". Adding a
 # route gives ONE BROKER their own address on one of these, it does not create
@@ -204,13 +206,20 @@ def list_routes(mga: Optional[str] = None,
         # so the Add dialog has to be able to offer the choice.
         prog_names = {p.id: p.name for p in
                       s.query(Program).filter(Program.tenant_id == tid).all()}
+        # With the contracts each one's files can be written under, so the
+        # dialog's example names one — and says whether it has to.
         broker_programmes: dict[str, list] = {}
         for pb in (s.query(ProgramBroker)
                    .filter(ProgramBroker.tenant_id == tid,
                            ProgramBroker.status == "active").all()):
             broker_programmes.setdefault(str(pb.broker_party_id), []).append(
                 {"program_id": pb.program_id,
-                 "name": prog_names.get(pb.program_id, f"Programme {pb.program_id}")})
+                 "name": prog_names.get(pb.program_id, f"Programme {pb.program_id}"),
+                 "code": svc.programme_code(pb.program_id),
+                 "contracts": [{"contract_id": c.id, "name": svc.contract_label(c),
+                                "code": svc.contract_code(c)}
+                               for c in svc.live_contracts(s, tid, pb.program_id,
+                                                           pb.broker_party_id)]})
         for v in broker_programmes.values():
             v.sort(key=lambda x: (x["name"] or "").lower())
 
@@ -377,7 +386,35 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
                       "broker_party_id": route.broker_party_id})
         out = _route_dict(route, broker.legal_name, 0)
         out["folder"] = created_dir
+        # The broker is told how to name what they send — the same example
+        # the dialog shows — so their first file is not a refused one.
+        out["guide"] = _email_guide(s, route, carrier_name)
         return out
+
+
+def _email_guide(s, route: IntakeRoute, carrier: str) -> dict:
+    """Email the broker this channel's "How They Send It". Never fails the
+    request that asked for it: the dialog still shows the example to copy."""
+    import intake_guide
+    try:
+        return intake_guide.send(s, route, carrier=carrier, send_to=_send_to(route))
+    except Exception:  # noqa: BLE001
+        log.warning("could not email the channel guide for route %s", route.id, exc_info=True)
+        return {"recipients": [], "sending": False}
+
+
+@router.post("/routes/{route_id}/guide")
+def email_route_guide(route_id: int, mga: Optional[str] = None,
+                      principal: Principal = Depends(require_role("carrier_admin"))):
+    """Send the broker this channel's instructions again."""
+    with SessionLocal() as s:
+        route = s.get(IntakeRoute, route_id)
+        if route is None:
+            raise HTTPException(404, "route not found")
+        assert_tenant_owns(principal, route.tenant_id)
+        if route.channel not in ("email", "sftp"):
+            raise HTTPException(400, "only email and SFTP channels have instructions to send")
+        return _email_guide(s, route, _tenant_name(s, route.tenant_id) or "your carrier")
 
 
 @router.patch("/routes/{route_id}")

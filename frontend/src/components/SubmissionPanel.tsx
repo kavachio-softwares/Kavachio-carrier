@@ -8,6 +8,7 @@
  * carrier. Answering an exception stays the broker's job.
  */
 import { useCallback, useEffect, useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { InfoTip } from "./InfoTip";
 import { canAmendExceptions } from "../auth";
 import {
@@ -23,6 +24,20 @@ const CAME_BY: Record<string, string> = {
 function when(iso: string | null | undefined): string {
   if (!iso) return "";
   return new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short",
+    hour: "2-digit", minute: "2-digit" });
+}
+
+/** Badge colour per version status. */
+const TONE: Record<string, "ok" | "warn" | "crit" | "info" | "mut"> = {
+  clean: "ok", delivered: "ok", ready: "ok",
+  with_exceptions: "warn", held_at_deadline: "warn", delivered_flagged: "warn", on_hold: "warn",
+  failed: "crit", rejected: "crit",
+  processing: "info", received: "info",
+};
+
+/** Full date and time for the history list: "5 Oct 2026, 09:36". */
+function stamp(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric",
     hour: "2-digit", minute: "2-digit" });
 }
 
@@ -45,11 +60,12 @@ export default function SubmissionPanel({ arrivalId, onChanged, onOpenVersion }:
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
 
   const load = useCallback(() => {
     submissionForArrival(arrivalId).then(setDoc).catch(() => setDoc(null));
   }, [arrivalId]);
-  useEffect(() => { setDoc(undefined); setErr(null); setConfirm(false); load(); }, [load]);
+  useEffect(() => { setDoc(undefined); setErr(null); setConfirm(false); setShowHistory(false); load(); }, [load]);
 
   if (doc === undefined || doc === null) return null;
   // Versions made from secure-link corrections before they were sent as files
@@ -87,24 +103,43 @@ export default function SubmissionPanel({ arrivalId, onChanged, onOpenVersion }:
       <div className="kv"><span className="k">Version</span>
         <span className="v">Version {doc.this_file_version}
           {doc.version && doc.version !== doc.this_file_version ? ` · latest is version ${doc.version}` : ""}</span></div>
-      {/* Every version, oldest first. Files Received lists a submission once,
-          as its latest file — an earlier file opens from here. */}
-      {doc.versions.length > 1 && (
-        <div className="kv" style={{ alignItems: "flex-start" }}><span className="k">History</span>
-          <span className="v" style={{ display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "flex-end" }}>
-            {doc.versions.map((v) => {
+      {/* Every version, newest first, folded away until asked for. Files
+          Received lists a submission once, as its latest file — an earlier
+          file opens from here. */}
+      {doc.versions.length > 1 && (<>
+        <div className="kv"><span className="k">History</span>
+          <button type="button" className="btn" style={{ padding: "3px 10px", fontSize: 12 }}
+            aria-expanded={showHistory} onClick={() => setShowHistory((o) => !o)}>
+            {showHistory ? "Hide History" : `View History (${doc.versions.length})`}
+            {showHistory ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button></div>
+        {showHistory && (
+          <ol className="ver-tl">
+            {[...doc.versions].reverse().map((v) => {
               const here = v.is_file !== false && v.version === doc.this_file_version;
               const openable = !here && v.arrival_id != null && !!onOpenVersion;
+              const tone = TONE[v.status] ?? "mut";
               return (
-                <button key={v.version} type="button" disabled={!openable}
-                  className={`badge ${here ? "b-info" : "b-mut"}`}
-                  style={{ border: 0, cursor: openable ? "pointer" : "default" }}
-                  title={openable ? `Open version ${v.version}` : undefined}
-                  onClick={() => { if (openable) onOpenVersion!(v.arrival_id!); }}>
-                  v{v.version}{CAME_BY[v.source] ? ` · ${CAME_BY[v.source]}` : ""} · {v.status_text}
-                </button>);
+                <li key={v.version} className={here ? "here" : undefined}>
+                  <span className={`dot ${tone}`} />
+                  <div className="row1">
+                    <b>Version {v.version}</b>
+                    {here && <span className="badge b-info">This file</span>}
+                    <span className={`badge b-${tone}`} style={{ marginLeft: "auto" }}>{v.status_text}</span>
+                  </div>
+                  <div className="row2">
+                    <span>{CAME_BY[v.source] ?? (v.is_file === false ? "Secure Link correction" : v.source)}</span>
+                    {v.created_at && <><span>·</span><span>{stamp(v.created_at)}</span></>}
+                    {v.exceptions != null && v.exceptions > 0 && (
+                      <><span>·</span><span>{v.exceptions} exception{v.exceptions === 1 ? "" : "s"}</span></>)}
+                    {openable && (
+                      <button type="button" className="lnk" onClick={() => onOpenVersion!(v.arrival_id!)}>
+                        Open →</button>)}
+                  </div>
+                </li>);
             })}
-          </span></div>)}
+          </ol>)}
+      </>)}
       <div className="kv"><span className="k">Status</span>
         <span className="v">{doc.status_text}</span></div>
       {doc.progress_text && (

@@ -52,7 +52,7 @@ export default function BrokerRuns() {
                 <table>
                   <thead>
                     <tr>
-                      <th>File Name</th><th>Reporting Period</th><th>Programme</th><th>Contract</th><th>Sent by</th><th>Rows</th>
+                      <th>File Name</th><th>Reporting Period</th><th>Programme</th><th>Broker</th><th>Contract</th><th>Rows</th>
                       <th>Result</th><th>When</th><th></th>
                     </tr>
                   </thead>
@@ -66,12 +66,12 @@ export default function BrokerRuns() {
                         </td>
                         <td>{r.reporting_period ? periodLabel(r.reporting_period) : <span className="muted">—</span>}</td>
                         <td>{r.programme ?? "—"}</td>
+                        <td>{r.broker_name ?? "—"}</td>
                         <td>
                           {r.contract_id != null
                             ? <Link className="linkish" to={`/contracts/${r.contract_id}`}>{r.contract ?? `Contract #${r.contract_id}`}</Link>
                             : <span className="muted">{r.contract ?? "—"}</span>}
                         </td>
-                        <td>{r.sent_by === "carrier" ? "The carrier" : "Your team"}</td>
                         <td>{r.rows ?? "—"}</td>
                         <td>
                           {r.exception_count > 0

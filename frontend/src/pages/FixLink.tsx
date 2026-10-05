@@ -26,7 +26,7 @@ import type { StoredException } from "../api/validation";
 import {
   decideViaLink, errorStatus, errorText, loadExport, loadSubmission, openLink, sendCode,
   streamPathFor, submitVersion, validateLink, verifyCode,
-  type FixExport, type FixGate, type FixSubmission, type FixValidation,
+  type FixExport, type FixGate, type FixSubmission, type FixValidation, type FixVersion,
 } from "../api/fixLink";
 
 const SEV_SPINE: Record<string, string> = { critical: "crit", warning: "warn", info: "info" };
@@ -483,17 +483,7 @@ export default function FixLink() {
           </>
         )}
 
-        {doc.versions.length > 1 && (
-          <div style={{ marginTop: 22, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center",
-                        fontSize: 12, color: "var(--p-muted)" }}>
-            <span style={{ fontWeight: 600, color: "var(--p-faint)", letterSpacing: ".2px" }}>HISTORY</span>
-            {doc.versions.map((v) => (
-              <span key={v.version} className="badge b-mut" title={v.source === "secure_link" ? "Submitted on this page" : `Sent by ${v.source}`}>
-                v{v.version} · {v.status_text}
-              </span>
-            ))}
-          </div>
-        )}
+        {doc.versions.length > 1 && <VersionHistory versions={doc.versions} current={doc.version} />}
       </main>
 
       {REVIEWABLE.includes(doc.status) && (
@@ -585,6 +575,65 @@ function StatusBadge({ status, text }: { status: string; text: string }) {
     : status === "with_exceptions" || status === "held_at_deadline" ? "b-warn"
     : status === "failed" || status === "rejected" ? "b-crit" : "b-mut";
   return <span className={`badge ${cls}`}><span className="d" />{text}</span>;
+}
+
+/** How each version reached us, in plain words. */
+const CHANNEL: Record<string, string> = {
+  secure_link: "Submitted on this page", api: "Sent by API", email: "Sent by email",
+  sftp: "Sent by SFTP", upload: "Uploaded on Kavachio", portal: "Uploaded on Kavachio",
+};
+const channelText = (src: string) =>
+  CHANNEL[src] ?? `Sent by ${src.replace(/_/g, " ")}`;
+
+const fmtWhen = (iso: string) =>
+  new Date(iso).toLocaleString(undefined, { day: "2-digit", month: "short", year: "numeric",
+                                            hour: "2-digit", minute: "2-digit" });
+
+/** Every version of this file, newest first: when it came in, how, and what
+ *  became of it. The one on screen is marked. */
+function VersionHistory({ versions, current }: { versions: FixVersion[]; current: number | null }) {
+  const rows = [...versions].sort((a, b) => b.version - a.version);
+  return (
+    <div className="card" style={{ marginTop: 22 }}>
+      <div className="card-h">
+        <h3>Version history</h3>
+        <span className="sub">{plural(versions.length, "version")} of this file</span>
+      </div>
+      <div className="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th>Version</th><th>Uploaded</th><th>How it came in</th><th>Exceptions</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {rows.map(v => {
+              const isCur = v.version === current;
+              return (
+                <tr key={v.version} style={isCur ? { background: "var(--p-accent-soft, #EEF7F6)" } : undefined}>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    <b>Version {v.version}</b>
+                    {isCur && <span className="badge b-info" style={{ marginLeft: 8 }}>Showing</span>}
+                  </td>
+                  <td className="mono" style={{ whiteSpace: "nowrap" }}>
+                    {v.created_at ? fmtWhen(v.created_at) : <span className="muted">—</span>}
+                  </td>
+                  <td>{channelText(v.source)}</td>
+                  <td>
+                    {v.exceptions == null ? <span className="muted">—</span>
+                      : isCur && v.open != null ? `${v.open} of ${v.exceptions} open`
+                      : v.exceptions}
+                  </td>
+                  <td>
+                    <StatusBadge status={v.status} text={v.status_text} />
+                    {v.message && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{v.message}</div>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function Splash({ children }: { children: ReactNode }) {

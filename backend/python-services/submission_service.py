@@ -428,6 +428,20 @@ class Thread:
         return next((v for v in reversed(self.versions) if v.export_id == export_id), None)
 
 
+def thread_ref(s, ref: Optional[str]) -> Optional[str]:
+    """The submission a reference points at. A sender is handed only their
+    FILE's reference, so either one is taken: a submission's own, or a file's,
+    which leads to the submission that file is a version of."""
+    ref = find_reference(ref)
+    if not ref:
+        return None
+    if s.query(FileArrival.id).filter(FileArrival.submission_ref == ref).first():
+        return ref
+    row = (s.query(FileArrival.submission_ref)
+           .filter(FileArrival.public_ref == ref).first())
+    return row.submission_ref if row and row.submission_ref else None
+
+
 def load(s, ref: Optional[str]) -> Optional[Thread]:
     if not ref:
         return None
@@ -550,7 +564,7 @@ def on_land(s, arrival, route=None, *, period: Optional[str] = None,
 
 def _match(s, arrival, *, broker, program_id, period, reference) -> tuple[Optional[Thread], str]:
     if reference:
-        th = load(s, reference)
+        th = load(s, thread_ref(s, reference))
         if th is not None and th.tenant_id == arrival.tenant_id \
                 and th.broker_party_id == broker:
             return th, "reference"
@@ -1129,8 +1143,8 @@ def report_csv(ref: str, version_no, rows: list[dict]) -> str:
 
 
 def _baseline(s, th: Thread) -> int:
-    """Exceptions on the FIRST checked version — the "12" in
-    "12 exceptions → 8 fixed → 4 remaining"."""
+    """Exceptions on the FIRST checked version — only the fallback total
+    before the current version has been checked (see progress)."""
     from db import OutputExport
     for v in th.versions:
         if v.export_id and v.status not in _NOT_A_TURN:
@@ -1144,9 +1158,15 @@ def progress(s, th: Thread, state: Optional[dict] = None) -> dict:
     if state is None and th.current_export_id:
         out = s.get(OutputExport, th.current_export_id)
         state = export_state(s, out) if out is not None else None
+    # Measured on the CURRENT version: a later file for the month is a new
+    # bordereau whose exceptions stand on their own (even when there are more
+    # than before), so "N of M resolved" is that file's M — the same total the
+    # screens beside it show. The first version's count is only the fallback
+    # before anything has been checked.
+    total = state["total"] if state else base
     remaining = state["open"] if state else base
     blocking = state["blocking_open"] if state else 0
-    return {"total": base, "fixed": max(0, base - remaining),
+    return {"total": total, "fixed": max(0, total - remaining),
             "remaining": remaining, "blocking_remaining": blocking}
 
 
@@ -1463,6 +1483,16 @@ def _file_stem(name: Optional[str]) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-") or "bordereau"
 
 
+def _carrier_email(s, tenant_id) -> Optional[str]:
+    """The carrier's best contact address — the one a broker can write to."""
+    try:
+        from submission_calendar_service import carrier_contacts
+        cs = carrier_contacts(s, [tenant_id]).get(tenant_id, [])
+        return cs[0]["email"] if cs and cs[0].get("email") else None
+    except Exception:  # noqa: BLE001 — a missing address never stops the email
+        return None
+
+
 def _email_payload(s, th, ver, event, status, names, rows, p, *, token, csv_text,
                    export_id=None):
     """The broker's email. Says WHICH file in the words the portal uses — its
@@ -1499,7 +1529,12 @@ def _email_payload(s, th, ver, event, status, names, rows, p, *, token, csv_text
         body = ["We are resolving an issue on our side. No action is needed from you."]
     elif status == "duplicate":
         title = "File already received"
-        body = ["This file is identical to one already received, so it was not processed again."]
+        # A duplicate is held, not thrown away: the carrier can release it from
+        # Files Received. Say so, or the broker thinks it is a dead end.
+        reach = _carrier_email(s, th.tenant_id)
+        body = ["This file is identical to one already received, so it was not processed again.",
+                f"If you want this file processed, please contact {carrier}"
+                + (f" at {reach}." if reach else ".")]
     elif event == "deadline_hold":
         title = "Deadline passed — file on hold"
         body = [f"The deadline passed with exceptions still open. {carrier} will decide "

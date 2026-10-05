@@ -10,7 +10,7 @@ import { getBoard, getCalendar, type BoardResponse, type CalendarStatus } from "
 import { getBrokersPaged, getHierarchy } from "../api/hierarchy";
 import { listContractsPaged } from "../api/contractRecord";
 import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
-import { listArrivals, type Arrival } from "../api/intake";
+import { isHeld, listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
 import { StatCard } from "../components/StatCard";
 import { ArrivalsCard } from "../components/ArrivalsCard";
@@ -279,11 +279,20 @@ export default function Home() {
       .catch(() => setArrivals([]));
   }, [mga, showFiles]);
   // Every file that reached the carrier in the picked month, accepted or not.
-  const receivedInPeriod = arrivals?.filter(a => {
+  const arrivalsInPeriod = arrivals?.filter(a => {
     const t = a.received_at ? new Date(a.received_at) : null;
     if (!t) return false;
     return everyMonth || (!!monthStart && !!monthEnd && t >= monthStart && t <= monthEnd);
-  }).length;
+  });
+  const receivedInPeriod = arrivalsInPeriod?.length;
+  // Of those, the ones still On Hold — held at intake and nobody has decided
+  // yet. The same test as the On Hold tile on Files Received, so both agree.
+  const onHoldInPeriod = arrivalsInPeriod?.filter(a =>
+    a.outcome !== "accepted" && isHeld(a) && !a.resolution).length ?? 0;
+  // And the ones whose processing failed — the red "Failed" status on Files
+  // Received: accepted, but the check stopped and nothing was saved.
+  const failedInPeriod = arrivalsInPeriod?.filter(a =>
+    a.outcome === "accepted" && a.run_result === "failed").length ?? 0;
   // Only the newest ARRIVALS_FETCH come back. When that many did, a pick that
   // reaches back past the oldest of them may hold more than are counted, and
   // the number says so ("500+") rather than passing for the whole of it.
@@ -450,7 +459,9 @@ export default function Home() {
           <h3 style={{ margin: 0, fontSize: 18 }}>Files Received</h3>
           <InfoTip text={`All bordereau files your brokers sent${infoWhen}, across `
             + "every channel — including files on hold or rejected at intake. "
-            + "Click to view them all."} />
+            + "Below the total, amber counts files on hold (waiting for you to "
+            + "release or discard them) and red counts files whose processing "
+            + "failed (nothing was saved; safe to retry). Click to view them all."} />
         </div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
           <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>
@@ -460,6 +471,19 @@ export default function Home() {
             {receivedInPeriod === 1 && !receivedMore ? "file" : "files"} {countWhen}
           </span>
         </div>
+        {/* Only what needs attention — a zero would just be noise. */}
+        {(onHoldInPeriod > 0 || failedInPeriod > 0) && (
+          <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {onHoldInPeriod > 0 && (
+              <AttentionChip n={onHoldInPeriod} what="on hold — needs your review"
+                bg="#FEF3C7" fg="#B45309" dot="#D97706" />
+            )}
+            {failedInPeriod > 0 && (
+              <AttentionChip n={failedInPeriod} what="failed — processing stopped"
+                bg="#FEE2E2" fg="#B91C1C" dot="#DC2626" />
+            )}
+          </div>
+        )}
       </div>
       <div style={{ opacity: 0.3 }}>
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
@@ -815,5 +839,17 @@ export default function Home() {
         }).then(a => a.data)}
         onClose={() => setStatusDay(null)} />
     </div >
+  );
+}
+
+/** A small coloured count under a dashboard number: "3 files on hold — …". */
+function AttentionChip({ n, what, bg, fg, dot }:
+    { n: number; what: string; bg: string; fg: string; dot: string }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px",
+                   borderRadius: 999, fontSize: 12.5, fontWeight: 600, background: bg, color: fg }}>
+      <span style={{ width: 7, height: 7, borderRadius: 999, background: dot }} />
+      {n} {n === 1 ? "file" : "files"} {what}
+    </span>
   );
 }

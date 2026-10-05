@@ -159,11 +159,14 @@ export type ContractDocument = {
 export type ContractRecord = {
   id: number;
   name: string;
+  /** Short code a broker can write in an email subject or file name instead
+   *  of the name, e.g. CTR-7824YC. */
+  code?: string;
   /** Null for contracts raised before contracts had a coded type. */
   contract_type: string | null;
   contract_type_label: string | null;
   filename: string | null;
-  programme: { id: number; name: string } | null;
+  programme: { id: number; name: string; code?: string } | null;
   counterparty: { id: number; name: string; party_type: string } | null;
   output_template: { id: number; name: string; version: number } | null;
   schedule_key: string | null;

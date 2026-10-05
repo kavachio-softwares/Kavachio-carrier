@@ -10,6 +10,9 @@ import { currentMga } from "../auth";
 export type HierarchyContract = {
   id: number;
   filename: string | null;
+  /** Short code a broker can write in an email subject or file name instead
+   *  of the name, e.g. CTR-7824YC. */
+  code?: string;
   status: string | null;
   /** The business state (draft … active). `status` is what extraction did. */
   lifecycle?: string | null;
@@ -81,6 +84,8 @@ export const setupFinished = (setupStatus?: string | null): boolean =>
 export type HierarchyProgramme = {
   id: number;
   name: string;
+  /** Short code a broker can write instead of the name, e.g. PRG-5QSH84. */
+  code?: string;
   status: string | null;
   business_segment: string | null;
   product_line: string | null;

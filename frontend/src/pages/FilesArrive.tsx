@@ -16,12 +16,12 @@
 // resolve .field/.kv/.badge without painting a grey slab inside the dialog.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  createKey, createRoute, listKeys, listRoutes, patchRoute, revokeKey,
+  createKey, createRoute, emailRouteGuide, listKeys, listRoutes, patchRoute, revokeKey,
   type BrokerEmail, type BrokerLite, type Channel, type IntakeKey, type IntakeRoute,
-  type NewIntakeKey,
+  type GuideSent, type NewIntakeKey,
   type ProgrammeLite, type RoutesResponse,
 } from "../api/intake";
-import { Mail, Server, Upload, Zap } from "lucide-react";
+import { ChevronDown, ChevronUp, Mail, Server, Upload, Zap } from "lucide-react";
 import { Modal } from "../components/ui/Modal";
 import { getRouteContacts, putRouteContacts } from "../api/submissions";
 import { InfoTip } from "../components/InfoTip";
@@ -428,12 +428,64 @@ function RouteCard({ route, busy, keys, onSettings, onToggle }: {
             are the exception: they exist nowhere else. */}
         {/* Keys (API only) and who hears about each file's result (every
             channel) — the two things that exist nowhere else on the row. */}
+        {!isApi && <GuideBtn routeId={route.route_id} />}
         <button type="button" className="btn sm" onClick={onSettings}>
           {isApi ? (needsKey ? "Make a key" : "API keys") : "Notifications"}
         </button>
       </div>
     </div>
   );
+}
+
+/** True when the instructions really reached the broker's inbox. */
+function guideEmailed(g?: GuideSent | null): g is GuideSent {
+  return !!g && g.sending && g.recipients.length > 0;
+}
+
+/** What happened to the broker's copy of the instructions, in one line. */
+function GuideNote({ guide, broker }: { guide: GuideSent; broker: string | null }) {
+  const who = broker ?? "the broker";
+  if (!guide.recipients.length) {
+    return (
+      <div className="note warn" style={{ marginTop: 14 }}>
+        No email address is on file for {who}, so the instructions were not emailed — copy the
+        example below and send it to them.
+      </div>);
+  }
+  if (!guide.sending) {
+    return (
+      <div className="note warn" style={{ marginTop: 14 }}>
+        Broker emails are switched off, so the instructions were not emailed — copy the example
+        below and send it to {who}.
+      </div>);
+  }
+  return (
+    <div className="note ok" style={{ marginTop: 14 }}>
+      The instructions below have been emailed to {guide.recipients.join(", ")}.
+    </div>);
+}
+
+/** Send the broker this channel's instructions again — for a channel made
+ *  before they were emailed, or a broker who lost the email. */
+function GuideBtn({ routeId }: { routeId: number }) {
+  const [state, setState] = useState<"idle" | "busy" | "sent" | "off" | "none" | "err">("idle");
+  const [to, setTo] = useState("");
+  const label = { idle: "Email Instructions", busy: "Sending…", sent: "Sent",
+                  off: "Emails off", none: "No email on file", err: "Not sent" }[state];
+  return (
+    <button type="button" className="btn sm" disabled={state === "busy"}
+      title={state === "sent" ? `Emailed to ${to}`
+        : state === "off" ? "Broker emails are switched off (BROKER_NOTIFY_ENABLED)"
+        : state === "none" ? "This broker has no email address on file"
+        : "Email the broker how to name and send their files on this channel"}
+      onClick={async () => {
+        setState("busy");
+        try {
+          const g = await emailRouteGuide(routeId);
+          setTo(g.recipients.join(", "));
+          setState(!g.recipients.length ? "none" : g.sending ? "sent" : "off");
+        } catch { setState("err"); }
+      }}>{label}</button>);
 }
 
 /** Copy-to-clipboard that says so. The address is usually on its way into an
@@ -702,6 +754,135 @@ function KeyPanel({ route }: { route: IntakeRoute }) {
 }
 
 // ── add a way in ────────────────────────────────────────────────────────────
+const CODE_ROW: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
+};
+const CODE_LABEL: React.CSSProperties = {
+  fontSize: 10.5, fontWeight: 600, letterSpacing: ".4px", textTransform: "uppercase",
+  color: "var(--p-faint)",
+};
+const CODE_NAME: React.CSSProperties = {
+  fontSize: 13, color: "var(--p-ink)", overflow: "hidden", textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+/** A programme or contract code, copied with one click. */
+function CodeChip({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button type="button" title="Copy code"
+      onClick={() => {
+        navigator.clipboard?.writeText(code); setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      }}
+      style={{
+        flex: "none", minWidth: 96, fontFamily: "var(--p-mono)", fontSize: 12, fontWeight: 600,
+        color: copied ? "var(--p-ok-ink)" : "var(--p-ink)",
+        background: "var(--p-surface)", border: "1px solid var(--p-border-2)",
+        borderRadius: 6, padding: "4px 9px", cursor: "pointer", letterSpacing: ".3px",
+      }}>
+      {copied ? "Copied" : code}
+    </button>);
+}
+
+/** What one bordereau looks like on its way in — the email to write, or the
+ *  file to drop — filled from the choices in the dialog, for last month. */
+function ChannelExample({ channel, from, to, folder, programmes, shared }: {
+  channel: "email" | "sftp"; from: string; to: string; folder: string;
+  /** The programme(s) this address takes; the example uses the first. */
+  programmes: ProgrammeLite[];
+  /** One address for all the broker's programmes: the file must say which. */
+  shared: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [showCodes, setShowCodes] = useState(false);
+  const d = new Date(); d.setDate(0);                  // last day of last month
+  const month = d.toLocaleString("en-GB", { month: "long", year: "numeric" });
+  const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const slug = (s: string) => s.trim().replace(/\s+/g, "-");
+  // The example writes the short codes — nothing to misspell; the names work too.
+  const prog = programmes[0];
+  const programme = prog?.code ?? prog?.name ?? "Programme";
+  const first = prog?.contracts?.[0];
+  const contract = first ? (first.code ?? first.name) : null;
+  const text = channel === "email"
+    ? `From:     ${from || "<their sending address>"}\n`
+      + `To:       ${to}\n`
+      + `Subject:  ${programme} - ${contract ? `${contract} - ` : ""}${month}\n`
+      + `Attach:   the bordereau (.xlsx or .csv)`
+    : `${folder}/incoming/${slug(programme)}_${contract ? `${slug(contract)}_` : ""}${ym}.xlsx`;
+  const where = channel === "email" ? "The subject or the file name" : "The file name";
+  return (
+    <div className="field">
+      {/* Named for what it is — the required format, shown as a worked example. */}
+      <label>
+        {channel === "email" ? "Required Email Format" : "Required File Name Format"}
+        <span style={{ fontWeight: 400, color: "var(--p-muted)" }}> — follow this example</span>
+      </label>
+      <div className="keybox" style={{ alignItems: "flex-start" }}>
+        <code style={{ whiteSpace: "pre-wrap", wordBreak: "normal", overflowWrap: "anywhere" }}>{text}</code>
+        <button type="button" className="btn sm" onClick={() => {
+          navigator.clipboard?.writeText(text); setCopied(true);
+        }}>{copied ? "Copied" : "Copy"}</button>
+      </div>
+      <div className="hint">
+        {/* One line: what must be in it, and when the contract is needed. */}
+        {where} must include the month{shared && programmes.length > 1
+          ? " and programme (code or name)" : ""}; the contract only if Required.
+      </div>
+
+      {/* Every code this address takes: one card per programme, its contracts
+          beneath it, each code a chip that copies itself. */}
+      {programmes.some(p => p.code) && (
+        <div style={{ marginTop: 12 }}>
+          {/* Folded at first — the example above is enough for most; open it
+              for the full list of codes. */}
+          <button type="button" className="btn sm" aria-expanded={showCodes}
+            onClick={() => setShowCodes(v => !v)}
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+            {showCodes ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            {showCodes ? "Hide Codes" : `View Codes They Can Use (${programmes.length})`}
+          </button>
+          {showCodes && (
+          <div style={{ border: "1px solid var(--p-border-2)", borderRadius: "var(--p-r-sm)",
+                        overflow: "hidden" }}>
+            {programmes.map((p, i) => {
+              const cs = p.contracts ?? [];
+              return (
+                <div key={p.program_id}
+                  style={{ borderTop: i ? "1px solid var(--p-border-2)" : "none" }}>
+                  <div style={{ ...CODE_ROW, background: "var(--p-surface-2)" }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={CODE_LABEL}>Programme</div>
+                      <div style={{ ...CODE_NAME, fontWeight: 600 }}>{p.name}</div>
+                    </div>
+                    {p.code && <CodeChip code={p.code} />}
+                  </div>
+                  {cs.map(c => (
+                    <div key={c.contract_id} style={{ ...CODE_ROW, paddingLeft: 26 }}>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={CODE_LABEL}>Contract</div>
+                        <div style={CODE_NAME} title={c.name}>{c.name}</div>
+                      </div>
+                      {cs.length > 1
+                        ? <span className="badge b-warn" title="This programme has more than one contract, so the file must say which">
+                            Required</span>
+                        : <span className="badge b-mut" title="This programme has only one contract, so it can be left out">
+                            Optional</span>}
+                      {c.code && <CodeChip code={c.code} />}
+                    </div>))}
+                  {cs.length === 0 && (
+                    <div style={{ ...CODE_ROW, paddingLeft: 26, fontSize: 12, color: "var(--p-faint)" }}>
+                      No live contract yet
+                    </div>)}
+                </div>);
+            })}
+          </div>)}
+        </div>)}
+    </div>
+  );
+}
+
 export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroker,
                                creatable, mailbox,
                         mailReady, onClose, onCreated }: {
@@ -720,19 +901,23 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
   const [channel, setChannel] = useState<Channel>("sftp");
   const [senderEmail, setSenderEmail] = useState("");
   const [brokerId, setBrokerId] = useState<number | "">("");
-  const [programId, setProgramId] = useState<number | "">("");
+  // "any": every programme this broker is on, the file naming which one. A
+  // broker has ONE mailbox address and ONE folder, so email and SFTP cannot be
+  // split per programme the way API keys can.
+  const [programId, setProgramId] = useState<number | "" | "any">("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [created, setCreated] = useState<IntakeRoute | null>(null);
   const [minted, setMinted] = useState<NewIntakeKey | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showSent, setShowSent] = useState(false);
 
   useEffect(() => {
     if (open) {
       setChannel(creatable[0] ?? "sftp"); setBrokerId(""); setProgramId("");
       setSenderEmail("");
       setErr(null); setCreated(null); setMinted(null);
-      setCopied(false);
+      setCopied(false); setShowSent(false);
     }
   }, [open, creatable]);
 
@@ -746,10 +931,18 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
   // Filling it saves the typing when the two are the same, and the addresses are
   // listed under the field so it is visible WHERE the value came from rather
   // than the box simply appearing full.
+  const sharedWayIn = channel === "email" || channel === "sftp";
   useEffect(() => {
-    setProgramId(progs.length === 1 ? progs[0].program_id : "");
+    setProgramId(progs.length === 1 ? progs[0].program_id
+      : progs.length > 1 && sharedWayIn ? "any" : "");
     setSenderEmail(knownEmails.length > 0 ? knownEmails[0].email : "");
   }, [brokerId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Switching channel re-decides the default: "all programmes" is offered
+  // only where the broker has one address for all of them.
+  useEffect(() => {
+    if (programId === "any" && !sharedWayIn) setProgramId("");
+    if (programId === "" && sharedWayIn && progs.length > 1) setProgramId("any");
+  }, [channel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function create() {
     if (brokerId === "" || programId === "") return;
@@ -757,7 +950,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
     try {
       const route = await createRoute({
         channel, broker_party_id: Number(brokerId),
-        program_id: programId,
+        program_id: programId === "any" ? null : programId,
         ...(channel === "email" ? { sender_email: senderEmail.trim() } : {}),
       });
       setCreated(route);
@@ -808,6 +1001,55 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
       </div>}>
       <div className="proto proto-embed">
         {created ? (
+          // Once the instructions are in the broker's inbox there is nothing
+          // for the carrier to pass on: one confirmation, the two addresses,
+          // and the email's example behind a toggle. Only when the email could
+          // NOT go does the screen fall back to "tell them this yourself".
+          guideEmailed(created.guide) && (created.channel === "email" || created.channel === "sftp") ? (
+          <>
+            <div className="note ok">
+              <b>Channel created — {created.broker_name} has been emailed.</b>
+              <div style={{ marginTop: 6, fontSize: 12.5 }}>
+                The sending instructions{created.channel === "email" ? " (where to send" : " (where to upload"}, the
+                required format and the codes) went to {created.guide!.recipients.join(", ")}.
+                Nothing else is needed from you.
+              </div>
+            </div>
+            <div className="kv" style={{ marginTop: 14, fontSize: 13 }}>
+              {created.channel === "email" ? (<>
+                <div style={{ display: "flex", gap: 12, padding: "6px 0" }}>
+                  <span style={{ width: 110, color: "var(--p-muted)" }}>Sends from</span>
+                  <span className="mono">{created.display_address}</span></div>
+                {created.send_to && (
+                  <div style={{ display: "flex", gap: 12, padding: "6px 0" }}>
+                    <span style={{ width: 110, color: "var(--p-muted)" }}>Sends to</span>
+                    <span className="mono">{created.send_to}</span></div>)}
+              </>) : (
+                <div style={{ display: "flex", gap: 12, padding: "6px 0" }}>
+                  <span style={{ width: 110, color: "var(--p-muted)" }}>Uploads to</span>
+                  <span className="mono">{created.display_address}/incoming</span></div>)}
+            </div>
+            <button type="button" className="btn sm" aria-expanded={showSent}
+              onClick={() => setShowSent(v => !v)}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 12 }}>
+              {showSent ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              {showSent ? "Hide Email Contents" : "View What Was Sent"}
+            </button>
+            {showSent && (
+              <div style={{ marginTop: 12 }}>
+                {(() => {
+                  const all = programmesByBroker[String(created.broker_party_id)] ?? [];
+                  const mine = all.filter(p => p.program_id === created.program_id);
+                  return (
+                    <ChannelExample channel={created.channel as "email" | "sftp"}
+                      from={created.display_address}
+                      to={created.send_to ?? ""} folder={created.display_address}
+                      shared={!created.program_id}
+                      programmes={created.program_id ? mine : all} />);
+                })()}
+              </div>)}
+          </>
+          ) : (
           <>
             <div className="note ok" style={{ marginBottom: 14 }}>
               <b>{created.broker_name}</b> now has their own channel
@@ -833,6 +1075,21 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 <div style={{ fontSize: 12, marginTop: 8, color: "var(--p-muted)" }}>
                   The <span className="mono">+</span> tag makes this address theirs alone.
                 </div>
+              </div>)}
+
+            {created.guide && <GuideNote guide={created.guide} broker={created.broker_name} />}
+
+            {(created.channel === "email" || created.channel === "sftp") && (
+              <div style={{ marginTop: 14 }}>
+                {(() => {
+                  const all = programmesByBroker[String(created.broker_party_id)] ?? [];
+                  const mine = all.filter(p => p.program_id === created.program_id);
+                  return (
+                    <ChannelExample channel={created.channel} from={created.display_address}
+                      to={created.send_to ?? ""} folder={created.display_address}
+                      shared={!created.program_id}
+                      programmes={created.program_id ? mine : all} />);
+                })()}
               </div>)}
 
             {minted && (
@@ -876,6 +1133,7 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
               </div>
             )}
           </>
+          )
         ) : (
           <>
             {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
@@ -915,36 +1173,29 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 <label>Sender Email Address</label>
                 <input type="email" value={senderEmail} placeholder="ops@bridgebrokers.com"
                   onChange={e => setSenderEmail(e.target.value)} />
-                {/* Where the filled-in value came from, and the other addresses
-                    we hold. Shown rather than silently prefilled: these are
-                    portal logins, and a login that is not the sending mailbox
-                    produces a route that matches nothing — with the field
-                    looking perfectly filled in. */}
-                {knownEmails.length > 0 && (
-                  <div className="hint" style={{ marginTop: 6 }}>
-                    {knownEmails.length === 1 ? "Their login" : "Their logins"}:{" "}
-                    {knownEmails.map((k, i) => (
-                      <span key={k.email}>
-                        {i > 0 && " · "}
-                        <button type="button" className="linkbtn"
-                          onClick={() => setSenderEmail(k.email)}>{k.email}</button>
-                        {k.status !== "active" && (
-                          <span className="muted"> ({k.status})</span>)}
-                      </span>))}
-                  </div>)}
-                <div className="hint">The <b>From:</b> address on their bordereau emails.</div>
+                <div className="hint" style={{ marginTop: 6 }}>
+                  Only emails sent from this address are accepted.
+                </div>
               </div>)}
 
             <div className="field">
               <label>Select Programme</label>
               <select value={programId} disabled={brokerId === ""}
-                onChange={e => setProgramId(e.target.value === "" ? "" : Number(e.target.value))}>
-                {/* Every way in is pinned to one programme, so the blank option is
-                    a prompt, not a choice. */}
-                <option value="">Select a programme…</option>
+                onChange={e => setProgramId(e.target.value === "" ? ""
+                  : e.target.value === "any" ? "any" : Number(e.target.value))}>
+                {/* The blank option is a prompt, not a choice. */}
+                <option value="" disabled>Select a programme…</option>
+                {sharedWayIn && progs.length > 1 && (
+                  <option value="any">All of this broker's programmes</option>)}
                 {progs.map(p => (
                   <option key={p.program_id} value={p.program_id}>{p.name}</option>))}
               </select>
+              {sharedWayIn && typeof programId === "number" && progs.length > 1 && (
+                <div className="hint">
+                  This broker is on {progs.length} programmes but has one {channel === "email"
+                    ? "sending address" : "folder"} — pick “All of this broker's programmes” so
+                  files for the others are not filed under this one.
+                </div>)}
               {(brokerId === "" || progs.length === 0) && (
                 <div className="hint">
                   {brokerId === "" ? "Select a broker first." : "This broker is not on a programme yet."}
@@ -961,6 +1212,11 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 </div>
               </div>
             </div>
+
+            {sharedWayIn && brokerId !== "" && programId !== "" && preview && (
+              <ChannelExample channel={channel as "email" | "sftp"} from={senderEmail.trim()}
+                to={preview} folder={preview} shared={programId === "any"}
+                programmes={programId === "any" ? progs : progs.filter(p => p.program_id === programId)} />)}
 
           </>
         )}

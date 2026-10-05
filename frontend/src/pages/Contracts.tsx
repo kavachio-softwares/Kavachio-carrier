@@ -35,6 +35,10 @@ import { InfoTip } from "../components/InfoTip";
  *  FETCHED — not what is shown out of a larger fetch. */
 const PAGE_SIZE = 10;
 
+/** Why a code sits beside a name: the broker can write it instead. */
+const CODE_TIP = "Short code — brokers can write this in an email subject or file name instead of the name";
+
+
 /** What the lifecycle means to someone scanning the list.
  *
  *  `expired` is derived by the server from the term rather than stored, so a
@@ -256,6 +260,7 @@ export default function Contracts() {
                       <td>
                         <Link to={`/contracts/${c.id}`}><b>{c.name}</b></Link>
                         <div className="sub">
+                          {c.code && <><span className="mono" title={CODE_TIP}>{c.code}</span> · </>}
                           {c.contract_type
                             ? TYPE_LABEL[c.contract_type] ?? c.contract_type
                             : "type not set"}
@@ -268,7 +273,11 @@ export default function Contracts() {
                           <div className="sub">{c.counterparty.party_type}</div>
                         )} */}
                       </td>
-                      <td>{c.programme?.name ?? "—"}</td>
+                      <td>
+                        {c.programme?.name ?? "—"}
+                        {c.programme?.code && (
+                          <div className="sub mono" title={CODE_TIP}>{c.programme.code}</div>)}
+                      </td>
                       <td className="mono">
                         {c.inception_dt && c.expiry_dt
                           ? `${fmtDate(c.inception_dt)} → ${fmtDate(c.expiry_dt)}`

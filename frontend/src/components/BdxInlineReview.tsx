@@ -79,7 +79,7 @@ type SheetIndex = {
   /** `${gridRow}:${col}` → exceptions on that cell. */
   byCell: Map<string, StoredException[]>;
   /** col index → its flagged exceptions, split pending / decided. */
-  colFlags: Map<number, { pending: StoredException[]; decided: number }>;
+  colFlags: Map<number, { pending: StoredException[]; decided: StoredException[] }>;
   mapped: Set<StoredException>;
 };
 
@@ -205,7 +205,7 @@ function indexSheet(sheet: Sheet, sheetExceptions: StoredException[], totalRows?
   }
 
   const byCell = new Map<string, StoredException[]>();
-  const colFlags = new Map<number, { pending: StoredException[]; decided: number }>();
+  const colFlags = new Map<number, { pending: StoredException[]; decided: StoredException[] }>();
   const mapped = new Set<StoredException>();
   for (let i = 0; i < n; i++) {
     const e = own[i];
@@ -216,9 +216,9 @@ function indexSheet(sheet: Sheet, sheetExceptions: StoredException[], totalRows?
     if (!byCell.has(k)) byCell.set(k, []);
     byCell.get(k)!.push(e);
     mapped.add(e);
-    if (!colFlags.has(ci)) colFlags.set(ci, { pending: [], decided: 0 });
+    if (!colFlags.has(ci)) colFlags.set(ci, { pending: [], decided: [] });
     const cf = colFlags.get(ci)!;
-    if (decisionKindOf(e)) cf.decided += 1; else cf.pending.push(e);
+    (decisionKindOf(e) ? cf.decided : cf.pending).push(e);
   }
   return { byCell, colFlags, mapped };
 }
@@ -695,6 +695,11 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
   const [colFixVal, setColFixVal] = useState("");
   // What the column popover does to the ticked rules' rows.
   const [colAction, setColAction] = useState<"approve" | "fix" | "dismiss">("approve");
+  // Whether the column popover also re-decides rows already resolved — a
+  // bulk value that failed Validate Again is changed the way it was made.
+  const [colRedo, setColRedo] = useState(false);
+  const colTargets = (cf: { pending: StoredException[]; decided: StoredException[] }) =>
+    colRedo ? [...cf.pending, ...cf.decided] : cf.pending;
 
   useEffect(() => {
     if (autoScroll) rootRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1043,7 +1048,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
     const cf = idx?.colFlags.get(ci);
     if (!cf) return;
     // Only the rules (clauses) the user ticked in the popover.
-    const items = groupColPending(cf.pending)
+    const items = groupColPending(colTargets(cf))
       .filter(gr => colSel.has(gr.key))
       .flatMap(gr => gr.approvable)
       .map(e => ({
@@ -1056,7 +1061,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
     const cf = idx?.colFlags.get(ci);
     const value = colFixVal.trim();
     if (!cf || !value) return;
-    const items = groupColPending(cf.pending)
+    const items = groupColPending(colTargets(cf))
       .filter(gr => colSel.has(gr.key))
       .flatMap(gr => gr.pending)
       .map(e => ({ e, kind: "fix" as const, value }));
@@ -1067,7 +1072,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
   function dismissColumn(ci: number) {
     const cf = idx?.colFlags.get(ci);
     if (!cf) return;
-    const items = groupColPending(cf.pending)
+    const items = groupColPending(colTargets(cf))
       .filter(gr => colSel.has(gr.key))
       .flatMap(gr => gr.pending)
       .map(e => ({ e, kind: "dismiss" as const }));
@@ -1153,7 +1158,8 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
   const popExcs = cellPop ? (idx.byCell.get(cellPop.key) ?? []) : [];
   const popCol = colPop ? (idx.colFlags.get(colPop.ci) ?? null) : null;
   const popColGroups = useMemo(
-    () => (popCol ? groupColPending(popCol.pending) : []), [popCol]);
+    () => (popCol ? groupColPending(colRedo ? [...popCol.pending, ...popCol.decided] : popCol.pending) : []),
+    [popCol, colRedo]);
   const popColSelected = popColGroups.filter(gr => colSel.has(gr.key));
   const popColCount = popColSelected.reduce((a, gr) => a + gr.approvable.length, 0);
   // Fix and Dismiss act on every pending row of the ticked rules.
@@ -1247,6 +1253,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                   {header.map((h, ci) => {
                     const cf = idx.colFlags.get(ci);
                     const pend = cf?.pending.length ?? 0;
+                    const done = cf?.decided.length ?? 0;
                     return (
                       <th key={ci} style={{
                         ...stickyHead,
@@ -1255,15 +1262,20 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                       }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                           <span>{String(h ?? "").trim() || `Column ${ci + 1}`}</span>
-                          {pend > 0 && !readOnly && (
+                          {(pend > 0 || done > 0) && !readOnly && (
                             <button
                               onClick={ev => {
                                 ev.stopPropagation();
                                 setSaveErr(null); setCellPop(null);
+                                // Nothing left open: the popover changes the
+                                // decisions already made instead.
+                                const redo = pend === 0;
+                                setColRedo(redo);
                                 // Pre-tick every clause; the popover lets the user untick
                                 // the ones they don't want (Approve skips clauses with
                                 // nothing to approve on its own).
-                                const groups = groupColPending(cf?.pending ?? []);
+                                const groups = groupColPending(
+                                  redo ? (cf?.decided ?? []) : (cf?.pending ?? []));
                                 setColSel(new Set(groups.map(gr => gr.key)));
                                 setColAction(bulkFix || !groups.some(gr => gr.approvable.length > 0)
                                   ? "fix" : "approve");
@@ -1273,14 +1285,20 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                                 setColFixVal(vals.size === 1 ? String([...vals][0]) : "");
                                 setColPop({ ci, pos: place(ev.currentTarget.getBoundingClientRect(), 340, 300) });
                               }}
-                              title={`Approve, fix or dismiss all ${pend} flagged ${pend === 1 ? "row" : "rows"} in this column`}
+                              title={pend > 0
+                                ? `Approve, fix or dismiss all ${pend} flagged ${pend === 1 ? "row" : "rows"} in this column`
+                                : `Change the decision on all ${done} resolved ${done === 1 ? "row" : "rows"} in this column`}
                               style={{
                                 display: "inline-flex", alignItems: "center", gap: 3,
                                 fontSize: 10, fontWeight: 700, textTransform: "none", letterSpacing: 0,
-                                color: "#047857", background: "#ECFDF5", border: "1px solid #A7F3D0",
+                                ...(pend > 0
+                                  ? { color: "#047857", background: "#ECFDF5", border: "1px solid #A7F3D0" }
+                                  : { color: DONE_FG.fix, background: "#fff", border: `1px solid ${DONE_BD.fix}` }),
                                 borderRadius: 999, padding: "1px 7px", cursor: "pointer",
                               }}>
-                              <Check size={10} /> Resolve all · {pend}
+                              {pend > 0
+                                ? <><Check size={10} /> Resolve all · {pend}</>
+                                : <><Wrench size={10} /> Change all · {done}</>}
                             </button>
                           )}
                         </div>
@@ -1474,8 +1492,23 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
           style={{ left: colPop.pos.left, top: colPop.pos.top, bottom: colPop.pos.bottom,
                    maxHeight: colPop.pos.maxH }}>
           <div className="font-semibold text-ink mb-2">
-            All flagged rows — {String(header[colPop.ci] ?? "")}
+            {popCol.pending.length > 0 ? "All flagged rows" : "Change all resolved rows"}
+            {" — "}{String(header[colPop.ci] ?? "")}
           </div>
+          {/* Open rows and rows already decided in one column: the earlier
+              decisions are left alone unless asked for. */}
+          {popCol.pending.length > 0 && popCol.decided.length > 0 && (
+            <label className="flex items-center gap-2 mb-2.5 text-[11px] text-ink-muted cursor-pointer">
+              <input type="checkbox" className="h-3.5 w-3.5" checked={colRedo}
+                onChange={ev => {
+                  const on = ev.target.checked;
+                  setColRedo(on);
+                  setColSel(new Set(groupColPending(
+                    on ? [...popCol.pending, ...popCol.decided] : popCol.pending).map(gr => gr.key)));
+                }} />
+              Also change the {popCol.decided.length} already resolved
+            </label>
+          )}
           {/* The same three decisions a single cell offers, for the whole column. */}
           <div className="grid grid-cols-3 gap-1 mb-2.5" role="tablist">
             {([["approve", "Approve", Check], ["fix", "Fix", Wrench], ["dismiss", "Dismiss", Hand]] as const)

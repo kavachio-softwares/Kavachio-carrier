@@ -104,10 +104,10 @@ const CHECKS: [string, string][] = [
    "The sender must be a broker on one of your programmes."],
   ["Programme, contract & period",
    "The file must say which reporting period it is for — and which programme and contract, when the sender has more than one."],
-  ["Duplicate check",
-   "Previously received files are not loaded again, preventing double-counted premium."],
   ["Security scan",
    "External files are scanned for malware before opening."],
+  ["Duplicate check",
+   "A file we have already received is not loaded a second time."],
   ["File readability",
    "Incomplete or password-protected files cannot be opened."],
   ["Data present",
@@ -132,8 +132,8 @@ function failedCheck(reason: string | null): number {
   if (/expands to|internal parts|contains macros/.test(r)) return 2;
   if (/recognise the sender|not linked to a broker|been switched off/.test(r)) return 3;
   if (/no reporting period|not a reporting period|has not ended yet|which programme\?|which contract\?|contract is not one/.test(r)) return 4;
-  if (/same file we already loaded/.test(r)) return 5;
-  if (/security scan/.test(r)) return 6;
+  if (/security scan/.test(r)) return 5;
+  if (/same file we already loaded/.test(r)) return 6;
   if (/could not open it/.test(r)) return 7;
   if (/no rows in it/.test(r)) return 8;
   if (/columns this programme reports on|missing \d+ column/.test(r)) return 9;
@@ -188,6 +188,17 @@ function latestVersions(rows: Arrival[]): Arrival[] {
     || (counting.get(a.submission_ref) ?? any.get(a.submission_ref)) === a);
 }
 
+/** Copy a reference, and say so. */
+function CopyRef({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button type="button" className="linkbtn" title="Copy reference"
+      onClick={() => {
+        navigator.clipboard?.writeText(text); setDone(true);
+        window.setTimeout(() => setDone(false), 1500);
+      }}>{done ? "Copied" : "Copy"}</button>);
+}
+
 function waitDays(a: Arrival): number {
   if (!a.received_at) return 0;
   return Math.floor((Date.now() - new Date(a.received_at).getTime()) / 86400000);
@@ -232,7 +243,7 @@ function actionLabel(a: Arrival): string {
 // backend's full sentence is kept for the tooltip and the drawer.
 const SHORT_REASON = [
   "Invalid file size", "Unsupported file type", "Unsafe file content",
-  "Unrecognised sender", "No reporting period", "Duplicate file", "Failed security scan",
+  "Unrecognised sender", "No reporting period", "Failed security scan", "Duplicate file",
   "Unable to open file", "No data rows", "Required columns missing", "No active contract",
 ];
 
@@ -405,8 +416,18 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
+    // A pasted reference — the one a broker quotes from their API reply or
+    // result email — finds that exact file, even an earlier version the table
+    // otherwise folds under its latest one. A month's own reference finds the
+    // file standing for it.
+    const byRef = needle.length >= 6
+      ? (rows ?? []).filter(a => (a.public_ref ?? "").toLowerCase().includes(needle))
+      : [];
+    const byMonth = needle.length >= 6 && !byRef.length
+      ? all.filter(a => (a.submission_ref ?? "").toLowerCase() === needle) : [];
+    const refHit = byRef.length ? byRef : byMonth;
 
-    const list = all.filter(a => {
+    const list = (refHit.length ? refHit : all).filter(a => {
       if (filter === "held") {
         // The tile above counts held AND UNDECIDED, so the filter has to mean
         // the same thing — a tile that is a control must hand you the rows it
@@ -420,7 +441,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
       if (fChannel && a.channel !== fChannel) return false;
       if (fBroker && a.broker_name !== fBroker) return false;
       if (fProgramme && a.program_name !== fProgramme) return false;
-      if (needle) {
+      if (needle && !refHit.length) {
         const hay = `${a.filename} ${a.broker_name ?? ""} ${a.claimed_sender ?? ""} ${a.contract_name ?? ""}`.toLowerCase();
         if (!hay.includes(needle)) return false;
       }
@@ -439,7 +460,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
       if (aw !== bw) return aw - bw;
       return aw === 0 ? at(a) - at(b) : at(b) - at(a);
     });
-  }, [all, filter, sort, q, range, fChannel, fBroker, fProgramme]);
+  }, [all, rows, filter, sort, q, range, fChannel, fBroker, fProgramme]);
 
   // What the table actually draws. `shown` stays the whole filtered set, so the
   // count beside the sort, the select-all tick and the bulk actions all go on
@@ -542,13 +563,14 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
       </div>
 
       <div className="filters">
-        <label className="searchbox">
+        {/* Fills the row up to the filters — no gap between them. */}
+        <label className="searchbox" style={{ maxWidth: "none" }}>
           <svg className="si" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             strokeWidth="2" aria-hidden="true">
             <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
           <input type="search" value={q} onChange={e => setQ(e.target.value)}
-            placeholder="Search by file, broker, sender or contract…" aria-label="Search files" />
+            placeholder="Search by file, broker, sender, contract or reference id..." aria-label="Search files" />
         </label>
         <span className="spacer">
           <select className="sel" value={range} aria-label="Received"
@@ -938,6 +960,13 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival }: {
                 <span className="v">{fmtStamp(arrival.received_at)}</span></div>
               <div className="kv"><span className="k">Rows</span>
                 <span className="v mono">{rowsOf(arrival.run_rows ?? arrival.row_count)}</span></div>
+              {/* The one ID the broker is given for this file (the API reply's
+                  `reference`): what they quote, and what the search finds. */}
+              {arrival.public_ref && (
+                <div className="kv"><span className="k">Reference</span>
+                  <span className="v" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <span className="mono" style={{ fontSize: 12 }}>{arrival.public_ref}</span>
+                    <CopyRef text={arrival.public_ref} /></span></div>)}
             </div>
 
             {/* The broker exception loop: reference, progress, and whether
@@ -995,8 +1024,6 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival }: {
                 onClick={() => setShowMore(o => !o)}>{showMore ? "Hide" : "Show"}</button>
             </div>
             {showMore && (<>
-              <div className="kv"><span className="k">Submission</span>
-                <span className="v mono">#{arrival.arrival_id}</span></div>
               {/* A manual upload's sender is the person who uploaded it; for
                   the other channels, which key or folder tells two of a
                   broker's systems apart. */}
@@ -1056,7 +1083,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival }: {
             {st === "held" && !arrival.resolution && (
               <button className="btn pri" disabled={busy}
                 onClick={() => decide("release")}>
-                {busy ? "Processing…" : "Release File"}</button>)}
+                {busy ? "Processing…" : "Process File"}</button>)}
 
             {st !== "ok" && !arrival.resolution && (
               <button className="btn" disabled={busy}

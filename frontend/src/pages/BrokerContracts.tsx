@@ -45,6 +45,10 @@ const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
 /** Rows per page. */
 const PAGE_SIZE = 10;
 
+/** Why a code sits beside a name: the broker can write it instead. */
+const CODE_TIP = "Short code — brokers can write this in an email subject or file name instead of the name";
+
+
 export default function BrokerContracts() {
   const [carriers, setCarriers] = useState<BrokerCarrier[]>([]);
   // The sidebar's selection is the scope, and the only carrier control there
@@ -185,13 +189,18 @@ export default function BrokerContracts() {
                             correct it and re-submit. */}
                         <Link to={`/contracts/${c.id}`}><b>{c.name}</b></Link>
                         <div className="sub">
+                          {c.code && <><span className="mono" title={CODE_TIP}>{c.code}</span> · </>}
                           {c.source === "carrier"
                             ? "the carrier added it" : "you added it"}
                           {c.filename && <> · {c.filename}</>}
                         </div>
                       </td>
                       <td>{c.carrier.name}</td>
-                      <td>{c.programme.name}</td>
+                      <td>
+                        {c.programme.name}
+                        {c.programme.code && (
+                          <div className="sub mono" title={CODE_TIP}>{c.programme.code}</div>)}
+                      </td>
                       <td className="muted">
                         {c.inception_dt && c.expiry_dt
                           ? `${c.inception_dt} → ${c.expiry_dt}` : "—"}
