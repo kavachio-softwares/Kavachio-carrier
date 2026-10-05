@@ -112,6 +112,14 @@ def sftp_root() -> Path:
     return Path(os.getenv("SFTP_ROOT", "./sftp-root")).expanduser().resolve()
 
 
+def sftp_port() -> int:
+    """The port brokers connect to — SFTP_PORT, else 22."""
+    try:
+        return int(os.getenv("SFTP_PORT", "22"))
+    except ValueError:
+        return 22
+
+
 def sftp_host() -> str:
     """Hostname shown to brokers. Config, not data — which is why the address
     stored on a route is the path alone."""
@@ -539,6 +547,20 @@ def identify(session, route: Optional[IntakeRoute], *, filename: str,
 
     # ── contract ──
     cons = live_contracts(session, tenant, pid, broker)
+    if contract_id is None:
+        # A contract CODE that belongs to another of this broker's programmes
+        # contradicts the programme. Refused — never quietly swapped for this
+        # programme's only contract, which filed it somewhere nobody named.
+        own = {c.id for c in cons}
+        for p in broker_programmes(session, tenant, broker):
+            other = [c for c in live_contracts(session, tenant, p.id, broker)
+                     if p.id != pid and c.id not in own]
+            hit = _named_in(text, other, lambda c: _code_forms(contract_code(c)))
+            if hit:
+                return found, (f"{contract_code(hit[0])} is a contract of {p.name}, not "
+                               f"of {prog.name if prog else 'this programme'} "
+                               f"({programme_code(prog) if prog else ''}). Check the "
+                               f"codes in {where}.")
     if contract_id is not None:
         if contract_id not in {c.id for c in cons}:
             return found, ("That contract is not one this broker's files on "
@@ -780,8 +802,12 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
               period_hint: Optional[str] = None,
               replaces: Optional[str] = None,
               program_id: Optional[int] = None,
-              contract_id: Optional[int] = None) -> FileArrival:
+              contract_id: Optional[int] = None,
+              refusal: Optional[str] = None) -> FileArrival:
     """Record one arriving file and decide whether it may go on.
+
+    `refusal` is a reason the channel has already found (an email that did not
+    copy the carrier): it is checked right after the sender, like any check.
 
     `period`, `program_id` and `contract_id` are what the sender STATED (the
     API's fields, the secure link's corrected data). Whatever is not stated is
@@ -844,6 +870,7 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
         lambda: _check_is_spreadsheet(filename, file_bytes),
         lambda: safety.check_safe_to_open(filename, file_bytes),
         lambda: _check_known_sender(route),
+        lambda: refusal,
         _identified,
         # Scanned before anything else is decided about it — the same order as
         # a manual upload, and the order Files Received shows.

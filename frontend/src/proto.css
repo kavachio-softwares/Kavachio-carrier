@@ -1567,3 +1567,8 @@
 .proto .ver-tl .row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:3px;color:var(--p-muted);font-size:12px}
 .proto .ver-tl .lnk{margin-left:auto;border:0;background:none;padding:0;color:var(--p-info,#2563eb);font-weight:600;font-size:12px;cursor:pointer}
 .proto .ver-tl .lnk:hover{text-decoration:underline}
+
+/* Files Received panel footer: every action on ONE row, same height, Close
+   kept at the right edge — four buttons used to wrap Close onto a line alone. */
+.proto .drawer-f.one-row{flex-wrap:nowrap;align-items:center;gap:8px;padding:14px 16px}
+.proto .drawer-f.one-row .btn{white-space:nowrap;padding-left:12px;padding-right:12px;flex:0 0 auto}

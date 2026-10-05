@@ -11,6 +11,7 @@ the interesting work happens in intake_service and sftp_poller.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -115,21 +116,22 @@ def _collector_status() -> dict:
 
 
 def _send_to(r: IntakeRoute) -> Optional[str]:
-    """The address to hand THIS broker, for an email route.
-
-    Plus-addressing, so the address a broker is given identifies them the way an
-    SFTP folder does — bordereaux+bridge-brokers@… can only be arrived at by
-    being told it. Falls back to the plain mailbox when the server does not
-    support tags; the From: match still resolves the route either way.
-    """
+    """The address to hand THIS broker, for an email route: Kavachio's intake
+    mailbox, the same for every broker. Who sent it (From:) and which carrier
+    is copied (Cc) say whose file it is — see email_intake_service."""
     if r.channel != "email":
         return None
     mailbox = _mail_cfg().user
-    if not mailbox or "@" not in mailbox:
-        return None
+    return mailbox if mailbox and "@" in mailbox else None
+
+
+def _carrier_cc(s, tenant_id: int) -> Optional[str]:
+    """The carrier address a broker must copy on every bordereau email."""
     import email_intake_service as mailsvc
-    local, _, domain = mailbox.partition("@")
-    return f"{local}+{mailsvc.route_label(r)}@{domain}"
+    try:
+        return mailsvc.carrier_cc(s, tenant_id)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _route_dict(r: IntakeRoute, broker_name: Optional[str],
@@ -274,6 +276,8 @@ def list_routes(mga: Optional[str] = None,
             # sftp_host: a route stores who a broker sends FROM, so moving the
             # intake mailbox must not strand every stored address.
             "email_mailbox": _mail_cfg().user or None,
+            # Who brokers copy (Cc) on every bordereau email to this carrier.
+            "carrier_cc": _carrier_cc(s, tid),
             "email_ready": _mail_ready(),
             "collector": _collector_status(),
             "tiles": {
@@ -340,6 +344,17 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
         else:
             address = svc.build_sftp_address(carrier_name, broker.legal_name)
 
+        # One API channel per broker + programme (uq_intake_route_api_scope):
+        # say so, rather than let the insert fail with a server error.
+        if body.channel == "api":
+            twin = (s.query(IntakeRoute)
+                    .filter(IntakeRoute.tenant_id == tid, IntakeRoute.channel == "api",
+                            IntakeRoute.broker_party_id == broker.id,
+                            IntakeRoute.program_id.is_(None) if body.program_id is None
+                            else IntakeRoute.program_id == body.program_id).first())
+            if twin is not None:
+                raise HTTPException(409, f"{broker.legal_name} already has an API channel "
+                                         "for this. Make a new key on it instead.")
         existing = None
         if body.channel != "api":
             existing = (s.query(IntakeRoute)
@@ -386,18 +401,23 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
                       "broker_party_id": route.broker_party_id})
         out = _route_dict(route, broker.legal_name, 0)
         out["folder"] = created_dir
+        out["cc"] = _carrier_cc(s, tid) if route.channel == "email" else None
         # The broker is told how to name what they send — the same example
         # the dialog shows — so their first file is not a refused one.
-        out["guide"] = _email_guide(s, route, carrier_name)
+        # API: emailed with its key, the moment the key is minted (create_key).
+        out["guide"] = (_email_guide(s, route, carrier_name)
+                        if route.channel != "api" else None)
         return out
 
 
-def _email_guide(s, route: IntakeRoute, carrier: str) -> dict:
+def _email_guide(s, route: IntakeRoute, carrier: str, *,
+                 api_key: Optional[str] = None, api_base: Optional[str] = None) -> dict:
     """Email the broker this channel's "How They Send It". Never fails the
     request that asked for it: the dialog still shows the example to copy."""
     import intake_guide
     try:
-        return intake_guide.send(s, route, carrier=carrier, send_to=_send_to(route))
+        return intake_guide.send(s, route, carrier=carrier, send_to=_send_to(route),
+                                 api_key=api_key, api_base=api_base)
     except Exception:  # noqa: BLE001
         log.warning("could not email the channel guide for route %s", route.id, exc_info=True)
         return {"recipients": [], "sending": False}
@@ -805,7 +825,7 @@ MAX_LIVE_KEYS = 2      # an overlap for rotation, without letting keys pile up
 
 
 @router.post("/routes/{route_id}/keys", status_code=201)
-def create_key(route_id: int, body: KeyCreate,
+def create_key(route_id: int, body: KeyCreate, request: Request,
                principal: Principal = Depends(require_role("carrier_admin"))):
     """Mint a key. The plaintext is returned exactly ONCE and never stored —
     the screen has to say so plainly before it disappears."""
@@ -836,11 +856,18 @@ def create_key(route_id: int, body: KeyCreate,
         _log(_tenant_name(s, route.tenant_id) or "", _actor(principal),
              "intake_key_created", target=str(cred.id),
              details={"route_id": route.id, "label": cred.label})
+        # The broker is emailed the key with how to use it — now, the only
+        # moment the plaintext exists. The address is this API's own.
+        from intake_api_routes import _base_url
+        base = (os.getenv("API_PUBLIC_URL") or "").strip() or _base_url(request)
+        guide = _email_guide(s, route, _tenant_name(s, route.tenant_id) or "your carrier",
+                             api_key=full, api_base=base)
         return {
             "credential_id": cred.id,
             "label": cred.label,
             "api_key": full,
             "warning": "Copy this now. It is not stored and cannot be shown again.",
+            "guide": guide,
         }
 
 

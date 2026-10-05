@@ -218,7 +218,10 @@ def _new_uids(imap: imaplib.IMAP4, search: str) -> list[bytes]:
 
 
 def _fetch(imap: imaplib.IMAP4, uid: bytes) -> bytes | None:
-    typ, data = imap.uid("FETCH", uid, "(RFC822)")
+    # PEEK: reading a message must not mark it read. The intake mailbox can be
+    # a person's working inbox (Kavachio's own); only a message we actually
+    # took a bordereau from is moved — see _retire.
+    typ, data = imap.uid("FETCH", uid, "(BODY.PEEK[])")
     if typ != "OK" or not data:
         return None
     for part in data:
@@ -390,7 +393,7 @@ def _handle_message(session, raw: bytes, summary: dict):
                  configuration fix picks it up next time rather than losing it.
     """
     parsed = mail.parse_message(raw)
-    route, how = mail.resolve_route(session, None, parsed)
+    route, how, refusal = mail.resolve_route(session, None, parsed)
 
     if not parsed.has_files:
         # A plain message with nothing attached is not a refusal, it is not
@@ -473,6 +476,8 @@ def _handle_message(session, raw: bytes, summary: dict):
             # "Bordereau – July 2026" in the subject names the reporting period
             # when the attachment's own name does not.
             period_hint=parsed.subject,
+            # Known sender, carrier not copied: recorded, and turned away.
+            refusal=refusal,
         )
         notify_sender(session, arrival, parsed)
         session.commit()

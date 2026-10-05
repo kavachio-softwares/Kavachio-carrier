@@ -19,7 +19,8 @@ export type IntakeRoute = {
   address: string;
   /** The full address to hand a broker — composed server-side from SFTP_HOST. */
   display_address: string;
-  /** Email routes only: the plus-address to hand THIS broker. Email is the one
+  /** Email routes only: the intake mailbox to hand THIS broker (the same for
+   *  every broker — From: and the carrier in Cc say whose file it is). Email is the one
    *  channel where the address a broker sends FROM and the address they send TO
    *  are different things, so the screen needs both. */
   send_to: string | null;
@@ -41,6 +42,8 @@ export type IntakeRoute = {
   disabled_at: string | null;
   /** Only returned by create — the folder that was made on disk. */
   folder?: string | null;
+  /** Only returned by create (email): the carrier address to copy. */
+  cc?: string | null;
   /** Only returned by create (email / SFTP): who is being emailed the
    *  instructions, and whether broker emails are switched on at all. */
   guide?: GuideSent;
@@ -77,6 +80,8 @@ export type RoutesResponse = {
   sftp_host: string;
   /** 10.3 — the inbox brokers email. Config like sftp_host, not data. */
   email_mailbox: string | null;
+  /** The carrier address brokers must copy (Cc) on every bordereau email. */
+  carrier_cc?: string | null;
   /** True once IMAP_HOST/USER/PASS are set, so the screen can say whether the
    *  mailbox is actually reachable rather than implying it is. */
   email_ready: boolean;
@@ -343,6 +348,8 @@ export type NewIntakeKey = {
   label: string | null;
   api_key: string;
   warning: string;
+  /** Who the key and its instructions were emailed to. */
+  guide?: GuideSent | null;
 };
 
 export async function listKeys(routeId: number): Promise<IntakeKey[]> {

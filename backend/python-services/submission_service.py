@@ -1183,8 +1183,11 @@ def _names(s, th: Thread) -> dict:
     broker = s.get(Party, th.broker_party_id) if th.broker_party_id else None
     con = (s.query(Contract.id, Contract.name, Contract.filename)
            .filter(Contract.id == th.contract_id).first() if th.contract_id else None)
+    from intake_service import contract_label
     return {"programme": prog.name if prog else None,
             "contract": (con.name or con.filename) if con else None,
+            # As the emails show it: a contract named after its file loses ".pdf".
+            "contract_label": contract_label(con) if con else None,
             "carrier": (ten.legal_name or ten.tenant_name) if ten else None,
             "broker": broker.legal_name if broker else None}
 
@@ -1550,6 +1553,7 @@ def _email_payload(s, th, ver, event, status, names, rows, p, *, token, csv_text
     due = (_aware(th.deadline_at).strftime("%d %b %Y")
            if status == "with_exceptions" and th.deadline_at else None)
     facts = [("File", file_name), ("Programme", names["programme"]),
+             ("Contract", names.get("contract_label")),
              ("Reporting period", period),
              ("Version", str(ver.no) if len(th.versions) > 1 else None),
              ("Due by", due)]
@@ -1623,7 +1627,8 @@ def _alert_carrier(s, th, ver, why, event: str = "on_hold") -> None:
     body = (f"The deadline passed with exceptions still open. Accept the file as it is "
             f"in Files Received, or wait for {names['broker'] or 'the broker'}.")
     facts = [("File", th.file_name), ("Broker", names["broker"]),
-             ("Programme", names["programme"]), ("Reporting period", period_label(th.period)),
+             ("Programme", names["programme"]), ("Contract", names.get("contract_label")),
+             ("Reporting period", period_label(th.period)),
              ("Open exceptions", str(progress(s, th)["remaining"]))]
     link = _app_link("/files")
     for c in carrier_contacts(s, [th.tenant_id]).get(th.tenant_id, []):

@@ -21,7 +21,7 @@ import {
   type GuideSent, type NewIntakeKey,
   type ProgrammeLite, type RoutesResponse,
 } from "../api/intake";
-import { ChevronDown, ChevronUp, Mail, Server, Upload, Zap } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Mail, Server, Upload, Zap } from "lucide-react";
 import { Modal } from "../components/ui/Modal";
 import { getRouteContacts, putRouteContacts } from "../api/submissions";
 import { InfoTip } from "../components/InfoTip";
@@ -93,8 +93,8 @@ const CHANNEL_DETAIL: Partial<Record<Channel, [string, string][]>> = {
     ["A later file for the same month", "Becomes the next version of that file — however the first one came in"],
   ],
   email: [
-    ["Where they send it", "The intake mailbox, at their own +address"],
-    ["How we know it is them", "The address they were given; the From: line as a fallback"],
+    ["Where they send it", "Kavachio's intake mailbox, with you copied (Cc)"],
+    ["How we know it is them", "The From: address, and your address in Cc — without it the file is turned away"],
     ["When we pick it up", "The moment it reaches the mailbox"],
     ["After we take it", "Filed into /Processed so it cannot be read twice"],
     ["Attachments we ignore", "Signatures, logos and anything not a spreadsheet"],
@@ -156,6 +156,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
     emailsByBroker: Record<string, BrokerEmail[]>;
     creatable: Channel[];
     mailbox: string | null;
+    carrierCc: string | null;
     mailReady: boolean;
   }) => void;
   /** Bumped by Refresh, and after a route is created. */
@@ -246,6 +247,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
       brokers: data.brokers, programmesByBroker: data.broker_programmes,
       emailsByBroker: data.broker_emails ?? {},
       creatable: data.creatable, mailbox: data.email_mailbox,
+      carrierCc: data.carrier_cc ?? null,
       mailReady: data.email_ready,
     });
   }, [data, onAddData]);
@@ -312,6 +314,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                     </div>
                   ) : routes.map(r => (
                     <RouteCard key={r.route_id} route={r} busy={busy}
+                      cc={data?.carrier_cc ?? null}
                       keys={keys[r.route_id]}
                       onSettings={() => setSettingsFor(r)}
                       onToggle={() => !busy && toggle(r)} />
@@ -338,8 +341,10 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
 // A card rather than a table row, because the four things people want are of
 // different shapes: who it is, what state it is in, what you can do to it, and
 // the address — which is the deliverable of this screen and gets its own line.
-function RouteCard({ route, busy, keys, onSettings, onToggle }: {
+function RouteCard({ route, busy, cc = null, keys, onSettings, onToggle }: {
   route: IntakeRoute; busy: boolean;
+  /** Email: the carrier address the broker must copy. */
+  cc?: string | null;
   /** undefined until the keys for this route have been fetched. */
   keys: IntakeKey[] | undefined;
   onSettings: () => void; onToggle: () => void;
@@ -389,6 +394,7 @@ function RouteCard({ route, busy, keys, onSettings, onToggle }: {
         {route.channel === "email" && (
           <div className="route-sub">
             sends from <span className="mono">{route.address}</span>
+            {cc && <> · Cc <span className="mono">{cc}</span> (required)</>}
           </div>)}
         {isApi && (needsKey
           ? <div className="route-sub warnt">Nothing can be sent through this channel until a key exists.</div>
@@ -443,25 +449,34 @@ function guideEmailed(g?: GuideSent | null): g is GuideSent {
 }
 
 /** What happened to the broker's copy of the instructions, in one line. */
-function GuideNote({ guide, broker }: { guide: GuideSent; broker: string | null }) {
+function GuideNote({ guide, broker, what = "instructions" }: {
+  guide: GuideSent; broker: string | null;
+  /** What was emailed: the instructions, or an API key with them. */
+  what?: "instructions" | "key";
+}) {
   const who = broker ?? "the broker";
+  const thing = what === "key" ? "the key and how to use it" : "the instructions";
+  const copy = what === "key" ? "copy the key above and send it to them privately"
+    : "copy the example below and send it to them";
   if (!guide.recipients.length) {
     return (
       <div className="note warn" style={{ marginTop: 14 }}>
-        No email address is on file for {who}, so the instructions were not emailed — copy the
-        example below and send it to them.
+        No email address is on file for {who}, so {thing} were not
+        emailed — {copy}.
       </div>);
   }
   if (!guide.sending) {
     return (
       <div className="note warn" style={{ marginTop: 14 }}>
-        Broker emails are switched off, so the instructions were not emailed — copy the example
-        below and send it to {who}.
+        Broker emails are switched off, so {thing} were not emailed — {copy}.
       </div>);
   }
   return (
     <div className="note ok" style={{ marginTop: 14 }}>
-      The instructions below have been emailed to {guide.recipients.join(", ")}.
+      {what === "key"
+        ? <>The key, the endpoint and an example request have been emailed to{" "}
+            {guide.recipients.join(", ")}.</>
+        : <>The instructions below have been emailed to {guide.recipients.join(", ")}.</>}
     </div>);
 }
 
@@ -688,9 +703,10 @@ function KeyPanel({ route }: { route: IntakeRoute }) {
             }}>{copied ? "Copied" : "Copy"}</button>
           </div>
           <div style={{ fontSize: 12, marginTop: 8, color: "var(--p-muted)" }}>
-            Send it to {route.broker_name} over something private. We keep only a fingerprint,
-            so if it is lost the only fix is to revoke it and make another.
+            We keep only a fingerprint, so if it is lost the only fix is to revoke it and make
+            another.
           </div>
+          {minted.guide && <GuideNote guide={minted.guide} broker={route.broker_name} what="key" />}
         </div>
       )}
 
@@ -787,8 +803,10 @@ function CodeChip({ code }: { code: string }) {
 
 /** What one bordereau looks like on its way in — the email to write, or the
  *  file to drop — filled from the choices in the dialog, for last month. */
-function ChannelExample({ channel, from, to, folder, programmes, shared }: {
+function ChannelExample({ channel, from, to, cc = null, folder, programmes, shared }: {
   channel: "email" | "sftp"; from: string; to: string; folder: string;
+  /** Email only: the carrier address the broker must copy. */
+  cc?: string | null;
   /** The programme(s) this address takes; the example uses the first. */
   programmes: ProgrammeLite[];
   /** One address for all the broker's programmes: the file must say which. */
@@ -808,6 +826,7 @@ function ChannelExample({ channel, from, to, folder, programmes, shared }: {
   const text = channel === "email"
     ? `From:     ${from || "<their sending address>"}\n`
       + `To:       ${to}\n`
+      + `Cc:       ${cc || "<your email>"}\n`
       + `Subject:  ${programme} - ${contract ? `${contract} - ` : ""}${month}\n`
       + `Attach:   the bordereau (.xlsx or .csv)`
     : `${folder}/incoming/${slug(programme)}_${contract ? `${slug(contract)}_` : ""}${ym}.xlsx`;
@@ -829,6 +848,8 @@ function ChannelExample({ channel, from, to, folder, programmes, shared }: {
         {/* One line: what must be in it, and when the contract is needed. */}
         {where} must include the month{shared && programmes.length > 1
           ? " and programme (code or name)" : ""}; the contract only if Required.
+        {channel === "email" && <> The Cc is required — an email that does not copy{" "}
+          <span className="mono">{cc || "you"}</span> is turned away.</>}
       </div>
 
       {/* Every code this address takes: one card per programme, its contracts
@@ -884,7 +905,7 @@ function ChannelExample({ channel, from, to, folder, programmes, shared }: {
 }
 
 export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroker,
-                               creatable, mailbox,
+                               creatable, mailbox, carrierCc = null,
                         mailReady, onClose, onCreated }: {
   open: boolean; brokers: { party_id: number; legal_name: string }[];
   programmesByBroker: Record<string, ProgrammeLite[]>;
@@ -893,6 +914,8 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
   creatable: Channel[];
   /** The inbox brokers email, so the +address can be previewed here. */
   mailbox: string | null;
+  /** The carrier address brokers must copy (Cc) on every email. */
+  carrierCc?: string | null;
   /** False when IMAP is not configured — the route can still be made, but
       nothing will collect from it, and saying so now beats a silent no-op. */
   mailReady: boolean;
@@ -910,14 +933,13 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
   const [created, setCreated] = useState<IntakeRoute | null>(null);
   const [minted, setMinted] = useState<NewIntakeKey | null>(null);
   const [copied, setCopied] = useState(false);
-  const [showSent, setShowSent] = useState(false);
 
   useEffect(() => {
     if (open) {
       setChannel(creatable[0] ?? "sftp"); setBrokerId(""); setProgramId("");
       setSenderEmail("");
       setErr(null); setCreated(null); setMinted(null);
-      setCopied(false); setShowSent(false);
+      setCopied(false);
     }
   }, [open, creatable]);
 
@@ -974,13 +996,11 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
     if (channel === "api") return "POST /v1/bordereaux";
     const slug = b.legal_name.normalize("NFKD").replace(/[^\w\s-]/g, "")
       .trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    // Email previews the address the broker is GIVEN — the +address — because
-    // that is the deliverable of this dialog. What they send FROM is typed in
-    // above and is not something we generate.
+    // Email: Kavachio's intake mailbox, the same for every broker — who sent
+    // it and the carrier in Cc say whose file it is.
     if (channel === "email") {
       if (!mailbox || !mailbox.includes("@")) return "no intake mailbox configured yet";
-      const [local, domain] = mailbox.split("@");
-      return `${local}+${slug}@${domain}`;
+      return mailbox;
     }
     return `sftp://…/${slug}`;
   }, [brokerId, brokers, channel, mailbox]);
@@ -1001,54 +1021,31 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
       </div>}>
       <div className="proto proto-embed">
         {created ? (
-          // Once the instructions are in the broker's inbox there is nothing
-          // for the carrier to pass on: one confirmation, the two addresses,
-          // and the email's example behind a toggle. Only when the email could
-          // NOT go does the screen fall back to "tell them this yourself".
-          guideEmailed(created.guide) && (created.channel === "email" || created.channel === "sftp") ? (
-          <>
-            <div className="note ok">
-              <b>Channel created — {created.broker_name} has been emailed.</b>
-              <div style={{ marginTop: 6, fontSize: 12.5 }}>
-                The sending instructions{created.channel === "email" ? " (where to send" : " (where to upload"}, the
-                required format and the codes) went to {created.guide!.recipients.join(", ")}.
-                Nothing else is needed from you.
-              </div>
+          // Once the instructions (and, for API, the key) are in the broker's
+          // inbox there is nothing for the carrier to pass on — just say it
+          // is done. Only when the email could NOT go does the screen fall
+          // back to the details, so the carrier can pass them on by hand.
+          guideEmailed(created.channel === "api" ? minted?.guide : created.guide) ? (
+          <div style={{ textAlign: "center", padding: "18px 8px 6px" }}>
+            <div style={{ width: 52, height: 52, borderRadius: 999, margin: "0 auto 14px",
+                          background: "var(--p-ok-bg, #DCFCE7)", color: "var(--p-ok, #16A34A)",
+                          display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Check size={26} strokeWidth={2.5} />
             </div>
-            <div className="kv" style={{ marginTop: 14, fontSize: 13 }}>
-              {created.channel === "email" ? (<>
-                <div style={{ display: "flex", gap: 12, padding: "6px 0" }}>
-                  <span style={{ width: 110, color: "var(--p-muted)" }}>Sends from</span>
-                  <span className="mono">{created.display_address}</span></div>
-                {created.send_to && (
-                  <div style={{ display: "flex", gap: 12, padding: "6px 0" }}>
-                    <span style={{ width: 110, color: "var(--p-muted)" }}>Sends to</span>
-                    <span className="mono">{created.send_to}</span></div>)}
-              </>) : (
-                <div style={{ display: "flex", gap: 12, padding: "6px 0" }}>
-                  <span style={{ width: 110, color: "var(--p-muted)" }}>Uploads to</span>
-                  <span className="mono">{created.display_address}/incoming</span></div>)}
+            <div style={{ fontSize: 16, fontWeight: 600, color: "var(--p-ink)" }}>
+              Channel configuration complete
             </div>
-            <button type="button" className="btn sm" aria-expanded={showSent}
-              onClick={() => setShowSent(v => !v)}
-              style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 12 }}>
-              {showSent ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              {showSent ? "Hide Email Contents" : "View What Was Sent"}
-            </button>
-            {showSent && (
-              <div style={{ marginTop: 12 }}>
-                {(() => {
-                  const all = programmesByBroker[String(created.broker_party_id)] ?? [];
-                  const mine = all.filter(p => p.program_id === created.program_id);
-                  return (
-                    <ChannelExample channel={created.channel as "email" | "sftp"}
-                      from={created.display_address}
-                      to={created.send_to ?? ""} folder={created.display_address}
-                      shared={!created.program_id}
-                      programmes={created.program_id ? mine : all} />);
-                })()}
-              </div>)}
-          </>
+            <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 8, lineHeight: 1.6,
+                          overflowWrap: "anywhere" }}>
+              <b style={{ color: "var(--p-ink)" }}>{created.broker_name}</b> can now send
+              bordereaux by <b style={{ color: "var(--p-ink)" }}>{
+                created.channel === "email" ? "Email" : created.channel === "sftp" ? "SFTP" : "API"}</b>.
+              <br />
+              {created.channel === "api"
+                ? "Their API key and sending instructions have been emailed to them."
+                : "The sending instructions and required format have been emailed to them."}
+            </div>
+          </div>
           ) : (
           <>
             <div className="note ok" style={{ marginBottom: 14 }}>
@@ -1072,9 +1069,11 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                 <b>Tell {created.broker_name} to send to this address:</b>
                 <div className="mono" style={{ fontSize: 12.5, marginTop: 7 }}>
                   {created.send_to}</div>
-                <div style={{ fontSize: 12, marginTop: 8, color: "var(--p-muted)" }}>
-                  The <span className="mono">+</span> tag makes this address theirs alone.
-                </div>
+                {(created.cc ?? carrierCc) && (
+                  <div style={{ fontSize: 12, marginTop: 8, color: "var(--p-muted)" }}>
+                    …and to copy <span className="mono">{created.cc ?? carrierCc}</span> (Cc) on
+                    every email — without it the file is turned away.
+                  </div>)}
               </div>)}
 
             {created.guide && <GuideNote guide={created.guide} broker={created.broker_name} />}
@@ -1086,7 +1085,8 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                   const mine = all.filter(p => p.program_id === created.program_id);
                   return (
                     <ChannelExample channel={created.channel} from={created.display_address}
-                      to={created.send_to ?? ""} folder={created.display_address}
+                      to={created.send_to ?? ""} cc={created.cc ?? carrierCc}
+                      folder={created.display_address}
                       shared={!created.program_id}
                       programmes={created.program_id ? mine : all} />);
                 })()}
@@ -1102,9 +1102,9 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
                   }}>{copied ? "Copied" : "Copy"}</button>
                 </div>
                 <div style={{ fontSize: 12, marginTop: 8, color: "var(--p-muted)" }}>
-                  Send it to {created.broker_name} privately. If it is lost, revoke it and
-                  create a new one.
+                  If it is lost, revoke it and create a new one.
                 </div>
+                {minted.guide && <GuideNote guide={minted.guide} broker={created.broker_name} what="key" />}
                 {/* What their system actually sends. `period` is the reporting
                     period the file is for — GET /v1/whoami lists the values
                     this key may use. */}
@@ -1170,12 +1170,13 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
 
             {channel === "email" && (
               <div className="field">
-                <label>Sender Email Address</label>
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  Sender Email Address
+                  <InfoTip text={"The broker's own address — the one their bordereau emails "
+                    + "come from. Only emails sent from it are accepted."} />
+                </label>
                 <input type="email" value={senderEmail} placeholder="ops@bridgebrokers.com"
                   onChange={e => setSenderEmail(e.target.value)} />
-                <div className="hint" style={{ marginTop: 6 }}>
-                  Only emails sent from this address are accepted.
-                </div>
               </div>)}
 
             <div className="field">
@@ -1203,19 +1204,33 @@ export function AddRouteModal({ open, brokers, programmesByBroker, emailsByBroke
             </div>
 
             <div className="field">
-              <label>Broker's Address</label>
+              {/* Email: not the broker's address — Kavachio's intake mailbox,
+                  where every broker sends, with the carrier copied. */}
+              <label>{channel === "email" ? "Send To (Kavachio Intake Mailbox)"
+                : channel === "sftp" ? "Broker's Folder" : "Broker's Address"}</label>
               <div className="drop filled" style={{ padding: "13px 15px", textAlign: "left" }}>
                 <span className="mono" style={{ fontSize: 12.5 }}>
                   {preview ?? "Select a broker to see their address"}</span>
                 <div style={{ fontSize: 12, marginTop: 5, color: "var(--p-muted)" }}>
-                  Generated automatically.
+                  {channel === "email" && preview && preview.includes("@") ? (
+                    // Three short rules, one per line — easier to scan than a paragraph.
+                    <ul style={{ margin: "4px 0 0", paddingLeft: 18, display: "grid", gap: 3, listStyle: "disc",
+                                 lineHeight: 1.5 }}>
+                      <li><b>To:</b> the broker sends the bordereau to this address.</li>
+                      <li><b>Cc:</b> always copy{" "}
+                        <span className="mono">{carrierCc ?? "your email"}</span> — without it
+                        the email is not accepted.</li>
+                      <li><b>Subject or file name:</b> the programme and contract (code or name)
+                        decide where the file goes.</li>
+                    </ul>
+                  ) : "Generated automatically."}
                 </div>
               </div>
             </div>
 
             {sharedWayIn && brokerId !== "" && programId !== "" && preview && (
               <ChannelExample channel={channel as "email" | "sftp"} from={senderEmail.trim()}
-                to={preview} folder={preview} shared={programId === "any"}
+                to={preview} cc={carrierCc} folder={preview} shared={programId === "any"}
                 programmes={programId === "any" ? progs : progs.filter(p => p.program_id === programId)} />)}
 
           </>

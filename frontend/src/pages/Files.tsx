@@ -201,6 +201,7 @@ export default function Files() {
         emailsByBroker={addData?.emailsByBroker ?? {}}
         creatable={addData?.creatable ?? ["sftp"]}
         mailbox={addData?.mailbox ?? null}
+        carrierCc={addData?.carrierCc ?? null}
         mailReady={addData?.mailReady ?? false}
         onClose={() => setAdding(false)}
         onCreated={() => { setAdding(false); setRefreshKey(k => k + 1); }} />

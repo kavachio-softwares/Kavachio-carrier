@@ -130,7 +130,7 @@ function failedCheck(reason: string | null): number {
   if (/we can accept files up to|nothing arrived at all/.test(r)) return 0;
   if (/not a spreadsheet|not an excel workbook|we can read /.test(r)) return 1;
   if (/expands to|internal parts|contains macros/.test(r)) return 2;
-  if (/recognise the sender|not linked to a broker|been switched off/.test(r)) return 3;
+  if (/recognise the sender|not linked to a broker|been switched off|did not copy the carrier/.test(r)) return 3;
   if (/no reporting period|not a reporting period|has not ended yet|which programme\?|which contract\?|contract is not one/.test(r)) return 4;
   if (/security scan/.test(r)) return 5;
   if (/same file we already loaded/.test(r)) return 6;
@@ -1071,7 +1071,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival }: {
             {err && <div className="note crit" style={{ marginTop: 12 }}>{err}</div>}
           </div>
 
-          <div className="drawer-f">
+          <div className="drawer-f one-row">
             {arrival.can_download && (
               <button className="btn" disabled={busy}
                 onClick={() => downloadArrival(arrival.arrival_id, arrival.filename)}
@@ -1082,8 +1082,9 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival }: {
                 broken, and the fix is a file we can open, not an override. */}
             {st === "held" && !arrival.resolution && (
               <button className="btn pri" disabled={busy}
+                title="Accept this file despite the hold reason and check it against the contract"
                 onClick={() => decide("release")}>
-                {busy ? "Processing…" : "Process File"}</button>)}
+                {busy ? "Accepting…" : "Accept & Process"}</button>)}
 
             {st !== "ok" && !arrival.resolution && (
               <button className="btn" disabled={busy}
