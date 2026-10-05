@@ -249,6 +249,9 @@ export type AggregateMarker = {
   level: "file" | "group";
   function: "sum" | "count" | "distinct_count" | string;
   group_by: string[];
+  /** The rule's bound on the total (from its IR, attached at read time). */
+  max?: number | null;
+  min?: number | null;
 };
 
 /** The compiler's own sentences for an aggregate breach (rule_compiler
@@ -294,6 +297,19 @@ export function aggregateLabel(a: AggregateMarker | null | undefined, field?: st
     note: `${what}. The highlight sits on the first row that feeds it — `
       + "the breach belongs to the total, not to this one value.",
   };
+}
+
+/** An aggregate's total as a reader writes it ("107,700", not "107700.0"),
+ *  and how far it sits past the rule's limit. Null for a row-level value. */
+export function aggregateValue(a: AggregateMarker | null | undefined, actual?: string | null) {
+  const raw = String(actual ?? "").replace(/,/g, "").trim();
+  const n = Number(raw);
+  if (!a || !raw || !Number.isFinite(n)) return null;
+  const fmt = (x: number) => x.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const gap = a.max != null && n > a.max ? `${fmt(n - a.max)} over the ${fmt(a.max)} limit`
+    : a.min != null && n < a.min ? `${fmt(a.min - n)} under the ${fmt(a.min)} minimum`
+    : null;
+  return { value: fmt(n), gap };
 }
 
 export type OutputException = {
@@ -435,14 +451,27 @@ export async function saveExportDecisions(
   return data;
 }
 
+/** What a generated download is FOR, in names — the strip above its exceptions. */
+export type DownloadAbout = {
+  programme: string | null; broker: string | null; contract: string | null;
+  reporting_period: string | null; version_no: number | null;
+};
+
+/** A generated download's output-stage exceptions, plus what the file is for. */
+export async function getDownloadReview(
+  downloadId: number | string
+): Promise<{ exceptions: StoredException[]; about: DownloadAbout | null }> {
+  const { data } = await api.get<{ exceptions: OutputException[]; about?: DownloadAbout }>(
+    `/export/downloads/${downloadId}`
+  );
+  return { exceptions: (data.exceptions ?? []).map(outputExcToStored), about: data.about ?? null };
+}
+
 /** Fetch a generated download's output-stage exceptions, mapped to StoredException[]. */
 export async function getDownloadExceptions(
   downloadId: number | string
 ): Promise<StoredException[]> {
-  const { data } = await api.get<{ exceptions: OutputException[] }>(
-    `/export/downloads/${downloadId}`
-  );
-  return (data.exceptions ?? []).map(outputExcToStored);
+  return (await getDownloadReview(downloadId)).exceptions;
 }
 
 /** Batch "Save": re-validate ALL edits together and write one new version per

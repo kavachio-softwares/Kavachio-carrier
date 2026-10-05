@@ -255,7 +255,11 @@ def _mem_session():
                      db.Party.__table__,
                      # The board resolves who to chase from the broker's own
                      # user accounts — there is no contact record anywhere else.
-                     db.AppUser.__table__])
+                     db.AppUser.__table__,
+                     # The Versions panel reads when each file came in from its
+                     # output and landing, and the board a programme's setups.
+                     db.OutputExport.__table__, db.LandingRecord.__table__,
+                     db.Pipeline.__table__])
     return sessionmaker(bind=eng)()
 
 

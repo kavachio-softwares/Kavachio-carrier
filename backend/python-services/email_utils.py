@@ -105,7 +105,8 @@ def mail_account(account: str = "") -> MailAccount:
 
 def send_email(to: str, subject: str, html: str, text: str | None = None,
                account: str = "", cc: "str | list[str] | None" = None,
-               attachments: "list[tuple[str, bytes, str]] | None" = None) -> None:
+               attachments: "list[tuple[str, bytes, str]] | None" = None,
+               reply_to: "str | None" = None) -> None:
     """Send an HTML email as `account` (default sender when omitted).
     Raises on failure — the caller decides how to handle it.
 
@@ -153,6 +154,10 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
     msg["To"] = to
     if cc_list:
         msg["Cc"] = ", ".join(cc_list)
+    if (reply_to or "").strip():
+        # e.g. a broker's intake address, so a reply carrying a corrected file
+        # lands where files are collected rather than in the sender's inbox.
+        msg["Reply-To"] = reply_to.strip()
     msg.set_content(text or "Open this message in an HTML-capable email client.")
     msg.add_alternative(html, subtype="html")
     for name, data, mime in (attachments or []):

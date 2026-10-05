@@ -1777,41 +1777,20 @@ def program_schedule_get(program_id: int, principal: Principal = Depends(current
     """
     from submission_calendar_service import (
         resolve_for_schedule, _unresolved_reason, program_contract_basis,
-        materialize_schedule,
+        ensure_auto_schedule,
     )
-    from submission_calendar import _norm_freq
     with SessionLocal() as s:
         p = s.get(Program, program_id)
         if not p:
             raise HTTPException(404, "program not found")
         assert_tenant_owns(principal, p.tenant_id)
         c_freq, c_anchor = program_contract_basis(s, program_id)
-        sched = (s.query(SubmissionSchedule)
-                 .filter(SubmissionSchedule.program_id == program_id).first())
+        # Built from the contract on first need (`_norm_freq`, not truthiness,
+        # decides "usable" — see ensure_auto_schedule); otherwise the prompt.
+        sched = ensure_auto_schedule(s, program_id, p.tenant_id)
         if sched is None:
-            # `_norm_freq` (not truthiness) decides "usable": it is the same check
-            # resolve_schedule() applies, so a frequency it cannot build from —
-            # 'annual', say — falls through to the prompt rather than creating a
-            # schedule row that could never resolve.
-            if not (_norm_freq(c_freq) and c_anchor):
-                return _schedule_dict(None, None, reason="not_set",
-                                      contract_frequency=c_freq, contract_anchor=c_anchor)
-            sched = SubmissionSchedule(tenant_id=p.tenant_id, program_id=program_id)
-            s.add(sched)
-            try:
-                s.flush()
-            except IntegrityError:
-                # Two first views at once; program_id is unique. Reuse whichever
-                # row won rather than failing the read.
-                s.rollback()
-                sched = (s.query(SubmissionSchedule)
-                         .filter(SubmissionSchedule.program_id == program_id).first())
-            if sched is not None:
-                materialize_schedule(s, sched)
-                s.commit(); s.refresh(sched)
-            if sched is None:
-                return _schedule_dict(None, None, reason="not_set",
-                                      contract_frequency=c_freq, contract_anchor=c_anchor)
+            return _schedule_dict(None, None, reason="not_set",
+                                  contract_frequency=c_freq, contract_anchor=c_anchor)
         resolved, program, contract = resolve_for_schedule(s, sched)
         reason = None if resolved else _unresolved_reason(sched, program, contract)
         return _schedule_dict(sched, resolved, reason,
@@ -5268,11 +5247,15 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
 
     Scoped to THIS carrier's tenant, so a broker party id from outside returns
     an empty list rather than another carrier's runs.
+
+    One row per SUBMISSION: a file sent again for the same programme, contract
+    and period is its next version, and only the newest version is listed and
+    counted (`current_export_ids`) — its exceptions are the ones that stand.
     """
     since = datetime.utcnow() - timedelta(days=days)
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
-        from exception_tally import current_export_ids, export_tally
+        from exception_tally import current_export_ids, export_tally, export_versions
         live = current_export_ids(s, tenant_id=tid)
         eids = [i for (i,) in s.query(OutputExport.id)
                 .filter(OutputExport.tenant_id == tid,
@@ -5284,6 +5267,7 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
         broker = s.query(Party).filter(Party.id == broker_party_id).first()
         prog_names = {pid: nm for pid, nm in s.query(Program.id, Program.name)
                       .filter(Program.tenant_id == tid).all()}
+        versions = export_versions(s, eids)
 
         items, by_prog = [], {}
         lo, hi = (page - 1) * page_size, (page - 1) * page_size + page_size
@@ -5301,17 +5285,26 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
             for k in ("rows", "exceptions", "open", "put_right"):
                 g[k] += t[k]
             if lo <= n < hi:
+                v = versions.get(r.id) or {}
                 items.append({
                     "export_id": r.id,
                     "source_upload_id": r.source_upload_id,
                     "filename": r.filename,
                     "programme_id": r.program_id,
                     "programme": prog_names.get(r.program_id),
+                    "contract_id": v.get("contract_id") or r.contract_id,
+                    "reporting_period": v.get("reporting_period"),
+                    "version_no": v.get("version_no"),
                     "status": r.status,
                     "created_at": _iso_utc(r.created_at),
                     **t,
                 })
             s.expunge(r)
+        con_ids = {i["contract_id"] for i in items if i["contract_id"]}
+        con_names = {cid: nm for cid, nm in s.query(Contract.id, Contract.name)
+                     .filter(Contract.id.in_(con_ids or {-1})).all()}
+        for i in items:
+            i["contract"] = con_names.get(i["contract_id"])
 
         programmes = sorted(by_prog.values(),
                             key=lambda g: (-g["open"], -g["files"], g["name"].lower()))

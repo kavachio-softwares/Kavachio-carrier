@@ -27,6 +27,12 @@ import { fmtDateTime } from "../utils/date";
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
+/** How a version came in — "v1 by hand, v2 by API" is one period's history. */
+const CAME_BY: Record<string, string> = {
+  upload: "Manual Upload", email: "Email", sftp: "SFTP", api: "API",
+  secure_link: "Secure Link",
+};
+
 /** ISO date → "15 Aug". The year is in the month heading above the table. */
 function fmtDay(iso?: string | null): string {
   if (!iso) return "—";
@@ -153,7 +159,11 @@ export default function BrokerCalendar() {
   // One carrier chosen in the sidebar: every row is theirs, so the column
   // would say the same thing on every line.
   const showCarrier = carrierId == null;
-  const cols = showCarrier ? 8 : 7;
+  const cols = showCarrier ? 9 : 8;
+  // The contract name, opening the contract — "—" when there is none yet.
+  const contractCell = (id?: number | null, name?: string | null) =>
+    id == null ? <span className="muted">—</span>
+      : <Link className="linkish" to={`/contracts/${id}`}>{name ?? `Contract #${id}`}</Link>;
 
 
   return (
@@ -236,7 +246,7 @@ export default function BrokerCalendar() {
               <thead>
                 <tr>
                   {showCarrier && <th>Carrier</th>}
-                  <th>Programme</th><th>Period</th><th>Due by</th>
+                  <th>Programme</th><th>Contract</th><th>Period</th><th>Due by</th>
                   <th>Sent On</th><th>Arrival Status</th><th>Version</th><th>Action</th>
                 </tr>
               </thead>
@@ -258,6 +268,7 @@ export default function BrokerCalendar() {
                     <tr key={r.id}>
                       {showCarrier && <td className="muted">{r.carrier_name ?? "—"}</td>}
                       <td><b>{r.program_name}</b></td>
+                      <td>{contractCell(r.contract_id, r.contract_name)}</td>
                       <td className="mono">{r.period}</td>
                       <td className="mono">{fmtDay(r.due_date)}</td>
                       <td className="mono">
@@ -334,7 +345,7 @@ export default function BrokerCalendar() {
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr>{showCarrier && <th>Carrier</th>}<th>Programme</th><th>Reporting Frequency</th>
+                <tr>{showCarrier && <th>Carrier</th>}<th>Programme</th><th>Contract</th><th>Reporting Frequency</th>
                   <th>Due</th><th>Next Due Date</th>
                   <th>Contract Ends On
                     <InfoTip text={"The day this programme's contract ends. Deadlines are set up to "
@@ -343,7 +354,7 @@ export default function BrokerCalendar() {
               </thead>
               <tbody>
                 {schedules.length === 0 && (
-                  <tr><td colSpan={showCarrier ? 6 : 5} className="muted"
+                  <tr><td colSpan={showCarrier ? 7 : 6} className="muted"
                     style={{ padding: "14px 12px" }}>
                     No deadlines yet — your carrier sets how often each programme reports.
                   </td></tr>
@@ -352,6 +363,7 @@ export default function BrokerCalendar() {
                   <tr key={sch.program_id}>
                     {showCarrier && <td className="muted">{sch.carrier_name ?? "—"}</td>}
                     <td><b>{sch.program_name}</b></td>
+                    <td>{contractCell(sch.brokers?.[0]?.contract_id, sch.brokers?.[0]?.contract_name)}</td>
                     <td>
                       {sch.frequency
                         ? sch.frequency_label
@@ -450,7 +462,11 @@ function VersionPanel({ row, onClose }: { row: BrokerCalendarRow; onClose: () =>
                   </span>
                 )}
               </div>
-              {v.source_filename && <div className="sub">{v.source_filename}</div>}
+              {(v.source_filename || v.channel) && (
+                <div className="sub">
+                  {v.source_filename}
+                  {v.channel && CAME_BY[v.channel] ? `${v.source_filename ? " · " : ""}via ${CAME_BY[v.channel]}` : ""}
+                </div>)}
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
                 {newest && v.id !== newest.id ? (
                   <span className="badge b-mut"><span className="d" />Replaced by {label(newest)}</span>

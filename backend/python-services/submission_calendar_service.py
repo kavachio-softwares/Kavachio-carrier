@@ -254,6 +254,39 @@ def active_broker_ids(session, program_id: int) -> list[int]:
     return sorted(out)
 
 
+def ensure_auto_schedule(session, program_id: int, tenant_id) -> Optional[SubmissionSchedule]:
+    """The programme's schedule — built from its contract the first time
+    anyone needs it, when the contract supplies both a frequency and a start.
+
+    Without this the calendar existed only once a carrier had opened the
+    programme's calendar screen, and a broker on a programme nobody had looked
+    at had no reporting period to pick. Returns None when there is no schedule
+    and the contract cannot supply one (then a person has to set it). Commits.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from submission_calendar import _norm_freq
+    sched = (session.query(SubmissionSchedule)
+             .filter(SubmissionSchedule.program_id == program_id).first())
+    if sched is not None:
+        return sched
+    c_freq, c_anchor = program_contract_basis(session, program_id)
+    if not (_norm_freq(c_freq) and c_anchor):
+        return None
+    sched = SubmissionSchedule(tenant_id=tenant_id, program_id=program_id)
+    session.add(sched)
+    try:
+        session.flush()
+    except IntegrityError:
+        # Two first views at once; program_id is unique. Reuse whichever row won.
+        session.rollback()
+        return (session.query(SubmissionSchedule)
+                .filter(SubmissionSchedule.program_id == program_id).first())
+    materialize_schedule(session, sched)
+    session.commit()
+    session.refresh(sched)
+    return sched
+
+
 def materialize_schedule(session, schedule: SubmissionSchedule,
                          today: Optional[date] = None,
                          horizon_months: Optional[int] = None) -> dict:
@@ -1020,6 +1053,89 @@ def _utc_iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() + "Z"
 
 
+def _as_utc_naive(dt):
+    """A timestamp as naive UTC — the convention of the utcnow() columns."""
+    if dt is not None and dt.tzinfo is not None:
+        from datetime import timezone
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+# How close a version's creation and its file's arrival are: the same
+# transaction writes both (intake_service.land_file), usually milliseconds
+# apart — seconds when keeping the copy of a large file is slow. The NEAREST
+# file inside this window is the one; the window only rules out a stranger.
+_SAME_LANDING_SECONDS = 30
+
+
+def _arrivals_behind(session, versions) -> dict:
+    """{version id: FileArrival} for versions that name no output.
+
+    A file sent by email, SFTP or API ticks its period the moment it LANDS
+    (intake_service.land_file), before it has been run — so the version had no
+    output to name, and the Versions panel showed no time and no View file.
+    New runs link the output once they finish (submission_service); this reads
+    the arrival for versions recorded before that. The tick is written in the
+    same transaction as the arrival, so the arrival is the one with the same
+    file name that landed at the moment the version was created."""
+    versions = [v for v in versions if v.source_filename and v.created_at]
+    if not versions:
+        return {}
+    try:
+        return _arrivals_behind_q(session, versions)
+    except Exception:  # noqa: BLE001 — a time and a link; never what breaks the list
+        log.debug("could not read the files behind unlinked versions", exc_info=True)
+        return {}
+
+
+def _arrivals_behind_q(session, versions) -> dict:
+    from intake_models import FileArrival, IntakeRoute
+    v0 = versions[0]
+    q = (session.query(FileArrival)
+         .outerjoin(IntakeRoute, IntakeRoute.id == FileArrival.route_id)
+         .filter(FileArrival.tenant_id == v0.tenant_id,
+                 FileArrival.outcome == "accepted",
+                 FileArrival.filename.in_({v.source_filename for v in versions}),
+                 func.coalesce(FileArrival.program_id, IntakeRoute.program_id) == v0.program_id))
+    if v0.broker_party_id is not None:
+        q = q.filter(FileArrival.matched_broker_party_id == v0.broker_party_id)
+    arrivals = [a for a in q.all() if a.received_at is not None]
+    out = {}
+    for v in versions:
+        best = min((a for a in arrivals if a.filename == v.source_filename),
+                   key=lambda a: abs((_as_utc_naive(a.received_at) - v.created_at).total_seconds()),
+                   default=None)
+        if best is not None and abs((_as_utc_naive(best.received_at)
+                                     - v.created_at).total_seconds()) <= _SAME_LANDING_SECONDS:
+            out[v.id] = best
+    return out
+
+
+def _ways_in(session, export_ids: set) -> dict:
+    """{export id: how its file came in}. A correction made on the secure link
+    is a file landed for the broker (matched_by 'secure_link'), or — before
+    that — an output of its own (output_exports.version_status)."""
+    if not export_ids:
+        return {}
+    from intake_models import FileArrival, IntakeRoute
+    out = {}
+    try:
+        rows = (session.query(FileArrival.run_export_id, FileArrival.channel,
+                              FileArrival.matched_by, IntakeRoute.channel)
+                .outerjoin(IntakeRoute, IntakeRoute.id == FileArrival.route_id)
+                .filter(FileArrival.run_export_id.in_(export_ids)).all())
+        for eid, own, matched_by, by_route in rows:
+            out[eid] = ("secure_link" if matched_by == "secure_link"
+                        else by_route or own or "upload")
+        for eid, vstatus in (session.query(OutputExport.id, OutputExport.version_status)
+                             .filter(OutputExport.id.in_(export_ids - set(out))).all()):
+            if vstatus:
+                out[eid] = "secure_link"
+    except Exception:  # noqa: BLE001 — a label; never what breaks the list
+        log.debug("could not say how versions came in", exc_info=True)
+    return out
+
+
 def submission_versions(session, expected_id: int) -> list[dict]:
     """Every file ever submitted for one period, oldest first.
 
@@ -1046,13 +1162,23 @@ def submission_versions(session, expected_id: int) -> list[dict]:
                             .group_by(LandingRecord.output_export_id).all()):
             if landed is not None:
                 uploaded[eid] = landed
+    arrived = _arrivals_behind(session, [v for v in versions if not v.received_export_id])
+    came_by = _ways_in(session, {v.received_export_id or (arrived[v.id].run_export_id
+                                                          if v.id in arrived else None)
+                                 for v in versions} - {None})
     out = []
     for v in versions:
+        a = arrived.get(v.id)
+        export_id = v.received_export_id or (a.run_export_id if a is not None else None)
         out.append({
+            # How this version came in — upload, email, sftp, api or
+            # secure_link — so "v1 by hand, v2 by API" reads as one history.
+            "channel": came_by.get(export_id),
             "id": v.id, "version_no": v.version_no, "kind": v.kind,
             "received_at": v.received_at.isoformat() if v.received_at else None,
-            "uploaded_at": _utc_iso(uploaded.get(v.received_export_id)),
-            "received_export_id": v.received_export_id,
+            "uploaded_at": _utc_iso(uploaded.get(v.received_export_id)
+                                    or (a.received_at if a is not None else None)),
+            "received_export_id": export_id,
             "source_filename": v.source_filename,
             "period_source": v.period_source,
             "released_at": v.released_at.isoformat() if v.released_at else None,
@@ -1492,6 +1618,55 @@ def _row_contracts(session, rows) -> dict:
     return out
 
 
+def _schedule_brokers(session, pid: int, broker_ids: list[int], today: date) -> list[dict]:
+    """Each broker on a programme, for the deadlines table: their contract, when
+    it ends, their next due date, and how far they are from a file being owed —
+    contract → bordereau setup. The frequency is the programme's; everything
+    here is per broker, which is what a programme with ten brokers needs."""
+    if not broker_ids:
+        return []
+    from db import Pipeline
+    try:
+        from hierarchy_routes import _contract_settled
+    except Exception:  # noqa: BLE001 — a missing gate reads as settled, as elsewhere
+        _contract_settled = None
+    ENDED = {"expired", "terminated", "superseded"}
+    names = _party_names(session, broker_ids)
+    contracts = (session.query(Contract).filter(Contract.program_id == pid)
+                 .order_by(Contract.id.desc()).all())
+    live = (session.query(Pipeline.broker_party_id)
+            .filter(Pipeline.program_id == pid, Pipeline.status == "active").all())
+    live_brokers = {b for (b,) in live}
+    out = []
+    for bid in broker_ids:
+        mine = [c for c in contracts if c.broker_party_id == bid
+                and (c.lifecycle or "").strip().lower() not in ENDED]
+        # The one a setup can be built on first, then any still being agreed.
+        settled = [c for c in mine
+                   if _contract_settled is None or _contract_settled(session, c)]
+        c = (settled or mine or [None])[0]
+        nxt = (session.query(ExpectedSubmission.due_date)
+               .filter(ExpectedSubmission.program_id == pid,
+                       ExpectedSubmission.broker_party_id == bid,
+                       ExpectedSubmission.received_at.is_(None),
+                       ExpectedSubmission.due_date >= today)
+               .order_by(ExpectedSubmission.due_date.asc()).first())
+        ends = _contract_expiry(c) if c is not None else None
+        out.append({
+            "broker_party_id": bid,
+            "broker_name": names.get(bid) or f"Broker {bid}",
+            "contract_id": c.id if c is not None else None,
+            "contract_name": (c.name or c.filename or f"Contract #{c.id}") if c is not None else None,
+            # A contract exists but is not agreed and signed yet.
+            "contract_settled": bool(settled),
+            "contract_ends": ends.isoformat() if ends else None,
+            # Their own live setup, or a programme-wide one (broker NULL).
+            "setup_live": bid in live_brokers or None in live_brokers,
+            "next_due": nxt[0].isoformat() if nxt and nxt[0] else None,
+        })
+    return out
+
+
 def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = None,
                    today: Optional[date] = None, broker_id: Optional[int] = None,
                    program_ids: Optional[list[int]] = None) -> dict:
@@ -1663,6 +1838,9 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         if broker_id is not None:
             nxt_q = nxt_q.filter(ExpectedSubmission.broker_party_id == broker_id)
         nxt = nxt_q.order_by(ExpectedSubmission.due_date.asc()).first()
+        bids = active_broker_ids(session, pid)
+        if broker_id is not None:
+            bids = [b for b in bids if b == broker_id]
         schedule_rows.append({
             "program_id": pid,
             "program_name": p.name,
@@ -1672,7 +1850,9 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
                                 if resolved else "Not set"),
             "due_rule": _due_rule_text(resolved),
             "next_due": nxt.due_date.isoformat() if nxt and nxt.due_date else None,
-            "broker_count": len(active_broker_ids(session, pid)),
+            "broker_count": len(bids),
+            # One entry per broker: contract, its end, next due date, setup.
+            "brokers": _schedule_brokers(session, pid, bids, today),
             # When the contract stops. This is what bounds the calendar, so the
             # screen can say why the deadlines end where they do instead of the
             # list simply running out.

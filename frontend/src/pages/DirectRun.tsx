@@ -79,9 +79,9 @@ export default function DirectRun() {
   // The reporting period this run is FOR — the same real calendar rows the
   // broker's own Process Bordereau picks from (GET /direct/periods mirrors
   // carrier_routes.contract_bordereau_periods). Only meaningful once a broker
-  // is picked — a period is always somebody's — and, like the broker/contract
-  // themselves, optional here: this route also serves runs made with neither,
-  // which keep behaving exactly as before.
+  // is picked — a period is always somebody's — and then REQUIRED whenever the
+  // calendar lists one, as on every other way a file comes in. A run for no
+  // broker has no period to pick.
   const [periods, setPeriods] = useState<BordereauPeriod[] | null>(null);
   const [period, setPeriod] = useState<string>("");
   useEffect(() => {
@@ -241,6 +241,11 @@ export default function DirectRun() {
   async function submit(checkOnly: boolean, confirmDuplicate = false) {
     if (!file || carrierId === "" || programId === "") {
       setErr("Pick carrier, program and an input file."); return;
+    }
+    // Every file says which reporting period it is for — wherever the calendar
+    // has one to pick. The server refuses it too.
+    if (!checkOnly && !period && periods && periods.length > 0) {
+      setErr("Pick the reporting period this bordereau is for."); return;
     }
     // The server refuses this too. Said here as well, because a disabled button
     // with no sentence beside it is a screen that will not say what is wrong.

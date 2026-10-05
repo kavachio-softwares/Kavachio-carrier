@@ -184,6 +184,22 @@ export type BoardSchedule = {
    *  no longer generated past it. Null when no contract states an expiry, in
    *  which case a rolling horizon is used instead. */
   covers_until: string | null;
+  /** One entry per broker on the programme: what they need before a file is
+   *  owed (contract → bordereau setup), and their own dates. */
+  brokers?: ScheduleBroker[];
+};
+
+export type ScheduleBroker = {
+  broker_party_id: number;
+  broker_name: string;
+  contract_id: number | null;
+  contract_name: string | null;
+  /** Agreed and signed — a bordereau setup can be built on it. */
+  contract_settled: boolean;
+  contract_ends: string | null;
+  /** A live bordereau setup this broker's files run through. */
+  setup_live: boolean;
+  next_due: string | null;
 };
 
 export type BoardResponse = {
@@ -208,6 +224,8 @@ export type SubmissionVersionRow = {
   uploaded_at?: string | null;
   received_export_id: number | null;
   source_filename: string | null;
+  /** How this version came in: upload, email, sftp, api or secure_link. */
+  channel?: string | null;
   /** How the period was decided: explicit | date | filename | oldest_open.
    *  "the file said July" and "we assumed July" are different confidences. */
   period_source: string | null;

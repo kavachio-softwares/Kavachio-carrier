@@ -67,7 +67,8 @@ export function programmeSteps(p: HierarchyProgramme): Step[] {
   const brokers = p.brokers.filter(b => onProgramme(b.link_status));
   const withContract = brokers.filter(hasSettledContract);
   const withSetup = withContract.filter(b => b.setup_status === "active");
-  const programmeUrl = `/programs/${p.id}/brokers`;
+  // The old programme brokers screen is gone; brokers are managed in step 2.
+  const programmeUrl = flowUrl(p.id, "brokers");
 
   // Contract: the first broker still without a live contract decides where
   // the step leads — their contract in progress, or a new one pre-filled.

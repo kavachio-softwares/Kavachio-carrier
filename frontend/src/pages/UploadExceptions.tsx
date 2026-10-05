@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { useParams, useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import {
-  getUploadExceptions, getDownloadExceptions, runValidation, rerenderExport,
-  type UploadExceptionsResponse,
+  getUploadExceptions, getDownloadReview, runValidation, rerenderExport,
+  type UploadExceptionsResponse, type DownloadAbout,
 } from "../api/validation";
 import { groupByRule, exportCSV, buildReverseSpec, tallyDecisions } from "../components/ExceptionCards";
 import RuleExplanationBlock from "../components/RuleExplanation";
@@ -13,6 +13,7 @@ import { CheckCircle2 } from "lucide-react";
 import { LoadingOverlay } from "../components/Busy";
 import BdxInlineReview from "../components/BdxInlineReview";
 import Modal from "../components/ui/Modal";
+import { periodLabel } from "../utils/date";
 
 /** Fix & re-run reloads the page — the success toast crosses the reload here. */
 const RERUN_TOAST_KEY = "kavachio.rerun-toast";
@@ -51,6 +52,7 @@ export default function UploadExceptions() {
     navigate(location.pathname + location.search, { replace: true, state: null });
   }, [reviewed]);
   const [data, setData] = useState<UploadExceptionsResponse | null>(null);
+  const [about, setAbout] = useState<DownloadAbout | null>(null);
   const [loading, setLoading] = useState(true);
   const [revalidating, setRevalidating] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
@@ -101,7 +103,8 @@ export default function UploadExceptions() {
       if (downloadId) {
         // Output-stage: the generated download's exceptions, mapped to the
         // shared shape so the same UI renders them.
-        const exceptions = await getDownloadExceptions(downloadId);
+        const { exceptions, about } = await getDownloadReview(downloadId);
+        setAbout(about);
         setData({
           success: true, uploadId, validated: true, run: null, exceptions,
           source_file: null, mga: null, mapper_id: null,
@@ -230,6 +233,17 @@ export default function UploadExceptions() {
               {exceptions.length} exception{exceptions.length === 1 ? "" : "s"} across{" "}
               {allGroups.length} rule{allGroups.length === 1 ? "" : "s"}.
             </p>
+            {about && (about.reporting_period || about.programme || about.broker || about.contract) && (
+              <div className="about-strip">
+                {about.reporting_period && (
+                  <span className="chip lead">
+                    {periodLabel(about.reporting_period)}
+                    {about.version_no != null && about.version_no > 1 && ` · Version ${about.version_no}`}
+                  </span>)}
+                {about.programme && <span className="chip"><span className="k">Programme</span>{about.programme}</span>}
+                {about.broker && <span className="chip"><span className="k">Broker</span>{about.broker}</span>}
+                {about.contract && <span className="chip"><span className="k">Contract</span>{about.contract}</span>}
+              </div>)}
           </div>
           <div className="actions">
             <button className="btn" onClick={() => navigate(back.to)}>

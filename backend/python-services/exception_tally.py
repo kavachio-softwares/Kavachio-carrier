@@ -99,4 +99,106 @@ def current_export_ids(s, *, broker_party_id: int | None = None,
         s.query(func.max(OutputExport.id))
          .filter(OutputExport.source_upload_id.isnot(None)))
         .group_by(OutputExport.source_upload_id).all()}
-    return live
+    return _newest_versions_only(s, live)
+
+
+def _newest_versions_only(s, live: set[int]) -> set[int]:
+    """Drop the runs a later version of the same submission has replaced.
+
+    A broker who sends September's file again — by any channel — sends the
+    next VERSION of one submission, not a second file. Its exceptions are the
+    ones that stand, even when there are more of them than before; the older
+    version's are history, exactly like a run that was fixed and re-run.
+    """
+    from db import OutputExport
+
+    seen = {eid: v for eid, v in export_versions(s, live).items()
+            if v["submission_ref"] or v["reporting_period"]}
+    if not seen:
+        return live
+    # Newest version within each submission first…
+    newest: dict[str, tuple] = {}
+    for eid, v in seen.items():
+        if v["submission_ref"]:
+            key = (v["version_no"] or 0, eid)
+            if key > newest.get(v["submission_ref"], (-1, -1)):
+                newest[v["submission_ref"]] = key
+    standing = {eid for _, eid in newest.values()}
+    standing |= {eid for eid, v in seen.items() if not v["submission_ref"]}
+    # …then one per broker + programme + contract + period: files from before
+    # the period was compulsory can sit in separate submissions for the same
+    # month (or in none, only on the calendar), and the latest one stands.
+    scope = {eid: (bid, pid, cid) for eid, bid, pid, cid in
+             s.query(OutputExport.id, OutputExport.broker_party_id,
+                     OutputExport.program_id, OutputExport.contract_id)
+             .filter(OutputExport.id.in_(standing)).all()}
+    latest: dict[tuple, int] = {}
+    for eid in standing:
+        v = seen[eid]
+        bid, pid, cid = scope.get(eid, (None, None, None))
+        group = ((bid, pid, v["contract_id"] or cid, v["reporting_period"])
+                 if v["reporting_period"] else ("ref", v["submission_ref"]))
+        latest[group] = max(latest.get(group, eid), eid)
+    keep = set(latest.values())
+    return {eid for eid in live if eid not in seen or eid in keep}
+
+
+def export_versions(s, export_ids) -> dict[int, dict]:
+    """Which submission, version, reporting period and contract each run is.
+
+    Read off the file the run was made from (the arrival's run_export_id, or
+    its landing after a Fix & re-run moved the pointer), then the export's own
+    stamp (secure-link corrections), then the calendar for the period. A run
+    that is part of no submission is simply absent.
+    """
+    from sqlalchemy import or_
+    from db import ExpectedSubmission, LandingRecord, OutputExport, SubmissionVersion
+    from intake_models import FileArrival
+
+    ids = {int(i) for i in export_ids if i is not None}
+    if not ids:
+        return {}
+    out: dict[int, dict] = {}
+
+    def _put(eid, ref, ver, period=None, contract_id=None, strong=True):
+        d = out.setdefault(eid, {"submission_ref": None, "version_no": None,
+                                 "reporting_period": None, "contract_id": None})
+        if ref and (strong or not d["submission_ref"]):
+            d["submission_ref"], d["version_no"] = ref, ver
+        d["reporting_period"] = d["reporting_period"] or period
+        d["contract_id"] = d["contract_id"] or contract_id
+
+    arrivals = (s.query(FileArrival.run_export_id, LandingRecord.output_export_id,
+                        FileArrival.submission_ref, FileArrival.version_no,
+                        FileArrival.reporting_period, FileArrival.contract_id)
+                .outerjoin(LandingRecord, LandingRecord.id == FileArrival.run_landing_id)
+                .filter(or_(FileArrival.run_export_id.in_(ids),
+                            LandingRecord.output_export_id.in_(ids)))
+                .order_by(FileArrival.version_no.asc().nullsfirst())
+                .all())
+    # The file a run was made from first, the export's own stamp second, and a
+    # landing's current run last (two files with the same bytes can share one
+    # landing), newest version winning.
+    for run_eid, _land, ref, ver, per, con in arrivals:
+        if run_eid in ids:
+            _put(run_eid, ref, ver, per, con)
+    for eid, ref, ver, con in (s.query(OutputExport.id, OutputExport.submission_ref,
+                                       OutputExport.version_no, OutputExport.contract_id)
+                               .filter(OutputExport.id.in_(ids)).all()):
+        if ref or eid in out:
+            _put(eid, ref, ver, None, con, strong=False)
+    stamped = {eid for eid, d in out.items() if d["submission_ref"]}
+    for run_eid, land_eid, ref, ver, per, con in arrivals:
+        if land_eid in ids and land_eid not in stamped:
+            _put(land_eid, ref, ver, per, con)
+    missing = [eid for eid, d in out.items() if not d["reporting_period"]]
+    missing += [eid for eid in ids if eid not in out]
+    if missing:
+        for eid, per in (s.query(SubmissionVersion.received_export_id, ExpectedSubmission.period)
+                         .join(ExpectedSubmission, ExpectedSubmission.id == SubmissionVersion.expected_id)
+                         .filter(SubmissionVersion.received_export_id.in_(missing)).all()):
+            if eid in out:
+                out[eid]["reporting_period"] = out[eid]["reporting_period"] or per
+            else:
+                _put(eid, None, None, per)
+    return out

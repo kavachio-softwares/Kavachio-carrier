@@ -288,7 +288,7 @@ export default function Brokers() {
                               {b.programmes.slice(0, MAX_CHIPS).map(p => (
                                 <Link
                                   key={p.id}
-                                  to={`/programs/${p.id}/brokers`}
+                                  to={`/programs/${p.id}/setup`}
                                   onClick={e => e.stopPropagation()}
                                   className="party-chip"
                                 >

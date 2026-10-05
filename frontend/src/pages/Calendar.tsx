@@ -16,6 +16,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { CalendarDays } from "lucide-react";
 import { listPrograms, type ProgramLite } from "../api/calendar";
+import { api } from "../api/client";
 import ProgramCalendar from "../components/ProgramCalendar";
 import NotificationBell from "../components/NotificationBell";
 
@@ -41,13 +42,21 @@ export default function Calendar() {
     })();
   }, []);
 
-  // A linked program that is not this tenant's (or was deleted) is dropped,
-  // rather than leaving a calendar up for something not in the list.
+  // A linked program missing from the list is looked up on its own. The list
+  // holds only programmes created in the app, but the Bordereau Calendar shows
+  // every programme the carrier has, so its links can name one that is not in
+  // it. One that is not this tenant's (or was deleted) is refused by the server
+  // and dropped, rather than leaving a calendar up for something we cannot load.
   useEffect(() => {
     if (!loaded || selProgram === "") return;
-    if (!programs.some(p => p.id === selProgram)) setSelProgram("");
+    if (programs.some(p => p.id === selProgram)) return;
+    let live = true;
+    api.get<ProgramLite>(`/programs/${selProgram}`)
+      .then(r => { if (live && r.data?.id) setPrograms(prev => [...prev, r.data]); })
+      .catch(() => { if (live) setSelProgram(""); });
+    return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, programs]);
+  }, [loaded, programs, selProgram]);
 
   const sorted = useMemo(
     () => [...programs].sort((a, b) => a.name.localeCompare(b.name)), [programs]);

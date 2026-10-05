@@ -1071,6 +1071,9 @@ def broker_insights(days: int = Query(30, ge=7, le=90),
 def _run_rows(s, exports) -> list[dict]:
     """The run rows both the dashboard and the run history show."""
     from app_routes import _iso_utc
+    from exception_tally import export_versions
+    vers = export_versions(s, [e.id for e in exports]) if exports else {}
+    tallies = {e.id: _export_tally(e) for e in exports}
     prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
                    .filter(Program.id.in_({e.program_id for e in exports})).all()}
                   if exports else {})
@@ -1083,14 +1086,23 @@ def _run_rows(s, exports) -> list[dict]:
         "filename": e.filename,
         "programme": prog_names.get(e.program_id),
         "contract": contract_names.get(e.contract_id),
+        "contract_id": e.contract_id if e.contract_id in contract_names else None,
         "rows": e.policy_count,
-        "exception_count": e.exception_count or 0,
         "status": e.status,
         # A run through the broker's own lane is recorded as the broker
         # company; anything else the carrier ran for them.
         "sent_by": ("broker" if (e.generated_by or "").startswith("broker:")
                     else "carrier"),
         "created_at": _iso_utc(e.created_at),
+        # Which version of its submission this file is, and the month it is
+        # for — the list shows each submission once, as its newest version.
+        "version_no": (vers.get(e.id) or {}).get("version_no"),
+        "reporting_period": (vers.get(e.id) or {}).get("reporting_period"),
+        # What is still open on it, counted exactly as Exceptions to Review
+        # and the dashboard's own tile count — so the file list never quotes
+        # 23 for a file whose review screen says 13 are left.
+        **{k: tallies[e.id][k] for k in ("open", "put_right")},
+        "exception_count": tallies[e.id]["exceptions"],
     } for e in exports]
 
 
@@ -1690,37 +1702,36 @@ def broker_calendar(month: Optional[str] = Query(None),
     scheduler do those writes; a broker opening its calendar should not.
     """
     from submission_calendar_service import calendar_board, submission_versions
-    from db import SubmissionVersion
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
         prog_ids = sorted({l.program_id for l in _links(s, bid, carrier_id=carrier_id)})
         board = calendar_board(s, None, month=month, broker_id=bid,
                                program_ids=prog_ids)
-        # The file behind each period's newest version, so a done row can open
-        # its exceptions — the same export the Process Bordereau result opens.
-        ids = [r["id"] for r in board["rows"]]
-        latest: dict[int, int] = {}
-        if ids:
-            for v in (s.query(SubmissionVersion)
-                      .filter(SubmissionVersion.expected_id.in_(ids))
-                      .order_by(SubmissionVersion.expected_id,
-                                SubmissionVersion.version_no.desc()).all()):
-                if v.received_export_id is not None:
-                    latest.setdefault(v.expected_id, v.received_export_id)
         for r in board["rows"]:
             # Who at the broker the carrier would email is the carrier's
             # concern, not something the broker needs read back to it.
             r.pop("contacts", None)
-            r["export_id"] = latest.get(r["id"])
             # When the newest version was actually uploaded — date AND time,
             # which `latest_received_at` (a date) cannot say. The same value
             # the Versions panel shows on its newest entry. A month holds a
             # handful of rows per broker, so one lookup each is cheap.
             vs = submission_versions(s, r["id"]) if r.get("version_count") else []
             r["uploaded_at"] = vs[-1].get("uploaded_at") if vs else None
+            # The file behind the period's newest version, so a done row can
+            # open its exceptions — the same export the Process Bordereau
+            # result opens. Read from the Versions panel's own list, so a file
+            # sent by email, SFTP or API (whose output is found through its
+            # arrival) opens too.
+            r["export_id"] = next((v["received_export_id"] for v in reversed(vs)
+                                   if v.get("received_export_id")), None)
         for sch in board["schedules"]:
             # How many OTHER brokers share a programme is the carrier's to know.
             sch.pop("broker_count", None)
+            # Likewise who they are and what contract each holds: keep only
+            # this broker's own entry (its contract, its next file).
+            if "brokers" in sch:
+                sch["brokers"] = [b for b in (sch["brokers"] or [])
+                                  if b.get("broker_party_id") == bid]
         return board
 
 
@@ -1728,10 +1739,13 @@ def broker_calendar(month: Optional[str] = Query(None),
 def broker_runs(page: int = Query(1, ge=1),
                 page_size: int = Query(20, ge=1, le=100),
                 p: Principal = Depends(current_principal)):
-    """Every run made for this broker, newest first, a page at a time.
+    """Every file processed for this broker, newest first, a page at a time.
 
     Same scope as the dashboard's recent runs: this broker's runs on the
     programmes it is still on, whether its own team or the carrier sent them.
+    One row per SUBMISSION: a file sent again for the same programme, contract
+    and month is its next version, so only the newest version is listed (the
+    older ones stay in the database, in the submission's history).
     """
     from db import OutputExport
     with SessionLocal() as s:
@@ -1739,8 +1753,10 @@ def broker_runs(page: int = Query(1, ge=1),
         prog_ids = [l.program_id for l in _links(s, bid)]
         if not prog_ids:
             return {"items": [], "total": 0}
+        live = current_export_ids(s, broker_party_id=bid)
         q = s.query(OutputExport).filter(OutputExport.broker_party_id == bid,
-                                         OutputExport.program_id.in_(prog_ids))
+                                         OutputExport.program_id.in_(prog_ids),
+                                         OutputExport.id.in_(live or {-1}))
         total = q.count()
         rows = (q.order_by(OutputExport.id.desc())
                  .offset((page - 1) * page_size).limit(page_size).all())

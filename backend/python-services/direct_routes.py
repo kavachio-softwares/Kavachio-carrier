@@ -2755,10 +2755,15 @@ async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None
         actor = _actor_label(principal,
                              requested=(body.actor if body else None))
     # Re-render IN PLACE so the export id/header stays stable across Re-generate.
-    return await _render_landing(int(landing_id), export_contract_id, None,
-                                 actor, {},
-                                 auto_ingest=False, reuse_export_id=export_id,
-                                 rule_scope_pipeline_id=export_pipeline_id)
+    result = await _render_landing(int(landing_id), export_contract_id, None,
+                                   actor, {},
+                                   auto_ingest=False, reuse_export_id=export_id,
+                                   rule_scope_pipeline_id=export_pipeline_id)
+    # The broker exception loop: refresh this file's submission (and deliver
+    # it if what held it back is now fixed or answered). Never raises.
+    import submission_service
+    await run_in_threadpool(submission_service.on_export_rerendered, export_id)
+    return result
 
 
 def _contract_clauses_by_field(contract_id: Optional[int],
@@ -3875,6 +3880,11 @@ def direct_runs(
             query = query.filter(OutputExport.broker_party_id == broker_party_id)
         if contract_id is not None:
             query = query.filter(OutputExport.contract_id == contract_id)
+        # One row per SUBMISSION: a later file for the same programme, contract
+        # and month is the next version and replaces the earlier one here; the
+        # older versions stay in the database and in the submission's history.
+        from exception_tally import current_export_ids, export_versions
+        query = query.filter(OutputExport.id.in_(current_export_ids(s, tenant_id=tid) or {-1}))
         if result == "clean":
             query = query.filter(OutputExport.status == vo.CLEAN)
         elif result == "exceptions":
@@ -3933,6 +3943,11 @@ def direct_runs(
                carrier_party_id_, program_id_, export_id, filename,
                exception_count, status_, carrier_name, program_name,
                broker_party_id_, broker_name, contract_id_, contract_name) in rows]
+
+        vers = export_versions(s, [i["export_id"] for i in items])
+        for i in items:
+            v = vers.get(i["export_id"]) or {}
+            i["version_no"], i["reporting_period"] = v.get("version_no"), v.get("reporting_period")
 
         if page is not None:
             return {"items": items, "total": int(total), "page": page, "page_size": page_size or 20}
@@ -4163,7 +4178,9 @@ async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Option
 
 def _record_manual_arrival(tid: int, principal: Principal, file_bytes: bytes,
                            filename: str, broker_party_id: Optional[int],
-                           program_id: int, confirm_duplicate: bool) -> Optional[int]:
+                           program_id: int, confirm_duplicate: bool,
+                           period: Optional[str] = None,
+                           contract_id: Optional[int] = None) -> Optional[int]:
     """Land a hand-uploaded file as an arrival (channel 'upload') and return its
     id. A refused file is still recorded, then refused here with its reason; a
     duplicate the person has not confirmed is a 409 they answer on the spot."""
@@ -4178,7 +4195,7 @@ def _record_manual_arrival(tid: int, principal: Principal, file_bytes: bytes,
                 s, tenant_id=tid, filename=filename, file_bytes=file_bytes,
                 user_id=principal.user_id, broker_party_id=broker_party_id,
                 program_id=program_id, confirm_duplicate=confirm_duplicate,
-                blob_ref=blob_ref)
+                blob_ref=blob_ref, period=period, contract_id=contract_id)
         except svc_intake.DuplicateUpload as d:
             raise HTTPException(409, {"code": "duplicate_file", "message": d.message})
         s.commit()
@@ -4266,6 +4283,20 @@ async def direct_run(
     file_bytes = await file.read()
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
+        # Every file says which reporting period it is for — the same rule as
+        # email, SFTP, API and the broker's own Process Bordereau. Asked only
+        # where the calendar has one to pick: a run for no broker, or for a
+        # broker with no period set up yet, has nothing to choose from.
+        if not check_only and not (period or "").strip() and broker_party_id:
+            from db import ExpectedSubmission
+            if (s.query(ExpectedSubmission.id)
+                    .filter(ExpectedSubmission.tenant_id == tid,
+                            ExpectedSubmission.program_id == program_id,
+                            ExpectedSubmission.broker_party_id == broker_party_id,
+                            ExpectedSubmission.period_end <= datetime.utcnow().date())
+                    .first() is not None):
+                raise HTTPException(400, "Pick the reporting period this bordereau "
+                                         "is for before generating it.")
 
     # A real upload is an ARRIVAL too — the same door as email, SFTP and API, so
     # the Files screen shows every file however it came in. A self-check is a
@@ -4274,7 +4305,8 @@ async def direct_run(
     if not check_only:
         arrival_id = _record_manual_arrival(
             tid, principal, file_bytes, file.filename or filename or "upload.xlsx",
-            broker_party_id, program_id, confirm_duplicate)
+            broker_party_id, program_id, confirm_duplicate, period=period,
+            contract_id=contract_id)
 
     try:
         prep = await _prepare_run(

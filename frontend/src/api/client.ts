@@ -185,15 +185,18 @@ export async function ensureAccessToken(): Promise<string | null> {
  *
  *  `quiet` skips the global error popup — for a background connection that
  *  reconnects by itself, where a server restart is nothing to tell anyone about.
+ *
+ *  `headers` replaces the login: the broker's secure correction link has no
+ *  session token, it sends its own `X-Fix-Session` instead.
  */
 export async function streamNdjson(
   path: string,
   params: Record<string, string | number | boolean | undefined>,
   onMessage: (msg: any) => void,
   signal?: AbortSignal,
-  opts: { quiet?: boolean } = {},
+  opts: { quiet?: boolean; headers?: Record<string, string> } = {},
 ): Promise<void> {
-  const token = await ensureAccessToken();
+  const token = opts.headers ? null : await ensureAccessToken();
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null) qs.set(k, String(v));
@@ -204,7 +207,7 @@ export async function streamNdjson(
   let res: Response;
   try {
     res = await fetch(`${baseURL}${path}?${qs.toString()}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: opts.headers ?? (token ? { Authorization: `Bearer ${token}` } : {}),
       signal,
     });
   } catch (e) {

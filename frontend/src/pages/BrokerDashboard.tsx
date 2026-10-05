@@ -11,11 +11,11 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   getBrokerDashboard, getBrokerInsights, getBrokerInvitations, getBrokerRunHistory,
-  acceptBrokerInvitation, declineBrokerInvitation,
+  acceptBrokerInvitation, declineBrokerInvitation, exceptionsLeft,
   type BrokerDashboard as Dash, type BrokerInsights, type BrokerInvitation, type OperatorRun,
 } from "../api/broker";
 import { useBrokerCarrierId } from "../brokerCarrier";
-import { fmtDate, fmtDateTime } from "../utils/date";
+import { fmtDate, fmtDateTime, periodLabel } from "../utils/date";
 import { inAppSigningUrl } from "../api/esign";
 import { AlertCircle, Building2, CalendarClock, FileCheck2, PenLine } from "lucide-react";
 import { RunTrend } from "../components/BrokerCharts";
@@ -284,7 +284,7 @@ function RecentFiles() {
 
   return (
     <ChartCard title="Recently Processed Files"
-      info={<InfoTip text="The last five bordereaux processed for you, newest first. Click one to see its exceptions." />}>
+      info={<InfoTip text="The last five bordereaux processed for you, newest first — once per month, as its latest version. Click one to see its exceptions." />}>
       {err ? <div className="muted">Could not load your files.</div>
         : !data ? <div className="muted">Loading…</div>
         : data.items.length === 0 ? <div className="muted">No files processed yet.</div>
@@ -300,13 +300,21 @@ function RecentFiles() {
                   <div style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden",
                                 textOverflow: "ellipsis" }} title={r.filename}>
                     {r.filename}
+                    {r.version_no != null && r.version_no > 1 && (
+                      <span className="vchip">Version {r.version_no}</span>)}
                   </div>
                   <div className="muted" style={{ fontSize: 12 }}>
-                    {r.programme ?? "—"} · {fmtDateTime(r.created_at)}
+                    {r.programme ?? "—"}
+                    {r.reporting_period && <> · {periodLabel(r.reporting_period)}</>}
+                    {" "}· {fmtDateTime(r.created_at)}
                   </div>
                 </div>
                 {r.exception_count > 0
-                  ? <span className="badge b-crit"><span className="d" />{r.exception_count} exceptions</span>
+                  ? (exceptionsLeft(r).open > 0
+                    ? <span className="badge b-crit" title={exceptionsLeft(r).title}><span className="d" />
+                        {exceptionsLeft(r).open} of {r.exception_count} open</span>
+                    : <span className="badge b-ok" title={exceptionsLeft(r).title}><span className="d" />
+                        All {r.exception_count} put right</span>)
                   : <span className="badge b-ok"><span className="d" />Clean</span>}
               </div>
             ))}

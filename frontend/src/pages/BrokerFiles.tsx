@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
-import { fmtDateTime } from "../utils/date";
+import { fmtDateTime, periodLabel } from "../utils/date";
 import { InfoTip } from "../components/InfoTip";
 
 const DAYS = 30;
@@ -10,6 +10,7 @@ const DAYS = 30;
 type File = {
   export_id: number; source_upload_id: number | null; filename: string | null;
   programme_id: number | null; programme: string | null;
+  contract: string | null; reporting_period: string | null; version_no: number | null;
   status: string | null; created_at: string | null;
   rows: number; rows_flagged: number;
   exceptions: number; open: number; put_right: number;
@@ -38,6 +39,9 @@ type Resp = {
  *
  * Same shape as the broker's own view of its team (PersonActivity) — the two
  * sides read the same numbers about the same runs, from opposite ends.
+ *
+ * One row per submission: September's file sent again is its next version,
+ * so the row shows the newest version and only its exceptions.
  */
 export default function BrokerFiles() {
   const { brokerId } = useParams();
@@ -92,7 +96,7 @@ export default function BrokerFiles() {
             <div className="card-h">
               <h3>Files they sent</h3>
               <span className="muted" style={{ fontSize: 13 }}>
-                {t!.files} {t!.files === 1 ? "file" : "files"} · {t!.rows} rows ·{" "}
+                {t!.files} {t!.files === 1 ? "file" : "files"} ·{" "}
                 <b style={{ color: "var(--p-ink)" }}>{t!.open}</b> of {t!.exceptions} exceptions open
               </span>
             </div>
@@ -110,7 +114,7 @@ export default function BrokerFiles() {
                     ) : <b style={{ fontSize: 14 }}>{g.name}</b>}
                     <span style={{ marginLeft: "auto", fontSize: 12.5, color: "var(--p-muted)",
                                    fontVariantNumeric: "tabular-nums" }}>
-                      {g.files} {g.files === 1 ? "file" : "files"} · {g.rows} rows ·{" "}
+                      {g.files} {g.files === 1 ? "file" : "files"} ·{" "}
                       <b style={{ color: g.open ? "var(--p-ink)" : "var(--p-faint)" }}>{g.open}</b> open
                       {g.put_right > 0 && <> · {g.put_right} resolved</>}
                     </span>
@@ -120,7 +124,7 @@ export default function BrokerFiles() {
                       <thead>
                         <tr>
                           <th>File</th>
-                          <th style={{ textAlign: "right" }}>Rows</th>
+                          <th>Reporting period</th>
                           <th style={{ textAlign: "right" }}>Exceptions</th>
                           <th style={{ textAlign: "right" }}>Still open</th>
                           <th style={{ textAlign: "right" }}>Resolved</th>
@@ -131,8 +135,15 @@ export default function BrokerFiles() {
                       <tbody>
                         {rows.map(f => (
                           <tr key={f.export_id}>
-                            <td><b>{f.filename ?? `Export ${f.export_id}`}</b></td>
-                            <Num v={f.rows} />
+                            <td>
+                              <b>{f.filename ?? `Export ${f.export_id}`}</b>
+                              {f.version_no != null && f.version_no > 1 && (
+                                <span className="vchip" style={{ marginLeft: 8 }}>Version {f.version_no}</span>)}
+                              {f.contract && (
+                                <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{f.contract}</div>)}
+                            </td>
+                            <td>{f.reporting_period ? periodLabel(f.reporting_period)
+                              : <span className="muted">—</span>}</td>
                             <Num v={f.exceptions} />
                             <Num v={f.open} />
                             <Num v={f.put_right} />

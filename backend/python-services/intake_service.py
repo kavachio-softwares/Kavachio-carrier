@@ -328,19 +328,256 @@ def _check_known_sender(route: Optional[IntakeRoute]) -> Optional[str]:
     return None
 
 
+# ── which programme, contract and period a file is for ─────────────────────
+#
+# Process Bordereau asks a person three things before a file is run: the
+# programme, the contract and the reporting period. A file that arrives by API,
+# email or SFTP answers the same three — stated (the API's fields), written in
+# the email subject or the file name, or, where only one answer is possible,
+# taken as read. A file that leaves one open is refused, and the reason says
+# what to name and where. That is what lets a file for the same programme +
+# contract + period be the next VERSION of the same submission, however it came
+# in (submission_service._match).
+
+
+def _plain(text) -> str:
+    """Words only, lower case — "Risk Mahi-demonity Contract", "risk_mahi
+    demonity contract" and "risk-mahi-demonity-contract" all read the same."""
+    folded = unicodedata.normalize("NFKD", str(text or "")).lower()
+    return " ".join(re.findall(r"[a-z0-9]+", folded))
+
+
+def programme_ref(prog) -> str:
+    """The carrier's own code where there is one, else a slug of the name —
+    never the surrogate id (see intake_api_routes)."""
+    ref = getattr(prog, "program_ref", None)
+    if ref:
+        return str(ref)
+    return "-".join((prog.name or f"programme-{prog.id}").lower().split())
+
+
+def contract_ref(contract) -> str:
+    """A contract as a sender names it: a slug of its name."""
+    return "-".join((contract.name or contract.filename
+                     or f"contract-{contract.id}").lower().split())
+
+
+def broker_programmes(session, tenant_id: int, broker_party_id) -> list:
+    """The programmes this broker is on at this carrier, now."""
+    from db import Program, ProgramBroker
+    if not broker_party_id:
+        return []
+    return (session.query(Program)
+            .join(ProgramBroker, ProgramBroker.program_id == Program.id)
+            .filter(ProgramBroker.broker_party_id == broker_party_id,
+                    ProgramBroker.status == "active",
+                    Program.tenant_id == tenant_id)
+            .order_by(Program.name).all())
+
+
+def live_contracts(session, tenant_id: int, program_id: Optional[int],
+                   broker_party_id) -> list:
+    """The contracts a file on this programme can be written under: the
+    broker's own and the carrier's programme-wide ones — the same rule the
+    live-contract check and Process Bordereau's contract list use. Light rows
+    (id, name, filename), never the stored PDF."""
+    if program_id is None:
+        return []
+    from db import Contract, Program
+    from contract_upload_services.contract_asof import NON_GOVERNING_STATUSES
+    q = (session.query(Contract.id, Contract.name, Contract.filename)
+         .join(Program, Program.id == Contract.program_id)
+         .filter(Program.tenant_id == tenant_id,
+                 Contract.program_id == program_id,
+                 func.coalesce(Contract.status, "").notin_(NON_GOVERNING_STATUSES)))
+    if broker_party_id is not None:
+        q = q.filter(or_(Contract.broker_party_id == broker_party_id,
+                         Contract.broker_party_id.is_(None)))
+    return q.order_by(Contract.id).all()
+
+
+def reporting_periods(session, tenant_id: int, program_id: Optional[int],
+                      broker_party_id) -> list[str]:
+    """The reporting periods a file may be for — the list Process Bordereau's
+    picker offers: this programme's calendar rows for this broker whose period
+    has ended, most recently due first. Empty when there is no calendar."""
+    if program_id is None:
+        return []
+    from db import ExpectedSubmission
+    rows = (session.query(ExpectedSubmission.period)
+            .filter(ExpectedSubmission.tenant_id == tenant_id,
+                    ExpectedSubmission.program_id == program_id,
+                    ExpectedSubmission.broker_party_id == broker_party_id,
+                    ExpectedSubmission.period_end <= datetime.utcnow().date())
+            .order_by(ExpectedSubmission.due_date.desc())
+            .limit(24).all())
+    return [r.period for r in rows]
+
+
+def _named_in(text: str, options: list, names) -> list:
+    """The options whose name or ref the text mentions. Where one name sits
+    inside another ("Property" in "Property Fac"), the longer one wins."""
+    hits = []
+    for o in options:
+        found = [n for n in (_plain(x) for x in names(o)) if n and f" {n} " in f" {text} "]
+        if found:
+            hits.append((max(len(n) for n in found), o))
+    if not hits:
+        return []
+    best = max(h[0] for h in hits)
+    return [o for n, o in hits if n == best]
+
+
+def _listed(names) -> str:
+    names = [n for n in names if n]
+    return ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+
+
+def identify(session, route: Optional[IntakeRoute], *, filename: str,
+             period: Optional[str] = None, period_hint: Optional[str] = None,
+             program_id: Optional[int] = None,
+             contract_id: Optional[int] = None) -> tuple[dict, Optional[str]]:
+    """Which programme, contract and reporting period a file is for.
+
+    Returns (found, None), or (what was found, the reason it cannot go on).
+    `program_id`, `contract_id` and `period` are what the sender STATED (the
+    API, or the secure link's corrected data); otherwise the email subject
+    (`period_hint`) and the file name are read, and a question with only one
+    possible answer is taken as answered.
+
+    A programme with no live contract is not refused here: the live-contract
+    check holds that file for the carrier, which is what it has always done.
+    """
+    found = {"program_id": None, "contract_id": None, "period": None,
+             "period_source": None}
+    if route is None or route.broker_party_id is None:
+        return found, None                        # the sender check refuses it
+    tenant, broker = route.tenant_id, route.broker_party_id
+    text = _plain(f"{period_hint or ''} {filename or ''}")
+    where = {"email": "the email subject or the file name",
+             "sftp": "the file name"}.get(route.channel, "the request")
+
+    # ── programme ──
+    pid = route.program_id or program_id
+    if pid is None:
+        progs = broker_programmes(session, tenant, broker)
+        if len(progs) == 1:
+            pid = progs[0].id
+        elif progs:
+            named = _named_in(text, progs, lambda p: (programme_ref(p), p.name))
+            if len(named) != 1:
+                return found, (f"Which programme? This broker reports on {len(progs)}: "
+                               f"{_listed(p.name for p in progs)}. Name one in {where}.")
+            pid = named[0].id
+        else:
+            return found, None          # on no programme: no contract, so it is held
+    found["program_id"] = pid
+    from db import Program
+    prog = session.get(Program, pid)
+
+    # ── contract ──
+    cons = live_contracts(session, tenant, pid, broker)
+    if contract_id is not None:
+        if contract_id not in {c.id for c in cons}:
+            return found, ("That contract is not one this broker's files on "
+                           f"{prog.name if prog else 'this programme'} are written under.")
+        cid = contract_id
+    elif len(cons) <= 1:
+        cid = cons[0].id if cons else None        # none: held by the contract check
+    else:
+        named = _named_in(text, cons, lambda c: (contract_ref(c), c.name))
+        if len(named) != 1:
+            return found, (f"Which contract? {prog.name if prog else 'This programme'} has "
+                           f"{len(cons)} contracts for this broker: "
+                           f"{_listed(c.name or c.filename for c in cons)}. "
+                           f"Name one in {where}.")
+        cid = named[0].id
+    found["contract_id"] = cid
+
+    # ── period ──
+    from submission_calendar import parse_period_hint
+    label, named_date = (period or "").strip() or None, None
+    source = "explicit" if label else None
+    if not label:
+        from submission_calendar_service import resolve_period_label
+        named_date = parse_period_hint(period_hint) or parse_period_hint(filename)
+        label, source = resolve_period_label(session, pid,
+                                             covering_date=parse_period_hint(period_hint),
+                                             source_filename=filename)
+        if not label and named_date is not None and not _has_calendar(session, pid):
+            label = f"{named_date:%Y-%m}"         # said, and no calendar to hold it to
+            source = "date" if parse_period_hint(period_hint) else "filename"
+    if not label:
+        if named_date is None:
+            return found, (f"No reporting period. Say which period the file is for in "
+                           f"{where}, for example Bordereau_2026-09.xlsx or "
+                           f"\"September 2026\".")
+        return found, (f"{named_date:%B %Y} is not a reporting period of this "
+                       f"programme. Name one of its periods in {where}.")
+    allowed = reporting_periods(session, tenant, pid, broker)
+    if allowed and label not in allowed:
+        from db import ExpectedSubmission
+        later = (session.query(ExpectedSubmission.id)
+                 .filter(ExpectedSubmission.program_id == pid,
+                         ExpectedSubmission.period == label).first())
+        if later is not None:
+            return found, (f"Reporting period {label} has not ended yet. A period's "
+                           f"file can be sent once it is over — the latest is "
+                           f"{allowed[0]}.")
+        return found, (f"{label} is not a reporting period of this programme. "
+                       f"Name one of its periods in {where}, e.g. {allowed[0]}.")
+    found["period"], found["period_source"] = label, source
+    return found, None
+
+
+def _has_calendar(session, program_id: int) -> bool:
+    from db import SubmissionSchedule
+    return (session.query(SubmissionSchedule.id)
+            .filter(SubmissionSchedule.program_id == program_id).first() is not None)
+
+
+class _RouteFor:
+    """The route as the later checks see it: narrowed to the programme the file
+    was identified for. A route pinned to a programme reads exactly as itself;
+    a broker-wide one is checked against the programme its file named."""
+
+    def __init__(self, route: IntakeRoute, program_id: Optional[int]):
+        self._route = route
+        self.program_id = program_id if program_id is not None else route.program_id
+
+    def __getattr__(self, name):
+        return getattr(self._route, name)
+
+
 def _check_not_duplicate(session, tenant_id: int, sha: str,
-                         route: Optional[IntakeRoute]) -> Optional[str]:
+                         route: Optional[IntakeRoute],
+                         scope: Optional[dict] = None) -> Optional[str]:
     """A file we have loaded before, arriving again.
 
     Only a PREVIOUSLY ACCEPTED file counts. Matching against refused arrivals
     too would mean a broker who fixes nothing and resends gets "duplicate"
     instead of the real reason their file was refused.
+
+    FOR THE SAME THING. Given `scope` (programme, contract, period — what the
+    file was identified as), only an earlier file for that same programme,
+    contract and period counts: the same spreadsheet sent for another
+    programme or another month is a different bordereau, and holding it as a
+    copy of the first filed it under the wrong programme's submission.
     """
-    prior = (session.query(FileArrival)
-             .filter(FileArrival.tenant_id == tenant_id,
-                     FileArrival.file_hash_sha256 == sha,
-                     FileArrival.outcome == "accepted")
-             .order_by(FileArrival.id.desc()).first())
+    q = (session.query(FileArrival)
+         .filter(FileArrival.tenant_id == tenant_id,
+                 FileArrival.file_hash_sha256 == sha,
+                 FileArrival.outcome == "accepted"))
+    scope = scope or {}
+    if scope.get("program_id") is not None and scope.get("period"):
+        q = (q.outerjoin(IntakeRoute, IntakeRoute.id == FileArrival.route_id)
+              .filter(func.coalesce(FileArrival.program_id, IntakeRoute.program_id)
+                      == scope["program_id"],
+                      FileArrival.reporting_period == scope["period"]))
+        if scope.get("contract_id") is not None:
+            q = q.filter(or_(FileArrival.contract_id == scope["contract_id"],
+                             FileArrival.contract_id.is_(None)))
+    prior = q.order_by(FileArrival.id.desc()).first()
     if prior is None:
         return None
     # The file is still held whoever sent the first copy — two brokers
@@ -479,8 +716,16 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
               blob_ref: Optional[str] = None,
               max_bytes: Optional[int] = None,
               period: Optional[str] = None,
-              period_hint: Optional[str] = None) -> FileArrival:
+              period_hint: Optional[str] = None,
+              replaces: Optional[str] = None,
+              program_id: Optional[int] = None,
+              contract_id: Optional[int] = None) -> FileArrival:
     """Record one arriving file and decide whether it may go on.
+
+    `period`, `program_id` and `contract_id` are what the sender STATED (the
+    API's fields, the secure link's corrected data). Whatever is not stated is
+    read from `period_hint` (an email subject) and the file name, or taken as
+    read when there is only one answer — see identify().
 
     Always returns a FileArrival — including for a file we refuse. That is the
     point: "Nothing here is lost. A turned-away file is kept exactly as it
@@ -516,6 +761,21 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
                 lambda: count_rows(filename, file_bytes)))
         return _counted[0]
 
+    # What the file is for — programme, contract, period — as Process Bordereau
+    # asks a person. Filled by the identification check; the later checks read
+    # the programme from it.
+    ident: dict = {}
+
+    def _identified() -> Optional[str]:
+        found, why = identify(session, route, filename=filename, period=period,
+                              period_hint=period_hint, program_id=program_id,
+                              contract_id=contract_id)
+        ident.update(found)
+        return why
+
+    def _scoped():
+        return _RouteFor(route, ident.get("program_id")) if route is not None else None
+
     reason: Optional[str] = None
     for check in (
         # ── settled without opening the file ────────────────────────────────
@@ -523,15 +783,16 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
         lambda: _check_is_spreadsheet(filename, file_bytes),
         lambda: safety.check_safe_to_open(filename, file_bytes),
         lambda: _check_known_sender(route),
+        _identified,
         # Before the scan on purpose: a file we have already accepted has
         # already been scanned, and there is no sense paying for it twice.
-        lambda: _check_not_duplicate(session, tenant_id, sha, route),
+        lambda: _check_not_duplicate(session, tenant_id, sha, route, scope=ident),
         lambda: safety.scan_for_malware(filename, file_bytes),
         # ── from here on the file gets opened ───────────────────────────────
         lambda: _check_can_open(rows()),
         lambda: _check_has_rows(rows()),
-        lambda: required_fields.check(session, route, filename, file_bytes),
-        lambda: _check_live_contract(session, route),
+        lambda: required_fields.check(session, _scoped(), filename, file_bytes),
+        lambda: _check_live_contract(session, _scoped()),
     ):
         reason = check()
         if reason:
@@ -565,6 +826,11 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
         public_ref=public_ref or new_public_ref(),
         idempotency_key=idempotency_key,
         blob_ref=blob_ref,
+        # What it is for, as far as it was identified — a file refused for
+        # "which contract?" still shows its programme on Files Received.
+        program_id=ident.get("program_id"),
+        contract_id=ident.get("contract_id"),
+        reporting_period=ident.get("period"),
     )
     session.add(arrival)
     session.flush()
@@ -580,28 +846,44 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
     # against the calendar) is trusted outright. Otherwise a hint the sender
     # wrote (an email subject such as "July 2026 bordereau"), then the file
     # NAME — so July's bordereau arriving in September still lands on July.
-    # When none says anything, mark_received falls back to the oldest open
-    # period and records that it guessed.
+    # A file that names no period is refused by identify() above, so it never
+    # gets here; mark_received's oldest-open fallback is left for programmes
+    # with no calendar to name.
     #
     # Best-effort on purpose: the calendar is a side-feature, and nothing here
     # may stop a file being recorded as arrived.
-    if outcome == "accepted" and route is not None and route.program_id is not None:
+    cal_program = ident.get("program_id") or (route.program_id if route is not None else None)
+    stated = ident.get("period") or period or None
+    if outcome == "accepted" and route is not None and cal_program is not None:
         try:
             from submission_calendar import parse_period_hint
             from submission_calendar_service import mark_received
             received = mark_received(
-                session, route.program_id,
+                session, cal_program,
                 received_on=arrival.received_at.date(),
                 broker_party_id=route.broker_party_id,
-                source_filename=filename, period=period or None,
-                covering_date=None if period else parse_period_hint(period_hint))
-            # Not a column: handed back so the API receipt can say which period
-            # the file was recorded against.
-            arrival.reporting_period = received["period"] if received else None
+                source_filename=filename, period=stated,
+                covering_date=None if stated else parse_period_hint(period_hint),
+                period_source=ident.get("period_source"))
+            # Kept on the arrival (a column since migration 32) so the API
+            # receipt can say which period the file was recorded against, and a
+            # correction for the same period finds this file's submission.
+            arrival.reporting_period = (received["period"] if received
+                                        else arrival.reporting_period or stated)
             session.flush()
         except Exception:   # noqa: BLE001
             log.warning("submission-calendar mark_received failed for arrival %s",
                         arrival.public_ref, exc_info=True)
+
+    # The broker exception loop: this file is a new submission, or the next
+    # version of one (by the reference it quotes, or by programme + contract +
+    # period — whichever way the earlier file came in).
+    # Bookkeeping only — it never changes what happens to the file — and it
+    # cannot fail the landing (on_land swallows its own errors).
+    import submission_service
+    submission_service.on_land(session, arrival, route,
+                               period=arrival.reporting_period,
+                               replaces=replaces, hint=period_hint)
 
     return arrival
 
@@ -620,7 +902,10 @@ def land_manual_upload(session, *, tenant_id: int, filename: str, file_bytes: by
                        user_id: Optional[int], broker_party_id: Optional[int],
                        program_id: Optional[int], confirm_duplicate: bool = False,
                        blob_ref: Optional[str] = None,
-                       max_bytes: Optional[int] = None) -> FileArrival:
+                       max_bytes: Optional[int] = None,
+                       period: Optional[str] = None,
+                       replaces: Optional[str] = None,
+                       contract_id: Optional[int] = None) -> FileArrival:
     """Record a file uploaded by hand on Process Bordereau as an arrival.
 
     The same door as email, SFTP and API, with the checks that make sense for a
@@ -666,7 +951,16 @@ def land_manual_upload(session, *, tenant_id: int, filename: str, file_bytes: by
     if reason and reason.startswith("Held — "):
         reason = reason[len("Held — "):]
         reason = reason[:1].upper() + reason[1:]
-    duplicate = None if reason else _check_not_duplicate(session, tenant_id, sha, None)
+    # The contract the person picked — or, when they did not have to pick, the
+    # only one there is. Kept on the file, as for every other way in.
+    if contract_id is None and program_id is not None:
+        only = live_contracts(session, tenant_id, program_id, broker_party_id)
+        if len(only) == 1:
+            contract_id = only[0].id
+    # A copy only of a file for the same programme, contract and month.
+    duplicate = None if reason else _check_not_duplicate(
+        session, tenant_id, sha, None,
+        scope={"program_id": program_id, "contract_id": contract_id, "period": period})
     if duplicate and not confirm_duplicate:
         msg = duplicate.replace("Held — ", "", 1).replace(
             "Loading it again", "Running it again")
@@ -677,6 +971,8 @@ def land_manual_upload(session, *, tenant_id: int, filename: str, file_bytes: by
         route_id=None,
         channel="upload",
         program_id=program_id,
+        contract_id=contract_id,
+        reporting_period=period or None,
         submitted_by_user_id=user_id,
         matched_broker_party_id=broker_party_id,
         claimed_sender=f"user:{user_id}" if user_id else None,
@@ -700,6 +996,11 @@ def land_manual_upload(session, *, tenant_id: int, filename: str, file_bytes: by
         arrival.resolution_note = "Run anyway at upload"
     session.add(arrival)
     session.flush()
+    if arrival.outcome == "accepted":
+        # The broker exception loop (bookkeeping only; never raises).
+        import submission_service
+        submission_service.on_land(session, arrival, None, period=period,
+                                   program_id=program_id, replaces=replaces)
     return arrival
 
 
@@ -734,6 +1035,12 @@ def mark_run(arrival_id: int, *, state: str, landing_id: Optional[int] = None,
             s.commit()
     except Exception:  # noqa: BLE001
         log.warning("could not record the run of arrival %s", arrival_id, exc_info=True)
+        return
+    # Tell the broker how it went (and deliver it if the programme's rule is
+    # met). Its own session; never raises.
+    if state in ("done", "failed", "not_run"):
+        import submission_service
+        submission_service.on_run_outcome(arrival_id)
 
 
 def month_counts(session, tenant_id: int) -> dict[int, int]:

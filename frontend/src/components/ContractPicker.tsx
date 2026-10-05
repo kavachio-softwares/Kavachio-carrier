@@ -1,41 +1,60 @@
 /**
- * The Contract picker on Process Bordereau — same treatment as
+ * The Programme and Contract pickers on Process Bordereau — same treatment as
  * PeriodPicker, and for the same reason: a native <select> flattens
  * "Contract 462 — Insurisk Spec v1 (Demo-Insurisk Company org)" into one
- * run-on line, when the name, the programme and the carrier are three
- * different things a broker is actually scanning for.
+ * run-on line, when the name, the programme and the carrier are different
+ * things a broker is actually scanning for.
  *
- * Still just ONE contract, still shown read-only (not a fake dropdown) when
- * there is nothing to choose between — see BrokerBordereau's own note on
- * why: a broker has exactly one thing to pick, and a control offering a
- * choice of one is furniture. This only changes how that one contract, or
- * the list of several, actually reads.
+ * Shown read-only (not a fake dropdown) when there is nothing to choose
+ * between: a control offering a choice of one is furniture. Both pickers are
+ * the one `ChoicePicker`, so they look and behave alike.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, Check } from "lucide-react";
 import type { BrokerContract } from "../api/broker";
+import { fmtDate } from "../utils/date";
 
-function ContractRow({ c }: { c: BrokerContract }) {
+/** A programme a broker can send a bordereau for, with the contracts on it. */
+export type BrokerProgramme = {
+  id: number;
+  name: string;
+  carrier: string;
+  contracts: BrokerContract[];
+};
+
+/** Live, or ended but still owed bordereaux for the months of its term. */
+export const isRunnable = (c: BrokerContract) =>
+  c.lifecycle === "active" || c.lifecycle === "expired";
+
+function Row({ title, sub, badge }: { title: string; sub?: ReactNode; badge?: ReactNode }) {
   return (
-    <div style={{ minWidth: 0, flex: 1 }}>
-      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--p-ink)",
-        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {c.name || c.filename || `Contract ${c.id}`}
+    <div style={{ minWidth: 0, flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--p-ink)",
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {title}
+        </div>
+        {sub && (
+          <div style={{ fontSize: 12, color: "var(--p-muted)", marginTop: 1,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {sub}
+          </div>
+        )}
       </div>
-      <div style={{ fontSize: 12, color: "var(--p-muted)", marginTop: 1,
-        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {c.programme.name} · {c.carrier.name}
-      </div>
+      {badge}
     </div>
   );
 }
 
-export function ContractPicker({
-  value, onChange, contracts,
-}: {
+/** One dropdown for both pickers: the closed box shows the pick in full. */
+function ChoicePicker<T>({ items, value, onChange, keyOf, render, placeholder, empty }: {
+  items: T[];
   value: number | "";
   onChange: (id: number) => void;
-  contracts: BrokerContract[];
+  keyOf: (t: T) => number;
+  render: (t: T) => ReactNode;
+  placeholder: string;
+  empty: string;
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -54,39 +73,20 @@ export function ContractPicker({
     };
   }, [open]);
 
-  const current = contracts.find(c => c.id === value) ?? null;
+  const flat = {
+    display: "flex", alignItems: "center", gap: 10,
+    border: "1px solid var(--p-border-2)", borderRadius: "var(--p-r-sm)",
+    background: "var(--p-surface-2)", padding: "9px 12px",
+  } as const;
 
   // Nothing to choose between: shown flat, not as a control that opens onto
   // a single, unavoidable answer.
-  if (contracts.length === 1) {
-    return (
-      <div style={{
-        display: "flex", alignItems: "center", gap: 10,
-        border: "1px solid var(--p-border-2)", borderRadius: "var(--p-r-sm)",
-        background: "var(--p-surface-2)", padding: "9px 12px",
-      }}>
-        <ContractRow c={contracts[0]} />
-      </div>
-    );
+  if (items.length === 1) return <div style={flat}>{render(items[0])}</div>;
+  if (items.length === 0) {
+    return <div style={{ ...flat, fontSize: 13.5, color: "var(--p-faint)" }}>{empty}</div>;
   }
 
-  if (contracts.length === 0) {
-    return (
-      <div style={{
-        border: "1px solid var(--p-border-2)", borderRadius: "var(--p-r-sm)",
-        background: "var(--p-surface-2)", padding: "9px 12px",
-        fontSize: 13.5, color: "var(--p-faint)",
-      }}>
-        No active contract yet
-      </div>
-    );
-  }
-
-  function pick(id: number) {
-    onChange(id);
-    setOpen(false);
-  }
-
+  const current = items.find(t => keyOf(t) === value) ?? null;
   return (
     <div style={{ position: "relative" }} ref={box}>
       <button
@@ -103,8 +103,8 @@ export function ContractPicker({
           transition: ".12s", textAlign: "left",
         }}
       >
-        {current ? <ContractRow c={current} /> : (
-          <span style={{ fontSize: 13.5, color: "var(--p-faint)" }}>Select Contract…</span>
+        {current ? render(current) : (
+          <span style={{ flex: 1, fontSize: 13.5, color: "var(--p-faint)" }}>{placeholder}</span>
         )}
         <ChevronDown size={15} strokeWidth={2}
           style={{ flex: "none", color: "var(--p-faint)" }} />
@@ -117,13 +117,14 @@ export function ContractPicker({
           borderRadius: "var(--p-r-sm)", boxShadow: "0 12px 28px -8px rgba(14,19,32,.18)",
           maxHeight: 320, overflowY: "auto", padding: 4,
         }}>
-          {contracts.map(c => {
-            const selected = c.id === value;
+          {items.map(t => {
+            const id = keyOf(t);
+            const selected = id === value;
             return (
               <button
-                key={c.id} type="button" role="option"
+                key={id} type="button" role="option"
                 aria-selected={selected}
-                onClick={() => pick(c.id)}
+                onClick={() => { onChange(id); setOpen(false); }}
                 style={{
                   width: "100%", display: "flex", alignItems: "center", gap: 10,
                   border: "none", borderRadius: 6, cursor: "pointer",
@@ -133,7 +134,7 @@ export function ContractPicker({
                 onMouseEnter={e => { if (!selected) e.currentTarget.style.background = "var(--p-surface-2)"; }}
                 onMouseLeave={e => { if (!selected) e.currentTarget.style.background = "transparent"; }}
               >
-                <ContractRow c={c} />
+                {render(t)}
                 {selected && <Check size={14} style={{ color: "var(--p-primary)", flex: "none" }} />}
               </button>
             );
@@ -141,5 +142,44 @@ export function ContractPicker({
         </div>
       )}
     </div>
+  );
+}
+
+export function ProgrammePicker({ value, onChange, programmes }: {
+  value: number | "";
+  onChange: (id: number) => void;
+  programmes: BrokerProgramme[];
+}) {
+  return (
+    <ChoicePicker items={programmes} value={value} onChange={onChange} keyOf={p => p.id}
+      placeholder="Select Programme…" empty="No programme yet"
+      render={p => (
+        <Row title={p.name}
+          sub={`${p.carrier} · ${p.contracts.length} ${p.contracts.length === 1 ? "contract" : "contracts"}`} />
+      )} />
+  );
+}
+
+/** The term in a few words — and, once it has ended, that it has. */
+function termOf(c: BrokerContract): string | null {
+  if (c.lifecycle === "expired") return c.expiry_dt ? `Term ended ${fmtDate(c.expiry_dt)}` : "Term ended";
+  return c.expiry_dt ? `In force until ${fmtDate(c.expiry_dt)}` : null;
+}
+
+export function ContractPicker({ value, onChange, contracts }: {
+  value: number | "";
+  onChange: (id: number) => void;
+  contracts: BrokerContract[];
+}) {
+  return (
+    <ChoicePicker items={contracts} value={value} onChange={onChange} keyOf={c => c.id}
+      placeholder="Select Contract…" empty="No active contract yet"
+      render={c => (
+        <Row title={c.name || c.filename || `Contract ${c.id}`}
+          sub={[c.carrier.name, termOf(c)].filter(Boolean).join(" · ")}
+          badge={c.lifecycle === "expired"
+            ? <span className="badge b-warn" style={{ flex: "none" }}><span className="d" />Ended</span>
+            : null} />
+      )} />
   );
 }

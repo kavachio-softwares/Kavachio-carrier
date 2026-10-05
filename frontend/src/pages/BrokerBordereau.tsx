@@ -24,9 +24,9 @@
  * WHAT DIFFERS FROM THE CARRIER'S SCREEN is only the scope, and only because
  * the two genuinely differ:
  *
- *   - The carrier picks carrier → programme → broker → contract. A broker has
- *     exactly one thing to pick: which of ITS OWN contracts this file is for.
- *     Carrier, programme and broker all follow from it.
+ *   - The carrier picks carrier → programme → broker → contract. A broker
+ *     picks only programme → contract, each shown flat when there is just
+ *     one; carrier and broker follow from the contract.
  *   - A broker seat carries no tenant, so every /direct/* and /export/* route
  *     refuses it. The run, the download and the preview all go through the
  *     carrier-centric chain instead, which authorizes the broker one path
@@ -34,8 +34,9 @@
  *
  * The contract is the scope because a bordereau is checked against a CONTRACT's
  * rules — a broker holding two contracts on one programme is answering to two
- * different sets of rules. Only live contracts can be run; one the carrier has
- * not approved governs nothing, and is named with the reason rather than hidden.
+ * different sets of rules. Live contracts can be run, and so can one whose term
+ * has ENDED, for the months inside its term (a late bordereau is still owed);
+ * one not yet in force governs nothing, and is named with the reason.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -50,7 +51,7 @@ import {
 } from "../api/brokerBordereau";
 import { Dropzone } from "../components/Dropzone";
 import { PeriodPicker } from "../components/PeriodPicker";
-import { ContractPicker } from "../components/ContractPicker";
+import { ContractPicker, ProgrammePicker, isRunnable, type BrokerProgramme } from "../components/ContractPicker";
 import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
 import { type Sheet } from "../components/OutputRows";
 import { LoadingOverlay } from "../components/Busy";
@@ -75,6 +76,7 @@ export default function BrokerBordereau() {
   const nav = useNavigate();
   const [brokerId, setBrokerId] = useState<number | null>(null);
   const [contracts, setContracts] = useState<BrokerContract[] | null>(null);
+  const [programmeId, setProgrammeId] = useState<number | "">("");
   const [contractId, setContractId] = useState<number | "">("");
   const [ready, setReady] = useState<BordereauReadiness | null>(null);
   const [readyLoading, setReadyLoading] = useState(false);
@@ -109,13 +111,15 @@ export default function BrokerBordereau() {
   useEffect(() => {
     // Switching carrier drops the current pick: keeping it would leave the
     // screen addressed at a contract no longer in the list it is showing.
-    setContractId("");
+    setContractId(""); setProgrammeId("");
     getBrokerContracts({ carrierId: carrierId ?? undefined })
       .then(rows => {
         setContracts(rows);
-        const live = rows.filter(c => c.lifecycle === "active");
-        // One live contract is not a choice. Select it and let the broker get
-        // on with the actual task.
+        const live = rows.filter(isRunnable);
+        // One programme, or one contract, is not a choice. Select it and let
+        // the broker get on with the actual task.
+        const progs = new Set(live.map(c => c.programme.id).filter(id => id != null));
+        if (progs.size === 1) setProgrammeId([...progs][0] as number);
         if (live.length === 1) setContractId(live[0].id);
       })
       .catch(() => setContracts([]));
@@ -125,13 +129,35 @@ export default function BrokerBordereau() {
   // This used to read the carrier's approval instead — a weaker question, and
   // one that no longer exists now the gate has gone.
   const live = useMemo(
-    () => (contracts ?? []).filter(c => c.lifecycle === "active"),
+    () => (contracts ?? []).filter(isRunnable),
     [contracts]);
   const waiting = useMemo(
-    () => (contracts ?? []).filter(c => c.lifecycle !== "active"),
+    () => (contracts ?? []).filter(c => !isRunnable(c)),
     [contracts]);
+  // The broker's programmes, from the contracts it can run — a programme is
+  // what the broker thinks in ("the Demonity file"), the contract follows.
+  const programmes: BrokerProgramme[] = useMemo(() => {
+    const m = new Map<number, BrokerProgramme>();
+    for (const c of live) {
+      if (c.programme.id == null) continue;
+      const p = m.get(c.programme.id) ?? { id: c.programme.id, name: c.programme.name,
+                                           carrier: c.carrier.name, contracts: [] };
+      p.contracts.push(c);
+      m.set(c.programme.id, p);
+    }
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [live]);
+  const onProgramme = useMemo(
+    () => programmes.find(p => p.id === programmeId)?.contracts ?? [],
+    [programmes, programmeId]);
   const contract = useMemo(
     () => live.find(c => c.id === contractId) ?? null, [live, contractId]);
+
+  function pickProgramme(id: number) {
+    setProgrammeId(id);
+    const on = programmes.find(p => p.id === id)?.contracts ?? [];
+    setContractId(on.length === 1 ? on[0].id : "");
+  }
 
   /** The full chain this run is addressed at. Null until everything resolves. */
   const path: ContractPath | null = useMemo(() => {
@@ -163,6 +189,8 @@ export default function BrokerBordereau() {
     if (!path) { setPeriods(null); return; }
     getContractPeriods(path)
       .then(rows => {
+        // An ended contract's calendar already stops at its term (the server
+        // builds no month that starts after the expiry).
         setPeriods(rows);
         // The most recent NOT-YET-PROCESSED period is almost always what
         // somebody dropping a file today means — pre-select it, but only if
@@ -284,15 +312,34 @@ export default function BrokerBordereau() {
         <div className="card pad">
           <div className="field">
             <label>
-              Contract
-              <InfoTip text={"Each contract has its own rules, so the same "
-                + "spreadsheet can pass under one and fail under another. "
-                + "Carrier and programme come with it — there is nothing "
-                + "else to pick."} />
+              Programme
+              <InfoTip text={"Which of your programmes this bordereau is for. "
+                + "The carrier comes with it."} />
             </label>
-            <ContractPicker value={contractId}
-              onChange={id => setContractId(id)} contracts={live} />
+            <ProgrammePicker value={programmeId} onChange={pickProgramme}
+              programmes={programmes} />
           </div>
+
+          {programmeId !== "" && (
+            <div className="field">
+              <label>
+                Contract
+                <InfoTip text={"Each contract has its own rules, so the same "
+                  + "spreadsheet can pass under one and fail under another."} />
+              </label>
+              <ContractPicker value={contractId}
+                onChange={id => setContractId(id)} contracts={onProgramme} />
+            </div>
+          )}
+
+          {/* An ended contract is still owed the bordereaux of its term — say
+              so, rather than leaving the broker to wonder why it is offered. */}
+          {contract?.lifecycle === "expired" && (
+            <div className="note" style={{ marginBottom: 16 }}>
+              This contract’s term ended{contract.expiry_dt ? <> on <b>{fmtDate(contract.expiry_dt)}</b></> : null}.
+              You can still send bordereaux for the months up to then.
+            </div>
+          )}
 
           {/* Which month (or quarter, on a quarterly programme) this file is
               FOR — the reporting period. A REAL row from this contract's own

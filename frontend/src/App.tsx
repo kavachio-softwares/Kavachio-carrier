@@ -24,7 +24,6 @@ import PartyDetail from "./pages/PartyDetail";
 import Programs from "./pages/Programs";
 import ProgramManagement from "./pages/ProgramManagement";
 import AddProgram from "./pages/AddProgram";
-import ProgramBrokers from "./pages/ProgramBrokers";
 import ContractDetail from "./pages/ContractDetail";
 import ContractRecord from "./pages/ContractRecord";
 import ContractSignature from "./pages/ContractSignature";
@@ -37,6 +36,7 @@ import ContractSignatures from "./pages/ContractSignatures";
 // The signing screen itself. PUBLIC — reached from an emailed link by
 // people who have no account here, so it sits outside RequireAuth.
 import SignContract from "./pages/SignContract";
+import FixLink from "./pages/FixLink";
 import Mapping from "./pages/Mapping";
 import DirectRun from "./pages/DirectRun";
 import DirectSetup from "./pages/DirectSetup";
@@ -138,6 +138,10 @@ export default function App() {
           stands for exactly one signer on exactly one contract. The
           insurer's signer and the broker's both land here. */}
       <Route path="/sign" element={<SignContract />} />
+      {/* The broker's secure correction link from a result email. Same idea as
+          /sign: no Layout, no session — the token is the credential, for one
+          submission only. */}
+      <Route path="/fix/:token" element={<FixLink />} />
       {/* /welcome is the tenant-admin first-run wizard — it has no Layout shell,
           so it carries the guards itself. */}
       <Route path="/welcome" element={<RequireAuth><RequireAccess><Welcome /></RequireAccess></RequireAuth>} />
@@ -184,7 +188,6 @@ export default function App() {
         <Route path="/programs/new" element={<AddProgram />} />
         {/* The same flow, picked up for a programme that already exists. */}
         <Route path="/programs/:programId/setup" element={<AddProgram />} />
-        <Route path="/programs/:programId/brokers" element={<ProgramBrokers />} />   {/* the mesh, managed */}
         {/* The contract as a RECORD — terms, documents, lifecycle. The
             programme-scoped route below is what it PRODUCED: clauses and rules. */}
         <Route path="/contracts" element={<Contracts />} />

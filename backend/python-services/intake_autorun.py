@@ -132,9 +132,19 @@ def run_one(arrival_id: int) -> None:
         broker = a.matched_broker_party_id
         filename, blob_ref = a.filename, a.blob_ref
         # land_file ticks the calendar for a file accepted on a programme's way
-        # in. A held file somebody released was never ticked, so its run does it.
-        calendar_done = bool(route and getattr(route, "program_id", None)
-                             and a.resolution != "released")
+        # in — a route pinned to the programme, or a file that named it (its
+        # programme is then on the arrival). A held file somebody released was
+        # never ticked, so its run does it.
+        calendar_done = bool(route and program_id and a.resolution != "released")
+        # Which period that run ticks. A released file that re-sends or
+        # corrects a submission is for its submission's period; left to guess,
+        # the run looked for the oldest period still open, found every ended
+        # one already received, and recorded nothing — so the calendar was a
+        # version short of the file history.
+        run_period = None
+        if a.resolution == "released":
+            import submission_service
+            run_period = submission_service.period_of(s, a)
 
         if program_id is None:
             svc.mark_run(arrival_id, state="not_run", error=(
@@ -149,7 +159,10 @@ def run_one(arrival_id: int) -> None:
                 "the Setup page, then run the file by hand."))
             return
         carrier_party_id = pipe.carrier_party_id
-        contract_id = _live_contract_id(s, tenant_id, program_id, broker)
+        # The contract the file is written under, as it arrived (picked, sent,
+        # named, or the only one) — else the old rule: the only live one.
+        contract_id = (getattr(a, "contract_id", None)
+                       or _live_contract_id(s, tenant_id, program_id, broker))
 
     data = svc.read_copy(blob_ref, arrival_id)
     if not data:
@@ -166,8 +179,14 @@ def run_one(arrival_id: int) -> None:
             broker_party_id=broker, contract_id=contract_id)
         # Recorded now, so a render that fails still points at its landing.
         svc.mark_run(arrival_id, state="running", landing_id=prep["landing_id"])
+        # Data the broker sent from the secure correction link carries their
+        # earlier Approve / Dismiss decisions onto this landing before it is
+        # checked. A no-op for every other file.
+        import submission_service
+        submission_service.carry_decisions(arrival_id, prep["landing_id"])
         result = await dr._render_prepared(prep, filename=None, actor=ACTOR,
-                                           mark_calendar=not calendar_done)
+                                           mark_calendar=not calendar_done,
+                                           period=run_period)
         result["_landing_id"] = prep["landing_id"]
         return result
 

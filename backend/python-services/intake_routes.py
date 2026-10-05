@@ -416,6 +416,7 @@ def patch_route(route_id: int, body: RoutePatch, mga: Optional[str] = None,
 _NO_RUN = {"run_result": None, "run_state": None, "run_error": None, "run_at": None,
            "run_export_id": None, "run_exception_count": None, "run_rows": None,
            "contract_id": None, "contract_name": None, "submitted_by_name": None,
+           "reporting_period": None,
            "resolved_by_name": None}
 
 
@@ -448,7 +449,10 @@ def _run_facts(s, rows) -> dict:
             OutputExport.id, OutputExport.status, OutputExport.exception_count,
             OutputExport.policy_count, OutputExport.contract_id,
         ).filter(OutputExport.id.in_(exp_ids)).all()}
-    con_ids = {e.contract_id for e in exports.values() if e.contract_id}
+    # The run's contract, else the one the file arrived for (picked, sent,
+    # named or the only one) — so a file shows its contract before it is run.
+    con_ids = ({e.contract_id for e in exports.values() if e.contract_id}
+               | {a.contract_id for a in rows if getattr(a, "contract_id", None)})
     contracts = {}
     if con_ids:
         contracts = {c.id: (c.name or c.filename or f"Contract #{c.id}")
@@ -461,11 +465,22 @@ def _run_facts(s, rows) -> dict:
     if user_ids:
         users = {u.id: (u.full_name or u.email)
                  for u in s.query(AppUser).filter(AppUser.id.in_(user_ids)).all()}
+    # The reporting period each file was FOR. A file landed with migration 32
+    # carries it; any other run says so through the calendar version its
+    # export filled in.
+    period_of = {}
+    if exp_ids:
+        from db import SubmissionVersion
+        period_of = {eid: p for eid, p in
+                     s.query(SubmissionVersion.received_export_id, SubmissionVersion.period)
+                     .filter(SubmissionVersion.received_export_id.in_(exp_ids)).all() if p}
     out = {}
     for a in rows:
         e = exports.get(a.run_export_id)
-        cid = e.contract_id if e else None
+        cid = (e.contract_id if e else None) or getattr(a, "contract_id", None)
         out[a.id] = {
+            "reporting_period": (getattr(a, "reporting_period", None)
+                                 or period_of.get(a.run_export_id)),
             "run_result": _run_result(a.run_state, e.status if e else None,
                                       e.exception_count if e else None),
             "run_state": a.run_state,
@@ -541,6 +556,13 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
                 "sender_notified_via": a.sender_notified_via,
                 "bdx_upload_id": a.bdx_upload_id,
                 "public_ref": a.public_ref,
+                # Which submission this file is a version of (migration 32) —
+                # the screen shows a submission once, as its latest file.
+                "submission_ref": a.submission_ref,
+                "version_no": a.version_no,
+                # The period the file is for — with programme and contract,
+                # what makes a later file the next version of this one.
+                "reporting_period": a.reporting_period,
                 # ── 12.3 — what a person decided, and whether the file is
                 # still there to look at. The screen needs both: a resolved row
                 # must stop asking to be worked, and a download button that

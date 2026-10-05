@@ -125,7 +125,6 @@ export const ROUTE_ACCESS: {
   { pattern: "/programs", requires: "carrier_admin" },
   { pattern: "/programs/new", requires: "carrier_admin" },
   { pattern: "/programs/:programId/setup", requires: "carrier_admin" },
-  { pattern: "/programs/:programId/brokers", requires: "carrier_admin" },
   // `only`, not `requires`: a bare `requires` lets kavachio_admin in by rank,
   // and this is the contract record by another route.
   { pattern: "/programs/:programId/contracts/:contractId",

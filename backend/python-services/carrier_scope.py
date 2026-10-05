@@ -46,6 +46,12 @@ def broker_party_id_of(s, p: Principal) -> Optional[int]:
     """
     if not p.is_broker:
         return None
+    # Same rule as auth_deps.resolve_broker_party_id: login tokens never carry
+    # it, so it is set only on a Principal the server built itself — the
+    # broker's secure correction link (fix_link_routes._as_broker), which acts
+    # for the broker company with no user behind it.
+    if p.broker_party_id:
+        return int(p.broker_party_id)
     u = s.query(AppUser).filter(AppUser.id == p.user_id).first()
     return int(u.broker_party_id) if u and u.broker_party_id else None
 

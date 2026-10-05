@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { getBrokerRunHistory, type OperatorRun } from "../api/broker";
+import { getBrokerRunHistory, exceptionsLeft, type OperatorRun } from "../api/broker";
 import { canAccessPath } from "../access";
 import { Pagination } from "../components/Pagination";
 import { InfoTip } from "../components/InfoTip";
-import { fmtDateTime } from "../utils/date";
+import { fmtDateTime, periodLabel } from "../utils/date";
 
 const PAGE_SIZE = 20;
 
@@ -29,7 +29,7 @@ export default function BrokerRuns() {
         <div className="page-head">
           <div className="t">
             <h2>Processed Files
-              <InfoTip text="Every bordereau processed for your broker, newest first. Open one to see its exceptions." />
+              <InfoTip text="Every bordereau processed for your broker, newest first — once per month, as its latest version. Open one to see its exceptions." />
             </h2>
           </div>
           {canAccessPath("/broker/bordereau") && (
@@ -52,21 +52,34 @@ export default function BrokerRuns() {
                 <table>
                   <thead>
                     <tr>
-                      <th>File Name</th><th>Programme</th><th>Sent by</th><th>Rows</th>
+                      <th>File Name</th><th>Reporting Period</th><th>Programme</th><th>Contract</th><th>Sent by</th><th>Rows</th>
                       <th>Result</th><th>When</th><th></th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.items.map(r => (
                       <tr key={r.export_id}>
-                        <td><b>{r.filename}</b></td>
+                        <td>
+                          <b>{r.filename}</b>
+                          {r.version_no != null && r.version_no > 1 && (
+                            <span className="vchip">Version {r.version_no}</span>)}
+                        </td>
+                        <td>{r.reporting_period ? periodLabel(r.reporting_period) : <span className="muted">—</span>}</td>
                         <td>{r.programme ?? "—"}</td>
+                        <td>
+                          {r.contract_id != null
+                            ? <Link className="linkish" to={`/contracts/${r.contract_id}`}>{r.contract ?? `Contract #${r.contract_id}`}</Link>
+                            : <span className="muted">{r.contract ?? "—"}</span>}
+                        </td>
                         <td>{r.sent_by === "carrier" ? "The carrier" : "Your team"}</td>
                         <td>{r.rows ?? "—"}</td>
                         <td>
                           {r.exception_count > 0
-                            ? <span className="badge b-warn"><span className="d" />
-                                {r.exception_count} {r.exception_count === 1 ? "exception" : "exceptions"}</span>
+                            ? (exceptionsLeft(r).open > 0
+                              ? <span className="badge b-warn" title={exceptionsLeft(r).title}><span className="d" />
+                                  {exceptionsLeft(r).open} of {r.exception_count} open</span>
+                              : <span className="badge b-ok" title={exceptionsLeft(r).title}><span className="d" />
+                                  All {r.exception_count} put right</span>)
                             : r.status === "not_validated"
                               ? <span className="badge"><span className="d" />Not Validated</span>
                               : <span className="badge b-ok"><span className="d" />Clean</span>}

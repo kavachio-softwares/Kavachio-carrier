@@ -20,14 +20,15 @@ import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, CalendarDays, Send, X } from "lucide-react";
 import {
   chase, getBoard, getPlatformBoard, getVersions,
-  type BoardResponse, type BoardRow, type BrokerContact,
-  type CalendarStatus, type SubmissionVersionRow,
+  type BoardResponse, type BoardRow, type BoardSchedule, type BrokerContact,
+  type CalendarStatus, type ScheduleBroker, type SubmissionVersionRow,
 } from "../api/calendar";
 import { isKavachioAdmin } from "../auth";
 import { parseUtc } from "../utils/date";
 import NotificationBell from "../components/NotificationBell";
 import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
+import { flowUrl } from "../components/ProgrammeStepper";
 
 // Same vocabulary as ProgramCalendar's status badges, so a period reads the
 // same on the carrier's board as it does inside a bordereau setup.
@@ -41,6 +42,12 @@ const STATUS_META: Record<CalendarStatus, { label: string; cls: string }> = {
 };
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+/** How a version came in — "v1 by hand, v2 by API" is one period's history. */
+const CAME_BY: Record<string, string> = {
+  upload: "Manual Upload", email: "Email", sftp: "SFTP", api: "API",
+  secure_link: "Secure Link",
+};
 
 /** ISO date → "15 Aug". The year is in the month heading above the table, so
  *  repeating it on every row is noise. */
@@ -117,10 +124,14 @@ export default function BordereauCalendar() {
   // "Chase them", every late row for "Chase what is late".
   const [chasing, setChasing] = useState<BoardRow[] | null>(null);
   const [schedPage, setSchedPage] = useState(1);
-  // Platform view only: the month's files and the deadlines behind them sit
-  // on two tabs, because across every carrier each list runs long.
-  const [tab, setTab] = useState<"month" | "deadlines">("month");
+  // The month's files and the deadlines behind them sit on two tabs — for
+  // everyone now, not only the platform view, so each table gets the page to
+  // itself. ?tab=deadlines opens the second one.
+  const [tab, setTab] = useState<"month" | "deadlines">(
+    () => (qs.get("tab") === "deadlines" ? "deadlines" : "month"));
   const [monthPage, setMonthPage] = useState(1);
+  // Programmes whose full broker list is open — a long one shows the first few.
+  const [openBrokers, setOpenBrokers] = useState<Set<number>>(new Set());
 
   const load = useCallback(async (m?: string) => {
     setLoading(true); setErr(null); setMonthPage(1);
@@ -277,19 +288,22 @@ export default function BordereauCalendar() {
           </div>
         </div>
 
-        {platform && (
-          <div className="tabs">
-            <button className={tab === "month" ? "on" : ""} onClick={() => setTab("month")}>
-              {fmtMonth(month)} ({worstFirst.length})
-            </button>
-            <button className={tab === "deadlines" ? "on" : ""} onClick={() => setTab("deadlines")}>
-              Bordereau deadlines ({schedules.length})
-            </button>
-          </div>
-        )}
+        <div className="tabs" style={{ alignItems: "center" }}>
+          <button className={tab === "month" ? "on" : ""} onClick={() => setTab("month")}>
+            Month-wise Calendar ({worstFirst.length})
+          </button>
+          <button className={tab === "deadlines" ? "on" : ""} onClick={() => setTab("deadlines")}>
+            All Programmes Calendar ({schedules.length})
+          </button>
+          <InfoTip text={tab === "month"
+            ? "One row for every file a broker owes in the month you pick: when it is "
+              + "due, whether it arrived, and what to do about it."
+            : "One row per programme: how often its bordereau is due, the next due date "
+              + "and when the deadlines stop. This is what fills the month-wise calendar."} />
+        </div>
 
         {/* ---- one row per file somebody owes this month ------------------ */}
-        {(!platform || tab === "month") && (
+        {tab === "month" && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-h">
             <CalendarDays className="ci" />
@@ -349,8 +363,9 @@ export default function BordereauCalendar() {
                         <td className="muted">—</td>
                         <td>
                           {!platform && (
-                            <Link className="linkish" to={`/programs/${r.program_id}/brokers`}>
-                              Add a broker →
+                            <Link className="linkish" to={flowUrl(r.program_id, "brokers")}
+                              title="This programme has no broker, so nobody owes a file yet">
+                              Add Broker →
                             </Link>
                           )}
                         </td>
@@ -408,15 +423,22 @@ export default function BordereauCalendar() {
                       </td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         {r.version_count > 0 && (
-                          <span className="linkish" onClick={() => setOpenRow(r)}>
-                            Versions →
+                          <span className="linkish" onClick={() => setOpenRow(r)}
+                            title="Every file received for this period, and where it was sent">
+                            View Versions →
                           </span>
                         )}
                         {!platform && r.status === "overdue" && (
-                          <span className="linkish" style={{ marginLeft: 8 }}
-                            onClick={() => setChasing([r])}>
-                            Remind →
+                          <span className="linkish" style={{ marginLeft: r.version_count > 0 ? 8 : 0 }}
+                            onClick={() => setChasing([r])}
+                            title="Email the broker a reminder that this file is late">
+                            Send Reminder →
                           </span>
+                        )}
+                        {/* Nothing owed yet and nothing received: no action, and
+                            the dash says so rather than leaving a blank cell. */}
+                        {r.version_count === 0 && (platform || r.status !== "overdue") && (
+                          <span className="muted">—</span>
                         )}
                       </td>
                     </tr>
@@ -443,16 +465,18 @@ export default function BordereauCalendar() {
         )}
 
         {/* ---- what fills the calendar ---------------------------------- */}
-        {(!platform || tab === "deadlines") && (
+        {tab === "deadlines" && (
         <div className="card">
           <div className="card-h">
-            <h3>Bordereau deadlines</h3>
-            <span className="sub">this is what fills the calendar</span>
+            <CalendarDays className="ci" />
+            <h3>All Programmes</h3>
+            <span className="sub">how often each programme's bordereau is due</span>
           </div>
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr>{platform && <th>Carrier</th>}<th>Programme</th><th>Reporting Frequency</th><th>Due</th>
+                <tr>{platform && <th>Carrier</th>}<th>Programme</th><th>Broker</th><th>Contract</th>
+                  <th>Reporting Frequency</th><th>Due</th>
                   <th>Next Due Date</th>
                   <th>Contract Ends On
                     <InfoTip text={"The day this programme's contract ends. Deadlines are set up to "
@@ -461,44 +485,99 @@ export default function BordereauCalendar() {
               </thead>
               <tbody>
                 {schedules.length === 0 && (
-                  <tr><td colSpan={platform ? 7 : 6} className="muted"
+                  <tr><td colSpan={platform ? 9 : 8} className="muted"
                     style={{ padding: "14px 12px" }}>No programmes yet.</td></tr>
                 )}
-                {schedRows.map(sch => (
-                  <tr key={sch.program_id}>
-                    {platform && <td className="muted">{sch.carrier_name ?? "—"}</td>}
-                    <td>
-                      <b>{sch.program_name}</b>
-                      <div className="sub">
-                        {sch.broker_count === 0 ? "no brokers on it"
-                          : plural(sch.broker_count, "broker")}
-                      </div>
-                    </td>
-                    <td>
-                      {sch.frequency
-                        ? sch.frequency_label
-                        : <span className="badge b-warn"><span className="d" />Not set</span>}
-                    </td>
-                    <td>{sch.due_rule}</td>
-                    <td className="mono">{fmtFull(sch.next_due)}</td>
-                    {/* Why the deadlines stop where they do. Without this the
-                        list just runs out and the reader has to guess whether
-                        that is the contract ending or the screen truncating. */}
-                    <td className="mono">
-                      {sch.covers_until
-                        ? fmtFull(sch.covers_until)
-                        : <span className="sub">no end date on the contract</span>}
-                    </td>
-                    <td>
-                      {/* Changing a schedule is the carrier's own call — the
-                          platform admin reads this board, never edits it. */}
-                      {!platform && (
-                        <Link className="linkish"
-                          to={`/calendar?program=${sch.program_id}`}>Change →</Link>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {schedRows.map(sch => {
+                  const brokers = sch.brokers ?? [];
+                  const open = openBrokers.has(sch.program_id);
+                  const visible = open ? brokers : brokers.slice(0, BROKERS_SHOWN);
+                  const hidden = brokers.length - visible.length;
+                  const toggle = () => setOpenBrokers(prev => {
+                    const next = new Set(prev);
+                    if (next.has(sch.program_id)) next.delete(sch.program_id);
+                    else next.add(sch.program_id);
+                    return next;
+                  });
+                  // Programme-level cells: one per programme, spanning its brokers.
+                  const span = Math.max(1, visible.length);
+                  const head = (
+                    <>
+                      {platform && <td rowSpan={span} className="muted">{sch.carrier_name ?? "—"}</td>}
+                      <td rowSpan={span} style={{ verticalAlign: "top" }}>
+                        <b>{sch.program_name}</b>
+                        <div className="sub">
+                          {brokers.length === 0 ? "no brokers on it"
+                            : plural(brokers.length, "broker")}
+                        </div>
+                        {(hidden > 0 || (open && brokers.length > BROKERS_SHOWN)) && (
+                          <span className="linkish" style={{ fontSize: 12 }} onClick={toggle}>
+                            {open ? "Show fewer" : `+${plural(hidden, "more broker")}`}
+                          </span>
+                        )}
+                      </td>
+                    </>
+                  );
+                  const freq = (
+                    <>
+                      <td rowSpan={span} style={{ verticalAlign: "top" }}>
+                        {sch.frequency
+                          ? sch.frequency_label
+                          : <span className="badge b-warn"><span className="d" />Not set</span>}
+                      </td>
+                      <td rowSpan={span} style={{ verticalAlign: "top" }}>{sch.due_rule}</td>
+                    </>
+                  );
+                  if (brokers.length === 0) {
+                    return (
+                      <tr key={sch.program_id}>
+                        {head}
+                        <td className="muted">no broker yet</td>
+                        <td className="muted">—</td>
+                        {freq}
+                        <td className="mono">—</td>
+                        <td className="mono">
+                          {sch.covers_until ? fmtFull(sch.covers_until)
+                            : <span className="sub">no contract yet</span>}
+                        </td>
+                        <td>
+                          {platform ? <span className="muted">—</span> : (
+                            <Link className="linkish" to={flowUrl(sch.program_id, "brokers")}
+                              title="Deadlines need a broker, their contract and a bordereau setup. Start by adding a broker.">
+                              Add Broker →
+                            </Link>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return visible.map((b, i) => (
+                    <tr key={`${sch.program_id}-${b.broker_party_id}`}>
+                      {i === 0 && head}
+                      <td><b>{b.broker_name}</b></td>
+                      <td>
+                        {b.contract_id == null ? <span className="muted">No contract</span>
+                          : platform ? b.contract_name
+                          : <Link className="linkish" to={`/contracts/${b.contract_id}`}>{b.contract_name}</Link>}
+                        {b.contract_id != null && !b.contract_settled && (
+                          <div className="sub">not agreed and signed yet</div>
+                        )}
+                      </td>
+                      {i === 0 && freq}
+                      <td className="mono">{fmtFull(b.next_due)}</td>
+                      {/* Why the deadlines stop where they do: this broker's
+                          contract ends. */}
+                      <td className="mono">
+                        {b.contract_ends ? fmtFull(b.contract_ends)
+                          : <span className="sub">{b.contract_id == null
+                            ? "no contract yet" : "no end date on the contract"}</span>}
+                      </td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        {platform ? <span className="muted">—</span> : <NextStep sch={sch} b={b} />}
+                      </td>
+                    </tr>
+                  ));
+                })}
               </tbody>
             </table>
           </div>
@@ -519,6 +598,34 @@ export default function BordereauCalendar() {
       )}
     </div>
   );
+}
+
+/** How many brokers a programme shows before "+N more brokers". */
+const BROKERS_SHOWN = 3;
+
+/** The one thing to do next for a broker on a programme. A file is only owed
+ *  once there is a broker, their contract is agreed and signed, and a bordereau
+ *  setup is live — so the deadlines are offered last, not first. */
+function NextStep({ sch, b }: { sch: BoardSchedule; b: ScheduleBroker }) {
+  const q = `program_id=${sch.program_id}&broker_party_id=${b.broker_party_id}`;
+  if (b.contract_id == null) {
+    return <Link className="linkish" to={`/contracts/new?${q}`}
+      title="This broker has no contract on this programme yet">Add Contract →</Link>;
+  }
+  if (!b.contract_settled) {
+    return <Link className="linkish" to={`/contracts/${b.contract_id}`}
+      title="The contract has to be agreed and signed before a bordereau setup">Finish Contract →</Link>;
+  }
+  if (!b.setup_live) {
+    return <Link className="linkish" to={`/direct/setup?${q}`}
+      title="No live bordereau setup for this broker yet, so their files cannot be processed">
+      Set Up Bordereau →</Link>;
+  }
+  return <Link className="linkish" to={`/calendar?program=${sch.program_id}`}
+    title={sch.frequency
+      ? "Change how often it is due, the due day and reminders"
+      : "Everything is in place. Set how often this programme's bordereau is due."}>
+    {sch.frequency ? "Edit Deadlines →" : "Set Frequency →"}</Link>;
 }
 
 // ---------------------------------------------------------------------------
@@ -595,8 +702,11 @@ function VersionPanel({ row, onClose }: {
                   </span>
                 )}
               </div>
-              {v.source_filename && (
-                <div className="sub" style={{ marginBottom: 4 }}>{v.source_filename}</div>
+              {(v.source_filename || v.channel) && (
+                <div className="sub" style={{ marginBottom: 4 }}>
+                  {v.source_filename}
+                  {v.channel && CAME_BY[v.channel] ? `${v.source_filename ? " · " : ""}via ${CAME_BY[v.channel]}` : ""}
+                </div>
               )}
             </div>
           ))}

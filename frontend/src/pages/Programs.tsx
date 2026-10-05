@@ -214,14 +214,14 @@ export default function Programs() {
                       <td className="align-middle">
                         {/* A link, not just a clickable row — it can be opened in a
                             new tab and reached by keyboard. */}
-                        <Link
+                        {/* <Link
                           to={`/programs/${p.id}/brokers`}
                           onClick={e => e.stopPropagation()}
                           title={about || undefined}
                           className="block font-semibold text-ink hover:text-navy hover:underline"
-                        >
+                        > */}
                           {p.name}
-                        </Link>
+                        {/* </Link> */}
                         <div className="mt-0.5 text-xs text-ink-muted">
                           {p.created_at ? `Created ${fmtDate(p.created_at)} · ` : ""}
                           {frequencyLabel(p.bdx_frequency).toLowerCase()}

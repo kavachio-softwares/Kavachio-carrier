@@ -53,6 +53,11 @@ from segment_routes import router as segment_router
 # at all because the emailed token is the credential (esign_routes.py).
 from esign_routes import router as esign_router, public_router as esign_public_router
 from audit_routes import router as audit_router
+# The broker exception loop: the secure correction link (public, token-
+# authenticated like e-sign) and the carrier's delivery rule / notify contacts.
+# No tables of its own — see submission_service.
+from fix_link_routes import router as fix_link_router
+from submission_routes import router as submission_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -137,6 +142,9 @@ app.include_router(esign_router)
 # back, which audit_feed.scope_for decides — so there is no role guard here to
 # fall out of step with it.
 app.include_router(audit_router)
+# The secure correction link — no login, the emailed token is the credential.
+app.include_router(fix_link_router)
+app.include_router(submission_router)
 
 
 def _mark_deprecated_aliases() -> None:
@@ -207,6 +215,12 @@ intake_autorun.start(app)
 # and keeps the record.
 import intake_review  # noqa: E402
 intake_review.start(app)
+
+# The broker exception loop's deadline rule, applied every 5 minutes
+# (SUBMISSION_DEADLINE_SWEEP_SECONDS; 0 = off). Broker emails stay off until
+# BROKER_NOTIFY_ENABLED=1.
+import submission_service  # noqa: E402
+submission_service.start(app)
 
 
 # --- DB audit middleware ---------------------------------------------------
@@ -2704,6 +2718,13 @@ def _attach_recommendations(excs: list) -> list:
             continue
         e = dict(e)
         spec = spec_by_id.get(e.get("rule_id"))
+        # An aggregate's limit, so its total can be shown against it ("7,700
+        # over the 100,000 limit") instead of as a bare sum that matches no
+        # cell. Display only — nothing that checks a file reads it.
+        if isinstance(e.get("aggregate"), dict) and "max" not in e["aggregate"]:
+            lim = _aggregate_limit(spec)
+            if lim:
+                e["aggregate"] = {**e["aggregate"], **lim}
         if e.get("confidence") is None:
             e["confidence"] = conf_by_id.get(e.get("rule_id"))
         if e.get("contract_clause_text") in (None, ""):
@@ -3118,6 +3139,29 @@ def _example_from_ir(rule_spec) -> Optional[dict]:
     if not (hint.get("example") or hint.get("format")):
         return None
     return {"example": hint.get("example"), "format": hint.get("format")}
+
+
+def _aggregate_limit(rule_spec) -> dict:
+    """The bound an aggregate_cap rule holds its total to — {"max": n} and/or
+    {"min": n} — or {} for any other rule."""
+    import json as _json
+    if isinstance(rule_spec, str):
+        try:
+            rule_spec = _json.loads(rule_spec)
+        except Exception:
+            return {}
+    ir = rule_spec.get("ir") if isinstance(rule_spec, dict) else None
+    if not isinstance(ir, dict) or ir.get("template") != "aggregate_cap":
+        return {}
+    params = ir.get("params") or {}
+    out = {}
+    for k in ("max", "min"):
+        try:
+            if params.get(k) is not None:
+                out[k] = float(params[k])
+        except (TypeError, ValueError):
+            pass
+    return out
 
 
 def _expected_from_ir(rule_spec) -> Optional[str]:
@@ -3817,8 +3861,28 @@ def export_download_get(export_id: int,
         # Not assert_tenant_owns: a BROKER seat has no tenant, so that guard
         # 404s them out of the exceptions for a run they made themselves.
         assert_can_read_export(s, principal, r)
-        return _export_to_dict(r, with_exceptions=True, mga=_tenant_name(s, r.tenant_id),
-                               viewer=principal)
+        out = _export_to_dict(r, with_exceptions=True, mga=_tenant_name(s, r.tenant_id),
+                              viewer=principal)
+        out["about"] = _export_about(s, r)
+        return out
+
+
+def _export_about(s, r: OutputExport) -> dict:
+    """What a run is FOR, in names — the strip above its exceptions: which
+    programme, broker and contract, which reporting period, which version."""
+    from exception_tally import export_versions
+    v = export_versions(s, [r.id]).get(r.id) or {}
+    prog = s.get(Program, r.program_id) if r.program_id else None
+    broker = s.get(Party, r.broker_party_id) if r.broker_party_id else None
+    cid = v.get("contract_id") or r.contract_id
+    con = s.get(Contract, cid) if cid else None
+    return {
+        "programme": prog.name if prog else None,
+        "broker": (broker.legal_name or broker.dba_name) if broker else None,
+        "contract": (con.name or con.filename) if con else None,
+        "reporting_period": v.get("reporting_period"),
+        "version_no": v.get("version_no"),
+    }
 
 
 @app.get("/export/downloads/{export_id}/file")
@@ -3829,15 +3893,29 @@ def export_download_file(export_id: int,
         if not r:
             raise HTTPException(404, "export file not found")
         assert_can_read_export(s, principal, r)
-        data = storage.resolve_bytes(r.blob_ref, r.blob)
-        if not data:
+        got = export_file_bytes(s, export_id, row=r)
+        if not got:
             raise HTTPException(404, "export file not found")
-        from output_serializers import content_type_for_filename
+        filename, data, media_type = got
         return Response(
             content=data,
-            media_type=content_type_for_filename(r.filename),
-            headers={"Content-Disposition": _content_disposition(r.filename)},
+            media_type=media_type,
+            headers={"Content-Disposition": _content_disposition(filename)},
         )
+
+
+def export_file_bytes(s, export_id: int, row=None):
+    """The generated BDX exactly as "Download BDX" serves it — exceptions
+    highlighted, each with its note — as (filename, bytes, media type), or None.
+    Also what the broker's exception email attaches."""
+    r = row if row is not None else _export_file_row(s, export_id)
+    if not r:
+        return None
+    data = storage.resolve_bytes(r.blob_ref, r.blob)
+    if not data:
+        return None
+    from output_serializers import content_type_for_filename
+    return r.filename, data, content_type_for_filename(r.filename)
 
 
 @app.get("/export/downloads/{export_id}/data")

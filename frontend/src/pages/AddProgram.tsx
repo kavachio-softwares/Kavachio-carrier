@@ -334,7 +334,7 @@ export default function AddProgram() {
   // assign, and carry on to step 3 on this same screen.
   async function finish() {
     if (pending === 0 && assigned.size === 0) {
-      nav(`/programs/${programId}/brokers`);
+      nav(`/programs`);
       return;
     }
     const r = await assignPicked();
@@ -932,7 +932,7 @@ export default function AddProgram() {
                 <div className="flex shrink-0 items-center gap-2">
                   <button type="button"
                     className="rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
-                    onClick={() => nav(`/programs/${programId}/brokers`)}>
+                    onClick={() => nav(`/programs`)}>
                     Go to programme →
                   </button>
                   {/* Always shown, disabled rather than hidden — a button

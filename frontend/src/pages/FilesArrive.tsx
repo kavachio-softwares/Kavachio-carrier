@@ -23,6 +23,8 @@ import {
 } from "../api/intake";
 import { Mail, Server, Upload, Zap } from "lucide-react";
 import { Modal } from "../components/ui/Modal";
+import { getRouteContacts, putRouteContacts } from "../api/submissions";
+import { InfoTip } from "../components/InfoTip";
 
 // Copy lives here, not in the API, because it is interface language rather than
 // data — the backend has no opinion on what "the old-fashioned way" means.
@@ -86,7 +88,9 @@ const CHANNEL_DETAIL: Partial<Record<Channel, [string, string][]>> = {
     ["After we take it", "Moved into /processed so it cannot be read twice"],
     ["If the file is still being written", "We wait until it stops growing"],
     ["If we do not know the folder", "Kept and shown on Files Received — but there is nobody to tell"],
-    ["Reporting period", "Read from the file name, e.g. Premium_BDX_2026-07.xlsx"],
+    ["Reporting period", "Required, in the file name, e.g. Premium_BDX_2026-07.xlsx — a file without one is rejected"],
+    ["Programme & contract", "Taken as read when the broker has only one; otherwise named in the file name, e.g. Demonity_RiskContract_2026-07.xlsx"],
+    ["A later file for the same month", "Becomes the next version of that file — however the first one came in"],
   ],
   email: [
     ["Where they send it", "The intake mailbox, at their own +address"],
@@ -95,15 +99,14 @@ const CHANNEL_DETAIL: Partial<Record<Channel, [string, string][]>> = {
     ["After we take it", "Filed into /Processed so it cannot be read twice"],
     ["Attachments we ignore", "Signatures, logos and anything not a spreadsheet"],
     ["If we cannot use it", "The sender can be notified — email is the only channel with a reply path"],
-    ["Reporting period", "Read from the subject line or file name, e.g. \"Bordereau – July 2026\""],
+    ["Reporting period", "Required, in the subject line or file name, e.g. \"Bordereau – July 2026\" — a file without one is rejected"],
+    ["Programme & contract", "Taken as read when the broker has only one; otherwise named in the subject line, e.g. \"Demonity – Risk Contract – July 2026\""],
+    ["A later file for the same month", "Becomes the next version of that file — however the first one came in"],
   ],
   api: [
-    ["Where they send it", "POST /v1/bordereaux"],
-    ["How they identify themselves", "An API key that only they hold"],
-    ["When it happens", "The moment they send — nothing is polled"],
-    ["What they get back", "A reference, and whether it was accepted, straight away"],
-    ["If it fails", "They are told at once in the reply, so they can retry"],
-    ["Reporting period", "Sent as period, e.g. 2026-07 — GET /v1/whoami lists the valid ones"],
+    ["Reporting period", "Required, sent as period, e.g. 2026-07 — GET /v1/whoami lists the valid ones"],
+    ["Programme & contract", "Fixed by the key when it covers one; otherwise sent as program_ref and contract_ref — GET /v1/whoami lists them"],
+    ["A later file for the same month", "Becomes the next version of that file — however the first one came in"],
   ],
 };
 
@@ -423,10 +426,11 @@ function RouteCard({ route, busy, keys, onSettings, onToggle }: {
             broker, programme, address — apart from a second on/off control
             weaker than the switch beside it, because it did not confirm. Keys
             are the exception: they exist nowhere else. */}
-        {isApi && (
-          <button type="button" className="btn sm" onClick={onSettings}>
-            {needsKey ? "Make a key" : "API keys"}
-          </button>)}
+        {/* Keys (API only) and who hears about each file's result (every
+            channel) — the two things that exist nowhere else on the row. */}
+        <button type="button" className="btn sm" onClick={onSettings}>
+          {isApi ? (needsKey ? "Make a key" : "API keys") : "Notifications"}
+        </button>
       </div>
     </div>
   );
@@ -463,7 +467,7 @@ function SettingsModal({ route, onClose, onSaved }:
 
   return (
     <Modal open={!!route} size="2xl" onClose={onClose}
-      title={route ? `API keys — ${route.broker_name ?? "this broker"}` : ""}
+      title={route ? `${route.channel === "api" ? "API keys & notifications" : "Notifications"} — ${route.broker_name ?? "this broker"}` : ""}
       footer={<div className="proto proto-embed" style={{ display: "flex", gap: 10 }}>
         <button className="btn pri" style={{ marginLeft: "auto" }}
           onClick={onSaved}>Done</button>
@@ -506,9 +510,64 @@ function SettingsModal({ route, onClose, onSaved }:
               separate screen. */}
           {route.channel === "api" && <KeyPanel route={route} />}
 
+          <NotifyPanel route={route} />
+
         </div>
       )}
     </Modal>
+  );
+}
+
+// ── Who hears about each file ───────────────────────────────────────────────
+// A broker sending by API, email or SFTP is not in this app, so the result of
+// every file — the exceptions, and the secure link to fix them — goes to these
+// addresses. Empty: the email address the file came from (email channel) or
+// the broker's own login.
+function NotifyPanel({ route }: { route: IntakeRoute }) {
+  const [text, setText] = useState("");
+  const [saved, setSaved] = useState<string[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
+
+  useEffect(() => {
+    setMsg(null);
+    getRouteContacts(route.route_id)
+      .then((e) => { setSaved(e); setText(e.join(", ")); })
+      .catch(() => setSaved([]));
+  }, [route.route_id]);
+
+  async function save() {
+    setBusy(true); setMsg(null);
+    const emails = text.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
+    try {
+      const e = await putRouteContacts(route.route_id, emails);
+      setSaved(e); setText(e.join(", "));
+      setMsg({ tone: "ok", text: e.length ? "Saved." : "Cleared — the broker's own login will be told." });
+    } catch (err) {
+      const d = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setMsg({ tone: "warn", text: d || "Could not save the addresses." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div className="sub-h">
+        Notify These Emails
+        <InfoTip text={"Who is told each file's result — exceptions, the secure link to fix them, "
+          + "and delivery — on top of the reply on this channel. Leave empty to use the sender's "
+          + "address (email channel) or the broker's own login."} />
+      </div>
+      <input className="inp" style={{ width: "100%" }} value={text} disabled={busy || saved === null}
+        placeholder="ops@broker.com, bordereaux@broker.com"
+        onChange={(e) => setText(e.target.value)} />
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
+        <button className="btn sm" disabled={busy || saved === null} onClick={save}>
+          {busy ? "Saving…" : "Save Addresses"}</button>
+        {msg && <span className={msg.tone === "ok" ? "ok" : "warn"} style={{ fontSize: 12 }}>{msg.text}</span>}
+      </div>
+    </div>
   );
 }
 

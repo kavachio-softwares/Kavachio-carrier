@@ -22,9 +22,10 @@ import {
   discardArrival, downloadArrival, isHeld, listArrivals, releaseArrival, rerunArrival,
   type Arrival, type Channel, type RunResult,
 } from "../api/intake";
-import { fmtStamp } from "../utils/date";
+import { fmtStamp, periodLabel } from "../utils/date";
 import { Pagination } from "../components/Pagination";
 import { InfoTip } from "../components/InfoTip";
+import SubmissionPanel from "../components/SubmissionPanel";
 
 // Each door gets a name and a tone, as in the carrier-centric design: email is
 // the one with a reply path so it reads as info, an upload was done by a person
@@ -101,6 +102,8 @@ const CHECKS: [string, string][] = [
    "The file is checked for macros and abnormal compression."],
   ["Sender verification",
    "The sender must be a broker on one of your programmes."],
+  ["Programme, contract & period",
+   "The file must say which reporting period it is for — and which programme and contract, when the sender has more than one."],
   ["Duplicate check",
    "Previously received files are not loaded again, preventing double-counted premium."],
   ["Security scan",
@@ -128,12 +131,13 @@ function failedCheck(reason: string | null): number {
   if (/not a spreadsheet|not an excel workbook|we can read /.test(r)) return 1;
   if (/expands to|internal parts|contains macros/.test(r)) return 2;
   if (/recognise the sender|not linked to a broker|been switched off/.test(r)) return 3;
-  if (/same file we already loaded/.test(r)) return 4;
-  if (/security scan/.test(r)) return 5;
-  if (/could not open it/.test(r)) return 6;
-  if (/no rows in it/.test(r)) return 7;
-  if (/columns this programme reports on|missing \d+ column/.test(r)) return 8;
-  if (/no (live|active) contract/.test(r)) return 9;
+  if (/no reporting period|not a reporting period|has not ended yet|which programme\?|which contract\?|contract is not one/.test(r)) return 4;
+  if (/same file we already loaded/.test(r)) return 5;
+  if (/security scan/.test(r)) return 6;
+  if (/could not open it/.test(r)) return 7;
+  if (/no rows in it/.test(r)) return 8;
+  if (/columns this programme reports on|missing \d+ column/.test(r)) return 9;
+  if (/no (live|active) contract/.test(r)) return 10;
   return -1;
 }
 
@@ -165,6 +169,25 @@ export function state(a: Arrival): "ok" | "held" | "away" {
 }
 
 /** Days since it landed. Only ever shown on a file still waiting on somebody. */
+/** Each submission once, as its newest file that COUNTS. A file somebody
+ *  discarded (a duplicate, say) never stands for the submission — it stays in
+ *  the row's History — and one still waiting on a decision keeps a row of its
+ *  own beside it: the queue must never hide work. A submission whose every
+ *  file was discarded still shows, as its newest, so it never vanishes. */
+function latestVersions(rows: Arrival[]): Arrival[] {
+  const newer = (a: Arrival, b?: Arrival) => !b || (a.version_no ?? 0) > (b.version_no ?? 0);
+  const counting = new Map<string, Arrival>();
+  const any = new Map<string, Arrival>();
+  for (const a of rows) {
+    if (!a.submission_ref) continue;
+    if (newer(a, any.get(a.submission_ref))) any.set(a.submission_ref, a);
+    if (a.resolution === "discarded" || isWaiting(a)) continue;
+    if (newer(a, counting.get(a.submission_ref))) counting.set(a.submission_ref, a);
+  }
+  return rows.filter(a => !a.submission_ref || isWaiting(a)
+    || (counting.get(a.submission_ref) ?? any.get(a.submission_ref)) === a);
+}
+
 function waitDays(a: Arrival): number {
   if (!a.received_at) return 0;
   return Math.floor((Date.now() - new Date(a.received_at).getTime()) / 86400000);
@@ -209,7 +232,7 @@ function actionLabel(a: Arrival): string {
 // backend's full sentence is kept for the tooltip and the drawer.
 const SHORT_REASON = [
   "Invalid file size", "Unsupported file type", "Unsafe file content",
-  "Unrecognised sender", "Duplicate file", "Failed security scan",
+  "Unrecognised sender", "No reporting period", "Duplicate file", "Failed security scan",
   "Unable to open file", "No data rows", "Required columns missing", "No active contract",
 ];
 
@@ -231,10 +254,17 @@ function subline(a: Arrival): string {
   }
   const reason = fullReason(a);
   const i = failedCheck(reason);
-  if (i === 8) {
+  if (i === 9) {
     const n = reason.match(/missing (\d+) column/i)?.[1];
     if (n) return `${n} required columns missing`;
     if (/none of the columns/i.test(reason)) return "Unrecognised file layout";
+  }
+  if (i === 4) {
+    // One step answers three questions; say which one was left open.
+    if (/which programme\?/i.test(reason)) return "Which programme?";
+    if (/which contract\?|contract is not one/i.test(reason)) return "Which contract?";
+    if (/has not ended yet/i.test(reason)) return "Period not over yet";
+    if (/is not a reporting period/i.test(reason)) return "Unknown period";
   }
   if (i >= 0) return SHORT_REASON[i];
   // Nothing matched: the first sentence, cut short.
@@ -332,7 +362,10 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [lookForNew]);
 
-  const all = rows ?? [];
+  // One row per submission: a corrected file is the next version of the same
+  // submission, so it replaces the one before it here. The earlier versions
+  // are listed in the file panel.
+  const all = useMemo(() => latestVersions(rows ?? []), [rows]);
   useEffect(() => { if (rows) onRows?.(rows); }, [rows, onRows]);
 
   // The tiles count over the Received period, so "Today" in the filter is what
@@ -641,6 +674,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                   </th>
                   <th>File Name</th><th>Channel</th><th>Broker</th><th>Programme</th>
                   <th title="Contract used for validation">Contract</th>
+                  <th title="The reporting period this file is for">Reporting Period</th>
                   <th>Rows</th><th>Status</th><th>Received</th><th />
                 </tr>
               </thead>
@@ -650,7 +684,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                   const sub = subline(a);
                   const on = picked.has(a.arrival_id);
                   return (
-                    <tr key={a.arrival_id} className={`arow ${st}${on ? " sel" : ""}`} tabIndex={0}
+                    <tr key={a.arrival_id} className={`arow ${st === "held" && a.resolution ? "decided" : st}${on ? " sel" : ""}`} tabIndex={0}
                       onClick={() => setOpen(a)}
                       onKeyDown={e => { if (e.key === "Enter") setOpen(a); }}>
                       <td className="cbcell" onClick={e => e.stopPropagation()}>
@@ -666,6 +700,8 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                       <td>
                         <div className="fname">
                           {a.filename}
+                          {(a.version_no ?? 0) > 1 &&
+                            <span className="vchip">Version {a.version_no}</span>}
                           {/* The wait, on the row. Without it the number was
                               only ever on the tile, describing a file the sort
                               order then hid at the bottom of the table. */}
@@ -690,11 +726,16 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                       <td className="muted">
                         {a.program_name ?? <span className="faint">—</span>}</td>
                       <td>{a.contract_name ?? <span className="faint">—</span>}</td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        {a.reporting_period ? periodLabel(a.reporting_period)
+                          : <span className="faint">—</span>}</td>
                       <td className="mono">{rowsOf(a.row_count)}</td>
                       <td>
                         {/* Two steps: did it get in, then what the run did. */}
                         {st === "ok" ? <Badge tone="ok">Accepted</Badge>
-                          : st === "held" ? <Badge tone="warn">On Hold</Badge>
+                          : st === "held" ? (a.resolution === "discarded"
+                            ? <Badge tone="mut">Discarded</Badge>
+                            : <Badge tone="warn">On Hold</Badge>)
                           : <Badge tone="crit">Rejected</Badge>}
                         {st === "ok" && (
                           <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
@@ -732,7 +773,11 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
         </div>
       </div>
 
-      <ArrivalDrawer arrival={open} onClose={() => setOpen(null)} onResolved={load} />
+      <ArrivalDrawer arrival={open} onClose={() => setOpen(null)} onResolved={load}
+        onOpenArrival={id => {
+          const r = (rows ?? []).find(x => x.arrival_id === id);
+          if (r) setOpen(r);
+        }} />
     </>
   );
 }
@@ -746,9 +791,11 @@ function verdict(a: Arrival, st: "ok" | "held" | "away"):
     { tone: "ok" | "warn" | "crit" | ""; title: string; text: string } {
   if (st === "away") return { tone: "crit", title: "Rejected at intake",
     text: fullReason(a) || "No reason recorded." };
+  // The headline alone: the reason is the failed step under Intake Checks,
+  // and the buttons below say what can be done about it.
   if (st === "held") return { tone: "warn",
     title: a.resolution === "discarded" ? "Discarded" : "On hold — needs your decision",
-    text: fullReason(a) || "Release it for processing or discard it." };
+    text: "" };
   const n = a.run_exception_count ?? 0;
   switch (a.run_result) {
     case "exceptions": return { tone: "warn",
@@ -767,8 +814,10 @@ function verdict(a: Arrival, st: "ok" | "held" | "away"):
   }
 }
 
-function ArrivalDrawer({ arrival, onClose, onResolved }: {
+function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival }: {
   arrival: Arrival | null; onClose: () => void; onResolved: () => void;
+  /** Open another version of the same submission. */
+  onOpenArrival?: (arrivalId: number) => void;
 }) {
   const st = arrival ? state(arrival) : "ok";
   const failed = arrival && st !== "ok" ? failedCheck(arrival.turned_away_reason) : -1;
@@ -855,7 +904,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
               const v = verdict(arrival, st);
               return (
                 <div className={`note ${v.tone}`} style={{ marginTop: 0 }}>
-                  <b style={{ display: "block", fontSize: 14, marginBottom: 3 }}>{v.title}</b>
+                  <b style={{ display: "block", fontSize: 14, marginBottom: v.text ? 3 : 0 }}>{v.title}</b>
                   {v.text}
                   {arrival.resolution && (
                     <div className="faint" style={{ fontSize: 11.5, marginTop: 6 }}>
@@ -876,6 +925,9 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
               {arrival.contract_name && (
                 <div className="kv"><span className="k">Contract</span>
                   <span className="v">{arrival.contract_name}</span></div>)}
+              {arrival.reporting_period && (
+                <div className="kv"><span className="k">Reporting Period</span>
+                  <span className="v">{periodLabel(arrival.reporting_period)}</span></div>)}
               <div className="kv"><span className="k">Channel</span>
                 <span className="v">
                   {arrival.channel
@@ -887,6 +939,11 @@ function ArrivalDrawer({ arrival, onClose, onResolved }: {
               <div className="kv"><span className="k">Rows</span>
                 <span className="v mono">{rowsOf(arrival.run_rows ?? arrival.row_count)}</span></div>
             </div>
+
+            {/* The broker exception loop: reference, progress, and whether
+                the broker was told. Shown once the file has a submission. */}
+            <SubmissionPanel arrivalId={arrival.arrival_id} onChanged={onResolved}
+              onOpenVersion={onOpenArrival} />
 
             {/* The ten intake checks as a stepper, in the order they ran. They
                 stop at the first failure, so anything after it never ran — a

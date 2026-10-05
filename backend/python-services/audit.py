@@ -174,6 +174,8 @@ _NUM = re.compile(r"/\d+")
 # Redacted here, at the only place a request path becomes an audit row.
 _SECRET_SEGMENTS = [
     (re.compile(r"(/esign/sign/)[^/]+"), r"\1{token}"),
+    # The broker's secure correction link is the same kind of credential.
+    (re.compile(r"(/fix-link/)[^/]+"), r"\1{token}"),
 ]
 
 # Id segments that are not NUMBERS. A tenant is addressed by its code, so
@@ -344,6 +346,11 @@ def friendly_action(method: str, path: str) -> str:
 # captured generically by the middleware. (/auth/* is skipped separately and
 # handled by auth_audit.)
 _SELF_LOGGED = [
+    # The secure correction link writes its own audit rows (who, by email).
+    ("POST",   re.compile(r"^/fix-link/[^/]+(/.*)?$")),
+    # The carrier's delivery rule and channel notify list log themselves.
+    ("PUT",    re.compile(r"^/programs/\d+/delivery-rule$")),
+    ("PUT",    re.compile(r"^/intake/routes/\d+/contacts$")),
     ("POST",   re.compile(r"^/extra-fields$")),
     ("POST",   re.compile(r"^/extra-fields/[^/]+/adopt$")),
     ("POST",   re.compile(r"^/tenants$")),

@@ -65,7 +65,7 @@ function answeredAction(r: BrokerOnboardingRequest) {
   }
   return (
     <Link className="linkish"
-      to={r.program_id ? `/programs/${r.program_id}/brokers` : "/brokers"}
+      to={r.program_id ? `/programs/${r.program_id}/setup` : "/brokers"}
       title="Nothing was created. Add the broker again to raise a new request.">
       Ask again →</Link>
   );
@@ -222,7 +222,7 @@ export default function BrokerOnboardingRequests() {
         <td>
           {r.programme
             ? (r.program_id
-                ? <Link to={`/programs/${r.program_id}/brokers`}
+                ? <Link to={`/programs/${r.program_id}/setup`}
                         className="party-chip">{r.programme}</Link>
                 : r.programme)
             : <span className="faint" title={"They were asked into your directory "

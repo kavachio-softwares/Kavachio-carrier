@@ -1161,6 +1161,21 @@
 .proto .aged{font-family:var(--p-mono);font-size:10px;font-weight:700;
   color:var(--p-warn-ink);background:var(--p-warn-soft);padding:1px 6px;
   border-radius:var(--p-r-xs);margin-left:7px;white-space:nowrap;vertical-align:1px}
+/* Which version of its submission a file is — the list shows each submission
+   once, as its latest file. */
+.proto .vchip{font-size:10.5px;font-weight:600;color:var(--p-primary);
+  background:var(--p-primary-soft);padding:1px 6px;border-radius:var(--p-r-xs);
+  margin-left:7px;white-space:nowrap;vertical-align:1px}
+/* What a file is for — period, programme, broker, contract — as one short
+   line of chips under a page title. */
+.proto .about-strip{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.proto .about-strip .chip{display:inline-flex;align-items:baseline;gap:6px;font-size:12.5px;
+  color:var(--p-ink);background:var(--p-surface-2);border:1px solid var(--p-border);
+  border-radius:var(--p-r-pill);padding:3px 10px;white-space:nowrap}
+.proto .about-strip .chip .k{font-size:10px;font-weight:600;text-transform:uppercase;
+  letter-spacing:.05em;color:var(--p-muted)}
+.proto .about-strip .chip.lead{background:var(--p-primary-soft);border-color:transparent;
+  color:var(--p-primary);font-weight:600}
 
 /* ── search + toolbar ─────────────────────────────────────────────────────── */
 .proto .searchbox{position:relative;display:flex;align-items:center;flex:1 1 210px;

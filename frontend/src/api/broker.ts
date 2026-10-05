@@ -126,6 +126,9 @@ export type BrokerCalendarRow = {
   chase_count: number;
   /** The file behind the newest version, for its exceptions screen. */
   export_id: number | null;
+  /** The contract this period answers to. */
+  contract_id?: number | null;
+  contract_name?: string | null;
   /** When the newest version was uploaded — exact time, UTC ISO. */
   uploaded_at: string | null;
 };
@@ -140,6 +143,8 @@ export type BrokerCalendar = {
     program_id: number; program_name: string; carrier_name: string | null;
     frequency: string | null; frequency_label: string; due_rule: string;
     next_due: string | null; covers_until: string | null;
+    /** This broker's own entry only (the server drops everyone else's). */
+    brokers?: { contract_id: number | null; contract_name: string | null }[];
   }[];
 };
 
@@ -276,6 +281,7 @@ export type OperatorRun = {
   filename: string;
   programme: string | null;
   contract: string | null;
+  contract_id?: number | null;
   rows: number | null;
   exception_count: number;
   status: string | null;
@@ -283,7 +289,23 @@ export type OperatorRun = {
    *  ran it for this broker. */
   sent_by: "broker" | "carrier";
   created_at: string | null;
+  /** Which version of its submission this file is — each submission is
+   *  listed once, as its newest version — and the month it is for. */
+  version_no?: number | null;
+  reporting_period?: string | null;
+  /** Still open / put right — the same count Exceptions to Review shows. */
+  open?: number;
+  put_right?: number;
 };
+
+/** "13 of 23 open" — what a file's badge says, the way Exceptions to Review
+ *  counts it. Undefined `open` (an older server) falls back to the total. */
+export function exceptionsLeft(r: OperatorRun): { open: number; total: number; title: string } {
+  const total = r.exception_count;
+  const open = r.open ?? total;
+  return { open, total,
+    title: `${open} of ${total} still open · ${r.put_right ?? total - open} put right` };
+}
 
 export const getOperatorHome = () =>
   api.get<OperatorHome>("/broker/operator-home").then(r => r.data);

@@ -115,6 +115,12 @@ export type Arrival = {
   bdx_upload_id: number | null;
   /** The reference a partner quotes back at us. */
   public_ref?: string | null;
+  /** The submission this file is a version of, and which version. A
+   *  corrected file is the next version of the same submission. */
+  submission_ref?: string | null;
+  version_no?: number | null;
+  /** The reporting period the file was FOR ('YYYY-MM'), when known. */
+  reporting_period?: string | null;
   // ── 12.3 — what a PERSON decided ─────────────────────────────────────────
   /** null means nobody has looked at this yet — which is what makes it a queue. */
   resolution: "released" | "discarded" | null;

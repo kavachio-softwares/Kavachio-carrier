@@ -64,6 +64,9 @@ class IntakeRoute(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     disabled_at = Column(DateTime(timezone=True), nullable=True)
     disabled_by_user_id = Column(BigInteger, ForeignKey("app_user.user_id"), nullable=True)
+    # Extra addresses told about every file on this channel (the broker
+    # exception loop): ["ops@broker.com", …]. Migration 32.
+    notify_emails = Column(JSONB, nullable=True)
 
 
 class FileArrival(Base):
@@ -133,6 +136,27 @@ class FileArrival(Base):
     channel = Column(Text, nullable=True)
     program_id = Column(BigInteger, nullable=True)
     submitted_by_user_id = Column(BigInteger, nullable=True)
+    # ── Migration 32 — the broker exception loop ────────────────────────────
+    # Every file from a broker is a version of a SUBMISSION. The reference the
+    # broker quotes is the public_ref of the thread's first file; a correction
+    # (a file quoting it, or the next file for the same programme + period)
+    # is the next version. Corrections made on the secure link are versions
+    # too, but they are exports (output_exports.version_no), not files.
+    reporting_period = Column(Text, nullable=True)   # the period it landed against
+    submission_ref = Column(Text, nullable=True, index=True)
+    version_no = Column(Integer, nullable=True)
+    matched_by = Column(Text, nullable=True)         # new | reference | period | duplicate
+    version_status = Column(Text, nullable=True)     # see submission_service.STATUS_WORDS
+    version_note = Column(Text, nullable=True)
+    # Thread-level, kept on the FIRST file only (public_ref == submission_ref).
+    deadline_at = Column(DateTime(timezone=True), nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    # Migration 34 — the contract the file is written under: picked on Process
+    # Bordereau, sent as contract_ref on the API, named in an email subject or
+    # file name, or the only one there is (intake_service.identify). The run
+    # checks the file against it, and it is part of what makes a later file
+    # the next version of the same submission.
+    contract_id = Column(BigInteger, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
 

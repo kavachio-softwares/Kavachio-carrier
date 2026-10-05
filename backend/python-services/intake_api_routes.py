@@ -68,22 +68,13 @@ def _programme_ref(prog: Program) -> str:
     """The carrier's own code where there is one, else a slug of the name.
     Surrogate ids are deliberately not exposed: they leak row counts, invite
     enumeration, and become an unbreakable public contract the first time a
-    partner hard-codes one."""
-    ref = getattr(prog, "program_ref", None)
-    if ref:
-        return str(ref)
-    return "-".join((prog.name or f"programme-{prog.id}").lower().split())
+    partner hard-codes one. (One definition: intake_service.programme_ref,
+    which email and SFTP subjects and file names are matched against too.)"""
+    return svc.programme_ref(prog)
 
 
 def _broker_programmes(s, tenant_id: int, broker_party_id) -> list[Program]:
-    if not broker_party_id:
-        return []
-    return (s.query(Program)
-            .join(ProgramBroker, ProgramBroker.program_id == Program.id)
-            .filter(ProgramBroker.broker_party_id == broker_party_id,
-                    ProgramBroker.status == "active",
-                    Program.tenant_id == tenant_id)
-            .all())
+    return svc.broker_programmes(s, tenant_id, broker_party_id)
 
 
 def resolve_programme(s, p: IntakePrincipal, declared_ref: Optional[str]):
@@ -128,21 +119,38 @@ def resolve_programme(s, p: IntakePrincipal, declared_ref: Optional[str]):
 def reporting_periods(s, tenant_id: int, program_id: Optional[int],
                       broker_party_id) -> list[str]:
     """The reporting periods a sender may name — the same list the broker's
-    Process Bordereau picker offers: this programme's calendar rows for this
-    broker whose period has ended, most recently due first. Empty when the
-    carrier has no calendar for the programme."""
-    if program_id is None:
-        return []
-    from datetime import datetime
-    from db import ExpectedSubmission
-    rows = (s.query(ExpectedSubmission.period)
-            .filter(ExpectedSubmission.tenant_id == tenant_id,
-                    ExpectedSubmission.program_id == program_id,
-                    ExpectedSubmission.broker_party_id == broker_party_id,
-                    ExpectedSubmission.period_end <= datetime.utcnow().date())
-            .order_by(ExpectedSubmission.due_date.desc())
-            .limit(24).all())
-    return [r.period for r in rows]
+    Process Bordereau picker offers (intake_service.reporting_periods)."""
+    return svc.reporting_periods(s, tenant_id, program_id, broker_party_id)
+
+
+def resolve_contract(s, p: IntakePrincipal, program_id: int,
+                     declared_ref: Optional[str]) -> Optional[int]:
+    """Which of the programme's contracts the file is written under — the
+    question Process Bordereau asks a person.
+
+      one contract            → that one; a different declared one is a 400
+      several + declared      → the declared one, if it is one of them
+      several, none declared  → 400 that LISTS the valid refs
+      none                    → None: the file is held for the carrier until a
+                                contract is agreed, as it always has been
+    """
+    options = svc.live_contracts(s, p.tenant_id, program_id, p.broker_party_id)
+    by_ref = {svc.contract_ref(c): c.id for c in options}
+    if declared_ref:
+        want = svc._plain(declared_ref)
+        hit = [c.id for c in options
+               if want in (svc._plain(svc.contract_ref(c)), svc._plain(c.name))]
+        if len(hit) != 1:
+            raise _err(400, "unknown_contract",
+                       f"There is no contract called '{declared_ref}' for this "
+                       "sender on that programme.", choices=sorted(by_ref))
+        return hit[0]
+    if len(options) > 1:
+        raise _err(400, "contract_required",
+                   "This programme has more than one contract for this sender, so "
+                   "each file has to say which one it is written under. Send "
+                   "contract_ref with the file.", choices=sorted(by_ref))
+    return options[0].id if options else None
 
 
 def _receipt(s, arrival: FileArrival, base: str, replayed: bool = False) -> dict:
@@ -150,12 +158,18 @@ def _receipt(s, arrival: FileArrival, base: str, replayed: bool = False) -> dict
     pastes the wrong key into the wrong script they see the wrong broker in the
     reply on the very first night, instead of you finding out three months later
     that files were filed against the wrong programme."""
+    from db import Contract
     route = s.get(IntakeRoute, arrival.route_id) if arrival.route_id else None
     tenant = s.get(Tenant, arrival.tenant_id)
     broker = (s.get(Party, arrival.matched_broker_party_id)
               if arrival.matched_broker_party_id else None)
-    prog = (s.get(Program, route.program_id)
-            if route and getattr(route, "program_id", None) else None)
+    # The programme the FILE was recorded against — the route's pin, or the one
+    # the sender named on a key that covers several.
+    prog_id = (getattr(route, "program_id", None) if route else None) or arrival.program_id
+    prog = s.get(Program, prog_id) if prog_id else None
+    con = (s.query(Contract.id, Contract.name, Contract.filename)
+           .filter(Contract.id == arrival.contract_id).first()
+           if getattr(arrival, "contract_id", None) else None)
     out = {
         "reference": arrival.public_ref,
         "status": _EXTERNAL.get(arrival.outcome, arrival.outcome),
@@ -164,13 +178,33 @@ def _receipt(s, arrival: FileArrival, base: str, replayed: bool = False) -> dict
                  "sha256": arrival.file_hash_sha256},
         "carrier": (tenant.legal_name or tenant.tenant_name) if tenant else None,
         "broker": broker.legal_name if broker else None,
+        # What the file was recorded as — programme, contract and period, the
+        # three things Process Bordereau asks a person to pick. A wrong one
+        # shows up on the first night rather than at month-end.
         "programme": prog.name if prog else None,
+        "programme_ref": _programme_ref(prog) if prog else None,
+        "contract": (con.name or con.filename) if con else None,
+        "contract_ref": svc.contract_ref(con) if con else None,
+        "period": arrival.reporting_period,
         "status_url": f"{base}/v1/bordereaux/{arrival.public_ref}",
     }
     if arrival.turned_away_reason:
         out["message"] = arrival.turned_away_reason
     if replayed:
         out["replayed"] = True
+    # The submission this file belongs to — the reference to quote on a
+    # correction (`replaces`), its version and where it stands now.
+    try:
+        import submission_service as subs
+        th, ver = subs.thread_for_arrival(s, arrival.id)
+        if th is not None and ver is not None:
+            doc = subs.status_json(s, th)
+            doc["this_file_version"] = ver.no
+            doc["this_file_status"] = ver.status
+            doc["exceptions_url"] = f"{base}/v1/submissions/{th.ref}/exceptions"
+            out["submission"] = doc
+    except Exception:  # noqa: BLE001 — the receipt never fails on it
+        log.warning("no submission block for %s", arrival.public_ref, exc_info=True)
     return out
 
 
@@ -188,10 +222,22 @@ async def receive_bordereau(
     # disagree. There is deliberately no broker or carrier field: a
     # client-supplied broker would let anyone with any key file as anyone else.
     program_ref: Optional[str] = Form(default=None),
+    # Which of the programme's contracts the file is written under — the
+    # Contract that Process Bordereau asks a person to pick. Needed only when
+    # the sender holds more than one on the programme; GET /v1/whoami lists
+    # them. Verified like program_ref, never trusted.
+    contract_ref: Optional[str] = Form(default=None),
     # The reporting period the file is FOR, e.g. "2026-07" — one of the
-    # labels GET /v1/whoami lists. Optional: without it the period is read
-    # from the file name, and failing that the oldest open period is assumed.
+    # labels GET /v1/whoami lists. REQUIRED: a file that does not say which
+    # period it is for was filed under the oldest period still open, which is
+    # a guess — and a wrong guess marks the wrong month as delivered. Kept
+    # Optional in the signature so a missing one gets this API's own error
+    # (period_required, with the valid choices) rather than a bare 422.
     period: Optional[str] = Form(default=None),
+    # A correction: the reference of the submission this file replaces (from
+    # the result email, the status endpoint or the SFTP status file). Without
+    # it a file for the same programme + period is still matched to it.
+    replaces: Optional[str] = Form(default=None),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     p: IntakePrincipal = Depends(current_intake_principal),
 ):
@@ -239,13 +285,19 @@ async def receive_bordereau(
             raise _err(403, "broker_not_on_programme",
                        "This sender is not currently set up on that programme. "
                        "Contact the carrier.")
+        contract_id = resolve_contract(s, p, program_id, contract_ref)
 
         # A stated period must be one the carrier's calendar expects — the same
         # rule Process Bordereau's picker enforces. Refused rather than guessed:
         # a wrong period marks the wrong month as delivered.
         period = (period or "").strip() or None
+        allowed = reporting_periods(s, p.tenant_id, program_id, p.broker_party_id)
+        if not period:
+            raise _err(400, "period_required",
+                       "Say which reporting period this file is for: send period "
+                       "with the file, e.g. period=" + (allowed[0] if allowed else "2026-09")
+                       + ".", choices=allowed)
         if period:
-            allowed = reporting_periods(s, p.tenant_id, program_id, p.broker_party_id)
             if allowed and period not in allowed:
                 raise _err(400, "unknown_period",
                            f"'{period}' is not a reporting period this programme "
@@ -273,7 +325,8 @@ async def receive_bordereau(
                 s, tenant_id=p.tenant_id, filename=fname, file_bytes=data,
                 route=route, claimed_sender=f"api:{p.credential_id}",
                 idempotency_key=idempotency_key, blob_ref=blob_ref,
-                period=period)
+                period=period, replaces=replaces,
+                program_id=program_id, contract_id=contract_id)
             s.commit()
         except IntegrityError:
             # Two identical POSTs racing each other — the DB arbitrated, so
@@ -333,6 +386,47 @@ def get_bordereau(reference: str, request: Request,
         return out
 
 
+def _own_submission(s, reference: str, p: IntakePrincipal):
+    """A submission this key's BROKER sent to this key's carrier — whichever
+    channel each version came through."""
+    import submission_service as subs
+    th = subs.load(s, subs.find_reference(reference))
+    if th is None or th.tenant_id != p.tenant_id \
+            or th.broker_party_id != p.broker_party_id:
+        raise _err(404, "not_found", "No submission with that reference.")
+    return th
+
+
+@router.get("/submissions/{reference}")
+def get_submission(reference: str, p: IntakePrincipal = Depends(current_intake_principal)):
+    """Where a submission stands: status, versions, progress, deadline."""
+    import submission_service as subs
+    with SessionLocal() as s:
+        return subs.status_json(s, _own_submission(s, reference, p))
+
+
+@router.get("/submissions/{reference}/exceptions")
+def get_submission_exceptions(reference: str, format: str = "json",
+                              p: IntakePrincipal = Depends(current_intake_principal)):
+    """Every exception on the current version, located in the broker's own
+    file: sheet, row, column, current value, expected value, what to fix.
+    Only the broker answers exceptions, so the broker's own key sees them.
+    `format=csv` for a spreadsheet."""
+    import submission_service as subs
+    with SessionLocal() as s:
+        th = _own_submission(s, reference, p)
+        doc = subs.status_json(s, th, include_exceptions=True)
+        if format == "csv":
+            from fastapi.responses import Response
+            body = subs.report_csv(th.ref, doc["version"], doc.get("exceptions") or [])
+            return Response(body, media_type="text/csv", headers={
+                "Content-Disposition":
+                    f'attachment; filename="{th.ref}-v{doc["version"]}-exceptions.csv"'})
+        return {"reference": th.ref, "version": doc["version"],
+                "status": doc["status"], "progress": doc["progress"],
+                "exceptions": doc.get("exceptions") or []}
+
+
 @router.get("/bordereaux")
 def list_bordereaux(request: Request, limit: int = 50,
                     p: IntakePrincipal = Depends(current_intake_principal)):
@@ -358,11 +452,25 @@ def whoami(p: IntakePrincipal = Depends(current_intake_principal)):
         broker = s.get(Party, p.broker_party_id) if p.broker_party_id else None
         prog = s.get(Program, p.program_id) if p.program_id else None
         options = _broker_programmes(s, p.tenant_id, p.broker_party_id)
+        # What a file sent with this key can be for: each programme it may
+        # name, the contracts under it and the periods open to it — the three
+        # pickers of Process Bordereau, as data.
+        shown = [prog] if prog is not None else options
+        programmes = [{
+            "ref": _programme_ref(x),
+            "name": x.name,
+            "contracts": [{"ref": svc.contract_ref(c), "name": c.name or c.filename}
+                          for c in svc.live_contracts(s, p.tenant_id, x.id,
+                                                      p.broker_party_id)],
+            "reporting_periods": reporting_periods(s, p.tenant_id, x.id,
+                                                   p.broker_party_id),
+        } for x in shown]
         return {
             "carrier": (tenant.legal_name or tenant.tenant_name) if tenant else None,
             "broker": broker.legal_name if broker else None,
             "programme": prog.name if prog else None,
             "programme_pinned": p.program_id is not None,
+            "programmes": programmes,
             # When the key is NOT pinned these are the refs a caller may send.
             "programme_options": sorted(_programme_ref(x) for x in options),
             # The values `period` may take on POST /v1/bordereaux.

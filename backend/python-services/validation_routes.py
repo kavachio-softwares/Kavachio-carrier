@@ -1482,7 +1482,9 @@ class ExportDecideRequest(BaseModel):
 
 
 def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest,
-                        principal: Principal, exp=None) -> dict:
+                        principal: Optional[Principal], exp=None,
+                        who: Optional[dict] = None,
+                        decided_by: Optional[str] = None) -> dict:
     """Persist decisions for a DIRECT-LANE export (output projected from
     landing_record.data, not canonical). Each decision is upserted into
     landing_correction keyed by (landing_id, sheet, row, field); Fix/Approve with
@@ -1510,10 +1512,14 @@ def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest,
     column_mapping = _as_dict(fmt and fmt["column_mapping"])
     landing_data = _as_dict(rec["data"])
     tenant_id = rec["tenant_id"]
-    # From the login, never body.user_id (see decide_exceptions).
+    # From the login, never body.user_id (see decide_exceptions). The secure
+    # correction link has no login: it passes the broker it acts for (`who`)
+    # and the person's email (`decided_by`) instead.
     import decision_log
-    who = decision_log.decider(s, principal)
-    decided_by = str(principal.user_id)
+    if who is None:
+        who = decision_log.decider(s, principal)
+    if decided_by is None:
+        decided_by = str(principal.user_id)
     exp = exp or {}
 
     updated, skipped = 0, []

@@ -343,6 +343,16 @@ class OutputExport(Base):
     # storage and `blob` is NULL. Falls back to `blob` otherwise.
     blob_ref = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    # ── Broker exception loop (migration 32) ────────────────────────────────
+    # The submission this checked file belongs to (the reference the broker
+    # quotes — file_arrival.public_ref of its first file) and its version.
+    # A file's own export carries the file's version number; an export made
+    # from secure-link corrections IS a version, so its status lives here too
+    # (version_status is NULL on a file's export: that status is the file's).
+    submission_ref = Column(String, nullable=True, index=True)
+    version_no = Column(Integer, nullable=True)
+    version_status = Column(String, nullable=True)
+    version_note = Column(Text, nullable=True)
 
 
 class UploadPolicy(Base):
@@ -507,6 +517,9 @@ class Program(Base):
     commercial_terms = Column(JSON, nullable=True)
     status = Column("status_ops", String, default="draft")
     source_contract_file = Column(String, nullable=True)
+    # What holds a broker's file back from the carrier, and what happens at
+    # the correction deadline (submission_service.rule_for). NULL = defaults.
+    delivery_rule = Column(JSON, nullable=True)
     # canonical_program_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -2229,6 +2242,12 @@ def init_db():
         _ensure_column(conn, inspector, "reference_document", "blob_ref", "VARCHAR")
         _ensure_column(conn, inspector, "export_templates", "template_blob_ref", "VARCHAR")
         _ensure_column(conn, inspector, "program", "party_id", "INTEGER")
+        # Broker exception loop (migration 32): the programme's delivery rule
+        # and a version's place in its submission. All nullable.
+        _ensure_column(conn, inspector, "program", "delivery_rule", json_type)
+        for _c, _ddl in (("submission_ref", "VARCHAR"), ("version_no", "INTEGER"),
+                         ("version_status", "VARCHAR"), ("version_note", "TEXT")):
+            _ensure_column(conn, inspector, "output_exports", _c, _ddl)
         _ensure_column(conn, inspector, "mappers", "party_id", "INTEGER")
         _ensure_column(conn, inspector, "upload", "party_id", "INTEGER")
         # Contract → Output Template hierarchy
@@ -2396,6 +2415,21 @@ def init_db():
                              ("program_id", "BIGINT"),
                              ("submitted_by_user_id", "BIGINT")):
                 _ensure_column(conn, inspector, "file_arrival", _c, _ddl)
+            # Migration 32 — the broker exception loop: which submission a
+            # file is, its version, and the thread's deadline / delivery.
+            for _c, _ddl in (("reporting_period", "VARCHAR"),
+                             ("submission_ref", "VARCHAR"), ("version_no", "INTEGER"),
+                             ("matched_by", "VARCHAR"), ("version_status", "VARCHAR"),
+                             ("version_note", "TEXT"),
+                             ("deadline_at", "TIMESTAMP WITH TIME ZONE"
+                              if dialect == "postgresql" else "TIMESTAMP"),
+                             ("delivered_at", "TIMESTAMP WITH TIME ZONE"
+                              if dialect == "postgresql" else "TIMESTAMP")):
+                _ensure_column(conn, inspector, "file_arrival", _c, _ddl)
+            # Migration 34 — the contract a received file is written under.
+            _ensure_column(conn, inspector, "file_arrival", "contract_id", "BIGINT")
+        if inspector.has_table("intake_route"):
+            _ensure_column(conn, inspector, "intake_route", "notify_emails", json_type)
             if not _had_run_state:
                 conn.exec_driver_sql(
                     "UPDATE file_arrival SET run_state = 'pre_autorun' "

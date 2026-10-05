@@ -4,7 +4,7 @@ import { Search } from "lucide-react";
 import { api, downloadFile } from "../api/client";
 import { currentMga } from "../auth";
 import { canAccessPath } from "../access";
-import { fmtStamp, localDayStart, localDayEnd } from "../utils/date";
+import { fmtStamp, localDayStart, localDayEnd, periodLabel } from "../utils/date";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -34,6 +34,10 @@ type Run = {
   filename: string | null;
   exception_count: number;
   status: string;
+  // Which version of its submission this file is — each submission is listed
+  // once, as its newest version — and the month it is for.
+  version_no?: number | null;
+  reporting_period?: string | null;
 };
 
 const RESULT_FILTERS = [
@@ -201,14 +205,19 @@ export default function RecentRuns() {
               <table>
                 <thead>
                   <tr>
-                    <th>Input File</th><th>Broker</th><th>Program</th>
+                    <th>Input File</th><th>Reporting Period</th><th>Broker</th><th>Program</th>
                     <th>Contract</th><th>Result</th><th>Processed</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
                   {pageRows.map(r => (
                     <tr key={r.landing_id}>
-                      <td><b>{r.source_filename ?? r.filename ?? `Run #${r.landing_id}`}</b></td>
+                      <td>
+                        <b>{r.source_filename ?? r.filename ?? `Run #${r.landing_id}`}</b>
+                        {r.version_no != null && r.version_no > 1 && (
+                          <span className="vchip">Version {r.version_no}</span>)}
+                      </td>
+                      <td>{r.reporting_period ? periodLabel(r.reporting_period) : <span className="muted">—</span>}</td>
                       <td className="muted">{r.broker_name ?? "—"}</td>
                       <td className="muted">{r.program_name ?? "—"}</td>
                       <td className="muted">{r.contract_name ?? "—"}</td>

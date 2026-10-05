@@ -521,14 +521,30 @@ def contract_bordereau_periods(scope: CarrierScope = Depends(contract_scope)):
     from datetime import datetime
     from db import ExpectedSubmission
     today = datetime.utcnow().date()
-    with SessionLocal() as s:
-        rows = (s.query(ExpectedSubmission)
+    def _rows(s):
+        return (s.query(ExpectedSubmission)
                 .filter(ExpectedSubmission.tenant_id == scope.carrier_id,
                         ExpectedSubmission.program_id == scope.program_id,
                         ExpectedSubmission.broker_party_id == scope.broker_party_id,
                         ExpectedSubmission.period_end <= today)
                 .order_by(ExpectedSubmission.due_date.desc())
                 .limit(24).all())
+    with SessionLocal() as s:
+        rows = _rows(s)
+        if not rows:
+            # No calendar for this broker yet: build it from the contract, as
+            # the carrier's calendar screen would on first view (a schedule
+            # made before this broker joined is rebuilt to include them).
+            from submission_calendar_service import ensure_auto_schedule, materialize_schedule
+            from db import SubmissionSchedule
+            had = (s.query(SubmissionSchedule.id)
+                   .filter(SubmissionSchedule.program_id == scope.program_id).first())
+            sched = ensure_auto_schedule(s, scope.program_id, scope.carrier_id)
+            if sched is not None and had is not None:
+                materialize_schedule(s, sched)
+                s.commit()
+            if sched is not None:
+                rows = _rows(s)
         return {"periods": [
             {"expected_id": e.id, "period": e.period,
              "due_date": e.due_date.isoformat() if e.due_date else None,
