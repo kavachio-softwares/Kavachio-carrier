@@ -118,7 +118,16 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
+/** One fresh page per contract. Going from one contract to another (Create
+ *  successor, the "Renews contract N" link) keeps this same route, so without
+ *  the key React reused the page — and the old contract's open forms, typed
+ *  inputs and late-arriving load carried over onto the new one. */
 export default function ContractRecord() {
+  const { contractId } = useParams();
+  return <ContractRecordView key={contractId} />;
+}
+
+function ContractRecordView() {
   const { contractId } = useParams();
   const id = Number(contractId);
   // Signing is the carrier ADMIN's (carrier_scope.require_carrier_admin), and
@@ -1223,6 +1232,18 @@ export default function ContractRecord() {
                 <Link to={`/contracts/${rec.renews_contract_id}`} className="linkish">
                   contract {rec.renews_contract_id}
                 </Link>
+              </div>
+            )}
+            {/* The renewal of an uploaded contract: same road as the one it
+                renews — attach the signed copy, then accept. No review, no
+                signing in Kavachio. See contract_routes._awaiting_signed_copy. */}
+            {rec.awaiting_signed_copy && !isBrokerSeat() && (
+              <div className="note" style={{ marginTop: 14 }}>
+                <b>Next: attach the signed renewal contract.</b>{" "}
+                Contract {rec.renews_contract_id} was uploaded, so this renewal
+                needs no signing in Kavachio. Under <b>Documents</b>, choose{" "}
+                <b>Wording</b>, tick <b>This is the signed copy</b> and attach
+                the PDF — then accept it to make it active.
               </div>
             )}
 

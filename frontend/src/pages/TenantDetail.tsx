@@ -33,12 +33,15 @@ type Contract = {
 };
 /** A contract's lifecycle in words and colour — the same labels the Contracts
  *  screen uses. `lifecycle` is the server's effective state (expired is derived
- *  from the term); the ops `status` is only a fallback for an older answer. */
+ *  from the term); the ops `status` is only a fallback for an older answer.
+ *  `in_review` reads "Draft" HERE ONLY, by the user's decision (6 Oct): on this
+ *  overview a contract the broker has not agreed yet is still a draft. The
+ *  Contracts and contract screens keep "Out for review". */
 function contractBadge(c: Contract) {
   const v = (c.lifecycle ?? (c.status === "active" ? "active" : "draft")).toLowerCase();
   const map: Record<string, [string, string]> = {
     draft: ["b-mut", "Draft"], pending: ["b-warn", "Awaiting acceptance"],
-    in_review: ["b-warn", "Out for review"], changes_requested: ["b-warn", "Changes requested"],
+    in_review: ["b-mut", "Draft"], changes_requested: ["b-warn", "Changes requested"],
     agreed: ["b-ok", "Terms agreed"], signed: ["b-ok", "Signed"], active: ["b-ok", "Active"],
     expired: ["b-mut", "Expired"], terminated: ["b-crit", "Terminated"],
     superseded: ["b-mut", "Superseded"],

@@ -159,7 +159,7 @@ export default function BrokerCalendar() {
   // One carrier chosen in the sidebar: every row is theirs, so the column
   // would say the same thing on every line.
   const showCarrier = carrierId == null;
-  const cols = showCarrier ? 10 : 9;
+  const cols = showCarrier ? 9 : 8;
   // The contract name, opening the contract — "—" when there is none yet.
   const contractCell = (id?: number | null, name?: string | null) =>
     id == null ? <span className="muted">—</span>
@@ -246,7 +246,8 @@ export default function BrokerCalendar() {
               <thead>
                 <tr>
                   {showCarrier && <th>Carrier</th>}
-                  <th>Programme</th><th>Broker</th><th>Contract</th><th>Period</th><th>Due by</th>
+                  {/* No Broker column: every row here is the signed-in broker's own. */}
+                  <th>Programme</th><th>Contract</th><th>Period</th><th>Due by</th>
                   <th>Sent On</th><th>Arrival Status</th><th>Version</th><th>Action</th>
                 </tr>
               </thead>
@@ -268,7 +269,6 @@ export default function BrokerCalendar() {
                     <tr key={r.id}>
                       {showCarrier && <td className="muted">{r.carrier_name ?? "—"}</td>}
                       <td><b>{r.program_name}</b></td>
-                      <td>{r.broker_name ?? "—"}</td>
                       <td>{contractCell(r.contract_id, r.contract_name)}</td>
                       <td className="mono">{r.period}</td>
                       <td className="mono">{fmtDay(r.due_date)}</td>

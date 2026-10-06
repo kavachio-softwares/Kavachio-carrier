@@ -134,6 +134,9 @@ export default function Home() {
   // date range), so the two can never disagree. Never `runs.length`, which is
   // the 5-row snapshot below and stopped at 5 however many files came in.
   const [runsTotal, setRunsTotal] = useState<number | null>(null);
+  // How many programmes those bordereaux are on. Null when the month holds
+  // more than one page of them — a partial count would read as the whole.
+  const [runsProgrammes, setRunsProgrammes] = useState<number | null>(null);
   // Group 3: deadline counts for the "Deadlines" tile (own submission calendar).
   const [calCounts, setCalCounts] = useState<Partial<Record<CalendarStatus, number>>>({});
   // The Bordereau Calendar's own counts, so the Overdue Bordereaux box and the
@@ -167,10 +170,10 @@ export default function Home() {
   const ARRIVALS_FETCH = 500;
   const [arrivals, setArrivals] = useState<Arrival[] | null>(null);
 
-  // ONE period for the three cards at the foot of the page — Overdue
-  // Bordereaux, Files Received and Files Processed — picked as a month and a
+  // ONE period for the cards at the foot of the page — Overdue
+  // Bordereaux and Bordereaux Processed — picked as a month and a
   // year in the bar above them. "All Months" takes the whole year, "All Years"
-  // everything. It opens on the current month, which is what all three
+  // everything. It opens on the current month, which is what they all
   // counted before there was a pick.
   const [year, setYear] = useState<string>(String(new Date().getFullYear()));
   const [month, setMonth] = useState<string>(pad2(new Date().getMonth() + 1));
@@ -338,19 +341,28 @@ export default function Home() {
 
   // The total, bought for one row: `page` makes /direct/runs answer with
   // {items, total}, and the total is counted over the whole date range rather
-  // than over the page, so page_size 1 still yields the real figure. Same
-  // trick the book-count tiles above use.
+  // than over the page. One full page (the endpoint's maximum) also gives the
+  // programmes they are on; past one page that count is left out.
   // No date range for All Years: the total is then every file ever run.
   useEffect(() => {
     let live = true;
     setRunsTotal(null);
-    api.get<{ total: number }>(`/direct/runs`, { params: {
-      mga, page: 1, page_size: 1,
+    setRunsProgrammes(null);
+    api.get<{ total: number; items: { program_id: number | null }[] }>(`/direct/runs`, { params: {
+      mga, page: 1, page_size: 200,
       ...(monthStart && monthEnd
         ? { date_from: monthStart.toISOString(), date_to: monthEnd.toISOString() } : {}),
     } })
-      .then(r => { if (live) setRunsTotal(r.data?.total ?? null); })
-      .catch(() => { if (live) setRunsTotal(null); });
+      .then(r => {
+        if (!live) return;
+        const total = r.data?.total ?? null;
+        const items = r.data?.items ?? [];
+        setRunsTotal(total);
+        setRunsProgrammes(total != null && items.length >= total
+          ? new Set(items.map(i => i.program_id).filter(id => id != null)).size
+          : null);
+      })
+      .catch(() => { if (live) { setRunsTotal(null); setRunsProgrammes(null); } });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mga, period]);
@@ -448,7 +460,10 @@ export default function Home() {
     />
   ) : null;
 
-  // Incoming files — the way into /files, which has no sidebar entry.
+  // Incoming files. NOT RENDERED since 6 Oct 2026 — the user asked for it off
+  // the dashboard. Kept so it can be put back; Files Received is still reached
+  // from the Ingestion button and Bordereau Calendar, and its counts still
+  // feed the Bordereaux Processed tooltip below.
   const incomingCard = showFiles && (
     <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/files")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "var(--p-shadow)"; }}>
       <div>
@@ -491,26 +506,22 @@ export default function Home() {
     </div>
   );
 
-  // How Files Received becomes Files Processed. Of the files that arrived,
-  // only those that passed intake are processed; and a bordereau (one
+  // How Files Received becomes Bordereaux Processed. Of the files that
+  // arrived, only those that passed intake are processed; and a bordereau (one
   // programme + contract + broker + reporting period) re-sent as a correction
   // is a new VERSION of the same bordereau, so it is counted once — its latest
   // version. Said with this period's own numbers when they are to hand.
   const acceptedInPeriod = arrivalsInPeriod?.filter(a => a.outcome === "accepted").length;
-  const processedTip = (receivedInPeriod != null && acceptedInPeriod != null && runsTotal != null
-      && !receivedMore)
-    ? `Of the ${receivedInPeriod} ${receivedInPeriod === 1 ? "file" : "files"} received${infoWhen}, `
-      + `${acceptedInPeriod} passed the intake checks and ${acceptedInPeriod === 1 ? "was" : "were"} processed. `
-      + "Each programme, contract, broker and reporting period is one bordereau; when a broker "
-      + "sends it again, the new file becomes its next version. Every version is checked, but "
-      + "only the latest one is counted here — so those "
-      + `${acceptedInPeriod} ${acceptedInPeriod === 1 ? "file is" : "files are"} `
-      + `${runsTotal} ${runsTotal === 1 ? "bordereau" : "bordereaux"}. `
-      + "Click for the results, bordereau by bordereau."
-    : `Bordereaux checked against their contract${infoWhen}, clean or with exceptions. `
-      + "Each programme, contract, broker and reporting period is one bordereau; a file "
-      + "sent again becomes its next version, and only the latest version is counted. "
-      + "Click for the results, bordereau by bordereau.";
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  const processedTip = "A bordereau is one broker's report for one programme, for one month. "
+    + ((receivedInPeriod != null && acceptedInPeriod != null && runsTotal != null && !receivedMore)
+      ? `${acceptedInPeriod} of the ${plural(receivedInPeriod, "file", "files")} received${infoWhen} `
+        + `${acceptedInPeriod === 1 ? "was" : "were"} processed. Re-sent files count once (latest copy), `
+        + `so that's ${plural(runsTotal, "bordereau", "bordereaux")}`
+        + (runsProgrammes != null
+          ? ` across ${plural(runsProgrammes, "programme", "programmes")}. ` : ". ")
+      : "Re-sent files count once (latest copy). ")
+    + "Click to see each result.";
 
   // Recent runs
   const recentCard = (
@@ -524,7 +535,7 @@ export default function Home() {
               have come back with exceptions still open, and calling that
               completed is the one reading a carrier must not take from
               this card. */}
-          <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Files Processed</h3>
+          <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Bordereaux Processed</h3>
           <span className="on-dark">
             <InfoTip text={processedTip} />
           </span>
@@ -534,7 +545,7 @@ export default function Home() {
             {fmt(runsTotal)}
           </span>
           <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 14 }}>
-            {runsTotal === 1 ? "file" : "files"} {countWhen}
+            {runsTotal === 1 ? "bordereau" : "bordereaux"} {countWhen}
           </span>
         </div>
       </div>
@@ -800,14 +811,14 @@ export default function Home() {
         )}
 
         {/* ONE month for the cards below — Overdue Bordereaux (carrier admin),
-            Files Received and Files Processed. They used to count the current
+            and Bordereaux Processed. They used to count the current
             month only; this lets a carrier look back a month at a time, or at
             every month together. The cards still open their full lists. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
                       gap: 12, marginBottom: 12 }}>
           <div style={{ display: "flex", alignItems: "center" }}>
             <h3 style={{ margin: 0, fontSize: 16 }}>Monthly Activity</h3>
-            <InfoTip text={(carrierAdmin ? "Overdue Bordereaux, Files Received and Files Processed"
+            <InfoTip text={(carrierAdmin ? "Overdue Bordereaux and Bordereaux Processed"
               : "The cards below") + " count the month and year picked here. All Months "
               + "counts the whole year; All Years counts everything."} />
           </div>
@@ -831,21 +842,19 @@ export default function Home() {
 
         {carrierAdmin ? (
           /* Carrier admin's foot of the page: Overdue Bordereaux on the left,
-             the two link cards stacked on the right. */
+             Bordereaux Processed on the right at the same height. */
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 18 }}>
             <div style={{ display: "grid" }}>
               <ArrivalsCard onTime={due?.on_time} late={due?.late} never={due?.never}
                 subtitle={due ? `Due in ${periodName(period)}` : undefined}
                 info={`Bordereaux your brokers owed${infoWhen}, by how they arrived.`} />
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-              {incomingCard}
+            <div style={{ display: "grid" }}>
               {recentCard}
             </div>
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
-            {incomingCard}
             {recentCard}
           </div>
         )}

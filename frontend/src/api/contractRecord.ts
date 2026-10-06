@@ -208,6 +208,9 @@ export type ContractRecord = {
    *  button on exactly the contracts this calls uploaded, and the screen
    *  working it out separately is how the two drift. */
   is_uploaded?: boolean;
+  /** A renewal of an uploaded contract with no signed copy attached yet — it
+   *  takes the uploaded road (attach, then accept), never review or signing. */
+  awaiting_signed_copy?: boolean;
   /** Each section BOTH ways: `body` carries the tokens the editor turns into
    *  chips, `rendered` is the same sentence with today's values in it. Read
    *  `rendered`; edit `body`. Resolving a token is the server's job — it is

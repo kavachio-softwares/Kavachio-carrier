@@ -397,6 +397,7 @@ def _record(s, c: Contract, *, with_docs: bool = True,
     has_wording = (bool((c.wording_sections or {}).get("sections"))
                    or any(d.kind == "contract" and d.is_active for d in active_docs)
                    or bool(c.blob_ref or c.blob))
+    signed_copy_due = _awaiting_signed_copy(s, c)
 
     return {
         "id": c.id,
@@ -469,6 +470,9 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # the two answers had already drifted: the server offers an accept
         # button on exactly the contracts this says are uploaded.
         "is_uploaded": _is_uploaded(c),
+        # A renewal of an uploaded contract with no signed copy attached yet:
+        # the screen asks for that copy instead of offering review or signing.
+        "awaiting_signed_copy": signed_copy_due,
         # Each section BOTH ways: `body` keeps the tokens the editor turns into
         # chips, `rendered` is the same sentence with today's values in it. The
         # screen reads one and edits the other, and neither has to know how a
@@ -509,7 +513,7 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # contract may not be submitted or activated until it is cleared.
         "missing_references": missing,
         "actions": _allowed_actions(c, missing, p, _unsigned_sides(sigs),
-                                    has_wording),
+                                    has_wording, signed_copy_due),
         # Whose move it is — "carrier", "broker", or null when nobody is
         # waiting. Both sides read this, so neither has to infer it from a
         # state name written for the other one.
@@ -722,6 +726,27 @@ def _is_uploaded(c: Contract) -> bool:
     return bool(c.blob_ref or c.blob or c.filename)
 
 
+def _awaiting_signed_copy(s, c: Contract) -> bool:
+    """Is this the renewal of an UPLOADED contract, still waiting for its
+    signed copy?
+
+    Renew starts the successor with no documents, and a contract with no
+    document reads as authored to _is_uploaded — so the renewal of a contract
+    signed on paper was offered the review and in-app signing it never needs.
+    Its road is the parent's: attach the signed renewal, then accept it. Once
+    that copy is attached _is_uploaded says so itself and this stops applying;
+    writing wording or terms here instead also ends it, as an authored choice.
+    """
+    if not c.renews_contract_id or _is_uploaded(c):
+        return False
+    if (c.wording_sections or {}).get("sections"):
+        return False
+    if isinstance(c.commercial_terms, dict) and c.commercial_terms:
+        return False
+    prior = s.get(Contract, c.renews_contract_id)
+    return bool(prior and _is_uploaded(prior))
+
+
 def _carrier_admin_turn(c: Contract, unsigned: list[str] | None = None) -> bool:
     """Is this contract waiting on the CARRIER ADMIN, specifically?
 
@@ -756,7 +781,8 @@ def _carrier_admin_turn(c: Contract, unsigned: list[str] | None = None) -> bool:
 def _allowed_actions(c: Contract, missing: list[str],
                      p: Principal | None = None,
                      unsigned: list[str] | None = None,
-                     has_wording: bool = True) -> dict[str, bool]:
+                     has_wording: bool = True,
+                     signed_copy_due: bool = False) -> dict[str, bool]:
     """What may be done to this contract right now, by THIS caller.
 
     Computed on the server because the rules are the server's: a screen that
@@ -807,8 +833,9 @@ def _allowed_actions(c: Contract, missing: list[str],
         # answers there are accept and send back; if one genuinely does need
         # the broker to look, sending it back puts it in `draft`, where this
         # button is offered exactly as it always was.
+        # Not on the renewal of an uploaded contract — see _awaiting_signed_copy.
         "send_for_review": (
-            is_carrier and not blocked
+            is_carrier and not blocked and not signed_copy_due
             and (state in ("draft", "changes_requested")
                  # An AUTHORED contract should never be in `pending` — one
                  # written here goes straight to the broker. But a row left
@@ -831,7 +858,8 @@ def _allowed_actions(c: Contract, missing: list[str],
         # contract is an uploaded one waiting to be accepted, and "skip the
         # review" is not the answer to it. Offering it there was a button that
         # 409'd with "a pending contract's terms have already been out".
-        "skip_review": (is_carrier and not blocked and state == "draft"),
+        "skip_review": (is_carrier and not blocked and state == "draft"
+                        and not signed_copy_due),
         # An uploaded contract's way up to the carrier admin. It has no terms to
         # negotiate and no broker to ask, so it does not go out for review — it
         # goes to the one person who can accept it on the carrier's behalf.
