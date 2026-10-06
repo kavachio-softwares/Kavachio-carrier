@@ -125,7 +125,10 @@ export default function AuditLogs() {
         </div>
 
         <div className="card" style={{ marginBottom: 14 }}>
-          <div className="card-h" style={{ gap: 14, flexWrap: "wrap", borderBottom: "none" }}>
+          {/* flex-end: every control is labelled, so they share one bottom line
+              — and "Clear filters" sits on it rather than floating mid-label. */}
+          <div className="card-h" style={{ gap: 14, flexWrap: "wrap", borderBottom: "none",
+                                           alignItems: "flex-end" }}>
             <label className="fbar-field">
               <span className="sub">Date range</span>
               <select className="fbar-select" aria-label="Date range" value={range}
@@ -167,15 +170,20 @@ export default function AuditLogs() {
               </select>
             </label>
 
-            <label className="search" style={{ minWidth: 220 }}>
-              <Search className="ic" />
-              <input type="search" placeholder="Search a person, file or action"
-                aria-label="Search the audit trail"
-                value={typed} onChange={e => setTyped(e.target.value)} />
+            {/* Labelled like the three dropdowns, or it sits a caption-height
+                higher than them. */}
+            <label className="fbar-field grow">
+              <span className="sub">Search</span>
+              <span className="search">
+                <Search className="ic" />
+                <input type="search" placeholder="Search a person, file or action"
+                  aria-label="Search the audit trail"
+                  value={typed} onChange={e => setTyped(e.target.value)} />
+              </span>
             </label>
 
             {filtered && (
-              <span className="linkish" onClick={() => {
+              <span className="linkish fbar-clear-link" onClick={() => {
                 setRange("30"); setFrom(daysAgo(30)); setTo(localDay(new Date()));
                 setActor(""); setAction("all"); setTyped("");
               }}>Clear filters</span>
@@ -230,7 +238,12 @@ export default function AuditLogs() {
                             </div>
                           )}
                         </td>
-                        <td>{r.target}</td>
+                        <td style={{ whiteSpace: "normal" }}>
+                          {/* The kind first — a bare name ("prg test") does not
+                              say whether it is a programme, a file or a setup. */}
+                          {r.target_kind && <div className="sub">{r.target_kind}</div>}
+                          {r.target}
+                        </td>
                         {showCarrier && <td className="muted">{r.carrier ?? "—"}</td>}
                         <td>
                           <span className={`badge ${TONE_CLASS[r.tone] ?? "b-mut"}`}>

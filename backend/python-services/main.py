@@ -252,7 +252,10 @@ async def _audit_activity(auth_header, method, path, status, ip):
         email = _audit.actor_email(uid)
         await _run_in_threadpool(
             _audit.log_activity, tid, email,
-            _audit.friendly_action(method, path), path,
+            # The target is redacted too, not only the action: a signing link
+            # in the path is a live credential, and it was still being stored
+            # here in full (found 6 Oct 2026). Ids are kept — they name the record.
+            _audit.friendly_action(method, path), _audit.redact_path(path),
             {"status": status, "ip": ip, "method": method},
             # The acting SEAT, not just the display email: a broker token
             # carries no tenant_id, so without this the row belongs to nobody

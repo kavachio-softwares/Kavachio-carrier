@@ -113,7 +113,8 @@ def release(session, arrival: FileArrival, *, user_id: Optional[int],
                        "intake.arrival.released", target=arrival.public_ref,
                        details={"filename": arrival.filename,
                                 "held_because": arrival.turned_away_reason,
-                                "note": arrival.resolution_note})
+                                "note": arrival.resolution_note},
+                       actor_user_id=user_id)
     # Not run HERE: a released file is accepted and waiting, exactly like every
     # other accepted file, and intake_autorun runs it (run_state stays NULL).
     return arrival
@@ -139,7 +140,8 @@ def discard(session, arrival: FileArrival, *, user_id: Optional[int],
                        "intake.arrival.discarded", target=arrival.public_ref,
                        details={"filename": arrival.filename,
                                 "reason": arrival.turned_away_reason,
-                                "note": arrival.resolution_note})
+                                "note": arrival.resolution_note},
+                       actor_user_id=user_id)
     return arrival
 
 

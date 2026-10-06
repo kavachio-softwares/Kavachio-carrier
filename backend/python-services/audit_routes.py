@@ -98,6 +98,7 @@ _COLUMNS = [
     ("carrier",      "Carrier"),
     ("action_label", "Action"),
     ("detail",       "What exactly"),
+    ("target_kind",  "Target type"),
     ("target",       "Target / file"),
     ("status",       "Status"),
     ("category",     "Log"),

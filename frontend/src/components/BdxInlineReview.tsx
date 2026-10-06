@@ -1173,7 +1173,10 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
       <div className="card-h">
         <h3>BDX Review</h3>
         <span className="sub">
-          {hint ?? <>{name ?? "Output"} — click a highlighted cell to see its error and fix it right here.</>}
+          {/* View only: nothing can be fixed here, so the line must not say so. */}
+          {hint ?? (readOnly
+            ? <>{name ?? "Output"} — click a highlighted cell to see its error.</>
+            : <>{name ?? "Output"} — click a highlighted cell to see its error and fix it right here.</>)}
         </span>
         
         <div className="right" style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1460,7 +1463,8 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
           </span>
           <span style={{ marginLeft: "auto" }}>
             {footerNote ?? <>
-              Approved &amp; fixed values are written into the output when you click <strong>Fix &amp; Validate</strong>.
+              {readOnly ? readOnlyNote : <>
+                Approved &amp; fixed values are written into the output when you click <strong>Fix &amp; Validate</strong>.</>}
               {unmapped > 0 && <> · {unmapped} exception{unmapped === 1 ? "" : "s"} not tied to a cell — use the rule cards below.</>}
             </>}
           </span>

@@ -470,6 +470,13 @@
 .proto .fbar-field{display:flex;flex-direction:column;gap:5px;min-width:170px}
 .proto .fbar-field > .sub{font-size:11.5px;font-weight:600;letter-spacing:.01em}
 .proto .fbar-field .fbar-select{width:100%}
+/* Every control under a caption is the same 36px, so a dropdown, the date
+   inputs and the search box line up exactly; the search takes the spare width. */
+.proto .fbar-field .fbar-select,
+.proto .fbar-field .fbar-date{height:36px;box-sizing:border-box;padding-top:0;padding-bottom:0}
+.proto .fbar-field > .search{height:36px;box-sizing:border-box;padding:0 12px;min-width:0}
+.proto .fbar-field.grow{flex:1 1 260px;min-width:220px}
+.proto .fbar-clear-link{line-height:36px;white-space:nowrap}
 
 /* misc */
 .proto .note{font-size:12.5px;color:var(--p-muted);background:var(--p-surface-2);border:1px solid var(--p-border);border-radius:var(--p-r-sm);padding:11px 13px;line-height:1.5}

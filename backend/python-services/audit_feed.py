@@ -59,6 +59,7 @@ from typing import Any, Iterable, Optional
 
 from sqlalchemy import desc, or_
 
+import audit_names
 from auth_deps import BROKER_ROLES, Principal, normalize_role
 from db import (
     AccessLog, ActivityEvent, AppUser, AuthAudit, ExceptionDecisionLog, Party,
@@ -368,15 +369,44 @@ ACTION_WORDS = {
     "output_template_fields_saved": "Saved the output template fields",
     "output_template_from_standard": "Created a template from a standard",
     "output_sources_analyzed":    "Analysed the source files",
-    "intake_route_created":       "Created a submission channel",
+    "intake_route_created":       "Created an ingestion channel",
+    "intake_route_updated":       "Changed an ingestion channel",
+    "intake_route_contacts_updated": "Changed who hears about a channel's files",
     "intake_key_created":         "Issued a channel API key",
+    "intake_key_revoked":         "Revoked a channel API key",
     # The same button collects from a mailbox, a folder or an SFTP server.
     "mailbox_polled":             "Checked a channel for new files",
     "intake_sftp_tested":         "Tested an SFTP server connection",
     "intake_guide_sent":          "Sent a broker their channel instructions",
     "intake_guide_emailed":       "Emailed a broker their channel instructions",
     "file_arrival_released":      "Released a file on hold",
+    # What the release / discard handlers write, with the file's name on it.
+    "intake.arrival.released":    "Released a file on hold",
+    "intake.arrival.discarded":   "Discarded a received file",
+    "intake_arrival_rerun":       "Re-ran a received file",
     "onboarding_skipped":         "Skipped onboarding",
+    # the received file's life after it lands (submission_service)
+    "bordereau_sent":             "Sent a bordereau to the carrier",
+    "bdx_submission_delivered":   "Delivered a file to the carrier",
+    "bdx_submission_on_hold":     "Put a file on hold",
+    "bdx_submission_deadline_hold": "Held a file at its deadline",
+    "bdx_delivery_rule_updated":  "Changed a programme's delivery rule",
+    # The status messages about a file — to the broker, or the carrier when a
+    # deadline needs a decision. Which message, and to whom, is the detail.
+    "bdx_notice_sent":            "Sent a file status update",
+    "bdx_notice_failed":          "Could not send a file status update",
+    "bdx_notice_skipped":         "Held back a file status update",
+    # the broker's secure correction link
+    "bdx_fix_link_code_sent":     "Asked for a secure-link code",
+    "bdx_fix_link_code_wrong":    "Entered a wrong secure-link code",
+    "bdx_fix_link_opened":        "Opened the secure correction link",
+    "bdx_fix_link_answers":       "Answered exceptions on the secure link",
+    "bdx_fix_link_validated":     "Re-checked corrections on the secure link",
+    "bdx_fix_link_submitted":     "Submitted corrections on the secure link",
+    # the Rule Library switch (the request path cannot say which way it went)
+    "rule_enabled":               "Switched a rule on",
+    "rule_disabled":              "Switched a rule off",
+    "rule_toggled":               "Switched a rule on or off",
     # access_log — reads and downloads of output / source data
     "download":         "Downloaded a file",
     "read":             "Opened a record",
@@ -420,6 +450,20 @@ _STATUS = {
     # the broker agrees rendered as a grey "Completed" beside every other row.
     "contract_terms_accepted":   ("Terms agreed", "ok"),
     "contract_signed_off":       ("Signed", "ok"),
+    # Read by name rather than by tail: "_released" / "_discarded" / "_sent"
+    # match nothing below and would all read as a grey "Completed".
+    "intake.arrival.released":   ("Released", "ok"),
+    "intake.arrival.discarded":  ("Discarded", "muted"),
+    "intake_key_revoked":        ("Revoked", "bad"),
+    "rule_enabled":              ("Switched on", "ok"),
+    "rule_disabled":             ("Switched off", "muted"),
+    "bordereau_sent":            ("Sent", "ok"),
+    "bdx_submission_delivered":  ("Delivered", "ok"),
+    "bdx_notice_sent":           ("Sent", "ok"),
+    "bdx_notice_failed":         ("Failed", "bad"),
+    "bdx_notice_skipped":        ("Not sent", "muted"),
+    "bdx_fix_link_code_wrong":   ("Wrong code", "bad"),
+    "bdx_fix_link_submitted":    ("Submitted", "ok"),
 }
 
 _METHOD_WORDS = {"POST": "Created", "PUT": "Updated", "PATCH": "Updated", "DELETE": "Deleted"}
@@ -467,6 +511,11 @@ def action_words(action: str) -> str:
 
 def _status_for(category: str, action: str, details: Any, ok: Any = None) -> tuple[str, str]:
     """(badge text, tone). Tone is one of ok | warn | info | bad | muted."""
+    # "Sent" on a bordereau whose email never left would be the one badge on
+    # the page that is wrong; the row records whether it went.
+    if action == "bordereau_sent" and isinstance(details, dict) \
+            and details.get("mail_sent") is False:
+        return "Email not sent", "warn"
     if action in _STATUS:
         return _STATUS[action]
     if category == "auth":
@@ -533,6 +582,13 @@ _DETAIL_LABELS = {
 }
 
 
+# Why a sign-in failed, in words. The stored code stays in the export's
+# "Event name" world; the screen says what it means.
+_AUTH_REASONS = {
+    "invalid_credentials": "Wrong email or password",
+}
+
+
 def _clip(value, n: int = 60) -> str:
     text = "" if value is None else str(value)
     return text if len(text) <= n else text[: n - 1] + "\u2026"
@@ -553,7 +609,9 @@ def _detail_words(details: Any, kind: str = "activity") -> str:
     d = details if isinstance(details, dict) else {}
     if kind == "auth":
         reason = d.get("reason") or d.get("error")
-        return _clip(reason, 120) if reason else ""
+        if not reason:
+            return ""
+        return _AUTH_REASONS.get(str(reason), _clip(str(reason).replace("_", " ").capitalize(), 120))
     parts = []
     for key, value in d.items():
         if key in _DETAIL_SKIP or value is None or value == "" or value == []:
@@ -731,6 +789,10 @@ class ActorNamer:
              broker_party_id=None, role: Optional[str] = None) -> dict:
         """{name, role, role_key, org} for one row, as this viewer may see it."""
         u = self.user(user_id) or self.user_by_email(actor)
+        # Some writers record the person as their bare user id ("2419") — the
+        # held-file release and discard did. That is a person, not automation.
+        if u is None and isinstance(actor, str) and actor.isdigit():
+            u = self.user(actor)
 
         # A `broker:<id>` actor with no seat recorded — a row written before
         # actor_user_id existed. The company is all it ever knew.
@@ -790,6 +852,15 @@ SUPPRESSED_ACTIONS = (
     "POST /contract-wording/preview",
     "POST /contracts/{id}/endorsement/preview",
     "POST /admin/notifications/read",
+    # The middleware's copy of an event the handler ALSO wrote, with the file's
+    # or rule's name on it. Every one of these (checked 6 Oct 2026: 9 releases,
+    # 4 discards, 2 key revocations, 3 rule switches) has exactly that named
+    # twin, written in the same second, so each action read twice — once as
+    # "Intake · arrivals #46 · release". audit.py no longer writes them.
+    "file_arrival_released",
+    "POST /intake/arrivals/{id}/discard",
+    "DELETE /intake/keys/{id}",
+    "PATCH /rule-library/{id}",
 )
 
 
@@ -810,8 +881,15 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
      ("bdx_uploaded", "direct_setup_uploaded", "supplement_uploaded",
       "contract_uploaded", "output_generated", "direct_output_generated",
       "direct_output_checked", "validation.run", "datamodel.ingest",
-      "bordereau_run"), ALL_SEATS),
-    ("exceptions", "Exceptions", ("exception_decided",), ALL_SEATS),
+      "bordereau_run", "bordereau_sent", "bdx_submission_delivered",
+      "bdx_submission_on_hold", "bdx_submission_deadline_hold",
+      "bdx_notice_sent", "bdx_notice_failed", "bdx_notice_skipped"), ALL_SEATS),
+    # The decisions themselves live in exception_decision_log; the secure-link
+    # rows are the broker answering the same exceptions from an email.
+    ("exceptions", "Exceptions",
+     ("exception_decided", "bdx_fix_link_code_sent", "bdx_fix_link_code_wrong",
+      "bdx_fix_link_opened", "bdx_fix_link_answers", "bdx_fix_link_validated",
+      "bdx_fix_link_submitted"), ALL_SEATS),
     # Building a Bordereau Setup, a mapping or an output template is the
     # carrier's work. A broker runs against what the carrier built and never
     # touches one, so offering them this filter offers a guaranteed blank page.
@@ -838,6 +916,7 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "clause.resolved_to_field", "rule_created", "rule_updated", "rule_deleted",
       "rule.disabled", "rule.tolerance_changed", "rule.output_field_changed",
       "rule.variation_value_added", "rule.variation_value_removed",
+      "rule_enabled", "rule_disabled", "rule_toggled",
       "contract_raised", "contract_edited", "contract_submitted",
       "contract_sent_for_review", "contract_sent_back",
       "contract_awaiting_review", "contract_awaiting_signature",
@@ -876,13 +955,16 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "broker_invitation_withdrawn", "broker_removed_from_programme",
       "program_created", "program_updated", "party_created", "party_updated",
       "party_contact_added", "party_contact_removed",
-      "submission_schedule_updated", "submission_chased"), CARRIER_SEATS),
+      "submission_schedule_updated", "submission_chased",
+      "bdx_delivery_rule_updated"), CARRIER_SEATS),
     # How files reach the CARRIER — mailboxes, routes and keys. The broker
     # sends; it is the carrier that sets up the ways in.
     ("intake", "Ingestion channels",
-     ("intake_route_created", "intake_key_created", "mailbox_polled",
-      "intake_guide_sent", "intake_guide_emailed",
-      "file_arrival_released"), CARRIER_SEATS),
+     ("intake_route_created", "intake_route_updated",
+      "intake_route_contacts_updated", "intake_key_created", "intake_key_revoked",
+      "mailbox_polled", "intake_sftp_tested", "intake_guide_sent",
+      "intake_guide_emailed", "intake.arrival.released",
+      "intake.arrival.discarded", "intake_arrival_rerun"), CARRIER_SEATS),
     ("downloads", "Downloads and views", ("download", "read", "export"), ALL_SEATS),
     # The browser silently renewing its token. Kept out of the default feed
     # (see _rows) because it is the machine working, not a person acting — but
@@ -1131,8 +1213,9 @@ def _decision_rows(s, sc: Scope, f: Filters, q_ids, limit: int) -> tuple[list[di
     out = []
     for r in (q.order_by(desc(ExceptionDecisionLog.decided_at),
                          desc(ExceptionDecisionLog.id)).limit(limit)):
-        target = (f"Output BDX #{r.export_id}" if r.export_id
-                  else f"Uploaded file #{r.landing_id}" if r.landing_id else "—")
+        # A ref, named at render time: the file the decision was made on.
+        target = (f"export:{r.export_id}" if r.export_id
+                  else f"landing:{r.landing_id}" if r.landing_id else None)
         out.append({
             "kind": "decision", "id": r.id, "at": r.decided_at,
             "action": "exception_decided", "target": target,
@@ -1231,7 +1314,42 @@ def _iso(dt) -> Optional[str]:
     return text if (text.endswith("Z") or "+" in text) else text + "Z"
 
 
-def render(s, namer: ActorNamer, raw: dict) -> dict:
+def _names_for(s, v: Viewer, raws: list[dict]) -> "audit_names.Names":
+    """One id->name resolver for a page, with every record on it fetched in
+    bulk — a query per KIND of record, not one per row."""
+    names = audit_names.Names(s, v)
+    try:
+        names.prefetch([ref for r in raws if r["kind"] != "auth"
+                        for ref in audit_names.row_refs(r["action"], r["target"],
+                                                        r["details"])])
+    except Exception:  # noqa: BLE001 — names are a nicety; the rows are not
+        pass
+    return names
+
+
+def _target_and_detail(names, raw: dict) -> tuple[Optional[str], str, str]:
+    """(kind of thing, Target words, "what exactly") for one row.
+
+    Ids become names; a request path becomes the record it acted on; the
+    details lose their internal keys. Never fails a read: if naming goes wrong
+    the row falls back to the words it had before.
+    """
+    kind = raw["kind"]
+    try:
+        if kind == "auth":
+            return None, "—", raw.get("detail") or ""
+        tkind, target = audit_names.target_words(names, raw["action"], raw["target"],
+                                                 raw["details"])
+        if kind == "activity":
+            detail = audit_names.detail_words(names, raw["action"], raw["details"], target)
+        else:
+            detail = raw.get("detail") or ""
+        return tkind, target, detail
+    except Exception:  # noqa: BLE001
+        return None, _target_words(raw["target"], raw["details"]), raw.get("detail") or ""
+
+
+def render(s, namer: ActorNamer, raw: dict, names=None) -> dict:
     """One stored row, as the screen shows it."""
     who = namer.name(user_id=raw["user_id"], actor=raw["actor"],
                      broker_party_id=raw["broker_party_id"], role=raw["role"])
@@ -1241,6 +1359,9 @@ def render(s, namer: ActorNamer, raw: dict) -> dict:
         kind = raw.get("decision_kind") or "fix"
         label = DECISION_WORDS.get(kind, "Decided an exception")
         status, tone = DECISION_STATUS.get(kind, ("Exception resolved", "warn"))
+    if names is None:
+        names = audit_names.Names(s, namer.v)
+    target_kind, target, detail = _target_and_detail(names, raw)
     return {
         "id": f"{raw['kind']}:{raw['id']}",
         "at": _iso(raw["at"]),
@@ -1251,8 +1372,11 @@ def render(s, namer: ActorNamer, raw: dict) -> dict:
         "actor_org": who["org"],
         "action": raw["action"],
         "action_label": label,
-        "detail": raw.get("detail") or "",
-        "target": _target_words(raw["target"], raw["details"]),
+        "detail": detail,
+        # What KIND of thing the target is ("Contract", "Received file") —
+        # the words alone are often just a name, and a name is ambiguous.
+        "target_kind": target_kind,
+        "target": target,
         "status": status,
         "tone": tone,
         "ip": raw["ip"],
@@ -1268,7 +1392,9 @@ def page(s, v: Viewer, f: Filters, page_no: int, page_size: int) -> dict:
     sc = scope_for(s, v)
     raw, total = _rows(s, sc, f, offset + page_size)
     namer = ActorNamer(s, v)
-    items = [render(s, namer, r) for r in raw[offset:offset + page_size]]
+    shown = raw[offset:offset + page_size]
+    names = _names_for(s, v, shown)
+    items = [render(s, namer, r, names) for r in shown]
     return {"items": items, "total": total, "page": page_no, "page_size": page_size,
             "seat": v.seat}
 
@@ -1278,7 +1404,9 @@ def export_rows(s, v: Viewer, f: Filters) -> list[dict]:
     sc = scope_for(s, v)
     raw, _total = _rows(s, sc, f, MAX_EXPORT_ROWS)
     namer = ActorNamer(s, v)
-    return [render(s, namer, r) for r in raw[:MAX_EXPORT_ROWS]]
+    rows = raw[:MAX_EXPORT_ROWS]
+    names = _names_for(s, v, rows)
+    return [render(s, namer, r, names) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -1372,9 +1500,10 @@ def categories_for_group(group: str) -> tuple[str, ...]:
         return ("auth",)
     if group == "downloads":
         return ("access",)
-    # Exceptions live in exception_decision_log now, not activity_events.
+    # Exceptions live in exception_decision_log now, not activity_events —
+    # except the secure link's rows, which are the broker answering them.
     if group == "exceptions":
-        return ("decision",)
+        return ("decision", "activity")
     if not group or group == "all":
         return CATEGORIES
     return ("activity",)

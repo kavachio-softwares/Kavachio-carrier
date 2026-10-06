@@ -329,7 +329,15 @@ _FRIENDLY = {
     ("POST",   "/intake/sftp/test"):                 "intake_sftp_tested",
     ("POST",   "/intake/routes/{id}/guide"):         "intake_guide_sent",
     ("POST",   "/intake/arrivals/{id}/release"):     "file_arrival_released",
+    # Rows written before these routes logged only themselves (_SELF_LOGGED).
+    ("POST",   "/intake/arrivals/{id}/discard"):     "intake.arrival.discarded",
+    ("DELETE", "/intake/keys/{id}"):                 "intake_key_revoked",
     ("POST",   "/v1/bordereaux"):                    "bdx_uploaded",
+    # A route that no longer exists; its rows still say it.
+    ("POST",   "/broker/bordereau/{id}/send"):       "bordereau_sent",
+    # The Rule Library switch. The path cannot say which way it went — the
+    # route's own row (rule_enabled / rule_disabled) does.
+    ("PATCH",  "/rule-library/{id}"):                "rule_toggled",
     # --- the rest
     ("POST",   "/calendar/chase"):                   "submission_chased",
     ("PUT",    "/programs/{id}/schedule"):           "submission_schedule_updated",
@@ -448,6 +456,14 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/contracts/\d+/send-back$")),
     ("POST",   re.compile(r"^/contracts/\d+/accept$")),
     ("POST",   re.compile(r"^/contracts/\d+/submit-for-approval$")),
+    # Each writes its own row with the file's / rule's name and the reason, so
+    # the middleware's copy only made every one of them appear twice — once as
+    # "Intake · arrivals #46 · release" (6 Oct 2026: every old copy had its
+    # named twin; audit_feed.SUPPRESSED_ACTIONS hides those).
+    ("POST",   re.compile(r"^/intake/arrivals/\d+/release$")),
+    ("POST",   re.compile(r"^/intake/arrivals/\d+/discard$")),
+    ("DELETE", re.compile(r"^/intake/keys/\d+$")),
+    ("PATCH",  re.compile(r"^/rule-library/\d+$")),
 ]
 
 def is_self_logged(method: str, path: str) -> bool:

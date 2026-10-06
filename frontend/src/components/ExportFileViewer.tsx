@@ -62,7 +62,11 @@ export function ExportFileViewer({ exportId, title, reviewTo, onClose }: {
           ) : (
             <BdxInlineReview
               readOnly
-              readOnlyNote="View only — approve, fix or dismiss these on Review exceptions."
+              // A replaced version has no Review exceptions link, so its note
+              // must not point at one.
+              readOnlyNote={reviewTo
+                ? "View only — approve, fix or dismiss these on Review exceptions."
+                : "View only — this version was replaced; its exceptions are worked on the newest version."}
               exportId={String(exportId)}
               exceptions={excs}
               onSaved={() => {}}

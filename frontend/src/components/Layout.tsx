@@ -305,6 +305,9 @@ function subScreenOwner(pathname: string, search: string): string | null {
     // A broker reviewing its own run's exceptions came from THEIR Process
     // Bordereau, which is a different path from the carrier's.
     if (from === "broker") return "/broker/bordereau";
+    if (from === "calendar") return "/bordereau-calendar";
+    // Files Received has no sidebar entry; the Dashboard is its way in.
+    if (from === "files") return "/home";
   }
   return null;
 }

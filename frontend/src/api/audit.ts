@@ -19,7 +19,10 @@ export type AuditRow = {
   /** Exactly what was done: the field, the policy, the old and new value, the
    *  row counts. Empty when the event recorded nothing beyond itself. */
   detail: string;
-  target: string;              // the file or record it was done to
+  /** What KIND of thing the target is — "Contract", "Received file",
+   *  "Ingestion channel" — or null when the row names nothing. */
+  target_kind: string | null;
+  target: string;              // its name, then where it sits (programme, period…)
   status: string;
   tone: "ok" | "warn" | "info" | "bad" | "muted";
   ip: string | null;
