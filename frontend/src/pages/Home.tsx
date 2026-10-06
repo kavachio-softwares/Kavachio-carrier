@@ -491,6 +491,27 @@ export default function Home() {
     </div>
   );
 
+  // How Files Received becomes Files Processed. Of the files that arrived,
+  // only those that passed intake are processed; and a bordereau (one
+  // programme + contract + broker + reporting period) re-sent as a correction
+  // is a new VERSION of the same bordereau, so it is counted once — its latest
+  // version. Said with this period's own numbers when they are to hand.
+  const acceptedInPeriod = arrivalsInPeriod?.filter(a => a.outcome === "accepted").length;
+  const processedTip = (receivedInPeriod != null && acceptedInPeriod != null && runsTotal != null
+      && !receivedMore)
+    ? `Of the ${receivedInPeriod} ${receivedInPeriod === 1 ? "file" : "files"} received${infoWhen}, `
+      + `${acceptedInPeriod} passed the intake checks and ${acceptedInPeriod === 1 ? "was" : "were"} processed. `
+      + "Each programme, contract, broker and reporting period is one bordereau; when a broker "
+      + "sends it again, the new file becomes its next version. Every version is checked, but "
+      + "only the latest one is counted here — so those "
+      + `${acceptedInPeriod} ${acceptedInPeriod === 1 ? "file is" : "files are"} `
+      + `${runsTotal} ${runsTotal === 1 ? "bordereau" : "bordereaux"}. `
+      + "Click for the results, bordereau by bordereau."
+    : `Bordereaux checked against their contract${infoWhen}, clean or with exceptions. `
+      + "Each programme, contract, broker and reporting period is one bordereau; a file "
+      + "sent again becomes its next version, and only the latest version is counted. "
+      + "Click for the results, bordereau by bordereau.";
+
   // Recent runs
   const recentCard = (
     <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", border: "none", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/runs?from=home")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgba(15,23,42,0.4), 0 4px 6px -4px rgba(15,23,42,0.4)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
@@ -505,8 +526,7 @@ export default function Home() {
               this card. */}
           <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Files Processed</h3>
           <span className="on-dark">
-            <InfoTip text={`Bordereaux checked against their contract${infoWhen}, `
-              + "clean or with exceptions. Click for the results, file by file."} />
+            <InfoTip text={processedTip} />
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>

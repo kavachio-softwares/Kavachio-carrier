@@ -370,6 +370,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                   ) : routes.map(r => (
                     <RouteCard key={r.route_id} route={r} busy={busy}
                       cc={data?.carrier_cc ?? null}
+                      brokerProgrammes={data?.broker_programmes?.[String(r.broker_party_id)] ?? []}
                       keys={keys[r.route_id]}
                       onSettings={() => setSettingsFor(r)}
                       onToggle={() => !busy && toggle(r)} />
@@ -396,8 +397,11 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
 // A card rather than a table row, because the four things people want are of
 // different shapes: who it is, what state it is in, what you can do to it, and
 // the address — which is the deliverable of this screen and gets its own line.
-function RouteCard({ route, busy, cc = null, keys, onSettings, onToggle }: {
+function RouteCard({ route, busy, cc = null, brokerProgrammes = [], keys, onSettings, onToggle }: {
   route: IntakeRoute; busy: boolean;
+  /** The broker's programmes — named on a route that takes any of them, so
+   *  two routes of one broker are told apart by more than the broker's name. */
+  brokerProgrammes?: ProgrammeLite[];
   /** Email: the carrier address the broker must copy. */
   cc?: string | null;
   /** undefined until the keys for this route have been fetched. */
@@ -431,6 +435,11 @@ function RouteCard({ route, busy, cc = null, keys, onSettings, onToggle }: {
               one on every file. */}
           {route.program_name
             ? <span className="prog">{route.program_name}</span>
+            : brokerProgrammes.length > 0
+            ? (<>
+                <span className="prog any">All programmes:</span>
+                {brokerProgrammes.map(p => <span key={p.program_id} className="prog">{p.name}</span>)}
+              </>)
             : <span className="prog any">Any programme</span>}
         </div>
 

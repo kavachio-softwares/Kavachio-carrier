@@ -27,6 +27,7 @@ import { isKavachioAdmin } from "../auth";
 import { parseUtc } from "../utils/date";
 import NotificationBell from "../components/NotificationBell";
 import { InfoTip } from "../components/InfoTip";
+import { ExportFileViewer } from "../components/ExportFileViewer";
 import { Pagination } from "../components/Pagination";
 import { flowUrl } from "../components/ProgrammeStepper";
 
@@ -640,6 +641,10 @@ function VersionPanel({ row, onClose }: {
 }) {
   const [versions, setVersions] = useState<SubmissionVersionRow[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // The ONE version whose file is open — the broker calendar's viewer, so the
+  // carrier reads every version the same way the broker who sent it does. It
+  // mounts only on click and streams just the rows on screen.
+  const [viewing, setViewing] = useState<SubmissionVersionRow | null>(null);
 
   const reload = useCallback(async () => {
     setErr(null);
@@ -650,6 +655,18 @@ function VersionPanel({ row, onClose }: {
   }, [row.id]);
 
   useEffect(() => { reload(); }, [reload]);
+  useEffect(() => {
+    // While a file is open, Escape belongs to the viewer: it closes the file
+    // and leaves this list where it was, rather than closing both at once.
+    if (viewing) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, viewing]);
+
+  const label = (v: SubmissionVersionRow) => `Version ${v.version_no}`;
+  // The newest version is the file that counts; every earlier one was replaced.
+  const newest = versions?.length ? versions[versions.length - 1] : null;
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(16,20,28,.45)",
@@ -708,6 +725,17 @@ function VersionPanel({ row, onClose }: {
                   {v.channel && CAME_BY[v.channel] ? `${v.source_filename ? " · " : ""}via ${CAME_BY[v.channel]}` : ""}
                 </div>
               )}
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+                {newest && v.id !== newest.id ? (
+                  <span className="badge b-mut"><span className="d" />Replaced by {label(newest)}</span>
+                ) : (
+                  <span className="badge b-ok"><span className="d" />The file that counts</span>
+                )}
+                {v.received_export_id != null && (
+                  <span className="linkish" style={{ marginLeft: "auto" }} role="button"
+                    onClick={() => setViewing(v)}>View file →</span>
+                )}
+              </div>
             </div>
           ))}
 
@@ -717,6 +745,20 @@ function VersionPanel({ row, onClose }: {
               panel gets the other half back. */}
         </div>
       </div>
+      {viewing?.received_export_id != null && (
+        // Outside the drawer's click-to-close area, so closing the file never
+        // closes the list behind it.
+        <div onClick={e => e.stopPropagation()}>
+          <ExportFileViewer exportId={viewing.received_export_id}
+            title={`${row.program_name} · ${row.period} · ${label(viewing)}`}
+            // A replaced version is history: its problems are worked on the
+            // newest file, so only that one offers the exceptions screen.
+            reviewTo={viewing.id === newest?.id
+              ? `/uploads/${viewing.received_export_id}/exceptions?download=${viewing.received_export_id}&from=calendar`
+              : undefined}
+            onClose={() => setViewing(null)} />
+        </div>
+      )}
     </div>
   );
 }

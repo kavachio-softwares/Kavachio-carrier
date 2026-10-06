@@ -205,8 +205,8 @@ export default function RecentRuns() {
               <table>
                 <thead>
                   <tr>
-                    <th>Input File</th><th>Reporting Period</th><th>Broker</th><th>Program</th>
-                    <th>Contract</th><th>Result</th><th>Processed</th><th></th>
+                    <th>Input File</th><th>Broker</th><th>Program</th>
+                    <th>Contract</th><th>Reporting Period</th><th>Result</th><th>Processed</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -217,10 +217,10 @@ export default function RecentRuns() {
                         {r.version_no != null && r.version_no > 1 && (
                           <span className="vchip">Version {r.version_no}</span>)}
                       </td>
-                      <td>{r.reporting_period ? periodLabel(r.reporting_period) : <span className="muted">—</span>}</td>
                       <td className="muted">{r.broker_name ?? "—"}</td>
                       <td className="muted">{r.program_name ?? "—"}</td>
                       <td className="muted">{r.contract_name ?? "—"}</td>
+                      <td>{r.reporting_period ? periodLabel(r.reporting_period) : <span className="muted">—</span>}</td>
                       <td>
                         <span className={`badge ${notValidated(r) ? "b-warn" : hasExc(r) ? "b-crit" : "b-ok"}`}>
                           <span className="d" />

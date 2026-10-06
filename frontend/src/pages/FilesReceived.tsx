@@ -694,10 +694,10 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                       checked={shown.length > 0 && picked.size === shown.length}
                       onChange={e => toggleAll(e.target.checked)} />
                   </th>
-                  <th>File Name</th><th>Channel</th><th>Broker</th><th>Programme</th>
+                  <th>File Name</th><th>Broker</th><th>Programme</th>
                   <th title="Contract used for validation">Contract</th>
                   <th title="The reporting period this file is for">Reporting Period</th>
-                  <th>Rows</th><th>Status</th><th>Received</th><th />
+                  <th>Channel</th><th>Status</th><th>Received</th><th />
                 </tr>
               </thead>
               <tbody>
@@ -737,13 +737,6 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                           title={(a.outcome === "accepted" ? a.run_error : fullReason(a)) || undefined}>
                           {sub}</div>}
                       </td>
-                      {/* The way in is a badge, not plain text: it is the one
-                          thing on the row that is a fixed set of five, and it
-                          is read by shape rather than word. */}
-                      <td>{a.channel
-                        ? <Badge tone={CAME_IN_BY[a.channel].tone}>
-                            {CAME_IN_BY[a.channel].label}</Badge>
-                        : <span className="muted">—</span>}</td>
                       <td>{a.broker_name ?? <span className="muted">Unidentified sender</span>}</td>
                       <td className="muted">
                         {a.program_name ?? <span className="faint">—</span>}</td>
@@ -751,7 +744,14 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                       <td style={{ whiteSpace: "nowrap" }}>
                         {a.reporting_period ? periodLabel(a.reporting_period)
                           : <span className="faint">—</span>}</td>
-                      <td className="mono">{rowsOf(a.row_count)}</td>
+                      {/* After the period: what the file is for first, then
+                          how it came. The way in is a badge, not plain text: it is the one
+                          thing on the row that is a fixed set of five, and it
+                          is read by shape rather than word. */}
+                      <td>{a.channel
+                        ? <Badge tone={CAME_IN_BY[a.channel].tone}>
+                            {CAME_IN_BY[a.channel].label}</Badge>
+                        : <span className="muted">—</span>}</td>
                       <td>
                         {/* Two steps: did it get in, then what the run did. */}
                         {st === "ok" ? <Badge tone="ok">Accepted</Badge>

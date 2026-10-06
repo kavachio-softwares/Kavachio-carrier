@@ -29,19 +29,21 @@ type Contract = {
   program_id?: number; program_name?: string;
   broker_party_id?: number | null; broker_name?: string | null;
   inception_dt?: string | null; expiry_dt?: string | null;
+  lifecycle?: string | null;
 };
-/** A contract's stage in words and colour — the stored value is a code. */
-function contractBadge(s?: string | null) {
-  const v = (s ?? "").toLowerCase();
+/** A contract's lifecycle in words and colour — the same labels the Contracts
+ *  screen uses. `lifecycle` is the server's effective state (expired is derived
+ *  from the term); the ops `status` is only a fallback for an older answer. */
+function contractBadge(c: Contract) {
+  const v = (c.lifecycle ?? (c.status === "active" ? "active" : "draft")).toLowerCase();
   const map: Record<string, [string, string]> = {
-    draft: ["b-mut", "Draft"], drafted: ["b-mut", "Draft"],
-    pending: ["b-warn", "Awaiting review"], in_review: ["b-warn", "Out for review"],
-    agreed: ["b-warn", "Agreed"], signed: ["b-ok", "Signed"],
-    in_force: ["b-ok", "In force"], active: ["b-ok", "Active"], approved: ["b-ok", "Approved"],
-    rejected: ["b-crit", "Rejected"], declined: ["b-crit", "Declined"],
-    voided: ["b-mut", "Voided"], expired: ["b-mut", "Expired"],
+    draft: ["b-mut", "Draft"], pending: ["b-warn", "Awaiting acceptance"],
+    in_review: ["b-warn", "Out for review"], changes_requested: ["b-warn", "Changes requested"],
+    agreed: ["b-ok", "Terms agreed"], signed: ["b-ok", "Signed"], active: ["b-ok", "Active"],
+    expired: ["b-mut", "Expired"], terminated: ["b-crit", "Terminated"],
+    superseded: ["b-mut", "Superseded"],
   };
-  const [cls, label] = map[v] ?? ["b-mut", v ? v.replace(/_/g, " ").replace(/^./, c => c.toUpperCase()) : "—"];
+  const [cls, label] = map[v] ?? ["b-mut", v.replace(/_/g, " ").replace(/^./, ch => ch.toUpperCase())];
   return { cls, label };
 }
 /** "1 Jan 2026" from an ISO date or timestamp. */
@@ -55,14 +57,16 @@ function fmtDay(iso?: string | null) {
 // the programme → broker names shown in the Brokers column.
 type DirBroker = { id: number; legal_name: string; programmes?: { id: number; name: string }[] };
 // One broker on one programme (GET /programs/{id}/brokers?mga=) — `status` is
-// its link to that programme.
-type ProgBroker = { id: number; legal_name: string; status?: string | null; contract_count?: number };
-function linkBadge(s?: string | null) {
-  const v = (s ?? "").toLowerCase();
-  if (v === "active") return { cls: "b-ok", label: "Active" };
-  if (v === "pending_approval") return { cls: "b-warn", label: "Awaiting approval" };
-  if (v === "ended") return { cls: "b-mut", label: "Ended" };
-  return { cls: "b-mut", label: s || "—" };
+// its link to that programme: active | pending_approval | inactive.
+type ProgBroker = { id: number; legal_name: string; status?: string | null };
+/** One row of the drawer's Contracts & Brokers table: a contract with the
+ *  broker that holds it, or a broker on the programme with no contract yet. */
+type DrawerRow = { key: string; contract: Contract | null; broker: string | null; link: string | null };
+/** The broker's standing on THIS programme (its programme link), in words. */
+function brokerBadge(link: string | null) {
+  if (link === "pending_approval") return { cls: "b-warn", label: "Awaiting approval" };
+  if (link === "inactive") return { cls: "b-mut", label: "Removed" };
+  return { cls: "b-ok", label: "Active" };
 }
 const DRAWER_PAGE = 5;
 type Run = {
@@ -156,21 +160,51 @@ export default function TenantDetail() {
   // the list behind it would look like the contracts had gone.
   const [selected, setSelected] = useState<{ id: number; name: string } | null>(null);
   const selectedProgramId = selected?.id ?? null;
-  // The viewed programme's brokers, for the drawer — a short whole list,
-  // paged here.
-  const {
-    page: brkPage, setPage: setBrkPage, items: brkItems, total: brkTotal,
-    pageCount: brkPageCount, loading: brkLoading,
-  } = useServerList<ProgBroker>(
-    (page, pageSize) =>
-      selectedProgramId == null
-        ? Promise.resolve({ items: [], total: 0 })
-        : api.get<ProgBroker[]>(`/programs/${selectedProgramId}/brokers`, { params: { mga } })
-            .then(r => ({ items: r.data.slice((page - 1) * pageSize, page * pageSize),
-                          total: r.data.length })),
-    isAdmin ? `pbrokers|${selectedProgramId ?? ""}` : "disabled",
-    DRAWER_PAGE,
-  );
+  // The drawer's ONE table: the viewed programme's contracts and its brokers,
+  // read whole and merged, so a broker holding a contract is one row, not a
+  // line in each of two tables. Brokers with no contract yet still get a row.
+  // Paged here — a programme holds a handful of each.
+  const [drawerRows, setDrawerRows] = useState<DrawerRow[]>([]);
+  const [drawerLoading, setDrawerLoading] = useState(false);
+  const [drawerPage, setDrawerPage] = useState(1);
+  const [drawerCounts, setDrawerCounts] = useState({ contracts: 0, brokers: 0 });
+  useEffect(() => {
+    setDrawerPage(1);
+    setDrawerRows([]);
+    setDrawerCounts({ contracts: 0, brokers: 0 });
+    if (!isAdmin || selectedProgramId == null) return;
+    let live = true;
+    setDrawerLoading(true);
+    Promise.all([
+      api.get<Contract[]>(`/programs/${selectedProgramId}/contracts`),
+      api.get<ProgBroker[]>(`/programs/${selectedProgramId}/brokers`, { params: { mga } }),
+    ]).then(([cr, br]) => {
+      if (!live) return;
+      const link = new Map(br.data.map(b => [b.id, b.status ?? null]));
+      const holding = new Set<number>();
+      const rows: DrawerRow[] = cr.data.map(c => {
+        if (c.broker_party_id != null) holding.add(c.broker_party_id);
+        return {
+          key: `c${c.id}`, contract: c, broker: c.broker_name ?? null,
+          link: c.broker_party_id != null ? link.get(c.broker_party_id) ?? null : null,
+        };
+      });
+      for (const b of br.data)
+        if (!holding.has(b.id))
+          rows.push({ key: `b${b.id}`, contract: null, broker: b.legal_name, link: b.status ?? null });
+      // Grouped by broker (carrier-held last), newest contract first within one.
+      rows.sort((x, y) =>
+        (x.broker == null ? 1 : 0) - (y.broker == null ? 1 : 0)
+        || (x.broker ?? "").localeCompare(y.broker ?? "")
+        || (y.contract?.id ?? 0) - (x.contract?.id ?? 0));
+      setDrawerRows(rows);
+      setDrawerCounts({ contracts: cr.data.length, brokers: br.data.length });
+    }).catch(() => { if (live) setDrawerRows([]); })
+      .finally(() => { if (live) setDrawerLoading(false); });
+    return () => { live = false; };
+  }, [isAdmin, selectedProgramId, mga]);
+  const drawerPageCount = Math.max(1, Math.ceil(drawerRows.length / DRAWER_PAGE));
+  const drawerItems = drawerRows.slice((drawerPage - 1) * DRAWER_PAGE, drawerPage * DRAWER_PAGE);
   // Escape closes the drawer.
   useEffect(() => {
     if (selectedProgramId == null) return;
@@ -284,26 +318,6 @@ export default function TenantDetail() {
     isAdmin ? "programs" : "disabled",
     PAGE_SIZE,
   );
-
-  // Contracts follow the SELECTED programme, so its id is the filter key —
-  // picking another programme snaps back to page 1, which is what turning to
-  // a different list should do. With nothing picked there is nothing to ask
-  // for, and the panel says so rather than showing the last programme's.
-  const {
-    page: conPage, setPage: setConPage, items: conItems, total: conTotal,
-    pageCount: conPageCount, loading: conLoading,
-  } = useServerList<Contract>(
-    (page, pageSize) =>
-      selectedProgramId == null
-        ? Promise.resolve({ items: [], total: 0 })
-        : api.get<{ items: Contract[]; total: number }>(
-            `/programs/${selectedProgramId}/contracts`,
-            { params: { page, page_size: pageSize } },
-          ).then(r => r.data),
-    isAdmin ? `contracts|${selectedProgramId ?? ""}` : "disabled",
-    DRAWER_PAGE,
-  );
-
 
   const runFilterKey = `${runDq}|${runDateFrom}|${runDateTo}`;
   const {
@@ -493,8 +507,8 @@ export default function TenantDetail() {
 
         {/* Programs & contracts */}
         {/* Programs & contracts — ONE table of programmes. "View" opens a
-            right-hand drawer with that programme's contracts and brokers,
-            each paged on its own. */}
+            right-hand drawer with ONE Contracts & Brokers table — each contract
+            beside the broker holding it, plus any broker with no contract yet. */}
         {tab === "pc" && (() => {
           const L: React.CSSProperties = { textAlign: "left" };
           return (
@@ -541,39 +555,54 @@ export default function TenantDetail() {
           {/* ---- The programme drawer ---- */}
           <div className={`scrim${selected ? " on" : ""}`} onClick={() => setSelected(null)} />
           <aside className={`drawer wide${selected ? " on" : ""}`} aria-hidden={!selected}
+            style={{ width: "min(1040px, 96vw)" }}
             aria-label={selected ? `${selected.name} — contracts and brokers` : undefined}>
             <div className="drawer-h">
               <div>
                 <h4>{selected?.name ?? ""}</h4>
                 <div style={{ fontSize: 12.5, color: "var(--p-muted)" }}>
-                  {selected ? `${conTotal} contract${conTotal === 1 ? "" : "s"} · ${brkTotal} broker${brkTotal === 1 ? "" : "s"}` : " "}
+                  {selected ? `${drawerCounts.contracts} contract${drawerCounts.contracts === 1 ? "" : "s"} · ${drawerCounts.brokers} broker${drawerCounts.brokers === 1 ? "" : "s"}` : " "}
                 </div>
               </div>
               <button type="button" className="closeb" aria-label="Close" onClick={() => setSelected(null)}>×</button>
             </div>
             <div className="drawer-b" style={{ padding: 0 }}>
-              {/* Contracts */}
               <div className="card-h" style={{ borderTop: 0 }}>
-                <h3>Contracts</h3><span className="sub">{conTotal}</span>
+                <h3>Contracts &amp; Brokers</h3><span className="sub">{drawerRows.length}</span>
               </div>
-              {conLoading ? <div className="muted" style={{ padding: "14px 20px" }}>Loading…</div>
-                : conTotal === 0 ? <div className="empty">No contracts on this program yet.</div> : (
+              {drawerLoading ? <div className="muted" style={{ padding: "14px 20px" }}>Loading…</div>
+                : drawerRows.length === 0
+                  ? <div className="empty">No contracts or brokers on this program yet.</div> : (
                 <div className="tbl-wrap">
                   <table>
-                    <thead><tr><th style={L}>Contract</th><th style={L}>Broker</th><th className="r">Status</th></tr></thead>
+                    <thead><tr>
+                      <th style={L}>Contract</th>
+                      <th style={L}>Contract Status</th>
+                      <th style={L}>Broker</th><th style={L}>Broker Status</th>
+                    </tr></thead>
                     <tbody>
-                      {conItems.map(c => {
-                        const cs = contractBadge(c.status);
-                        const from = fmtDay(c.inception_dt), to = fmtDay(c.expiry_dt);
+                      {drawerItems.map(r => {
+                        const c = r.contract;
+                        const cs = c ? contractBadge(c) : null;
+                        const bs = r.broker ? brokerBadge(r.link) : null;
+                        const from = fmtDay(c?.inception_dt), to = fmtDay(c?.expiry_dt);
                         return (
-                          <tr key={c.id}>
-                            <td style={L}><b>{c.name || c.filename || `Contract #${c.id}`}</b>
+                          <tr key={r.key}>
+                            <td style={L}>{c ? (<>
+                              <b>{c.name || c.filename || `Contract #${c.id}`}</b>
                               <div className="sub">
                                 {from || to ? `${from ?? "—"} – ${to ?? "—"}` : "No term set"}
                                 {" · "}{c.clause_count ?? 0} clause{(c.clause_count ?? 0) === 1 ? "" : "s"}
-                              </div></td>
-                            <td style={L}>{c.broker_name ?? <span className="muted">Held by the carrier</span>}</td>
-                            <td className="r"><span className={`badge ${cs.cls}`}><span className="d" />{cs.label}</span></td>
+                              </div></>)
+                              : <span className="muted">No contract yet</span>}</td>
+                            <td style={L}>{cs
+                              ? <span className={`badge ${cs.cls}`}><span className="d" />{cs.label}</span>
+                              : <span className="muted">—</span>}</td>
+                            <td style={L}>{r.broker ? <b>{r.broker}</b>
+                              : <span className="muted">Held by the carrier</span>}</td>
+                            <td style={L}>{bs
+                              ? <span className={`badge ${bs.cls}`}><span className="d" />{bs.label}</span>
+                              : <span className="muted">—</span>}</td>
                           </tr>
                         );
                       })}
@@ -581,38 +610,9 @@ export default function TenantDetail() {
                   </table>
                 </div>
               )}
-              {conTotal > DRAWER_PAGE && (
-                <Pagination page={conPage} pageCount={conPageCount} pageSize={DRAWER_PAGE}
-                  totalItems={conTotal} onPageChange={setConPage} noun="contracts" />
-              )}
-
-              {/* Brokers */}
-              <div className="card-h" style={{ marginTop: 10, borderTop: "1px solid var(--p-border)" }}>
-                <h3>Brokers</h3><span className="sub">{brkTotal}</span>
-              </div>
-              {brkLoading ? <div className="muted" style={{ padding: "14px 20px" }}>Loading…</div>
-                : brkTotal === 0 ? <div className="empty">No brokers on this program yet.</div> : (
-                <div className="tbl-wrap">
-                  <table>
-                    <thead><tr><th style={L}>Broker</th><th className="r">Contracts</th><th className="r">Status</th></tr></thead>
-                    <tbody>
-                      {brkItems.map(b => {
-                        const bs = linkBadge(b.status);
-                        return (
-                          <tr key={b.id}>
-                            <td style={L}><b>{b.legal_name}</b></td>
-                            <td className="r muted">{b.contract_count ?? 0}</td>
-                            <td className="r"><span className={`badge ${bs.cls}`}><span className="d" />{bs.label}</span></td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              {brkTotal > DRAWER_PAGE && (
-                <Pagination page={brkPage} pageCount={brkPageCount} pageSize={DRAWER_PAGE}
-                  totalItems={brkTotal} onPageChange={setBrkPage} noun="brokers" />
+              {drawerRows.length > DRAWER_PAGE && (
+                <Pagination page={drawerPage} pageCount={drawerPageCount} pageSize={DRAWER_PAGE}
+                  totalItems={drawerRows.length} onPageChange={setDrawerPage} noun="rows" />
               )}
             </div>
           </aside>

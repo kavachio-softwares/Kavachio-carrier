@@ -3178,8 +3178,13 @@ def program_contracts_list(program_id: int,
         # simply never returned, which left the pickers falling back to
         # "Contract 3115" for the contract the Contracts screen calls
         # "DEMO 2": one row, two names, and no way to tell they were the same.
+        # `status` is the ops column (mostly "drafted" whatever the contract's
+        # stage); `lifecycle` is where the contract actually is, with `expired`
+        # derived from the term — the same answer the Contracts screen gives.
+        from contract_routes import _effective_lifecycle
         items = [{"id": c.id, "name": c.name, "filename": c.filename,
                   "status": c.status,
+                  "lifecycle": _effective_lifecycle(c),
                   "extracted": c.extracted,
                   "upload_token": extracted_upload_token(c.extracted),
                   "clause_count": counts.get(c.id, 0),

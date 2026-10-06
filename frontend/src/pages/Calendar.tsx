@@ -13,8 +13,8 @@
 // dashboard link and the deadline email) so a program with no bordereau setup
 // yet still has somewhere to get its schedule set.
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { CalendarDays } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { CalendarDays, Layers } from "lucide-react";
 import { listPrograms, type ProgramLite } from "../api/calendar";
 import { api } from "../api/client";
 import ProgramCalendar from "../components/ProgramCalendar";
@@ -31,6 +31,11 @@ export default function Calendar() {
   const [selProgram, setSelProgram] = useState<number | "">(
     () => (sp.get("program") ? Number(sp.get("program")) : ""));
   const [err, setErr] = useState<string | null>(null);
+  // Opened FOR one program (a link from the Bordereau Calendar or the
+  // dashboard): the page is about that program only, so it is shown as a
+  // fixed heading rather than a picker that could wander off to another.
+  // Opened bare (the bell), there is nothing to lock, so the picker stays.
+  const [locked] = useState(() => !!sp.get("program"));
 
   useEffect(() => {
     (async () => {
@@ -86,9 +91,33 @@ export default function Calendar() {
           <div className="card-h">
             <CalendarDays className="ci" />
             <h3>Bordereau deadlines</h3>
-            <span className="sub">pick a program to see when its bordereaux are due</span>
+            <span className="sub">{locked
+              ? "when this program's bordereaux are due"
+              : "pick a program to see when its bordereaux are due"}</span>
           </div>
           <div style={{ padding: "16px 20px" }}>
+            {locked && selProgram !== "" ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+                            marginBottom: 16 }}>
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 10,
+                              padding: "10px 14px", borderRadius: 10,
+                              border: "1px solid var(--p-border)", background: "var(--p-surface-2)" }}>
+                  <span style={{ width: 32, height: 32, borderRadius: 8, display: "inline-flex",
+                                 alignItems: "center", justifyContent: "center",
+                                 background: "var(--p-surface)", color: "var(--p-primary)",
+                                 border: "1px solid var(--p-border)" }}>
+                    <Layers size={16} />
+                  </span>
+                  <span>
+                    <span style={{ display: "block", fontSize: 11, fontWeight: 600, letterSpacing: ".04em",
+                                   textTransform: "uppercase", color: "var(--p-muted)" }}>Program</span>
+                    <span style={{ display: "block", fontSize: 15, fontWeight: 600, color: "var(--p-ink)" }}>
+                      {programs.find(p => p.id === selProgram)?.name ?? "Loading…"}</span>
+                  </span>
+                </div>
+                <Link to="/bordereau-calendar" className="btn sm">← Bordereau Calendar</Link>
+              </div>
+            ) : (
             <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
               <div className="field" style={{ minWidth: 260, flex: "0 1 320px" }}>
                 <label>Program</label>
@@ -97,7 +126,7 @@ export default function Calendar() {
                   {sorted.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
               </div>
-            </div>
+            </div>)}
 
             {selProgram === "" ? (
               <span className="muted" style={{ fontSize: 13 }}>
