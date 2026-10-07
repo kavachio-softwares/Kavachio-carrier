@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, Search } from "lucide-react";
 import {
-  downloadAuditLogs, getAuditLogs, getAuditOptions,
+  downloadAuditLogs, getAuditGroup, getAuditLogs, getAuditOptions,
   type AuditOptions, type AuditQuery, type AuditRow,
 } from "../api/audit";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
@@ -10,7 +10,9 @@ import { Pagination } from "../components/Pagination";
 import { fmtDateTime } from "../utils/date";
 import { InfoTip } from "../components/InfoTip";
 
-const PAGE_SIZE = 15;
+// 200 a page, read by scrolling the table itself (its header stays put); the
+// page controls under it move between pages of 200.
+const PAGE_SIZE = 200;
 
 /** What this seat's trail actually covers — said once, at the top, because the
  *  answer is different for every role and a table of rows cannot say it. */
@@ -18,9 +20,9 @@ const SUBTITLE: Record<string, string> = {
   platform:
     "Everything that happens on Kavachio — every carrier, every broker and every person.",
   carrier_admin:
-    "Everyone at your company, and every broker you work with. A broker's people are shown as the broker.",
+    "Everyone at your company, and every broker you work with — each person by name, with their broker company. Steps Kavachio takes on its own (checking a file when it arrives, status emails, reminders) show as Kavachio · Automatic.",
   carrier_user:
-    "Your own trail, and everything the brokers you work with have done. A broker's people are shown as the broker.",
+    "Your own trail, and everything the brokers you work with have done — each person by name. Steps Kavachio takes on its own show as Kavachio · Automatic.",
   broker_admin:
     "Your whole team — who sent which file, and who cleared which exception.",
   broker_user:
@@ -78,6 +80,8 @@ export default function AuditLogs() {
   const [opts, setOpts] = useState<AuditOptions | null>(null);
   const [busy, setBusy] = useState<"" | "csv" | "xlsx">("");
   const [failed, setFailed] = useState(false);
+  const [openGroup, setOpenGroup] = useState<AuditRow | null>(null);
+  const scroller = useRef<HTMLDivElement>(null);
 
   useEffect(() => { getAuditOptions().then(setOpts).catch(() => setOpts(null)); }, []);
 
@@ -93,6 +97,9 @@ export default function AuditLogs() {
     JSON.stringify(query),
     PAGE_SIZE,
   );
+
+  // A new page starts at its top row, not wherever the last one was scrolled to.
+  useEffect(() => { scroller.current?.scrollTo({ top: 0 }); }, [list.page, JSON.stringify(query)]);
 
   const seat = list.extra?.seat ?? "";
   const showCarrier = seat === "platform";
@@ -204,7 +211,7 @@ export default function AuditLogs() {
             </div>
           ) : (
             <>
-              <div className="tbl-wrap">
+              <div className="tbl-wrap audit-scroll" ref={scroller}>
                 <table>
                   <thead>
                     <tr>
@@ -237,6 +244,14 @@ export default function AuditLogs() {
                               {r.detail}
                             </div>
                           )}
+                          {/* A bulk save is one line here; every change in it
+                              is one click away, exactly as it was recorded. */}
+                          {r.group && (
+                            <button type="button" className="linkish audit-group-link"
+                              onClick={() => setOpenGroup(r)}>
+                              View all {r.group.count} {r.group.noun ?? "changes"} →
+                            </button>
+                          )}
                         </td>
                         <td style={{ whiteSpace: "normal" }}>
                           {/* The kind first — a bare name ("prg test") does not
@@ -261,6 +276,122 @@ export default function AuditLogs() {
           )}
         </div>
       </div>
+      <GroupDrawer row={openGroup} query={query} onClose={() => setOpenGroup(null)} />
     </div>
+  );
+}
+
+// Where a decision was made — said once in the drawer's header, not 40 times.
+const WHERE_NOTES = [" · on the exceptions review link", " · on the exceptions screen in the portal"];
+// The drawer reads a bulk update 50 changes at a time ("Load more").
+const GROUP_PAGE = 50;
+
+/** Every change in one bulk save, in a right-hand drawer — the full record the
+ *  single summary line stands for, one row per value, as it was saved. */
+function GroupDrawer({ row, query, onClose }: {
+  row: AuditRow | null; query: AuditQuery; onClose: () => void;
+}) {
+  const [items, setItems] = useState<AuditRow[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [more, setMore] = useState(false);
+  const [err, setErr] = useState(false);
+  const key = row?.group?.key ?? null;
+
+  useEffect(() => {
+    if (!key) return;
+    let cancelled = false;
+    setItems(null); setTotal(0); setErr(false);
+    getAuditGroup(query, key, 0, GROUP_PAGE)
+      .then(r => { if (!cancelled) { setItems(r.items); setTotal(r.total); } })
+      .catch(() => { if (!cancelled) setErr(true); });
+    return () => { cancelled = true; };
+    // The filters are those the row was counted under; re-fetch only per row.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  // The next 50, added under the ones already read — the list only grows.
+  const loadMore = () => {
+    if (!key || !items || more) return;
+    setMore(true);
+    getAuditGroup(query, key, items.length, GROUP_PAGE)
+      .then(r => { setItems(prev => [...(prev ?? []), ...r.items]); setTotal(r.total); })
+      .catch(() => setErr(true))
+      .finally(() => setMore(false));
+  };
+
+  useEffect(() => {
+    if (!row) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [row, onClose]);
+
+  const open = !!row;
+  const noun = row?.group?.noun ?? "changes";
+  // Said once in the header rather than on every one of forty lines.
+  const where = WHERE_NOTES.find(n => !!items?.length && items.every(i => i.detail.endsWith(n)));
+  const L: React.CSSProperties = { textAlign: "left" };
+
+  return (
+    <>
+      <div className={`scrim${open ? " on" : ""}`} onClick={onClose} />
+      <aside className={`drawer wide${open ? " on" : ""}`} aria-hidden={!open}>
+        <div className="drawer-h">
+          <div>
+            <h4>{row?.action_label}</h4>
+            <div className="sub">
+              {row ? <>{row.actor} · {row.actor_role} · {fmtDateTime(row.at)}</> : " "}
+            </div>
+            {row?.target && row.target !== "—" && (
+              <div className="sub">{row.target_kind ? `${row.target_kind}: ` : ""}{row.target}</div>
+            )}
+            {where && <div className="sub">Made {where.replace(" · ", "")}.</div>}
+          </div>
+          <button type="button" className="closeb" aria-label="Close" onClick={onClose}>×</button>
+        </div>
+        <div className="drawer-b" style={{ padding: 0 }}>
+          {err && <div className="note warn" style={{ margin: 16 }}>Could not load these changes.</div>}
+          {!items && !err && <div className="muted" style={{ padding: 20 }}>Loading…</div>}
+          {items && items.length === 0 && (
+            <div className="empty" style={{ padding: 20 }}>Nothing to show for these filters.</div>
+          )}
+          {items && items.length > 0 && (
+            <div className="tbl-wrap">
+              <table>
+                <thead><tr>
+                  <th style={L}>#</th>
+                  <th style={L}>{noun === "bordereaux" ? "Bordereau due" : "What changed"}</th>
+                  <th style={L}>Status</th>
+                </tr></thead>
+                <tbody>
+                  {items.map((i, n) => (
+                    <tr key={i.id}>
+                      <td className="muted" style={L}>{n + 1}</td>
+                      <td style={{ ...L, whiteSpace: "normal" }}>
+                        {where ? i.detail.slice(0, -where.length) : i.detail}
+                      </td>
+                      <td style={L}>
+                        <span className={`badge ${TONE_CLASS[i.tone] ?? "b-mut"}`}>
+                          <span className="d" />{i.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="card-h" style={{ justifyContent: "space-between", borderBottom: "none",
+                                               borderTop: "1px solid var(--p-border)" }}>
+                <span className="sub">Showing {items.length} of {total} {noun}</span>
+                {items.length < total && (
+                  <button type="button" className="btn sm" disabled={more} onClick={loadMore}>
+                    {more ? "Loading…" : `Load ${Math.min(GROUP_PAGE, total - items.length)} more`}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </aside>
+    </>
   );
 }

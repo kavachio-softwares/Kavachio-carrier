@@ -949,14 +949,19 @@ def send_bordereau(session, expected_id: int, broker_party_id: int, *,
                    version_no=v.version_no)
 
     from audit import log_activity
-    log_activity(
-        e.tenant_id, f"broker:{broker_party_id}",
-        "bordereau_sent", target=f"program:{e.program_id}",
-        details={"program_id": e.program_id, "period": e.period,
-                "expected_id": expected_id, "version_no": v.version_no,
-                "to": to_emails, "cc": cc_emails,
-                "mail_sent": mail_sent, "mail_error": mail_error},
-        actor_user_id=actor_user_id, principal=actor_principal)
+    # Switched off on purpose (BORDEREAU_AUTO_SEND_EMAIL): no email was even
+    # attempted, so there is nothing for the audit trail to say. The release
+    # itself is still recorded above (record_release). A real send — or a real
+    # failure — is logged as before.
+    if mail_error != "outbound email is temporarily disabled":
+        log_activity(
+            e.tenant_id, f"broker:{broker_party_id}",
+            "bordereau_sent", target=f"program:{e.program_id}",
+            details={"program_id": e.program_id, "period": e.period,
+                     "expected_id": expected_id, "version_no": v.version_no,
+                     "to": to_emails, "cc": cc_emails,
+                     "mail_sent": mail_sent, "mail_error": mail_error},
+            actor_user_id=actor_user_id, principal=actor_principal)
     session.flush()
 
     return {"expected_id": expected_id, "period": e.period,

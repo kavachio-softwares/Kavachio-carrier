@@ -107,15 +107,14 @@ const CHANNEL_DETAIL: Partial<Record<Channel, [string, string][]>> = {
     ["A later file for the same month", "Becomes the next version of that file — however the first one came in"],
   ],
   api: [
-    ["Reporting period", "Required, sent as period, e.g. 2026-07 — GET /v1/whoami lists the valid ones"],
-    ["Programme & contract", "Fixed by the key when it covers one; otherwise sent as program_ref and contract_ref — GET /v1/whoami lists them"],
-    ["A later file for the same month", "Becomes the next version of that file — however the first one came in"],
+    ["Reporting period", "Sent as period, e.g. 2026-07"],
+    ["Programme & contract", "Use the programme and contract name, or their code"],
   ],
 };
 
+// No API entry: its dialog opens straight on the keys, with no intro above them.
 const CHANNEL_BLURB: Partial<Record<Channel, string>> = {
   sftp: "The oldest way of moving a file, and still the most dependable. Their system writes the file into a folder and we pick it up.",
-  api: "No person involved. Their software hands the file straight to ours, usually overnight, and gets an answer back immediately.",
 };
 
 function Badge({ tone, children }:
@@ -219,6 +218,9 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
   const [data, setData] = useState<RoutesResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [settingsFor, setSettingsFor] = useState<IntakeRoute | null>(null);
+  // A key just made from a card's Email Instructions button: the keys dialog
+  // opens showing it, because this is the only moment its text can be copied.
+  const [madeKey, setMadeKey] = useState<NewIntakeKey | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -372,7 +374,8 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
                       cc={data?.carrier_cc ?? null}
                       brokerProgrammes={data?.broker_programmes?.[String(r.broker_party_id)] ?? []}
                       keys={keys[r.route_id]}
-                      onSettings={() => setSettingsFor(r)}
+                      onSettings={() => { setMadeKey(null); setSettingsFor(r); }}
+                      onKeyMade={k => { setMadeKey(k); setSettingsFor(r); }}
                       onToggle={() => !busy && toggle(r)} />
                   ))}
                 </div>
@@ -387,8 +390,9 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
             the copy people actually needed. Folded away, addresses removed. */}
       </div>
 
-      <SettingsModal route={settingsFor} onClose={() => setSettingsFor(null)}
-        onSaved={() => { setSettingsFor(null); load(); }} />
+      <SettingsModal route={settingsFor} madeKey={madeKey}
+        onClose={() => { setSettingsFor(null); setMadeKey(null); }}
+        onSaved={() => { setSettingsFor(null); setMadeKey(null); load(); }} />
     </>
   );
 }
@@ -397,7 +401,7 @@ export default function WaysInTab({ onSummary, onDialogOpen, onAddData, refreshK
 // A card rather than a table row, because the four things people want are of
 // different shapes: who it is, what state it is in, what you can do to it, and
 // the address — which is the deliverable of this screen and gets its own line.
-function RouteCard({ route, busy, cc = null, brokerProgrammes = [], keys, onSettings, onToggle }: {
+function RouteCard({ route, busy, cc = null, brokerProgrammes = [], keys, onSettings, onKeyMade, onToggle }: {
   route: IntakeRoute; busy: boolean;
   /** The broker's programmes — named on a route that takes any of them, so
    *  two routes of one broker are told apart by more than the broker's name. */
@@ -407,6 +411,8 @@ function RouteCard({ route, busy, cc = null, brokerProgrammes = [], keys, onSett
   /** undefined until the keys for this route have been fetched. */
   keys: IntakeKey[] | undefined;
   onSettings: () => void; onToggle: () => void;
+  /** An API card's Email Instructions made a new key — hand it up to show. */
+  onKeyMade: (k: NewIntakeKey) => void;
 }) {
   const isApi = route.channel === "api";
   const live = (keys ?? []).filter(k => k.is_live);
@@ -510,7 +516,8 @@ function RouteCard({ route, busy, cc = null, brokerProgrammes = [], keys, onSett
             are the exception: they exist nowhere else. */}
         {/* Keys (API only) and who hears about each file's result (every
             channel) — the two things that exist nowhere else on the row. */}
-        {!isApi && <GuideBtn routeId={route.route_id} />}
+        <GuideBtn routeId={route.route_id} brokerName={route.broker_name}
+          onKeyMade={isApi ? onKeyMade : undefined} />
         <button type="button" className="btn sm" onClick={onSettings}>
           {isApi ? (needsKey ? "Make a key" : "API keys") : "Notifications"}
         </button>
@@ -557,26 +564,52 @@ function GuideNote({ guide, broker, what = "instructions" }: {
 }
 
 /** Send the broker this channel's instructions again — for a channel made
- *  before they were emailed, or a broker who lost the email. */
-function GuideBtn({ routeId }: { routeId: number }) {
+ *  before they were emailed, or a broker who lost the email.
+ *
+ *  API is different: the instructions carry the key, and a key is stored only
+ *  as a fingerprint — it cannot be read back. So here the button makes a NEW
+ *  key and emails it with the instructions (`onKeyMade`); the keys already
+ *  there keep working until they are revoked. */
+function GuideBtn({ routeId, brokerName, onKeyMade }: {
+  routeId: number; brokerName?: string | null;
+  /** Given for an API channel only. */
+  onKeyMade?: (k: NewIntakeKey) => void;
+}) {
   const [state, setState] = useState<"idle" | "busy" | "sent" | "off" | "none" | "err">("idle");
   const [to, setTo] = useState("");
   const label = { idle: "Email Instructions", busy: "Sending…", sent: "Sent",
                   off: "Emails off", none: "No email on file", err: "Not sent" }[state];
+  async function send() {
+    if (onKeyMade && !window.confirm(
+      `Email ${brokerName ?? "the broker"} their instructions with a NEW API key?\n\n` +
+      "A key can't be read back once it is made, so this makes a new one. " +
+      "Their current key keeps working until you revoke it under API keys.")) return;
+    setState("busy");
+    try {
+      if (onKeyMade) {
+        const k = await createKey(routeId, "Emailed with instructions");
+        const g = k.guide;
+        setTo(g?.recipients.join(", ") ?? "");
+        setState(!g?.recipients.length ? "none" : g.sending ? "sent" : "off");
+        onKeyMade(k);
+      } else {
+        const g = await emailRouteGuide(routeId);
+        setTo(g.recipients.join(", "));
+        setState(!g.recipients.length ? "none" : g.sending ? "sent" : "off");
+      }
+    } catch (e: any) {
+      setState("err");
+      if (onKeyMade) window.alert(e?.response?.data?.detail ?? "Could not make a key.");
+    }
+  }
   return (
     <button type="button" className="btn sm" disabled={state === "busy"}
       title={state === "sent" ? `Emailed to ${to}`
         : state === "off" ? "Broker emails are switched off (BROKER_NOTIFY_ENABLED)"
         : state === "none" ? "This broker has no email address on file"
+        : onKeyMade ? "Make a new API key and email it to the broker with how to send files"
         : "Email the broker how to name and send their files on this channel"}
-      onClick={async () => {
-        setState("busy");
-        try {
-          const g = await emailRouteGuide(routeId);
-          setTo(g.recipients.join(", "));
-          setState(!g.recipients.length ? "none" : g.sending ? "sent" : "off");
-        } catch { setState("err"); }
-      }}>{label}</button>);
+      onClick={send}>{label}</button>);
 }
 
 /** Copy-to-clipboard that says so. The address is usually on its way into an
@@ -603,8 +636,9 @@ function CopyBtn({ text }: { text: string }) {
 // Nothing in here is edited any more, so there is nothing to save. "Done"
 // closes AND reloads, because minting or revoking a key changes what the row
 // says about live keys.
-function SettingsModal({ route, onClose, onSaved }:
-  { route: IntakeRoute | null; onClose: () => void; onSaved: () => void }) {
+function SettingsModal({ route, madeKey = null, onClose, onSaved }:
+  { route: IntakeRoute | null; madeKey?: NewIntakeKey | null;
+    onClose: () => void; onSaved: () => void }) {
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => { if (route) setErr(null); }, [route]);
 
@@ -622,10 +656,11 @@ function SettingsModal({ route, onClose, onSaved }:
             <div className="note warn" style={{ marginBottom: 14 }}>
               <b>The last check failed.</b> {route.sftp.last_error}
             </div>)}
-          <div className="note" style={{ marginBottom: 14 }}>
-            {route.sftp ? PULL_BLURB
-              : CHANNEL_BLURB[route.channel] ?? CHANNEL_COPY[route.channel].sub}
-          </div>
+          {route.channel !== "api" && (
+            <div className="note" style={{ marginBottom: 14 }}>
+              {route.sftp ? PULL_BLURB
+                : CHANNEL_BLURB[route.channel] ?? CHANNEL_COPY[route.channel].sub}
+            </div>)}
           <div className="kv"><span className="k">Broker</span><span>{route.broker_name}</span></div>
           <div className="kv">
             <span className="k">Programme</span>
@@ -653,13 +688,14 @@ function SettingsModal({ route, onClose, onSaved }:
             <div className="kv" key={k}><span className="k">{k}</span>
               <span className={k === "Server fingerprint" ? "mono" : undefined}
                 style={{ overflowWrap: "anywhere" }}>{v}</span></div>))}
-          <div className="kv"><span className="k">Received This Month</span>
-            <span>{route.files_this_month}</span></div>
+          {route.channel !== "api" && (
+            <div className="kv"><span className="k">Received This Month</span>
+              <span>{route.files_this_month}</span></div>)}
 
           {/* Keys are the API route's whole identity mechanism — the equivalent
               of the folder for SFTP — so they belong in this panel, not on a
               separate screen. */}
-          {route.channel === "api" && <KeyPanel route={route} />}
+          {route.channel === "api" && <KeyPanel route={route} initialMinted={madeKey} />}
 
           <NotifyPanel route={route} />
 
@@ -727,9 +763,10 @@ function NotifyPanel({ route }: { route: IntakeRoute }) {
 // the sender's request carries nothing but the file. We never store the key
 // itself, only a fingerprint — so it is shown once and genuinely cannot be
 // recovered, and the panel has to say so before it disappears.
-function KeyPanel({ route }: { route: IntakeRoute }) {
+function KeyPanel({ route, initialMinted = null }:
+  { route: IntakeRoute; initialMinted?: NewIntakeKey | null }) {
   const [keys, setKeys] = useState<IntakeKey[] | null>(null);
-  const [minted, setMinted] = useState<NewIntakeKey | null>(null);
+  const [minted, setMinted] = useState<NewIntakeKey | null>(initialMinted);
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -769,9 +806,7 @@ function KeyPanel({ route }: { route: IntakeRoute }) {
     <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--p-border)" }}>
       <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Their key</h3>
       <p className="muted" style={{ fontSize: 12.5, margin: "0 0 12px", lineHeight: 1.55 }}>
-        A folder is what tells us who sent an SFTP file. There is no folder here, so the key
-        does that job — it carries the broker and the programme, and the sender sends nothing
-        but the file.
+        Use the keys below to send a bordereau to the respective programme and contract.
       </p>
 
       {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}

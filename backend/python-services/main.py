@@ -243,20 +243,29 @@ import asyncio as _asyncio  # noqa: E402
 from starlette.concurrency import run_in_threadpool as _run_in_threadpool  # noqa: E402
 
 
-async def _audit_activity(auth_header, method, path, status, ip):
+async def _audit_activity(auth_header, method, path, status, ip, esign=None):
     """Look up the actor + write the activity row. Runs OFF the request's
     critical path (see below) — the email lookup + insert are 2 extra DB
     round-trips that must not add latency to every write."""
     try:
         uid, tid = _audit.actor_from_token(auth_header)
         email = _audit.actor_email(uid)
+        target = _audit.redact_path(path)
+        details = {"status": status, "ip": ip, "method": method}
+        if esign:
+            # A signing link: the contract it was for, and who it was sent to
+            # (an emailed signer has no login — the address is who signed).
+            if esign.get("contract_id"):
+                target = f"contract:{esign['contract_id']}"
+            details["signer"] = esign.get("email")
+            tid = tid if tid is not None else esign.get("tenant_id")
+            email = email or esign.get("email")
         await _run_in_threadpool(
             _audit.log_activity, tid, email,
             # The target is redacted too, not only the action: a signing link
             # in the path is a live credential, and it was still being stored
             # here in full (found 6 Oct 2026). Ids are kept — they name the record.
-            _audit.friendly_action(method, path), _audit.redact_path(path),
-            {"status": status, "ip": ip, "method": method},
+            _audit.friendly_action(method, path), target, details,
             # The acting SEAT, not just the display email: a broker token
             # carries no tenant_id, so without this the row belongs to nobody
             # the Audit Logs screen can scope it to (see db.ActivityEvent).
@@ -266,12 +275,12 @@ async def _audit_activity(auth_header, method, path, status, ip):
         pass
 
 
-async def _audit_access(auth_header, path, ip):
+async def _audit_access(auth_header, path, ip, action="download"):
     try:
         uid, tid = _audit.actor_from_token(auth_header)
         email = _audit.actor_email(uid)
         await _run_in_threadpool(
-            _audit.log_access, email, path, "download", ip, uid, tid,
+            _audit.log_access, email, path, action, ip, uid, tid,
         )
     except Exception:  # noqa: BLE001
         pass
@@ -279,6 +288,14 @@ async def _audit_access(auth_header, path, ip):
 
 @app.middleware("http")
 async def _db_audit_middleware(request, call_next):
+    # A signing link's contract must be read BEFORE the request: signing
+    # clears the token. Only these few public requests pay for the lookup.
+    esign = None
+    if request.method == "POST" and request.url.path.startswith("/esign/sign/"):
+        try:
+            esign = await _run_in_threadpool(_audit.esign_context, request.url.path)
+        except Exception:  # noqa: BLE001
+            esign = None
     response = await call_next(request)
     try:
         method = request.method
@@ -292,9 +309,13 @@ async def _db_audit_middleware(request, call_next):
             # adding the email-lookup + insert round-trips to EVERY mutating
             # request's latency (writes felt slow against a remote DB).
             if method in ("POST", "PUT", "PATCH", "DELETE") and not _audit.is_self_logged(method, path):
-                _asyncio.ensure_future(_audit_activity(auth_header, method, path, status, ip))
+                _asyncio.ensure_future(_audit_activity(auth_header, method, path, status, ip,
+                                                       esign))
             elif method == "GET" and _audit.is_access_path(path):
-                _asyncio.ensure_future(_audit_access(auth_header, path, ip))
+                # A download only when the Download button asked for the file;
+                # a screen loading it to show it is a view (audit.DOWNLOAD_HEADER).
+                action = "download" if request.headers.get(_audit.DOWNLOAD_HEADER) else "view"
+                _asyncio.ensure_future(_audit_access(auth_header, path, ip, action))
     except Exception:  # noqa: BLE001 — auditing must never break the request
         pass
     return response

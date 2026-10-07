@@ -10,8 +10,8 @@ export type AuditRow = {
   id: string;                  // "activity:1204" — unique across the three stores
   at: string | null;           // explicit-UTC ISO
   category: "activity" | "auth" | "access" | "decision";
-  actor: string;               // a person, or a broker company when masked
-  actor_role: string;          // "Broker Admin", "Carrier User", "Automation", …
+  actor: string;               // the person, or "Kavachio" for an automatic step
+  actor_role: string;          // "Broker · Wani org", "Carrier", "Automatic", …
   actor_role_key: string;
   actor_org: string | null;
   action: string;              // the stored event name
@@ -27,6 +27,9 @@ export type AuditRow = {
   tone: "ok" | "warn" | "info" | "bad" | "muted";
   ip: string | null;
   carrier: string | null;
+  /** A bulk save ("Corrected 40 values in one bulk update"): how many changes
+   *  it holds, and the key getAuditGroup opens them with. Null otherwise. */
+  group: { key: string; count: number; noun: string } | null;
 };
 
 export type AuditPage = {
@@ -91,6 +94,17 @@ export async function getAuditLogs(
 ): Promise<AuditPage> {
   const { data } = await api.get<AuditPage>("/audit/logs", {
     params: { ...params(q), page, page_size: pageSize },
+  });
+  return data;
+}
+
+/** The changes in one bulk save, a page at a time (from `offset`) — under the
+ *  same filters as the page, so it opens exactly the changes that row counted. */
+export async function getAuditGroup(
+  q: AuditQuery, key: string, offset = 0, limit = 50,
+): Promise<{ items: AuditRow[]; total: number }> {
+  const { data } = await api.get<{ items: AuditRow[]; total: number }>("/audit/logs/group", {
+    params: { ...params(q), key, offset, limit },
   });
   return data;
 }

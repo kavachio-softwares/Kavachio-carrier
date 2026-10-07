@@ -498,12 +498,13 @@ def test_resend_updates_timestamp_without_a_second_release_count(mock_send, monk
 
 
 @patch("email_utils.send_email")
-def test_audit_log_entry_written_on_send(mock_send, _no_real_audit_writes):
+def test_audit_log_entry_written_on_send(mock_send, _no_real_audit_writes, monkeypatch):
     # log_activity() itself opens a fresh SessionLocal() (see audit.py), so
     # this asserts on the CALL — the fixture is what keeps it off the shared
     # DB and gives us something to inspect. What matters here is that
     # send_bordereau asks for exactly one "bordereau_sent" row naming this
-    # period, on the CARRIER's tenant.
+    # period, on the CARRIER's tenant — for an email that was really sent.
+    monkeypatch.setenv("BORDEREAU_AUTO_SEND_EMAIL", "true")
     import db, submission_calendar_service as svc
     s = _mem_session()
     p, _ = _seed(s, today=date(2026, 9, 1))
@@ -543,6 +544,24 @@ def test_outbound_email_disabled_by_default(mock_send, monkeypatch):
     fresh = s.get(db.ExpectedSubmission, e.id)
     assert fresh.released_at is not None
     assert fresh.released_count == 1
+
+
+@patch("email_utils.send_email")
+def test_no_audit_row_when_outbound_email_is_switched_off(mock_send, _no_real_audit_writes,
+                                                          monkeypatch):
+    # Switched off on purpose, so no email was even attempted — the audit
+    # trail says nothing (6 Oct 2026). The release is still recorded.
+    monkeypatch.delenv("BORDEREAU_AUTO_SEND_EMAIL", raising=False)
+    import db, submission_calendar_service as svc
+    s = _mem_session()
+    p, _ = _seed(s, today=date(2026, 9, 1))
+    _add_carrier_admin(s, 1)
+    e = s.query(db.ExpectedSubmission).filter_by(program_id=p.id, period="2026-07").first()
+    _process(s, e.id, received_on=e.due_date)
+    svc.send_bordereau(s, e.id, 100, actor_email="a@example.com")
+    s.commit()
+    _no_real_audit_writes.assert_not_called()
+    assert s.get(db.ExpectedSubmission, e.id).released_count == 1
 
 
 @patch("email_utils.send_email")

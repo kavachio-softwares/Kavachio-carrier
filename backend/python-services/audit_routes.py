@@ -30,7 +30,7 @@ from db import SessionLocal
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
-DEFAULT_PAGE_SIZE = 15          # the reference design's page — 1–15 of N
+DEFAULT_PAGE_SIZE = 200         # the screen reads 200 at a time, in a scrolling table
 
 
 def _filters(days: Optional[int], since: Optional[str], until: Optional[str],
@@ -74,6 +74,28 @@ def audit_logs(
                                page, page_size)
 
 
+@router.get("/logs/group")
+def audit_log_group(
+    key: str,
+    offset: int = 0,
+    limit: int = audit_feed.GROUP_PAGE,
+    days: Optional[int] = None,
+    since: Optional[str] = Query(default=None, alias="from"),
+    until: Optional[str] = Query(default=None, alias="to"),
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    q: Optional[str] = None,
+    principal: Principal = Depends(current_principal),
+):
+    """Every decision in one bulk save — the rows behind a "Corrected 40
+    values in one bulk update" line. Same scope and filters as /logs, so it
+    opens exactly the decisions that line counted."""
+    with SessionLocal() as s:
+        v = audit_feed.viewer_for(s, principal)
+        return audit_feed.group_rows(s, v, _filters(days, since, until, actor, action, q),
+                                     key, offset, limit)
+
+
 @router.get("/options")
 def audit_options(principal: Principal = Depends(current_principal)):
     """The dropdown contents — built from what this seat can actually see, so
@@ -98,6 +120,7 @@ _COLUMNS = [
     ("carrier",      "Carrier"),
     ("action_label", "Action"),
     ("detail",       "What exactly"),
+    ("bulk",         "Bulk update"),
     ("target_kind",  "Target type"),
     ("target",       "Target / file"),
     ("status",       "Status"),
@@ -184,7 +207,7 @@ def _xlsx(rows: list[dict]) -> Response:
         cell.alignment = Alignment(vertical="center")
     for r in rows:
         ws.append([_cell(r, k) for k, _label in _COLUMNS])
-    widths = [20, 26, 15, 26, 22, 30, 56, 30, 20, 12, 15, 26]
+    widths = [20, 26, 26, 26, 22, 42, 64, 30, 20, 36, 14, 12, 15, 26]
     for i, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
     ws.freeze_panes = "A2"

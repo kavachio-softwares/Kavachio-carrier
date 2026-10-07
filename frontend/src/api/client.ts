@@ -249,7 +249,10 @@ export async function streamNdjson(
 // instead we fetch the bytes through the interceptor and hand the browser a
 // blob URL to save.
 export async function downloadFile(path: string, filename?: string): Promise<void> {
-  const res = await api.get(path, { responseType: "blob" });
+  // The header tells the Audit Logs this was a real download (a file saved),
+  // not a screen loading the same file to show it — see audit.DOWNLOAD_HEADER.
+  const res = await api.get(path, { responseType: "blob",
+                                    headers: { "X-Kavachio-Download": "1" } });
   // Prefer the server's filename (Content-Disposition) over the caller's hint.
   const cd = (res.headers?.["content-disposition"] as string | undefined) ?? "";
   const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);

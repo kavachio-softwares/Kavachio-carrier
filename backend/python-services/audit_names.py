@@ -15,9 +15,8 @@ read better — including every row written before this existed. Lookups are
 memoised per response and prefetched in bulk (one query per kind per page), so
 a 20,000-row export does not become 20,000 round trips.
 
-Masking holds here too: a carrier viewer never learns the name of a broker's
-own people, so a broker seat named as a TARGET reads as its broker company,
-exactly as audit_feed.ActorNamer does for the actor.
+Naming matches audit_feed.ActorNamer: a broker's own admin is named; only a
+retired broker-user seat named as a TARGET reads to a carrier as its company.
 """
 from __future__ import annotations
 
@@ -45,6 +44,7 @@ KIND_WORDS = {
     "arrival":    "Received file",
     "submission": "Received file",
     "export":     "Processed bordereau",
+    "output":     "Output BDX file",
     "landing":    "Uploaded file",
     "upload":     "Uploaded file",
     "user":       "User",
@@ -71,6 +71,7 @@ _COLLECTION = {
     "format": "format", "mapping-tasks": "task", "uploads": "upload",
     "landing": "landing", "clause-routing": "clause",
     "broker-onboarding-requests": "request", "pages": "wording",
+    "runs": "export",
 }
 
 # `kind:value` targets (program:1295, pipeline:216, submission:inb_…).
@@ -120,8 +121,11 @@ ACTION_NAME_KIND = {
     "output_template_activated": "template", "output_template_refreshed": "template",
     "input_mapper_generated": "mapper", "input_mapper_updated": "mapper",
     "input_mapper_activated": "mapper",
-    "direct_output_generated": "export", "direct_output_checked": "export",
-    "output_generated": "export",
+    # The recorded name is the OUTPUT file ("Mahi_Corp_pvt_ltd_prg_test.xlsx"),
+    # not the file the broker sent — said as such, or it reads as a second,
+    # unknown "processed bordereau" beside the one named after the received file.
+    "direct_output_generated": "output", "direct_output_checked": "output",
+    "output_generated": "output",
     "user_invited": "user", "user_updated": "user", "user_deleted": "user",
     "intake.arrival.released": "arrival", "intake.arrival.discarded": "arrival",
     "intake_arrival_rerun": "arrival",
@@ -246,9 +250,11 @@ class Names:
         e = self.entry(kind, key)
         if not e:
             return None
-        # A broker's own person, named to a carrier: the company, never them.
+        # A retired broker-user seat ("operator"), named to a carrier: the
+        # company. A broker's own admin is named — as the Actor column does.
         if kind == "user" and e.get("broker") and self.v is not None \
-                and getattr(self.v, "is_carrier", False):
+                and getattr(self.v, "is_carrier", False) \
+                and e.get("role") not in (None, "broker_admin"):
             return self.name("broker", e["broker"]) or "Broker"
         return e.get("name")
 
@@ -470,14 +476,16 @@ def _load_upload(s, keys):
 
 def _load_user(s, keys):
     from db import AppUser
-    rows = (s.query(AppUser.id, AppUser.full_name, AppUser.email, AppUser.broker_party_id)
+    rows = (s.query(AppUser.id, AppUser.full_name, AppUser.email, AppUser.broker_party_id,
+                    AppUser.role)
             .filter(AppUser.id.in_([int(k) for k in keys])).all())
     out = {}
     for r in rows:
         name = r.full_name or r.email or f"User #{r.id}"
         if r.full_name and r.email:
             name = f"{r.full_name} ({r.email})"
-        out[r.id] = {"name": name, "ctx": [], "broker": r.broker_party_id}
+        out[r.id] = {"name": name, "ctx": [], "broker": r.broker_party_id,
+                     "role": r.role}
     return out
 
 
@@ -618,7 +626,7 @@ def _person_recorded(names: Names, d: dict) -> Optional[str]:
         return None
     if names.v is not None and getattr(names.v, "is_carrier", False):
         role = str(d.get("role") or "")
-        if role in _BROKER_ROLES:
+        if role in _BROKER_ROLES and role != "broker_admin":
             return "A broker user"
         if role not in ("carrier_admin", "carrier_user"):
             return "A user"
@@ -657,6 +665,12 @@ def target_words(names: Names, action: str, target: Optional[str],
         # is what follows.
         same = primary is not None and _same_kind(primary[0], kind)
         ctx = _context(names, refs, primary if same else None)
+        # A direct run's target is "direct:<carrier> — <programme>": the
+        # programme is where the output file belongs.
+        if t.startswith("direct:") and " \u2014 " in t:
+            prog = t.split(" \u2014 ", 1)[1].strip()
+            if prog and prog not in ctx:
+                ctx.append(prog)
         return (KIND_WORDS.get(kind) if kind else None,
                 " · ".join([recorded] + [c for c in ctx if c != recorded]))
 
@@ -734,7 +748,8 @@ _SKIP = {"status", "ip", "method", "email", "full_name", "user_agent",
          "carrier_party_id", "tenant_id", "expected_id", "check_export_id",
          "format_id", "template_id", "output_template_id", "pipeline_id",
          "landing_id", "mapper_id", "task_id", "request_id", "export_id",
-         "upload_id", "rule_id", "arrival_id", "route_id", "credential_id"}
+         "upload_id", "rule_id", "arrival_id", "route_id", "credential_id",
+         "person_added_later"}
 
 # Ids worth reading — as the name of what they point at.
 _ID_KIND = {"program_id": "program", "contract_id": "contract",
@@ -798,6 +813,9 @@ NOTICE_WORDS = {
 
 def _values(v) -> str:
     if isinstance(v, (list, tuple, set)):
+        # A list of records is counted, never printed as raw data.
+        if any(isinstance(x, (dict, list, tuple)) for x in v):
+            return f"{len(v)} items"
         return ", ".join(str(x) for x in v if x not in (None, ""))
     return str(v)
 
@@ -874,16 +892,9 @@ def _generic(names: Names, d: dict) -> list[tuple[str, Optional[str]]]:
 
 
 def _notice(names, d):
-    """bdx_notice_*: which email, to whom, about which version."""
+    """bdx_notice_*: to whom, about which version. Which email it was — its
+    subject — is the Action words (audit_feed.notice_words)."""
     parts = []
-    bits = str(d.get("key") or "").split(":")
-    status = bits[2] if len(bits) > 2 else None
-    event = d.get("event")
-    title = NOTICE_WORDS.get(event if event in ("deadline_hold", "carrier_deadline")
-                             else status or "", None)
-    via = "SFTP status file" if d.get("channel") == "sftp" else "email"
-    if title:
-        parts.append((f"“{title}” {via}", None))
     if d.get("recipient"):
         parts.append((f"to {d['recipient']}", None))
     if d.get("version"):
@@ -910,19 +921,45 @@ def _bordereau_sent(names, d):
 
 
 def _fix_validated(names, d):
+    """The review link's Validate: a preview of the next version, not sent."""
     parts = []
     if d.get("version"):
-        parts.append((f"Version {d['version']} checked", None))
+        parts.append((f"Preview of Version {d['version']} (not sent yet)", None))
     if d.get("corrected") is not None:
         ok = d.get("corrected_ok")
         parts.append((f"{d['corrected']} corrected" +
-                      (f", {ok} now pass" if ok is not None else ""), None))
+                      (f", {ok} now pass the checks" if ok is not None else ""), None))
     if d.get("still_failing_count"):
         parts.append((f"{d['still_failing_count']} still failing", None))
     if d.get("open_after") is not None:
         b = d.get("blocking_after")
         parts.append((f"{d['open_after']} exceptions still open" +
-                      (f" ({b} blocking)" if b else ""), None))
+                      (f" ({b} must be fixed before delivery)" if b else ""), None))
+    return parts
+
+
+def _fix_link(names, d):
+    """The review link's sign-in and submit rows: which link — the one emailed
+    to this address — and which version of the file it was for."""
+    parts = []
+    email = d.get("email")
+    if email:
+        parts.append((f"Link emailed to {email}", None))
+    if d.get("from_version"):
+        to = d.get("to_version")
+        parts.append((f"Corrections to Version {d['from_version']} sent in as "
+                      + (f"Version {to}" if to else "the next version"), None))
+    elif d.get("version"):
+        parts.append((f"Version {d['version']}", None))
+    return parts
+
+
+def _fix_link_code(names, d):
+    parts = []
+    if d.get("email"):
+        parts.append((f"Code emailed to {d['email']}", None))
+    if d.get("version"):
+        parts.append((f"Version {d['version']}", None))
     return parts
 
 
@@ -945,6 +982,11 @@ def _mapping_proposed(names, d):
 _SPECIAL = {
     "bordereau_sent": _bordereau_sent,
     "bdx_fix_link_validated": _fix_validated,
+    "bdx_fix_link_code_sent": _fix_link_code,
+    "bdx_fix_link_code_wrong": _fix_link,
+    "bdx_fix_link_opened": _fix_link,
+    "bdx_fix_link_submitted": _fix_link,
+    "bdx_fix_link_answers": _fix_link,
     "bdx_submission_delivered": _delivered,
     "datamodel_mapping_proposed": _mapping_proposed,
 }

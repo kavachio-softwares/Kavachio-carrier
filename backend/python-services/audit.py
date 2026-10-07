@@ -464,7 +464,56 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/intake/arrivals/\d+/discard$")),
     ("DELETE", re.compile(r"^/intake/keys/\d+$")),
     ("PATCH",  re.compile(r"^/rule-library/\d+$")),
+    # Switching a channel on/off writes intake_route_updated ("switched off").
+    ("PATCH",  re.compile(r"^/intake/routes/\d+$")),
+    # Saving a submission schedule writes submission_schedule_updated itself.
+    ("PUT",    re.compile(r"^/programs/\d+/schedule$")),
+    # 6 Oct 2026 (user: "such duplicate entry should not happen in the logs
+    # table"): each of these handlers writes its own NAMED row for the click —
+    # with the contract, the template, the channel, the file and the counts —
+    # so the middleware's copy was the same action a second time. Checked
+    # first that every one of them always writes its row, and that nothing
+    # reads the copies.
+    ("POST",   re.compile(r"^/contracts/\d+/request-changes$")),   # contract_pushed_back
+    ("POST",   re.compile(r"^/contracts/\d+/accept-terms$")),      # contract_awaiting_signature
+    ("POST",   re.compile(r"^/output-template/from-standard$")),   # output_template_generated
+    ("POST",   re.compile(r"^/intake/routes$")),                   # intake_route_created
+    ("POST",   re.compile(r"^/intake/routes/\d+/keys$")),          # intake_key_created
+    ("POST",   re.compile(r"^/programs/\d+/contracts/\d+/generate-rules$")),  # contract.rules_generated
+    ("POST",   re.compile(r"^/calendar/chase$")),                  # submission_chased, per bordereau
+    # A portal upload: its result row (direct_output_generated / _checked)
+    # names the person, the file and the counts.
+    ("POST",   re.compile(r"^/carriers/\d+/programs/\d+/brokers/\d+/contracts/\d+/runs$")),
+    # Opening a contract to sign it is a page, not an act; the handler writes
+    # signature_round_started itself when it really starts a round.
+    ("POST",   re.compile(r"^/esign/contracts/\d+/signing-session$")),
 ]
+
+_ESIGN_SIGN = re.compile(r"^/esign/sign/([^/]+)(?:/|$)")
+
+
+def esign_context(path: str) -> dict | None:
+    """{contract_id, tenant_id, email} for a signing-link request — read BEFORE
+    the request runs, because signing clears the token. Without it every
+    signature row named nothing ("—"): the token was the only thing in its
+    path, and it is blanked before the row is stored. Never raises."""
+    m = _ESIGN_SIGN.match(path or "")
+    if not m:
+        return None
+    try:
+        from db import EsignEnvelope, EsignRecipient
+        with SessionLocal() as s:
+            rec = s.query(EsignRecipient).filter(EsignRecipient.token == m.group(1)).first()
+            env = s.get(EsignEnvelope, rec.envelope_id) if rec is not None else None
+            if env is None:
+                return None
+            return {"contract_id": getattr(env, "contract_id", None),
+                    "tenant_id": getattr(env, "tenant_id", None),
+                    "email": getattr(rec, "email", None)}
+    except Exception as e:  # noqa: BLE001
+        log.warning("audit: esign context lookup failed: %s", e)
+        return None
+
 
 def is_self_logged(method: str, path: str) -> bool:
     return any(m == method and rx.match(path) for m, rx in _SELF_LOGGED)
@@ -473,8 +522,19 @@ def is_self_logged(method: str, path: str) -> bool:
 # GET endpoints that return sensitive output / source data → access_log.
 # Curated on purpose: only data-bearing detail/download reads, NOT every list GET
 # (which would flood the log with page-load noise).
+#
+# A read is recorded as a "download" only when the browser's Download button
+# asked for it (api/client.ts downloadFile sends DOWNLOAD_HEADER). Everything
+# else on these paths — a screen loading a file to SHOW it, the preview after a
+# run — is a "view": kept in the table, never called a download (6 Oct 2026: a
+# broker who downloaded nothing read as "Downloaded a file" five times).
+DOWNLOAD_HEADER = "x-kavachio-download"
+
 _ACCESS_PATHS = [
     re.compile(r"^/export/downloads/\d+/file$"),
+    # The broker's own Download button (carrier_routes, the nested run path) —
+    # never logged before, so a broker's real downloads left no trace at all.
+    re.compile(r"^/carriers/\d+/programs/\d+/brokers/\d+/contracts/\d+/runs/\d+/file$"),
     re.compile(r"^/export/downloads/\d+/data$"),
     re.compile(r"^/export/downloads/\d+$"),
     re.compile(r"^/uploads/\d+/file$"),

@@ -326,12 +326,21 @@ def _tenant_name(session, tenant_id: Optional[int]) -> Optional[str]:
 
 
 def _log(mga: str, actor: Optional[str], action: str, target: Optional[str] = None,
-         details: Optional[dict] = None) -> None:
+         details: Optional[dict] = None, principal=None) -> None:
     # `mga` is still the inbound caller key; resolve it to the tenant_id the
-    # row is actually stored under.
+    # row is actually stored under. `principal`, when given, records the
+    # acting seat too (the Audit Logs screen names the person by it).
+    seat = {}
+    if principal is not None:
+        try:
+            from audit import actor_columns
+            seat = actor_columns(principal)
+        except Exception:  # noqa: BLE001 — auditing never breaks the request
+            seat = {}
     with SessionLocal() as s:
         s.add(ActivityEvent(tenant_id=_get_tenant_id(s, mga), actor=actor,
-                            action=action, target=target, details=details or {}))
+                            action=action, target=target, details=details or {},
+                            **seat))
         s.commit()
 
 
@@ -4314,7 +4323,7 @@ class ContractGenerateRulesBody(BaseModel):
 def _add_template_rule_set(*, contract_id: int, program_id: int, tenant_id,
                            tenant_mga, body, template_fields: list[dict],
                            clause_rows, terms: dict,
-                           bound_template_id: int) -> dict:
+                           bound_template_id: int, principal=None) -> dict:
     """Write a rule set for an output template OTHER than the one the contract
     is bound to, beside the contract's own set (rule_scope.py). Every rule is
     tagged with that template; nothing of the own set is touched — not its
@@ -4387,8 +4396,8 @@ def _add_template_rule_set(*, contract_id: int, program_id: int, tenant_id,
         # makes that fail out loud instead of reporting rules that are not there.
         conn.execute(text("SELECT 1"))
 
-    _log(tenant_mga, body.actor, "contract.rules_generated",
-         target=f"contract:{contract_id}",
+    _log(tenant_mga, body.actor or _actor(principal), "contract.rules_generated",
+         target=f"contract:{contract_id}", principal=principal,
          details={"program_id": program_id, "output_template_id": tid,
                   "bound_template_id": bound_template_id, "rule_set": "added",
                   "clauses": len(clauses), "rules_created": len(created),
@@ -4518,7 +4527,8 @@ def contract_generate_rules(program_id: int, contract_id: int,
                 contract_id=contract_id, program_id=program_id,
                 tenant_id=tenant_id, tenant_mga=tenant_mga, body=body,
                 template_fields=template_fields, clause_rows=rows,
-                terms=terms, bound_template_id=bound_template_id)
+                terms=terms, bound_template_id=bound_template_id,
+                principal=principal)
         raise HTTPException(
             409,
             f"this contract already carries {own_live} rule(s) written against "
@@ -4633,8 +4643,8 @@ def contract_generate_rules(program_id: int, contract_id: int,
                 c.status = "active"
             s.commit()
 
-    _log(tenant_mga, body.actor, "contract.rules_generated",
-         target=f"contract:{contract_id}",
+    _log(tenant_mga, body.actor or _actor(principal), "contract.rules_generated",
+         target=f"contract:{contract_id}", principal=principal,
          details={"program_id": program_id,
                   "output_template_id": body.output_template_id,
                   "clauses": len(clauses),

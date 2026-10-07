@@ -1160,6 +1160,19 @@ def signing_session(contract_id: int, request: Request,
     # has just closed.
     if envelope_id is None:
         envelope_id = _open_round(request, p, contract_id)
+        # The one moment worth a row: a round really started (the middleware's
+        # copy of this request is no longer written — opening the page to sign
+        # is not an act, and the signature is its own row).
+        try:
+            from audit import log_activity, actor_email
+            with SessionLocal() as s:
+                _c = s.get(Contract, contract_id)
+                _tid = getattr(_c, "tenant_id", None)
+            log_activity(_tid, actor_email(p.user_id), "signature_round_started",
+                         target=f"contract:{contract_id}",
+                         details={"envelope_id": envelope_id}, principal=p)
+        except Exception:  # noqa: BLE001 — auditing never breaks signing
+            pass
 
     with SessionLocal() as s:
         env = s.get(EsignEnvelope, envelope_id)

@@ -2755,10 +2755,15 @@ async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None
         actor = _actor_label(principal,
                              requested=(body.actor if body else None))
     # Re-render IN PLACE so the export id/header stays stable across Re-generate.
+    # run_by_user_id: the person who pressed Re-generate, for the audit row
+    # only — `actor` is the broker COMPANY for a broker seat, which left the
+    # row reading "Wani org" instead of who it was. The export is re-rendered
+    # in place, so its own generated_by_user_id is untouched.
     result = await _render_landing(int(landing_id), export_contract_id, None,
                                    actor, {},
                                    auto_ingest=False, reuse_export_id=export_id,
-                                   rule_scope_pipeline_id=export_pipeline_id)
+                                   rule_scope_pipeline_id=export_pipeline_id,
+                                   run_by_user_id=getattr(principal, "user_id", None) or None)
     # The broker exception loop: refresh this file's submission (and deliver
     # it if what held it back is now fixed or answered). Never raises.
     import submission_service

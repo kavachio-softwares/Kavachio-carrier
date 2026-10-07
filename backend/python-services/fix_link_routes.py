@@ -85,11 +85,17 @@ def _session(s, token: str, session: Optional[str]) -> tuple[dict, "svc.Thread"]
 
 def _audit(s, th, doc: dict, token: str, action: str, details: dict) -> None:
     from db import ActivityEvent
+    # Which version the link was open on — so the Audit Logs can say WHICH
+    # review link this was (the file is the target, the address is `email`).
+    try:
+        version = th.current.no
+    except Exception:  # noqa: BLE001 — a log detail never fails the request
+        version = None
     s.add(ActivityEvent(
         tenant_id=th.tenant_id, actor=f"broker:{th.broker_party_id}",
         action=action, target=f"submission:{th.ref}",
         details={"reference": th.ref, "via": "secure link", "email": doc["e"],
-                 "link": svc.link_id(token), **details},
+                 "link": svc.link_id(token), "version": version, **details},
         actor_broker_party_id=th.broker_party_id))
 
 
