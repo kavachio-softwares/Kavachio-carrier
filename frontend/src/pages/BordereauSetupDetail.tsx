@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, ChevronDown, ChevronRight,
+  AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, CheckCircle2, ChevronDown, ChevronRight,
   FileSpreadsheet, FileText, FileUp, Info, Pencil, ShieldCheck,
 } from "lucide-react";
 import { SetupTabs, SheetChips, useSetupTab, type SetupTab } from "../components/SetupTabs";
@@ -15,8 +15,10 @@ import { Button } from "../components/ui/Button";
 import { Banner } from "../components/ui/Banner";
 import { Modal } from "../components/ui/Modal";
 import { Sk } from "../components/ui/Skeleton";
-import { ContractInline, ContractStatusChip } from "../components/DirectMappingWidgets";
-import { MissingColumnsNote } from "../components/MissingColumnsNote";
+import {
+  ContractInline, ContractStatusChip, InlineExtraTab, isLibraryText,
+} from "../components/DirectMappingWidgets";
+import { MissingBdxColumnsPanel, useMissingColumns } from "../components/MissingColumnsNote";
 import {
   MissingReferenceDocsNote, useRefDocs, PipelineRefDocs,
 } from "../components/MissingReferenceDocsNote";
@@ -98,6 +100,11 @@ export default function BordereauSetupDetail() {
   const [contractBusy, setContractBusy] = useState(false);
   // Bumped whenever a rule's mapping changes, to re-read the missing-columns note.
   const [noteKey, setNoteKey] = useState(0);
+  // The stored contract-vs-bordereau check, read once for the whole page — its
+  // list is a Contract Rules sub-tab, its count is on the Setup Summary.
+  const mc = useMissingColumns(pipeline?.id, { refreshKey: noteKey });
+  // Which Contract Rules sub-tab a Setup Summary tile asked for.
+  const [contractFocus, setContractFocus] = useState<{ view: string; seq: number } | null>(null);
   // Activation straight from this read-only view: a setup that only needs to be
   // switched on shouldn't have to be opened in the editor and re-saved.
   const [confirmActivate, setConfirmActivate] = useState(false);
@@ -134,6 +141,19 @@ export default function BordereauSetupDetail() {
       .catch(() => setErr("This setup could not be found, or you don't have access to it."))
       .finally(() => setLoading(false));
   }, [id]);
+
+  // True rule total across this setup's contracts (see ruleCount). Re-read after
+  // a rule changes (noteKey) so Generate Rule / Remove update the number.
+  const [contractRuleTotal, setContractRuleTotal] = useState<number | null>(null);
+  useEffect(() => {
+    if (!pipeline?.program_id || pipeline.contracts.length === 0) { setContractRuleTotal(null); return; }
+    let alive = true;
+    Promise.all(pipeline.contracts.map(pc =>
+      api.get<ContractDetailT>(`/programs/${pipeline.program_id}/contracts/${pc.contract_id}`)
+        .then(r => (r.data.rules ?? []).length).catch(() => null)))
+      .then(ns => { if (alive) setContractRuleTotal(ns.some(n => n == null) ? null : ns.reduce<number>((a, n) => a + (n ?? 0), 0)); });
+    return () => { alive = false; };
+  }, [pipeline, noteKey]);
 
   async function toggleContract(cid: number) {
     if (openContractId === cid) { setOpenContractId(null); setContractDetail(null); return; }
@@ -244,14 +264,43 @@ export default function BordereauSetupDetail() {
 
   // DISTINCT contract rules (by rule_id), not clause attachments — one rule can
   // attach to several fields, so summing per-field clause counts overstates it.
-  const ruleCount = (() => {
+  const shownRuleCount = (() => {
     const ids = new Set<number>();
     for (const f of editor?.fields ?? []) for (const c of (f.clauses ?? [])) ids.add(c.rule_id);
     return ids.size;
   })();
+  // The count above is read off the per-column view, which leaves out a rule
+  // with no column yet and shows a paragraph once per column even when two rules
+  // quote it — so it can come up short. The true total comes from the contracts,
+  // and is the same number the Contract Rules tab lists.
+  const ruleCount = contractRuleTotal ?? shownRuleCount;
   const fieldsWithClauses = (editor?.fields ?? []).filter(f => (f.clauses?.length ?? 0) > 0).length;
 
   const refDocs = useRefDocs(pipeline?.reference_documents);
+
+  // Setup-level gaps, shown as sub-tabs inside the contract panel beside
+  // "Rules with no column": BDX columns the contract asks for that the broker's
+  // file lacks, and documents the contract defers rules to that were never
+  // attached. (These were the old "Missing Items" tab.)
+  const extraTabs: InlineExtraTab[] = [
+    { key: "missing-bdx", label: "Columns Missing from BDX", count: mc.data?.items.length ?? 0,
+      tileLabel: "Columns Missing from BDX",
+      content: <MissingBdxColumnsPanel state={mc} /> },
+    { key: "missing-docs", label: "Missing documents", count: refDocs.missing.length,
+      content: refDocs.missing.length > 0
+        ? <MissingReferenceDocsNote refDocs={refDocs} showSources={(pipeline?.contracts.length ?? 0) > 1} />
+        : <p className="flex items-center gap-1.5 text-xs text-emerald-700">
+            <CheckCircle2 size={13} /> Every document the contract refers to was provided at setup.
+          </p> },
+  ];
+  // What the Setup Summary's "missing" tile counts. Clauses use the same
+  // definition as the "Rules with no column" sub-tab (the contract's own;
+  // generic-library ones excluded), so the two numbers always agree.
+  const gapClauses = (mc.data?.unmapped_clauses ?? []).filter(c => !isLibraryText(c.clause_text)).length;
+  const gapColumns = mc.data?.items.length ?? 0;
+  const gapDocs = refDocs.missing.length;
+  const gapUnsourced = unsourcedFields.length;
+  const missingTotal = gapClauses + gapColumns + gapDocs + gapUnsourced;
 
   function outFieldsFor(sheet: string): string[] {
     return (editor?.fields ?? []).filter(f => f.sheet === sheet).map(f => f.field);
@@ -274,31 +323,34 @@ export default function BordereauSetupDetail() {
 
   // ── the tabs ── one per section of what used to be one long page.
   // Named for what each one shows; the ⓘ on the tab says the rest on hover.
+  // What is missing is listed on Contract Rules, so it has no tab of its own.
   const tabs: SetupTab[] = [
     { key: "overview", label: "Setup Summary",
       info: "The programme, templates and status of this setup, with counts "
         + "that open the other tabs." },
+    { key: "contracts", label: "Contract Rules", count: ruleCount,
+      info: "The rules taken from the contract and the BDX column each one "
+        + "checks — plus contract rules with no column yet, BDX columns the "
+        + "contract asks for that the broker's file lacks, and documents it "
+        + "refers to that were never added. The number is how many rules there are." },
     { key: "mapping", label: "Map Input & Output Columns",
       info: "Which input column (from the broker's file) fills each output "
         + "column (in your BDX). The amber number is how many output columns "
         + "have no input column yet.",
       ...(unsourcedFields.length ? { count: unsourcedFields.length, warn: true } : {}) },
-    { key: "contracts", label: "Contract Rules", count: ruleCount,
-      info: "The rules taken from the contract, and the BDX column each one "
-        + "checks. The number is how many rules there are." },
     { key: "output", label: "Output BDX Template",
       info: "The layout of your BDX: its sheets and columns. Change it from Edit." },
-    { key: "attention", label: "Missing Items",
-      info: "Documents the contract refers to that were never added, and "
-        + "contract rules with no BDX column to check. Fix them from Edit. "
-        + "The amber number is how many documents are missing.",
-      ...(refDocs.missing.length ? { count: refDocs.missing.length, warn: true } : {}) },
     ...(pipeline?.program_id != null
       ? [{ key: "calendar" as const, label: "Due Dates",
            info: "How often the broker must send a bordereau, the day each one "
              + "is due, and how early you are reminded. Change it from Edit." }] : []),
   ];
   const [tab, setTab] = useSetupTab(tabs);
+  /** Open Contract Rules on one of its sub-tabs (a Setup Summary tile). */
+  const openContractsAt = (view: string) => {
+    setTab("contracts");
+    setContractFocus(f => ({ view, seq: (f?.seq ?? 0) + 1 }));
+  };
   // A setup with a single contract opens it on Contracts & rules — there is
   // nothing to choose between, so the rules are the first thing shown.
   useEffect(() => {
@@ -307,10 +359,9 @@ export default function BordereauSetupDetail() {
       toggleContract(pipeline.contracts[0].contract_id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, pipeline, contracts]);
-  // Edit has no "Missing Items" tab — its fixes are made on Map Input & Output Columns.
-  // "Overview" has no Edit counterpart to land on either: Edit's first tab is
-  // Field mapping, so that is where the summary sends you.
-  const editTab = tab === "attention" || tab === "overview" ? "mapping" : tab;
+  // "Setup Summary" has no Edit counterpart to land on: Edit's first tab is
+  // Contract Rules, so that is where the summary sends you.
+  const editTab = tab === "overview" ? "contracts" : tab;
 
   return (
     <>
@@ -388,12 +439,12 @@ export default function BordereauSetupDetail() {
         ) : pipeline && (
           <>
             <SetupTabs tabs={tabs} current={tab} onChange={setTab} />
+            <p className="mb-3 flex items-center gap-2 rounded-md bg-surface-2 px-3 py-2 text-[12.5px] text-ink-muted">
+              <Info size={14} className="shrink-0" /> Read-only. Press Edit to change anything.
+            </p>
 
             {tab === "overview" && (
               <>
-                <p className="mb-3 flex items-center gap-2 rounded-md bg-surface-2 px-3 py-2 text-[12.5px] text-ink-muted">
-                  <Info size={14} className="shrink-0" /> Read-only. Press Edit to change anything.
-                </p>
                 <Card title={<span className="flex items-center gap-2">
                   <ShieldCheck size={16} className="text-navy" /> Setup Summary</span>}>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
@@ -461,10 +512,23 @@ export default function BordereauSetupDetail() {
                   <JumpTile n={fieldsWithClauses} label="fields with a contract rule"
                     onClick={() => setTab("mapping")} />
                   <JumpTile n={ruleCount} label={`rules from ${pipeline.contracts.length} contract${pipeline.contracts.length === 1 ? "" : "s"}`}
-                    onClick={() => setTab("contracts")} />
-                  <JumpTile n={unsourcedFields.length + refDocs.missing.length}
-                    label="things to look at" warn={unsourcedFields.length + refDocs.missing.length > 0}
-                    onClick={() => setTab(refDocs.missing.length ? "attention" : "mapping")} />
+                    onClick={() => openContractsAt("rules")} />
+                  <JumpTile n={missingTotal} warn={missingTotal > 0}
+                    label={missingTotal === 1 ? "thing to look at" : "things to look at"}
+                    detail={missingTotal > 0 && <>
+                      {gapClauses > 0 && <GapLine onClick={() => openContractsAt("clauses")}>
+                        {gapClauses} contract {gapClauses === 1 ? "rule has" : "rules have"} no column to check</GapLine>}
+                      {gapColumns > 0 && <GapLine onClick={() => openContractsAt("missing-bdx")}>
+                        {gapColumns} {gapColumns === 1 ? "column the contract needs is" : "columns the contract needs are"} not in the broker's file</GapLine>}
+                      {gapDocs > 0 && <GapLine onClick={() => openContractsAt("missing-docs")}>
+                        {gapDocs} {gapDocs === 1 ? "document the contract mentions was" : "documents the contract mentions were"} not added</GapLine>}
+                      {gapUnsourced > 0 && <GapLine onClick={() => setTab("mapping")}>
+                        {gapUnsourced} output {gapUnsourced === 1 ? "column has" : "columns have"} no input column</GapLine>}
+                    </>}
+                    onClick={() => gapClauses > 0 ? openContractsAt("clauses")
+                      : gapColumns > 0 ? openContractsAt("missing-bdx")
+                      : gapDocs > 0 ? openContractsAt("missing-docs")
+                      : gapUnsourced > 0 ? setTab("mapping") : openContractsAt("rules")} />
                 </div>
               </>
             )}
@@ -482,7 +546,13 @@ export default function BordereauSetupDetail() {
                   ? activeSheet : editor.input_sheets[0];
                 const outs = outputsForInput(editor.sheet_routing, inputSheet);
                 const inputCols = editor.input_columns[inputSheet] ?? [];
-                return (
+                return (<>
+                  {ruleCount > 0 && (
+                    <p className="mb-3 flex items-center gap-2 rounded-md bg-surface-2 px-3 py-2 text-[12.5px] text-ink-muted">
+                      <CheckCircle2 size={14} className="shrink-0" />
+                      Contract: {ruleCount} rule(s) across {fieldsWithClauses} output column(s).
+                    </p>
+                  )}
                   <Card title={<span className="flex items-center gap-2">
                     <FileSpreadsheet size={16} className="text-navy" /> {inputSheet}</span>}
                     action={<span className="text-xs text-ink-muted">
@@ -565,7 +635,7 @@ export default function BordereauSetupDetail() {
                       </div>
                     )}
                   </Card>
-                );
+                </>);
               })()
             )}
 
@@ -576,7 +646,7 @@ export default function BordereauSetupDetail() {
               <Card title={<span className="flex items-center gap-2">
                 <FileText size={16} className="text-navy" /> Contracts
                 <span className="text-xs font-normal text-ink-muted">({pipeline.contracts.length})</span>
-                <span className="text-xs font-normal text-ink-muted">· {ruleCount} rule(s) across {fieldsWithClauses} field(s)</span>
+                <span className="text-xs font-normal text-ink-muted">· {ruleCount} rule(s) across {fieldsWithClauses} output column(s)</span>
               </span>}>
               <div className="space-y-2">
                 {pipeline.contracts.length === 0 && (
@@ -611,7 +681,8 @@ export default function BordereauSetupDetail() {
                           {contractBusy ? null : contractDetail
                             ? <ContractInline detail={contractDetail} programId={pipeline.program_id ?? ""}
                                 contractId={c.id} mga={mga} onChanged={reloadContractDetail} readOnly feedFor={feedFor}
-                                canEditVariations={canEditVariations} />
+                                canEditVariations={canEditVariations} extraTabs={extraTabs}
+                                focus={contractFocus} />
                             : <div className="text-sm text-ink-muted">Could not load this contract.</div>}
                         </div>
                       )}
@@ -627,23 +698,6 @@ export default function BordereauSetupDetail() {
                  of this page — columns are changed from Edit. */
               <SetupOutputTemplate boundId={pipeline.output_template_id}
                 templateName={pipeline.output_template_name} />
-            )}
-
-            {tab === "attention" && (
-              <>
-                {/* What the contract asks for that this setup cannot check yet:
-                    documents it defers to that were never supplied, and clauses
-                    with no column to check. Each is fixed from Edit. */}
-                <MissingReferenceDocsNote refDocs={refDocs} className="mb-4"
-                  showSources={pipeline.contracts.length > 1} />
-                <MissingColumnsNote pipelineId={pipeline.id} refreshKey={noteKey} />
-                <div className="mt-4 flex justify-end">
-                  <Button variant="secondary"
-                    onClick={() => nav(`/direct/setups/${id}/edit?back=${encodeURIComponent(`/direct/setups/${id}`)}&tab=mapping`)}>
-                    <Pencil size={14} /> Fix these in Edit
-                  </Button>
-                </div>
-              </>
             )}
 
             {tab === "calendar" && pipeline.program_id != null && (
@@ -767,16 +821,30 @@ export default function BordereauSetupDetail() {
   );
 }
 
-/** A count on the Overview that opens the tab it counts. */
-function JumpTile({ n, label, warn, onClick }: {
-  n: number; label: ReactNode; warn?: boolean; onClick: () => void;
+/** A count on the Overview that opens the tab it counts. `detail` is a
+ *  plain-words breakdown under the label, whose lines may be buttons — so the
+ *  tile is a div with button behaviour, not a <button> holding buttons. */
+function JumpTile({ n, label, warn, onClick, detail }: {
+  n: number; label: ReactNode; warn?: boolean; onClick: () => void; detail?: ReactNode;
 }) {
   return (
-    <button type="button" onClick={onClick}
-      className="grid gap-0.5 rounded-lg border border-border bg-white px-4 py-3 text-left transition-colors hover:border-navy
+    <div role="button" tabIndex={0} onClick={onClick}
+      onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }}
+      className="grid cursor-pointer content-start gap-0.5 rounded-lg border border-border bg-white px-4 py-3 text-left transition-colors hover:border-navy
                  focus-visible:outline focus-visible:outline-2 focus-visible:outline-navy">
       <span className={`text-xl font-bold tabular-nums ${warn ? "text-amber-600" : "text-ink"}`}>{n}</span>
       <span className="text-xs text-ink-muted">{label} →</span>
+      {detail && <span className="mt-1.5 grid gap-0.5 text-[11.5px] leading-snug text-ink-muted">{detail}</span>}
+    </div>
+  );
+}
+
+/** One line of a tile's breakdown — opens exactly the list it counts. */
+function GapLine({ onClick, children }: { onClick: () => void; children: ReactNode }) {
+  return (
+    <button type="button" onClick={e => { e.stopPropagation(); onClick(); }}
+      className="block text-left hover:text-navy hover:underline">
+      • {children}
     </button>
   );
 }

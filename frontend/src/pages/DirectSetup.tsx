@@ -17,7 +17,7 @@ import { Modal } from "../components/ui/Modal";
 import { Field, Select, TextInput } from "../components/ui/Field";
 import { InfoTip } from "../components/ui/InfoTip";
 import { LoadingOverlay } from "../components/Busy";
-import { MissingColumnsList, UnmappedClausesList } from "../components/MissingColumnsNote";
+import { BuildGapTabs, ownUnmappedClauses } from "../components/MissingColumnsNote";
 import { errText, MissingColumnsResp, scheduleOf } from "../utils/directSetup";
 import { contractLabel } from "../utils/contractLabel";
 import {
@@ -1281,7 +1281,7 @@ function DirectSetupScreen() {
       <Modal open={!!buildSummary} onClose={() => setBuildSummary(null)}
         title="Mapping Generated"
         size={(buildSummary?.missing?.items.length
-               || buildSummary?.missing?.unmapped_clauses?.length) ? "2xl" : "md"}
+               || ownUnmappedClauses(buildSummary?.missing).length) ? "2xl" : "md"}
         footer={
           <div className="flex items-center gap-2">
             {/* Review the mapping on the setup's own page … */}
@@ -1315,7 +1315,9 @@ function DirectSetupScreen() {
         }>
         {buildSummary && (() => {
           const missingItems = buildSummary.missing?.items ?? [];
-          const clauses = buildSummary.missing?.unmapped_clauses ?? [];
+          // The contract's own clauses only — the same count the setup's
+          // "Rules with no column" sub-tab shows.
+          const clauses = ownUnmappedClauses(buildSummary.missing);
           // One list at a time. Stacked, the two boxes each scrolled inside a
           // dialog that scrolled too — three nested scrollbars, and the actions
           // pushed below the fold. Tabs make the dialog one screen again.
@@ -1334,7 +1336,7 @@ function DirectSetupScreen() {
                 k={`Contract Rule${buildSummary.rules === 1 ? "" : "s"} Created`} />
               <Stat v={buildSummary.fieldsWithRules}
                 k={`Of ${buildSummary.totalFields} Columns Carry a Rule`} />
-              <Stat v={clauses.length} k="Clauses Awaiting a Column"
+              <Stat v={clauses.length} k={`Rule${clauses.length === 1 ? "" : "s"} with No Column`}
                 tone={clauses.length > 0 ? "warn" : undefined} />
             </div>
             <p className="mt-2 text-[11px] text-ink-soft">
@@ -1363,48 +1365,10 @@ function DirectSetupScreen() {
               </div>
             )}
 
+            {/* The same two lists, in the same words, as the setup's Contract
+                Rules tab — "Rules with no column" and "Columns Missing from BDX". */}
             {(missingItems.length > 0 || clauses.length > 0) && (
-              <div className="mt-4 rounded-lg border border-border overflow-hidden">
-                <div className="flex items-center gap-1 border-b border-border px-1">
-                  <SummaryTab active={tab === "missing"} disabled={missingItems.length === 0}
-                    onClick={() => setSummaryTab("missing")}
-                    label="Columns May Be Missing" count={missingItems.length} />
-                  <SummaryTab active={tab === "clauses"} disabled={clauses.length === 0}
-                    onClick={() => setSummaryTab("clauses")}
-                    label="Clauses Awaiting Columns" count={clauses.length} />
-                </div>
-                {tab === "missing" ? (
-                  /* What the contract asks for that this bordereau doesn't
-                     provide. The same note is kept on the setup's own page. */
-                  <div className="p-3">
-                    <div className="mb-2 flex flex-wrap items-center gap-2">
-                      {buildSummary.missing!.counts.required > 0 && (
-                        <span className="pill pill-red">
-                          {buildSummary.missing!.counts.required} Required</span>
-                      )}
-                      {buildSummary.missing!.counts.recommended > 0 && (
-                        <span className="pill pill-amber">
-                          {buildSummary.missing!.counts.recommended} Recommended</span>
-                      )}
-                    </div>
-                    <MissingColumnsList items={missingItems} maxHeight="16rem" />
-                    <p className="mt-2 text-[11px] text-ink-soft">
-                      This note stays on the setup — you can review it any time from Configured
-                      Bordereau Setups.
-                    </p>
-                  </div>
-                ) : (
-                  /* The DERIVED half: clauses the extraction wanted a rule for
-                     but could not bind to a column. No model call behind these,
-                     so they show even when the check above couldn't run. */
-                  <div className="p-3">
-                    <UnmappedClausesList items={clauses} maxHeight="16rem" />
-                    <p className="mt-2 text-[11px] text-ink-soft">
-                      Pick a column for each on the setup's page to generate its rule.
-                    </p>
-                  </div>
-                )}
-              </div>
+              <BuildGapTabs data={buildSummary.missing} tab={tab} onTab={setSummaryTab} />
             )}
             {buildSummary.missing?.analyzed && missingItems.length === 0 && clauses.length === 0 && (
               <div className="mt-3 flex items-start gap-2 rounded-lg bg-emerald-50 text-emerald-700 text-xs px-3 py-2.5">
@@ -2590,21 +2554,3 @@ function Stat({ v, k, tone }: { v: number; k: string; tone?: "warn" }) {
   );
 }
 
-/** A tab in the build summary. An empty list keeps its tab — the count is the
- *  answer to "is there anything here", and a tab that vanishes makes the reader
- *  wonder whether the check ran at all. */
-function SummaryTab({ active, disabled, onClick, label, count }: {
-  active: boolean; disabled: boolean; onClick: () => void; label: string; count: number;
-}) {
-  return (
-    <button type="button" onClick={onClick} disabled={disabled}
-      className={`px-3 py-2.5 text-[13px] font-medium border-b-2 -mb-px transition-colors
-        ${active ? "border-navy text-ink"
-          : disabled ? "border-transparent text-ink-soft cursor-default"
-          : "border-transparent text-ink-muted hover:text-ink"}`}>
-      {label}
-      <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[11px] ${
-        count > 0 ? "bg-surface-2 text-ink-muted" : "text-ink-soft"}`}>{count}</span>
-    </button>
-  );
-}

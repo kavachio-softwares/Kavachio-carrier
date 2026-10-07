@@ -379,6 +379,12 @@
 .setup-tab .info-tip{display:inline-flex;vertical-align:middle;outline:none}
 .setup-tab .info-tip .ic{width:14px;height:14px;cursor:help;opacity:.6}
 .setup-tab .info-tip:hover .ic,.setup-tab .info-tip:focus .ic{opacity:1}
+/* Beside a heading in plain Tailwind screens (e.g. a clause with no column in
+   Bordereau Setup) — outside .proto and .setup-tab, so it is sized here too;
+   without this the icon has no size and simply does not show. */
+.tip-inline .info-tip{display:inline-flex;vertical-align:middle;outline:none}
+.tip-inline .info-tip .ic{width:14px;height:14px;cursor:help;color:#9aa3b2}
+.tip-inline .info-tip:hover .ic,.tip-inline .info-tip:focus .ic{color:#1f3a5f}
 .info-tip-bubble{
   position:fixed;
   width:230px;background:#0E1320;color:#fff;font-size:12px;font-weight:500;line-height:1.5;

@@ -19,9 +19,10 @@ import { Sk } from "../components/ui/Skeleton";
 import { Modal } from "../components/ui/Modal";
 import {
   ContractInline, ContractStatusChip, ScoreChip, SevBadge, ClauseMatchChip, Combo, TagPill,
+  InlineExtraTab,
 } from "../components/DirectMappingWidgets";
 import { ClauseText } from "../components/ClauseText";
-import { MissingColumnsNote } from "../components/MissingColumnsNote";
+import { MissingBdxColumnsPanel, useMissingColumns } from "../components/MissingColumnsNote";
 import {
   MissingReferenceDocsNote, useRefDocs, PipelineRefDocs,
 } from "../components/MissingReferenceDocsNote";
@@ -111,6 +112,9 @@ export default function BordereauSetupEdit() {
   const [contractBusy, setContractBusy] = useState(false);
   // Bumped whenever a rule's mapping changes, to re-read the missing-columns note.
   const [noteKey, setNoteKey] = useState(0);
+  // The stored contract-vs-bordereau check, read once for the whole page — its
+  // list is the "Columns Missing from BDX" sub-tab of Contract Rules.
+  const mc = useMissingColumns(pipeline?.id, { refreshKey: noteKey });
 
   async function load() {
     if (!id) return;
@@ -139,6 +143,19 @@ export default function BordereauSetupEdit() {
     } finally { setLoading(false); }
   }
   useEffect(() => { load(); }, [id]);
+
+  // True rule total across this setup's contracts (see ruleCount). Re-read after
+  // a rule changes (noteKey) so Generate Rule / Remove update the number.
+  const [contractRuleTotal, setContractRuleTotal] = useState<number | null>(null);
+  useEffect(() => {
+    if (!pipeline?.program_id || pipeline.contracts.length === 0) { setContractRuleTotal(null); return; }
+    let alive = true;
+    Promise.all(pipeline.contracts.map(pc =>
+      api.get<ContractDetailT>(`/programs/${pipeline.program_id}/contracts/${pc.contract_id}`)
+        .then(r => (r.data.rules ?? []).length).catch(() => null)))
+      .then(ns => { if (alive) setContractRuleTotal(ns.some(n => n == null) ? null : ns.reduce<number>((a, n) => a + (n ?? 0), 0)); });
+    return () => { alive = false; };
+  }, [pipeline, noteKey]);
 
   async function toggleContract(cid: number) {
     if (openContractId === cid) { setOpenContractId(null); setContractDetail(null); return; }
@@ -194,17 +211,37 @@ export default function BordereauSetupEdit() {
   // DISTINCT contract rules (by rule_id), not clause attachments — one rule can
   // attach to several output fields, so summing per-field clause counts overstates
   // it (e.g. a 17-rule contract showing as 36). Matches the count the build modal shows.
-  const ruleCount = (() => {
+  const shownRuleCount = (() => {
     const ids = new Set<number>();
     for (const f of editor?.fields ?? []) for (const c of (f.clauses ?? [])) ids.add(c.rule_id);
     return ids.size;
   })();
+  // The count above is read off the per-column view, which leaves out a rule
+  // with no column yet and shows a paragraph once per column even when two rules
+  // quote it — so it can come up short. The true total comes from the contracts,
+  // and is the same number the Contract Rules tab lists.
+  const ruleCount = contractRuleTotal ?? shownRuleCount;
   const fieldsWithClauses = (editor?.fields ?? []).filter(f => (f.clauses?.length ?? 0) > 0).length;
 
   // Reference documents the contract defers rules to — the same summary the
   // read-only setup view shows, so a document that was never attached is
   // visible from the screen where the setup is actually being fixed.
   const refDocs = useRefDocs(pipeline?.reference_documents);
+  // Setup-level gaps, shown as sub-tabs inside the contract panel beside
+  // "Rules with no column": BDX columns the contract asks for that the broker's
+  // file lacks, and documents the contract defers rules to that were never
+  // attached. (These were on the old "Summary & Missing Items" tab.)
+  const extraTabs: InlineExtraTab[] = [
+    { key: "missing-bdx", label: "Columns Missing from BDX", count: mc.data?.items.length ?? 0,
+      tileLabel: "Columns Missing from BDX",
+      content: <MissingBdxColumnsPanel state={mc} /> },
+    { key: "missing-docs", label: "Missing documents", count: refDocs.missing.length,
+      content: refDocs.missing.length > 0
+        ? <MissingReferenceDocsNote refDocs={refDocs} showSources={(pipeline?.contracts.length ?? 0) > 1} />
+        : <p className="flex items-center gap-1.5 text-xs text-emerald-700">
+            <CheckCircle2 size={13} /> Every document the contract refers to was provided at setup.
+          </p> },
+  ];
   // BDX output column → the broker column(s) feeding it, for Contracts & rules.
   const feedFor = useMemo(() => feedIndex(sel, extra), [sel, extra]);
 
@@ -376,6 +413,8 @@ export default function BordereauSetupEdit() {
       }
       setMsg("Saved.");
       await load();
+      // A save can rebind contracts, which changes the missing-columns read.
+      setNoteKey(k => k + 1);
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
@@ -395,6 +434,8 @@ export default function BordereauSetupEdit() {
     });
     await load();
     setShownTplId(tplId);
+    // A different template means different BDX columns to check against.
+    setNoteKey(k => k + 1);
   }
 
   async function goRun() {
@@ -468,7 +509,7 @@ export default function BordereauSetupEdit() {
             {contractBusy ? null : contractDetail
               ? <ContractInline detail={contractDetail} programId={pipeline?.program_id ?? ""}
                   contractId={c.id} mga={mga} onChanged={reloadContractDetail} feedFor={feedFor}
-                  canEditVariations={isAdmin} />
+                  canEditVariations={isAdmin} extraTabs={extraTabs} />
               : <div className="text-sm text-ink-muted">Could not load this contract.</div>}
           </div>
         )}
@@ -476,29 +517,24 @@ export default function BordereauSetupEdit() {
     );
   };
 
-  // ── the tabs ── the same as the read-only view's, less "Missing Items":
-  // its fixes are made here on Summary & Missing Items and Map Input & Output Columns.
-  // "Summary & Missing Items" sits second to last, not first: View's Setup
-  // Summary is what you land on, and its Edit counterpart is the paperwork you
-  // finish with, after the mapping and the rules. Named for what is done on
+  // ── the tabs ── the read-only view's, less its Setup Summary; Output BDX
+  // Template is editable here. Contract Rules comes first: it is where the
+  // missing items are listed (and most are fixed). Named for what is done on
   // each; the ⓘ on the tab says the rest on hover.
   const tabs: SetupTab[] = [
+    { key: "contracts", label: "Contract Rules", count: ruleCount,
+      info: "The rules taken from the contract and the BDX column each one "
+        + "checks — plus contract rules with no column yet, BDX columns the "
+        + "contract asks for that the broker's file lacks, and documents it "
+        + "refers to that were never added. The number is how many rules there are." },
     { key: "mapping", label: "Map Input & Output Columns",
       info: "Match each input column (from the broker's file) to an output "
         + "column (in your BDX). The amber number is how many output columns "
         + "have no input column yet.",
       ...(unsourcedFields.length ? { count: unsourcedFields.length, warn: true } : {}) },
-    { key: "contracts", label: "Contract Rules", count: ruleCount,
-      info: "The rules taken from the contract, and the BDX column each one "
-        + "checks. The number is how many rules there are." },
     { key: "output", label: "Output BDX Template",
       info: "The layout of your BDX: its sheets and columns. Add or remove "
         + "columns here." },
-    { key: "overview", label: "Summary & Missing Items",
-      info: "The programme and templates this setup uses, and anything the "
-        + "contract needs that is missing: a document it refers to, or a column "
-        + "for one of its rules. The amber number is how many documents are missing.",
-      ...(refDocs.missing.length ? { count: refDocs.missing.length, warn: true } : {}) },
     ...(pipeline?.program_id != null
       ? [{ key: "calendar" as const, label: "Due Dates",
            info: "How often the broker must send a bordereau, the day each one "
@@ -568,45 +604,6 @@ export default function BordereauSetupEdit() {
         {msg && <Banner kind="ok"><CheckCircle2 size={15} /> {msg}</Banner>}
 
         <SetupTabs tabs={tabs} current={tab} onChange={setTab} />
-
-        {/* ── Setup & documents ── */}
-        {tab === "overview" && (
-        <Card title={<span className="flex items-center gap-2">
-          <FileText size={16} className="text-navy" /> Bordereau Setup</span>}>
-          <div className="flex flex-wrap items-center gap-2 mb-4">
-            <span className="font-medium text-sm">{pipeline.name || `Setup #${pipeline.id}`}</span>
-            <span className={`text-[11px] rounded-full px-2 py-0.5 font-medium ${pipeline.status === "active"
-              ? "bg-emerald-100 text-emerald-700" : "bg-surface-2 text-ink-muted"}`}>
-              {STATUS_LABEL[pipeline.status]}
-            </span>
-          </div>
-          <div className="mb-4 grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
-            {([
-              ["Carrier", pipeline.carrier_name],
-              ["Program", pipeline.program_name],
-              ["Input Template", pipeline.input_format_name],
-              ["Output Template", pipeline.output_template_name],
-            ] as const).map(([k, v]) => (
-              <div key={k}>
-                <div className="mb-1 text-[11px] uppercase text-ink-muted">{k}</div>
-                <div className="truncate font-medium">{v ?? "—"}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* Documents the contract defers rules to that were never supplied —
-              first, because it explains why some clauses produced no rule at
-              all, which otherwise reads as a mapping gap below. */}
-          <MissingReferenceDocsNote refDocs={refDocs} className="mb-4"
-            showSources={pipeline.contracts.length > 1} />
-
-          {/* What this setup's contract asks for that its bordereau doesn't
-              provide — above the contracts on purpose: it is read BEFORE the
-              contract it was judged against. Self-loading from the stored
-              check, so opening this page costs no model call. */}
-          <MissingColumnsNote pipelineId={pipeline.id} refreshKey={noteKey} />
-        </Card>
-        )}
 
         {/* ── Contracts & rules ── each contract expands to its terms, rules
             and clause routing, editable. */}

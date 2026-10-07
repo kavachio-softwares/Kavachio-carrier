@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { ReactNode, useCallback, useEffect, useState } from "react";
 import {
   AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronRight,
   FileWarning, Info, Loader2, Quote, RefreshCw,
 } from "lucide-react";
 import { api } from "../api/client";
 import { fmtStamp } from "../utils/date";
-import { MissingColumn, MissingColumnsResp, UnmappedClause } from "../utils/directSetup";
+import { InfoTip } from "./InfoTip";
+import { isLibraryText } from "./DirectMappingWidgets";
+import { MissingColumn, MissingColumnsResp, UnmappedClause, clauseHeading } from "../utils/directSetup";
 
 // The contract-vs-bordereau gap NOTE, shared by the setup's read-only page
 // (where it sits between Setup Overview and Contracts) and the build-completion
@@ -121,40 +123,42 @@ export function MissingColumnsList({ items, maxHeight = "22rem" }: {
 /** One rule-bearing clause with no output column yet. Unlike a MissingColumn
  *  this is NOT a model finding — the extraction decided the clause deserves a
  *  rule and recorded why no column fitted, so `reason` is its own words. */
-function UnmappedClauseRow({ item }: { item: UnmappedClause }) {
+function UnmappedClauseRow({ item, n }: { item: UnmappedClause; n: number }) {
   const [showProof, setShowProof] = useState(false);
   return (
-    <li className="px-3.5 py-3 first:pt-3 hover:bg-sky-50/40 transition-colors">
-      <div className="flex items-start gap-2 flex-wrap">
-        <span className="font-semibold text-sm text-ink break-words">
-          {item.rule_name || "Untitled clause"}
-        </span>
-        {item.source_page != null && (
-          <span className="pill pill-grey shrink-0 font-mono !text-[10px]">
-            Page {item.source_page}
-          </span>
+    <li className="grid grid-cols-[22px_minmax(0,1fr)] items-start gap-3 px-3.5 py-3 hover:bg-surface-2/50 transition-colors">
+      <span className="mt-0.5 grid h-[22px] w-[22px] place-items-center rounded-full bg-amber-50 text-[11px] font-bold text-amber-700">
+        {n}
+      </span>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[13.5px] font-semibold text-ink">
+          <span className="break-words">{clauseHeading(item)}</span>
+          {/* Why no column fitted — behind the ⓘ, as on the setup's own page. */}
+          {item.reason && (
+            <span className="tip-inline inline-flex">
+              <InfoTip text={`Why it has no column: ${item.reason}`} />
+            </span>
+          )}
+          <span className="ml-1 inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">Unmapped Clause</span>
+          {item.source_page != null && (
+            <span className="text-[11px] font-normal text-ink-soft">page {item.source_page}</span>
+          )}
+        </div>
+        {item.clause_text && (
+          <ProofToggle open={showProof} tone="sky"
+            onClick={() => setShowProof(v => !v)} />
+        )}
+        {item.clause_text && showProof && (
+          <div className="mt-1.5 rounded-md bg-surface-2/60 border border-border px-2.5 py-1.5">
+            <div className="flex items-start gap-1.5">
+              <Quote size={11} className="mt-1 shrink-0 text-ink-soft" />
+              <p className="text-[11.5px] italic leading-snug text-ink-muted">
+                {item.clause_text}
+              </p>
+            </div>
+          </div>
         )}
       </div>
-      {item.reason && (
-        <p className="mt-1 text-[12.5px] leading-snug text-ink-muted">
-          <span className="font-medium text-ink-soft">Why unmapped: </span>
-          {item.reason}
-        </p>
-      )}
-      {item.clause_text && (
-        <ProofToggle open={showProof} tone="sky"
-          onClick={() => setShowProof(v => !v)} />
-      )}
-      {item.clause_text && showProof && (
-        <div className="mt-1.5 rounded-md bg-white/70 border border-sky-100 px-2.5 py-1.5">
-          <div className="flex items-start gap-1.5">
-            <Quote size={11} className="mt-1 shrink-0 text-sky-500" />
-            <p className="text-[11.5px] italic leading-snug text-ink-muted">
-              {item.clause_text}
-            </p>
-          </div>
-        </div>
-      )}
     </li>
   );
 }
@@ -166,11 +170,11 @@ export function UnmappedClausesList({ items, maxHeight = "22rem" }: {
 }) {
   if (items.length === 0) return null;
   return (
-    <div className="rounded-lg border border-sky-200 bg-sky-50/50 overflow-hidden">
-      <ul className="divide-y divide-sky-200/70 overflow-y-auto overscroll-contain"
+    <div className="rounded-lg border border-border bg-white overflow-hidden">
+      <ul className="divide-y divide-border overflow-y-auto overscroll-contain"
         style={{ maxHeight }}>
         {items.map((it, i) => (
-          <UnmappedClauseRow key={`${it.clause_id ?? "x"}-${i}`} item={it} />
+          <UnmappedClauseRow key={`${it.clause_id ?? "x"}-${i}`} item={it} n={i + 1} />
         ))}
       </ul>
     </div>
@@ -412,6 +416,192 @@ export function MissingColumnsNote({ pipelineId, autoCheck = true, refreshKey = 
         )}
       </div>
     </section>
+  );
+}
+
+/** The stored contract-vs-bordereau check for one setup, loaded once by the page
+ *  so its parts can be shown in different places (a Contract Rules sub-tab, its
+ *  count on a tile and on the Setup Summary) without fetching twice. Same
+ *  behaviour as MissingColumnsNote: reading is free, and a setup that has never
+ *  been checked runs the check once. */
+export type MissingColumnsState = {
+  data: MissingColumnsResp | null; loading: boolean; checking: boolean; failed: boolean;
+  runCheck: (force: boolean) => Promise<void>;
+};
+export function useMissingColumns(pipelineId: number | string | null | undefined,
+                                  { autoCheck = true, refreshKey = 0 } = {}): MissingColumnsState {
+  const [data, setData] = useState<MissingColumnsResp | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [checking, setChecking] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const runCheck = useCallback(async (force: boolean) => {
+    if (pipelineId == null) return;
+    setChecking(true); setFailed(false);
+    try {
+      const { data: d } = await api.post<MissingColumnsResp>(
+        `/pipelines/${pipelineId}/missing-columns/analyze`, null, { params: { force } });
+      setData(d);
+    } catch { setFailed(true); } finally { setChecking(false); }
+  }, [pipelineId]);
+
+  // Blank out only when the SETUP changes; a refreshKey bump re-reads in place.
+  useEffect(() => {
+    setLoading(true); setData(null); setFailed(false);
+  }, [pipelineId]);
+
+  useEffect(() => {
+    if (pipelineId == null) return;
+    let alive = true;
+    api.get<MissingColumnsResp>(`/pipelines/${pipelineId}/missing-columns`)
+      .then(r => {
+        if (!alive) return;
+        setData(r.data);
+        if (autoCheck && !r.data.analyzed) runCheck(false);
+      })
+      .catch(() => { if (alive) setFailed(true); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [pipelineId, autoCheck, runCheck, refreshKey]);
+
+  return { data, loading, checking, failed, runCheck };
+}
+
+/** Only the "asked for by the contract, not a column in your bordereau" half of
+ *  the note — the clauses-with-no-column half is the contract's own
+ *  "Rules with no column" list, shown beside it. */
+export function MissingBdxColumnsPanel({ state }: { state: MissingColumnsState }) {
+  const { data, loading, checking, failed, runCheck } = state;
+  if (loading || checking) {
+    return (
+      <div className="flex items-center gap-2 rounded-md bg-surface-2 px-4 py-2.5 text-sm text-ink-muted">
+        <Loader2 size={15} className="animate-spin shrink-0" />
+        {checking ? "Checking this bordereau against the contract…" : "Loading contract check…"}
+      </div>
+    );
+  }
+  if (failed || !data) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded-md bg-surface-2 px-4 py-2.5 text-sm text-ink-muted">
+        <Info size={15} className="shrink-0" />
+        <span>The contract check couldn't be loaded.</span>
+        <button type="button" onClick={() => runCheck(true)}
+          className="linkish ml-auto inline-flex items-center gap-1">
+          <RefreshCw size={12} /> Check Now
+        </button>
+      </div>
+    );
+  }
+  if (!data.analyzed) {
+    const why = data.skipped_reason;
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded-md bg-surface-2 px-4 py-2.5 text-sm text-ink-muted">
+        <Info size={15} className="shrink-0" />
+        <span>
+          {why
+            ? `This setup hasn't been checked for missing bordereau columns — ${why}.`
+            : "This setup hasn't been checked for missing bordereau columns yet."}
+        </span>
+        <button type="button" onClick={() => runCheck(true)}
+          className="linkish ml-auto inline-flex items-center gap-1">
+          <RefreshCw size={12} /> Check Now
+        </button>
+      </div>
+    );
+  }
+  const n = data.items.length;
+  if (n === 0) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded-md bg-emerald-50 px-4 py-2.5 text-sm text-emerald-700">
+        <CheckCircle2 size={15} className="shrink-0" />
+        <span>
+          Your bordereau provides everything the contract asks for.
+          {data.analyzed_at && (
+            <span className="text-emerald-700/70"> Checked {fmtStamp(data.analyzed_at)}.</span>
+          )}
+        </span>
+      </div>
+    );
+  }
+  // Full height in the tab — it is the whole panel, so the page scrolls.
+  return <MissingBdxColumnsBody data={data} maxHeight="none" />;
+}
+
+/** The "Columns Missing from BDX" list with its counts — ONE body for the
+ *  setup's sub-tab and the build-complete popup, so the two read the same. */
+function MissingBdxColumnsBody({ data, maxHeight, footer }: {
+  data: MissingColumnsResp; maxHeight: string;
+  footer?: ReactNode;
+}) {
+  return (
+    <div>
+      {/* Deliberately about the BORDEREAU, not about rules: the check only
+          compares contract prose against the columns of the broker's sample
+          file, so an entry here may still have a rule behind it. */}
+      <div className="mb-2 flex justify-end"><CountPills counts={data.counts} /></div>
+      <MissingColumnsList items={data.items} maxHeight={maxHeight} />
+      <p className="mt-2.5 flex items-start gap-1.5 px-1 text-[11px] text-ink-soft">
+        <Info size={11} className="mt-0.5 shrink-0" />
+        These columns stay blank in the output until the broker's file carries them, and any contract rule that needs them can't run.
+      </p>
+      {footer}
+    </div>
+  );
+}
+
+/** The contract's own unmapped clauses — the generic-library ones are not
+ *  listed (or counted), the same rule as the setup's "Rules with no column". */
+export const ownUnmappedClauses = (data: MissingColumnsResp | null | undefined) =>
+  (data?.unmapped_clauses ?? []).filter(c => !isLibraryText(c.clause_text));
+
+/** The two gap lists in the build-complete popup, as the SAME sub-tabs the
+ *  setup's Contract Rules tab shows: "Rules with no column" and "Columns
+ *  Missing from BDX", each with its who-fixes-it box. Lists scroll inside a
+ *  capped box so the popup's buttons stay on screen. */
+export function BuildGapTabs({ data, tab, onTab }: {
+  data: MissingColumnsResp | null;
+  tab: "missing" | "clauses";
+  onTab: (t: "missing" | "clauses") => void;
+}) {
+  const clauses = ownUnmappedClauses(data);
+  const missing = data?.items ?? [];
+  const btn = (key: "missing" | "clauses", label: string, n: number) => (
+    <button type="button" onClick={() => onTab(key)} aria-pressed={tab === key}
+      className={`flex-1 whitespace-nowrap rounded-md px-3 py-1.5 text-center text-xs font-semibold transition-colors
+        ${tab === key ? "bg-white text-ink shadow-sm" : "text-ink-muted hover:text-ink"}`}>
+      {label} · {n}
+    </button>
+  );
+  return (
+    <div className="mt-4">
+      <div className="mb-3 flex w-full gap-0.5 rounded-lg bg-surface-2 p-1" role="group" aria-label="Show">
+        {btn("clauses", "Rules with no column", clauses.length)}
+        {btn("missing", "Columns Missing from BDX", missing.length)}
+      </div>
+      {tab === "missing" ? (
+        !data?.analyzed ? (
+          <p className="flex items-center gap-2 rounded-md bg-surface-2 px-3 py-2 text-xs text-ink-muted">
+            <Info size={13} className="shrink-0" />
+            The bordereau-column check didn't run for this build — it runs again when you open the setup.
+          </p>
+        ) : missing.length === 0 ? (
+          <p className="flex items-center gap-1.5 rounded-md bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+            <CheckCircle2 size={13} className="shrink-0" /> Your bordereau provides everything the contract asks for.
+          </p>
+        ) : (
+          <MissingBdxColumnsBody data={data} maxHeight="16rem" />
+        )
+      ) : clauses.length === 0 ? (
+        <p className="flex items-center gap-1.5 rounded-md bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+          <CheckCircle2 size={13} className="shrink-0" /> Every rule-bearing clause in this contract has a column.
+        </p>
+      ) : (
+        <UnmappedClausesList items={clauses} maxHeight="16rem" />
+      )}
+      <p className="mt-2.5 text-[11px] text-ink-soft">
+        Both lists stay on the setup — under Contract Rules in Configured Bordereau Setups.
+      </p>
+    </div>
   );
 }
 

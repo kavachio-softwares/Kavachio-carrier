@@ -1,8 +1,8 @@
-import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import {
-  AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronRight, Plus,
+  AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Plus,
   RotateCcw, Save, Search, ShieldAlert, Sparkles, Trash2, X,
-  ListChecks, Columns3, FileText, FileWarning, type LucideIcon,
+  ListChecks, Columns3, Link2Off, type LucideIcon,
 } from "lucide-react";
 import { api } from "../api/client";
 import { getUser } from "../auth";
@@ -10,6 +10,7 @@ import Banner from "./ui/Banner";
 import Button from "./ui/Button";
 import { Modal } from "./ui/Modal";
 import { ClauseText } from "./ClauseText";
+import { InfoTip } from "./InfoTip";
 import {
   ClauseRouting, ContractDetailT, ContractRule, VariationDecision, VariationRemoval,
   clauseHeading, errText,
@@ -32,31 +33,10 @@ function isVariationRule(r: ContractRule): boolean {
 // clauses. They are worth keeping reachable but not worth putting first — a
 // reviewer opens a contract to see what THIS contract says.
 const _LIBRARY_TEXT = /^\s*\[\s*(generic rule|derived (formula|rule))\s*\]/i;
-const isLibraryText = (s: string | null | undefined) => _LIBRARY_TEXT.test(s ?? "");
+export const isLibraryText = (s: string | null | undefined) => _LIBRARY_TEXT.test(s ?? "");
 /** A rule with no quoted clause behind it did not come from this contract's
  *  prose — that absence is exactly what the card renders as "no quote". */
 const isLibraryRule = (r: ContractRule) => !(r.source_clause?.text ?? "").trim();
-
-/** A section that folds away. Used for the library content above, so the
- *  contract's own rules and clauses are what you see on open. */
-function Foldaway({ label, count, children, defaultOpen = false }: {
-  label: string; count: number; children: ReactNode; defaultOpen?: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  if (count === 0) return null;
-  return (
-    <div className="rounded-md border border-border/70 bg-surface-2/40">
-      <button type="button" onClick={() => setOpen(o => !o)}
-        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs text-ink-muted hover:text-ink">
-        {open ? <ChevronDown size={12} className="shrink-0" />
-              : <ChevronRight size={12} className="shrink-0" />}
-        <span>{label}</span>
-        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[10px]">{count}</span>
-      </button>
-      {open && <div className="px-2 pb-2">{children}</div>}
-    </div>
-  );
-}
 
 /** Label for a rule's variation list. The two enum templates mean OPPOSITE
  *  things — one widens what passes, the other widens what is caught — so they
@@ -84,9 +64,9 @@ function MiniStat({ label, value, icon: Icon, alert, hint, onClick }: {
     <button type="button" onClick={onClick}
       className={`flex items-center gap-3 rounded-xl border bg-white px-3 py-2.5 text-left shadow-sm
         transition hover:-translate-y-0.5 hover:shadow-md
-        ${alert ? "border-red-200" : "border-border"}`}>
+        ${alert ? "border-amber-200" : "border-border"}`}>
       <span className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg
-        ${alert ? "bg-red-50 text-red-500" : "bg-teal-50 text-teal-600"}`}>
+        ${alert ? "bg-amber-50 text-amber-700" : "bg-teal-50 text-teal-600"}`}>
         <Icon size={16} strokeWidth={2.5} />
       </span>
       <span className="min-w-0">
@@ -231,11 +211,21 @@ export function Combo({ value, options, placeholder, onSelect, clearable = true,
   );
 }
 
-// Inline detail for one contract — extracted terms + clause→field rules, the
-// same context the standalone Contract page shows, without leaving setup.
+// Inline detail for one contract — its rules, the clauses still waiting for a
+// column, and any setup-level gaps the page hands in, without leaving setup.
 // Each rule can be retargeted to a different output field or removed.
+/** A setup-level section the page shows among a contract's own sub-tabs —
+ *  "Columns Missing from BDX" and "Missing documents" belong to the setup, not
+ *  to one contract, so the page builds them and hands them in. */
+export type InlineExtraTab = {
+  key: string; label: string; count: number; content: ReactNode;
+  /** Also show this section as an "at a glance" tile, with this label. */
+  tileLabel?: string;
+};
+
 export function ContractInline({ detail, programId, contractId, mga, onChanged,
-                                 readOnly = false, canEditVariations = false, feedFor }: {
+                                 readOnly = false, canEditVariations = false, feedFor,
+                                 extraTabs = [], focus }: {
   detail: ContractDetailT; programId: number | ""; contractId: number;
   mga: string; onChanged: () => Promise<void> | void; readOnly?: boolean;
   /** The broker (input) column(s) that feed a BDX output column, from the
@@ -247,38 +237,29 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
    *  is exactly where a tenant_admin corrects a spelling, so gating on !readOnly
    *  would make the feature dead on the one screen it exists for. */
   canEditVariations?: boolean;
+  /** Setup-level sections shown as sub-tabs right after "Rules with no column". */
+  extraTabs?: InlineExtraTab[];
+  /** Ask for a sub-tab from outside (e.g. a Setup Summary tile). `seq` changes
+   *  on every request, so asking for the same sub-tab twice still switches. */
+  focus?: { view: string; seq: number } | null;
 }) {
   const rules = detail.rules ?? [];
-  const terms = detail.terms ?? [];
-  const maps = detail.field_mappings ?? [];
   // Columns removed from the template are never offered (active false).
   const fieldOptions = Array.from(new Set((detail.output_template?.fields ?? [])
     .filter(f => f.active !== false)
     .map(f => f.name).filter(Boolean)));
-  // Rule-bearing clauses that couldn't be auto-mapped to any output field,
-  // split so the contract's own come first and the house rules fold away.
+  // Rule-bearing clauses that couldn't be auto-mapped to any output field.
+  // Only the contract's own are listed — generic-library ones are not shown.
   const reviewClauses = (detail.clause_routing ?? []).filter(r => r.bucket === "review");
   const ownClauses = reviewClauses.filter(r => !isLibraryText(r.clause_text));
-  const libraryClauses = reviewClauses.filter(r => isLibraryText(r.clause_text));
   // Same split for rules: this contract's, then the shared/derived ones.
   const ownRules = rules.filter(r => !isLibraryRule(r));
   const libraryRules = rules.filter(r => isLibraryRule(r));
 
-  // The server keys field_mappings by (clause, column), so a rule spanning
-  // three columns arrives as three rows repeating one long clause string.
-  // Collapse to one row per clause with its columns as chips.
-  const mapGroups = useMemo(() => {
-    const by = new Map<string, { clause: string; fields: string[] }>();
-    for (const m of maps) {
-      const g = by.get(m.contract_field) ?? { clause: m.contract_field, fields: [] };
-      if (!g.fields.includes(m.output_field)) g.fields.push(m.output_field);
-      by.set(m.contract_field, g);
-    }
-    return [...by.values()];
-  }, [maps]);
-  // One list at a time: rules, clauses still without a column, the terms read
-  // from the contract, or the clause → BDX output column index.
-  const [view, setView] = useState<"rules" | "clauses" | "terms" | "cols">("rules");
+  // One list at a time: the rules, the contract's rules that have no column
+  // yet, or one of the setup-level sections the page hands in (extraTabs).
+  const [view, setView] = useState<string>(focus?.view ?? "rules");
+  useEffect(() => { if (focus) setView(focus.view); }, [focus?.seq]); // eslint-disable-line react-hooks/exhaustive-deps
   const [ruleFilter, setRuleFilter] = useState<"contract" | "standard" | "all">(
     ownRules.length > 0 ? "contract" : "all");
   const [ruleQuery, setRuleQuery] = useState("");
@@ -712,12 +693,11 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
   }
 
   // ── the layout ─────────────────────────────────────────────────────────────
-  // Every control above is unchanged; this only arranges them: a line of
-  // counts, a switch between four lists, and one line per rule that opens to
+  // Every control above is unchanged; this only arranges them: a row of
+  // counts, a switch between the lists, and one line per rule that opens to
   // the rule's full card (and, when editable, all of its controls).
   const boundOf = (r: ContractRule) => (r.output_fields && r.output_fields.length)
     ? r.output_fields : (r.output_field ? [r.output_field] : []);
-  const outputColumnsChecked = new Set(maps.map(m => m.output_field)).size;
   const q = ruleQuery.trim().toLowerCase();
   const listed = (ruleFilter === "contract" ? ownRules : ruleFilter === "standard" ? libraryRules : rules)
     .filter(r => !q || r.rule_name.toLowerCase().includes(q)
@@ -737,7 +717,7 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
       : <span className="text-[11px] text-ink-muted">from input column{cols.length > 1 ? "s" : ""}{" "}
           <b className="font-mono font-medium text-ink">{cols.join(", ")}</b></span>;
   };
-  const switchBtn = (key: typeof view, label: ReactNode) => (
+  const switchBtn = (key: string, label: ReactNode) => (
     <button type="button" onClick={() => setView(key)} aria-pressed={view === key}
       className={`relative flex-1 whitespace-nowrap rounded-md px-3 py-1.5 text-center text-xs font-semibold transition-colors
         before:absolute before:-left-px before:top-1/4 before:h-1/2 before:w-px before:bg-gray-300 first:before:hidden
@@ -753,28 +733,35 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
     </button>
   );
 
+  const tiles = extraTabs.filter(t => t.tileLabel);
   return (
     <div className="space-y-3">
-      {/* The contract in four numbers — the dashboard's KPI tiles. */}
-      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+      {/* At a glance — what this contract contributes to the setup. Each tile
+          opens the list it counts. */}
+      <div className={`grid grid-cols-1 gap-2.5 sm:grid-cols-2 ${tiles.length ? "lg:grid-cols-3" : ""}`}>
         <MiniStat label={`Rule${rules.length !== 1 ? "s" : ""} check your file`}
           value={rules.length} icon={ListChecks} onClick={() => setView("rules")} />
-        <MiniStat label={`BDX output column${outputColumnsChecked !== 1 ? "s" : ""} checked`}
-          value={outputColumnsChecked} icon={Columns3} onClick={() => setView("cols")} />
-        <MiniStat label={`Term${terms.length !== 1 ? "s" : ""} read from the contract`}
-          value={terms.length} icon={FileText} onClick={() => setView("terms")} />
-        {reviewClauses.length > 0 && (
-          <MiniStat label={`Clause${ownClauses.length !== 1 ? "s" : ""} with no column yet`}
-            value={ownClauses.length} icon={FileWarning} alert hint="see →"
-            onClick={() => setView("clauses")} />
-        )}
+        <MiniStat label={`Rule${ownClauses.length !== 1 ? "s" : ""} with no column`}
+          value={ownClauses.length} icon={Link2Off} alert={ownClauses.length > 0}
+          onClick={() => setView("clauses")} />
+        {tiles.map(t => (
+          <MiniStat key={t.key} label={t.tileLabel!} value={t.count} icon={Columns3}
+            alert={t.count > 0} onClick={() => setView(t.key)} />
+        ))}
       </div>
+      {detail.output_template && (
+        <p className="text-[11.5px] text-ink-muted">
+          Checked against output template{" "}
+          <b className="text-ink">{detail.output_template.name} v{detail.output_template.version}</b>
+        </p>
+      )}
 
       <div className="flex w-full flex-wrap gap-0.5 rounded-lg bg-surface-2 p-1" role="group" aria-label="Show">
         {switchBtn("rules", <>Rules · {rules.length}</>)}
-        {reviewClauses.length > 0 && switchBtn("clauses", <>Clauses with no column · {ownClauses.length}</>)}
-        {switchBtn("terms", <>Contract terms · {terms.length}</>)}
-        {switchBtn("cols", <>Clause → BDX Output column</>)}
+        {switchBtn("clauses", <>Rules with no column · {ownClauses.length}</>)}
+        {extraTabs.map(t => (
+          <Fragment key={t.key}>{switchBtn(t.key, <>{t.label} · {t.count}</>)}</Fragment>
+        ))}
       </div>
 
       {ruleErr && (
@@ -787,11 +774,9 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
       ) : (
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-1.5">
-            {libraryRules.length > 0 && <>
-              {filterChip("contract", "From this contract", ownRules.length)}
-              {filterChip("standard", "Standard checks", libraryRules.length)}
-              {filterChip("all", "All", rules.length)}
-            </>}
+            {filterChip("contract", "Contract Rules", ownRules.length)}
+            {filterChip("standard", "Generic Rules", libraryRules.length)}
+            {filterChip("all", "All rules", rules.length)}
             <label className="ml-auto flex w-56 max-w-full items-center gap-1.5 rounded-md border border-border bg-white px-2 py-1">
               <Search size={12} className="shrink-0 text-ink-soft" />
               <input value={ruleQuery} onChange={e => setRuleQuery(e.target.value)}
@@ -800,7 +785,8 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
             </label>
           </div>
           <div className="overflow-hidden rounded-md border border-border">
-            {listed.length === 0 && <p className="px-3 py-3 text-xs text-ink-muted">No rule matches that.</p>}
+            {listed.length === 0 && <p className="px-3 py-3 text-xs text-ink-muted">
+              {q ? "No rule matches that." : "No rules in this group."}</p>}
             {listed.map(r => {
               const isOpen = openRule === r.validation_rule_id;
               const cols = boundOf(r).map(f => pending[`${r.validation_rule_id}::${f}`] ?? f);
@@ -818,7 +804,7 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
                         {unsaved && <span className="rounded-full bg-amber-50 px-1.5 text-[10px] font-bold text-amber-700">Unsaved</span>}
                       </span>
                       <span className="block truncate text-[11px] text-ink-muted">
-                        {isLibraryRule(r) ? "Standard check" : page ? `From the contract · page ${page}` : "From the contract"}
+                        {isLibraryRule(r) ? "Generic rule" : page ? `From the contract · page ${page}` : "From the contract"}
                       </span>
                     </span>
                     <span className="hidden max-w-[16rem] flex-wrap justify-end gap-1 sm:flex">
@@ -871,113 +857,23 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
         </div>
       ))}
 
-      {/* ── Clauses that should have a rule but no column fitted ── */}
-      {view === "clauses" && reviewClauses.length > 0 && (
+      {/* ── The contract's rules that have no column to check yet ── */}
+      {view === "clauses" && (
         <div>
-          <p className="mb-2 text-[12.5px] text-ink-muted">
-            {readOnly
-              ? "These clauses should have a rule, but no BDX output column fitted them. Press Edit to pick a column and generate their rules."
-              : "Each clause below should have a rule, but no column fitted it. Pick the column(s), describe the rule, then Generate Rule."}
-          </p>
-          <div className="overflow-hidden rounded-md border border-border bg-white">
-            {ownClauses.map((rc, i) => renderReviewClause(rc, i + 1))}
-          </div>
-          {libraryClauses.length > 0 && (
-            // Kept reachable, not shown first: these are the shared library's
-            // checks (claims, currency, NAICS…) that this template has no column
-            // for. They are still resolvable, but they are not what this
-            // contract asks for.
-            <div className="mt-2">
-              <Foldaway label="Standard rules with no column in this template"
-                count={libraryClauses.length}>
-                <div className="overflow-hidden rounded-md border border-border bg-white">
-                  {libraryClauses.map((rc, i) => renderReviewClause(rc, i + 1))}
-                </div>
-              </Foldaway>
+          {ownClauses.length === 0 ? (
+            <p className="flex items-center gap-1.5 text-xs text-emerald-700">
+              <CheckCircle2 size={13} /> Every rule-bearing clause in this contract has a column.
+            </p>
+          ) : (
+            <div className="overflow-hidden rounded-md border border-border bg-white">
+              {ownClauses.map((rc, i) => renderReviewClause(rc, i + 1))}
             </div>
           )}
         </div>
       )}
 
-      {/* ── Terms read from the contract ── */}
-      {view === "terms" && (terms.length === 0 ? (
-        <p className="text-xs text-ink-muted">No terms were read from this contract.</p>
-      ) : (
-        <div className="overflow-x-auto rounded-md border border-border bg-white">
-          <table className="w-full text-[13px]">
-            <thead>
-              <tr className="border-b border-border bg-surface-2 text-[10.5px] uppercase tracking-wide text-ink-soft">
-                <th className="px-4 py-2.5 text-left font-semibold">Term</th>
-                <th className="px-4 py-2.5 text-left font-semibold">Value</th>
-                <th className="px-4 py-2.5 text-left font-semibold">Where the contract says so</th>
-              </tr>
-            </thead>
-            <tbody>
-              {terms.map(t => (
-                <tr key={t.id} className="border-b border-border last:border-b-0 align-top">
-                  <td className="px-4 py-2.5 text-left font-semibold capitalize">{String(t.category ?? "").replace(/_/g, " ") || "—"}</td>
-                  <td className="px-4 py-2.5 text-left">{fmtTermValue(t.value)}</td>
-                  <td className="max-w-md px-4 py-2.5 text-left text-[12.5px] italic text-ink-muted">
-                    {t.source_text ? <ClauseText text={t.source_text} /> : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ))}
-
-      {/* ── Clause → BDX output column: the same pairs the rules carry,
-          indexed clause-first, with the broker column that fills each one ── */}
-      {view === "cols" && (mapGroups.length === 0 ? (
-        <p className="text-xs text-ink-muted">No clause is checked on a column yet.</p>
-      ) : (
-        <div>
-          <p className="mb-2 text-[12.5px] text-ink-muted">
-            Rules check your <b className="text-ink">BDX output columns</b>, not the broker's own column
-            names. Each broker's file is first mapped into your BDX layout on the Map Input &amp; Output Columns tab, so
-            one rule works for every broker.
-          </p>
-          <div className="overflow-x-auto rounded-md border border-border bg-white">
-            <table className="w-full min-w-[560px] text-[13px]">
-              <thead>
-                <tr className="border-b border-border bg-surface-2 text-[10.5px] uppercase tracking-wide text-ink-soft">
-                  <th className="px-4 py-2.5 text-left font-semibold">Contract clause</th>
-                  <th className="w-6" />
-                  <th className="px-4 py-2.5 text-left font-semibold">BDX output column it checks</th>
-                  {feedFor && <th className="px-4 py-2.5 text-left font-semibold">Input column</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {mapGroups.map((g, i) => g.fields.map((f, k) => (
-                  <tr key={`${i}-${f}`} className={k === g.fields.length - 1 ? "border-b border-border last:border-b-0" : "border-b border-border/50"}>
-                    {k === 0 && <>
-                      <td rowSpan={g.fields.length} className="px-4 py-2.5 text-left align-top">
-                        <span className="line-clamp-3" title={g.clause}>{g.clause}</span>
-                        {g.fields.length > 1 && (
-                          <span className="mt-0.5 block text-[11px] text-ink-muted">
-                            uses {g.fields.length} columns — the first is the main one</span>
-                        )}
-                      </td>
-                      <td rowSpan={g.fields.length} className="align-top pt-3 text-ink-soft">
-                        <ArrowRight size={13} />
-                      </td>
-                    </>}
-                    <td className="px-4 py-2 text-left align-top">
-                      <span className="rounded-full bg-navy/10 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-navy">{f}</span>
-                    </td>
-                    {feedFor && <td className="px-4 py-2 text-left align-top">{feedLine(f, true)}</td>}
-                  </tr>
-                )))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ))}
-
-      {rules.length === 0 && terms.length === 0 && maps.length === 0 && reviewClauses.length === 0 && (
-        <p className="text-xs text-ink-muted">No terms or rules were extracted from this contract.</p>
-      )}
+      {/* ── Setup-level sections handed in by the page ── */}
+      {extraTabs.map(t => view === t.key && <div key={t.key}>{t.content}</div>)}
 
       {/* In-app confirm for rule removal (replaces window.confirm, which looked
           like a browser popup and couldn't carry the app's styling). */}
@@ -1233,6 +1129,7 @@ function ReviewClauseRow({ item, n, fieldOptions, onResolve, readOnly = false }:
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<null | { ok: boolean; message: string }>(null);
+  const [mapOpen, setMapOpen] = useState(false);
 
   const addField = (f: string | null) => {
     if (!f) return;
@@ -1249,87 +1146,114 @@ function ReviewClauseRow({ item, n, fieldOptions, onResolve, readOnly = false }:
       if (r.ok) {
         const n = r.created_rules?.length ?? 0;
         setResult({ ok: true, message: `Generated ${n} rule${n !== 1 ? "s" : ""}.` });
+        setMapOpen(false);
       } else {
         setResult({ ok: false, message: r.reason || "Could not generate a rule for these fields." });
       }
     } catch (e) { setResult({ ok: false, message: errText(e) }); } finally { setBusy(false); }
   }
 
+  // The mapping form is opened on demand: a list of seven clauses each
+  // carrying a picker, a three-line note and a button read as one long form.
+  // Shut, every clause is one line with its "Map Column" action on the right.
+  const open = mapOpen;
   return (
-    <div className="grid grid-cols-[22px_minmax(0,1fr)] items-start gap-3 border-b border-border px-3 py-3 text-xs last:border-b-0">
-      <span className="mt-0.5 grid h-[22px] w-[22px] place-items-center rounded-full bg-amber-50 text-[11px] font-bold text-amber-700">
-        {n}
-      </span>
-      <div className="min-w-0">
-        <div className="text-[13.5px] font-semibold text-ink">
-          {clauseHeading(item)}
-          <span className="ml-2 inline-flex rounded-full bg-amber-50 px-2 py-0.5 align-middle text-[10.5px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">Unmapped Clause</span>
-          {item.source_page ? <span className="ml-1.5 text-[11px] font-normal text-ink-soft">page {item.source_page}</span> : null}
-        </div>
-        {item.reason && <p className="mt-0.5 text-[12.5px] text-ink-muted">{item.reason}</p>}
-        {item.clause_text && (
-          <details className="mt-1.5">
-            <summary className="cursor-pointer text-[12px] font-semibold text-navy">Show the contract's words</summary>
-            <div className="mt-1.5 border-l-[3px] border-border bg-surface px-2.5 py-1.5 text-[12.5px] italic text-ink-muted">
-              <ClauseText text={item.clause_text} />
-            </div>
-          </details>
-        )}
-
-      {!readOnly && (
-        <>
-          {/* Step 1 — choose the field(s) */}
-          <div className="mt-2.5 text-[11.5px] font-semibold text-ink-muted">
-            1. BDX output column(s) — the first is the main one
+    <div className="border-b border-border px-3 py-3 text-xs last:border-b-0">
+      <div className="grid grid-cols-[22px_minmax(0,1fr)_auto] items-start gap-3">
+        <span className="mt-0.5 grid h-[22px] w-[22px] place-items-center rounded-full bg-amber-50 text-[11px] font-bold text-amber-700">
+          {n}
+        </span>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[13.5px] font-semibold text-ink">
+            <span>{clauseHeading(item)}</span>
+            {/* Why no column fitted — behind the ⓘ (hover or click) rather than
+                a grey line under every heading; the heading is what's scanned. */}
+            {item.reason && (
+              <span className="tip-inline inline-flex">
+                <InfoTip text={`Why it has no column: ${item.reason}`} />
+              </span>
+            )}
+            <span className="ml-1 inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">Unmapped Clause</span>
+            {item.source_page ? <span className="text-[11px] font-normal text-ink-soft">page {item.source_page}</span> : null}
           </div>
-          <div className="mt-1 w-56">
-            <Combo value="" options={remaining} clearable={false} disabled={busy}
-              placeholder={fields.length ? "Add another column…" : "Choose output column…"}
-              onSelect={addField} />
-          </div>
-          {fields.length > 0 && (
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {fields.map((f, i) => (
-                <span key={f} className="inline-flex items-center gap-1 rounded-full bg-surface-2 border border-border px-2 py-0.5">
-                  {i === 0 && <span className="text-[10px] text-accent font-semibold">Primary</span>}
-                  <span>{f}</span>
-                  <button type="button" disabled={busy} onClick={() => removeField(f)}
-                    className="text-ink-muted hover:text-danger disabled:opacity-50" aria-label={`Remove ${f}`}>
-                    <X size={11} />
-                  </button>
-                </span>
-              ))}
-            </div>
+          {item.clause_text && (
+            <details className="mt-1">
+              <summary className="cursor-pointer text-[12px] font-semibold text-navy">Show the contract's words</summary>
+              <div className="mt-1.5 border-l-[3px] border-border bg-surface px-2.5 py-1.5 text-[12.5px] italic text-ink-muted">
+                <ClauseText text={item.clause_text} />
+              </div>
+            </details>
           )}
+          {result && (
+            <p className={`mt-1.5 flex items-center gap-1 ${result.ok ? "text-green-700" : "text-danger"}`}>
+              {result.ok ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
+              {result.message}
+            </p>
+          )}
+        </div>
+        {!readOnly && !open && (
+          <button type="button" onClick={() => { setMapOpen(true); setResult(null); }}
+            className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-navy/30 bg-white px-2.5 py-1 text-[12px] font-semibold text-navy hover:bg-navy/5">
+            <Plus size={12} /> Map Column
+          </button>
+        )}
+      </div>
 
-          {/* Step 2 — describe the rule logic */}
-          <div className="mt-2.5 text-[11.5px] font-semibold text-ink-muted">
-            2. Reference note — the rule logic for this column (and why)
+      {!readOnly && open && (
+        <div className="ml-[34px] mt-2.5 rounded-lg border border-border bg-surface-2/60 p-3">
+          <div className="grid gap-3 md:grid-cols-[15rem_minmax(0,1fr)]">
+            {/* Step 1 — choose the column(s) */}
+            <div>
+              <div className="mb-1 text-[11.5px] font-semibold text-ink-muted">BDX output column</div>
+              <Combo value="" options={remaining} clearable={false} disabled={busy}
+                placeholder={fields.length ? "Add another column…" : "Choose output column…"}
+                onSelect={addField} />
+              {fields.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {fields.map((f, i) => (
+                    <span key={f} className="inline-flex items-center gap-1 rounded-full border border-border bg-white px-2 py-0.5">
+                      {i === 0 && fields.length > 1 && <span className="text-[10px] font-semibold text-accent">Main</span>}
+                      <span>{f}</span>
+                      <button type="button" disabled={busy} onClick={() => removeField(f)}
+                        className="text-ink-muted hover:text-danger disabled:opacity-50" aria-label={`Remove ${f}`}>
+                        <X size={11} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {fields.length > 1 && (
+                <p className="mt-1 text-[11px] text-ink-soft">The first column is the main one.</p>
+              )}
+            </div>
+            {/* Step 2 — describe the rule logic */}
+            <div>
+              <div className="mb-1 text-[11.5px] font-semibold text-ink-muted">
+                Rule note <span className="font-normal text-ink-soft">(optional — what to check, and why)</span>
+              </div>
+              <textarea
+                value={note}
+                onChange={e => setNote(e.target.value)}
+                disabled={busy}
+                rows={2}
+                placeholder="e.g. If Country is USA, the state must not be Puerto Rico or a US Territory."
+                className="w-full resize-y rounded-md border border-border bg-white px-2 py-1.5 placeholder:text-ink-soft" />
+            </div>
           </div>
-          <textarea
-            value={note}
-            onChange={e => setNote(e.target.value)}
-            disabled={busy}
-            rows={3}
-            placeholder="e.g. If Country is USA, the state must not be Puerto Rico, US Virgin Islands, or US Territories — this column reports the insured's home state."
-            className="mt-1 w-full border border-border rounded-md px-2 py-1.5 bg-surface resize-y placeholder:text-ink-soft" />
-
           {/* Step 3 — generate */}
-          <div className="mt-2.5">
-            <Button className="!py-1 !px-2 !text-xs" onClick={submit} disabled={fields.length === 0 || busy}>
+          <div className="mt-2.5 flex items-center justify-end gap-2">
+            <button type="button" disabled={busy}
+              onClick={() => { setMapOpen(false); setFields([]); setNote(""); }}
+              className="text-xs text-ink-muted hover:text-ink disabled:opacity-50">
+              Cancel
+            </button>
+            <Button className="!py-1 !px-2.5 !text-xs" onClick={submit} disabled={fields.length === 0 || busy}>
               <Sparkles size={12} />
-              Generate Rule
+              {busy ? "Generating…" : "Generate Rule"}
             </Button>
           </div>
-        </>
+        </div>
       )}
-      {result && (
-        <p className={`mt-1.5 flex items-center gap-1 ${result.ok ? "text-green-700" : "text-danger"}`}>
-          {result.ok ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
-          {result.message}
-        </p>
-      )}
-      </div>
     </div>
   );
 }
