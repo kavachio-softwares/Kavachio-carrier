@@ -15,7 +15,10 @@ run_state, run_error), which is what the Files screen reads.
 What it will NOT run, and says so on the arrival (`not_run` + run_error):
   · a file on a way in that names no programme — which setup would it use?
   · a file whose stored copy is gone
-  · a programme with no live setup yet
+  · a programme with no live setup yet — the file is kept, the carrier is asked
+    for a setup (`bordereau_setup_needed`, on the bell and in the Audit Logs),
+    and it goes back in the queue by itself the moment one goes live
+    (`requeue_waiting`, called when a setup is activated or approved)
 
 Old files are safe: migration 29 stamps every arrival accepted before this
 existed as `pre_autorun`, so switching it on never runs a backlog.
@@ -31,7 +34,7 @@ import os
 import threading
 from typing import Optional
 
-from sqlalchemy import func, or_, update
+from sqlalchemy import func, or_, select, update
 
 log = logging.getLogger("kavachio.intake.autorun")
 
@@ -40,6 +43,15 @@ _stop = threading.Event()
 _wake = threading.Event()
 
 ACTOR = "Auto-run"
+
+# What Files Received says about a file that came in before its programme had a
+# live setup. "Waiting" files are found again by its OPENING WORDS, so the rest
+# can be reworded without stranding files already waiting — and the older
+# wording ("…then run the file by hand") still matches. Keep "setup" in it:
+# submission_service files a not-run error containing it as on hold, not failed.
+NO_SETUP_ERROR = ("There is no live setup for this programme yet. The file is kept "
+                  "and is processed automatically as soon as one is live.")
+_NO_SETUP_PREFIX = "There is no live setup for this programme yet."
 
 
 def _enabled() -> bool:
@@ -116,6 +128,100 @@ def _detail(e: BaseException) -> str:
     return str(d or e) or e.__class__.__name__
 
 
+def _waiting(s, tenant_id: int, program_id: int, broker_party_id: Optional[int],
+             *, whole_programme: bool = False):
+    """Accepted files that were not run ONLY because the programme had no live
+    setup. A file's programme is its channel's or its own, as run_one reads it.
+
+    `whole_programme` is for a setup made for every broker (no broker of its
+    own): it frees every broker's waiting files. Otherwise only this broker's."""
+    from intake_models import FileArrival, IntakeRoute
+    q = (s.query(FileArrival)
+         .filter(FileArrival.tenant_id == tenant_id,
+                 FileArrival.outcome == "accepted",
+                 FileArrival.run_state == "not_run",
+                 FileArrival.run_error.startswith(_NO_SETUP_PREFIX),
+                 or_(FileArrival.program_id == program_id,
+                     FileArrival.route_id.in_(
+                         select(IntakeRoute.id).where(IntakeRoute.program_id == program_id)))))
+    if not whole_programme:
+        q = q.filter(FileArrival.matched_broker_party_id == broker_party_id
+                     if broker_party_id is not None
+                     else FileArrival.matched_broker_party_id.is_(None))
+    return q
+
+
+def _ask_for_setup(tenant_id: int, program_id: int, broker_party_id: Optional[int],
+                   arrival_id: int, filename: Optional[str]) -> None:
+    """Tell the carrier a file is waiting for a Bordereau Setup on its programme.
+
+    ONE notice per programme and broker, not one per file: the files are not
+    lost and run by themselves once a setup is live, so the second, third and
+    tenth file add nothing the carrier has not been told. (Asked of the files
+    themselves — not of the activity log — so a later gap raises a fresh one.)
+
+    Best-effort: the file is already recorded as not run, and a reminder that
+    could not be written must never change that."""
+    try:
+        from audit import log_activity
+        from db import Party, SessionLocal
+        from intake_models import FileArrival
+        with SessionLocal() as s:
+            if (_waiting(s, tenant_id, program_id, broker_party_id)
+                    .filter(FileArrival.id != arrival_id).first()) is not None:
+                return
+            broker = s.get(Party, broker_party_id) if broker_party_id else None
+            broker_name = getattr(broker, "legal_name", None)
+        log_activity(tenant_id, "system", "bordereau_setup_needed",
+                     target=f"program:{program_id}",
+                     details={"program_id": program_id,
+                              "broker_party_id": broker_party_id,
+                              "broker_name": broker_name,
+                              "arrival_id": arrival_id, "filename": filename})
+    except Exception:  # noqa: BLE001 — a reminder must never fail the run
+        log.warning("could not ask for a setup for arrival %s", arrival_id,
+                    exc_info=True)
+
+
+def requeue_waiting(tenant_id: Optional[int], program_id: Optional[int],
+                    broker_party_id: Optional[int] = None) -> int:
+    """A setup just went live: put the files that were waiting for it back in
+    the queue, so the worker runs them exactly as it would a new arrival.
+
+    `broker_party_id` is the setup's own broker, None for a setup that covers
+    the whole programme. A file whose broker has a setup of its own, or none
+    that this one covers, is left alone — it would only be refused again.
+    Returns how many were queued. Never raises: it runs after the activation
+    has been committed and must not be able to undo it."""
+    if not (tenant_id and program_id):
+        return 0
+    try:
+        from db import SessionLocal
+        from intake_models import FileArrival
+        with SessionLocal() as s:
+            ids = [r[0] for r in _waiting(
+                s, tenant_id, program_id, broker_party_id,
+                whole_programme=broker_party_id is None
+            ).with_entities(FileArrival.id).all()]
+            if not ids:
+                return 0
+            # `run_state = 'not_run'` again: a hand Reprocess may have got there first.
+            res = s.execute(update(FileArrival)
+                            .where(FileArrival.id.in_(ids),
+                                   FileArrival.run_state == "not_run")
+                            .values(run_state=None, run_error=None))
+            s.commit()
+        if res.rowcount:
+            log.info("setup live on programme %s: %s waiting file(s) queued",
+                     program_id, res.rowcount)
+            wake()
+        return res.rowcount or 0
+    except Exception:  # noqa: BLE001
+        log.warning("could not queue the files waiting for programme %s", program_id,
+                    exc_info=True)
+        return 0
+
+
 def run_one(arrival_id: int) -> None:
     """Run one claimed arrival and record the outcome on it."""
     import intake_service as svc
@@ -154,9 +260,8 @@ def run_one(arrival_id: int) -> None:
             return
         pipe = _live_pipeline(s, tenant_id, program_id, broker)
         if pipe is None:
-            svc.mark_run(arrival_id, state="not_run", error=(
-                "There is no live setup for this programme yet. Activate one on "
-                "the Setup page, then run the file by hand."))
+            svc.mark_run(arrival_id, state="not_run", error=NO_SETUP_ERROR)
+            _ask_for_setup(tenant_id, program_id, broker, arrival_id, filename)
             return
         carrier_party_id = pipe.carrier_party_id
         # The contract the file is written under, as it arrived (picked, sent,

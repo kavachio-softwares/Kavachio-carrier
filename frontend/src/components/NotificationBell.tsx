@@ -6,6 +6,7 @@ import { currentMga, isBrokerSeat } from "../auth";
 import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { getActivity, type ActivityEvent } from "../api/activity";
 import { listPrograms, type ProgramLite } from "../api/calendar";
+import { flowUrl } from "./ProgrammeStepper";
 
 // C-9 — in-app reminder bell. Reads the activity feed, surfaces only the
 // notification-worthy events (deadline reminders today), and shows how many are
@@ -30,6 +31,12 @@ export const NOTIFY: Record<string, {
   submission_overdue:   { label: "Bordereau overdue",   tone: "#c0392b", to: "/calendar" },
   submission_due_today: { label: "Bordereau due today", tone: "#b7791f", to: "/calendar" },
   submission_due_soon:  { label: "Bordereau due soon",  tone: "#2c6fbb", to: "/calendar" },
+  // A broker's file came in for a programme with no live Bordereau Setup. The
+  // file is kept and runs by itself once a setup is live, so this is the cue to
+  // build one — straight to that step. Amber: nothing is late, a file waits.
+  bordereau_setup_needed: {
+    label: "Setup needed — file waiting", tone: "#b7791f", to: "/programs",
+    link: d => d.program_id ? flowUrl(Number(d.program_id), "setup") : null },
 
   // --- waiting on the CARRIER ADMIN --------------------------------------
   // A colleague has finished something that cannot reach the broker until the
@@ -427,7 +434,7 @@ export default function NotificationBell({
                               with one — the reason it did. */}
                           {d.period
                             ? `${d.period}${d.due_date ? ` · due ${d.due_date}` : ""}`
-                            : [d.name, d.broker_name, d.note]
+                            : [d.name, d.filename, d.broker_name, d.note]
                                 .filter(Boolean).join(" · ")}
                         </div>
                       </div>

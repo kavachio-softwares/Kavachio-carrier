@@ -267,6 +267,7 @@ ACTION_WORDS = {
     # setup
     "bordereau_setup_completed": "Completed a Bordereau Setup",
     "bordereau_setup_activated": "Activated a Bordereau Setup",
+    "bordereau_setup_needed": "A bordereau arrived before its programme had a live Bordereau Setup",
     # Approval: a carrier user builds a setup, the carrier admin decides.
     # Worded from the actor's side, because that is who the row is about.
     "bordereau_setup_submitted": "Sent a Bordereau Setup for approval",
@@ -1118,7 +1119,7 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     # carrier's work. A broker runs against what the carrier built and never
     # touches one, so offering them this filter offers a guaranteed blank page.
     ("setup", "Setup and templates",
-     ("bordereau_setup_completed", "bordereau_setup_activated",
+     ("bordereau_setup_completed", "bordereau_setup_activated", "bordereau_setup_needed",
       # The approval trail. CARRIER_SEATS, like the rest of this category: the
       # decision is internal to the carrier, and the broker only ever sees the
       # setup that came out the other side.

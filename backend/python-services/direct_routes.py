@@ -3454,15 +3454,20 @@ def _go_live(s, p: Pipeline, principal: Principal) -> tuple[dict, bool, int]:
 
 
 def _after_go_live(result: dict, tenant_id, format_id, principal) -> None:
-    """The two things that follow a setup going live, whoever released it.
+    """The three things that follow a setup going live, whoever released it.
 
-    Both swallow their own errors and run after the commit, so neither can
-    affect the activation that triggered them."""
+    All swallow their own errors and run after the commit, so none can affect
+    the activation that triggered them."""
     actor = _principal_email(principal)
     # Raise the mapping task FIRST: the notification is about that task, so it
     # has to exist before we look for it.
     _queue_datamodel_mapping(tenant_id, format_id, actor)
     _notify_setup_activated(result, actor, _principal_name(principal))
+    # Files that arrived while this programme had no setup were kept, not run.
+    # They go back in the auto-run queue now (a no-op when nothing is waiting).
+    import intake_autorun
+    intake_autorun.requeue_waiting(tenant_id, result.get("program_id"),
+                                   result.get("broker_party_id"))
 
 
 @router.post("/pipelines/{pipeline_id}/activate")
