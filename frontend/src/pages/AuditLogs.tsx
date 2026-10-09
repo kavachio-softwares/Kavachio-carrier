@@ -20,7 +20,7 @@ const SUBTITLE: Record<string, string> = {
   platform:
     "Everything that happens on Kavachio — every carrier, every broker and every person.",
   carrier_admin:
-    "Everyone at your company, and every broker you work with — each person by name, with their broker company. Steps Kavachio takes on its own (checking a file when it arrives, status emails, reminders) show as Kavachio · Automatic.",
+    "Everyone at your company, and every broker you work with — each person by name, with their broker company. Steps Kavachio takes on its own (status emails, reminders) show as Kavachio · Automatic.",
   carrier_user:
     "Your own trail, and everything the brokers you work with have done — each person by name. Steps Kavachio takes on its own show as Kavachio · Automatic.",
   broker_admin:

@@ -29,6 +29,11 @@ export type SetupTab = {
    *  Bordereau Setup is a form read front to back, and saying so is half of
    *  what tells someone there is more of it after the tab they are on. */
   step?: number;
+  /** Shut until something earlier on the form is chosen; the reason shows
+   *  on hover. Used by the unsaved Bordereau Setup, where the later tabs need
+   *  a broker picked first. */
+  disabled?: boolean;
+  disabledReason?: string;
 };
 
 /** The open tab, read from and written to ?tab=. Falls back to the first tab
@@ -61,10 +66,12 @@ export function SetupTabs({ tabs, current, onChange }: {
         const on = t.key === current;
         return (
           <button key={t.key} type="button" role="tab" aria-selected={on}
+            disabled={t.disabled} title={t.disabled ? t.disabledReason : undefined}
             onClick={() => onChange(t.key)}
             className={`setup-tab inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3.5 py-2 text-[13.5px] font-semibold transition-all
               ${on ? "bg-ink text-white shadow-sm"
                    : "text-ink-muted hover:bg-white/70 hover:text-ink"}
+              disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-ink-muted
               focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy`}>
             {t.step != null && (
               <span className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-[10.5px] font-bold tabular-nums

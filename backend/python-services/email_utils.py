@@ -367,6 +367,45 @@ def broker_removed_email_html(name: str | None, carrier: str, program_name: str)
 </body></html>"""
 
 
+def broker_added_back_email_html(name: str | None, carrier: str, program_name: str) -> str:
+    """A carrier putting a broker it had removed back on a programme — the
+    counterpart of broker_removed_email_html. Only ever sent to a broker who
+    was taken off before; a first-time add sends nothing."""
+    greeting = f"Hi {escape_html(name)}," if (name or "").strip() else "Hi,"
+    c, p = escape_html(carrier), escape_html(program_name)
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
+        {c} has added you back to {p}
+      </h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        <b>{c}</b> has put you back on the programme <b>{p}</b>. What this means:
+      </p>
+      <ul style="font-size:14px;color:#566071;line-height:1.7;margin:0 0 14px;padding-left:20px">
+        <li>You can send bordereaux for it again, by upload, email, SFTP or API.</li>
+        <li>You can fix and approve exceptions on its files again.</li>
+        <li>If you send by SFTP, API or email, your existing login, key or address
+            works as before &mdash; there is nothing new to set up.</li>
+        <li>Files you sent earlier, and your contracts, are still on record with {c}.</li>
+      </ul>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        If you have any questions, please contact {c}.
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a notice from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
 def bordereau_sent_email_html(program_name: str, period: str, due_date: str | None,
                               sent_date: str) -> str:
     """A broker sending a processed bordereau on to the carrier. The file

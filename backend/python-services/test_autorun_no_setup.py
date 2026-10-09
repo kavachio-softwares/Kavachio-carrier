@@ -71,6 +71,9 @@ def world(monkeypatch):
     monkeypatch.setattr(audit, "log_activity",
                         lambda *a, **kw: w.events.append((a, kw)))
     monkeypatch.setattr(intake_autorun, "_live_pipeline", lambda *a: None)
+    # The broker is still on the programme (the stand-in session cannot query).
+    monkeypatch.setattr(intake_service, "broker_on_programme",
+                        lambda *a: True, raising=False)
     monkeypatch.setattr(intake_autorun, "_waiting",
                         lambda *a, **kw: _Waiting(w.other_waiting))
     return w

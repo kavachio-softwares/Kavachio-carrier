@@ -202,6 +202,11 @@ def collect_route(session, route: IntakeRoute) -> dict:
             # the whole one as a "duplicate" the moment the client renamed it.
             if sftp_watch.is_temp_name(path.name):
                 continue
+            # Still open on Kavachio's own SFTP server (sftp_server): an upload
+            # that has stalled is quiet, but it is not finished.
+            if sftp_watch.being_written(path):
+                summary["skipped_still_writing"] += 1
+                continue
             # Finished if nothing has touched it for the quiet window — or if
             # the watcher saw it renamed from a temporary name, which IS the
             # client saying "done" and needs no waiting out.

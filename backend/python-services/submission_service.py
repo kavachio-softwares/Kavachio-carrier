@@ -672,7 +672,16 @@ def _on_land(s, arrival, route, *, period, program_id, replaces, hint):
     if st in ("rejected", "failed", "on_hold", "duplicate"):
         _queue_result_email(s, th, ver, arrival, event=st)
         if th.channel == "sftp" and route is not None:
-            _queue_sftp(s, th, ver, route, "result", status_json(s, th))
+            # The vN result is about THIS file (refused, held, duplicate) —
+            # not the submission's newest processed version, which a broker
+            # would read as "your file has exceptions". status.json beside it
+            # stays the submission as a whole.
+            overall = status_json(s, th)
+            _queue_sftp(s, th, ver, route, "result",
+                        {**overall, "file": arrival.filename, "version": ver.no,
+                         "status": st, "status_text": STATUS_WORDS.get(st, st),
+                         "message": note},
+                        status_doc=overall)
     return th
 
 
@@ -1704,7 +1713,8 @@ def _receipt_doc(th, ver, arrival) -> dict:
             "message": ver.note, "period": th.period}
 
 
-def _queue_sftp(s, th, ver, route, kind: str, doc: dict) -> None:
+def _queue_sftp(s, th, ver, route, kind: str, doc: dict,
+                status_doc: Optional[dict] = None) -> None:
     # A route Kavachio pulls from someone else's server (sftp_pull) has no
     # `outbound/` folder of ours to write a receipt into — and writing back to
     # their server is not something it was given permission to do. The broker
@@ -1716,7 +1726,10 @@ def _queue_sftp(s, th, ver, route, kind: str, doc: dict) -> None:
                "tenant_id": th.tenant_id, "version": ver_no, "event": kind,
                "channel": "sftp_file", "recipient": route.address,
                "payload": {"route_address": route.address, "kind": kind, "doc": doc,
-                           "reference": th.ref, "version": ver_no}})
+                           "reference": th.ref, "version": ver_no,
+                           # The submission as a whole, when `doc` is about
+                           # one file only (write_sftp's status.json).
+                           **({"status_doc": status_doc} if status_doc else {})}})
 
 
 def _queue_sftp_for(s, th, ver, kind: str) -> None:
@@ -1744,8 +1757,9 @@ def write_sftp(payload: dict) -> None:
 
     _atomic(f"{stem}.{kind}.json", json.dumps(doc, indent=2, default=str))
     if kind == "result":
+        whole = payload.get("status_doc") or doc
         _atomic(f"{ref}.status.json", json.dumps(
-            {k: v for k, v in doc.items() if k != "exceptions"}, indent=2, default=str))
+            {k: v for k, v in whole.items() if k != "exceptions"}, indent=2, default=str))
         excs = [r for r in (doc.get("exceptions") or []) if r.get("status") == "open"]
         if excs:
             _atomic(f"{stem}.exceptions.csv", report_csv(ref, ver, excs))

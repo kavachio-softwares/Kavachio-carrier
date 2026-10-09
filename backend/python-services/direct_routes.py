@@ -3050,12 +3050,20 @@ def direct_output_fields(template_id: int, contract_id: Optional[int] = None,
 
 
 @router.get("/direct/format/{format_id}/editor")
-def direct_format_editor(format_id: int,
+def direct_format_editor(format_id: int, original_sample: bool = False,
                          principal: Principal = Depends(current_principal)):
     """Rebuild the full Setup editor view for an EXISTING setup: its saved routing
     + column mapping, the output template's fields (with contract clauses), and the
     input columns/sheets from its latest landing record — so a saved setup can be
-    reopened, reviewed and edited exactly like a fresh upload."""
+    reopened, reviewed and edited exactly like a fresh upload.
+
+    ``original_sample`` reads the input columns from the sample the carrier built
+    the setup from instead: the FIRST landing in the setup's own layout. The latest
+    landing is whatever was processed last, a broker's file included, so a column
+    the broker added or dropped would otherwise show up on the carrier's own setup.
+    (Not the newest of that layout either: headings are fingerprinted trimmed, in
+    any case and any order, so a broker's re-ordered file is "the same layout".)
+    The read-only setup page asks for this; every other caller is unchanged."""
     with SessionLocal() as s:
         f = s.get(DirectFormat, format_id)
         if not f:
@@ -3064,9 +3072,15 @@ def direct_format_editor(format_id: int,
         tpl = s.get(ExportTemplate, f.output_template_id) if f.output_template_id else None
         structure = _load_structure(tpl) if tpl else {"sheets": []}
         output_sheets = _output_sheet_names(structure)
-        rec = (s.query(LandingRecord)
-               .filter(LandingRecord.format_id == format_id)
-               .order_by(LandingRecord.id.desc()).first())
+        if original_sample:
+            q = s.query(LandingRecord).filter(LandingRecord.format_id == format_id)
+            rec = ((q.filter(LandingRecord.fingerprint == f.fingerprint)
+                    .order_by(LandingRecord.id.asc()).first() if f.fingerprint else None)
+                   or q.order_by(LandingRecord.id.asc()).first())
+        else:
+            rec = (s.query(LandingRecord)
+                   .filter(LandingRecord.format_id == format_id)
+                   .order_by(LandingRecord.id.desc()).first())
         input_sheets: list[str] = []
         input_columns: dict[str, list[str]] = {}
         landing_id = None

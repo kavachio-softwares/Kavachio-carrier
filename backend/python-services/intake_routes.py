@@ -24,6 +24,7 @@ from sqlalchemy import func
 import intake_events
 import intake_review as review
 import intake_service as svc
+import sftp_accounts
 import sftp_pull
 from app_routes import (
     _actor, _iso_utc, _log, _tenant_name, assert_tenant_owns, resolve_tenant_id,
@@ -94,9 +95,10 @@ class RouteCreate(BaseModel):
     # from another; who the mail comes from is what does. See
     # email_intake_service.build_email_address.
     sender_email: Optional[str] = None
-    # SFTP — the server Kavachio collects FROM (sftp_pull). Without it an SFTP
-    # route is the old kind, a folder on Kavachio's own server (sftp_poller):
-    # still supported, no longer offered on the screen.
+    # SFTP — the broker's own server that Kavachio collects FROM (sftp_pull).
+    # Without it an SFTP route is a folder on KAVACHIO's server (sftp_server):
+    # the broker gets a login of their own, emailed to them, and uploads; the
+    # collector (sftp_poller) takes it from there.
     sftp: Optional[SftpSettings] = None
 
 
@@ -164,10 +166,32 @@ def _carrier_cc(s, tenant_id: int) -> Optional[str]:
         return None
 
 
+def _login_view(cred) -> Optional[dict]:
+    """A broker's login on Kavachio's SFTP server, as the screen shows it. Never
+    the password — only its fingerprint is kept, so it cannot be shown."""
+    if cred is None:
+        return None
+    return {"username": cred.key_prefix, "host": svc.sftp_host(), "port": svc.sftp_port(),
+            # Where they upload (and start), and where Kavachio answers.
+            "folder": "/incoming", "results_folder": "/outbound",
+            "issued_at": _iso_utc(cred.created_at),
+            "last_login_at": _iso_utc(cred.last_used_at), "live": cred.revoked_at is None}
+
+
+def _sftp_server_info() -> dict:
+    """Kavachio's own SFTP server as brokers are told about it, and whether it
+    is actually up in this process — a login to a server that is not running
+    is a broker who cannot send."""
+    import sftp_server
+    return {"host": svc.sftp_host(), "port": svc.sftp_port(),
+            "status": sftp_server.status(), "fingerprints": sftp_server.fingerprints()}
+
+
 def _route_dict(r: IntakeRoute, broker_name: Optional[str],
                 files_this_month: int = 0,
                 program_name: Optional[str] = None,
-                sftp: Optional[dict] = None) -> dict:
+                sftp: Optional[dict] = None,
+                login: Optional[dict] = None) -> dict:
     return {
         "route_id": r.id,
         "channel": r.channel,
@@ -192,6 +216,9 @@ def _route_dict(r: IntakeRoute, broker_name: Optional[str],
         # An SFTP route that collects from someone else's server: its settings
         # and last check (sftp_pull.public_view) — never the password or key.
         "sftp": sftp,
+        # An SFTP route on Kavachio's own server: the broker's login
+        # (_login_view), or None when it has none yet.
+        "login": login,
     }
 
 
@@ -225,9 +252,13 @@ def list_routes(mga: Optional[str] = None,
         # carrier has none (or before migration 35 — then it returns {}).
         pull = (sftp_pull.configs_for_tenant(s, tid)
                 if any(svc.is_external_sftp(r) for r in rows) else {})
+        # And every login on Kavachio's own server, in one query too.
+        logins = (sftp_accounts.logins_for_tenant(s, tid)
+                  if any(sftp_accounts.is_hosted(r) for r in rows) else {})
         routes = [_route_dict(r, names.get(r.broker_party_id), counts.get(r.id, 0),
                               _prog_names.get(getattr(r, "program_id", None)),
-                              sftp=sftp_pull.public_view(pull.get(r.id)))
+                              sftp=sftp_pull.public_view(pull.get(r.id)),
+                              login=_login_view(logins.get(r.id)))
                   for r in rows]
 
         # Brokers that may be given a way in: those actually on one of this
@@ -311,6 +342,8 @@ def list_routes(mga: Optional[str] = None,
             "collecting": list(COLLECTING_CHANNELS),
             "creatable": list(CREATABLE_CHANNELS),
             "sftp_host": svc.sftp_host(),
+            # Kavachio's own SFTP server: where an SFTP channel's broker signs in.
+            "sftp_server": _sftp_server_info(),
             # 10.3 — the inbox brokers send TO. Config, not data, exactly like
             # sftp_host: a route stores who a broker sends FROM, so moving the
             # intake mailbox must not strand every stored address.
@@ -413,7 +446,9 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
             # "sftp://user@host:port/folder" — the server we collect from.
             address = pull_address
         else:
-            address = svc.build_sftp_address(carrier_name, broker.legal_name)
+            address = svc.build_sftp_address(carrier_name, broker.legal_name,
+                                             tenant_id=tid, broker_party_id=broker.id,
+                                             program_id=body.program_id)
 
         # One API channel per broker + programme (uq_intake_route_api_scope):
         # say so, rather than let the insert fail with a server error.
@@ -426,6 +461,28 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
             if twin is not None:
                 raise HTTPException(409, f"{broker.legal_name} already has an API channel "
                                          "for this. Make a new key on it instead.")
+        # One SFTP login per broker per programme on Kavachio's server: a second
+        # channel covering a programme the broker already has a login for would
+        # only hand them a second user name and password for the same thing.
+        # "All of their programmes" covers every one, so it clashes with any.
+        if body.channel == "sftp" and pull_cfg is None:
+            for twin in (s.query(IntakeRoute)
+                         .filter(IntakeRoute.tenant_id == tid, IntakeRoute.channel == "sftp",
+                                 IntakeRoute.broker_party_id == broker.id).all()):
+                if svc.is_external_sftp(twin):
+                    continue
+                if twin.program_id is None or body.program_id is None \
+                        or twin.program_id == body.program_id:
+                    scope = "all their programmes"
+                    if twin.program_id is not None:
+                        p = s.get(Program, twin.program_id)
+                        scope = p.name if p else "that programme"
+                    cred = sftp_accounts.credential(s, twin.id)
+                    raise HTTPException(409, (
+                        f"{broker.legal_name} already has an SFTP login for {scope}"
+                        + (f" (user {cred.key_prefix})" if cred else "")
+                        + ". Use that one — Ingestion Channels → Make a New Password "
+                          "emails them a fresh password."))
         existing = None
         if body.channel != "api":
             existing = (s.query(IntakeRoute)
@@ -468,6 +525,15 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
             except OSError as exc:
                 raise HTTPException(500, f"could not create the folder: {exc}")
 
+        # A folder on Kavachio's own server: the broker's login is made with the
+        # channel, in the same transaction — an SFTP channel nobody can sign in
+        # to is not a way in at all.
+        login_cred, password = None, None
+        if sftp_accounts.is_hosted(route):
+            login_cred, password = sftp_accounts.issue(
+                s, route, broker_name=broker.legal_name, carrier_name=carrier_name,
+                user_id=getattr(principal, "user_id", None))
+
         s.commit()
         s.refresh(route)
         _log(_tenant_name(s, tid) or "", _actor(principal), "intake_route_created",
@@ -476,27 +542,39 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
                       "broker_party_id": route.broker_party_id,
                       # Which server key was trusted, and by whom (the actor).
                       **({"host_key": pull_cfg["host_key"]["fingerprint_sha256"]}
-                         if pull_cfg else {})})
+                         if pull_cfg else {}),
+                      **({"sftp_user": login_cred.key_prefix} if login_cred else {})})
         out = _route_dict(route, broker.legal_name, 0,
-                          sftp=sftp_pull.public_view(pull_cfg))
+                          sftp=sftp_pull.public_view(pull_cfg),
+                          login=_login_view(login_cred))
         out["folder"] = created_dir
         out["cc"] = _carrier_cc(s, tid) if route.channel == "email" else None
         # The broker is told how to name what they send — the same example
         # the dialog shows — so their first file is not a refused one.
         # API: emailed with its key, the moment the key is minted (create_key).
-        out["guide"] = (_email_guide(s, route, carrier_name)
+        # SFTP on our server: emailed with the login, the moment it is made.
+        out["guide"] = (_email_guide(s, route, carrier_name,
+                                     sftp_login=({"username": login_cred.key_prefix,
+                                                  "password": password}
+                                                 if login_cred else None))
                         if route.channel != "api" else None)
+        if login_cred:
+            # Returned once, like an API key. The screen shows it only when the
+            # email could not carry it; it is not kept anywhere.
+            out["login"]["password"] = password
         return out
 
 
 def _email_guide(s, route: IntakeRoute, carrier: str, *,
-                 api_key: Optional[str] = None, api_base: Optional[str] = None) -> dict:
+                 api_key: Optional[str] = None, api_base: Optional[str] = None,
+                 sftp_login: Optional[dict] = None) -> dict:
     """Email the broker this channel's "How They Send It". Never fails the
     request that asked for it: the dialog still shows the example to copy."""
     import intake_guide
     try:
         return intake_guide.send(s, route, carrier=carrier, send_to=_send_to(route),
-                                 api_key=api_key, api_base=api_base)
+                                 api_key=api_key, api_base=api_base,
+                                 sftp_login=sftp_login)
     except Exception:  # noqa: BLE001
         log.warning("could not email the channel guide for route %s", route.id, exc_info=True)
         return {"recipients": [], "sending": False}
@@ -505,7 +583,9 @@ def _email_guide(s, route: IntakeRoute, carrier: str, *,
 @router.post("/routes/{route_id}/guide")
 def email_route_guide(route_id: int, mga: Optional[str] = None,
                       principal: Principal = Depends(require_role("carrier_admin"))):
-    """Send the broker this channel's instructions again."""
+    """Send the broker this channel's instructions again. For an SFTP channel
+    on Kavachio's server that includes their user name — never a password,
+    which is not kept (POST /routes/{id}/sftp-login makes a new one)."""
     with SessionLocal() as s:
         route = s.get(IntakeRoute, route_id)
         if route is None:
@@ -513,7 +593,49 @@ def email_route_guide(route_id: int, mga: Optional[str] = None,
         assert_tenant_owns(principal, route.tenant_id)
         if route.channel not in ("email", "sftp"):
             raise HTTPException(400, "only email and SFTP channels have instructions to send")
-        return _email_guide(s, route, _tenant_name(s, route.tenant_id) or "your carrier")
+        cred = (sftp_accounts.credential(s, route.id)
+                if sftp_accounts.is_hosted(route) else None)
+        login = ({"username": cred.key_prefix,
+                  "issued_on": cred.created_at.strftime("%d %B %Y") if cred.created_at else None}
+                 if cred is not None and cred.revoked_at is None else None)
+        return _email_guide(s, route, _tenant_name(s, route.tenant_id) or "your carrier",
+                            sftp_login=login)
+
+
+@router.post("/routes/{route_id}/sftp-login")
+def new_sftp_login(route_id: int, mga: Optional[str] = None,
+                   principal: Principal = Depends(require_role("carrier_admin"))):
+    """A new password for the broker's login on Kavachio's SFTP server — or
+    their first login, for a channel made before logins existed — emailed to
+    them with how to send. The old password stops working at once, and anyone
+    signed in with it is disconnected.
+
+    The password comes back in this response, once: the screen shows it only
+    when the email cannot carry it."""
+    import sftp_server
+    with SessionLocal() as s:
+        route = s.get(IntakeRoute, route_id)
+        if route is None:
+            raise HTTPException(404, "route not found")
+        assert_tenant_owns(principal, route.tenant_id)
+        if not sftp_accounts.is_hosted(route):
+            raise HTTPException(400, "Only an SFTP channel on Kavachio's server has a login.")
+        broker = s.get(Party, route.broker_party_id) if route.broker_party_id else None
+        tenant_name = _tenant_name(s, route.tenant_id)
+        first = sftp_accounts.credential(s, route.id) is None
+        cred, password = sftp_accounts.issue(
+            s, route, broker_name=broker.legal_name if broker else "",
+            carrier_name=tenant_name or "carrier",
+            user_id=getattr(principal, "user_id", None))
+        s.commit()
+        closed = sftp_server.drop_sessions(route.id)
+        _log(tenant_name or "", _actor(principal), "intake_sftp_login_issued",
+             target=str(route.id),
+             details={"username": cred.key_prefix, "first_login": first,
+                      "sessions_closed": closed})
+        guide = _email_guide(s, route, tenant_name or "your carrier",
+                             sftp_login={"username": cred.key_prefix, "password": password})
+        return {"login": {**_login_view(cred), "password": password}, "guide": guide}
 
 
 @router.patch("/routes/{route_id}")
@@ -540,6 +662,11 @@ def patch_route(route_id: int, body: RoutePatch, mga: Optional[str] = None,
 
         s.commit()
         s.refresh(route)
+        # Switched off means off now: a broker already signed in to Kavachio's
+        # SFTP server is disconnected, not left uploading into a dead channel.
+        if body.is_enabled is False and sftp_accounts.is_hosted(route):
+            import sftp_server
+            sftp_server.drop_sessions(route.id)
         names = _broker_names(s, route.tenant_id)
         _log(_tenant_name(s, route.tenant_id) or "", _actor(principal),
              "intake_route_updated", target=str(route.id),
@@ -547,7 +674,9 @@ def patch_route(route_id: int, body: RoutePatch, mga: Optional[str] = None,
         return _route_dict(route, names.get(route.broker_party_id),
                            svc.month_counts(s, route.tenant_id).get(route.id, 0),
                            sftp=(sftp_pull.public_view(sftp_pull.load_config(s, route.id))
-                                 if svc.is_external_sftp(route) else None))
+                                 if svc.is_external_sftp(route) else None),
+                           login=(_login_view(sftp_accounts.credential(s, route.id))
+                                  if sftp_accounts.is_hosted(route) else None))
 
 
 # What an arrival that has not been run reports. Keys match _run_facts.

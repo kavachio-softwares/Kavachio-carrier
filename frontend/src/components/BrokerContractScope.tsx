@@ -179,10 +179,11 @@ export function BrokerSelect({ scope, disabled }: {
             old behaviour, where leaving it blank pulled in every broker's
             contracts and let one broker's terms validate another's bordereau.
 
-            Leaving it unselected is still valid and still builds a
-            programme-wide setup on the carrier's own contracts. A placeholder
-            cannot say that and stay a placeholder, so ProgrammeWideNote says it
-            under the dropdown instead. */}
+            Picking one is REQUIRED (9 Oct): a setup left without a broker
+            uploaded its contract with no broker, and every broker on the
+            programme could then see it and be checked against it. The later
+            tabs stay shut until a broker is picked; ProgrammeWideNote says so
+            under the dropdown. */}
         <option value="" disabled>Select Broker…</option>
         {scope.brokers.map(b => (
           <option key={b.id} value={b.id}>
@@ -242,8 +243,8 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
   if (!scope.loading && scope.brokers.length === 0) {
     return (
       <Hint>
-        No broker has been put on this programme yet, so this setup covers the
-        whole programme. Add one on the Brokers screen to scope it further.
+        No broker has been put on this programme yet. A setup is always for one
+        broker, so add one first (Programmes → Configure Program).
       </Hint>
     );
   }
@@ -377,21 +378,21 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
   );
 }
 
-/** What happens if the broker is left unselected.
+/** Why nothing after Setup Details opens yet.
  *
- *  The dropdown reads "Select Broker…" so it names the thing you are meant to
- *  do — but leaving it alone is not a dead end, it builds a setup covering the
- *  whole programme. A placeholder cannot say that and stay a placeholder, so it
- *  is said here. Without it the one supported route to a programme-wide setup
- *  would be undiscoverable. */
+ *  A setup used to be allowed with no broker, covering the whole programme on
+ *  the carrier's own contracts — but the contract it uploaded then had no
+ *  broker, and every broker on the programme could see it and be checked
+ *  against it. Since 9 Oct a broker must be picked first. */
 function ProgrammeWideNote({ scope }: {
   scope: ReturnType<typeof useBrokerContractScope>;
 }) {
   if (scope.brokerPartyId !== "" || scope.brokers.length === 0) return null;
   return (
     <Hint>
-      No broker selected, so this setup covers the whole programme and uses only
-      the carrier&rsquo;s own contracts.
+      <b>Pick the broker</b> to continue — a setup and its contract always
+      belong to one broker. The Documents and Output BDX Template tabs open once
+      one is picked.
     </Hint>
   );
 }

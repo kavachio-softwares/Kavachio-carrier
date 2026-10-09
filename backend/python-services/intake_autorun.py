@@ -258,6 +258,15 @@ def run_one(arrival_id: int) -> None:
                 "to process it with. Link the channel to a programme, or process "
                 "the file manually."))
             return
+        # Taken off the programme since the file arrived (held, then released,
+        # say): not processed. Only they could fix its exceptions, and now
+        # they cannot. Re-runs by hand once they are added back.
+        if broker is not None and not svc.broker_on_programme(s, broker, program_id):
+            svc.mark_run(arrival_id, state="not_run", error=(
+                "The broker who sent this file is no longer on this programme, so it "
+                "was not processed. Add them back to the programme, then process it "
+                "again."))
+            return
         pipe = _live_pipeline(s, tenant_id, program_id, broker)
         if pipe is None:
             svc.mark_run(arrival_id, state="not_run", error=NO_SETUP_ERROR)

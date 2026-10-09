@@ -552,6 +552,17 @@ def assert_can_amend(principal: Principal) -> None:
              "re-validate it.")
 
 
+def require_contract_broker(broker_party_id) -> None:
+    """A contract is always WITH one broker (9 Oct 2026). Saved with none, it
+    belonged to nobody: every broker on the programme could see it and be
+    checked against it. Said before anything is read or paid for."""
+    if broker_party_id is None:
+        raise HTTPException(
+            400, "Pick the broker this contract is with. A contract always "
+                 "belongs to one broker on the programme, so it cannot be "
+                 "saved without one.")
+
+
 def assert_broker_on_programme(s, broker_party_id, program_id,
                                file_owner_party_id=None) -> None:
     """Refuse a change to a file from a broker the carrier has taken OFF the

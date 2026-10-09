@@ -201,6 +201,15 @@ sftp_poller.start(app)
 import sftp_pull  # noqa: E402
 sftp_pull.start(app)
 
+# Kavachio's own SFTP server (6 Oct 2026). Each broker's SFTP channel has a
+# login of its own, emailed to them (sftp_accounts); signed in, a broker sees
+# only their channel's /incoming (upload — the collector above takes the file
+# from there) and /outbound (our answer to each file). Listens on
+# SFTP_SERVER_PORT (default 2022). Opt out with SFTP_SERVER_ENABLED=0 where
+# something else serves SFTP_ROOT.
+import sftp_server  # noqa: E402
+sftp_server.start(app)
+
 # 10.3 — email collector. Waits on the intake mailbox with IMAP IDLE and reads
 # it the moment mail arrives; falls back to a timer on a server without IDLE.
 # ON by default, but ONLY where a mailbox is configured — start() returns early

@@ -243,6 +243,10 @@ export const addProgrammeBroker = (programId: number, brokerPartyId: number) =>
        ok: boolean; reactivated: boolean; link_id: number | null;
        /** True when this became a request for the carrier admin. */
        pending?: boolean; request_id?: number; message?: string;
+       /** Set only for a broker taken off this programme before: they are
+        *  emailed that they are back (a first-time add emails nobody). */
+       added_back?: boolean; emailed?: number; email_failed?: string[];
+       no_contact?: boolean;
      });
 
 /** Removing a pair that already carries contracts DEACTIVATES it — the

@@ -634,6 +634,13 @@ function DirectSetupScreen() {
     && pipelines.length === 0;
   const scopeIncomplete =
     programId === "" || (scope.hasBrokers !== true && pipelines.length === 0);
+  // A broker must be picked before anything after Setup Details opens (9 Oct).
+  // Left blank, the contract uploaded here was saved with no broker, and every
+  // broker on the programme could then see it and be checked against it.
+  const brokerMissing = programId === "" || scope.brokerPartyId === "";
+  const brokerGateMsg = programId === ""
+    ? "Select a programme and a broker first."
+    : "Select a broker first.";
 
 
   // Populate the editor from an upload/editor response (shared by build + load).
@@ -755,6 +762,8 @@ function DirectSetupScreen() {
   // none ticked — and "upload one" is the wrong advice for the second.
   function missingForBuild(): string[] {
     const missing: string[] = [];
+    if (programId === "") missing.push("a programme and a broker");
+    else if (scope.brokerPartyId === "") missing.push("a broker");
     if (!inputFile) missing.push("the input template");
     if (staged.length === 0) {
       missing.push(scope.boundContracts.length > 0
@@ -810,9 +819,9 @@ function DirectSetupScreen() {
     // from a reporting standard or from the contract counts too, and when the
     // scope already resolves to one there is nothing to upload at all.
     const existingTemplateId = resolved?.template?.id ?? 0;
-    if (carrierId === "" || programId === "" || !inputFile || staged.length === 0) {
-      setErr(carrierId === "" || programId === ""
-        ? "Select a programme and broker first."
+    if (carrierId === "" || brokerMissing || !inputFile || staged.length === 0) {
+      setErr(carrierId === "" || brokerMissing
+        ? brokerGateMsg
         : `Still needed: ${missingForBuild().join("; ")}.`);
       return;
     }
@@ -1217,10 +1226,21 @@ function DirectSetupScreen() {
   // thing it builds is made of all three.
   const tabs: SetupTab[] = useMemo(() => [
     { key: "details", label: "Setup Details", step: 1 },
-    { key: "documents", label: "Documents", step: 2 },
-    { key: "output", label: "Output BDX Template", step: 3 },
-  ], []);
+    { key: "documents", label: "Documents", step: 2,
+      disabled: brokerMissing, disabledReason: brokerGateMsg },
+    { key: "output", label: "Output BDX Template", step: 3,
+      disabled: brokerMissing, disabledReason: brokerGateMsg },
+  ], [brokerMissing, brokerGateMsg]);
   const [tab, setTab] = useSetupTab(tabs);
+  // A link or a refresh can open ?tab=documents with no broker picked; send it
+  // back to Setup Details. Not while a broker named in the link is still being
+  // selected (the effect that picks it clears broker_party_id once it has).
+  useEffect(() => {
+    if (brokerMissing && tab !== "details" && !params.get("broker_party_id")) {
+      setTab("details");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brokerMissing, tab]);
   // What comes after the open tab, so the footer can offer it by name. Read
   // off the same list the strip is drawn from — a second, hand-written order
   // here is how the two would eventually disagree.
@@ -1523,10 +1543,8 @@ function DirectSetupScreen() {
                   is on the programme. Put a broker on it from the{" "}
                   <button type="button" className="underline font-medium"
                     onClick={() => navigate("/brokers")}>Brokers</button>{" "}
-                  screen and the uploads on the <b>Documents</b> tab open up. A
-                programme that already
-                  has a saved setup is not held shut this way — those predate the
-                  broker level and stay editable.
+                  screen and the uploads on the <b>Documents</b> tab open up. Setups
+                  already saved stay editable from the Bordereau Setups list.
                 </p>
               </div>
             )}
@@ -1947,8 +1965,8 @@ function DirectSetupScreen() {
           <div className="-mx-5 -mb-5 mt-6 flex flex-wrap items-center gap-x-4
             gap-y-3 rounded-b-lg border-t border-border bg-surface-2/60 px-5 py-4">
             <Button onClick={buildSetup}
-              disabled={building || !inputFile || staged.length === 0}
-              title={!building && (!inputFile || staged.length === 0)
+              disabled={building || brokerMissing || !inputFile || staged.length === 0}
+              title={!building && (brokerMissing || !inputFile || staged.length === 0)
                 ? `Still needed: ${missingForBuild().join("; ")}`
                 : (!building && !outFile && !resolved?.template
                     ? "No output template yet — you'll be offered the two ways to create one"
@@ -1963,7 +1981,7 @@ function DirectSetupScreen() {
                 disabled:!text-ink-soft disabled:ring-1 disabled:ring-inset disabled:ring-border">
               {"Set Up Bordereau Pipeline"}
             </Button>
-            {!building && (!inputFile || staged.length === 0) && (
+            {!building && (brokerMissing || !inputFile || staged.length === 0) && (
               <span className="inline-flex items-center gap-1.5 text-[12.5px] text-warn">
                 <AlertTriangle size={14} className="shrink-0" />
                 Still needed: {missingForBuild().join(", ")}
@@ -1986,6 +2004,8 @@ function DirectSetupScreen() {
                 form, it is not what the form is for. */}
             {nextTab && (
               <Button variant="secondary" className="ml-auto"
+                disabled={!!nextTab.disabled}
+                title={nextTab.disabled ? nextTab.disabledReason : undefined}
                 onClick={() => setTab(nextTab.key)}>
                 Next: {nextTab.label} <ArrowRight size={14} />
               </Button>

@@ -93,6 +93,44 @@ def forget(path: Path) -> None:
         _finished.pop(_key(path), None)
 
 
+# Files Kavachio's own SFTP server (sftp_server) has open for writing right now,
+# with how many handles. A stalled upload is not finished however long it has
+# been quiet — and when the server is in this process we KNOW it is still open,
+# rather than guessing from a modification time. A file written by any other
+# SFTP server never appears here, so the quiet window still decides for it.
+_writing: dict[str, int] = {}
+_writing_lock = threading.Lock()
+
+
+def writing_started(path) -> None:
+    with _writing_lock:
+        k = _key(path)
+        _writing[k] = _writing.get(k, 0) + 1
+
+
+def writing_ended(path) -> None:
+    with _writing_lock:
+        k = _key(path)
+        n = _writing.get(k, 0) - 1
+        if n > 0:
+            _writing[k] = n
+        else:
+            _writing.pop(k, None)
+
+
+def writing_renamed(old, new) -> None:
+    """A file renamed while a handle on it is still open keeps its open count."""
+    with _writing_lock:
+        n = _writing.pop(_key(old), 0)
+        if n:
+            _writing[_key(new)] = _writing.get(_key(new), 0) + n
+
+
+def being_written(path) -> bool:
+    with _writing_lock:
+        return _key(path) in _writing
+
+
 class _Wake(FileSystemEventHandler):
     """Turns filesystem events into "go and look" — and nothing more."""
 

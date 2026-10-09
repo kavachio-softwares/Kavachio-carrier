@@ -257,10 +257,10 @@ ACTION_WORDS = {
     "direct_setup_uploaded":     "Uploaded a sample bordereau for a Bordereau Setup",
     "supplement_uploaded":       "Uploaded a supporting file",
     "contract_uploaded":         "Uploaded a contract",
-    "output_generated":          "Process Bordereau: Checked a bordereau and built the output BDX",
-    "direct_output_generated":   "Process Bordereau: Checked a bordereau and built the output BDX",
+    "output_generated":          "Process Bordereau: Checked a bordereau against the rules and prepared it in the carrier's layout",
+    "direct_output_generated":   "Process Bordereau: Checked a bordereau against the rules and prepared it in the carrier's layout",
     "direct_output_checked":     "Test-checked a file (nothing was sent)",
-    "datamodel.ingest":          "Loaded the file's rows into the data model",
+    "datamodel.ingest":          "Saved the processed bordereau file's rows in Kavachio's records",
     "validation.run":            "Ran the rule checks on a file",
     # exceptions
     "exception_decided":         "Resolved exceptions",
@@ -378,7 +378,7 @@ ACTION_WORDS = {
     "broker_request_withdrawn":   "Withdrew their broker request",
     # the run
     # The person's click; the result follows as its own row ("Checked a
-    # bordereau and built the output BDX", with the row and exception counts).
+    # bordereau against the rules…", with the row and exception counts).
     "bordereau_run":              "Uploaded a bordereau in the portal and ran the checks",
     "bordereau_setup_created":    "Created a Bordereau Setup",
     "missing_columns_analyzed":   "Checked which columns a file is missing",
@@ -390,6 +390,7 @@ ACTION_WORDS = {
     "intake_route_contacts_updated": "Changed who hears about a channel's files",
     "intake_key_created":         "Issued a channel API key",
     "intake_key_revoked":         "Revoked a channel API key",
+    "intake_sftp_login_issued":   "Issued a broker's SFTP login",
     # The same button collects from a mailbox, a folder or an SFTP server.
     "mailbox_polled":             "Checked a channel for new files",
     "intake_sftp_tested":         "Tested an SFTP server connection",
@@ -545,9 +546,9 @@ def action_words(action: str) -> str:
 # ("Kavachio · Automatic"), never as an anonymous "System": a reader new to the
 # trail must be able to tell a step the platform takes from one a person took.
 AUTOMATIC_ACTION_WORDS = {
-    "direct_output_generated": "Process Bordereau: Checked the received file and built the output BDX",
-    "output_generated":        "Process Bordereau: Checked the received file and built the output BDX",
-    "datamodel.ingest":        "Loaded the file's rows into the data model",
+    "direct_output_generated": "Checked the file it received against the rules and prepared the bordereau in the carrier's layout",
+    "output_generated":        "Checked the file it received against the rules and prepared the bordereau in the carrier's layout",
+    "datamodel.ingest":        "Saved the processed bordereau file's rows in Kavachio's records",
     "bordereau_sent":          "Sent the bordereau on to the carrier by email",
     "contract.rules_generated": "Built the checks for a contract from its clauses",
     "datamodel_mapping_proposed": "Suggested how a file's columns map to the data model",
@@ -1063,6 +1064,16 @@ SUPPRESSED_ACTIONS = (
 #   by "Secure link (…)"   millisecond as bdx_fix_link_validated, which has the
 #                          counts that matter (corrected, still failing, open).
 NEVER_SHOWN_ACTIONS = ("bdx_fix_link_answers",)
+# Kavachio's own bookkeeping after a file arrives. Nobody pressed anything and
+# nothing is decided by it, so a carrier or broker has no use for it: it is one
+# more line to read past, twice per run. Only the Kavachio admin sees it (9 Oct
+# 2026, user request). Nothing is deleted.
+#   datamodel.ingest        saving the processed file's rows to Kavachio's records
+#   output_generated and    the run itself, when Kavachio ran it unattended on a
+#   direct_output_generated file that arrived by email, SFTP or API. A run a
+#                           person started stays visible to everyone.
+PLATFORM_ONLY_ACTIONS = ("datamodel.ingest",)
+PLATFORM_ONLY_WHEN_AUTOMATIC = ("output_generated", "direct_output_generated")
 # The bordereau email to the carrier is switched off on purpose
 # (BORDEREAU_AUTO_SEND_EMAIL unset): send_bordereau still releases the version
 # and writes its bordereau_sent row with this mail_error, but no email was
@@ -1187,6 +1198,7 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("intake", "Ingestion channels",
      ("intake_route_created", "intake_route_updated",
       "intake_route_contacts_updated", "intake_key_created", "intake_key_revoked",
+      "intake_sftp_login_issued",
       "mailbox_polled", "intake_sftp_tested", "intake_guide_sent",
       "intake_guide_emailed", "intake.arrival.released",
       "intake.arrival.discarded", "intake_arrival_rerun"), CARRIER_SEATS),
@@ -1241,6 +1253,20 @@ def _actor_user_col(model):
     """
     col = getattr(model, "actor_user_id", None)
     return col if col is not None else getattr(model, "user_id", None)
+
+
+def _automatic_rows(model):
+    """Exactly the rows the table names "Kavachio · Automatic" — not every row
+    without an email on it, which took in the review link's rows (the broker)
+    and the held-file release (the carrier, by user id)."""
+    col = _actor_user_col(model)
+    auto = or_(model.actor.is_(None),
+               func.lower(model.actor).in_(sorted(_AUTOMATIC_ACTORS)),
+               func.lower(model.actor).like("kavachio%"))
+    if model is ActivityEvent:
+        auto = or_(auto, and_(model.actor.like("broker:%"),
+                              model.action.in_(sorted(_AUTOMATIC_BROKER_ACTIONS))))
+    return and_(col.is_(None), auto) if col is not None else auto
 
 
 def _scope_clause(model, sc: Scope):
@@ -1299,17 +1325,7 @@ def _actor_filter_clause(model, f: Filters):
         ors.append(model.actor.in_([f"broker:{b}" for b in f.actor_broker_ids]))
         ors.append(_in_broker_users(model, f.actor_broker_ids))
     if f.actor_system:
-        # Exactly the rows the table names "Kavachio · Automatic" — not every
-        # row without an email on it, which took in the review link's rows
-        # (the broker) and the held-file release (the carrier, by user id).
-        col = _actor_user_col(model)
-        auto = or_(model.actor.is_(None),
-                   func.lower(model.actor).in_(sorted(_AUTOMATIC_ACTORS)),
-                   func.lower(model.actor).like("kavachio%"))
-        if model is ActivityEvent:
-            auto = or_(auto, and_(model.actor.like("broker:%"),
-                                  model.action.in_(sorted(_AUTOMATIC_BROKER_ACTIONS))))
-        ors.append(and_(col.is_(None), auto) if col is not None else auto)
+        ors.append(_automatic_rows(model))
     return or_(*[o for o in ors if o is not None]) if ors else None
 
 
@@ -1979,6 +1995,10 @@ def _rows(s, sc: Scope, f: Filters, limit: int,
             # would list every resolution twice, once as "the broker".
             q = q.filter(ActivityEvent.action != "exception_decided")
             q = q.filter(ActivityEvent.action.notin_(NEVER_SHOWN_ACTIONS))
+            if not sc.everything:           # everyone but the Kavachio admin
+                q = q.filter(ActivityEvent.action.notin_(PLATFORM_ONLY_ACTIONS))
+                q = q.filter(~and_(ActivityEvent.action.in_(PLATFORM_ONLY_WHEN_AUTOMATIC),
+                                   _automatic_rows(ActivityEvent)))
             q = q.filter(~and_(
                 ActivityEvent.action == "bordereau_sent",
                 func.coalesce(cast(ActivityEvent.details, JSONB)["mail_error"].astext, "")

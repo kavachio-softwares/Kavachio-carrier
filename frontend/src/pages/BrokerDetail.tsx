@@ -76,12 +76,27 @@ export default function BrokerDetail() {
       // assign is a request their carrier admin has to answer, so it did not
       // happen at all yet: "they can produce on it now" would be wrong twice
       // over.
-      setAssignMsg(r.pending
+      const parts = [r.pending
         ? (r.message
            ?? `${name} has gone to the carrier to approve.`)
         : r.reactivated
         ? `Back on ${name}. Their earlier contracts there are live again.`
-        : `Added to ${name}. They can produce on it now.`);
+        : r.added_back
+        ? `Back on ${name}. They can produce on it again.`
+        : `Added to ${name}. They can produce on it now.`];
+      // Only a broker coming back after a removal is emailed — the same
+      // wording as the removal's result line.
+      if (r.added_back) {
+        if (r.emailed) {
+          parts.push(`We emailed ${r.emailed} ${r.emailed === 1 ? "person" : "people"} at the broker.`);
+        } else if (r.no_contact) {
+          parts.push("There is no email address on record for them, so please tell them yourself.");
+        }
+        if (r.email_failed?.length) {
+          parts.push(`The email could not be delivered to ${r.email_failed.join(", ")}.`);
+        }
+      }
+      setAssignMsg(parts.join(" "));
       setAssignTo("");
       load();
     } catch (e: any) {

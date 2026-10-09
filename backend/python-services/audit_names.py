@@ -98,6 +98,7 @@ ACTION_TARGET_KIND = {
     "intake_route_contacts_updated": "route",
     "intake_arrival_rerun": "arrival",
     "intake_key_created": "key", "intake_key_revoked": "key",
+    "intake_sftp_login_issued": "route",
     "contract_activated": "contract",
     "tenant_created": "tenant_code", "tenant_updated": "tenant_code",
     "intake.arrival.released": "arrival", "intake.arrival.discarded": "arrival",
@@ -980,7 +981,20 @@ def _mapping_proposed(names, d):
     return [(", ".join(got), None)] if got else []
 
 
+def _rows_saved(names, d):
+    """The background save of a file's rows: how many went in. "10 loaded ·
+    0 failed" said nothing to someone who has never heard of the data model."""
+    total, ok, bad = d.get("total"), d.get("loaded"), d.get("failed")
+    if total is None or ok is None:
+        return _generic(names, d)
+    parts = [(f"{ok} of {total} rows saved", None)]
+    if bad:
+        parts.append((f"{bad} could not be saved", None))
+    return parts
+
+
 _SPECIAL = {
+    "datamodel.ingest": _rows_saved,
     "bordereau_sent": _bordereau_sent,
     "bdx_fix_link_validated": _fix_validated,
     "bdx_fix_link_code_sent": _fix_link_code,

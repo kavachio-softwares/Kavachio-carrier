@@ -113,11 +113,16 @@ def sftp_root() -> Path:
 
 
 def sftp_port() -> int:
-    """The port brokers connect to — SFTP_PORT, else 22."""
-    try:
-        return int(os.getenv("SFTP_PORT", "22"))
-    except ValueError:
-        return 22
+    """The port brokers connect to — SFTP_PORT, else the port Kavachio's own
+    SFTP server listens on (sftp_server), else 22."""
+    raw = os.getenv("SFTP_PORT", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            return 22
+    import sftp_server
+    return sftp_server.listen_port() if sftp_server.enabled() else 22
 
 
 def sftp_host() -> str:
@@ -155,14 +160,29 @@ def slugify(value: str) -> str:
     return text or "broker"
 
 
-def build_sftp_address(carrier_name: str, broker_name: str) -> str:
+def build_sftp_address(carrier_name: str, broker_name: str, *,
+                       tenant_id: Optional[int] = None,
+                       broker_party_id: Optional[int] = None,
+                       program_id: Optional[int] = None) -> str:
     """The path half of a broker's SFTP address: "insurisk/corvin".
 
     One folder per broker, never one shared folder per carrier. A shared folder
     means working out who sent what from the filename, which is exactly the
     guesswork a route is supposed to remove.
+
+    Given the ids (every channel made since 9 Oct 2026) the folder carries them
+    — "insurisk-c12/corvin-b340", plus "-p56" for a channel kept to one
+    programme — because names alone are not unique: two carriers whose names
+    read alike, each with a broker of the same name, would otherwise share ONE
+    folder and collect each other's files. Ids make that impossible, and let one
+    broker have a channel per programme. Older channels keep the folder they have.
     """
-    return f"{slugify(carrier_name)}/{slugify(broker_name)}"
+    if tenant_id is None or broker_party_id is None:
+        return f"{slugify(carrier_name)}/{slugify(broker_name)}"
+    broker_part = f"{slugify(broker_name)[:40].strip('-')}-b{broker_party_id}"
+    if program_id is not None:
+        broker_part += f"-p{program_id}"
+    return f"{slugify(carrier_name)[:40].strip('-')}-c{tenant_id}/{broker_part}"
 
 
 def is_external_sftp(route) -> bool:
@@ -454,6 +474,18 @@ def broker_programmes(session, tenant_id: int, broker_party_id) -> list:
             .order_by(Program.name).all())
 
 
+def broker_on_programme(session, broker_party_id, program_id) -> bool:
+    """Is this broker on this programme now — the same ACTIVE link
+    broker_programmes reads, and carrier_scope.assert_broker_on_programme."""
+    from db import ProgramBroker
+    if not broker_party_id or not program_id:
+        return False
+    return (session.query(ProgramBroker.id)
+            .filter(ProgramBroker.program_id == program_id,
+                    ProgramBroker.broker_party_id == broker_party_id,
+                    ProgramBroker.status == "active").first()) is not None
+
+
 def live_contracts(session, tenant_id: int, program_id: Optional[int],
                    broker_party_id) -> list:
     """The contracts a file on this programme can be written under: the
@@ -512,6 +544,33 @@ def _listed(names) -> str:
     return ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
 
 
+def _programme_label(p) -> str:
+    return f"{p.name} ({programme_code(p)})"
+
+
+def _programme_names(p) -> tuple:
+    return (programme_ref(p), p.name, *_code_forms(programme_code(p)))
+
+
+def _names_programme_not_on(session, tenant_id: int, progs: list, text: str,
+                            where: str) -> Optional[str]:
+    """A file that names one of the carrier's programmes this broker is NOT on
+    (say, one they were taken off) — and none they are on. Refused, rather than
+    quietly filed under the broker's one remaining programme. The programme is
+    not named back: the broker is told only which ones they CAN send for."""
+    from db import Program
+    if _named_in(text, progs, _programme_names):
+        return None
+    on = {p.id for p in progs}
+    others = [p for p in session.query(Program).filter(Program.tenant_id == tenant_id).all()
+              if p.id not in on]
+    if not others or not _named_in(text, others, _programme_names):
+        return None
+    return (f"{where[0].upper()}{where[1:]} names a programme this broker is not on, so "
+            f"the file is not accepted. Files can be sent for: "
+            f"{_listed(_programme_label(p) for p in progs)}.")
+
+
 def identify(session, route: Optional[IntakeRoute], *, filename: str,
              period: Optional[str] = None, period_hint: Optional[str] = None,
              program_id: Optional[int] = None,
@@ -537,9 +596,27 @@ def identify(session, route: Optional[IntakeRoute], *, filename: str,
              "sftp": "the file name"}.get(route.channel, "the request")
 
     # ── programme ──
+    # A broker taken off a programme (hierarchy_routes.programme_broker_remove)
+    # can no longer send for it — by any channel. Refused with the reason,
+    # never held as "no contract yet" nor filed under another programme.
     pid = route.program_id or program_id
-    if pid is None:
+    if pid is not None:
+        if not broker_on_programme(session, broker, pid):
+            from db import Program
+            prog = session.get(Program, pid)
+            return found, (f"This broker is not on "
+                           f"{_programme_label(prog) if prog else 'that programme'}, "
+                           f"so files for it are not accepted. If that is a mistake, "
+                           f"ask the carrier to add them back.")
+    else:
         progs = broker_programmes(session, tenant, broker)
+        if not progs:
+            return found, ("This broker is not on any programme, so files cannot be "
+                           "accepted. If that is a mistake, ask the carrier to add "
+                           "them to the programme.")
+        refused = _names_programme_not_on(session, tenant, progs, text, where)
+        if refused:
+            return found, refused
         if len(progs) == 1:
             pid = progs[0].id
         elif progs:
@@ -550,8 +627,6 @@ def identify(session, route: Optional[IntakeRoute], *, filename: str,
                                f"{_listed(f'{p.name} ({programme_code(p)})' for p in progs)}. "
                                f"Name one, or its code, in {where}.")
             pid = named[0].id
-        else:
-            return found, None          # on no programme: no contract, so it is held
     found["program_id"] = pid
     from db import Program
     prog = session.get(Program, pid)

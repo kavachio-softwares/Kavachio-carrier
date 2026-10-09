@@ -127,7 +127,10 @@ export default function BordereauSetupDetail() {
       .then(async r => {
         setPipeline(r.data);
         if (r.data.input_format_id) {
-          const e = await api.get<EditorResp>(`/direct/format/${r.data.input_format_id}/editor`);
+          // The carrier's own sample, never the last file processed: a column a
+          // broker adds or drops in Process Bordereau must not change this page.
+          const e = await api.get<EditorResp>(`/direct/format/${r.data.input_format_id}/editor`,
+            { params: { original_sample: true } });
           setEditor(e.data);
           // One sheet at a time (chips pick it) — a setup can have many
           // sheets, and all of them open at once made the page unusably long.

@@ -302,6 +302,10 @@ def _log_broker_linked(s, tid: int, principal: Principal, program_id: int,
         "program_name": getattr(prog, "name", None),
         "link_status": result.get("status"),
         "reactivated": result.get("reactivated"),
+        # A broker coming back after a removal is emailed; how many it reached.
+        **({"added_back": True, "emailed": result.get("emailed", 0),
+            "email_failed": len(result.get("email_failed") or [])}
+           if result.get("added_back") else {}),
     })
 
 
@@ -390,11 +394,89 @@ def programme_broker_add(program_id: int, body: BrokerAssignBody,
             return raise_request_for_existing_broker(
                 s, tid, program_id, party, principal)
 
+        # Taken off this programme before? Read BEFORE the link is rewritten.
+        # Only a broker coming BACK is emailed; a first-time add sends nothing.
+        back = _was_removed(s, tid, program_id, party.id)
         result = _do_programme_link(s, tid, program_id, party,
                                     principal.user_id, "active")
-        _log_broker_linked(s, tid, principal, program_id, party, result)
+        notify = (_tell_broker_added_back(s, tid, principal, program_id, party.id)
+                  if back else [])
         s.commit()
-        return result
+
+    # After the commit, exactly as the removal email: never tell a broker they
+    # are back while the database says they are not.
+    sent, failed = 0, []
+    for email, send in notify:
+        try:
+            send()
+            sent += 1
+        except Exception as ex:  # noqa: BLE001
+            import logging
+            logging.getLogger("bdx.email").warning(
+                "broker-added-back email to %s failed: %s", email, ex)
+            failed.append(email)
+    if back:
+        result.update({"added_back": True, "emailed": sent, "email_failed": failed,
+                       "no_contact": not notify})
+    with SessionLocal() as s:
+        # Read again: the rows of the session above expired at its commit.
+        _log_broker_linked(s, tid, principal, program_id,
+                           s.get(Party, body.broker_party_id), result)
+    return result
+
+
+def _was_removed(s, tid: int, program_id: int, broker_party_id: int) -> bool:
+    """Was this broker taken off this programme before (programme_broker_remove)?
+
+    A link with contracts under it is kept as `inactive`; one without is
+    deleted outright, so then only the removal's own audit row remembers it."""
+    from db import ActivityEvent
+    link = (s.query(ProgramBroker.status)
+            .filter(ProgramBroker.program_id == program_id,
+                    ProgramBroker.broker_party_id == broker_party_id).first())
+    if link is not None and link[0] == "inactive":
+        return True
+    return (s.query(ActivityEvent.id)
+            .filter(ActivityEvent.tenant_id == tid,
+                    ActivityEvent.action == "broker_removed_from_programme",
+                    ActivityEvent.target == f"party:{broker_party_id}",
+                    ActivityEvent.details["program_id"].as_integer() == program_id)
+            .first()) is not None
+
+
+def _tell_broker_added_back(s, tid: int, principal: Principal, program_id: int,
+                            broker_party_id: int) -> list:
+    """The "you are back on it" email to a broker the carrier had removed —
+    the counterpart of _tell_broker_removed, to the same contacts, with the
+    same Cc. Returns [(email, send)], or [] when nobody can be emailed."""
+    from submission_calendar_service import broker_contacts
+    prog = s.get(Program, program_id)
+    carrier = s.get(Tenant, tid)
+    carrier_name = ((carrier.legal_name or carrier.tenant_name) if carrier else None) or "Your carrier"
+    program_name = (prog.name if prog else None) or f"Programme {program_id}"
+    contacts = broker_contacts(s, [broker_party_id]).get(broker_party_id, [])
+    try:
+        from audit import actor_email
+        copy_to = actor_email(principal.user_id)
+    except Exception:  # noqa: BLE001
+        copy_to = None
+
+    def _sender(c: dict):
+        def send() -> None:
+            from email_utils import send_email, broker_added_back_email_html
+            send_email(
+                c["email"], f"{carrier_name} has added you back to {program_name}",
+                broker_added_back_email_html(c.get("name"), carrier_name, program_name),
+                text=(f"Hi {c.get('name')}, " if c.get("name") else "")
+                + f"{carrier_name} has put you back on the programme {program_name} on "
+                  "Kavachio. You can send bordereaux for it again, by upload, email, SFTP "
+                  "or API, and fix or approve exceptions on its files. If you send by SFTP, "
+                  "API or email, your existing login, key or address works as before. "
+                  "Files you sent "
+                  f"earlier, and your contracts, are still on record with {carrier_name}.",
+                account="NOTIFY", cc=copy_to)
+        return send
+    return [(c["email"], _sender(c)) for c in contacts if c.get("email")]
 
 
 def _tell_broker_removed(s, tid: int, principal: Principal, program_id: int,
@@ -507,6 +589,17 @@ def programme_broker_remove(program_id: int, broker_party_id: int,
             logging.getLogger("bdx.email").warning(
                 "broker-removed email to %s failed: %s", email, ex)
             failed.append(email)
+    # Signed in to Kavachio's SFTP server for this programme right now? Cut off
+    # at once; their next sign-in is refused (sftp_accounts.verify). Never
+    # fails the removal.
+    try:
+        import sftp_accounts
+        sftp_accounts.drop_removed(tid, broker_party_id)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger("kavachio.sftp_accounts").warning(
+            "could not close the SFTP sessions of removed broker %s", broker_party_id,
+            exc_info=True)
     # `no_contact`: they were live but nobody on record can be emailed, so the
     # carrier has to tell them another way — the screen says so.
     out.update({"emailed": sent, "email_failed": failed,

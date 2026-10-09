@@ -2071,8 +2071,8 @@ async def program_contract_upload(
     # (hierarchy_routes: `c.broker_party_id == party.id`). Without this the row
     # is created with a NULL broker and appears under nobody — the contract
     # exists, the setup exists, and the programme still looks empty.
-    # Optional: a carrier-held contract that predates the broker level, and any
-    # caller that does not know the broker, still works exactly as before.
+    # REQUIRED since 9 Oct 2026 — declared Optional only so that a caller who
+    # leaves it out gets the plain sentence below rather than a bare 422.
     broker_party_id: Optional[int] = Form(default=None),
     schedule_key: Optional[str] = Form(default=None),
     reference_files: Optional[list[UploadFile]] = File(default=None),
@@ -2104,8 +2104,11 @@ async def program_contract_upload(
     — passes it here and the row is filed under that broker instead of landing
     as a carrier-held contract nobody's page can show. It also narrows what this
     upload supersedes: replacing one broker's contract must not retire another
-    broker's on the same programme. Optional, because the setup builder uploads
-    at (carrier, programme) scope and those contracts genuinely have no broker.
+    broker's on the same programme. REQUIRED (9 Oct 2026): the setup builder used
+    to upload with none, and that contract then belonged to no broker, so every
+    broker on the programme could see it and be checked against it. Contracts
+    saved before this keep working as they were; no new one is saved without a
+    broker.
 
     Reference documents: when the contract DEFERS rule content to an external
     document ("Excluded Classes: per the Purchasing Guidelines on file"), the
@@ -2122,6 +2125,8 @@ async def program_contract_upload(
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
+    from carrier_scope import require_contract_broker
+    require_contract_broker(broker_party_id)
 
     # -------------------------------------------------
     # RESOLVE OUTPUT TEMPLATE + FETCH ITS FIELDS

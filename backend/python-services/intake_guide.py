@@ -7,6 +7,10 @@ shows the carrier an example; this sends the broker the same example, with the
 rules for their own programmes, so the first file they send is not the one that
 teaches them the format by being turned away.
 
+An SFTP channel on Kavachio's own server (sftp_server) also carries the
+broker's login: host, port, user name and — only in the email sent when it is
+made — the password, with the server's fingerprint to check on first connect.
+
 Sent on the NOTIFY account behind the same switches as every other broker
 email: BROKER_NOTIFY_ENABLED, and the MAIL_ALLOWED_RECIPIENTS test guard.
 """
@@ -48,10 +52,13 @@ def recipients(s, route) -> list[str]:
 
 
 def build(s, route, *, carrier: str, send_to: Optional[str],
-          api_key: Optional[str] = None, api_base: Optional[str] = None) -> dict:
+          api_key: Optional[str] = None, api_base: Optional[str] = None,
+          sftp_login: Optional[dict] = None) -> dict:
     """{subject, html, text, reply_to} for one route. An API route's email
     carries its new key (`api_key`, plaintext — only ever at the moment it is
-    minted) and the endpoint (`api_base`)."""
+    minted) and the endpoint (`api_base`). An SFTP route on Kavachio's server
+    carries its login (`sftp_login`: username, and `password` only at the
+    moment one is made; `issued_on` when it is not)."""
     import intake_service as svc
     from db import Program
     from notifications import _email_text, notification_email_html
@@ -75,6 +82,13 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
     if pull:
         import sftp_pull
         every = (sftp_pull.load_config(s, route.id) or {}).get("interval_minutes")
+    # An SFTP channel on Kavachio's own server, with the broker's login on it.
+    login = (sftp_login or {}) if route.channel == "sftp" and not pull else {}
+    fp = None
+    if login.get("username"):
+        import sftp_server
+        fps = sftp_server.fingerprints()
+        fp = f"{fps[0]['fingerprint']} ({fps[0]['type']})" if fps else None
 
     d = _example_month()
     month, ym = d.strftime("%B %Y"), d.strftime("%Y-%m")
@@ -102,7 +116,8 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
                    f"  -F \"period={ym}\" \\\n"
                    f"  -F \"program_ref={pcode}\""
                    + (f" \\\n  -F \"contract_ref={ccode}\"" if ccode else ""))
-    elif pull:
+    elif pull or login.get("username"):
+        # Signed in, a broker starts in their upload folder: the name is all.
         where = "the file name"
         example = f"{pcode}_{f'{ccode}_' if ccode else ''}{ym}.xlsx"
     else:
@@ -131,11 +146,14 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
         "api": "What each request must send (programme and contract: code or name)",
     }.get(route.channel, "What the file name must say (programme and contract: code or name)")
     how = {"email": "by email", "api": "through our API"}.get(route.channel, "by SFTP")
+    new_login = bool(login.get("password"))
     title = (f"Your API access for sending bordereaux to {carrier}" if api
+             else f"Your SFTP login for sending bordereaux to {carrier}" if new_login
              else f"How to send your bordereaux to {carrier}")
     intro = (f"{carrier} has set up a way for you to send your bordereaux {how}"
              + (f" for {prog}." if not shared and plist else ".")
-             + (" Your API key is below." if api and api_key else ""))
+             + (" Your API key is below." if api and api_key else "")
+             + (" Your login is below." if new_login else ""))
     more = [(f"Send each file as in the example. You can give the programme and "
              f"contract by code or by name — the code is shorter and avoids typing mistakes. "
              f"A request missing what is required is refused, with the reason and the valid "
@@ -156,6 +174,27 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
                     + (f"every {every} minutes" if every else "regularly")
                     + ". Put each file there in one piece; a file still being uploaded "
                       "is left until it is complete.")
+    elif route.channel == "sftp" and login.get("username"):
+        folders = ("Upload each file into /incoming, the folder you start in. A file is "
+                   "collected as soon as it has finished uploading and then leaves "
+                   "/incoming, so an empty folder means everything arrived. Our answer to "
+                   "each file — a receipt, then the result and any exceptions — is put in "
+                   "/outbound. Only you can see these two folders.")
+        if new_login:
+            more.append("Sign in with the user name and password above, using any SFTP "
+                        "client — FileZilla, WinSCP or your own system. " + folders)
+            more.append(f"Keep the password private: anyone who has it can send files as "
+                        f"you. If it is lost or exposed, ask {carrier} for a new one — the "
+                        f"old one stops working at once.")
+        else:
+            when = login.get("issued_on")
+            more.append("Sign in with the user name above and the password emailed to you"
+                        + (f" on {when}" if when else "")
+                        + f". If you no longer have it, ask {carrier} for a new one. "
+                        + folders)
+        if fp:
+            more.append(f"The first time you connect, your SFTP client shows the server's "
+                        f"fingerprint. Check that it is {fp} before you accept it.")
     elif route.channel == "sftp":
         more.append("Your SFTP login (user name and password, or key) is shared with you "
                     "separately.")
@@ -168,13 +207,22 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
         where_to = ("Send to", send_to)
     elif pull:
         where_to = ("Collected from", "The agreed SFTP location")
+    elif login.get("username"):
+        where_to = ("Upload to", "/incoming — the folder you start in")
     else:
         where_to = ("Upload to", f"{svc.display_address(route)}/incoming")
+    # Host and port apart, the way an SFTP client asks for them.
     facts = [("Channel", _CHANNEL_WORD.get(route.channel, route.channel)),
              where_to,
              ("API key", api_key if api else None),
+             ("Host", svc.sftp_host() if login.get("username") else None),
+             ("Port", svc.sftp_port() if login.get("username") else None),
+             ("User name", login.get("username")),
+             ("Password", login.get("password")),
+             ("Results", "/outbound" if login.get("username") else None),
+             ("Server fingerprint", fp),
              ("Server", f"{svc.sftp_host()} (port {svc.sftp_port()})"
-              if route.channel == "sftp" and not pull else None),
+              if route.channel == "sftp" and not pull and not login.get("username") else None),
              ("Send from", route.address if route.channel == "email" else None),
              ("Cc", cc),
              ("Programme" if len(plist) == 1 else "Programmes",
@@ -214,11 +262,14 @@ def build(s, route, *, carrier: str, send_to: Optional[str],
 
 
 def send(s, route, *, carrier: str, send_to: Optional[str],
-         api_key: Optional[str] = None, api_base: Optional[str] = None) -> dict:
+         api_key: Optional[str] = None, api_base: Optional[str] = None,
+         sftp_login: Optional[dict] = None) -> dict:
     """Email the guide to the broker in the background. Returns who it is going
-    to, and whether broker emails are switched on at all. An API route is only
+    to, whether broker emails are switched on at all, and which addresses the
+    MAIL_ALLOWED_RECIPIENTS test guard will skip (`blocked`) — so a screen can
+    show a secret that is not really going to arrive. An API route is only
     emailed with a key — when one is minted."""
-    from submission_service import notifications_enabled
+    from submission_service import _blocked_by_test_mode, notifications_enabled
     if route.channel not in _CHANNEL_WORD or (route.channel == "api" and not api_key):
         return {"recipients": [], "sending": False}
     rcpts = recipients(s, route)
@@ -226,13 +277,13 @@ def send(s, route, *, carrier: str, send_to: Optional[str],
     if not rcpts or not on:
         return {"recipients": rcpts, "sending": False}
     msg = build(s, route, carrier=carrier, send_to=send_to,
-                api_key=api_key, api_base=api_base)
+                api_key=api_key, api_base=api_base, sftp_login=sftp_login)
     tenant_id, route_id = route.tenant_id, route.id
+    blocked = [r for r in rcpts if _blocked_by_test_mode(r)]
 
     def _run():
         from audit import log_activity
         from email_utils import send_email
-        from submission_service import _blocked_by_test_mode
         for r in rcpts:
             if _blocked_by_test_mode(r):
                 status, err = "skipped", "test mode: address not in MAIL_ALLOWED_RECIPIENTS"
@@ -252,4 +303,4 @@ def send(s, route, *, carrier: str, send_to: Optional[str],
                 pass
 
     threading.Thread(target=_run, name=f"intake-guide-{route_id}", daemon=True).start()
-    return {"recipients": rcpts, "sending": True}
+    return {"recipients": rcpts, "sending": True, "blocked": blocked}

@@ -49,11 +49,52 @@ export type IntakeRoute = {
   guide?: GuideSent;
   /** SFTP pull routes only: the server Kavachio collects from. The password
    *  or key is never sent back — `has_secret` only says one is stored. Absent
-   *  (or null) on an older local-folder SFTP route. */
+   *  (or null) on an SFTP route on Kavachio's own server. */
   sftp?: SftpRouteInfo | null;
+  /** SFTP routes on Kavachio's own server: the broker's login. Null when the
+   *  channel has none yet (one made before logins existed). */
+  login?: SftpLogin | null;
 };
 
-export type GuideSent = { recipients: string[]; sending: boolean };
+/** `blocked`: recipients the MAIL_ALLOWED_RECIPIENTS test guard will skip —
+ *  "sending" to them delivers nothing. */
+export type GuideSent = { recipients: string[]; sending: boolean; blocked?: string[] };
+
+// ── Kavachio's own SFTP server ──────────────────────────────────────────────
+// The broker signs in with a login of their own and uploads into /incoming;
+// Kavachio's answer to each file is put in /outbound.
+
+/** A broker's login. The password is only ever in the response that made it. */
+export type SftpLogin = {
+  username: string;
+  host: string;
+  port: number;
+  /** Where they upload — and where a login starts. */
+  folder: string;
+  /** Where Kavachio puts its receipt and result for each file. */
+  results_folder: string;
+  /** When the current password was made. */
+  issued_at: string | null;
+  last_login_at: string | null;
+  live: boolean;
+  password?: string;
+};
+
+export type SftpServerInfo = {
+  host: string;
+  port: number;
+  /** listening | waiting | failed | starting | not_started | off */
+  status: { mode: string; port?: number; error?: string | null };
+  fingerprints: { type: string; fingerprint: string }[];
+};
+
+/** A new password for the broker's login (or their first login), emailed to
+ *  them. The old password stops working at once. */
+export async function newSftpLogin(routeId: number): Promise<{ login: SftpLogin; guide: GuideSent }> {
+  const { data } = await api.post(`/intake/routes/${routeId}/sftp-login`, null,
+    { params: { mga: currentMga() } });
+  return data;
+}
 
 // ── external SFTP pull ──────────────────────────────────────────────────────
 // Kavachio signs in to the carrier's (or the broker's) own SFTP server as a
@@ -145,6 +186,9 @@ export type RoutesResponse = {
   /** Channels that are wired end to end and can be created. */
   creatable: Channel[];
   sftp_host: string;
+  /** Kavachio's own SFTP server, where an SFTP channel's broker signs in.
+   *  Optional so an older server that does not send it still renders. */
+  sftp_server?: SftpServerInfo;
   /** 10.3 — the inbox brokers email. Config like sftp_host, not data. */
   email_mailbox: string | null;
   /** The carrier address brokers must copy (Cc) on every bordereau email. */
@@ -283,9 +327,11 @@ export async function createRoute(body: {
    *  broker emails the same inbox, so the mailbox cannot tell routes apart —
    *  who the mail comes from is what does. */
   sender_email?: string;
-  /** REQUIRED for channel "sftp": the server to collect from. `fingerprint`
-   *  must be the one the last successful test returned — it is pinned, and the
-   *  server re-tests before it saves. */
+  /** Channel "sftp" only, and only to collect from the BROKER's own server.
+   *  `fingerprint` must be the one the last successful test returned — it is
+   *  pinned, and the server re-tests before it saves. Left out, the channel is
+   *  on Kavachio's own SFTP server: the reply carries the broker's new `login`
+   *  (with its password, once) and the email that takes it to them. */
   sftp?: SftpConnection & {
     after: SftpAfter; interval_minutes: SftpInterval; fingerprint: string;
   };

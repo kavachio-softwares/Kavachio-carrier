@@ -168,7 +168,10 @@ def current_intake_principal(
             raise _invalid()
 
         route = s.get(IntakeRoute, cred.route_id)
-        if route is None:
+        # The same table holds SFTP logins (sftp_accounts). Their fingerprint
+        # can never match a key — the user name is inside it — but a credential
+        # only ever opens the door it was made for.
+        if route is None or route.channel != "api":
             raise _invalid()
 
         # A switched-off route turns files away WITH a note rather than

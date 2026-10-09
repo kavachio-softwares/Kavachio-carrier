@@ -328,6 +328,7 @@ _FRIENDLY = {
     ("POST",   "/intake/routes/{id}/poll"):          "mailbox_polled",
     ("POST",   "/intake/sftp/test"):                 "intake_sftp_tested",
     ("POST",   "/intake/routes/{id}/guide"):         "intake_guide_sent",
+    ("POST",   "/intake/routes/{id}/sftp-login"):    "intake_sftp_login_issued",
     ("POST",   "/intake/arrivals/{id}/release"):     "file_arrival_released",
     # Rows written before these routes logged only themselves (_SELF_LOGGED).
     ("POST",   "/intake/arrivals/{id}/discard"):     "intake.arrival.discarded",
@@ -467,6 +468,8 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/intake/arrivals/\d+/release$")),
     ("POST",   re.compile(r"^/intake/arrivals/\d+/discard$")),
     ("DELETE", re.compile(r"^/intake/keys/\d+$")),
+    # A broker's SFTP login writes intake_sftp_login_issued, with the user name.
+    ("POST",   re.compile(r"^/intake/routes/\d+/sftp-login$")),
     ("PATCH",  re.compile(r"^/rule-library/\d+$")),
     # Switching a channel on/off writes intake_route_updated ("switched off").
     ("PATCH",  re.compile(r"^/intake/routes/\d+$")),

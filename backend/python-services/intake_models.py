@@ -173,6 +173,10 @@ class IntakeCredential(Base):
     the pepper held outside the database, so a dump alone yields no working
     keys; `key_prefix` is the indexed handle parsed out of the request header.
     Revoked, never deleted — arrivals point at the credential that carried them.
+
+    Since 6 Oct 2026 an SFTP channel on Kavachio's own server keeps its
+    broker's login here too (sftp_accounts): `key_prefix` is the user name and
+    `key_hash` the password's keyed fingerprint. Same columns, no migration.
     """
     __tablename__ = "intake_credential"
 

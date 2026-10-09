@@ -203,6 +203,8 @@ export default function Files() {
         mailbox={addData?.mailbox ?? null}
         carrierCc={addData?.carrierCc ?? null}
         mailReady={addData?.mailReady ?? false}
+        sftpServer={addData?.sftpServer ?? null}
+        sftpLoginsByBroker={addData?.sftpLoginsByBroker ?? {}}
         onClose={() => setAdding(false)}
         onCreated={() => { setAdding(false); setRefreshKey(k => k + 1); }} />
     </div>
