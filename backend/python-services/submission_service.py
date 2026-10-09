@@ -915,9 +915,34 @@ def _sweep_every() -> int:
         return 300
 
 
+def _log_email_switches() -> None:
+    """One line at start-up saying which emails this server will send.
+
+    Both switches are off unless set, and MAIL_ALLOWED_RECIPIENTS quietly keeps
+    every email to a test list, so without this nothing shows whether a broker
+    will hear anything. Only ON/OFF and a count — never an address or a secret.
+    """
+    from email_poller import _reply_on_refusal
+    from email_utils import _allowed_recipients
+    from settings import SETTINGS, _DEV_SECRET
+    word = lambda on: "ON" if on else "OFF"   # noqa: E731
+    n = len(_allowed_recipients())
+    line = (f"broker emails {word(notifications_enabled())} · "
+            f"refusal replies {word(_reply_on_refusal())} · "
+            "MAIL_ALLOWED_RECIPIENTS: "
+            + (f"{n} address{'es' if n != 1 else ''}" if n else "NOT SET (real recipients)"))
+    if SETTINGS.JWT_SECRET == _DEV_SECRET:
+        log.warning("%s · fix links and logins are signed with the development "
+                    "secret — set JWT_SECRET", line)
+    else:
+        log.info("%s", line)
+
+
 def start(app) -> None:
-    """Attach the deadline sweep to the app, the same way intake_review does."""
+    """Attach the deadline sweep to the app, the same way intake_review does,
+    after saying once in the log which emails this server will send."""
     import asyncio
+    _log_email_switches()
     every = _sweep_every()
     if every <= 0:
         log.info("submission deadline sweep off (SUBMISSION_DEADLINE_SWEEP_SECONDS=0)")
@@ -1443,6 +1468,13 @@ def period_label(period: Optional[str]) -> Optional[str]:
 def _queue_result_email(s, th: Thread, ver: Optional[Version], arrival, *,
                         event: str, suffix: str = "") -> None:
     if th is None:
+        return
+    # A file uploaded by hand in the web portal: the broker watched it run and
+    # read the result on screen, so it is not emailed too. Files sent by email,
+    # SFTP or API are. (Later carrier actions — delivery, a deadline hold —
+    # come with no arrival and are still emailed.)
+    if arrival is not None and (getattr(arrival, "channel", None) or "") == "upload":
+        log.info("no email for %s (%s): uploaded by hand in the portal", th.ref, event)
         return
     ver = ver or th.current
     status = ver.status if event == "result" else (

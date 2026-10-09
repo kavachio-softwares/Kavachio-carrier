@@ -301,12 +301,29 @@ def notify_sender(session, arrival: FileArrival,
       * never to automated senders (Auto-Submitted, Precedence: bulk, no-reply);
       * never more than EMAIL_REPLY_MAX_PER_DAY times to one sender;
       * off entirely unless EMAIL_REPLY_ON_REFUSAL is set.
+
+    Two more, so a refused file gets one email, not two, and 'Sender Notified'
+    on Files Received is only said of a reply that really went:
+
+      * not to a broker we know while broker emails are on — the broker loop
+        already sends them 'File rejected' with the reason (submission_service),
+        so this plain reply is only for senders nobody else tells;
+      * not to an address the MAIL_ALLOWED_RECIPIENTS test guard would skip —
+        send_email drops it without raising.
     """
     if not _reply_on_refusal():
         return False
     if arrival.outcome != "turned_away":
         return False
     if parsed.is_automated or not parsed.from_addr:
+        return False
+    import submission_service
+    if (getattr(arrival, "matched_broker_party_id", None) is not None
+            and submission_service.notifications_enabled()):
+        return False
+    if submission_service._blocked_by_test_mode(parsed.from_addr):
+        log.info("not replying to %s — not in MAIL_ALLOWED_RECIPIENTS (test mode)",
+                 parsed.from_addr)
         return False
     if _already_told_today(session, parsed.from_addr) >= _reply_cap():
         log.info("not replying to %s — daily cap reached", parsed.from_addr)
