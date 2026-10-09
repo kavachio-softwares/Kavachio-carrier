@@ -52,7 +52,7 @@ import {
 import { Dropzone } from "../components/Dropzone";
 import { PeriodPicker } from "../components/PeriodPicker";
 import { ContractPicker, ProgrammePicker, isRunnable, type BrokerProgramme } from "../components/ContractPicker";
-import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
+import { RunResult, ColumnToggles, fetchPreview, type RunResp, type LayoutChanges } from "../components/RunResult";
 import { type Sheet } from "../components/OutputRows";
 import { LoadingOverlay } from "../components/Busy";
 import { downloadFile, downloadErrorText } from "../api/client";
@@ -87,6 +87,13 @@ export default function BrokerBordereau() {
   const [err, setErr] = useState<string | null>(null);
   // "This exact file was sent before" — asked on the spot, not refused.
   const [duplicateMsg, setDuplicateMsg] = useState<string | null>(null);
+  // "Fewer than 90% of the setup's columns are in this file" — asked in a
+  // popup before the run: Cancel, or Process Bordereau Anyway
+  // (direct_routes._layout_gate).
+  const [layoutBlock, setLayoutBlock] = useState<(LayoutChanges & { message: string; min_match_pct?: number }) | null>(null);
+  // The broker chose Continue Anyway for this file, so a duplicate question
+  // that follows must not ask about the columns again.
+  const [layoutOk, setLayoutOk] = useState(false);
   const [result, setResult] = useState<RunResp | null>(null);
   const [preview, setPreview] = useState<Sheet | null>(null);
   const [periods, setPeriods] = useState<BordereauPeriod[] | null>(null);
@@ -178,6 +185,7 @@ export default function BrokerBordereau() {
   // changes, so a stale exception list can never be read as this one's.
   useEffect(() => {
     setResult(null); setPreview(null); setErr(null); setFile(null);
+    setLayoutBlock(null); setLayoutOk(false);
     setPeriod("");
     // A different contract is a different history, so it is read from its start.
     setRunsPage(1);
@@ -225,12 +233,13 @@ export default function BrokerBordereau() {
   // whether this contract is ready to be run.
   useEffect(() => { loadRuns(); }, [loadRuns]);
 
-  async function submit(checkOnly: boolean, confirmDuplicate = false) {
+  async function submit(checkOnly: boolean, confirmDuplicate = false, confirmLayout = layoutOk) {
     if (!file || !path || !urls) return;
     setMode(checkOnly ? "check" : "run");
-    setBusy(true); setErr(null); setResult(null); setPreview(null);
+    setBusy(true); setErr(null); setResult(null); setPreview(null); setLayoutBlock(null);
     try {
-      const r = await runBrokerBordereau(path, file, { checkOnly, confirmDuplicate, period });
+      const r = await runBrokerBordereau(path, file,
+        { checkOnly, confirmDuplicate, confirmLayout, period });
       setResult(r);
       // Best-effort preview, exactly as the carrier's screen does it — a
       // missing preview must never make a good run look like a failure.
@@ -246,6 +255,9 @@ export default function BrokerBordereau() {
           && (detail as { code?: string }).code === "duplicate_file") {
         setDuplicateMsg((detail as { message?: string }).message
           ?? "This exact file has already been sent.");
+      } else if (detail && typeof detail === "object"
+          && (detail as { code?: string }).code === "layout_mismatch") {
+        setLayoutBlock(detail as LayoutChanges & { message: string; min_match_pct?: number });
       } else {
         setErr(errorText(e));
       }
@@ -253,7 +265,19 @@ export default function BrokerBordereau() {
   }
 
   function clearForm() {
-    setFile(null); setResult(null); setPreview(null); setErr(null);
+    pickFile(null); setResult(null); setPreview(null); setErr(null);
+  }
+
+  // A new file is a new answer to "run it anyway?".
+  function pickFile(f: File | null) {
+    setFile(f); setLayoutBlock(null); setLayoutOk(false);
+  }
+
+  function downloadTemplate() {
+    if (!path) return;
+    downloadFile(bordereauTemplatePath(path))
+      .catch(async e => setErr(await downloadErrorText(e,
+        "We couldn't download the bordereau template — please try again.")));
   }
 
   // Required on a real submission — see contract_bordereau_run. Not required
@@ -270,10 +294,34 @@ export default function BrokerBordereau() {
         onClose={() => setDuplicateMsg(null)}
         footer={<>
           <button className="btn" onClick={() => setDuplicateMsg(null)}>Don’t send it</button>
-          <button className="btn pri" onClick={() => { setDuplicateMsg(null); submit(false, true); }}>
+          <button className="btn pri" onClick={() => { setDuplicateMsg(null); submit(false, true, layoutOk); }}>
             Send it anyway</button>
         </>}>
         <p className="text-sm">{duplicateMsg}</p>
+      </Modal>
+      <Modal open={layoutBlock != null}
+        title={<span className="flex items-center gap-2">
+          <AlertTriangle size={17} className="text-amber-500" /> Your columns don’t match the carrier’s template
+        </span>}
+        onClose={() => setLayoutBlock(null)}
+        footer={<>
+          <button className="btn" onClick={() => setLayoutBlock(null)}>Cancel</button>
+          <button className="btn pri" disabled={!canSubmit}
+            onClick={() => { setLayoutBlock(null); setLayoutOk(true); submit(false, false, true); }}>
+            Process Bordereau Anyway</button>
+        </>}>
+        <div>
+          {layoutBlock && (
+            <ul className="text-sm" style={{ margin: 0, paddingLeft: 20, listStyle: "disc",
+                                             display: "grid", gap: 4 }}>
+              <li><b>{layoutBlock.missing_columns.length} of {layoutBlock.expected_count} columns</b> are
+                missing or renamed ({Math.round(layoutBlock.changed_pct)}%).</li>
+              <li>At least <b>{layoutBlock.min_match_pct ?? 90}%</b> must match.</li>
+              <li>Missing columns will be <b>blank</b> in the output.</li>
+            </ul>
+          )}
+          <ColumnToggles changes={layoutBlock} />
+        </div>
       </Modal>
       {busy && <LoadingOverlay label={mode === "check"
         ? "Checking your bordereau — running every validation. Nothing is sent…"
@@ -403,17 +451,14 @@ export default function BrokerBordereau() {
                   dropping it below. Only for a real setup: the legacy fallback
                   has no id and no sample of its own to rebuild. */}
               {ready.setup?.id != null && path && (
-                <button className="btn" style={{ marginLeft: "auto" }}
-                  onClick={() => downloadFile(bordereauTemplatePath(path))
-                    .catch(async e => setErr(await downloadErrorText(e,
-                      "We couldn't download the bordereau template — please try again.")))}>
+                <button className="btn" style={{ marginLeft: "auto" }} onClick={downloadTemplate}>
                   <Download size={14} /> Bordereau Input Template
                 </button>
               )}
             </div>
           )}
 
-          <Dropzone file={file} onPick={setFile} disabled={!ready?.ready} />
+          <Dropzone file={file} onPick={pickFile} disabled={!ready?.ready} />
 
           <div style={{ marginTop: 18, display: "flex", gap: 10, alignItems: "center" }}>
             {/* Hidden for now, the same as on the carrier's screen — Generate
@@ -463,7 +508,8 @@ export default function BrokerBordereau() {
                 Review Exceptions
               </button>
             ) : null}
-            footNote={<b>Ask your carrier to review the setup.</b>}
+            // Unmapped columns and mapping tasks are the carrier's to fix.
+            carrierNotes={false}
           />
         )}
 

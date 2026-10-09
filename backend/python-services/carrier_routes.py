@@ -566,6 +566,9 @@ async def contract_bordereau_run(
     # The broker was told this exact file was loaded before and chose to send
     # it anyway. Without it a duplicate comes back as a 409 question.
     confirm_duplicate: bool = Form(default=False),
+    # The broker was told most of the setup's columns are missing from this
+    # file and chose to run it anyway. Without it that case is a 409 question.
+    confirm_layout: bool = Form(default=False),
     # The reporting period this run is FOR — one of the labels /periods just
     # listed, e.g. "2026-08". Required on a real submission (not on a
     # self-check, which touches no calendar) so the file lands on the period
@@ -599,6 +602,7 @@ async def contract_bordereau_run(
         # Passed explicitly: called as a function, direct_run's own default is
         # the Form() marker, which is truthy.
         confirm_duplicate=confirm_duplicate,
+        check_layout=not confirm_layout,
         principal=scope.acting,
     )
 

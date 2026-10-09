@@ -4040,10 +4040,102 @@ def _assert_run_contract(s, tid: int, program_id: int,
     return c
 
 
+def _run_setup(s, tid: int, carrier_party_id: int, program_id: int,
+               broker_party_id: Optional[int], contract_id: Optional[int]):
+    """(pipeline, input format) a run executes against; (None, None) if none."""
+    # This broker's own setup first, then the programme-wide one — and when
+    # the bordereau names its contract, the setup built for THAT contract.
+    # A broker with two contracts on two templates has two live setups;
+    # setup_scope decides between them, the same answer every screen shows.
+    from setup_scope import live_setup_for
+    pipe = live_setup_for(s, tid, carrier_party_id, program_id,
+                          broker_party_id, contract_id)
+    if pipe and pipe.input_format_id:
+        return pipe, s.get(DirectFormat, pipe.input_format_id)
+    # Temporary rollout fallback: no pipeline yet → use the legacy
+    # approved-DirectFormat so an in-flight setup keeps running until it
+    # is backfilled/activated as a pipeline. Remove after soak (plan Step 7).
+    return None, (s.query(DirectFormat)
+                  .filter(DirectFormat.tenant_id == tid,
+                          DirectFormat.carrier_party_id == carrier_party_id,
+                          DirectFormat.program_id == program_id,
+                          DirectFormat.approved == 1)
+                  .order_by(DirectFormat.id.desc()).first())
+
+
+def _scoped_sheets(fmt, sheets_dict: dict) -> dict:
+    """Only the input sheets the setup actually maps — extra sheets in the ops
+    file are ignored, so the fingerprint stays comparable to setup."""
+    wanted = _routing_input_sheets(fmt.sheet_routing)
+    if wanted:
+        filtered = {k: v for k, v in sheets_dict.items() if k in wanted}
+        if filtered:
+            return filtered
+    return sheets_dict
+
+
+# At least this share of the setup's input columns must be in a broker's file.
+# Fewer, and Process Bordereau stops to ask before running it; otherwise the
+# file runs and the result lists what changed.
+LAYOUT_MIN_MATCH_PCT = 90
+
+
+def _layout_changes(s, fmt, sheets_dict: dict) -> Optional[dict]:
+    """The setup's input columns this file does not have (and what share of the
+    setup's columns that is), and the file's columns the setup does not know
+    (extra — a run ignores them). None when the file's layout is the setup's own
+    (same fingerprint — the sample is never loaded then) or the sample the
+    setup was built from is no longer on file. Headings compare as the
+    fingerprint does: trimmed, any case."""
+    if not fmt.fingerprint or fmt.fingerprint == signature_hash(signature_multi(sheets_dict)):
+        return None
+    import bordereau_template as bt
+    rec = bt.sample_landing(s, fmt)
+    expected = list(dict.fromkeys(
+        c for _, cols in bt.input_layout((rec.data or {}).get("sheets") if rec else None,
+                                         fmt.sheet_routing)
+        for c in cols))
+    if not expected:
+        return None
+    got = list(dict.fromkeys(str(c).strip() for df in sheets_dict.values() for c in df.columns))
+    have = {c.lower() for c in got}
+    known = {c.strip().lower() for c in expected}
+    missing = [c for c in expected if c.strip().lower() not in have]
+    return {"missing_columns": missing,
+            "extra_columns": [c for c in got if c.lower() not in known],
+            "expected_count": len(expected),
+            "changed_pct": round(100 * len(missing) / len(expected), 1)}
+
+
+def _layout_gate(tid: int, sheets_dict: dict, *, carrier_party_id: int, program_id: int,
+                 broker_party_id: Optional[int], contract_id: Optional[int]) -> None:
+    """409 `layout_mismatch` when fewer than LAYOUT_MIN_MATCH_PCT of the setup's
+    columns are in the file. Answered on the spot: the broker downloads the input template or
+    sends `confirm_layout` to run it anyway. Raised before the file is recorded
+    as an arrival, so running it anyway is not then refused as a duplicate."""
+    with SessionLocal() as s:
+        _, fmt = _run_setup(s, tid, carrier_party_id, program_id,
+                            broker_party_id, contract_id)
+        # No setup: _prepare_run refuses with its own reason.
+        changes = _layout_changes(s, fmt, _scoped_sheets(fmt, sheets_dict)) if fmt else None
+    # Counts, not the rounded percentage, so exactly 90% matched still runs.
+    if changes and (len(changes["missing_columns"]) * 100
+                    > (100 - LAYOUT_MIN_MATCH_PCT) * changes["expected_count"]):
+        raise HTTPException(409, {
+            "code": "layout_mismatch",
+            "message": (f"About {round(changes['changed_pct'])}% of the columns your "
+                        "carrier set up are not the same in this file "
+                        f"({len(changes['missing_columns'])} of {changes['expected_count']}). "
+                        f"At least {LAYOUT_MIN_MATCH_PCT}% of the columns should be the same."),
+            "min_match_pct": LAYOUT_MIN_MATCH_PCT,
+            **changes})
+
+
 async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
                        file_bytes: bytes, source_filename: Optional[str],
                        skip_rows: int = 0, broker_party_id: Optional[int] = None,
-                       contract_id: Optional[int] = None) -> dict:
+                       contract_id: Optional[int] = None,
+                       sheets_dict: Optional[dict] = None) -> dict:
     """Everything a run does BEFORE validation: read the workbook, find the live
     setup, refuse what cannot run, and write the landing record.
 
@@ -4051,36 +4143,16 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
     arrived by email, SFTP or API), so both go through exactly one path. Every
     refusal here is a real HTTPException raised before any output exists.
     """
-    sheets_dict = await run_in_threadpool(read_excel_all_sheets, file_bytes, skip_rows)
+    if sheets_dict is None:
+        sheets_dict = await run_in_threadpool(read_excel_all_sheets, file_bytes, skip_rows)
     if not sheets_dict:
         raise HTTPException(400, "workbook has no readable sheets")
 
     with SessionLocal() as s:
         if contract_id:
             _assert_run_contract(s, tid, program_id, broker_party_id, contract_id)
-        # Resolve the active PIPELINE for this carrier+program — that's the
-        # config a run executes against. The pipeline's Input Template (a
-        # DirectFormat) supplies the input layout below.
-        # This broker's own setup first, then the programme-wide one — and when
-        # the bordereau names its contract, the setup built for THAT contract.
-        # A broker with two contracts on two templates has two live setups;
-        # setup_scope decides between them, the same answer every screen shows.
-        from setup_scope import live_setup_for
-        pipe = live_setup_for(s, tid, carrier_party_id, program_id,
-                              broker_party_id, contract_id)
-        if pipe and pipe.input_format_id:
-            fmt = s.get(DirectFormat, pipe.input_format_id)
-        else:
-            # Temporary rollout fallback: no pipeline yet → use the legacy
-            # approved-DirectFormat so an in-flight setup keeps running until it
-            # is backfilled/activated as a pipeline. Remove after soak (plan Step 7).
-            pipe = None
-            fmt = (s.query(DirectFormat)
-                   .filter(DirectFormat.tenant_id == tid,
-                           DirectFormat.carrier_party_id == carrier_party_id,
-                           DirectFormat.program_id == program_id,
-                           DirectFormat.approved == 1)
-                   .order_by(DirectFormat.id.desc()).first())
+        pipe, fmt = _run_setup(s, tid, carrier_party_id, program_id,
+                               broker_party_id, contract_id)
         if not fmt:
             raise HTTPException(
                 400, "no active pipeline for this carrier + program — activate "
@@ -4112,13 +4184,7 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
                 {n: list(map(str, df.columns)) for n, df in sheets_dict.items()})
         if multi_tables:
             raise HTTPException(400, _multi_table_error(multi_tables))
-        # Restrict to the input sheets the setup actually maps — extra sheets in
-        # the ops file are ignored, so the fingerprint stays comparable to setup.
-        wanted = _routing_input_sheets(fmt.sheet_routing)
-        if wanted:
-            filtered = {k: v for k, v in sheets_dict.items() if k in wanted}
-            if filtered:
-                sheets_dict = filtered
+        sheets_dict = _scoped_sheets(fmt, sheets_dict)
         landing = await run_in_threadpool(dl.build_landing_record, sheets_dict)
 
         # Supplement: capture the setup's stored supplementary sheets alongside the
@@ -4131,6 +4197,7 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
 
         fp = signature_hash(signature_multi(sheets_dict))
         drift = bool(fmt.fingerprint and fmt.fingerprint != fp)
+        layout_changes = _layout_changes(s, fmt, sheets_dict) if drift else None
         eff_contract_id = contract_id or fmt.contract_id
 
         # A scope was named, so the output template must be the one agreed for
@@ -4163,7 +4230,8 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
 
     return {"landing_id": landing_id, "pipeline_id": pipeline_id,
             "contract_id": contract_id, "eff_contract_id": eff_contract_id,
-            "run_scope": run_scope, "drift": drift, "supp_stats": supp_stats}
+            "run_scope": run_scope, "drift": drift, "supp_stats": supp_stats,
+            "layout_changes": layout_changes}
 
 
 async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Optional[str],
@@ -4183,6 +4251,7 @@ async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Option
         scope=prep["run_scope"], run_by_user_id=run_by_user_id,
         mark_calendar=mark_calendar, period=period)
     result["format_drift"] = prep["drift"]
+    result["layout_changes"] = prep.get("layout_changes")
     if prep["supp_stats"] is not None:
         result["supplement"] = prep["supp_stats"]
     return result
@@ -4281,6 +4350,10 @@ async def direct_run(
     # Set when the person has been told this exact file was loaded before and
     # chose to run it anyway. Without it a duplicate comes back as a 409.
     confirm_duplicate: bool = Form(default=False),
+    # Stop a file whose headings mostly differ from the setup's (_layout_gate).
+    # Only the broker's Process Bordereau asks for it, and sends it off again
+    # when the broker chooses to run the file anyway.
+    check_layout: bool = Form(default=False),
     principal: Principal = Depends(current_principal),
 ):
     """DATA step: ops uploads a real data file for a carrier + program. Uses the
@@ -4310,6 +4383,15 @@ async def direct_run(
                 raise HTTPException(400, "Pick the reporting period this bordereau "
                                          "is for before generating it.")
 
+    # Read once here when the layout is checked; _prepare_run reuses it.
+    sheets_dict = None
+    if check_layout:
+        sheets_dict = await run_in_threadpool(read_excel_all_sheets, file_bytes, skip_rows)
+        if sheets_dict:
+            _layout_gate(tid, sheets_dict, carrier_party_id=carrier_party_id,
+                         program_id=program_id, broker_party_id=broker_party_id,
+                         contract_id=contract_id)
+
     # A real upload is an ARRIVAL too — the same door as email, SFTP and API, so
     # the Files screen shows every file however it came in. A self-check is a
     # dry run and is not a file arriving, so it is never recorded.
@@ -4325,7 +4407,7 @@ async def direct_run(
             tid, carrier_party_id=carrier_party_id, program_id=program_id,
             file_bytes=file_bytes, source_filename=file.filename,
             skip_rows=skip_rows, broker_party_id=broker_party_id,
-            contract_id=contract_id)
+            contract_id=contract_id, sheets_dict=sheets_dict)
     except HTTPException as e:
         if arrival_id:
             svc_intake.mark_run(arrival_id, state="failed", error=str(e.detail))

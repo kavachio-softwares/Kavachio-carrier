@@ -17,6 +17,7 @@
  * Everything below reads the run payload, which is identical either way.
  */
 import { useState } from "react";
+import { AlertTriangle } from "lucide-react";
 import { api, downloadFile } from "../api/client";
 import { InfoTip } from "./InfoTip";
 import {
@@ -50,12 +51,85 @@ export type GoverningContract = {
   contract_filename: string | null; fallback: boolean;
 };
 
+export type LayoutChanges = {
+  missing_columns: string[]; extra_columns?: string[];
+  expected_count: number; changed_pct: number;
+};
+
+/** "Missing Columns" / "Extra Columns": one list open at a time, the
+ *  columns as chips in a box that scrolls. Shared by the card below and
+ *  Process Bordereau's "columns don't match" popup. */
+export function ColumnToggles({ changes, actions, indent = 0 }: {
+  changes: LayoutChanges | null | undefined;
+  actions?: React.ReactNode;
+  indent?: number;
+}) {
+  const [open, setOpen] = useState<"missing" | "new" | null>(null);
+  const missing = changes?.missing_columns ?? [];
+  const extra = changes?.extra_columns ?? [];
+  const shown = open === "missing" ? missing : open === "new" ? extra : [];
+  // Missing in red, extra in green — the button carries the count, and the
+  // open one gets a solid border.
+  const tab = (k: "missing" | "new", label: string, n: number) => {
+    const c = k === "missing" ? "crit" : "ok";
+    return n > 0 && (
+      <button className="btn sm" aria-expanded={open === k}
+        onClick={() => setOpen(o => (o === k ? null : k))}
+        style={{ color: `var(--p-${c}-ink)`, background: `var(--p-${c}-soft)`,
+                 borderColor: open === k ? `var(--p-${c})` : "transparent" }}>
+        {label} ({n})
+      </button>
+    );
+  };
+  if (!missing.length && !extra.length && !actions) return null;
+  return (
+    <>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: `12px 0 0 ${indent}px` }}>
+        {tab("missing", "Missing Columns", missing.length)}
+        {tab("new", "Extra Columns", extra.length)}
+        {actions && <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>{actions}</div>}
+      </div>
+      {shown.length > 0 && (
+        <div style={{ margin: `10px 0 0 ${indent}px`, padding: 10, maxHeight: 220, overflowY: "auto",
+                      display: "flex", flexWrap: "wrap", gap: 6, background: "var(--p-surface-2)",
+                      border: "1px solid var(--p-border)", borderRadius: "var(--p-r-sm)" }}>
+          {shown.map(c => (
+            <span key={c} className={`badge ${open === "missing" ? "b-crit" : "b-ok"}`}
+              style={{ fontWeight: 500 }}>{c}</span>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** A file's headings against the setup's input template, shown after a run. */
+export function LayoutChangesCard({ changes, title, message }: {
+  changes: LayoutChanges | null | undefined;
+  title: string;
+  message: React.ReactNode;
+}) {
+  return (
+    <div className="card spine warn pad" style={{ marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <AlertTriangle size={17} style={{ color: "var(--p-warn)", flexShrink: 0 }} />
+        <span style={{ fontSize: 15, fontWeight: 600 }}>{title}</span>
+      </div>
+      <div style={{ color: "var(--p-muted)", fontSize: 13, margin: "6px 0 0 27px" }}>{message}</div>
+      <ColumnToggles changes={changes} indent={27} />
+    </div>
+  );
+}
+
 export type RunResp = {
   export_id: number; filename: string; row_count: number;
   exception_count: number; exceptions: RunException[];
   status: string; datamodel_mapped: boolean; admin_task_id?: number | null;
   datamodel_queued?: boolean;
   format_drift?: boolean;
+  /** The setup's input columns this file lacks; null when its layout is the
+   *  setup's own. */
+  layout_changes?: LayoutChanges | null;
   governing_contracts?: GoverningContract[];
   /** True when produced by the pre-submission self-check — not ingested, not
    *  recorded as a run. */
@@ -94,6 +168,7 @@ export function fetchPreview(urls: RunUrls, exportId: number): Promise<Sheet | n
 
 export function RunResult({
   result, preview, urls, onError, actions, footNote, findings = "check-only",
+  carrierNotes = true,
 }: {
   result: RunResp;
   preview: Sheet | null;
@@ -117,6 +192,10 @@ export function RunResult({
   findings?: "check-only" | "always";
   /** Screen-specific line under the notes (e.g. who to ask about a drift). */
   footNote?: React.ReactNode;
+  /** Notes about the SETUP rather than the file — checks not run because a
+   *  column is not mapped, a data-model mapping task raised. Only the carrier
+   *  can act on them, so the broker's screen turns them off. */
+  carrierNotes?: boolean;
 }) {
   const [showAll, setShowAll] = useState(false);
   const [allSheets, setAllSheets] = useState<Sheet[] | null>(null);
@@ -250,7 +329,7 @@ export function RunResult({
       {/* The findings, inline. Read-only in both cases: on a check because a
           check is a look, not a submission; on a real run because whoever sees
           this list here is the party that has no triage screen. */}
-      {notChecked && (
+      {carrierNotes && notChecked && (
         <div className="note warn" style={{ marginBottom: 18 }}>
           {/* An entry carrying only partly-run checks has no "not run" line. */}
           {(notRun > 0 || !notChecked.partial?.length) && <>
@@ -366,12 +445,12 @@ export function RunResult({
       })()}
 
       {result.format_drift && (
-        <div className="note warn" style={{ marginBottom: 18 }}>
-          This file's columns differ from the setup's input template — the output
-          may be incomplete. {footNote}
-        </div>
+        <LayoutChangesCard changes={result.layout_changes}
+          title="Some columns don't match the carrier's input BDX template"
+          message={<>Your file was processed, but some column names are different
+            from the Bordereau Input Template. {footNote}</>} />
       )}
-      {!isCheck && !result.datamodel_mapped && (
+      {carrierNotes && !isCheck && !result.datamodel_mapped && (
         <div className="note" style={{ marginBottom: 18 }}>
           New input format — a one-time admin task was raised to map it to the data model
           {result.admin_task_id ? ` (task #${result.admin_task_id})` : ""}. Delivery is complete regardless.

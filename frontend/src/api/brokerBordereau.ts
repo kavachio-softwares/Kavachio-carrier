@@ -92,7 +92,8 @@ export type { RunResp as BrokerRunResult } from "../components/RunResult";
  */
 export const runBrokerBordereau = (
   p: ContractPath, file: File,
-  opts: { checkOnly?: boolean; skipRows?: number; confirmDuplicate?: boolean; period?: string } = {},
+  opts: { checkOnly?: boolean; skipRows?: number; confirmDuplicate?: boolean;
+          confirmLayout?: boolean; period?: string } = {},
 ) => {
   const fd = new FormData();
   fd.append("file", file);
@@ -101,6 +102,8 @@ export const runBrokerBordereau = (
   // Only after the broker has been asked "this exact file was sent before —
   // send it anyway?" and said yes. Without it that case is a 409 question.
   if (opts.confirmDuplicate) fd.append("confirm_duplicate", "true");
+  // Likewise after "most of the setup's columns are missing — run it anyway?".
+  if (opts.confirmLayout) fd.append("confirm_layout", "true");
   fd.append("skip_rows", String(opts.skipRows ?? 0));
   // Required by the server on a real submission (not a self-check) — see
   // carrier_routes.contract_bordereau_run. Sent as the row's own period
