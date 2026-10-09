@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import {
   addProgrammeBroker, getBroker, getHierarchy, listBrokerContracts,
+  removeProgrammeBroker,
   type BrokerContractRow, type BrokerDetail as Detail,
   type HierarchyProgramme,
 } from "../api/hierarchy";
@@ -21,6 +22,7 @@ import { fmtDate, fmtStamp } from "../utils/date";
 import Card from "../components/ui/Card";
 import { Sk } from "../components/ui/Skeleton";
 import { Button } from "../components/ui/Button";
+import { Modal } from "../components/ui/Modal";
 import { Select, TextInput } from "../components/ui/Field";
 import { PageBody, PageHeader } from "../components/Layout";
 import { OnboardingBadge } from "../components/OnboardingBadge";
@@ -87,6 +89,39 @@ export default function BrokerDetail() {
       setAssignMsg((typeof d === "string" ? d : d?.message)
         ?? "Could not put them on that programme.");
     } finally { setAssigning(false); }
+  }
+
+  // Taking them off a programme. Confirmed first, because it emails the broker
+  // and stops their work on it straight away.
+  const [removing, setRemoving] = useState<{ id: number; name: string } | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeMsg, setRemoveMsg] = useState("");
+
+  async function removeFromProgramme() {
+    if (!removing || !brokerId) return;
+    setRemoveBusy(true);
+    try {
+      const r = await removeProgrammeBroker(removing.id, Number(brokerId));
+      const parts = [r.already
+        ? `They were already off ${removing.name}.`
+        : `Removed from ${removing.name}.`];
+      if (r.emailed) {
+        parts.push(`We emailed ${r.emailed} ${r.emailed === 1 ? "person" : "people"} at the broker.`);
+      } else if (r.no_contact) {
+        parts.push("There is no email address on record for them, so please tell them yourself.");
+      }
+      if (r.email_failed?.length) {
+        parts.push(`The email could not be delivered to ${r.email_failed.join(", ")}.`);
+      }
+      setRemoveMsg(parts.join(" "));
+      setRemoving(null);
+      load();
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      setRemoveMsg((typeof d === "string" ? d : d?.message)
+        ?? "Could not take them off that programme.");
+      setRemoving(null);
+    } finally { setRemoveBusy(false); }
   }
 
   // Contract rows carry a programme id, not its name. Built once here rather
@@ -172,10 +207,18 @@ export default function BrokerDetail() {
                           : "taken off — their contracts stay readable"}
                       </div>
                     </div>
+                    {p.status === "active" && (
+                      <button type="button"
+                        onClick={() => { setRemoveMsg(""); setRemoving({ id: p.id, name: p.name }); }}
+                        className="ml-auto shrink-0 text-xs text-danger hover:underline">
+                        Remove
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
             )}
+            {removeMsg && <p className="mt-3 text-xs text-ink-muted">{removeMsg}</p>}
 
             {/* Only programmes they are not already ON. Offering one they are
                 already on would be offering a button whose only outcome is
@@ -444,6 +487,23 @@ export default function BrokerDetail() {
           )}
         </Card>
 
+        <Modal open={removing !== null} title={`Remove ${b.legal_name} from ${removing?.name ?? ""}?`} size="md"
+          onClose={() => { if (!removeBusy) setRemoving(null); }}
+          footer={
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="secondary" disabled={removeBusy}
+                onClick={() => setRemoving(null)}>Cancel</Button>
+              <Button variant="danger" disabled={removeBusy} onClick={removeFromProgramme}>
+                {removeBusy ? "Removing…" : "Remove broker"}
+              </Button>
+            </div>
+          }>
+          <div className="space-y-2 text-sm text-ink-muted">
+            <p>We will email them straight away to tell them.</p>
+            <p>From then on they can't send bordereaux for this programme or fix its exceptions.</p>
+            <p>Everything they already sent, and their contracts, stays on record. You can add them back at any time.</p>
+          </div>
+        </Modal>
         <AddContractModal
           open={adding}
           onClose={() => setAdding(false)}

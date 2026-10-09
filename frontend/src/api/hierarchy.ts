@@ -246,10 +246,16 @@ export const addProgrammeBroker = (programId: number, brokerPartyId: number) =>
      });
 
 /** Removing a pair that already carries contracts DEACTIVATES it — the
- *  response says which happened so the UI can tell the truth about it. */
+ *  response says which happened so the UI can tell the truth about it.
+ *  The broker is emailed as part of the removal: `emailed` is how many
+ *  contacts the notice reached, `email_failed` the addresses it did not, and
+ *  `no_contact` that nobody on record could be emailed at all. */
 export const removeProgrammeBroker = (programId: number, brokerPartyId: number) =>
   api.delete(`/programs/${programId}/brokers/${brokerPartyId}`)
-     .then(r => r.data as { ok: boolean; deactivated: boolean; contract_count: number; message?: string });
+     .then(r => r.data as {
+       ok: boolean; deactivated: boolean; contract_count: number; message?: string;
+       already?: boolean; emailed?: number; email_failed?: string[]; no_contact?: boolean;
+     });
 
 export const getApprovalHistory = (contractId: number) =>
   api.get<ApprovalEvent[]>(`/contracts/${contractId}/approvals`).then(r => r.data);

@@ -74,6 +74,13 @@ def _link(s, token: str) -> tuple[dict, "svc.Thread"]:
 def _open(th) -> None:
     if th.status not in svc.OPEN_STATUSES:
         raise HTTPException(409, "This file is not waiting for your review.")
+    # A link emailed before the carrier took this broker off the programme is
+    # still validly signed, so the link alone cannot say whether they may
+    # still fix the file. The page stays readable; changing it does not.
+    from carrier_scope import assert_broker_on_programme
+    from db import SessionLocal
+    with SessionLocal() as s:
+        assert_broker_on_programme(s, th.broker_party_id, th.program_id)
 
 
 def _session(s, token: str, session: Optional[str]) -> tuple[dict, "svc.Thread"]:

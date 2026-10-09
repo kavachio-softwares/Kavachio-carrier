@@ -397,6 +397,46 @@ def programme_broker_add(program_id: int, body: BrokerAssignBody,
         return result
 
 
+def _tell_broker_removed(s, tid: int, principal: Principal, program_id: int,
+                         broker_party_id: int) -> list:
+    """Read everything the "you were removed" email needs, NOW, and return the
+    thunk that sends it. Sent after the commit, one message per broker contact,
+    each failure caught on its own: a dead mailbox must not undo the removal or
+    hide the others' notice (the same rule as the overdue chase).
+
+    Returns [] -> nothing to send (no contact on record), else [(email, send)].
+    The caller reports how many went, so the carrier is told the truth rather
+    than "notified" about an address that bounced.
+    """
+    from submission_calendar_service import broker_contacts
+    prog = s.get(Program, program_id)
+    carrier = s.get(Tenant, tid)
+    carrier_name = ((carrier.legal_name or carrier.tenant_name) if carrier else None) or "Your carrier"
+    program_name = (prog.name if prog else None) or f"Programme {program_id}"
+    contacts = broker_contacts(s, [broker_party_id]).get(broker_party_id, [])
+    try:
+        from audit import actor_email
+        copy_to = actor_email(principal.user_id)
+    except Exception:  # noqa: BLE001
+        copy_to = None
+
+    def _sender(c: dict):
+        def send() -> None:
+            from email_utils import send_email, broker_removed_email_html
+            send_email(
+                c["email"], f"{carrier_name} has removed you from {program_name}",
+                broker_removed_email_html(c.get("name"), carrier_name, program_name),
+                text=(f"Hi {c.get('name')}, " if c.get("name") else "")
+                + f"{carrier_name} has taken you off the programme {program_name} on "
+                  "Kavachio. You can no longer send bordereaux for it or fix its "
+                  f"exceptions. Files you already sent stay on record with {carrier_name}. "
+                  f"If you think this is a mistake, please contact {carrier_name}.",
+                account="NOTIFY", cc=copy_to)
+        return send
+
+    return [(c["email"], _sender(c)) for c in contacts if c.get("email")]
+
+
 @router.delete("/programs/{program_id}/brokers/{broker_party_id}")
 def programme_broker_remove(program_id: int, broker_party_id: int,
                             principal: Principal = Depends(require_role("carrier_admin"))):
@@ -406,6 +446,11 @@ def programme_broker_remove(program_id: int, broker_party_id: int,
     inactive, so the contracts underneath keep their meaning and the history of
     the relationship survives. Only a pair that never produced anything is
     removed outright.
+
+    The broker is EMAILED, and from this moment cannot send a bordereau for the
+    programme or fix its exceptions (carrier_scope.assert_broker_on_programme).
+    What they already sent stays on record for the carrier. Removing someone
+    already removed changes nothing and emails nobody.
     """
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal)
@@ -419,6 +464,20 @@ def programme_broker_remove(program_id: int, broker_party_id: int,
         )
         if not link:
             raise HTTPException(404, "that broker is not on this programme")
+        if link.status == "inactive":
+            return {"ok": True, "deactivated": True, "already": True,
+                    "contract_count": 0, "emailed": 0,
+                    "message": "They were already taken off this programme."}
+
+        # Only a broker who could SEE the programme has anything to be told. A
+        # link still waiting for approval never reached them.
+        was_live = link.status == "active"
+        notify = (_tell_broker_removed(s, tid, principal, program_id, broker_party_id)
+                  if was_live else [])
+        # Read now, while the rows are loaded: the audit entry names them.
+        broker_row, prog_row = s.get(Party, broker_party_id), s.get(Program, program_id)
+        broker_name = getattr(broker_row, "legal_name", None)
+        prog_name = getattr(prog_row, "name", None)
 
         contracts = (
             s.query(func.count(Contract.id))
@@ -428,13 +487,40 @@ def programme_broker_remove(program_id: int, broker_party_id: int,
         )
         if contracts:
             link.status = "inactive"
-            s.commit()
-            return {"ok": True, "deactivated": True, "contract_count": contracts,
-                    "message": f"Kept because {contracts} contract(s) sit under it. "
-                               f"They stay readable; no new work can start."}
-        s.delete(link)
+            out = {"ok": True, "deactivated": True, "contract_count": contracts,
+                   "message": f"Kept because {contracts} contract(s) sit under it. "
+                              f"They stay readable; no new work can start."}
+        else:
+            s.delete(link)
+            out = {"ok": True, "deactivated": False, "contract_count": 0}
         s.commit()
-        return {"ok": True, "deactivated": False, "contract_count": 0}
+
+    # After the commit: a broker told they were removed while the database says
+    # they were not is the one combination there is no way back from.
+    sent, failed = 0, []
+    for email, send in notify:
+        try:
+            send()
+            sent += 1
+        except Exception as ex:  # noqa: BLE001
+            import logging
+            logging.getLogger("bdx.email").warning(
+                "broker-removed email to %s failed: %s", email, ex)
+            failed.append(email)
+    # `no_contact`: they were live but nobody on record can be emailed, so the
+    # carrier has to tell them another way — the screen says so.
+    out.update({"emailed": sent, "email_failed": failed,
+                "no_contact": was_live and not notify})
+    with SessionLocal() as s:
+        _log_broker_act(s, tid, principal, "broker_removed_from_programme", {
+            "target": f"party:{broker_party_id}",
+            "name": broker_name, "broker_name": broker_name,
+            "broker_party_id": broker_party_id,
+            "program_id": program_id, "program_name": prog_name,
+            "kept_as_inactive": out["deactivated"],
+            "emailed": sent, "email_failed": len(failed),
+        })
+    return out
 
 
 # =============================================================================

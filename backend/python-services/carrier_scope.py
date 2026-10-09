@@ -552,6 +552,52 @@ def assert_can_amend(principal: Principal) -> None:
              "re-validate it.")
 
 
+def assert_broker_on_programme(s, broker_party_id, program_id,
+                               file_owner_party_id=None) -> None:
+    """Refuse a change to a file from a broker the carrier has taken OFF the
+    programme it was sent to.
+
+    assert_can_amend answers "is this the broker's kind of work"; this answers
+    "does this broker still hold the programme". Both have to be true. The
+    second was only ever implied: assert_can_read_export hides a removed
+    programme's files from the broker (a bare 404), and the other write routes
+    did not ask at all — a page left open, an upload-keyed route or an old
+    correction email still got through. This says why, in words, and covers
+    the routes the read check does not.
+
+    Pass the file's own programme. Nothing to check for a file with none
+    recorded, or for a caller that is not a broker (platform and carrier seats
+    never reach the write routes — assert_can_amend refuses them first).
+
+    Pass `file_owner_party_id` when the file is looked up by id: the message
+    names the carrier and programme, so it is only said about the broker's OWN
+    file. Anyone else's falls through to the usual "not found".
+
+    403 with the reason, not 404: the broker has worked on this programme, so
+    naming it discloses nothing, and "not found" would read as a fault.
+    """
+    if not broker_party_id or not program_id:
+        return
+    if file_owner_party_id is not None and int(file_owner_party_id) != int(broker_party_id):
+        return
+    live = (s.query(ProgramBroker.id)
+              .filter(ProgramBroker.program_id == program_id,
+                      ProgramBroker.broker_party_id == broker_party_id,
+                      func.coalesce(ProgramBroker.status, "active") == "active")
+              .first())
+    if live is not None:
+        return
+    prog = s.query(Program).filter(Program.id == program_id).first()
+    carrier = (s.query(Tenant).filter(Tenant.id == prog.tenant_id).first()
+               if prog is not None else None)
+    who = ((carrier.legal_name or carrier.tenant_name) if carrier else None) or "The carrier"
+    where = prog.name if prog is not None and prog.name else "this programme"
+    raise HTTPException(
+        403, f"{who} has taken you off {where}, so you can no longer send "
+             f"bordereaux for it or fix, approve or re-check its exceptions. "
+             f"Please contact {who} if this is a mistake.")
+
+
 def assert_can_read_export(s, p: Principal, export_row) -> None:
     """May this principal see this generated output?
 

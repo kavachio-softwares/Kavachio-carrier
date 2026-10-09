@@ -447,6 +447,10 @@ _SELF_LOGGED = [
     # reason in details, which the notification bell cannot render from a path.
     ("POST",   re.compile(r"^/brokers$")),
     ("POST",   re.compile(r"^/programs/\d+/brokers$")),
+    # Taking a broker off logs itself too: the path alone is two ids, and the
+    # trail should say WHICH broker came off WHICH programme, and whether they
+    # were told.
+    ("DELETE", re.compile(r"^/programs/\d+/brokers/\d+$")),
     ("POST",   re.compile(r"^/broker-onboarding-requests/\d+/approve$")),
     ("POST",   re.compile(r"^/broker-onboarding-requests/\d+/reject$")),
     ("DELETE", re.compile(r"^/broker-onboarding-requests/\d+$")),

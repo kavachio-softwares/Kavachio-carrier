@@ -29,6 +29,40 @@ log = logging.getLogger("bdx.validation")
 router = APIRouter()
 
 
+def _assert_broker_still_on(s, principal: Principal, *, upload_id: Optional[int] = None,
+                            exception_ids: Optional[list] = None) -> None:
+    """Refuse a broker who has been taken off the programme this file was sent
+    to — they can read it but no longer change it (carrier_scope.
+    assert_broker_on_programme). For the upload-keyed routes, where the file's
+    programme is not in hand: it is read off the broker's own exports of that
+    upload, the same link the exception UPDATE below already scopes by."""
+    if not principal.is_broker:
+        return
+    bid = resolve_broker_party_id(s, principal)
+    if bid is None:
+        return
+    from carrier_scope import assert_broker_on_programme
+    if exception_ids is not None:
+        ids = [int(i) for i in exception_ids if i is not None]
+        if not ids:
+            return
+        rows = s.execute(text(
+            "SELECT DISTINCT oe.program_id FROM validation_exception ve "
+            "LEFT JOIN validation_run vr ON vr.run_id = ve.validation_run_id "
+            "JOIN output_exports oe ON oe.broker_party_id = :bid "
+            "  AND oe.source_upload_id IN (ve.upload_id, vr.bdx_upload_id) "
+            "WHERE ve.exception_id = ANY(:ids) AND oe.program_id IS NOT NULL"),
+            {"bid": bid, "ids": ids}).fetchall()
+    else:
+        rows = s.execute(text(
+            "SELECT DISTINCT program_id FROM output_exports "
+            "WHERE source_upload_id = :u AND broker_party_id = :bid "
+            "AND program_id IS NOT NULL"),
+            {"u": upload_id, "bid": bid}).fetchall()
+    for (pid,) in rows:
+        assert_broker_on_programme(s, bid, pid)
+
+
 class ValidateBody(BaseModel):
     uploadId: int
     contractId: Optional[int] = None
@@ -394,6 +428,8 @@ def validate(body: ValidateBody, principal: Principal = Depends(current_principa
     # Re-validating writes a new run of the file — the carrier's or broker's call.
     from carrier_scope import assert_can_amend
     assert_can_amend(principal)
+    with SessionLocal() as _s:
+        _assert_broker_still_on(_s, principal, upload_id=body.uploadId)
     engines = body.engines or ["global", "custom", "ajv"]
     stage = body.stage or "input"
 
@@ -900,6 +936,8 @@ def save_fields(body: FieldsSaveBody,
     introduce a new validation exception."""
     from carrier_scope import assert_can_amend
     assert_can_amend(principal)
+    with SessionLocal() as _s:
+        _assert_broker_still_on(_s, principal, upload_id=body.uploadId)
     from scd2_sql import (
         resolve_field, pick_target_row, find_target_in_upload, coerce_value,
         build_scd2_sql, physical_columns, missing_scd_columns, pk_is_identity_always,
@@ -1393,6 +1431,8 @@ def decide_exceptions(body: DecideRequest,
         # -1 matches nothing, for a broker seat with no broker bound.
         bid_filter = ((resolve_broker_party_id(s, principal) or -1)
                       if principal.is_broker else None)
+        _assert_broker_still_on(s, principal,
+                                exception_ids=[d.exception_id for d in body.decisions])
         # WHO decided comes from the login, never from body.user_id — a value
         # the browser sends is a claim, and the audit trail is not a claim.
         import decision_log
@@ -1606,7 +1646,12 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
         # program_id/broker_party_id are what answer that — see
         # carrier_scope.assert_can_read_export. Platform admin bypasses.
         from types import SimpleNamespace
-        from carrier_scope import assert_can_read_export
+        from carrier_scope import assert_can_read_export, assert_broker_on_programme
+        # Taken off the programme since sending this: no more changes. Asked
+        # BEFORE the read check, which answers a removed broker with a bare
+        # "not found" — true, but it reads as a fault, not a decision.
+        assert_broker_on_programme(s, resolve_broker_party_id(s, principal),
+                                   exp["program_id"], exp["broker_party_id"])
         assert_can_read_export(s, principal, SimpleNamespace(
             tenant_id=exp["tenant_id"], program_id=exp["program_id"],
             broker_party_id=exp["broker_party_id"]))

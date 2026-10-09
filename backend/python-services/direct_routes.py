@@ -2742,10 +2742,17 @@ async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None
         # Guarded on the EXPORT, not on the landing's tenant: the export is what
         # carries the broker this run was made for, and a broker seat has no
         # tenant for the old comparison to match.
-        from carrier_scope import assert_can_read_export
+        from carrier_scope import assert_can_read_export, assert_broker_on_programme
+        from auth_deps import resolve_broker_party_id
         _exp = s.get(OutputExport, export_id)
         if _exp is None:
             raise HTTPException(404, "export not found")
+        # Taken off the programme since sending this: no more changes. Asked
+        # BEFORE the read check, which answers a removed broker with a bare
+        # "not found" — true, but it reads as a fault, not a decision.
+        assert_broker_on_programme(s, resolve_broker_party_id(s, principal),
+                                   getattr(_exp, "program_id", None),
+                                   getattr(_exp, "broker_party_id", None))
         assert_can_read_export(s, principal, _exp)
         export_pipeline_id = getattr(_exp, "pipeline_id", None)
         # The contract this export was made under. Re-generate measures the
