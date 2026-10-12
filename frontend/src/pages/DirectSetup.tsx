@@ -614,6 +614,29 @@ function DirectSetupScreen() {
   // Setup/template name is derived from the scope — no separate field needed.
   const programName = programs.find(p => p.id === programId)?.name ?? "";
   const setupName = [carrierName, programName].filter(Boolean).join(" — ") || "Direct setup";
+  // The scope an uploaded output layout is filed under: the programme, the
+  // broker, and the contract only when this build REUSES one already on file.
+  // Not pickedContractId: that falls back to the broker's only contract even
+  // after Clear, and a layout filed under a contract the user just set aside
+  // would take over that contract's lookup. A contract the build uploads names
+  // the layout itself (contract.output_template_id).
+  const layoutContract = reusedContracts[0] ?? null;
+  const uploadBrokerId = scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId);
+  // The name it is saved under, and so which template it becomes the next
+  // version of. Versions share a name, and the setup lookup matches a layout to
+  // a setup by name, so two scopes must never share one: the upload joins an
+  // existing layout only when that layout is filed under exactly this scope.
+  // Otherwise the broker's name goes in (under the programme's name alone, a
+  // second broker's upload became version 2 of the first broker's), and the
+  // contract's when it is filed under one.
+  const agreed = resolved?.found ? resolved.template : null;
+  const sameScope = !!agreed && programId !== ""
+    && agreed.scope.program_id === Number(programId)
+    && (agreed.scope.broker_party_id ?? null) === uploadBrokerId
+    && (agreed.scope.contract_id ?? null) === (layoutContract?.id ?? null);
+  const uploadTemplateName = sameScope && agreed ? agreed.name
+    : [setupName, scope.brokerName,
+       layoutContract ? contractLabel(layoutContract) : null].filter(Boolean).join(" — ");
   // The uploads are all scoped to a (carrier, program) pair — nothing picked
   // yet means there's nowhere for a file to attach to, so every drop zone
   // stays disabled until both are selected.
@@ -852,8 +875,14 @@ function DirectSetupScreen() {
       // that split before any rules are generated — the modal drives step 2 + 3.
       setStep("Creating output template…");
       const fOut = new FormData();
-      fOut.append("mga", mga); fOut.append("name", setupName); fOut.append("file", outFile);
+      fOut.append("mga", mga); fOut.append("name", uploadTemplateName); fOut.append("file", outFile);
       fOut.append("carrier_party_id", String(carrierId));
+      // Filed under the scope worked out above (layoutContract), like a
+      // template built from the standard or the contract, so the lookup never
+      // offers it to another broker on the same programme.
+      fOut.append("program_id", String(programId));
+      if (uploadBrokerId != null) fOut.append("broker_party_id", String(uploadBrokerId));
+      if (layoutContract) fOut.append("contract_id", String(layoutContract.id));
       if (outputSheetOpts) for (const sh of outputSheetSel) fOut.append("sheets", sh);
       const tplRes = await api.post(`/export/template/generate`, fOut);
       const tid = tplRes.data.id as number;
@@ -1863,7 +1892,11 @@ function DirectSetupScreen() {
                   </div>
                   <p className="mt-1">
                     <b className="break-all">{outFile!.name}</b> becomes{" "}
-                    {resolved?.found
+                    {/* Only that template's next version if the upload is saved
+                        under its name, which happens only when it is filed
+                        under exactly the same programme, broker and contract.
+                        Otherwise the upload is saved beside it. */}
+                    {resolved?.found && resolved.template!.name === uploadTemplateName
                       ? <>version {resolved.template!.version + 1} of{" "}
                           <b>{resolved.template!.name}</b></>
                       : <>this selection's Output BDX Template</>}{" "}

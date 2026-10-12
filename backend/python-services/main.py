@@ -1930,6 +1930,8 @@ async def export_template_generate(
     file: UploadFile = File(...),
     carrier_party_id: Optional[int] = Form(default=None),
     contract_id: Optional[int] = Form(default=None),
+    program_id: Optional[int] = Form(default=None),
+    broker_party_id: Optional[int] = Form(default=None),
     sheets: Optional[list[str]] = Form(default=None),
     output_format: str = Form(default="xlsx"),
     principal: Principal = Depends(current_principal),
@@ -1941,7 +1943,28 @@ async def export_template_generate(
     of this template produces; xlsx preserves the sample workbook's styling.
 
     `sheets` restricts the template to the sheets the user chose; the generated
-    output will then contain only those sheets."""
+    output will then contain only those sheets.
+
+    `program_id`, `broker_party_id` and `contract_id` tie the layout to the
+    programme, broker and contract it was uploaded for, the way a template built
+    from the standard or the contract is tied, so the lookup never offers one
+    broker's uploaded layout to another broker on the same programme. The
+    contract is sent only when the setup is for a contract already on file; a
+    contract the setup uploads afterwards names this layout itself
+    (contract.output_template_id), and the layout stays the broker's, so the
+    broker's other contracts can still reach it."""
+    # The same check the other two ways of making a template run: the broker
+    # must be on the programme, the contract must be theirs. A broker or a
+    # contract with no programme is a scope nothing could ever resolve to.
+    # Checked before the file is read, so a refused scope never pays for the AI
+    # mapping below.
+    if (broker_party_id is not None or contract_id is not None) and program_id is None:
+        raise HTTPException(400, "a broker or contract can only be set together with its programme")
+    if program_id is not None:
+        from output_template_routes import _scope_check
+        with SessionLocal() as s:
+            _scope_check(s, principal, resolve_tenant_id(s, principal, mga),
+                         program_id, broker_party_id, contract_id)
     file_bytes = await file.read()
     structure = await run_in_threadpool(parse_template, file_bytes, filename=file.filename)
     if not structure["sheets"]:
@@ -1996,9 +2019,11 @@ async def export_template_generate(
             tenant_id=tid, name=name, version=version, is_active=is_active,
             carrier=carrier_name,
             carrier_party_id=carrier_party_id, contract_id=contract_id,
+            program_id=program_id, broker_party_id=broker_party_id,
             structure=structure, template_blob=tmpl_bytes,
             template_blob_ref=tmpl_ref, approved=0,
             output_format=_norm_fmt(output_format),
+            source_kind="uploaded",
         )
         s.add(t)
         s.commit()
@@ -2008,7 +2033,10 @@ async def export_template_generate(
             log_activity(t.tenant_id, actor_email(principal.user_id),
                          "output_template_generated", target=f"template:{t.name}",
                          details={"template_id": t.id, "name": t.name,
-                                  "version": t.version, "carrier_party_id": t.carrier_party_id})
+                                  "version": t.version, "carrier_party_id": t.carrier_party_id,
+                                  "program_id": t.program_id,
+                                  "broker_party_id": t.broker_party_id,
+                                  "contract_id": t.contract_id})
         except Exception:  # noqa: BLE001 — auditing must never break the response
             pass
         return _template_to_dict(t, s)
