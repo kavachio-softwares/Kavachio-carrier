@@ -237,6 +237,7 @@ def run_one(arrival_id: int) -> None:
         program_id = (getattr(route, "program_id", None) if route else None) or a.program_id
         broker = a.matched_broker_party_id
         filename, blob_ref = a.filename, a.blob_ref
+        arrival_period = a.reporting_period
         # land_file ticks the calendar for a file accepted on a programme's way
         # in — a route pinned to the programme, or a file that named it (its
         # programme is then on the arrival). A held file somebody released was
@@ -290,7 +291,10 @@ def run_one(arrival_id: int) -> None:
         prep = await dr._prepare_run(
             tenant_id, carrier_party_id=carrier_party_id, program_id=program_id,
             file_bytes=data, source_filename=filename, skip_rows=0,
-            broker_party_id=broker, contract_id=contract_id)
+            broker_party_id=broker, contract_id=contract_id,
+            # For ITD handling (itd_run.py) only: which file this is, and the
+            # period it arrived for.
+            arrival_id=arrival_id, period=run_period or arrival_period)
         # Recorded now, so a render that fails still points at its landing.
         svc.mark_run(arrival_id, state="running", landing_id=prep["landing_id"])
         # Data the broker sent from the secure correction link carries their
@@ -308,7 +312,12 @@ def run_one(arrival_id: int) -> None:
         result = asyncio.run(_go())
     except Exception as e:  # noqa: BLE001 — every failure is recorded, never raised
         log.info("auto-run of arrival %s failed: %s", arrival_id, _detail(e))
-        svc.mark_run(arrival_id, state="failed", error=_detail(e))
+        # An ITD older than one already loaded is not a failure to retry: it
+        # is kept for the record and not loaded (itd_run.OlderItdFile).
+        _d = getattr(e, "detail", None)
+        older_itd = isinstance(_d, dict) and _d.get("code") == "older_itd"
+        svc.mark_run(arrival_id, state="not_run" if older_itd else "failed",
+                     error=_detail(e))
         return
     svc.mark_run(arrival_id, state="done", landing_id=result.get("_landing_id"),
                  export_id=result.get("export_id"))

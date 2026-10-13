@@ -14,6 +14,7 @@ import { resolveOutputTemplate, type ResolveResult } from "../api/outputTemplate
 import { contractLabel } from "../utils/contractLabel";
 import { type BordereauPeriod } from "../api/brokerBordereau";
 import { InfoTip } from "../components/InfoTip";
+import { olderItdMessage } from "../api/itd";
 
 type Party = { id: number; legal_name: string; is_active?: boolean };
 type Program = { id: number; name: string; status?: string; party_id?: number | null };
@@ -290,6 +291,11 @@ export default function DirectRun() {
           ?? "This exact file has already been loaded.");
         return;
       }
+      // An ITD file older than one already loaded. A refusal, not a question:
+      // running it anyway would wind the running total back, so there is no
+      // "run anyway" — only the sentence saying why.
+      const older = olderItdMessage(detail);
+      if (older) { setErr(older); return; }
       const msg = typeof detail === "string" && detail.trim()
         ? detail : a?.message ?? "Run failed.";
       if (/multiple tables|more than one table/i.test(msg)) setMultiTableModal(msg);

@@ -1234,7 +1234,10 @@ def mark_run(arrival_id: int, *, state: str, landing_id: Optional[int] = None,
             a.run_error = (error or "")[:2000] or None if state != "done" else None
             # Processed: the database copy has done its job (see DB_COPY_REF).
             # A failed run keeps it, so Run again still has a file to run.
-            if state == "done" and a.blob_ref == DB_COPY_REF:
+            # An ITD file keeps it for good: its landing holds only the rows
+            # that were new (itd_run.py), so this copy is the file as it came.
+            if (state == "done" and a.blob_ref == DB_COPY_REF
+                    and getattr(a, "load_type", None) != "itd"):
                 try:
                     drop_copy(s, a.id)
                     a.blob_ref = None

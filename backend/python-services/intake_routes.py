@@ -830,6 +830,14 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
                 # The period the file is for — with programme and contract,
                 # what makes a later file the next version of this one.
                 "reporting_period": a.reporting_period,
+                # ITD handling (migration 38, itd_run.py): how the run read the
+                # file, and what it did with its rows. NULL unless the setup's
+                # ITD settings are on.
+                "load_type": a.load_type,
+                "load_type_reason": a.load_type_reason,
+                "period_start": a.period_start.isoformat() if a.period_start else None,
+                "period_end": a.period_end.isoformat() if a.period_end else None,
+                "itd_summary": a.itd_summary,
                 # ── 12.3 — what a person decided, and whether the file is
                 # still there to look at. The screen needs both: a resolved row
                 # must stop asking to be worked, and a download button that

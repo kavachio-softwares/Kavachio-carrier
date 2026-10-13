@@ -25,6 +25,8 @@ import {
   HL_WARN_BG, HL_WARN_BD, type Sheet,
 } from "./OutputRows";
 import { contractLabel } from "../utils/contractLabel";
+import { type ItdSummary } from "../api/itd";
+import { ItdRunCard } from "./ItdRunCard";
 
 export type RunException = {
   severity?: string; sheet?: string; row?: number;
@@ -151,6 +153,25 @@ export type RunResp = {
     to: string[]; cc: string[];
     mail_sent: boolean; mail_error?: string | null;
   } | null;
+  /** What ITD handling made of the file. Absent when the setup has it off. */
+  itd?: RunItd;
+};
+
+/** The ITD half of a run: whether the file was read as inception-to-date, and
+ *  what was sent on from it. */
+export type RunItd = {
+  load_type: "itd" | "regular";
+  /** The period the file runs up to, e.g. "2025-08". */
+  as_at: string | null;
+  reason: string | null;
+  summary: ItdSummary;
+  /** A self-check: compared, but nothing recorded in the running total. */
+  check_only: boolean;
+  applied?: number;
+  /** Rows that could not be recorded — another file changed them at once. */
+  conflicts?: number;
+  /** The output is fine, but the running total could not be updated. */
+  apply_error?: string | null;
 };
 
 export type RunUrls = {
@@ -325,6 +346,10 @@ export function RunResult({
           )}
         </div>
       )} */}
+
+      {/* ITD: what went into the output BDX from a file that repeats earlier periods, so
+          "89 rows" above is not read as 89 rows delivered. */}
+      {result.itd && <ItdRunCard itd={result.itd} />}
 
       {/* The findings, inline. Read-only in both cases: on a check because a
           check is a look, not a submission; on a real run because whoever sees

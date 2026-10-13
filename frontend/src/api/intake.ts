@@ -1,5 +1,6 @@
 import { api, streamNdjson } from "./client";
 import { currentMga } from "../auth";
+import type { ItdSummary } from "./itd";
 
 // Feature 10 — File Intake Channels. Backs "How Files Arrive" and
 // "Files Received".
@@ -281,6 +282,17 @@ export type Arrival = {
   contract_name: string | null;
   /** Who uploaded it, for a manual upload. */
   submitted_by_name: string | null;
+  // ── ITD bordereaux (feature 13) ──────────────────────────────────────────
+  /** Whether the file was read as inception-to-date. null when the setup has
+   *  ITD handling off, or the file was not run. */
+  load_type?: "itd" | "regular" | null;
+  /** Why it was read that way, in a sentence. */
+  load_type_reason?: string | null;
+  /** The span the file covers (ISO dates). */
+  period_start?: string | null;
+  period_end?: string | null;
+  /** What the comparison found. null when ITD handling is off. */
+  itd_summary?: ItdSummary | null;
 };
 
 /** ingested — every row passed · exceptions — clean rows in, the rest held for

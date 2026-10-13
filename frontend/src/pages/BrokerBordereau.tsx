@@ -59,6 +59,7 @@ import { downloadFile, downloadErrorText } from "../api/client";
 import { fmtDate } from "../utils/date";
 import { Pagination } from "../components/Pagination";
 import { InfoTip } from "../components/InfoTip";
+import { olderItdMessage } from "../api/itd";
 
 /** Runs per page of the history. Server-side: the endpoint used to stop at the
  *  twentieth most recent file with no way to reach the twenty-first. */
@@ -259,7 +260,9 @@ export default function BrokerBordereau() {
           && (detail as { code?: string }).code === "layout_mismatch") {
         setLayoutBlock(detail as LayoutChanges & { message: string; min_match_pct?: number });
       } else {
-        setErr(errorText(e));
+        // An ITD file older than one already sent is refused outright — no
+        // "send anyway", it would wind the running total back.
+        setErr(olderItdMessage(detail) ?? errorText(e));
       }
     } finally { setBusy(false); }
   }

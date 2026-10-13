@@ -949,6 +949,8 @@ class PipelineCreate(BaseModel):
     # Which of its contracts' rule sets this setup runs — see rule_scope.py.
     # Omitted, the setup runs its own template's rules, as every setup did.
     rule_scope: Optional[dict] = None
+    # ITD handling (itd.py) — omitted, ITD stays off, as every setup was.
+    itd_config: Optional[dict] = None
 
 
 class PipelineUpdate(BaseModel):
@@ -960,6 +962,9 @@ class PipelineUpdate(BaseModel):
     # Replaces the setup's rule choice when sent; an empty object clears it.
     # Left out, the stored choice is kept.
     rule_scope: Optional[dict] = None
+    # Replaces the setup's ITD settings when sent (itd.py); an empty object
+    # clears them. Left out, the stored settings are kept.
+    itd_config: Optional[dict] = None
 
 
 @router.get("/direct/format/{format_id}")
@@ -1467,6 +1472,16 @@ def _derive_reference_documents(s, contract_id):
         return []
 
 
+def _pipeline_itd_config(s, pipeline_id: int) -> Optional[dict]:
+    """A setup's ITD settings for the screens — None when it has none or the
+    database cannot hold them yet; never the reason a setup fails to load."""
+    try:
+        import itd_store
+        return itd_store.read_config(s, pipeline_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
     ready, reason = _pipeline_ready(s, p)
     # Supplement is configured on the input template (DirectFormat); surface a
@@ -1538,6 +1553,7 @@ def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
         ],
         "reference_documents": _ref_docs,
         "rule_scope": _rule_scope_mod.pipeline_scope(s, p.id),
+        "itd_config": _pipeline_itd_config(s, p.id),
         "ready": ready, "ready_reason": reason,
         # Who sent this up for approval and when. Both NULL on a setup that
         # never went up — one a carrier ADMIN built, or one from before
@@ -3254,6 +3270,18 @@ def _store_rule_scope(s, pipeline_id: int, raw: dict) -> None:
                                  "the database is missing migration 21.")
 
 
+def _store_itd_config(s, pipeline_id: int, raw: dict) -> None:
+    """Save a setup's ITD settings (itd_store.write_config), inside the
+    caller's transaction — refused out loud on a database without migration 38."""
+    import itd_store
+    try:
+        itd_store.write_config(s, pipeline_id, raw)
+    except LookupError:
+        s.rollback()
+        raise HTTPException(409, "This setup's ITD settings cannot be saved yet: "
+                                 "the database is missing migration 38.")
+
+
 @router.post("/pipelines")
 def pipeline_create(body: PipelineCreate, mga: Optional[str] = None,
                     principal: Principal = Depends(current_principal)):
@@ -3272,6 +3300,14 @@ def pipeline_create(body: PipelineCreate, mga: Optional[str] = None,
         _replace_pipeline_contracts(s, pipe, body.contracts)
         if body.rule_scope is not None:
             _store_rule_scope(s, pipe.id, body.rule_scope)
+        if body.itd_config is not None:
+            _store_itd_config(s, pipe.id, body.itd_config)
+        else:
+            # A new setup starts with ITD filled in from its own input sheets
+            # (on only when they carry a transaction id and a reported period).
+            # Nobody fills these in by hand — no screen shows them.
+            import itd_store
+            itd_store.auto_fill(s, pipe)
         s.commit()
         s.refresh(pipe)
         return _pipeline_to_dict(s, pipe)
@@ -3408,6 +3444,8 @@ def pipeline_update(pipeline_id: int, body: PipelineUpdate,
             p.name = body.name
         if body.broker_party_id is not None:
             p.broker_party_id = body.broker_party_id
+        input_changed = (body.input_format_id is not None
+                         and body.input_format_id != p.input_format_id)
         if body.input_format_id is not None:
             p.input_format_id = body.input_format_id
         if body.output_template_id is not None:
@@ -3434,6 +3472,14 @@ def pipeline_update(pipeline_id: int, body: PipelineUpdate,
                         "setup back to draft."))
         if body.rule_scope is not None:
             _store_rule_scope(s, p.id, body.rule_scope)
+        if body.itd_config is not None:
+            _store_itd_config(s, p.id, body.itd_config)
+        elif input_changed:
+            # New input sheets: automatic ITD settings follow them. Settings a
+            # person saved, and a setup that never had any, are left alone.
+            import itd_store
+            s.flush()
+            itd_store.auto_fill(s, p, refill=True)
         p.modified_at = datetime.utcnow()
         s.commit()
         s.refresh(p)
@@ -4232,6 +4278,9 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
                        file_bytes: bytes, source_filename: Optional[str],
                        skip_rows: int = 0, broker_party_id: Optional[int] = None,
                        contract_id: Optional[int] = None,
+                       arrival_id: Optional[int] = None,
+                       period: Optional[str] = None,
+                       check_only: bool = False,
                        sheets_dict: Optional[dict] = None) -> dict:
     """Everything a run does BEFORE validation: read the workbook, find the live
     setup, refuse what cannot run, and write the landing record.
@@ -4239,6 +4288,11 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
     Shared by /direct/run (a person uploading) and intake_autorun (a file that
     arrived by email, SFTP or API), so both go through exactly one path. Every
     refusal here is a real HTTPException raised before any output exists.
+
+    ITD handling (itd_run.py) happens here too, just before the landing is
+    written, on a setup whose ITD settings are switched on: an ITD file's
+    landing then holds only its new rows and adjustments. `arrival_id`,
+    `period` and `check_only` are only used for that.
     """
     if sheets_dict is None:
         sheets_dict = await run_in_threadpool(read_excel_all_sheets, file_bytes, skip_rows)
@@ -4284,6 +4338,19 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
         sheets_dict = _scoped_sheets(fmt, sheets_dict)
         landing = await run_in_threadpool(dl.build_landing_record, sheets_dict)
 
+        # ITD (itd_run.py): compare the file with what this feed has already
+        # delivered and keep only what is new. A no-op — the landing comes back
+        # untouched and itd_plan is None — unless the setup switched ITD on.
+        import itd_run
+        try:
+            landing, itd_plan = itd_run.prepare(
+                s, tenant_id=tid, pipe=pipe, program_id=program_id,
+                broker_party_id=broker_party_id, landing=landing,
+                file_bytes=file_bytes, arrival_id=arrival_id, period=period,
+                check_only=check_only)
+        except itd_run.OlderItdFile as e:
+            raise HTTPException(409, {"code": "older_itd", "message": str(e)})
+
         # Supplement: capture the setup's stored supplementary sheets alongside the
         # BDX (no policy-number join — a supplement file just carries extra data).
         # Uploaded once on the Setup page; nothing to upload here.
@@ -4324,10 +4391,14 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
         s.refresh(rec)
         landing_id = rec.id
         pipeline_id = pipe.id if pipe else None
+        if itd_plan:
+            itd_run.stage(s, itd_plan, landing_id)
+            s.commit()
 
     return {"landing_id": landing_id, "pipeline_id": pipeline_id,
             "contract_id": contract_id, "eff_contract_id": eff_contract_id,
             "run_scope": run_scope, "drift": drift, "supp_stats": supp_stats,
+            "itd": itd_plan,
             "layout_changes": layout_changes}
 
 
@@ -4351,6 +4422,11 @@ async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Option
     result["layout_changes"] = prep.get("layout_changes")
     if prep["supp_stats"] is not None:
         result["supplement"] = prep["supp_stats"]
+    if prep.get("itd"):
+        # The output exists: move the feed's ITD running total forward.
+        import itd_run
+        result["itd"] = await run_in_threadpool(
+            itd_run.finish, prep["landing_id"], prep["itd"])
     return result
 
 
@@ -4504,10 +4580,17 @@ async def direct_run(
             tid, carrier_party_id=carrier_party_id, program_id=program_id,
             file_bytes=file_bytes, source_filename=file.filename,
             skip_rows=skip_rows, broker_party_id=broker_party_id,
-            contract_id=contract_id, sheets_dict=sheets_dict)
+            contract_id=contract_id, arrival_id=arrival_id, period=period,
+            check_only=check_only, sheets_dict=sheets_dict)
     except HTTPException as e:
         if arrival_id:
-            svc_intake.mark_run(arrival_id, state="failed", error=str(e.detail))
+            # An ITD older than one already loaded is kept, not loaded — not
+            # a failed run (itd_run.OlderItdFile).
+            older_itd = isinstance(e.detail, dict) and e.detail.get("code") == "older_itd"
+            svc_intake.mark_run(
+                arrival_id, state="not_run" if older_itd else "failed",
+                error=(e.detail.get("message") if isinstance(e.detail, dict)
+                       else str(e.detail)))
         raise
 
     # Validation + output generation can exceed the Azure ingress ~4-min idle
@@ -4965,9 +5048,18 @@ def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
         # that broker as their sender, so a broker only ever reads its own.
         run_ctx = _landing_run_context(s, rec)
 
+    # An ITD delta (itd_run.py) loads in append mode: each row is one new
+    # transaction or adjustment, carrying its key in itd.RESERVED_COLUMNS.
+    import itd as _itd
+    itd_append = (data.get("itd") or {}).get("load_type") == _itd.ITD
+    if itd_append:
+        spec_by_sheet = _itd.data_model_spec(spec_by_sheet)
+
     sheets_dict: dict[str, pd.DataFrame] = {}
     for name, sheet in (data.get("sheets") or {}).items():
         cols = sheet.get("columns") or []
+        if itd_append:
+            cols = [*cols, *[c for c in _itd.RESERVED_COLUMNS if c not in cols]]
         rows = sheet.get("rows") or []
         sheets_dict[name] = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
@@ -4982,19 +5074,36 @@ def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
 
     loaded = 0
     with CanonicalSession() as cs:
-        # Each record ingests inside its own SAVEPOINT so a single failing INSERT
-        # (a duplicate invoice, a bad value, a constraint hit) rolls back only that
-        # record instead of aborting the whole Postgres transaction — which
-        # otherwise makes every following record fail with InFailedSqlTransaction.
-        # Good rows still commit.
-        for record in records:
+        if itd_append:
+            # An ITD delta loads whole or not at all: the feed's running total
+            # already counts every one of these rows as delivered, so a half
+            # load would leave the data model short with nothing to say so.
+            # Append mode skips rows already loaded, so a retry is safe.
             try:
-                with cs.begin_nested():
-                    ingest_record(cs, tenant_mga, record, run=run_ctx)
-                loaded += 1
+                for record in records:
+                    ingest_record(cs, tenant_mga, record, run=run_ctx, mode="append")
+                    loaded += 1
+                cs.commit()
             except Exception as e:  # noqa: BLE001
-                log.warning("ingest_record failed during backfill: %s", e)
-        cs.commit()
+                cs.rollback()
+                log.warning("ITD data-model load of landing %s rolled back at "
+                            "record %d of %d: %s", landing_id, loaded + 1,
+                            len(records), e)
+                loaded = 0
+        else:
+            # Each record ingests inside its own SAVEPOINT so a single failing INSERT
+            # (a duplicate invoice, a bad value, a constraint hit) rolls back only that
+            # record instead of aborting the whole Postgres transaction — which
+            # otherwise makes every following record fail with InFailedSqlTransaction.
+            # Good rows still commit.
+            for record in records:
+                try:
+                    with cs.begin_nested():
+                        ingest_record(cs, tenant_mga, record, run=run_ctx)
+                    loaded += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning("ingest_record failed during backfill: %s", e)
+            cs.commit()
 
     with SessionLocal() as s:
         r = s.get(LandingRecord, landing_id)

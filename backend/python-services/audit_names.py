@@ -96,7 +96,7 @@ ACTION_TARGET_KIND = {
     "intake_route_created": "route", "intake_route_updated": "route",
     "intake_guide_emailed": "route", "intake_guide_sent": "route",
     "intake_route_contacts_updated": "route",
-    "intake_arrival_rerun": "arrival",
+    "intake_arrival_rerun": "arrival", "itd_file_withdrawn": "arrival",
     "intake_key_created": "key", "intake_key_revoked": "key",
     "intake_sftp_login_issued": "route",
     "contract_activated": "contract",

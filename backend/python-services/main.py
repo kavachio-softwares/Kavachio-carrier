@@ -42,6 +42,7 @@ from broker_routes import router as broker_router
 from output_template_routes import router as output_template_router
 # Feature 10 — file intake channels ("How Files Arrive" / "Files Received").
 from intake_routes import router as intake_router
+from itd_routes import router as itd_router
 # Feature 10.2 — the machine-to-machine way in (/v1). API-key auth, not JWT.
 from intake_api_routes import router as intake_api_router
 from carrier_routes import router as carrier_router
@@ -145,6 +146,9 @@ app.include_router(audit_router)
 # The secure correction link — no login, the emailed token is the credential.
 app.include_router(fix_link_router)
 app.include_router(submission_router)
+# ITD handling: a setup's ITD settings, a file's row comparison, a feed's
+# running total (itd_routes.py).
+app.include_router(itd_router)
 
 
 def _mark_deprecated_aliases() -> None:

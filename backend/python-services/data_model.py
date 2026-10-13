@@ -555,6 +555,9 @@ DATA_MODEL: dict[str, dict] = {
     "premium_transaction_version_no":                       {"table": "premium_transaction", "column": "version_no", "type": "int", "description": "Version counter; (id, version_no) is the effective key.", "source": "system"},
     "premium_transaction_lineage_row_key":                  {"table": "premium_transaction", "column": "row_key", "type": "string", "description": "Hash of the business key \u2014 how the ETL finds the active version.", "source": "system"},
     "premium_transaction_row_hash":                         {"table": "premium_transaction", "column": "row_hash", "type": "string", "description": "Hash of business attributes. Same = resend; different = correction.", "source": "system"},
+    "premium_transaction_source_ref":                        {"table": "premium_transaction", "column": "premium_transaction_source_ref", "type": "string", "description": "The broker's own reference for this transaction, e.g. an invoice number (INV110582, INV110582-R).", "source": "bdx"},
+    "premium_transaction_itd_adjusts_row_key":               {"table": "premium_transaction", "column": "premium_transaction_itd_adjusts_row_key", "type": "string", "description": "On an ITD adjustment row: the row key of the transaction it corrects.", "source": "system"},
+    "premium_transaction_itd_reverses_row_key":              {"table": "premium_transaction", "column": "premium_transaction_itd_reverses_row_key", "type": "string", "description": "On a reversal row (e.g. INV110582-R): the row key of the transaction it reverses, so the two stay linked for audit.", "source": "system"},
 
     # ============= tax_line =============
     "tax_line_id":                                          {"table": "tax_line", "column": "tax_line_id", "type": "int", "description": "Primary key.", "source": "system", "pk": True},
@@ -787,17 +790,70 @@ DATA_MODEL: dict[str, dict] = {
     "landing_correction_modified_at":                       {"table": "landing_correction", "column": "modified_at", "type": "datetime", "description": "When this row was last updated.", "source": "system"},
     "landing_correction_upload_id":                         {"table": "landing_correction", "column": "upload_id", "type": "int", "description": "Upload that produced this row \u2014 ingestion lineage.", "source": "system", "fk": True},
 
-    # ============= bordereau_position =============
-    "position_id":                                          {"table": "bordereau_position", "column": "position_id", "type": "int", "description": "Primary key.", "source": "system", "pk": True},
-    "position_contract_id":                                 {"table": "bordereau_position", "column": "position_contract_id", "type": "int", "description": "References contract.contract_id.", "source": "system", "fk": True},
-    "position_row_key":                                     {"table": "bordereau_position", "column": "position_row_key", "type": "string", "description": "Position row key.", "source": "system"},
-    "position_row_hash":                                    {"table": "bordereau_position", "column": "position_row_hash", "type": "string", "description": "Position row hash.", "source": "system"},
-    "position_entity_id":                                   {"table": "bordereau_position", "column": "position_entity_id", "type": "int", "description": "Foreign key.", "source": "system", "fk": True},
-    "position_status":                                      {"table": "bordereau_position", "column": "position_status", "type": "string", "description": "Position status.", "source": "system"},
-    "position_last_seen_at":                                {"table": "bordereau_position", "column": "position_last_seen_at", "type": "datetime", "description": "Position last seen at.", "source": "system"},
-    "bordereau_position_created_at":                        {"table": "bordereau_position", "column": "created_at", "type": "datetime", "description": "When this row was first inserted.", "source": "system"},
-    "bordereau_position_modified_at":                       {"table": "bordereau_position", "column": "modified_at", "type": "datetime", "description": "When this row was last updated.", "source": "system"},
-    "bordereau_position_upload_id":                         {"table": "bordereau_position", "column": "upload_id", "type": "int", "description": "Upload that produced this row \u2014 ingestion lineage.", "source": "system", "fk": True},
+    # ============= bdx_sent_transaction =============
+    # Every transaction already sent to the carrier, once each (ITD — was
+    # bordereau_position; renamed for readability, migration 39).
+    "sent_id":                                          {"table": "bdx_sent_transaction", "column": "sent_id", "type": "int", "description": "Primary key.", "source": "system", "pk": True},
+    "sent_contract_id":                                 {"table": "bdx_sent_transaction", "column": "sent_contract_id", "type": "int", "description": "References contract.contract_id.", "source": "system", "fk": True},
+    "sent_row_key":                                     {"table": "bdx_sent_transaction", "column": "sent_row_key", "type": "string", "description": "Normalised matching key of the transaction (txn:… or cmp:…#n).", "source": "system"},
+    "sent_row_hash":                                    {"table": "bdx_sent_transaction", "column": "sent_row_hash", "type": "string", "description": "Fingerprint of the row as last sent.", "source": "system"},
+    "sent_entity_id":                                   {"table": "bdx_sent_transaction", "column": "sent_entity_id", "type": "int", "description": "Foreign key.", "source": "system", "fk": True},
+    "sent_status":                                      {"table": "bdx_sent_transaction", "column": "sent_status", "type": "string", "description": "active | dropped | removed | void.", "source": "system"},
+    "sent_last_seen_at":                                {"table": "bdx_sent_transaction", "column": "sent_last_seen_at", "type": "datetime", "description": "When a file last carried this transaction.", "source": "system"},
+    "bdx_sent_transaction_created_at":                        {"table": "bdx_sent_transaction", "column": "created_at", "type": "datetime", "description": "When this row was first inserted.", "source": "system"},
+    "bdx_sent_transaction_modified_at":                       {"table": "bdx_sent_transaction", "column": "modified_at", "type": "datetime", "description": "When this row was last updated.", "source": "system"},
+    "bdx_sent_transaction_upload_id":                         {"table": "bdx_sent_transaction", "column": "upload_id", "type": "int", "description": "Upload that produced this row \u2014 ingestion lineage.", "source": "system", "fk": True},
+    # ITD running total (migration 38, itd_store.py): one row per transaction a
+    # feed has delivered — feed = tenant + programme + broker + stream.
+    "sent_program_id":                                   {"table": "bdx_sent_transaction", "column": "sent_program_id", "type": "int", "description": "Programme of the feed (ITD running total).", "source": "system"},
+    "sent_broker_party_id":                              {"table": "bdx_sent_transaction", "column": "sent_broker_party_id", "type": "int", "description": "Broker of the feed; 0 when the setup has no broker.", "source": "system"},
+    "sent_stream":                                       {"table": "bdx_sent_transaction", "column": "sent_stream", "type": "string", "description": "Stream within the feed: the input sheet, or the stream name the ITD settings give.", "source": "system"},
+    "sent_key_source":                                   {"table": "bdx_sent_transaction", "column": "sent_key_source", "type": "string", "description": "txn = matched on the broker's own transaction id; composite = on the fallback columns.", "source": "system"},
+    "sent_source_ref":                                   {"table": "bdx_sent_transaction", "column": "sent_source_ref", "type": "string", "description": "The transaction id as the broker wrote it, e.g. INV110582-R.", "source": "system"},
+    "sent_money":                                        {"table": "bdx_sent_transaction", "column": "sent_money", "type": "json", "description": "Latest value of each money column, to the cent.", "source": "system"},
+    "sent_values":                                       {"table": "bdx_sent_transaction", "column": "sent_values", "type": "json", "description": "The row as last received.", "source": "system"},
+    "sent_adjust_count":                                 {"table": "bdx_sent_transaction", "column": "sent_adjust_count", "type": "int", "description": "How many ITD adjustment rows this transaction has had.", "source": "system"},
+    "sent_reverses_key":                                 {"table": "bdx_sent_transaction", "column": "sent_reverses_key", "type": "string", "description": "On a reversal: the row key of the transaction it reverses.", "source": "system"},
+    "sent_first_arrival_id":                             {"table": "bdx_sent_transaction", "column": "sent_first_arrival_id", "type": "int", "description": "File (file_arrival) that first delivered this transaction.", "source": "system"},
+    "sent_last_arrival_id":                              {"table": "bdx_sent_transaction", "column": "sent_last_arrival_id", "type": "int", "description": "File (file_arrival) that last carried this transaction.", "source": "system"},
+    "sent_last_period":                                  {"table": "bdx_sent_transaction", "column": "sent_last_period", "type": "string", "description": "YYYY-MM the last file that carried it was as at.", "source": "system"},
+
+    # ============= bdx_row_comparison =============
+    # Every row of every file and what the comparison decided for it (was
+    # bordereau_position_event; migration 39).
+    # What happened to each row of each file under ITD handling (migration 38):
+    # the audit trail, the comparison screen, and how a run moves the running
+    # total forward only once it has succeeded (pending → applied).
+    "comparison_id":                                              {"table": "bdx_row_comparison", "column": "comparison_id", "type": "int", "description": "Primary key.", "source": "system", "pk": True},
+    "comparison_sent_id":                                     {"table": "bdx_row_comparison", "column": "comparison_sent_id", "type": "int", "description": "References bdx_sent_transaction.sent_id.", "source": "system"},
+    "comparison_file_arrival_id":                                 {"table": "bdx_row_comparison", "column": "comparison_file_arrival_id", "type": "int", "description": "References file_arrival.id — the file this row came in.", "source": "system"},
+    "comparison_landing_id":                                      {"table": "bdx_row_comparison", "column": "comparison_landing_id", "type": "int", "description": "References landing_record.id — the run.", "source": "system"},
+    "comparison_program_id":                                      {"table": "bdx_row_comparison", "column": "comparison_program_id", "type": "int", "description": "Programme of the feed.", "source": "system"},
+    "comparison_broker_party_id":                                 {"table": "bdx_row_comparison", "column": "comparison_broker_party_id", "type": "int", "description": "Broker of the feed; 0 when none.", "source": "system"},
+    "comparison_stream":                                          {"table": "bdx_row_comparison", "column": "comparison_stream", "type": "string", "description": "Stream within the feed.", "source": "system"},
+    "comparison_sheet":                                           {"table": "bdx_row_comparison", "column": "comparison_sheet", "type": "string", "description": "Input sheet the row was on.", "source": "system"},
+    "comparison_row_no":                                          {"table": "bdx_row_comparison", "column": "comparison_row_no", "type": "int", "description": "0-based row on that sheet in the file as received.", "source": "system"},
+    "comparison_row_key":                                         {"table": "bdx_row_comparison", "column": "comparison_row_key", "type": "string", "description": "Normalised matching key.", "source": "system"},
+    "comparison_source_ref":                                      {"table": "bdx_row_comparison", "column": "comparison_source_ref", "type": "string", "description": "Transaction id as the broker wrote it.", "source": "system"},
+    "comparison_result":                                          {"table": "bdx_row_comparison", "column": "comparison_result", "type": "string", "description": "new | unchanged | changed | details_changed | dropped | duplicate | missing_key.", "source": "system"},
+    "comparison_load_type":                                       {"table": "bdx_row_comparison", "column": "comparison_load_type", "type": "string", "description": "itd | regular — how the file was read.", "source": "system"},
+    "comparison_status":                                          {"table": "bdx_row_comparison", "column": "comparison_status", "type": "string", "description": "pending | applied | conflict | check_only | void | dropped_decided.", "source": "system"},
+    "comparison_period":                                          {"table": "bdx_row_comparison", "column": "comparison_period", "type": "string", "description": "YYYY-MM the file is as at.", "source": "system"},
+    "comparison_old_hash":                                        {"table": "bdx_row_comparison", "column": "comparison_old_hash", "type": "string", "description": "Row fingerprint before this file.", "source": "system"},
+    "comparison_new_hash":                                        {"table": "bdx_row_comparison", "column": "comparison_new_hash", "type": "string", "description": "Row fingerprint in this file.", "source": "system"},
+    "comparison_old_money":                                       {"table": "bdx_row_comparison", "column": "comparison_old_money", "type": "json", "description": "Money columns before this file.", "source": "system"},
+    "comparison_new_money":                                       {"table": "bdx_row_comparison", "column": "comparison_new_money", "type": "json", "description": "Money columns in this file.", "source": "system"},
+    "comparison_money_delta":                                     {"table": "bdx_row_comparison", "column": "comparison_money_delta", "type": "json", "description": "New minus old, per money column, for a changed row.", "source": "system"},
+    "comparison_changed_fields":                                  {"table": "bdx_row_comparison", "column": "comparison_changed_fields", "type": "json", "description": "Columns whose value changed.", "source": "system"},
+    "comparison_adjust_no":                                       {"table": "bdx_row_comparison", "column": "comparison_adjust_no", "type": "int", "description": "Number of the adjustment row this change produced.", "source": "system"},
+    "comparison_reverses_key":                                    {"table": "bdx_row_comparison", "column": "comparison_reverses_key", "type": "string", "description": "On a reversal row: the row key of the transaction it reverses (empty when that transaction was never delivered).", "source": "system"},
+    "comparison_reverses_ref":                                    {"table": "bdx_row_comparison", "column": "comparison_reverses_ref", "type": "string", "description": "On a reversal row: the id of the transaction it reverses, as written (INV110582).", "source": "system"},
+    "comparison_old_values":                                      {"table": "bdx_row_comparison", "column": "comparison_old_values", "type": "json", "description": "The row as it was before (changed rows) — restored if the file is withdrawn.", "source": "system"},
+    "comparison_new_values":                                      {"table": "bdx_row_comparison", "column": "comparison_new_values", "type": "json", "description": "The row as received (new and changed rows).", "source": "system"},
+    "comparison_row_period":                                      {"table": "bdx_row_comparison", "column": "comparison_row_period", "type": "string", "description": "YYYY-MM the row is reported in (its reported-period column); for a dropped row, the month it was reported in before.", "source": "system"},
+    "comparison_note":                                            {"table": "bdx_row_comparison", "column": "comparison_note", "type": "string", "description": "Why a row was held back, or a person's decision.", "source": "system"},
+    "bdx_row_comparison_created_at":                   {"table": "bdx_row_comparison", "column": "created_at", "type": "datetime", "description": "When this row was first inserted.", "source": "system"},
+    "bdx_row_comparison_modified_at":                  {"table": "bdx_row_comparison", "column": "modified_at", "type": "datetime", "description": "When this row was last updated.", "source": "system"},
 
     # ============= validation_rule =============
     "rule_id":                                              {"table": "validation_rule", "column": "rule_id", "type": "int", "description": "Surrogate primary key. Referenced from validation_exception.rule_id.", "source": "system", "pk": True},

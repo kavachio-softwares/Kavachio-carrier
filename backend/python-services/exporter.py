@@ -1565,6 +1565,24 @@ def _keeps_own_date_format(dst_cell, src_cell) -> bool:
         return False
 
 
+def _heading_date_on_non_date(dst_cell, src_cell) -> bool:
+    """True when the donor is a HEADING whose number format is a date and dst
+    does not hold a date — _keeps_own_date_format the other way round.
+
+    A heading row is often formatted as dates without anyone noticing (text
+    looks the same either way — the Risksmith workbook has 88 of its 93
+    headings so). Copied onto a number, that format shows 2,000 as 22/06/1905
+    and 0 as 00/01/1900; and a number past Excel's last date (10,000,000) is
+    turned into #VALUE! the next time the file is opened to paint exceptions.
+    So a heading's date format only goes onto a real date."""
+    try:
+        if isinstance(dst_cell.value, (_date_cls, datetime, _time_cls)):
+            return False
+        return is_date_format(src_cell.number_format)
+    except Exception:  # noqa: BLE001 — style decisions never break a delivery
+        return False
+
+
 def _copy_cell_style(src_cell, dst_cell, strip_bold: bool = False) -> None:
     """Copy src's style onto dst, unchanged — except `strip_bold`, passed when
     the donor is the HEADER cell (the fallback for a template whose sample data
@@ -1576,7 +1594,8 @@ def _copy_cell_style(src_cell, dst_cell, strip_bold: bool = False) -> None:
     cell's original look.
 
     The one style a date cell does NOT take from the donor is its number format
-    (see _keeps_own_date_format)."""
+    (see _keeps_own_date_format); nor does any other cell take a HEADING's date
+    format (see _heading_date_on_non_date)."""
     if src_cell is None or src_cell is dst_cell:
         return
     try:
@@ -1587,7 +1606,8 @@ def _copy_cell_style(src_cell, dst_cell, strip_bold: bool = False) -> None:
         dst_cell.fill = copy(src_cell.fill)
         dst_cell.border = copy(src_cell.border)
         dst_cell.alignment = copy(src_cell.alignment)
-        if not _keeps_own_date_format(dst_cell, src_cell):
+        if not (_keeps_own_date_format(dst_cell, src_cell)
+                or (strip_bold and _heading_date_on_non_date(dst_cell, src_cell))):
             dst_cell.number_format = src_cell.number_format
         dst_cell.protection = copy(src_cell.protection)
     except Exception as e:

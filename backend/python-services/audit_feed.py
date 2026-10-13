@@ -402,6 +402,10 @@ ACTION_WORDS = {
     "intake.arrival.released":    "Released a file on hold",
     "intake.arrival.discarded":   "Discarded a received file",
     "intake_arrival_rerun":       "Re-ran a received file",
+    # ITD handling (itd_routes.py)
+    "itd_config_saved":           "Changed a setup's ITD settings",
+    "itd_file_withdrawn":         "Withdrew an ITD file from its running total",
+    "itd_dropped_decided":        "Decided on a transaction an ITD file dropped",
     "onboarding_skipped":         "Skipped onboarding",
     # the received file's life after it lands (submission_service)
     "bordereau_sent":             "Sent the bordereau to the carrier",
@@ -1208,7 +1212,8 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "intake_sftp_login_issued",
       "mailbox_polled", "intake_sftp_tested", "intake_guide_sent",
       "intake_guide_emailed", "intake.arrival.released",
-      "intake.arrival.discarded", "intake_arrival_rerun"), CARRIER_SEATS),
+      "intake.arrival.discarded", "intake_arrival_rerun", "itd_config_saved",
+      "itd_file_withdrawn", "itd_dropped_decided"), CARRIER_SEATS),
     ("downloads", "Downloads and views", ("download", "read", "export"), ALL_SEATS),
     # The browser silently renewing its token. Kept out of the default feed
     # (see _rows) because it is the machine working, not a person acting — but

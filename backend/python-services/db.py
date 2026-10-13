@@ -2133,6 +2133,18 @@ def init_db():
         return
     # Ops/mapper tables on the local (ops) database.
     Base.metadata.create_all(engine)
+    # The ITD tables' clearer names (itd_store.rename_old_tables) — moved
+    # across BEFORE create_all, which would otherwise build empty tables under
+    # the new names beside the old ones and their rows.
+    try:
+        import logging
+        import itd_store
+        with engine.begin() as conn:
+            for line in itd_store.rename_old_tables(conn):
+                logging.getLogger("bdx.db").info("renamed %s", line)
+    except Exception as e:  # noqa: BLE001 — never what stops the app starting
+        import logging
+        logging.getLogger("bdx.db").warning("ITD tables not renamed: %s", e)
     # Canonical 53-table xlsx-derived schema on the canonical Postgres DB.
     canonical_metadata.create_all(canonical_engine)
 
@@ -2428,6 +2440,16 @@ def init_db():
                 _ensure_column(conn, inspector, "file_arrival", _c, _ddl)
             # Migration 34 — the contract a received file is written under.
             _ensure_column(conn, inspector, "file_arrival", "contract_id", "BIGINT")
+            # Migration 38 — ITD handling: how the run read the file. All
+            # nullable, no backfill: NULL is "not an ITD-enabled setup".
+            for _c, _ddl in (("load_type", "VARCHAR"), ("load_type_reason", "TEXT"),
+                             ("period_start", "DATE"), ("period_end", "DATE"),
+                             ("itd_summary", json_type)):
+                _ensure_column(conn, inspector, "file_arrival", _c, _ddl)
+        # Migration 38 — a setup's ITD settings (itd.py). Not mapped on the
+        # Pipeline model, for the reason rule_scope is not: read and written
+        # through itd_store so a database without it keeps working.
+        _ensure_column(conn, inspector, "pipeline", "itd_config", json_type)
         if inspector.has_table("intake_route"):
             _ensure_column(conn, inspector, "intake_route", "notify_emails", json_type)
             if not _had_run_state:
@@ -2451,6 +2473,26 @@ def init_db():
                 except Exception:  # noqa: BLE001 — fall back to a safe type
                     _ddl = "VARCHAR"
                 _ensure_column(conn, inspector, _t_name, _col.name, _ddl)
+        # Migrations 38/39 — one live row per transaction sent, per feed
+        # (itd_store.py), and the lookups every ITD comparison makes. Same
+        # indexes as the migration files; create_all makes none.
+        if dialect == "postgresql" and inspector.has_table("bdx_sent_transaction"):
+            for _ddl in (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_bdx_sent_transaction_feed_key "
+                "ON bdx_sent_transaction (tenant_id, sent_program_id, "
+                "sent_broker_party_id, sent_stream, sent_row_key) "
+                "WHERE COALESCE(sent_status, 'active') <> 'void'",
+                "CREATE INDEX IF NOT EXISTS ix_bdx_row_comparison_landing "
+                "ON bdx_row_comparison (comparison_landing_id, comparison_status)",
+                "CREATE INDEX IF NOT EXISTS ix_bdx_row_comparison_feed "
+                "ON bdx_row_comparison (tenant_id, comparison_program_id, "
+                "comparison_broker_party_id, comparison_load_type, comparison_status)",
+            ):
+                try:
+                    with conn.begin_nested():
+                        conn.exec_driver_sql(_ddl)
+                except Exception:  # noqa: BLE001 — an index never blocks boot
+                    pass
 
     # Canonical: add `extras` JSONB column to each row-strategy entity table
     # so user-defined fields (the `_xf:*` mapping prefix) have a home.

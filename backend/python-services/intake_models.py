@@ -22,7 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text,
+    BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -157,6 +157,13 @@ class FileArrival(Base):
     # checks the file against it, and it is part of what makes a later file
     # the next version of the same submission.
     contract_id = Column(BigInteger, nullable=True)
+    # Migration 38 — ITD handling (itd.py). Set by the run, from the rows, on
+    # a setup whose ITD settings are switched on; NULL everywhere else.
+    load_type = Column(Text, nullable=True)          # itd | regular
+    load_type_reason = Column(Text, nullable=True)   # why, in words
+    period_start = Column(Date, nullable=True)       # earliest period in the rows
+    period_end = Column(Date, nullable=True)         # latest — what an ITD is "as at"
+    itd_summary = Column(JSONB, nullable=True)       # counts per row result
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
 

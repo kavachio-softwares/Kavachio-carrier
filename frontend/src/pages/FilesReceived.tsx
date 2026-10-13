@@ -22,10 +22,12 @@ import {
   discardArrival, downloadArrival, isHeld, listArrivals, releaseArrival, rerunArrival,
   type Arrival, type Channel, type RunResult,
 } from "../api/intake";
-import { fmtStamp, periodLabel } from "../utils/date";
+import { itdSummaryLine, lateRowsNote } from "../api/itd";
+import { fmtDate, fmtStamp, periodLabel } from "../utils/date";
 import { Pagination } from "../components/Pagination";
 import { InfoTip } from "../components/InfoTip";
 import SubmissionPanel from "../components/SubmissionPanel";
+import { ItdComparisonDrawer } from "../components/ItdComparisonDrawer";
 
 // Each door gets a name and a tone, as in the carrier-centric design: email is
 // the one with a reply path so it reads as info, an upload was done by a person
@@ -256,6 +258,8 @@ function subline(a: Arrival): string {
   if (a.outcome === "accepted") {
     // Once it has been run, the run is the news — and a failed run says why.
     if (a.run_state === "failed" || a.run_state === "not_run") {
+      // An older ITD says it once, on its ITD line (olderItdShort).
+      if (olderItd(a)) return "";
       const first = (a.run_error ?? "").split(/(?<=\.)\s/)[0];
       return first.length > 60 ? first.slice(0, 57).trimEnd() + "…" : first;
     }
@@ -281,6 +285,63 @@ function subline(a: Arrival): string {
   // Nothing matched: the first sentence, cut short.
   const first = reason.split(/(?<=\.)\s/)[0];
   return first.length > 60 ? first.slice(0, 57).trimEnd() + "…" : first;
+}
+
+// ── ITD files (feature 13) ──────────────────────────────────────────────────
+// A file read as inception-to-date carries what its comparison found. Shown
+// only when the setup has ITD handling on: a regular file under it is labelled
+// too, because it is recorded so later ITD files do not repeat its rows.
+function hasItd(a: Arrival): boolean {
+  return a.load_type === "itd" || (a.load_type === "regular" && !!a.itd_summary);
+}
+
+/** Held because a newer ITD file is already loaded — nothing was compared. */
+const olderItd = (a: Arrival) => a.itd_summary?.held === "older_itd";
+
+/** "2025-08" or "2025-07-31" → "August 2025" / "July 2025". */
+function monthName(p?: string | null): string {
+  const m = /^(\d{4})-(\d{2})/.exec(p ?? "");
+  if (!m) return "an earlier month";
+  return new Date(Number(m[1]), Number(m[2]) - 1, 1)
+    .toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+}
+
+/** An older ITD in a few words — the line under the file name. */
+const olderItdShort = (a: Arrival) =>
+  `Not processed — a newer ITD file (up to ${monthName(a.itd_summary?.last_itd)}) `
+  + "was already received.";
+
+/** An older ITD in full, in the carrier's words — the drawer's "Not processed"
+ *  box. Built here rather than read from run_error, which holds the words the
+ *  BROKER was shown ("…we already have your ITD file…"). */
+const olderItdText = (a: Arrival) =>
+  `This file covers up to ${monthName(a.period_end)}, but the broker's ITD file up to `
+  + `${monthName(a.itd_summary?.last_itd)} has already been processed. This file is `
+  + "saved for the record only. Ask the broker for their latest ITD file if needed.";
+
+/** The ITD line: what the comparison found, or why the file was held. */
+function itdText(a: Arrival): string {
+  const s = a.itd_summary;
+  if (olderItd(a)) return olderItdShort(a);
+  if (!s) return a.load_type_reason || "Not compared yet.";
+  if (a.load_type === "regular") {
+    // The badge beside it already says Regular.
+    return `All ${s.rows_in_file.toLocaleString()} rows processed${lateRowsNote(s)} · `
+      + "recorded so later ITD files don't repeat them";
+  }
+  if (s.status === "withdrawn") {
+    return `${itdSummaryLine(s)} · `
+      + (s.replaced_by ? `replaced by version ${s.replaced_by}` : "withdrawn");
+  }
+  return itdSummaryLine(s);
+}
+
+/** There are rows to look at. A held file was never compared. */
+const canCompare = (a: Arrival) => !!a.itd_summary && !olderItd(a);
+
+function ItdBadge({ a }: { a: Arrival }) {
+  return a.load_type === "itd" ? <Badge tone="info">ITD</Badge>
+    : <Badge tone="mut">Regular</Badge>;
 }
 
 // The backend writes held reasons as "Held — the file is …". The badge already
@@ -316,6 +377,8 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
   const [fBroker, setFBroker] = useState<string>("");
   const [fProgramme, setFProgramme] = useState<string>("");
   const [open, setOpen] = useState<Arrival | null>(null);
+  // The file whose ITD comparison is open, if any.
+  const [itdFor, setItdFor] = useState<number | null>(null);
   const [page, setPage] = useState(1);
 
   // Ticked rows, by arrival_id. Cleared whenever the visible set changes, so a
@@ -350,8 +413,8 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
   useEffect(() => {
     if (rows) seen.current = rows.length ? Math.max(...rows.map(r => r.arrival_id)) : 0;
   }, [rows]);
-  const gate = useRef({ active, busy, open: !!open });
-  gate.current = { active, busy, open: !!open };
+  const gate = useRef({ active, busy, open: !!open || itdFor != null });
+  gate.current = { active, busy, open: !!open || itdFor != null };
   const stale = useRef(false);
   const lookForNew = useCallback(async () => {
     const g = gate.current;
@@ -366,7 +429,7 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
   useEffect(() => { if (liveTick) lookForNew(); }, [liveTick, lookForNew]);
   useEffect(() => {
     if (stale.current) lookForNew();
-  }, [active, busy, open, lookForNew]);
+  }, [active, busy, open, itdFor, lookForNew]);
   useEffect(() => {
     const onVisible = () => { if (!document.hidden && stale.current) lookForNew(); };
     document.addEventListener("visibilitychange", onVisible);
@@ -736,6 +799,19 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
                         {sub && <div className="sub"
                           title={(a.outcome === "accepted" ? a.run_error : fullReason(a)) || undefined}>
                           {sub}</div>}
+                        {hasItd(a) && (
+                          <div className="sub" style={{
+                            display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
+                            color: olderItd(a) ? "var(--p-warn-ink)" : undefined,
+                          }}>
+                            <ItdBadge a={a} />
+                            <span>{itdText(a)}</span>
+                            {canCompare(a) && (
+                              <button type="button" className="linkbtn"
+                                onClick={e => { e.stopPropagation(); setItdFor(a.arrival_id); }}
+                                onKeyDown={e => e.stopPropagation()}>
+                                View comparison</button>)}
+                          </div>)}
                       </td>
                       <td>{a.broker_name ?? <span className="muted">Unidentified sender</span>}</td>
                       <td className="muted">
@@ -799,7 +875,11 @@ export default function InboxTab({ onWaitingCount, onRows, active, refreshKey, l
         onOpenArrival={id => {
           const r = (rows ?? []).find(x => x.arrival_id === id);
           if (r) setOpen(r);
-        }} />
+        }}
+        onCompare={id => { setOpen(null); setItdFor(id); }} />
+
+      <ItdComparisonDrawer arrivalId={itdFor} onClose={() => setItdFor(null)}
+        onChanged={load} />
     </>
   );
 }
@@ -828,7 +908,7 @@ function verdict(a: Arrival, st: "ok" | "held" | "away"):
     case "failed": return { tone: "crit", title: "Processing failed",
       text: a.run_error || RUN_META.failed.meaning };
     case "not_run": return { tone: "warn", title: "Not processed",
-      text: a.run_error || RUN_META.not_run.meaning };
+      text: olderItd(a) ? olderItdText(a) : a.run_error || RUN_META.not_run.meaning };
     case "not_checked": return { tone: "", title: "Not validated",
       text: RUN_META.not_checked.meaning };
     default: return { tone: "", title: awaitingRun(a),
@@ -836,10 +916,12 @@ function verdict(a: Arrival, st: "ok" | "held" | "away"):
   }
 }
 
-function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival }: {
+function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival, onCompare }: {
   arrival: Arrival | null; onClose: () => void; onResolved: () => void;
   /** Open another version of the same submission. */
   onOpenArrival?: (arrivalId: number) => void;
+  /** Open this file's ITD comparison. */
+  onCompare?: (arrivalId: number) => void;
 }) {
   const st = arrival ? state(arrival) : "ok";
   const failed = arrival && st !== "ok" ? failedCheck(arrival.turned_away_reason) : -1;
@@ -968,6 +1050,30 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival }: {
                     <span className="mono" style={{ fontSize: 12 }}>{arrival.public_ref}</span>
                     <CopyRef text={arrival.public_ref} /></span></div>)}
             </div>
+
+            {/* What the ITD comparison made of it — only when the setup has
+                ITD handling on. */}
+            {hasItd(arrival) && (<>
+              <div className="sub-h">Inception-to-Date</div>
+              <div className={`note${olderItd(arrival) ? " warn" : ""}`} style={{ marginTop: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
+                  <ItdBadge a={arrival} />
+                  {(arrival.period_start || arrival.period_end) && (
+                    <span className="faint" style={{ fontSize: 11.5 }}>
+                      Covers {fmtDate(arrival.period_start, "…")} – {fmtDate(arrival.period_end, "…")}
+                    </span>)}
+                </div>
+                {itdText(arrival)}
+                {arrival.load_type_reason && (
+                  <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
+                    {arrival.load_type_reason}</div>)}
+                {canCompare(arrival) && onCompare && (
+                  <div style={{ marginTop: 8 }}>
+                    <button type="button" className="btn sm"
+                      onClick={() => onCompare(arrival.arrival_id)}>View comparison</button>
+                  </div>)}
+              </div>
+            </>)}
 
             {/* The broker exception loop: reference, progress, and whether
                 the broker was told. Shown once the file has a submission. */}

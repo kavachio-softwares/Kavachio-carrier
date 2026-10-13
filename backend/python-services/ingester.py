@@ -1022,15 +1022,20 @@ def _ensure_ambient_party(session: Session, tenant_id: int, label: str) -> int |
         session, tenant_id, label, party_type="agency", legal_name=label)
 
 
-def _clear_policy_children(session: Session, policy_id: int, policy_number: str | None) -> None:
+def _clear_policy_children(session: Session, policy_id: int, policy_number: str | None,
+                           keep_transactions: bool = False) -> None:
     """Re-ingest cleanup (Option A — sheet wins, prior edits kept as history):
     RETIRE the policy's existing canonical child rows (mark them inactive SCD-2
     history) instead of deleting them, so a re-upload preserves prior edits; the
     caller then inserts the fresh sheet rows as the new ACTIVE versions. Tables
     without SCD columns are still deleted so they don't accumulate.
+
+    ``keep_transactions`` (the ITD append load): leave premium_transaction and
+    its tax / commission lines alone — an ITD delta carries only the policy's
+    NEW transactions, so retiring the rest would hide every earlier one.
     """
     # 1a. transaction-children first (keyed by this policy's active transaction ids)
-    pt = CANONICAL_TABLES.get("premium_transaction")
+    pt = None if keep_transactions else CANONICAL_TABLES.get("premium_transaction")
     if pt is not None and "premium_transaction_policy_id" in pt.c:
         tstmt = select(pt.c.premium_transaction_id).where(
             pt.c.premium_transaction_policy_id == policy_id)
@@ -1073,6 +1078,8 @@ def _clear_policy_children(session: Session, policy_id: int, policy_number: str 
 
     # policy-children (incl. premium_transaction itself)
     for table_name in POLICY_CHILDREN:
+        if keep_transactions and table_name == "premium_transaction":
+            continue
         t = CANONICAL_TABLES.get(table_name)
         fk = _CHILD_FK.get(table_name)
         if t is None or fk not in t.c:
@@ -1097,13 +1104,35 @@ def _clear_policy_children(session: Session, policy_id: int, policy_number: str 
                     _supersede(session, ct, ct.c[fk] == ambient_id)
 
 
+def _existing_txn_keys(session: Session, tenant_id: int, keys: list[str]) -> set[str]:
+    """Which of these premium_transaction row keys are already loaded (current)."""
+    pt = CANONICAL_TABLES.get("premium_transaction")
+    if pt is None or not keys or "premium_transaction_row_key" not in pt.c:
+        return set()
+    stmt = select(pt.c.premium_transaction_row_key).where(
+        pt.c.premium_transaction_row_key.in_(keys))
+    tcol = tenant_col("premium_transaction")
+    if tcol and tcol in pt.c:
+        stmt = stmt.where(pt.c[tcol] == tenant_id)
+    if "is_current_version" in pt.c:
+        stmt = stmt.where(pt.c.is_current_version.isnot(False))
+    return {r[0] for r in session.execute(stmt).fetchall()}
+
+
 def ingest_record(session: Session, mga: str, record: dict,
                   canonical_upload_id: int | None = None,
-                  run: dict | None = None) -> int | None:
+                  run: dict | None = None, mode: str = "replace") -> int | None:
     """Ingest one merged record. Returns the policy_id created (or None).
 
     Idempotent: if the policy already exists, its child canonical rows are
     retired and re-inserted with the freshly merged data.
+
+    ``mode="append"`` is the ITD load (itd.py): the record is ONE new
+    transaction (or one adjustment) of the policy. The policy's other
+    transactions stay as they are; a transaction whose row key is already
+    loaded is skipped, so loading the same ITD delta twice adds nothing. The
+    policy's descriptive children (coverage, location, …) still follow the
+    latest row, exactly as in the default mode.
 
     `canonical_upload_id` (when supplied) is stamped on premium_transaction
     rows (ingestion lineage) and on ingested_party rows.
@@ -1175,8 +1204,26 @@ def ingest_record(session: Session, mga: str, record: dict,
     # Re-ingest cleanup retires a policy's existing child rows before re-inserting.
     # A brand-new policy has none, so skip it — that saves ~a dozen DB round-trips
     # per row, which dominates the cost of a fresh (10k-row) upload.
+    append = mode == "append"
     if policy_id is not None and not policy_is_new:
-        _clear_policy_children(session, policy_id, polno)
+        _clear_policy_children(session, policy_id, polno, keep_transactions=append)
+
+    # ITD append: drop the transactions this feed has already loaded. When
+    # every one of the record's transactions is already there, its tax and
+    # commission lines are not loaded again either.
+    skip_txn_children = False
+    if append:
+        txn_items = _as_list(record.get("premium_transaction"))
+        keyed = [t.get("premium_transaction_row_key") for t in txn_items
+                 if isinstance(t, dict) and t.get("premium_transaction_row_key")]
+        if keyed:
+            have = _existing_txn_keys(session, tenant_id, keyed)
+            fresh = [t for t in txn_items
+                     if not (isinstance(t, dict)
+                             and t.get("premium_transaction_row_key") in have)]
+            if len(fresh) != len(txn_items):
+                record = {**record, "premium_transaction": fresh}
+                skip_txn_children = not fresh
 
     ctx = {"policy_payload": pol_payload}
 
@@ -1209,7 +1256,8 @@ def ingest_record(session: Session, mga: str, record: dict,
     # Children that hang off premium_transaction. If the BDX provides taxes/
     # commissions without an explicit premium_transaction in the record, we
     # still need a transaction to attach them to — synthesise one.
-    needs_txn_parent = any(record.get(t) for t in TRANSACTION_CHILDREN)
+    needs_txn_parent = (any(record.get(t) for t in TRANSACTION_CHILDREN)
+                        and not skip_txn_children)
     if needs_txn_parent and not txn_ids:
         ids = _insert_children(
             session, "premium_transaction", [{}], parent_ctx=ctx,
@@ -1217,7 +1265,7 @@ def ingest_record(session: Session, mga: str, record: dict,
             premium_transaction_upload_id=canonical_upload_id,
         )
         txn_ids = ids
-    parent_txn_id = txn_ids[0] if txn_ids else None
+    parent_txn_id = txn_ids[0] if txn_ids and not skip_txn_children else None
     for table in TRANSACTION_CHILDREN:
         items = _as_list(record.get(table))
         if not items or parent_txn_id is None:
