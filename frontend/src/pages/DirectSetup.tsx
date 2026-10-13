@@ -7,7 +7,8 @@ import {
 } from "lucide-react";
 import { api, downloadFile, downloadErrorText } from "../api/client";
 import { getHierarchy } from "../api/hierarchy";
-import { readyForSetupUrl } from "../components/ProgrammeStepper";
+import { readyForSetupUrl, hasSettledContract } from "../components/ProgrammeStepper";
+import { onProgramme } from "../api/hierarchy";
 import { currentMga, isTenantAdmin } from "../auth";
 import { PageBody, PageHeader } from "../components/Layout";
 import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
@@ -403,12 +404,15 @@ function DirectSetupScreen() {
     // picker now: pick a programme of your own book.
     resetEditor();
     setPrograms([]); setProgramId(""); setProgramsLoaded(false);
-    api.get(`/programs`, { params: { mga } })
-      // Inactive programs are hidden here — you can't build a setup on them.
-      .then(r => {
-        const list: Program[] = Array.isArray(r.data) ? r.data : (r.data?.items ?? []);
-        setPrograms(list.filter(p => p.status !== "inactive"));
-      })
+    // Only programmes that got as far as a contract: a setup is built for a
+    // broker's contract, so a programme with no broker or no contract has
+    // nothing to set up. Read from the same hierarchy the Programmes screen
+    // shows, so every programme listed there as "1 contract" is offered here
+    // (older ones not marked app-managed included).
+    getHierarchy()
+      .then(h => setPrograms(h.programmes
+        .filter(p => p.brokers.some(b => onProgramme(b.link_status) && hasSettledContract(b)))
+        .map(p => ({ id: p.id, name: p.name }))))
       .catch(() => setPrograms([]))
       .finally(() => setProgramsLoaded(true));
   }, [mga]);

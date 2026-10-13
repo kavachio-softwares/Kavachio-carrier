@@ -36,7 +36,7 @@ export type Step = {
 // the SAME programme — the two must not reach different answers to "is this
 // broker ready for a setup". Missing on an older server reads as not ready,
 // the safer direction to be wrong in.
-const hasSettledContract = (b: HierarchyBroker) => b.contracts.some(c => c.settled);
+export const hasSettledContract = (b: HierarchyBroker) => b.contracts.some(c => c.settled);
 // Contracts that have ended no longer count as work in progress.
 const ENDED = new Set(["expired", "terminated", "superseded"]);
 const openContract = (b: HierarchyBroker) => b.contracts.find(c => !ENDED.has(c.lifecycle ?? ""));

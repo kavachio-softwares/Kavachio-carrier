@@ -264,9 +264,8 @@ export default function AddContractModal({
         ) : (
         <>
         <p className="text-[12.5px] text-ink-muted">
-          The contract is read here exactly as it is in Bordereau Setup — the
-          document is parsed and its clauses extracted and saved. A contract
-          added here can be used by a setup later without being read again.
+          The contract is read once here and its clauses are saved, so a
+          Bordereau Setup can use it later without reading it again.
         </p>
 
         {copiedFrom && (initialFile ? (
@@ -364,10 +363,7 @@ export default function AddContractModal({
                 {scheduleOf(file.name)
                   ? <>Read as <b>{scheduleOf(file.name)}</b> from the file name,
                       so it replaces only this broker's contract for that schedule.</>
-                  : <>The file name names no schedule, so this becomes this
-                      broker's contract for the programme and supersedes any
-                      earlier one of theirs. Other brokers' contracts are
-                      untouched.</>}
+                  : null}
               </p>
             )}
           </>
@@ -476,10 +472,8 @@ function TemplateState({ resolving, resolved }: {
   if (!t) {
     return (
       <Note>
-        This reads the contract and saves its <b>clauses</b>. Rules are written
-        against an output template's columns, so the clauses that carry one are
-        held until a Bordereau Setup picks this contract up — the contract
-        itself will not need reading again.
+        Its <b>clauses</b> are saved now. Clauses that become rules are held
+        until a Bordereau Setup picks up this contract.
       </Note>
     );
   }
