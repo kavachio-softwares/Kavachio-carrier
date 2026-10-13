@@ -305,6 +305,7 @@ ACTION_WORDS = {
     "rule_deleted":     "Deleted a rule",
     "rule.disabled":    "Disabled a rule",
     "rule.tolerance_changed":      "Changed a rule tolerance",
+    "contract.margin_changed":     "Changed a contract margin",
     "rule.output_field_changed":   "Changed a rule's output field",
     "rule.variation_value_added":  "Accepted a spelling on a rule",
     "rule.variation_value_removed": "Removed a spelling from a rule",
@@ -429,6 +430,10 @@ ACTION_WORDS = {
                                   "“Validate” on the exceptions review link",
     "bdx_fix_link_submitted":     "Submitted their corrections from the "
                                   "exceptions review link",
+    # Fix & Validate on the exception screen: the corrections went in as the
+    # next version, exactly as the review link's Submit sends them.
+    "bdx_fix_validate_submitted": "Pressed Fix & Validate: corrections sent in "
+                                  "as a new version",
     # the Rule Library switch (the request path cannot say which way it went)
     "rule_enabled":               "Switched a rule on",
     "rule_disabled":              "Switched a rule off",
@@ -490,6 +495,7 @@ _STATUS = {
     "bdx_notice_skipped":        ("Not sent", "muted"),
     "bdx_fix_link_code_wrong":   ("Wrong code", "bad"),
     "bdx_fix_link_submitted":    ("Submitted", "ok"),
+    "bdx_fix_validate_submitted": ("New version", "ok"),
 }
 
 _METHOD_WORDS = {"POST": "Created", "PUT": "Updated", "PATCH": "Updated", "DELETE": "Deleted"}
@@ -1125,7 +1131,7 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("exceptions", "Exceptions",
      ("exception_decided", "bdx_fix_link_code_sent", "bdx_fix_link_code_wrong",
       "bdx_fix_link_opened", "bdx_fix_link_answers", "bdx_fix_link_validated",
-      "bdx_fix_link_submitted"), ALL_SEATS),
+      "bdx_fix_link_submitted", "bdx_fix_validate_submitted"), ALL_SEATS),
     # Building a Bordereau Setup, a mapping or an output template is the
     # carrier's work. A broker runs against what the carrier built and never
     # touches one, so offering them this filter offers a guaranteed blank page.
@@ -1150,7 +1156,8 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("contracts", "Contracts and rules",
      ("contract_uploaded", "contract.rules_generated", "contract.rules_built",
       "clause.resolved_to_field", "rule_created", "rule_updated", "rule_deleted",
-      "rule.disabled", "rule.tolerance_changed", "rule.output_field_changed",
+      "rule.disabled", "rule.tolerance_changed", "contract.margin_changed",
+      "rule.output_field_changed",
       "rule.variation_value_added", "rule.variation_value_removed",
       "rule_enabled", "rule_disabled", "rule_toggled",
       "contract_raised", "contract_edited", "contract_submitted",

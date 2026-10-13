@@ -84,11 +84,19 @@ export type ContractRule = {
   severity?: string | null; rule_status?: string | null;
   output_field?: string | null; output_fields?: string[]; rule_kind?: string | null;
   source_clause?: { text?: string | null; page_number?: number | null } | null;
-  // cross_field_math (formula) rules only — the ±% tolerance band. `reject_pct`,
-  // when set above `tolerance_pct`, splits flag (warning) from auto-reject.
+  // The ±% margin, on formula (cross_field_math) and limit (max_limit /
+  // min_limit / range_check) rules only. `tolerance_pct` is the margin the run
+  // APPLIES — the rule's own value, or else the contract margin — and
+  // `tolerance_source` says which. `reject_pct` is the formula rule's second
+  // step: when set above `tolerance_pct`, it splits flag (warning) from
+  // auto-reject. Limit rules have no reject step.
   rule_template?: string | null;
   tolerance_pct?: number | null;
   reject_pct?: number | null;
+  tolerance_source?: "rule" | "contract" | null;
+  // The rule as stored. Read only for a range check's low/high, to tell a
+  // range from one required value (low == high).
+  rule_spec?: { ir?: { params?: Record<string, unknown> | null } | null } | null;
   // Value-matching rules (value_in_set / value_not_in_set / conditional_*) only.
   // `enum_values` are the values the CONTRACT names; `variation_values` are the
   // surface spellings of those values the rule accepts — the list a tenant_admin
@@ -245,6 +253,9 @@ export type ContractDetailT = {
   output_template: { name: string; version: number; fields?: TemplateField[] } | null;
   terms: ContractTerm[]; rules: ContractRule[]; field_mappings: FieldMapping[];
   clause_routing?: ClauseRouting[];
+  /** The margin (%) every rule with one follows until it is given its own.
+   *  0 when none was set; older servers omit it. */
+  contract_margin_pct?: number;
 };
 
 /** The reason the server gave, when it gave one a person can read.

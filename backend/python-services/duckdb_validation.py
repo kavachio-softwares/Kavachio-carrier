@@ -310,9 +310,14 @@ def _policy_number_columns(structure):
     the "Dataset-level" fallback. Returns {} when the structure carries no such
     mapping.
 
-    When several columns tie on the policy_number candidate confidence, the one
-    whose NAME carries a historical/alternate qualifier (previous, prior, umr,
-    master, group, …) is demoted so the PRIMARY policy number wins."""
+    The column the template itself MAPS to canonical policy_number
+    (`canonical_field`) wins first: Lloyd's "Policy or Group Ref" (CR0026) is the
+    policy number, but its name carries "group", and the qualifier rule below
+    used to hand the label to a "Transaction number" at 0.40 instead — every
+    exception then showed the transaction number as its policy (13 Oct).
+    Otherwise, the one whose NAME carries a historical/alternate qualifier
+    (previous, prior, umr, master, group, …) is demoted so the PRIMARY policy
+    number wins."""
     out = {}
     for sh in (structure or {}).get("sheets", []) or []:
         name = str(sh.get("sheet_name", "")).strip()
@@ -330,9 +335,11 @@ def _policy_number_columns(structure):
                 continue
             lname = col_name.lower()
             is_primary = not any(tok in lname for tok in _NON_PRIMARY_POLICY_TOKENS)
-            # Rank: prefer primary names, then higher confidence. First column
-            # wins on a full tie (stable — only replace on a strictly better rank).
-            rank = (1 if is_primary else 0, conf)
+            # Rank: the template's own policy_number column, then primary names,
+            # then higher confidence. First column wins on a full tie (stable —
+            # only replace on a strictly better rank).
+            mapped = str(c.get("canonical_field") or "").strip() == "policy_number"
+            rank = (1 if mapped else 0, 1 if is_primary else 0, conf)
             if best_rank is None or rank > best_rank:
                 best_rank, best_col = rank, col_name
         if best_col:
@@ -497,6 +504,22 @@ def _aggregate_marker(rule) -> "dict | None":
     }
 
 
+def _policy_total_marker(rule, d) -> "dict | None":
+    """The `aggregate` marker for a POLICY-TOTAL row of a money limit (19.2): the
+    run measured a multi-row policy on its sum and pinned it to the policy's
+    first row, so `actual_value` is that total — the screens say "Total for this
+    policy" exactly as they do for a grouped aggregate_cap. Only rules the run
+    gave a `policy_total` param (contract_margin.apply_rule_settings) and only
+    their grouped arm, recognised by its reason; None for everything else."""
+    if " policy total " not in str(d.get("reason") or ""):
+        return None
+    try:
+        from contract_margin import policy_total_marker
+        return policy_total_marker(rule, d.get("sheet"))
+    except Exception:
+        return None
+
+
 def execute_rule(con, sql, rule, contract, max_rows):
     """Run the SQL; return list of structured exception dicts."""
     rel = con.execute(sql)
@@ -505,6 +528,7 @@ def execute_rule(con, sql, rule, contract, max_rows):
     out = []
     for row in rel.fetchmany(max_rows):
         d = dict(zip(colnames, row))
+        row_aggregate = aggregate or _policy_total_marker(rule, d)
         # Fuzzy enum rules emit a per-row `zone`: 'warning' (ambiguous match in
         # the 0.80–0.90 band → soft, non-blocking warning) vs 'violation' (a
         # confident match → the rule's real severity). Non-enum rules have no
@@ -552,8 +576,9 @@ def execute_rule(con, sql, rule, contract, max_rows):
             "error_class": "type_mismatch" if numeric_format else "data_violation",
             # Present only on an aggregate rule, where `actual_value` is a
             # total rather than the flagged cell's own value — see
-            # `_aggregate_marker`. Absent on every row-level exception.
-            **({"aggregate": aggregate} if aggregate else {}),
+            # `_aggregate_marker` (and `_policy_total_marker` for a policy
+            # total). Absent on every row-level exception.
+            **({"aggregate": row_aggregate} if row_aggregate else {}),
         })
     return out
 
@@ -1287,7 +1312,8 @@ def run_type_checks(con, tables, column_types, max_rows=10_000):
 
 def run_validation(records_by_sheet, rules, contract=None, template_id=None,
                    session=None, max_exc=500, schema_cols=None, column_types=None,
-                   filled_cols=None, inactive_cols=None, tenant_id=None):
+                   filled_cols=None, inactive_cols=None, tenant_id=None,
+                   rule_settings=None):
     """Validate the resolved output records against the contract rules using
     DuckDB.
 
@@ -1311,6 +1337,12 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
     A fan-out rule that runs on only some of its sheets (the others do not fill
     a column it reads) is listed in `partially_checked` with the sheets it
     skipped; it still counts as a rule that ran.
+
+    `rule_settings` (optional) turns on the contract margin (19.3) and policy
+    totals (19.2) for this run: {"margins": {contract_id: pct},
+    "own_tolerance_rule_ids": [...], "policy_columns": {sheet: column}} — see
+    contract_margin.apply_rule_settings. Applied in memory, nothing written
+    back; None leaves every rule exactly as stored.
 
     Returns:
       {
@@ -1392,6 +1424,16 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
                                   tenant_id=tenant_id)
         except Exception:
             pass
+
+        # Contract margin + policy totals, in memory (see contract_margin.py).
+        # Best-effort like the reconciliation above: any failure runs the
+        # rules exactly as stored.
+        if rule_settings:
+            try:
+                from contract_margin import apply_rule_settings
+                rules = apply_rule_settings(con, tables, rules, rule_settings)
+            except Exception as _ms:
+                print(f"[DuckDB] contract margin / policy totals skipped: {_ms}")
 
         for rule in rules:
             if len(exceptions) >= max_exc:

@@ -2198,6 +2198,14 @@ async def _render_landing(
                      if governing_ids else [])
         _fname = {c.id: c.filename for c in _gov_rows}
         _cname = {c.id: c.name for c in _gov_rows}
+        # Each governing contract's margin (19.3) — every tolerance-taking
+        # rule of that contract runs with it unless it has its own value.
+        try:
+            from contract_margin import contract_margin_pct
+            contract_margins = {c.id: contract_margin_pct(c.extracted)
+                                for c in _gov_rows}
+        except Exception:      # noqa: BLE001 — fail-open: rules as stored
+            contract_margins = None
         _mapped = {str(k).strip(): int(v)
                    for k, v in sheet_contracts.items() if v}
         _pinned = set(_mapped.values())
@@ -2309,6 +2317,26 @@ async def _render_landing(
         column_types = {sh: kinds for sh, kinds in (
             (sh, {c: k for c, k in kinds.items() if c in _active.get(sh, ())})
             for sh, kinds in _column_types_from_structure(structure).items()) if kinds}
+        # Contract margin (19.3) + policy totals (19.2), applied in memory by
+        # the run (contract_margin.apply_rule_settings). Resolving who set a
+        # tolerance before tolerance_source existed is ONE audit query.
+        rule_settings = None
+        try:
+            if rules:
+                import contract_margin as _cm
+                from duckdb_validation import _policy_number_columns
+                with SessionLocal() as _ms:
+                    _own = _cm.rules_with_legacy_own_tolerance(
+                        _ms, [r.get("rule_id") for r in rules
+                              if _cm.tolerance_template(r.get("rule_spec"))])
+                rule_settings = {
+                    "margins": contract_margins,
+                    "own_tolerance_rule_ids": sorted(_own),
+                    "policy_columns": _policy_number_columns(structure),
+                }
+        except Exception as _mx:  # noqa: BLE001 — never block validation
+            log.info(f"[margin] contract margin / policy totals skipped ({_mx})")
+            rule_settings = None
         if rules or column_types:
             from duckdb_validation import run_validation
             dv = run_validation(blocks, rules, template_id=eff_output_template_id,
@@ -2317,7 +2345,8 @@ async def _render_landing(
                                 # column it leaves empty is not checked
                                 filled_cols=vo.filled_cols_from_mapping(column_mapping),
                                 inactive_cols=vo.inactive_cols(structure),
-                                tenant_id=tenant_id)
+                                tenant_id=tenant_id,
+                                rule_settings=rule_settings)
             exceptions = dv.get("exceptions", [])
     except Exception as e:  # noqa: BLE001 — never block delivery on validation
         # …but never call it clean either: the outcome below records it.
@@ -2437,6 +2466,30 @@ async def _render_landing(
                 output_bytes = highlight_exceptions(output_bytes, structure, cell_exceptions)
             except Exception as e:  # noqa: BLE001
                 log.warning("highlight skipped: %s", e)
+        # The counts of what happened to every row (plan 22.3): a "Results"
+        # sheet after the template's own sheets. Decisions already saved on
+        # this landing count as resolved. Before the formulas, which must stay
+        # last; never costs the file (add_results_sheet returns it unchanged
+        # on any failure).
+        try:
+            import export_results as _xr
+            with SessionLocal() as _s:
+                _dec = [dict(m) for m in _s.execute(text(
+                    "SELECT output_sheet, output_row, output_field, kind "
+                    "FROM landing_correction WHERE landing_id = :l"),
+                    {"l": landing_id}).mappings()]
+                _src = _s.execute(text(
+                    "SELECT source_filename FROM landing_record WHERE id = :l"),
+                    {"l": landing_id}).scalar()
+            _res = _xr.compute(projected, _xr.apply_decisions(counted, _dec),
+                               not_validated=(status == vo.NOT_VALIDATED))
+            # The grey line under the title: which file, which period, when.
+            from datetime import datetime as _dt, timezone as _tz
+            output_bytes = _xr.add_results_sheet(output_bytes, _res, about={
+                "File": _src, "Period": period,
+                "Checked": _dt.now(_tz.utc).replace(microsecond=0)})
+        except Exception as e:  # noqa: BLE001
+            log.warning("results sheet skipped: %s", e)
         # LAST step on purpose: highlighting re-saves the workbook via openpyxl,
         # which would drop injected formulas/cached values. Patches each detected
         # totals cell with =SUM(...) + a cached value recomputed from the
@@ -2726,9 +2779,14 @@ class RerenderRequest(BaseModel):
 @router.post("/export/downloads/{export_id}/rerender")
 async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None,
                           principal: Principal = Depends(current_principal)):
-    """Re-generate a DIRECT-LANE export's output BDX with saved Fix/Approve
-    corrections applied. Produces a NEW output_exports (the landing's corrections
-    persist across renders, since they're keyed by landing, not export)."""
+    """Fix & Validate: send the fixes and decisions saved on this export in as
+    the NEXT VERSION of its submission — the same call the secure link's Submit
+    makes (submission_service.submit_corrections). The version corrected here
+    is kept, marked replaced once the new one is checked; the response names
+    the new version's export, so the screen opens it.
+
+    An export that belongs to no submission (made before submissions existed)
+    is still re-checked in place, as before."""
     from carrier_scope import assert_can_amend
     assert_can_amend(principal)
     with SessionLocal() as s:
@@ -2761,6 +2819,26 @@ async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None
         export_contract_id = getattr(_exp, "contract_id", None)
         actor = _actor_label(principal,
                              requested=(body.actor if body else None))
+        import submission_service
+        try:
+            versioned = submission_service.correctable_thread(s, export_id) is not None
+        except submission_service.CannotCorrect as exc:
+            raise HTTPException(409, str(exc))
+    if versioned:
+        from audit import actor_columns
+        try:
+            out = await run_in_threadpool(
+                submission_service.fix_and_validate, export_id,
+                _principal_email(principal), actor=actor,
+                actor_cols=actor_columns(principal))
+        except submission_service.CannotCorrect as exc:
+            raise HTTPException(409, str(exc))
+        if not out.get("export_id"):
+            # Landed but not checked yet (the auto-run has it): say where it is.
+            raise HTTPException(409, out.get("run_error") or (
+                f"Version {out.get('version') or ''} was sent in but is still being "
+                "checked. Open it from Files Received in a moment.").replace("  ", " "))
+        return out
     # Re-render IN PLACE so the export id/header stays stable across Re-generate.
     # run_by_user_id: the person who pressed Re-generate, for the audit row
     # only — `actor` is the broker COMPANY for a broker seat, which left the

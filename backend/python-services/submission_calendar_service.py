@@ -1130,7 +1130,7 @@ def _ways_in(session, export_ids: set) -> dict:
                 .outerjoin(IntakeRoute, IntakeRoute.id == FileArrival.route_id)
                 .filter(FileArrival.run_export_id.in_(export_ids)).all())
         for eid, own, matched_by, by_route in rows:
-            out[eid] = ("secure_link" if matched_by == "secure_link"
+            out[eid] = (matched_by if matched_by in ("secure_link", "fix_validate")
                         else by_route or own or "upload")
         for eid, vstatus in (session.query(OutputExport.id, OutputExport.version_status)
                              .filter(OutputExport.id.in_(export_ids - set(out))).all()):

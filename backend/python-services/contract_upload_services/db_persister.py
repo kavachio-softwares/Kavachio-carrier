@@ -765,12 +765,19 @@ def persist_pipeline_output(
             # COALESCE, not assignment, on the business fields: a date or a UMR
             # a person typed is a FACT, and the extraction's reading of the same
             # field is a guess. The guess only fills a blank.
+            #
+            # `extracted` is rewritten whole, but its "settings" key is the
+            # carrier's own (the contract margin set in Bordereau Setup — see
+            # contract_margin.py), not the extraction's: a re-read keeps it.
             conn.execute(
                 text("""
                     UPDATE contract
                     SET    filename           = :filename,
                            status_ops         = :status_ops,
-                           extracted          = CAST(:extracted AS JSONB),
+                           extracted          = CAST(:extracted AS JSONB)
+                               || CASE WHEN jsonb_typeof(extracted -> 'settings') = 'object'
+                                       THEN jsonb_build_object('settings', extracted -> 'settings')
+                                       ELSE '{}'::jsonb END,
                            output_template_id = COALESCE(:output_template_id,
                                                          output_template_id),
                            row_hash           = :content_fingerprint,

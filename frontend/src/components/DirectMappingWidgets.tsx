@@ -2,7 +2,7 @@ import { Fragment, ReactNode, useCallback, useEffect, useRef, useState } from "r
 import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Plus,
   RotateCcw, Save, Search, ShieldAlert, Sparkles, Trash2, X,
-  ListChecks, Columns3, Link2Off, type LucideIcon,
+  ListChecks, Columns3, Link2Off, type LucideIcon, Percent,
 } from "lucide-react";
 import { api } from "../api/client";
 import { getUser } from "../auth";
@@ -47,6 +47,47 @@ function spellingLabel(r: ContractRule): string {
     : "Accepted Variations";
 }
 
+// Limit templates that carry a ±% margin (the formula template has one too,
+// plus a reject step). Mirrors the server's list.
+const MARGIN_LIMIT_TEMPLATES = ["max_limit", "min_limit", "range_check"];
+
+/** Which margin editor a rule gets: the formula's flag/reject band, a limit's
+ *  single margin, or none. A limit rule gets it only when the server says
+ *  where its margin comes from — an older server does not, and would refuse
+ *  the save. Decided by template, never by rule_kind: rules made from typed
+ *  contract terms carry margins too. */
+function marginKind(r: ContractRule): "formula" | "limit" | null {
+  if (r.rule_template === "cross_field_math") return "formula";
+  if (MARGIN_LIMIT_TEMPLATES.includes(r.rule_template ?? "") && r.tolerance_source != null) return "limit";
+  return null;
+}
+
+/** A range check whose low and high are the same number is one required value
+ *  (a fixed commission, say) — the server checks it as "must equal". */
+function isExactValue(r: ContractRule): boolean {
+  if (r.rule_template !== "range_check") return false;
+  const p = r.rule_spec?.ir?.params;
+  if (!p || p.min == null || p.max == null || p.min === "" || p.max === "") return false;
+  const lo = Number(p.min), hi = Number(p.max);
+  return Number.isFinite(lo) && lo === hi;
+}
+
+/** What a limit rule's margin means, in words. `pct` is the margin shown. */
+function limitMarginSentence(r: ContractRule, pct: string): ReactNode {
+  const flagged = <>flagged as {r.severity || "a warning"}</>;
+  const none = Number(pct) === 0;
+  if (isExactValue(r)) {
+    return none
+      ? <>Anything other than the required value is {flagged}.</>
+      : <>Within <b>{pct}%</b> of the required value passes. Anything beyond is {flagged}.</>;
+  }
+  const where = r.rule_template === "max_limit" ? "over the maximum"
+    : r.rule_template === "min_limit" ? "under the minimum" : "outside the range";
+  return none
+    ? <>Anything {where} is {flagged}.</>
+    : <>Up to <b>{pct}%</b> {where} passes. Anything beyond is {flagged}.</>;
+}
+
 // Small widgets shared between the Bordereau Setup mapping UIs (the builder's
 // pre-build helpers and the setup editor) — a rule's confidence chip, a
 // contract's status pill, the AI-extracted-terms formatter, the searchable
@@ -56,12 +97,12 @@ function spellingLabel(r: ContractRule): string {
 
 /** A compact dashboard-style KPI tile — icon beside the number, one line of
  *  label — for the contract's counts, where the full StatCard is too tall. */
-function MiniStat({ label, value, icon: Icon, alert, hint, onClick }: {
-  label: string; value: number; icon: LucideIcon; alert?: boolean;
-  hint?: string; onClick?: () => void;
+function MiniStat({ label, value, icon: Icon, alert, hint, note, testId, onClick }: {
+  label: string; value: number | string; icon: LucideIcon; alert?: boolean;
+  hint?: string; note?: ReactNode; testId?: string; onClick?: () => void;
 }) {
   return (
-    <button type="button" onClick={onClick}
+    <button type="button" onClick={onClick} data-testid={testId}
       className={`flex items-center gap-3 rounded-xl border bg-white px-3 py-2.5 text-left shadow-sm
         transition hover:-translate-y-0.5 hover:shadow-md
         ${alert ? "border-amber-200" : "border-border"}`}>
@@ -74,6 +115,7 @@ function MiniStat({ label, value, icon: Icon, alert, hint, onClick }: {
         <span className="block truncate text-xs text-ink-muted">
           {label}{hint && <span className="ml-1 font-semibold text-navy">{hint}</span>}
         </span>
+        {note && <span className="mt-0.5 block text-[11px] leading-snug text-ink-soft">{note}</span>}
       </span>
     </button>
   );
@@ -279,6 +321,11 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
   // independently of the output-field batch above via the tolerance endpoint.
   const [tolDraft, setTolDraft] = useState<Record<number, { tolerance_pct: string; reject_pct: string }>>({});
   const [tolBusy, setTolBusy] = useState<number | null>(null);
+  // The contract margin box. null = untouched, so it shows the saved margin.
+  const [marginDraft, setMarginDraft] = useState<string | null>(null);
+  // The "Contract margin on rules" dialog, opened from its tile.
+  const [marginOpen, setMarginOpen] = useState(false);
+  const [marginBusy, setMarginBusy] = useState(false);
   // "Add a spelling" dialog. `varResult` holds the server's DECISION — which is a
   // 200 whether or not the spelling was accepted, so the dialog stays open and
   // shows the reason (and the contract's own words) rather than throwing.
@@ -302,10 +349,22 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
 
   const actor = getUser()?.email;
 
-  const tolOrig = (r: ContractRule) => ({
-    tolerance_pct: r.tolerance_pct != null ? String(r.tolerance_pct) : "",
-    reject_pct: r.reject_pct != null ? String(r.reject_pct) : "",
-  });
+  // The contract margin: what every rule with a margin follows until it is
+  // given its own. Older servers do not send it.
+  const hasContractMargin = detail.contract_margin_pct != null;
+  const contractMargin = detail.contract_margin_pct ?? 0;
+  /** The margin the run applies to a rule: its own value, else the contract
+   *  margin — never a made-up 0 or 1 while a contract margin exists. */
+  const effectiveTol = (r: ContractRule): number | null =>
+    r.tolerance_pct ?? (hasContractMargin ? contractMargin : null);
+
+  const tolOrig = (r: ContractRule) => {
+    const eff = effectiveTol(r);
+    return {
+      tolerance_pct: eff != null ? String(eff) : "",
+      reject_pct: r.reject_pct != null ? String(r.reject_pct) : "",
+    };
+  };
   const tolValue = (r: ContractRule) => tolDraft[r.validation_rule_id] ?? tolOrig(r);
   function setTol(r: ContractRule, patch: Partial<{ tolerance_pct: string; reject_pct: string }>) {
     setTolDraft(prev => ({ ...prev, [r.validation_rule_id]: { ...tolValue(r), ...patch } }));
@@ -316,6 +375,25 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
     const o = tolOrig(r);
     return d.tolerance_pct !== o.tolerance_pct || d.reject_pct !== o.reject_pct;
   }
+  /** A limit rule's one box is its whole band — blank, there is nothing to send. */
+  function tolSavable(r: ContractRule): boolean {
+    return tolDirty(r)
+      && (marginKind(r) === "formula" || tolValue(r).tolerance_pct.trim() !== "");
+  }
+  /** The margin a rule's sentence states: what is typed, else what the run
+   *  applies now (a blank box saves nothing, so it changes nothing). */
+  function tolShown(r: ContractRule): string {
+    const typed = tolValue(r).tolerance_pct.trim();
+    if (typed !== "") return typed;
+    const eff = effectiveTol(r);
+    return eff != null ? String(eff) : "0";
+  }
+
+  const marginText = marginDraft ?? String(contractMargin);
+  const marginNum = Number(marginText);
+  const marginValid = marginText.trim() !== "" && Number.isFinite(marginNum)
+    && marginNum >= 0 && marginNum <= 100;
+  const marginSavable = marginDraft !== null && marginValid && marginNum !== contractMargin;
 
   function stageField(rule: ContractRule, oldField: string, newField: string | null) {
     setPending(prev => {
@@ -363,9 +441,18 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
     const d = tolValue(r);
     const body: Record<string, unknown> = { mga, actor };
     // Blank flag% leaves the existing value; blank reject% clears the reject band.
-    if (d.tolerance_pct.trim() !== "") body.tolerance_pct = Number(d.tolerance_pct);
-    if (d.reject_pct.trim() === "") body.clear_reject = true;
-    else body.reject_pct = Number(d.reject_pct);
+    // Only a CHANGED margin is sent: the box opens on the margin the run applies
+    // (often the contract margin), and sending that back when only the reject
+    // step was edited would give the rule its own copy — a later contract
+    // margin change would then pass it by.
+    if (d.tolerance_pct.trim() !== "" && d.tolerance_pct !== tolOrig(r).tolerance_pct) {
+      body.tolerance_pct = Number(d.tolerance_pct);
+    }
+    // Limit rules have no reject step — the server takes their margin alone.
+    if (marginKind(r) === "formula") {
+      if (d.reject_pct.trim() === "") body.clear_reject = true;
+      else body.reject_pct = Number(d.reject_pct);
+    }
     setTolBusy(r.validation_rule_id); setRuleErr(null);
     try {
       await api.put(
@@ -374,6 +461,31 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
       setTolDraft(prev => { const n = { ...prev }; delete n[r.validation_rule_id]; return n; });
       await onChanged();
     } catch (e: unknown) { setRuleErr(errText(e)); } finally { setTolBusy(null); }
+  }
+  /** Drop a rule's own margin so it follows the contract margin again. */
+  async function followContractMargin(r: ContractRule) {
+    if (tolBusy !== null) return;
+    setTolBusy(r.validation_rule_id); setRuleErr(null);
+    try {
+      await api.put(
+        `/programs/${programId}/contracts/${contractId}/rules/${r.validation_rule_id}/tolerance`,
+        { follow_contract: true, mga, actor });
+      setTolDraft(prev => { const n = { ...prev }; delete n[r.validation_rule_id]; return n; });
+      await onChanged();
+    } catch (e: unknown) { setRuleErr(errText(e)); } finally { setTolBusy(null); }
+  }
+  async function saveMargin() {
+    if (!marginSavable || marginBusy) return;
+    setMarginBusy(true); setRuleErr(null);
+    try {
+      await api.put(`/programs/${programId}/contracts/${contractId}/margin`,
+        { margin_pct: marginNum, mga, actor });
+      // Re-read first, then drop the draft — the box goes straight from the
+      // typed margin to the saved one, never back through the old one.
+      await onChanged();
+      setMarginDraft(null);
+      setMarginOpen(false);
+    } catch (e: unknown) { setRuleErr(errText(e)); } finally { setMarginBusy(false); }
   }
 
   /** Every piece of dialog state, cleared together. Split out because opening and
@@ -550,6 +662,7 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
   // library rules render identically from two lists.
   function renderRule(r: ContractRule) {
     const busy = busyRule === r.validation_rule_id;
+    const kind = marginKind(r);
             const canRetarget = r.rule_kind === "ir_v1" && fieldOptions.length > 0;
             const boundFields = (r.output_fields && r.output_fields.length)
               ? r.output_fields : (r.output_field ? [r.output_field] : []);
@@ -600,30 +713,63 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
                     </span>
                   )}
                 </div>
-                {r.rule_template === "cross_field_math" && (
+                {kind && (
                   <div className="mt-2 border-t border-border/60 pt-2">
-                    <div className="flex items-center gap-1.5 text-ink-muted mb-1">
+                    <div className="flex items-center gap-1.5 text-ink-muted mb-1 flex-wrap">
                       Tolerance Band
-                      <span className="text-[11px] text-ink-soft">(reported vs formula)</span>
+                      <span className="text-[11px] text-ink-soft">
+                        {kind === "formula" ? "(reported vs formula)"
+                          : isExactValue(r) ? "(around the required value)" : "(around the limit)"}
+                      </span>
+                      {/* Where the margin comes from. A rule follows the contract
+                          margin until someone gives it its own value. */}
+                      {r.tolerance_source === "contract" && (
+                        <span className="rounded-full bg-navy/10 px-1.5 py-0.5 text-[10px] font-semibold text-navy">
+                          Contract margin
+                        </span>
+                      )}
+                      {r.tolerance_source === "rule" && (<>
+                        <span className="rounded-full bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
+                          Own value
+                        </span>
+                        {!readOnly && (
+                          <button type="button" onClick={() => followContractMargin(r)}
+                            disabled={tolBusy !== null}
+                            className="ml-auto inline-flex items-center gap-1 text-navy hover:underline disabled:opacity-50">
+                            <RotateCcw size={11} /> Use contract margin
+                          </button>
+                        )}
+                      </>)}
                     </div>
                     <div className="flex items-center gap-3 flex-wrap">
-                      <label className="flex items-center gap-1">
-                        <span className="text-[11px]">Flag Over</span>
-                        <input type="number" step="0.1" min="0" value={tolValue(r).tolerance_pct}
-                          disabled={readOnly || tolBusy === r.validation_rule_id}
-                          onChange={e => setTol(r, { tolerance_pct: e.target.value })}
-                          className="w-16 rounded border border-border px-1.5 py-0.5 text-xs" />
-                        <span className="text-[11px]">%</span>
-                      </label>
-                      <label className="flex items-center gap-1">
-                        <span className="text-[11px]">Reject Over</span>
-                        <input type="number" step="0.1" min="0" value={tolValue(r).reject_pct}
-                          placeholder="off" disabled={readOnly || tolBusy === r.validation_rule_id}
-                          onChange={e => setTol(r, { reject_pct: e.target.value })}
-                          className="w-16 rounded border border-border px-1.5 py-0.5 text-xs" />
-                        <span className="text-[11px]">%</span>
-                      </label>
-                      {!readOnly && tolDirty(r) && (
+                      {kind === "formula" ? (<>
+                        <label className="flex items-center gap-1">
+                          <span className="text-[11px]">Flag Over</span>
+                          <input type="number" step="0.1" min="0" value={tolValue(r).tolerance_pct}
+                            disabled={readOnly || tolBusy === r.validation_rule_id}
+                            onChange={e => setTol(r, { tolerance_pct: e.target.value })}
+                            className="w-16 rounded border border-border px-1.5 py-0.5 text-xs" />
+                          <span className="text-[11px]">%</span>
+                        </label>
+                        <label className="flex items-center gap-1">
+                          <span className="text-[11px]">Reject Over</span>
+                          <input type="number" step="0.1" min="0" value={tolValue(r).reject_pct}
+                            placeholder="off" disabled={readOnly || tolBusy === r.validation_rule_id}
+                            onChange={e => setTol(r, { reject_pct: e.target.value })}
+                            className="w-16 rounded border border-border px-1.5 py-0.5 text-xs" />
+                          <span className="text-[11px]">%</span>
+                        </label>
+                      </>) : (
+                        <label className="flex items-center gap-1">
+                          <span className="text-[11px]">Margin</span>
+                          <input type="number" step="0.1" min="0" max="100" value={tolValue(r).tolerance_pct}
+                            disabled={readOnly || tolBusy === r.validation_rule_id}
+                            onChange={e => setTol(r, { tolerance_pct: e.target.value })}
+                            className="w-16 rounded border border-border px-1.5 py-0.5 text-xs" />
+                          <span className="text-[11px]">%</span>
+                        </label>
+                      )}
+                      {!readOnly && tolSavable(r) && (
                         <button onClick={() => saveTolerance(r)} disabled={tolBusy !== null}
                           className="inline-flex items-center gap-1 rounded bg-navy px-2 py-0.5 text-white disabled:opacity-50">
                           <Save size={12} /> Save
@@ -631,10 +777,12 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
                       )}
                     </div>
                     <p className="text-[11px] text-ink-soft mt-1">
-                      Within <b>{tolValue(r).tolerance_pct || "0"}%</b> of the formula passes.{" "}
-                      {tolValue(r).reject_pct.trim() !== ""
-                        ? <>Beyond <b>{tolValue(r).reject_pct}%</b> is rejected ({r.severity || "critical"}); in between is a warning.</>
-                        : <>Anything beyond is flagged as {r.severity || "a warning"}.</>}
+                      {kind === "formula" ? (<>
+                        Within <b>{tolShown(r)}%</b> of the formula passes.{" "}
+                        {tolValue(r).reject_pct.trim() !== ""
+                          ? <>Beyond <b>{tolValue(r).reject_pct}%</b> is rejected ({r.severity || "critical"}); in between is a warning.</>
+                          : <>Anything beyond is flagged as {r.severity || "a warning"}.</>}
+                      </>) : limitMarginSentence(r, tolShown(r))}
                     </p>
                   </div>
                 )}
@@ -734,11 +882,33 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
   );
 
   const tiles = extraTabs.filter(t => t.tileLabel);
+  // The rules the contract margin reaches, split the way the rule list is
+  // (Contract Rules / Generic Rules), and the ones that have their own.
+  const followRules = rules.filter(r => r.tolerance_source === "contract");
+  const followContract = followRules.filter(r => !isLibraryRule(r));
+  const followGeneric = followRules.filter(r => isLibraryRule(r));
+  const ownMarginRules = rules.filter(r => r.tolerance_source === "rule");
+  const pctText = (n: number) => `${Number.isInteger(n) ? n : Number(n.toFixed(2))}%`;
+  const count = (n: number, word: string) => `${n} ${word}${n !== 1 ? "s" : ""}`;
+  const follows = (n: number) => (n === 1 ? "follows" : "follow");
+  const nc = followContract.length, ng = followGeneric.length;
+  // "12 contract rules follow it" when they all come from the contract; a mix
+  // says how it splits, on its own line.
+  const followHead = nc + ng === 0 ? "No rule follows it"
+    : ng === 0 ? `${count(nc, "contract rule")} ${follows(nc)} it`
+    : nc === 0 ? `${count(ng, "generic rule")} ${follows(ng)} it`
+    : `${nc + ng} rules follow it`;
+  const followSplit = [nc && ng ? `${nc} contract · ${ng} generic` : "",
+    ownMarginRules.length ? `${ownMarginRules.length} with ${ownMarginRules.length === 1 ? "its" : "their"} own` : ""]
+    .filter(Boolean).join(" · ");
+  const followNote = !hasContractMargin ? null
+    : <>{followHead}{followSplit && <><br />{followSplit}</>}</>;
   return (
     <div className="space-y-3">
       {/* At a glance — what this contract contributes to the setup. Each tile
-          opens the list it counts. */}
-      <div className={`grid grid-cols-1 gap-2.5 sm:grid-cols-2 ${tiles.length ? "lg:grid-cols-3" : ""}`}>
+          opens the list it counts; the margin tile opens its own settings. */}
+      <div className={`grid grid-cols-1 gap-2.5 sm:grid-cols-2
+        ${tiles.length ? "lg:grid-cols-4" : "lg:grid-cols-3"}`}>
         <MiniStat label={`Rule${rules.length !== 1 ? "s" : ""} check your file`}
           value={rules.length} icon={ListChecks} onClick={() => setView("rules")} />
         <MiniStat label={`Rule${ownClauses.length !== 1 ? "s" : ""} with no column`}
@@ -748,6 +918,11 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
           <MiniStat key={t.key} label={t.tileLabel!} value={t.count} icon={Columns3}
             alert={t.count > 0} onClick={() => setView(t.key)} />
         ))}
+        {/* One margin for the whole contract. Every rule with a margin follows
+            it until that rule is given its own value. */}
+        <MiniStat label="Contract margin on rules" value={pctText(contractMargin)}
+          icon={Percent} note={followNote} testId="contract-margin"
+          onClick={() => { setRuleErr(null); setMarginDraft(null); setMarginOpen(true); }} />
       </div>
       {detail.output_template && (
         <p className="text-[11.5px] text-ink-muted">
@@ -877,6 +1052,88 @@ export function ContractInline({ detail, programId, contractId, mga, onChanged,
 
       {/* In-app confirm for rule removal (replaces window.confirm, which looked
           like a browser popup and couldn't carry the app's styling). */}
+      <Modal open={marginOpen} size="lg"
+        title={<span className="flex items-center gap-2">
+          <Percent size={16} className="text-navy" /> Contract margin on rules
+        </span>}
+        onClose={() => { if (!marginBusy) setMarginOpen(false); }}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="secondary" disabled={marginBusy}
+              onClick={() => setMarginOpen(false)}>{readOnly ? "Close" : "Cancel"}</Button>
+            {!readOnly && (
+              <Button disabled={!marginSavable || marginBusy} onClick={saveMargin}>
+                {marginBusy ? "Saving…" : "Save margin"}
+              </Button>
+            )}
+          </div>
+        }>
+        <div className="space-y-4 text-sm" data-testid="contract-margin-dialog">
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor={`contract-margin-${contractId}`} className="font-semibold text-ink">
+              Margin for this contract
+            </label>
+            <span className="tip-inline inline-flex">
+              <InfoTip text={"One margin for every rule of this contract that can have one — limits, "
+                + "totals and formulas, from the contract or generic. A value within this share of "
+                + "its limit or expected figure still passes; 0 means exact. A rule given its own "
+                + "margin keeps it until you press \u201cUse contract margin\u201d on that rule."} />
+            </span>
+            <input id={`contract-margin-${contractId}`} type="number" step="0.1" min="0" max="100"
+              value={marginText} disabled={readOnly || marginBusy} autoFocus={!readOnly}
+              onChange={e => setMarginDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void saveMargin(); } }}
+              aria-invalid={!marginValid}
+              title={marginValid ? undefined : "Enter a number from 0 to 100"}
+              className={`ml-1 w-24 rounded-md border bg-white px-2 py-1.5 text-sm tabular-nums
+                ${marginValid ? "border-border" : "border-danger"}`} />
+            <span className="text-ink-muted">%</span>
+          </div>
+          {ruleErr && (
+            <div className="rounded-md bg-danger/10 px-2 py-1 text-[12px] text-danger">{ruleErr}</div>
+          )}
+          {([["Contract rules that follow it", followContract],
+             ["Generic rules that follow it", followGeneric]] as const).map(([title, list]) =>
+            list.length > 0 && (
+              <div key={title}>
+                <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">
+                  {title} · {list.length}
+                </p>
+                <ul className="max-h-40 divide-y divide-border overflow-auto rounded-md border border-border">
+                  {list.map(r => (
+                    <li key={r.validation_rule_id} className="px-3 py-1.5 text-[13px] text-ink">{r.rule_name}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          {ownMarginRules.length > 0 && (
+            <div>
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">
+                Rules with their own margin · {ownMarginRules.length}
+              </p>
+              <ul className="max-h-40 divide-y divide-border overflow-auto rounded-md border border-border">
+                {ownMarginRules.map(r => (
+                  <li key={r.validation_rule_id} className="flex items-center gap-2 px-3 py-1.5 text-[13px]">
+                    <span className="min-w-0 flex-1 truncate text-ink">{r.rule_name}</span>
+                    <span className="tabular-nums text-ink-muted">{pctText(r.tolerance_pct ?? 0)}</span>
+                    {!readOnly && (
+                      <button type="button" onClick={() => followContractMargin(r)}
+                        disabled={tolBusy === r.validation_rule_id}
+                        className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[11px] text-navy hover:bg-surface-2 disabled:opacity-50">
+                        <RotateCcw size={11} /> Use contract margin
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {followRules.length === 0 && ownMarginRules.length === 0 && (
+            <p className="text-ink-muted">No rule of this contract can have a margin.</p>
+          )}
+        </div>
+      </Modal>
+
       <Modal open={ruleToRemove !== null} title="Remove this rule?" size="md"
         onClose={() => { if (busyRule === null) setRuleToRemove(null); }}
         footer={

@@ -3416,6 +3416,14 @@ def program_contract_detail(program_id: int, contract_id: int,
         rules = []
         mappings_by_key: dict[tuple[str, str], dict] = {}
 
+        # Contract margin (19.3): what every tolerance-taking rule of this
+        # contract runs with unless it has its own value (contract_margin.py).
+        import contract_margin as _cm
+        contract_margin = _cm.contract_margin_pct(contract.extracted)
+        _legacy_own = _cm.rules_with_legacy_own_tolerance(
+            s, [r["validation_rule_id"] for r in rule_rows
+                if _cm.tolerance_template(_json_value(r.get("rule_spec")))])
+
         for row in rule_rows:
             rule = dict(row)
             rule["canonical_target"] = _json_value(rule.get("canonical_target")) or {}
@@ -3427,16 +3435,25 @@ def program_contract_detail(program_id: int, contract_id: int,
             rule["output_fields"] = _ofields
             _spec = rule["rule_spec"]
             rule["rule_kind"] = _spec.get("kind") if isinstance(_spec, dict) else None
-            # Surface the tolerance band on cross_field_math (formula) rules so the
-            # UI can offer a ±% editor (PUT .../rules/{id}/tolerance). Other rule
-            # templates carry no band, so these stay null and the UI hides it.
+            # Surface the tolerance band on formula (cross_field_math) and
+            # number-limit rules so the UI can offer a ±% editor (PUT
+            # .../rules/{id}/tolerance). `tolerance_pct` is the EFFECTIVE band
+            # the run applies — the rule's own value, else the contract margin —
+            # and `tolerance_source` says which. Other templates carry no band,
+            # so these stay null and the UI hides it.
             _ir = _spec.get("ir") if isinstance(_spec, dict) else None
             if isinstance(_ir, dict):
                 _params = _ir.get("params") or {}
                 rule["rule_template"] = _ir.get("template")
-                if _ir.get("template") == "cross_field_math":
-                    rule["tolerance_pct"] = _params.get("tolerance_pct")
-                    rule["reject_pct"] = _params.get("reject_pct")
+                if _cm.tolerance_template(_spec):
+                    _own = _cm.has_own_tolerance(
+                        _spec, rule["validation_rule_id"], _legacy_own)
+                    _eff, _src = _cm.effective_tolerance(_spec, contract_margin, _own)
+                    rule["tolerance_pct"] = _eff
+                    rule["tolerance_source"] = _src
+                    rule["reject_pct"] = (_params.get("reject_pct")
+                                          if _ir.get("template") == "cross_field_math"
+                                          else None)
                 else:
                     # Value-matching rules (allowed/prohibited lists, conditional
                     # values) carry the accepted SURFACE SPELLINGS of each value.
@@ -3556,6 +3573,7 @@ def program_contract_detail(program_id: int, contract_id: int,
                 "created_at": _iso_utc(contract.created_at),
             },
             "output_template": template,
+            "contract_margin_pct": contract_margin,
             "terms": terms,
             "clauses": [dict(row) for row in clause_rows],
             "field_mappings": list(mappings_by_key.values()),
@@ -3601,6 +3619,16 @@ class RuleToleranceBody(BaseModel):
     tolerance_pct: Optional[float] = None
     reject_pct: Optional[float] = None
     clear_reject: Optional[bool] = False
+    # Drop the rule's own value: it follows the contract margin again (19.3).
+    follow_contract: Optional[bool] = False
+    mga: Optional[str] = None
+    actor: Optional[str] = None
+
+
+class ContractMarginBody(BaseModel):
+    # Percent (1.0 == 1%), 0–100. Every tolerance-taking rule of the contract
+    # (formula rules and number limits) runs with it unless it has its own value.
+    margin_pct: float
     mga: Optional[str] = None
     actor: Optional[str] = None
 
@@ -3724,14 +3752,18 @@ def rule_retarget_output_field(program_id: int, contract_id: int, rule_id: int,
 def rule_update_tolerance(program_id: int, contract_id: int, rule_id: int,
                           body: RuleToleranceBody,
                           principal: Principal = Depends(current_principal)):
-    """Set the ±% tolerance band(s) on a cross_field_math (formula) rule.
+    """Set the ±% tolerance band(s) on a formula (cross_field_math) rule, or the
+    margin on a number-limit rule (max_limit / min_limit / range_check).
 
     Deterministically rewrites the rule's IR params and recompiles its SQL (no
     LLM) so the DuckDB runtime picks up the new band on the next run. Soft cache
     (`rule_sql`) is cleared so it recompiles clean — same contract as retargeting.
+    The value becomes the rule's OWN (the contract margin stops applying to it);
+    `follow_contract` drops it so the rule follows the contract margin again.
     """
     from contract_upload_services.output_schema import build_output_schema
     from contract_upload_services.rule_editor import patch_tolerance, RuleEditError
+    import contract_margin as _cm
 
     updates: dict = {}
     if body.tolerance_pct is not None:
@@ -3740,9 +3772,10 @@ def rule_update_tolerance(program_id: int, contract_id: int, rule_id: int,
         updates["reject_pct"] = None
     elif body.reject_pct is not None:
         updates["reject_pct"] = body.reject_pct
-    if not updates:
+    if not updates and not body.follow_contract:
         raise HTTPException(
-            400, "supply tolerance_pct and/or reject_pct (or clear_reject)")
+            400, "supply tolerance_pct and/or reject_pct (or clear_reject, "
+                 "or follow_contract)")
 
     with SessionLocal() as s:
         contract = s.get(Contract, contract_id)
@@ -3766,9 +3799,12 @@ def rule_update_tolerance(program_id: int, contract_id: int, rule_id: int,
         rule_spec = _json_value(row["rule_spec"]) or {}
 
         try:
-            new_spec, applied = patch_tolerance(rule_spec, schema, updates)
+            new_spec, applied = patch_tolerance(
+                rule_spec, schema, updates,
+                follow_contract=bool(body.follow_contract))
         except RuleEditError as e:
             raise HTTPException(400, str(e))
+        margin = _cm.contract_margin_pct(contract.extracted)
 
         s.execute(
             text("""UPDATE validation_rule
@@ -3787,10 +3823,59 @@ def rule_update_tolerance(program_id: int, contract_id: int, rule_id: int,
     _log(tenant_mga, body.actor, "rule.tolerance_changed",
          target=f"rule:{rule_id}",
          details={"contract_id": contract_id, "program_id": program_id,
-                  "rule_name": row["rule_name"], "applied": applied})
+                  "rule_name": row["rule_name"], "applied": applied,
+                  **({"follow_contract": True} if body.follow_contract else {})})
+    eff, src = _cm.effective_tolerance(new_spec, margin,
+                                       _cm.has_own_tolerance(new_spec, rule_id))
     return {"ok": True, "rule_id": rule_id,
-            "tolerance_pct": new_params.get("tolerance_pct"),
-            "reject_pct": new_params.get("reject_pct")}
+            "tolerance_pct": eff,
+            "reject_pct": new_params.get("reject_pct"),
+            "tolerance_source": src}
+
+
+@router.put("/programs/{program_id}/contracts/{contract_id}/margin")
+def contract_update_margin(program_id: int, contract_id: int,
+                           body: ContractMarginBody,
+                           principal: Principal = Depends(current_principal)):
+    """Set the contract margin (19.3): ONE percent that every tolerance-taking
+    rule of this contract — formula rules and number limits — runs with, unless
+    a rule has its own value (PUT .../rules/{id}/tolerance).
+
+    Stored as `extracted.settings.margin_pct` (nested: the top-level plain values
+    of `extracted` become output constants) and applied at run time, in memory
+    (contract_margin.py) — no rule is rewritten, so the next run picks it up.
+    Same ownership checks as the tolerance edit.
+    """
+    import contract_margin as _cm
+    try:
+        new = float(body.margin_pct)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "margin_pct must be a number (percent)")
+    if not (0.0 <= new <= _cm.MARGIN_MAX_PCT):
+        raise HTTPException(400, "margin_pct must be between 0 and 100")
+
+    with SessionLocal() as s:
+        contract = s.get(Contract, contract_id)
+        if not contract or contract.program_id != program_id:
+            raise HTTPException(404, "contract not found for this program")
+        assert_tenant_owns(principal, contract.tenant_id)
+        old = _cm.contract_margin_pct(contract.extracted)
+        extracted = dict(contract.extracted) if isinstance(contract.extracted, dict) else {}
+        settings = dict(extracted.get("settings") or {}) \
+            if isinstance(extracted.get("settings"), dict) else {}
+        settings["margin_pct"] = new
+        extracted["settings"] = settings
+        # A fresh dict, so the ORM sees the JSONB column change.
+        contract.extracted = extracted
+        tenant_id = contract.tenant_id
+        s.commit()
+        tenant_mga = body.mga or _tenant_name(s, tenant_id)
+
+    _log(tenant_mga, body.actor, "contract.margin_changed",
+         target=f"contract:{contract_id}",
+         details={"contract_id": contract_id, "program_id": program_id,
+                  "old": old, "new": new})
+    return {"ok": True, "contract_id": contract_id, "margin_pct": new}
 
 
 @router.post("/programs/{program_id}/contracts/{contract_id}/rules/{rule_id}/variation-values")

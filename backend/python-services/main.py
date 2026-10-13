@@ -3987,6 +3987,116 @@ def export_file_bytes(s, export_id: int, row=None):
     return r.filename, data, content_type_for_filename(r.filename)
 
 
+def _export_results(s, export_id: int, principal):
+    """Every row of one stored output with its outcome (export_results.compute),
+    read from the file as it was delivered plus the decisions saved since."""
+    import export_results as xr
+    r = _export_file_row(s, export_id)
+    if not r:
+        raise HTTPException(404, "export not found")
+    assert_can_read_export(s, principal, r)
+    data = storage.resolve_bytes(r.blob_ref, r.blob)
+    grid = _output_to_grid(data, r.filename, max_rows=1_000_000,
+                           header_row_by_sheet=_export_header_rows(s, r)) if data else []
+    data_names = _export_data_sheet_names(s, r)
+    if data_names:
+        for sh in grid:
+            sh["is_data"] = " ".join(str(sh["sheet"]).split()).strip().lower() in data_names
+    sheets, columns = xr.grid_to_sheets(grid)
+    full = s.get(OutputExport, export_id)
+    excs = _attach_decisions(_attach_recommendations(full.exceptions or []), full, principal)
+    res = xr.compute(sheets, excs, not_validated=((full.status or "") == "not_validated"),
+                     columns=columns)
+    return full, sheets, columns, res
+
+
+def _export_versions(s, out) -> list[dict]:
+    """Every version of the submission this export belongs to, newest first,
+    each with its own output (History & Downloads). An export made before
+    submissions existed is its own only version."""
+    import submission_service as svc
+    th = svc.load(s, out.submission_ref) if getattr(out, "submission_ref", None) else None
+    cols = (OutputExport.id, OutputExport.filename, OutputExport.status,
+            OutputExport.exception_count, OutputExport.policy_count,
+            OutputExport.output_format, OutputExport.created_at)
+    if th is None:
+        return [{"version": out.version_no or 1, "export_id": out.id, "current": True,
+                 "status": None, "status_text": None, "source": None,
+                 "created_at": _iso_utc(out.created_at), "filename": out.filename,
+                 "exceptions": out.exception_count or 0, "rows": out.policy_count or 0,
+                 "output_format": getattr(out, "output_format", None),
+                 "replaced_by": None}]
+    ids = [v.export_id for v in th.versions if v.export_id]
+    meta = {row[0]: row for row in s.query(*cols).filter(OutputExport.id.in_(ids)).all()} if ids else {}
+    current = th.current_export_id
+    turns = [v for v in th.versions if v.export_id]
+    items = []
+    for i, v in enumerate(th.versions):
+        m = meta.get(v.export_id)
+        later = next((w.no for w in turns if w.no > v.no), None)
+        items.append({
+            "version": v.no, "export_id": v.export_id,
+            "current": bool(v.export_id) and v.export_id == current,
+            "status": v.status, "status_text": svc.STATUS_WORDS.get(v.status, v.status),
+            "source": v.source, "created_at": _iso_utc(v.created_at),
+            "filename": m[1] if m else None,
+            "exceptions": (m[3] or 0) if m else None, "rows": (m[4] or 0) if m else None,
+            "output_format": m[5] if m else None,
+            "replaced_by": later if (v.status == "superseded" and later) else None,
+        })
+    return list(reversed(items))
+
+
+@app.get("/export/downloads/{export_id}/results")
+def export_download_results(export_id: int, outcome: str | None = None,
+                            q: str | None = None, page: int = 1, page_size: int = 50,
+                            principal: Principal = Depends(current_principal)):
+    """The Results tab of one checked file: Summary (rows passed, failed and
+    open, resolved, not checked), All Records (every row with its outcome and
+    exceptions, filtered and paged here) and History (every version)."""
+    with SessionLocal() as s:
+        full, _sheets, _cols, res = _export_results(s, export_id, principal)
+        versions = _export_versions(s, full)
+    rows = res["rows"]
+    if outcome in ("passed", "open", "resolved", "not_checked"):
+        rows = [r for r in rows if r["outcome"] == outcome]
+    if q and q.strip():
+        needle = q.strip().lower()
+        rows = [r for r in rows
+                if needle in str(r.get("policy_number") or "").lower()
+                or any(needle in str(x.get("rule") or "").lower()
+                       or needle in str(x.get("field") or "").lower()
+                       for x in r["exceptions"])]
+    page_size = max(1, min(int(page_size or 50), 500))
+    pages = max(1, -(-len(rows) // page_size))
+    page = max(1, min(int(page or 1), pages))
+    return {
+        "export_id": export_id,
+        "status": full.status,
+        "summary": res["summary"],
+        "by_rule": res["by_rule"],
+        "records": {"items": rows[(page - 1) * page_size: page * page_size],
+                    "total": len(rows), "page": page, "page_size": page_size,
+                    "pages": pages},
+        "versions": versions,
+    }
+
+
+@app.get("/export/downloads/{export_id}/results.csv")
+def export_download_results_csv(export_id: int,
+                                principal: Principal = Depends(current_principal)):
+    """The whole file as CSV with each row's result and exceptions."""
+    import re
+    import export_results as xr
+    with SessionLocal() as s:
+        full, sheets, cols, res = _export_results(s, export_id, principal)
+        name = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", full.filename or f"export_{export_id}")
+    body = xr.results_csv(sheets, res, cols)
+    return Response(content=body.encode("utf-8-sig"), media_type="text/csv",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{name}-results.csv"'})
+
+
 @app.get("/export/downloads/{export_id}/data")
 def export_download_data(export_id: int,
                          full: bool = False,

@@ -428,7 +428,12 @@ export type ExportDecideResponse = {
 export async function rerenderExport(
   exportId: number | string,
   actor?: string
-): Promise<{ export_id: number; exception_count?: number; status?: string }> {
+): Promise<{
+  export_id: number; exception_count?: number; status?: string;
+  /** Set when Fix & Validate made the next version (the secure link's way):
+   *  the version corrected here is kept and marked replaced. */
+  version?: number | null; from_version?: number | null; status_text?: string | null;
+}> {
   const { data } = await api.post(`/export/downloads/${exportId}/rerender`,
     { actor: actor ?? null });
   return data;
@@ -563,4 +568,52 @@ export function toTitleCase(str?: string | null): string {
     .split(' ')
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
+}
+
+
+// ── Results tab (plan 21–22): every row's outcome, the counts, the versions ──
+
+export type RowOutcome = "passed" | "open" | "resolved" | "not_checked";
+
+export type ResultsSummary = {
+  total: number; passed: number; open: number; resolved: number; not_checked: number;
+  exceptions: number; exceptions_open: number; exceptions_resolved: number;
+};
+
+export type ResultRecord = {
+  sheet: string | null; sheet_name: string; row: number;
+  policy_number: string | null; outcome: RowOutcome;
+  exceptions: Array<{
+    rule: string; field: string | null; severity: string; message: string | null;
+    actual: unknown; status: string; decided_by?: string | null; decided_at?: string | null;
+  }>;
+};
+
+export type ResultVersion = {
+  version: number; export_id: number | null; current: boolean;
+  status: string | null; status_text: string | null; source: string | null;
+  created_at: string | null; filename: string | null;
+  exceptions: number | null; rows: number | null; output_format: string | null;
+  replaced_by: number | null;
+};
+
+export type ExportResults = {
+  export_id: number; status: string | null;
+  summary: ResultsSummary;
+  by_rule: Array<{ rule: string; severity: string; exceptions: number; open: number; resolved: number }>;
+  records: { items: ResultRecord[]; total: number; page: number; page_size: number; pages: number };
+  versions: ResultVersion[];
+};
+
+export async function getExportResults(
+  exportId: number | string,
+  opts: { outcome?: RowOutcome | ""; q?: string; page?: number; pageSize?: number } = {},
+): Promise<ExportResults> {
+  const { data } = await api.get(`/export/downloads/${exportId}/results`, {
+    params: {
+      outcome: opts.outcome || undefined, q: opts.q?.trim() || undefined,
+      page: opts.page ?? 1, page_size: opts.pageSize ?? 50,
+    },
+  });
+  return data;
 }

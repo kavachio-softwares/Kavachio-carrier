@@ -733,27 +733,126 @@ def _b_value_not_in_set(sheet, p):
                               variation_values=p.get("variation_values"))
 
 
+# A NUMBER-LIMIT rule (max_limit / min_limit / range_check) may carry a MARGIN:
+# `tolerance_pct` (1.0 == 1%) widens its bound by that share of the bound's own
+# size — a maximum of 1,000 at 5% passes up to 1,050, a minimum of 500 at 5%
+# passes down to 475, and an exact value X at 5% passes anything within 5% of X.
+# It is the contract margin (contract.extracted.settings.margin_pct) or the rule's
+# own value, applied at run time (see contract_margin.py). Absent or 0 compiles
+# exactly as before, byte for byte: a margin exists only when somebody set one.
+def _limit_tol(p) -> float:
+    raw = p.get("tolerance_pct")
+    if raw in (None, ""):
+        return 0.0
+    try:
+        tol = float(raw)
+    except (TypeError, ValueError):
+        raise CompileError(f"tolerance_pct must be a number, got {raw!r}")
+    if tol < 0:
+        raise CompileError("tolerance_pct cannot be negative")
+    return tol
+
+
+def _widen(bound: str, pct: float, direction: int) -> str:
+    """`bound` (a _num_lit literal) moved OUTWARDS by |bound| x pct/100 —
+    direction -1 for a minimum, +1 for a maximum. Rounded so a 5% margin on 500
+    reads 475 in the query, not 474.99999999999994."""
+    b = float(bound)
+    return _num_lit(round(b + direction * abs(b) * pct / 100.0, 10))
+
+
+def _margin_note(pct: float) -> str:
+    """Appended to the reason only when a margin is on, so a reviewer reads which
+    band the row was measured with; nothing at 0."""
+    return f" (margin {_num_lit(pct)}%)" if pct > 0 else ""
+
+
+# POLICY TOTALS. A bordereau reports a policy as several TRANSACTION rows — the
+# new business row, then each endorsement, return premium or cancellation — and a
+# money term such as "minimum premium 500 per policy" is about the POLICY, not
+# about one of its rows: a 1,000 policy with a 200 endorsement has 1,200 of
+# premium and meets the minimum, but measured row by row the endorsement fails.
+# The optional `policy_total` param ({"key": column} or {"keys": {sheet: column}})
+# measures such a limit on each multi-row policy's SUM instead — one exception per
+# policy, pinned to its first row — and keeps today's per-row check for a policy
+# that has one row (or no policy number). Only ever added at run time, and only
+# for amounts that add up across rows (see contract_margin.policy_total_eligible);
+# absent → the builders below emit exactly the SQL they always did.
+def _policy_key(sheet, p):
+    pt = p.get("policy_total")
+    if not isinstance(pt, dict):
+        return None
+    keys = pt.get("keys")
+    key = (keys.get(sheet) if isinstance(keys, dict) else None) or pt.get("key")
+    return key if isinstance(key, str) and key.strip() else None
+
+
+def _policy_total_limit(sheet, f, p, key, violates, row_reason, total_reason):
+    """Per-row arm for single-row (or unnumbered) policies, a grouped arm for
+    every policy with more than one row, and the usual not-a-number arm.
+    `violates(expr)` is the limit's violation condition on a numeric SQL
+    expression — the cell for a row, SUM over the policy for a total. Scope is
+    applied BEFORE grouping, so a policy's out-of-scope rows neither count nor
+    turn its in-scope row into a 'multi-row' policy."""
+    scope_sql = _scope_clause(p.get("scope"))
+    kq = f"TRIM({_q(key)})"
+    has_key = _present(key)
+    in_rows = _and(has_key, scope_sql)
+    multi = (f"SELECT {kq} FROM {_q(sheet)} WHERE {in_rows} "
+             f"GROUP BY {kq} HAVING COUNT(*) > 1")
+    num = _num(f)
+    row_where = _and(f"{num} IS NOT NULL AND {violates(num)}", scope_sql,
+                     f"(NOT {has_key} OR {kq} NOT IN ({multi}))")
+    total = f"SUM({num})"
+    total_sql = (
+        f"SELECT MIN(__rowid) AS row_id, {_lit(sheet)} AS sheet, {_lit(f)} AS field, "
+        f"{_lit(total_reason)} AS reason, CAST({total} AS VARCHAR) AS actual_value "
+        f"FROM {_q(sheet)} WHERE {in_rows} GROUP BY {kq} "
+        f"HAVING COUNT(*) > 1 AND {total} IS NOT NULL AND {violates(total)}")
+    return (_select(sheet, f, row_reason, row_where, f)
+            + "\nUNION ALL\n" + total_sql
+            + "\nUNION ALL\n" + _not_numeric_select(sheet, f, p.get("scope")))
+
+
 def _b_max_limit(sheet, p):
     f = p["field"]
     mx = _num_lit(p["max"])
-    where = _and(f"{_num(f)} IS NOT NULL AND {_num(f)} > {mx}",
+    tol = _limit_tol(p)
+    hi = _widen(mx, tol, +1) if tol > 0 else mx
+    reason = f"{f} exceeds maximum {mx}{_margin_note(tol)}"
+    key = _policy_key(sheet, p)
+    if key:
+        return _policy_total_limit(
+            sheet, f, p, key, lambda x: f"{x} > {hi}", reason,
+            f"{f} policy total exceeds maximum {mx}{_margin_note(tol)}")
+    where = _and(f"{_num(f)} IS NOT NULL AND {_num(f)} > {hi}",
                  _scope_clause(p.get("scope")))
-    return (_select(sheet, f, f"{f} exceeds maximum {mx}", where, f)
+    return (_select(sheet, f, reason, where, f)
             + "\nUNION ALL\n" + _not_numeric_select(sheet, f, p.get("scope")))
 
 
 def _b_min_limit(sheet, p):
     f = p["field"]
     mn = _num_lit(p["min"])
-    where = _and(f"{_num(f)} IS NOT NULL AND {_num(f)} < {mn}",
+    tol = _limit_tol(p)
+    lo = _widen(mn, tol, -1) if tol > 0 else mn
+    reason = f"{f} below minimum {mn}{_margin_note(tol)}"
+    key = _policy_key(sheet, p)
+    if key:
+        return _policy_total_limit(
+            sheet, f, p, key, lambda x: f"{x} < {lo}", reason,
+            f"{f} policy total below minimum {mn}{_margin_note(tol)}")
+    where = _and(f"{_num(f)} IS NOT NULL AND {_num(f)} < {lo}",
                  _scope_clause(p.get("scope")))
-    return (_select(sheet, f, f"{f} below minimum {mn}", where, f)
+    return (_select(sheet, f, reason, where, f)
             + "\nUNION ALL\n" + _not_numeric_select(sheet, f, p.get("scope")))
 
 
 def _b_range_check(sheet, p):
     f = p["field"]
     mn, mx = _num_lit(p["min"]), _num_lit(p["max"])
+    tol = _limit_tol(p)
+    note = _margin_note(tol)
     # min == max means "must EQUAL exactly X" — a fixed required value such as a
     # commission schedule of 23.5% (→ 0.235), a fixed fee, or an exact share.
     # Compile it as an exact-equality check (violation = present AND not == X).
@@ -763,13 +862,25 @@ def _b_range_check(sheet, p):
     # normalized upstream in rule_normalizer before this runs.)
     not_numeric = _not_numeric_select(sheet, f, p.get("scope"))
     if mn == mx:
-        where = _and(f"{_num(f)} IS NOT NULL AND {_num(f)} <> {mn}",
+        # With a margin, "equal" means within that share of X: |x - X| > |X| x t.
+        # Never measured on a policy total — an exact value is a per-row figure.
+        cmp = (f"ABS({_num(f)} - {mn}) > ABS({mn}) * {repr(tol / 100.0)}"
+               if tol > 0 else f"{_num(f)} <> {mn}")
+        where = _and(f"{_num(f)} IS NOT NULL AND {cmp}",
                      _scope_clause(p.get("scope")))
-        return (_select(sheet, f, f"{f} must equal {mn}", where, f)
+        return (_select(sheet, f, f"{f} must equal {mn}{note}", where, f)
                 + "\nUNION ALL\n" + not_numeric)
-    where = _and(f"{_num(f)} IS NOT NULL AND ({_num(f)} < {mn} OR {_num(f)} > {mx})",
+    lo = _widen(mn, tol, -1) if tol > 0 else mn
+    hi = _widen(mx, tol, +1) if tol > 0 else mx
+    reason = f"{f} outside [{mn}, {mx}]{note}"
+    key = _policy_key(sheet, p)
+    if key:
+        return _policy_total_limit(
+            sheet, f, p, key, lambda x: f"({x} < {lo} OR {x} > {hi})", reason,
+            f"{f} policy total outside [{mn}, {mx}]{note}")
+    where = _and(f"{_num(f)} IS NOT NULL AND ({_num(f)} < {lo} OR {_num(f)} > {hi})",
                  _scope_clause(p.get("scope")))
-    return (_select(sheet, f, f"{f} outside [{mn}, {mx}]", where, f)
+    return (_select(sheet, f, reason, where, f)
             + "\nUNION ALL\n" + not_numeric)
 
 

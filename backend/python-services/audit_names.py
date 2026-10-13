@@ -1001,6 +1001,7 @@ _SPECIAL = {
     "bdx_fix_link_code_wrong": _fix_link,
     "bdx_fix_link_opened": _fix_link,
     "bdx_fix_link_submitted": _fix_link,
+    "bdx_fix_validate_submitted": _fix_link,
     "bdx_fix_link_answers": _fix_link,
     "bdx_submission_delivered": _delivered,
     "datamodel_mapping_proposed": _mapping_proposed,

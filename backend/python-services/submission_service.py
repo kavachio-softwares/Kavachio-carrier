@@ -100,6 +100,10 @@ STATUS_WORDS = {
 }
 # A submission the broker can still answer on the secure link.
 OPEN_STATUSES = ("with_exceptions", "ready", "held_at_deadline")
+# How a corrected version can come in without a file: the broker's secure
+# link, or Fix & Validate on the exception screen. Both send the corrected
+# data as the next version through submit_corrections.
+CORRECTION_SOURCES = ("secure_link", "fix_validate")
 _NOT_A_TURN = ("rejected", "duplicate")   # versions that never become "current"
 
 
@@ -298,8 +302,8 @@ class Version:
         if not self.is_file:
             return "secure_link"
         a = self.arrival
-        if a.matched_by == "secure_link":
-            return "secure_link"
+        if a.matched_by in CORRECTION_SOURCES:
+            return a.matched_by
         return (a.channel or self._route_channel
                 or ("upload" if a.route_id is None else "channel"))
 
@@ -1877,9 +1881,14 @@ def _landing_workbook(data: dict) -> bytes:
     return buf.getvalue()
 
 
-def submit_corrections(ref: str, email: str) -> dict:
+def submit_corrections(ref: str, email: str, *, via: str = "secure_link",
+                       wake: bool = True) -> dict:
     """Send the corrected data as the next version. Returns where it stands
-    (processing — the auto-run picks it up like any arrival)."""
+    (processing — the auto-run picks it up like any arrival).
+
+    `via` is how the broker sent it: "secure_link", or "fix_validate" for the
+    exception screen's Fix & Validate, which then runs the version itself
+    (`wake=False`, see fix_and_validate) instead of waiting for the loop."""
     from db import LandingRecord, SessionLocal
     import direct_routes as dr
     import intake_service as isvc
@@ -1918,17 +1927,24 @@ def submit_corrections(ref: str, email: str) -> dict:
                 period=th.period, replaces=ref, contract_id=th.contract_id)
             if arrival.outcome == "accepted":
                 arrival.run_state = None
+                # The run reads the arrival's kept copy. land_file keeps one when
+                # blob storage kept none; this path did not, so with database
+                # storage the new version could never run ("No copy of this file
+                # was kept").
+                s.flush()
+                isvc.keep_copy(s, arrival, body)
             arrival.claimed_sender = email
-        arrival.matched_by = "secure_link"
+        arrival.matched_by = via
         s.commit()
         aid = arrival.id
         if arrival.outcome != "accepted":
             raise ValueError(arrival.turned_away_reason or "The corrected data could not be accepted.")
-    try:
-        import intake_autorun
-        intake_autorun.wake()
-    except Exception:  # noqa: BLE001 — the loop finds it on its next tick anyway
-        pass
+    if wake:
+        try:
+            import intake_autorun
+            intake_autorun.wake()
+        except Exception:  # noqa: BLE001 — the loop finds it on its next tick anyway
+            pass
     with SessionLocal() as s:
         doc = status_json(s, load(s, ref))
         doc["arrival_id"] = aid
@@ -1937,13 +1953,13 @@ def submit_corrections(ref: str, email: str) -> dict:
 
 def carry_decisions(arrival_id: int, landing_id: int) -> None:
     """intake_autorun, between landing a file and checking it: a file sent from
-    the secure link takes the broker's earlier decisions that are not values in
+    the secure link (or Fix & Validate) takes the broker's earlier decisions that are not values in
     its data. Every other file: nothing. Never raises."""
     from db import SessionLocal
     try:
         with SessionLocal() as s:
             a = s.get(FileArrival, arrival_id)
-            if a is None or a.matched_by != "secure_link" or not a.submission_ref:
+            if a is None or a.matched_by not in CORRECTION_SOURCES or not a.submission_ref:
                 return
             th = load(s, a.submission_ref)
             prev = next((v.landing_id for v in reversed(th.versions)
@@ -1968,3 +1984,121 @@ def carry_decisions(arrival_id: int, landing_id: int) -> None:
                      n, prev, landing_id, a.submission_ref)
     except Exception:  # noqa: BLE001
         log.warning("could not carry decisions onto landing %s", landing_id, exc_info=True)
+
+
+# ── the exception screen's Fix & Validate: the next version, the same way ───
+#
+# Fix & Validate used to check the export again IN PLACE, so the version the
+# broker corrected was overwritten: its file, exception list and counts were
+# gone. It now does what the secure link's Submit does — submit_corrections:
+# the corrected data goes in as the next version of the submission, the
+# version before it is kept and marked replaced ("superseded") when the new
+# one settles, and the delivery rule, result email and calendar follow as for
+# any version. The one difference is timing: the screen waits for the answer,
+# so the new version is run here, at once, instead of by the auto-run loop.
+
+class CannotCorrect(ValueError):
+    """This export's submission cannot take a new version now. The message is
+    what the broker reads."""
+
+
+def correctable_thread(s, export_id: int) -> Optional[Thread]:
+    """The submission this export is the CURRENT version of, if it can take a
+    correction now. None when the export belongs to no submission (outputs
+    made before submissions existed): the caller keeps the old in-place
+    re-check for those. Raises CannotCorrect otherwise, with the same rules as
+    the secure link (fix_link_routes._open)."""
+    from db import OutputExport
+    out = s.get(OutputExport, export_id)
+    th = load(s, getattr(out, "submission_ref", None)) if out is not None else None
+    if th is None:
+        return None
+    if th.status in ("delivered", "delivered_flagged"):
+        raise CannotCorrect(
+            "This bordereau has already been delivered to the carrier, so it can "
+            "no longer be changed here. Send a corrected file instead.")
+    if th.current_export_id != export_id:
+        mine = th.by_export(export_id)
+        was = f"Version {mine.no}" if mine is not None else "This version"
+        raise CannotCorrect(
+            f"{was} has been replaced by Version {th.current.no}. Open Version "
+            f"{th.current.no} to fix its exceptions.")
+    if th.status not in OPEN_STATUSES:
+        raise CannotCorrect(
+            f"This version is {STATUS_WORDS.get(th.status, th.status).lower()}, so "
+            "there is nothing to fix and validate.")
+    return th
+
+
+def fix_and_validate(export_id: int, email: Optional[str], *,
+                     actor: Optional[str] = None,
+                     actor_cols: Optional[dict] = None,
+                     wait_seconds: int = 120) -> dict:
+    """Send the fixes and decisions saved on this export as the next version
+    and run it now. Returns the new version: its number, its export and how
+    the run went. The export must be its submission's current version
+    (correctable_thread); raises CannotCorrect when it cannot be corrected."""
+    import time
+    import intake_autorun
+    import intake_service as isvc
+    from db import ActivityEvent, SessionLocal
+    with SessionLocal() as s:
+        th = correctable_thread(s, export_id)
+        if th is None:
+            raise CannotCorrect("This file is not part of a submission, so it "
+                                "cannot be sent in as a new version.")
+        ref, from_version = th.ref, th.current.no
+        landing_id = _correction_inputs(s, th)["landing_id"]
+        if not s.execute(text("SELECT COUNT(*) FROM landing_correction "
+                              "WHERE landing_id = :l"), {"l": landing_id}).scalar():
+            raise CannotCorrect("Fix, approve or dismiss at least one exception "
+                                "first, then press Fix & Validate.")
+        broker_party_id = th.broker_party_id
+        tenant_id = th.tenant_id
+    try:
+        doc = submit_corrections(ref, email or "", via="fix_validate", wake=False)
+    except ValueError as exc:
+        raise CannotCorrect(str(exc)) from exc
+    aid = doc.get("arrival_id")
+    # Run it here. If the auto-run loop claimed it first, wait for its answer.
+    with SessionLocal() as s:
+        mine = intake_autorun._claim(s, aid)
+    if mine:
+        try:
+            intake_autorun.run_one(aid)
+        except Exception:  # noqa: BLE001 — recorded on the arrival, like the loop does
+            log.exception("Fix & Validate run of arrival %s crashed", aid)
+            isvc.mark_run(aid, state="failed", error="The run stopped unexpectedly.")
+    deadline = time.monotonic() + max(0, wait_seconds)
+    while True:
+        with SessionLocal() as s:
+            a = s.get(FileArrival, aid)
+            state = a.run_state if a is not None else None
+        if state in ("done", "failed", "not_run") or time.monotonic() >= deadline:
+            break
+        time.sleep(1)
+    with SessionLocal() as s:
+        a = s.get(FileArrival, aid)
+        th = load(s, ref)
+        ver = th.by_export(a.run_export_id) if (th and a and a.run_export_id) else None
+        out = {
+            "reference": ref,
+            "arrival_id": aid,
+            "from_version": from_version,
+            "from_export_id": export_id,
+            "version": (ver.no if ver else (a.version_no if a else None)),
+            "export_id": a.run_export_id if a else None,
+            "run_state": a.run_state if a else None,
+            "run_error": a.run_error if a else None,
+            "status": ver.status if ver else None,
+            "status_text": STATUS_WORDS.get(ver.status) if ver else None,
+        }
+        s.add(ActivityEvent(
+            tenant_id=tenant_id, actor=actor or email, action="bdx_fix_validate_submitted",
+            target=f"submission:{ref}",
+            details={"reference": ref, "from_version": from_version,
+                     "to_version": out["version"], "from_export_id": export_id,
+                     "export_id": out["export_id"], "run_state": out["run_state"]},
+            **({"actor_broker_party_id": broker_party_id} | (actor_cols or {}))))
+        s.commit()
+    return out

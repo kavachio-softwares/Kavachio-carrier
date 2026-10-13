@@ -12,6 +12,7 @@ import { canAccessPath } from "../access";
 import { CheckCircle2 } from "lucide-react";
 import { LoadingOverlay } from "../components/Busy";
 import BdxInlineReview from "../components/BdxInlineReview";
+import ResultsPanel from "../components/ResultsPanel";
 import Modal from "../components/ui/Modal";
 import { periodLabel } from "../utils/date";
 
@@ -64,6 +65,10 @@ export default function UploadExceptions() {
   // row, failed cells highlighted and actionable in place). The modal viewer is
   // still used elsewhere; here the review happens inline.
   const [bdxOpen, setBdxOpen] = useState(false);
+  // Exceptions (decide and fix) or Results (every row, the counts, every
+  // version). Only an output has Results; `?tab=results` opens on it.
+  const [tab, setTab] = useState<"exceptions" | "results">(
+    params.get("tab") === "results" ? "results" : "exceptions");
 
   // Where "back" goes. This used to be a hardcoded /direct, which is the
   // CARRIER's Process Bordereau — a broker reviewing their own run was sent to
@@ -147,8 +152,13 @@ export default function UploadExceptions() {
     setRegenerating(true); setErr(null); setMsg(null);
     try {
       const res = await rerenderExport(downloadId);
+      // Fix & Validate sends the fixes in as the next version (the secure
+      // link's way); the version fixed here is kept, marked replaced.
       sessionStorage.setItem(RERUN_TOAST_KEY,
-        "Your corrections have been applied.");
+        res?.version && res?.from_version
+          ? `Version ${res.version} was made from your fixes and checked again. `
+            + `Version ${res.from_version} is kept, marked as replaced.`
+          : "Your corrections have been applied.");
       if (res?.export_id && String(res.export_id) !== String(downloadId)) {
         const qs = new URLSearchParams();
         qs.set("download", String(res.export_id));
@@ -306,8 +316,8 @@ export default function UploadExceptions() {
                   {applied > 0 ? (
                     <>
                       Your approved and fixed values are saved, but they are <b>not in the output yet</b>.
-                      Run <b>Fix &amp; Validate</b> to write them into the bordereau and re-check the
-                      remaining exceptions.
+                      Run <b>Fix &amp; Validate</b> to send them in as the next version of this file and
+                      re-check the remaining exceptions. This version is kept.
                     </>
                   ) : (
                     <>
@@ -380,7 +390,20 @@ export default function UploadExceptions() {
           </div>
         ))}
 
-        {loading ? null : !data ? (
+        {downloadId && !loading && data && (
+          <div className="tabs" role="tablist">
+            <button role="tab" className={tab === "exceptions" ? "on" : ""} onClick={() => setTab("exceptions")}>
+              Exceptions
+            </button>
+            <button role="tab" className={tab === "results" ? "on" : ""} onClick={() => setTab("results")}>
+              Results
+            </button>
+          </div>
+        )}
+
+        {downloadId && tab === "results" && !loading && data ? (
+          <ResultsPanel exportId={downloadId} uploadId={uploadId} fromParam={fromParam} />
+        ) : loading ? null : !data ? (
           err ? null : (
             <div className="card pad">
               <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
