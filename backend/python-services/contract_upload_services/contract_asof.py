@@ -295,9 +295,11 @@ def stamp_effective_dates(conn, contract_id: int, lineage: Lineage,
     if not _columns_present(conn) or effective_from is None:
         return False
 
-    # Close the open-ended predecessor(s) in the SAME lineage. Scoped to
-    # contract_id <> the new row so re-running cannot close the row it just
-    # opened, and to open-ended rows only so already-closed history is immutable.
+    # Close any predecessor in the SAME lineage that extends into or past the
+    # new version's term. Scoped to contract_id <> the new row so re-running
+    # cannot close the row it just opened, and to rows extending past eff_from
+    # (either open-ended, or with effective_to > eff_from) so already-closed
+    # history prior to eff_from is immutable.
     conn.execute(
         text(f"""
             UPDATE contract
@@ -306,7 +308,7 @@ def stamp_effective_dates(conn, contract_id: int, lineage: Lineage,
               AND  contract_id <> :cid
               AND  contract_effective_from IS NOT NULL
               AND  contract_effective_from < :eff_from
-              AND  contract_effective_to IS NULL
+              AND  (contract_effective_to IS NULL OR contract_effective_to > :eff_from)
         """),
         {"pid": lineage.program_id, "sk": lineage.schedule_key,
          "bk": lineage.broker_party_id, "cid": contract_id, "eff_from": effective_from},

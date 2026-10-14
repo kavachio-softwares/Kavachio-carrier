@@ -1507,6 +1507,10 @@ class DirectFormat(Base):
     datamodel_mapper_id = Column(Integer, nullable=True)
     approved = Column(Integer, default=0)
     hit_count = Column(Integer, default=1)
+    # Feature 7 (§7.1): which column's date decides which contract version governs,
+    # plus per-setup tuning in JSONB. Requires migration 20_3_contract_asof_config.sql.
+    governing_date_field = Column(String, nullable=True)
+    asof_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -1680,6 +1684,10 @@ class Pipeline(Base):
     # is deliberately NOT mapped here: a mapped column is selected by every
     # Pipeline query, and a database without migration 21 would fail them all.
     # Read and written through rule_scope.pipeline_scope / write_pipeline_scope.
+    # Feature 7 (§7.1): pipeline overrides its direct_format when set.
+    # Requires migration 20_3_contract_asof_config.sql.
+    governing_date_field = Column(String, nullable=True)
+    asof_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

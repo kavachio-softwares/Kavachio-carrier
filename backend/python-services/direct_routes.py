@@ -928,6 +928,8 @@ class DirectFormatUpdate(BaseModel):
     carrier_party_id: Optional[int] = None
     program_id: Optional[int] = None
     approved: Optional[bool] = None
+    governing_date_field: Optional[str] = None
+    asof_config: Optional[dict] = None
 
 
 class PipelineContractIn(BaseModel):
@@ -951,6 +953,8 @@ class PipelineCreate(BaseModel):
     rule_scope: Optional[dict] = None
     # ITD handling (itd.py) — omitted, ITD stays off, as every setup was.
     itd_config: Optional[dict] = None
+    governing_date_field: Optional[str] = None
+    asof_config: Optional[dict] = None
 
 
 class PipelineUpdate(BaseModel):
@@ -965,6 +969,8 @@ class PipelineUpdate(BaseModel):
     # Replaces the setup's ITD settings when sent (itd.py); an empty object
     # clears them. Left out, the stored settings are kept.
     itd_config: Optional[dict] = None
+    governing_date_field: Optional[str] = None
+    asof_config: Optional[dict] = None
 
 
 @router.get("/direct/format/{format_id}")
@@ -1007,6 +1013,10 @@ def direct_format_update(format_id: int, body: DirectFormatUpdate,
             f.carrier_party_id = body.carrier_party_id
         if body.program_id is not None:
             f.program_id = body.program_id
+        if body.governing_date_field is not None:
+            f.governing_date_field = body.governing_date_field
+        if body.asof_config is not None:
+            f.asof_config = body.asof_config
         if body.approved is not None:
             f.approved = 1 if body.approved else 0
             # Supersede any prior active setup for the same carrier + program:
@@ -1136,6 +1146,8 @@ def _format_to_dict(f: DirectFormat) -> dict:
         "datamodel_mapped": bool(f.datamodel_mapped),
         "datamodel_mapper_id": f.datamodel_mapper_id,
         "approved": bool(f.approved), "hit_count": f.hit_count,
+        "governing_date_field": getattr(f, "governing_date_field", None),
+        "asof_config": getattr(f, "asof_config", None),
     }
 
 
@@ -1555,6 +1567,8 @@ def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
         "rule_scope": _rule_scope_mod.pipeline_scope(s, p.id),
         "itd_config": _pipeline_itd_config(s, p.id),
         "ready": ready, "ready_reason": reason,
+        "governing_date_field": getattr(p, "governing_date_field", None),
+        "asof_config": getattr(p, "asof_config", None),
         # Who sent this up for approval and when. Both NULL on a setup that
         # never went up — one a carrier ADMIN built, or one from before
         # approvals existed — which is what the queue sorts and captions by.
@@ -3294,7 +3308,9 @@ def pipeline_create(body: PipelineCreate, mga: Optional[str] = None,
             carrier_party_id=body.carrier_party_id, program_id=body.program_id,
             broker_party_id=body.broker_party_id,
             input_format_id=body.input_format_id,
-            output_template_id=body.output_template_id, status="draft")
+            output_template_id=body.output_template_id, status="draft",
+            governing_date_field=body.governing_date_field,
+            asof_config=body.asof_config)
         s.add(pipe)
         s.flush()
         _replace_pipeline_contracts(s, pipe, body.contracts)
@@ -3444,6 +3460,10 @@ def pipeline_update(pipeline_id: int, body: PipelineUpdate,
             p.name = body.name
         if body.broker_party_id is not None:
             p.broker_party_id = body.broker_party_id
+        if body.governing_date_field is not None:
+            p.governing_date_field = body.governing_date_field
+        if body.asof_config is not None:
+            p.asof_config = body.asof_config
         input_changed = (body.input_format_id is not None
                          and body.input_format_id != p.input_format_id)
         if body.input_format_id is not None:

@@ -197,6 +197,24 @@ def test_stamping_never_reopens_already_closed_history(conn):
                                  "WHERE contract_id = 2")).scalar()) == "2025-01-01"
 
 
+def test_stamping_shortens_predecessor_with_existing_end_date(conn):
+    """When a predecessor already has an end date (e.g. annual contract ending
+    2026-01-01), a mid-term endorsement starting 2025-07-01 must shorten the
+    predecessor's end date to 2025-07-01 so they do not overlap."""
+    conn.execute(text(
+        "INSERT INTO contract (contract_id, contract_program_id, filename, "
+        "                     contract_effective_from, contract_effective_to) "
+        "VALUES (10, 7, 'annual.pdf', '2025-01-01', '2026-01-01')"))
+    conn.execute(text(
+        "INSERT INTO contract (contract_id, contract_program_id, filename) "
+        "VALUES (11, 7, 'endorsement.pdf')"))
+    asof.stamp_effective_dates(conn, 11, LIN, date(2025, 7, 1), date(2026, 1, 1), "Endt 003")
+
+    pred_end = conn.execute(text("SELECT contract_effective_to FROM contract "
+                                 "WHERE contract_id = 10")).scalar()
+    assert str(pred_end) == "2025-07-01"
+
+
 # ── overlap detection ───────────────────────────────────────────────────────
 
 def test_find_overlaps_is_clean_on_a_well_formed_timeline(conn):

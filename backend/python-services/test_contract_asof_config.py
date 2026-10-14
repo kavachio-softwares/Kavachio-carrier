@@ -44,6 +44,18 @@ def test_autodetects_policy_inception_on_the_real_mockrisk_columns():
     assert cfg.governing_date_field(MOCKRISK_COLS) == "PolicyTermBeginDate"
 
 
+def test_db_models_have_asof_columns(monkeypatch):
+    """Verify that SQLAlchemy models DirectFormat and Pipeline actually carry
+    governing_date_field and asof_config attributes."""
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+    from db import DirectFormat, Pipeline
+    df = DirectFormat(governing_date_field="LossDate", asof_config={"date_strategy": "max"})
+    pipe = Pipeline(governing_date_field="PolicyInception", asof_config={"enabled": True})
+    assert cfg.governing_date_field(MOCKRISK_COLS, pipe, df) == "PolicyInception"
+    assert cfg.governing_date_field(MOCKRISK_COLS, df) == "LossDate"
+    assert cfg.enabled(pipe) is True
+
+
 def test_inception_is_preferred_over_transaction_date():
     """For a premium bordereau the contract in force when the risk ATTACHED
     governs it for its whole term — so inception outranks transaction date,
