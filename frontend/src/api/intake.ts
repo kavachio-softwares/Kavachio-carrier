@@ -386,9 +386,25 @@ export type ReviewResult = {
 
 /** "This is fine, load it." Held files only — a turned-away file is one we
  *  could not read, and releasing it would hand processing something broken. */
-export async function releaseArrival(arrivalId: number, note?: string): Promise<ReviewResult> {
+export async function releaseArrival(arrivalId: number, note?: string,
+                                     contractId?: number | null): Promise<ReviewResult> {
   const { data } = await api.post(`/intake/arrivals/${arrivalId}/release`,
-    { note: note || null }, { params: { mga: currentMga() } });
+    { note: note || null, contract_id: contractId ?? null },
+    { params: { mga: currentMga() } });
+  return data;
+}
+
+export type ContractChoice = {
+  id: number; name: string; code: string;
+  inception_dt: string | null; expiry_dt: string | null;
+  renews_contract_id: number | null;
+};
+
+/** The contracts a held file can be released under (its programme and broker). */
+export async function arrivalContractChoices(arrivalId: number):
+    Promise<{ choices: ContractChoice[]; current: number | null }> {
+  const { data } = await api.get(`/intake/arrivals/${arrivalId}/contract-choices`,
+    { params: { mga: currentMga() } });
   return data;
 }
 

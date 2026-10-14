@@ -55,6 +55,16 @@ export type ContractTypeSpec = {
  * what is being sought is the broker's AGREEMENT, which neither side can settle
  * alone.
  */
+export type RenewalVersion = {
+  id: number;
+  version: number;
+  name: string;
+  inception_dt: string | null;
+  expiry_dt: string | null;
+  lifecycle: Lifecycle;
+  is_current: boolean;
+};
+
 export type Lifecycle =
   | "draft" | "pending"
   | "in_review" | "changes_requested" | "agreed" | "signed"
@@ -191,6 +201,22 @@ export type ContractRecord = {
   terminated_date: string | null;
   termination_reason: string | null;
   renews_contract_id: number | null;
+  /** Every period in this contract's renewal chain, oldest first. Empty when
+   *  it was never renewed and renews nothing; null on list rows. Contract
+   *  periods only — attached files are document history, in `documents`. */
+  renewal_history?: RenewalVersion[] | null;
+  /** The Renew area (server rule: expired, or active within the renewal
+   *  window, and not already renewed). `existing` and `opens_on` are sent to
+   *  the carrier only. */
+  renewal?: {
+    allowed: boolean;
+    reason: "already_renewed" | "too_early" | "not_renewable" | null;
+    /** Active, not yet in the window: the day Renew appears. */
+    opens_on: string | null;
+    window_days: number;
+    /** The renewal already made — linked instead of a second Renew. */
+    existing: { id: number; name: string; lifecycle: Lifecycle } | null;
+  } | null;
   submitted_at: string | null;
   approved_at: string | null;
   created_at: string | null;
@@ -211,6 +237,12 @@ export type ContractRecord = {
   /** A renewal of an uploaded contract with no signed copy attached yet — it
    *  takes the uploaded road (attach, then accept), never review or signing. */
   awaiting_signed_copy?: boolean;
+  /** A renewal whose signed PDF is attached but not read yet — no clauses. */
+  awaiting_read?: boolean;
+  /** The contract has clauses (read from its PDF, copied, or written here). */
+  has_clauses?: boolean | null;
+  /** Renewals: the programme has a live Bordereau Setup. */
+  has_live_setup?: boolean | null;
   /** Each section BOTH ways: `body` carries the tokens the editor turns into
    *  chips, `rendered` is the same sentence with today's values in it. Read
    *  `rendered`; edit `body`. Resolving a token is the server's job — it is
@@ -792,7 +824,33 @@ export const renewContract = (id: number, body: {
   premium_cap_amount?: number | null; notice_period_days?: number | null;
   year_of_account?: string | null; schedule_key?: string | null;
   class_of_business?: string | null;
+  /** Uploaded contracts: keep the previous contract's wording, clauses,
+   *  terms and checks instead of a new signed PDF. */
+  same_wording?: boolean;
 }) => api.post<ContractRecord>(`/contracts/${id}/renew`, body).then(r => r.data);
+
+export type RenewalRuleChanges = {
+  previous_contract_id: number | null;
+  previous_count: number; renewal_count: number; unchanged: number;
+  added: { rule_id: number; rule_name: string; check: string | null; column: unknown }[];
+  removed: { rule_name: string; check: string | null; column: unknown }[];
+  changed: { rule_id: number; rule_name: string; previous_name: string;
+             settings: string[]; previous_status: string; status: string }[];
+  uncertain: { check: string | null; column: unknown; previous: string[]; renewal: string[] }[];
+  dates_to_review: { rule_id: number; rule_name: string; dates: string[] }[];
+  setup?: { pipeline_id: number; name: string | null; output_template_id: number };
+  kept_disabled?: string[];
+  margin_note?: string | null;
+};
+
+/** Preview: the renewal's rules against the previous contract's. */
+export const getRenewalRuleChanges = (id: number) =>
+  api.get<RenewalRuleChanges>(`/contracts/${id}/renewal-rule-changes`).then(r => r.data);
+
+/** "Reflect new contract rules in BDX setup": rules for the live setup's output
+ *  template, written onto this (not yet active) renewal only. */
+export const reflectSetup = (id: number) =>
+  api.post<RenewalRuleChanges>(`/contracts/${id}/reflect-setup`).then(r => r.data);
 
 export type DocumentsPayload = {
   documents: ContractDocument[];
@@ -829,6 +887,11 @@ export const uploadDocument = (
     rules_stale: boolean;
   }>(`/contracts/${id}/documents`, fd).then(r => r.data);
 };
+
+/** Go on without the document(s) the wording defers to ("Continue anyway"). */
+export const continueWithoutReferences = (id: number) =>
+  api.post<ContractRecord>(`/contracts/${id}/continue-without-references`)
+    .then(r => r.data);
 
 /** Retire a document — never delete it. The rules in force were generated from
  *  these, and a deleted one leaves rules nobody can explain. */
@@ -985,7 +1048,11 @@ export const generateRules = (id: number, outputTemplateId?: number | null) => {
     counts: Record<string, number> | null;
     endorsements_applied: string[];
     references_applied: string[];
-  }>(`/contracts/${id}/generate-rules`, fd).then(r => r.data);
+  // An EMPTY multipart body is malformed (no closing boundary) and the server
+  // refuses it with "There was an error parsing the body" — so with no
+  // template to send, send no body at all; the field is optional there.
+  }>(`/contracts/${id}/generate-rules`, outputTemplateId != null ? fd : undefined)
+    .then(r => r.data);
 };
 
 

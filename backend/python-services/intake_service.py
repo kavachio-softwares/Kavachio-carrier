@@ -647,22 +647,28 @@ def identify(session, route: Optional[IntakeRoute], *, filename: str,
                                f"of {prog.name if prog else 'this programme'} "
                                f"({programme_code(prog) if prog else ''}). Check the "
                                f"codes in {where}.")
+    # A contract and its renewal are both live once the renewal is in force:
+    # the renewal for its own period, the old one for late files. When the file
+    # names either (old codes stay in brokers' habits), or neither but they are
+    # the only candidates, the PERIOD decides — below, once it is known.
+    chain = None
     if contract_id is not None:
         if contract_id not in {c.id for c in cons}:
             return found, ("That contract is not one this broker's files on "
                            f"{prog.name if prog else 'this programme'} are written under.")
-        cid = contract_id
+        cid = contract_id                         # stated outright: respected
     elif len(cons) <= 1:
         cid = cons[0].id if cons else None        # none: held by the contract check
     else:
         named = _named_in(text, cons, lambda c: (contract_ref(c), c.name, contract_label(c),
                                                  *_code_forms(contract_code(c))))
-        if len(named) != 1:
+        chain = _renewal_chain(session, cons, named if named else cons)
+        if len(named) != 1 and chain is None:
             return found, (f"Which contract? {prog.name if prog else 'This programme'} has "
                            f"{len(cons)} contracts for this broker: "
                            f"{_listed(f'{contract_label(c)} ({contract_code(c)})' for c in cons)}. "
                            f"Name one, or its code, in {where}.")
-        cid = named[0].id
+        cid = named[0].id if len(named) == 1 else None
     found["contract_id"] = cid
 
     # ── period ──
@@ -701,7 +707,32 @@ def identify(session, route: Optional[IntakeRoute], *, filename: str,
         return found, (f"{label} is not a reporting period of this programme. "
                        f"Name one of its periods in {where}, e.g. {allowed[0]}.")
     found["period"], found["period_source"] = label, source
+    if chain:
+        import renewal_chain as rc
+        picked, why = rc.route_by_period(chain, cid, label)
+        if why:
+            return found, why
+        found["contract_id"] = picked
     return found, None
+
+
+def _renewal_chain(session, cons: list, pool: list) -> Optional[list]:
+    """The live contracts of ONE renewal chain that `pool` belongs to, when that
+    chain has two or more live members on this programme for this broker —
+    else None (no chain question; the ordinary rules apply)."""
+    import renewal_chain as rc
+    if not rc.routing_enabled() or len(cons) < 2 or not pool:
+        return None
+    from db import Contract
+    rows = (session.query(Contract.id, Contract.name, Contract.renews_contract_id,
+                          Contract.inception_dt, Contract.expiry_dt)
+            .filter(Contract.id.in_([c.id for c in cons])).all())
+    key = rc.chain_of(rows)
+    keys = {key.get(p.id) for p in pool}
+    if len(keys) != 1 or None in keys:
+        return None
+    members = [r for r in rows if key[r.id] in keys]
+    return members if len(members) > 1 else None
 
 
 def _period_name(label: str) -> str:

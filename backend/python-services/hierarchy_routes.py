@@ -238,6 +238,18 @@ def programme_brokers(program_id: int, mga: Optional[str] = None,
                         Contract.broker_party_id == party.id)
                 .scalar() or 0
             )
+            # The "live" figure leaves out a superseded contract: it was
+            # replaced by its renewal and is history, not one of the contracts a
+            # setup chooses between ("2 live contracts" for one renewed
+            # contract). contract_count keeps it — removing the broker still
+            # affects it.
+            superseded = (
+                s.query(func.count(Contract.id))
+                .filter(Contract.program_id == program_id,
+                        Contract.broker_party_id == party.id,
+                        Contract.lifecycle == "superseded")
+                .scalar() or 0
+            )
             # `approved` used to be counted apart from `contract_count`, which
             # included contracts still waiting on the carrier's decision. There
             # is no such wait any more — a contract exists or it does not — so
@@ -248,7 +260,7 @@ def programme_brokers(program_id: int, mga: Optional[str] = None,
                 "status": link.status,
                 "assigned_at": _iso_utc(link.created_at),
                 "contract_count": contracts,
-                "approved_contract_count": contracts,
+                "approved_contract_count": contracts - superseded,
             })
             out.append(d)
         return out

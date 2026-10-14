@@ -64,7 +64,10 @@ export function useBrokerContractScope(programId: number | "") {
     setContractsLoading(true);
     getScopedContracts(Number(programId),
                        brokerPartyId === "" ? null : Number(brokerPartyId))
-      .then(setAllContracts)
+      // A superseded contract was replaced by its renewal, so a setup is never
+      // built on it. A setup already built on it keeps working: files for its
+      // old period still reach it through the renewal chain.
+      .then(rows => setAllContracts(rows.filter(c => c.lifecycle !== "superseded")))
       .catch(() => setAllContracts([]))
       .finally(() => setContractsLoading(false));
   }, [programId, brokerPartyId]);

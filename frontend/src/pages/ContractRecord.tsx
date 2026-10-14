@@ -31,6 +31,18 @@ import { fmtDate, fmtStamp } from "../utils/date";
 import { describeChecks } from "../utils/contractChecks";
 import { TermDurationField, useTermDuration } from "../components/TermDuration";
 import { EXPIRY_FIELD, INCEPTION_FIELD, type TermSpec } from "../utils/term";
+import { documentsEmptyMessage } from "../utils/documentsEmpty";
+import { Dropzone } from "../components/Dropzone";
+import { FileDrop, MultiFileDrop } from "../components/ui/FileDrop";
+
+// The Renew form's two upload boxes share one size, so they always match.
+// How a renewal that already exists is described on its predecessor's page.
+const RENEWAL_LIVE = new Set<string>(["active"]);
+const RENEWAL_IN_PROGRESS = new Set<string>(
+  ["draft", "pending", "in_review", "changes_requested", "agreed", "signed"]);
+const REF_PROMPT_LABEL = "Upload reference document";
+const RENEW_DROP_BOX =
+  "h-[150px] overflow-y-auto flex flex-col items-center justify-center";
 import {
   chipEdits, readTermMove, restoreChips, type TermMove,
 } from "../utils/wordingEdits";
@@ -46,7 +58,8 @@ import {
   acceptContract, sendBackContract, sendForReview, skipReview, submitForApproval,
   submitSigned, terminateContract,
   downloadContractPdf, previewWording,
-  updateContract, uploadDocument, fieldErrors,
+  updateContract, uploadDocument, fieldErrors, continueWithoutReferences,
+  getRenewalRuleChanges, reflectSetup, type RenewalRuleChanges,
   type ContractDocumentKind, type ContractField, type ContractRecord as Rec,
   type AgreedLimits, type AgreedLimitSpec, type ContractTypeSpec, type FieldErrors,
   type Lifecycle, type LimitGroup,
@@ -96,16 +109,15 @@ const DOC_KIND: Record<ContractDocumentKind, { label: string; blurb: string }> =
   // is in the code, not on the screen.
   contract: {
     label: "Wording",
-    blurb: "The contract itself — attaching a new one retires the previous.",
+    blurb: "Adding a new one replaces the old one.",
   },
   reference: {
     label: "Reference",
-    blurb: "A document the wording defers to, and cannot be checked without.",
+    blurb: "A document the contract refers to, like underwriting guidelines.",
   },
   endorsement: {
     label: "Endorsement",
-    blurb: "A change agreed later; it sits alongside the wording rather than "
-         + "replacing it.",
+    blurb: "A change agreed after the contract was made.",
   },
 };
 
@@ -144,7 +156,12 @@ function ContractRecordView() {
   // The raise flow attaches documents AFTER creating the contract, so a
   // document that failed to attach is reported here — where it can be retried —
   // rather than as a failure to create a contract that in fact exists.
-  const handoff = (useLocation().state as { notice?: string } | null)?.notice;
+  const navState = useLocation().state as
+    { notice?: string; acceptError?: string } | null;
+  const handoff = navState?.notice;
+  // A renewal is accepted automatically once created; if that was refused,
+  // the reason arrives here and the page offers to try again.
+  const acceptError = navState?.acceptError;
 
   const [rec, setRec] = useState<Rec | null>(null);
   const [history, setHistory] = useState<ApprovalEvent[]>([]);
@@ -200,6 +217,25 @@ function ContractRecordView() {
   // Asked only when this contract has none (an uploaded one) — the type
   // requires it, so the successor could not be saved without it.
   const [renewClass, setRenewClass] = useState("");
+  // The signed renewal PDF, for an uploaded contract: its renewal IS that
+  // document, so the renewal is not created without it.
+  const [renewFile, setRenewFile] = useState<File | null>(null);
+  // Optional documents the new contract defers to (guidelines etc.), attached
+  // to the renewal as references — as on a fresh contract upload.
+  const [renewRefs, setRenewRefs] = useState<File[]>([]);
+  // After Create renewal reads the new PDF: documents it defers to that were
+  // not attached. Asked once, as a popup — upload them, or continue anyway.
+  const [refPrompt, setRefPrompt] = useState<{ id: number; names: string[] } | null>(null);
+  const [refFiles, setRefFiles] = useState<File[]>([]);
+  const [refBusy, setRefBusy] = useState<"" | "upload" | "skip">("");
+  const [refErr, setRefErr] = useState("");
+  // Uploaded contracts only: is there a new signed contract for the period
+  // ("yes" — upload it, nothing old carries over) or does the renewal keep the
+  // previous contract's wording and checks ("no")? Must be answered.
+  const [renewNewDoc, setRenewNewDoc] = useState<"" | "yes" | "no">("");
+  // A renewal's rules against the previous contract's (preview), and the
+  // result of "Reflect new contract rules in BDX setup".
+  const [ruleChanges, setRuleChanges] = useState<RenewalRuleChanges | null>(null);
   const [termSpec, setTermSpec] = useState<TermSpec | null>(null);
 
   // Editing the terms. The inputs are built from the SERVER's field spec, the
@@ -335,6 +371,27 @@ function ContractRecordView() {
     });
   }
 
+  /** The last step of Create renewal (and of the reference popup): an
+   *  UPLOADED renewal is accepted and made active straight away — the carrier
+   *  already chose to renew, so "Accept it and make it active" is not asked
+   *  again. A contract written in Kavachio still goes to the broker and is
+   *  signed, so it is only opened. */
+  async function finishRenewal(newId: number) {
+    let acceptError = "";
+    if (rec?.is_uploaded && rec.actions.carrier_admin_seat) {
+      try {
+        const f = await getContract(newId);
+        // Unread (the read failed): its page offers "Try again", and the
+        // accept follows that read.
+        if (!f.awaiting_read && f.lifecycle === "draft") await submitForApproval(newId);
+      } catch (e) {
+        acceptError = fieldErrors(e).message;
+      }
+    }
+    setRefPrompt(null); setShowRenew(false);
+    nav(`/contracts/${newId}`, acceptError ? { state: { acceptError } } : undefined);
+  }
+
   /** Terms → checks. See bindChecks: the server resolves which bordereau
    *  template this contract reports into, so there is nothing to choose. */
   async function doGenerate() {
@@ -349,6 +406,19 @@ function ContractRecordView() {
           ? `${r.references_applied.length} reference(s) resolved` : null,
       ].filter(Boolean);
       setNote(`Re-read from the active documents — ${bits.join(", ") || "done"}.`);
+      // A renewal whose read failed at creation: now that it is read, finish
+      // it the way Create renewal would have — ask for missing references, or
+      // accept it.
+      if (rec?.renews_contract_id && rec.is_uploaded && rec.lifecycle === "draft"
+          && rec.actions.carrier_admin_seat) {
+        const fresh = await getContract(id);
+        if (fresh.missing_references.length > 0) {
+          setRefFiles([]); setRefErr("");
+          setRefPrompt({ id, names: fresh.missing_references });
+        } else {
+          await submitForApproval(id);
+        }
+      }
     });
   }
 
@@ -403,6 +473,11 @@ function ContractRecordView() {
   const docs = rec.documents ?? [];
   const active = docs.filter(d => d.is_active);
   const retired = docs.filter(d => !d.is_active);
+  // While renewing with no files to list, the Documents card is hidden; if
+  // there is no history either, the side column is empty and the main column
+  // takes the full width.
+  const hideDocs = showRenew && docs.length === 0;
+  const sideEmpty = hideDocs && history.length === 0;
 
   // Was this contract WRITTEN here, or does it come from a document somebody
   // else drafted? The answer changes what may be attached to it.
@@ -808,6 +883,95 @@ function ContractRecordView() {
 
   return (
     <div className="proto">
+      {refPrompt && (
+        // Not closable by clicking outside: the renewal already exists, and
+        // one of the two choices has to be made for it.
+        <div className="proto-modal-overlay">
+          <div className="proto-modal" onClick={e => e.stopPropagation()}>
+            <div className="m-b" style={{ textAlign: "center", paddingTop: 24 }}>
+              <div style={{
+                width: 46, height: 46, borderRadius: "50%", margin: "0 auto 12px",
+                display: "grid", placeItems: "center",
+                background: "var(--p-warn-soft)", color: "var(--p-warn)",
+              }}>
+                <FileText size={22} />
+              </div>
+              <h3 style={{ margin: "0 0 6px", fontSize: 17 }}>
+                {refPrompt.names.length === 1
+                  ? "Reference document missing"
+                  : `${refPrompt.names.length} reference documents missing`}
+              </h3>
+              <p style={{ margin: "0 0 14px", color: "var(--p-muted)", fontSize: 13 }}>
+                The new contract refers to {refPrompt.names.length === 1 ? "it" : "them"}.
+                Upload {refPrompt.names.length === 1 ? "it" : "them"} so those clauses get checked.
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6,
+                            marginBottom: 14 }}>
+                {refPrompt.names.map(n => (
+                  <div key={n} style={{
+                    display: "flex", alignItems: "center", gap: 8, textAlign: "left",
+                    padding: "8px 12px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                    background: "var(--p-warn-soft)", color: "var(--p-ink)",
+                  }}>
+                    <AlertTriangle size={14} style={{ flex: "none", color: "var(--p-warn)" }} />
+                    {n}
+                  </div>
+                ))}
+              </div>
+              <MultiFileDrop
+                box="h-[110px] overflow-y-auto flex flex-col items-center justify-center"
+                label={REF_PROMPT_LABEL} tone="required"
+                icon={<Paperclip size={15} />}
+                accept=".pdf,.docx,.doc,.txt,.xlsx,.xls,.csv"
+                files={refFiles}
+                onChange={setRefFiles}
+                hint="PDF, Word, Excel or text"
+                disabled={!!refBusy} />
+              {refErr && <div className="note bad" style={{ marginTop: 10, textAlign: "left" }}>{refErr}</div>}
+              <p style={{ margin: "12px 0 0", fontSize: 11.5, color: "var(--p-muted)" }}>
+                Continue anyway skips {refPrompt.names.length === 1 ? "it" : "them"}: the renewal can still be accepted, but those clauses won't be checked.
+              </p>
+            </div>
+            <div className="m-f">
+              <button className="btn" type="button" disabled={!!refBusy}
+                onClick={async () => {
+                  setRefBusy("skip"); setRefErr("");
+                  try {
+                    await continueWithoutReferences(refPrompt.id);
+                    await finishRenewal(refPrompt.id);
+                  } catch (e) {
+                    setRefErr(String((e as any)?.response?.data?.detail?.message
+                      ?? (e as any)?.response?.data?.detail ?? "Could not continue."));
+                  } finally { setRefBusy(""); }
+                }}>
+                {refBusy === "skip" ? "Continuing…" : "Continue anyway"}
+              </button>
+              <button className="btn pri" type="button"
+                disabled={!!refBusy || refFiles.length === 0}
+                onClick={async () => {
+                  setRefBusy("upload"); setRefErr("");
+                  try {
+                    const one = refFiles.length === 1 && refPrompt.names.length === 1;
+                    for (const f of refFiles) {
+                      await uploadDocument(refPrompt.id, f, {
+                        kind: "reference",
+                        satisfiesReference: one ? refPrompt.names[0] : null });
+                    }
+                    // Read again, now with the references, so their clauses
+                    // become rules.
+                    try { await generateRules(refPrompt.id, null); } catch { /* "Try again" on the page */ }
+                    await finishRenewal(refPrompt.id);
+                  } catch (e) {
+                    setRefErr(String((e as any)?.response?.data?.detail?.message
+                      ?? (e as any)?.response?.data?.detail ?? "Upload failed."));
+                  } finally { setRefBusy(""); }
+                }}>
+                {refBusy === "upload" ? "Uploading…" : "Upload and continue"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="view full">
         <div className="page-head">
           <div className="t">
@@ -851,6 +1015,22 @@ function ContractRecordView() {
         {note && (
           <div className="note ok" style={{ marginBottom: 14, maxWidth: 700 }}>{note}</div>
         )}
+        {acceptError && rec.lifecycle === "draft" && !note && (
+          <div className="note warn" style={{ marginBottom: 14, maxWidth: 700 }}>
+            <b>The renewal was created but could not be made active.</b>{" "}
+            {acceptError}{" "}
+            {a.submit_for_approval && (
+              <button className="btn pri sm" type="button" disabled={!!busy}
+                style={{ marginLeft: 6 }}
+                onClick={() => run("approval", async () => {
+                  await submitForApproval(id);
+                  nav(`/contracts/${id}`, { replace: true });
+                })}>
+                {busy === "approval" ? "Trying…" : "Try again"}
+              </button>
+            )}
+          </div>
+        )}
         {handoff && !note && (
           <div className="note warn" style={{ marginBottom: 14, maxWidth: 700 }}>{handoff}</div>
         )}
@@ -875,17 +1055,45 @@ function ContractRecordView() {
         {/* The gate. Named early because while it stands, most of the page's
             actions are refused and the reason is not otherwise visible. */}
         {rec.missing_references.length > 0 && (
-          <div className="note warn" style={{ marginBottom: 14 }}>
-            <b>
-              <AlertTriangle size={13} style={{ verticalAlign: "-2px" }} />{" "}
-              This contract defers to {rec.missing_references.length} document
-              {rec.missing_references.length === 1 ? "" : "s"} nobody has supplied.
-            </b>{" "}
-            {rec.missing_references.join(", ")} — the clauses pointing at
-            {rec.missing_references.length === 1 ? " it" : " them"} cannot become
-            rules until {rec.missing_references.length === 1 ? "it is" : "they are"}{" "}
-            attached below. Until then the contract cannot be submitted, put in
-            force, or re-read.
+          <div style={{
+            display: "flex", gap: 14, alignItems: "flex-start", marginBottom: 16,
+            padding: "14px 16px", borderRadius: 12,
+            background: "var(--p-warn-soft)",
+            border: "1px solid color-mix(in srgb, var(--p-warn) 30%, transparent)",
+          }}>
+            <div style={{
+              flex: "none", width: 34, height: 34, borderRadius: "50%",
+              display: "grid", placeItems: "center",
+              background: "color-mix(in srgb, var(--p-warn) 18%, transparent)",
+              color: "var(--p-warn)",
+            }}>
+              <AlertTriangle size={17} />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600, fontSize: 14, color: "var(--p-ink)" }}>
+                {rec.missing_references.length === 1
+                  ? "Reference document needed"
+                  : `${rec.missing_references.length} reference documents needed`}
+              </div>
+              <div style={{ fontSize: 12.5, color: "var(--p-muted)",
+                            marginTop: 3, lineHeight: 1.45 }}>
+                {rec.lifecycle === "draft"
+                  ? `The contract refers to ${rec.missing_references.length === 1 ? "this document" : "these documents"}. Upload ${rec.missing_references.length === 1 ? "it" : "them"} before accepting the contract.`
+                  : `The contract refers to ${rec.missing_references.length === 1 ? "this document" : "these documents"}, so the clauses that depend on ${rec.missing_references.length === 1 ? "it" : "them"} aren't being checked.`}
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                {rec.missing_references.map(n => (
+                  <span key={n} style={{
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                    padding: "5px 10px", borderRadius: 8, fontSize: 12.5,
+                    background: "var(--p-surface)", color: "var(--p-ink)",
+                    border: "1px solid var(--p-border)",
+                  }}>
+                    <FileText size={13} style={{ color: "var(--p-warn)" }} /> {n}
+                  </span>
+                ))}
+              </div>
+            </div>
           </div>
         )}
 
@@ -910,7 +1118,8 @@ function ContractRecordView() {
             is, what was agreed, what it says, and the words it says it in.
             RIGHT is the paper trail about it — the files attached and how it
             got here — and stays put whichever tab is open. */}
-        <div className="rec-split">
+        <div className="rec-split"
+             style={sideEmpty ? { gridTemplateColumns: "minmax(0,1fr)" } : undefined}>
           <div className="rec-main">
 
         <div className="tabs">
@@ -1247,6 +1456,24 @@ function ContractRecordView() {
               </div>
             )}
 
+            {rec.awaiting_read && !isBrokerSeat() && (
+              <div className="note" style={{ marginTop: 14 }}>
+                {/* The PDF is read automatically on Create renewal; this only
+                    shows when that read did not finish. */}
+                <b>The new contract has not been read yet.</b>{" "}
+                Reading it when the renewal was created did not finish, so this
+                renewal has no clauses and nothing to check files against yet.{" "}
+                {a.generate_rules && (
+                  <button
+                    className="btn pri sm" type="button" disabled={!!busy}
+                    onClick={doGenerate} style={{ marginLeft: 6 }}
+                  >
+                    {busy === "rules" ? "Reading…" : "Try again"}
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Said once, above the buttons, because no state name on this
                 page says it: the contract is inside the carrier and the broker
                 has not been shown any of it. */}
@@ -1322,7 +1549,9 @@ function ContractRecordView() {
                   signed. Sending it out stays possible below, for the contract
                   that genuinely does need the broker to look — it is just no
                   longer the road the screen points at. */}
-              {a.submit_for_approval && (
+              {/* Not on an uploaded renewal: Create renewal accepts it itself
+                  (finishRenewal); a refusal shows its own Try again above. */}
+              {a.submit_for_approval && !(rec.renews_contract_id && isUploaded) && (
                 <button
                   className="btn pri" type="button" disabled={!!busy}
                   onClick={() => run("approval", () => submitForApproval(id))}
@@ -1433,6 +1662,27 @@ function ContractRecordView() {
                         onClick={() => setShowRenew(v => !v)}>
                   <ArrowRight size={13} /> Renew
                 </button>
+              )}
+              {/* Instead of Renew, never beside it: the renewal already made
+                  (a second one would be refused), or — for an active contract
+                  not yet in its renewal window — the day Renew appears. */}
+              {!a.renew && !isBrokerSeat() && rec.renewal?.existing && (
+                <Link className="btn" to={`/contracts/${rec.renewal.existing.id}`}>
+                  <ArrowRight size={13} />
+                  {RENEWAL_LIVE.has(rec.renewal.existing.lifecycle)
+                    ? "Renewed — open the active renewal"
+                    : RENEWAL_IN_PROGRESS.has(rec.renewal.existing.lifecycle)
+                      ? "Renewal in progress — open it"
+                      : "Renewed — open the renewal"}
+                </Link>
+              )}
+              {!a.renew && !isBrokerSeat() && !rec.renewal?.existing
+                && rec.renewal?.opens_on && (
+                <span style={{ alignSelf: "center", fontSize: 12.5,
+                               color: "var(--p-muted)" }}>
+                  Renewal opens on <b>{fmtDate(rec.renewal.opens_on)}</b>
+                  {" "}({rec.renewal.window_days} days before expiry)
+                </span>
               )}
               {a.terminate && (
                 <button className="btn danger" type="button"
@@ -1753,11 +2003,14 @@ function ContractRecordView() {
               <div className="note" style={{ marginTop: 14 }}>
                 <b>Renew into a successor</b>
                 <p style={{ margin: "6px 0 0" }}>
-                  This creates a NEW contract for the next term, pointing back at
-                  this one. This contract's own term is left exactly as it is —
-                  everything checked against it has to keep meaning what it
-                  meant. The successor starts with no documents: last year's
-                  wording is not this year's.
+                  {isUploaded
+                    ? "This creates the contract for the next term from the new "
+                      + "signed PDF, pointing back at this one. This contract stays "
+                      + "as it is until the renewal is accepted and active."
+                    : "This creates a draft for the next term with this contract's "
+                      + "terms and wording copied in. Review and edit it, then send "
+                      + "it to the broker. This contract stays as it is until the "
+                      + "renewal is signed and active."}
                 </p>
                 <div className="grid g-3" style={{ marginTop: 12 }}>
                   <div className="field" style={{ marginBottom: 0 }}>
@@ -1791,28 +2044,306 @@ function ContractRecordView() {
                     </div>
                   </div>
                 )}
+                {isUploaded && (
+                  <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
+                    <label>Do you have a new signed contract for this period?</label>
+                    <div className="seg">
+                      <button type="button" disabled={!!busy}
+                              className={renewNewDoc === "yes" ? "on" : ""}
+                              onClick={() => setRenewNewDoc("yes")}>
+                        Yes — upload the new contract
+                      </button>
+                      <button type="button" disabled={!!busy}
+                              className={renewNewDoc === "no" ? "on" : ""}
+                              onClick={() => { setRenewNewDoc("no"); setRenewFile(null); }}>
+                        No — keep the previous contract
+                      </button>
+                    </div>
+                    <div className="hint">
+                      {renewNewDoc === "yes"
+                        ? "The renewal gets its clauses and checks only from the "
+                          + "new PDF. Nothing from this contract carries over."
+                        : renewNewDoc === "no"
+                        ? "The renewal gets its own copy of this contract's "
+                          + "clauses, terms and checks; only the period changes."
+                        : "Choose one to continue."}
+                    </div>
+                  </div>
+                )}
+                {isUploaded && renewNewDoc === "no" && (
+                  <div className="note warn" style={{ marginTop: 12 }}>
+                    <b>No new signed document.</b> The renewal reuses last
+                    year's signed PDF, which shows last year's dates. Accepting
+                    it records the same terms for the new period without a
+                    newly signed contract.
+                  </div>
+                )}
+                {isUploaded && renewNewDoc === "yes" && (
+                  // Two identical boxes, side by side: same component, same
+                  // width (equal columns) and the same fixed height, so they
+                  // line up whether empty or holding files.
+                  <div style={{ display: "grid", marginTop: 12, gap: 16,
+                                gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+                    <FileDrop
+                      box={RENEW_DROP_BOX}
+                      label="Signed renewal contract" tone="required" required
+                      icon={<FileText size={15} />}
+                      accept=".pdf,application/pdf"
+                      file={renewFile}
+                      hint="PDF, signed by both sides"
+                      disabled={!!busy}
+                      onPick={f => {
+                        // A drop skips the picker's PDF filter, so it is
+                        // checked here.
+                        if (f && !/\.pdf$/i.test(f.name)
+                            && f.type !== "application/pdf") {
+                          setErr("The signed renewal contract must be a PDF.");
+                          return;
+                        }
+                        setErr("");
+                        setRenewFile(f);
+                      }} />
+                    <MultiFileDrop
+                      box={RENEW_DROP_BOX}
+                      label="Reference Document(s)" tone="optional"
+                      icon={<FileText size={15} />}
+                      accept=".pdf,.docx,.doc,.txt,.xlsx,.xls,.csv"
+                      files={renewRefs}
+                      onChange={setRenewRefs}
+                      hint="Guidelines the new contract refers to"
+                      disabled={!!busy} />
+                  </div>
+                )}
                 <div className="rowacts">
                   <button
                     className="btn pri" type="button"
                     disabled={!renewFrom || !renewTo || !!busy
-                              || (!rec.class_of_business && !renewClass.trim())}
+                              || (!rec.class_of_business && !renewClass.trim())
+                              || (isUploaded && !renewNewDoc)
+                              || (isUploaded && renewNewDoc === "yes" && !renewFile)}
                     onClick={() => run("renew", async () => {
                       const created = await renewContract(id, {
                         inception_dt: renewFrom, expiry_dt: renewTo,
-                        ...(rec.class_of_business ? {} : { class_of_business: renewClass.trim() }) });
-                      nav(`/contracts/${created.id}`);
+                        ...(rec.class_of_business ? {} : { class_of_business: renewClass.trim() }),
+                        ...(isUploaded && renewNewDoc === "no" ? { same_wording: true } : {}) });
+                      setRenewNewDoc("");
+                      if (isUploaded && renewNewDoc === "yes" && renewFile) {
+                        // The renewal exists either way; if the attach fails,
+                        // its page asks for the signed copy again.
+                        try {
+                          await uploadDocument(created.id, renewFile, {
+                            kind: "contract", isExecutedCopy: true });
+                        } catch { /* see above */ }
+                        // References too; one that fails can be attached on
+                        // the renewal's own Documents panel.
+                        for (const ref of renewRefs) {
+                          try {
+                            await uploadDocument(created.id, ref, { kind: "reference" });
+                          } catch { /* see above */ }
+                        }
+                        // Read the new contract now, so the renewal arrives with
+                        // its clauses — no separate step. A read that fails
+                        // leaves a "Try again" on the renewal's page.
+                        try {
+                          await generateRules(created.id, null);
+                        } catch { /* see above */ }
+                        setRenewFile(null);
+                        setRenewRefs([]);
+                      }
+                      // The read (or the copy, on "No") is what finds the
+                      // documents the contract refers to; any not attached are
+                      // asked for in a popup. Otherwise the renewal is
+                      // accepted and made active straight away.
+                      try {
+                        const fresh = await getContract(created.id);
+                        if (fresh.missing_references.length > 0) {
+                          setRefFiles([]); setRefErr("");
+                          setRefPrompt({ id: created.id, names: fresh.missing_references });
+                          return;
+                        }
+                      } catch { /* the accept below reports any problem */ }
+                      await finishRenewal(created.id);
                     })}
                   >
-                    Create successor
+                    {busy === "renew"
+                      ? (renewNewDoc === "yes" ? "Creating and reading the contract…" : "Creating…")
+                      : "Create renewal"}
                   </button>
                   <button className="btn" type="button"
-                          onClick={() => setShowRenew(false)}>Cancel</button>
+                          onClick={() => {
+                            setShowRenew(false); setRenewNewDoc(""); setRenewFile(null);
+                            setRenewRefs([]);
+                          }}>Cancel</button>
                 </div>
               </div>
             )}
           </div>
         </div>
 
+        {/* ── a renewal's rules ── what changed against the previous contract,
+            and (for a renewal read from a new PDF) mapping its rules onto the
+            programme's existing Bordereau Setup. Nothing here runs on a
+            bordereau until the renewal is accepted and active. */}
+        {rec.renews_contract_id && !isBrokerSeat() && (
+          <div className="card" style={{ marginBottom: 18 }}>
+            <div className="card-h">
+              <h3>Rules for this renewal</h3>
+              <InfoTip text="Compared with the previous contract. These rules check bordereaux only once the renewal is accepted and active." />
+            </div>
+            <div style={{ padding: "16px 20px" }}>
+              <div className="rowacts" style={{ marginTop: 0 }}>
+                <button className="btn" type="button" disabled={!!busy}
+                  onClick={() => run("rule-changes", async () =>
+                    setRuleChanges(await getRenewalRuleChanges(id)))}>
+                  {busy === "rule-changes" ? "Comparing…" : "Show rule changes"}
+                </button>
+                {isUploaded && rec.has_clauses && !rec.awaiting_read && !rec.awaiting_signed_copy
+                  && rec.has_live_setup === false && rec.programme && rec.counterparty
+                  && !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle) && (
+                  <Link className="btn pri"
+                    to={`/direct/setup?program_id=${rec.programme.id}`
+                      + `&broker_party_id=${rec.counterparty.id}`}>
+                    Next: go to Bordereau Setup <ArrowRight size={13} />
+                  </Link>
+                )}
+                {isUploaded && rec.has_clauses && !rec.awaiting_read && !rec.awaiting_signed_copy
+                  && rec.has_live_setup !== false
+                  && !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle) && (
+                  <button className="btn pri" type="button" disabled={!!busy}
+                    onClick={() => run("reflect", async () =>
+                      setRuleChanges(await reflectSetup(id)))}>
+                    {busy === "reflect" ? "Working…" : "Reflect new contract rules in BDX setup"}
+                  </button>
+                )}
+              </div>
+              {isUploaded && !rec.has_clauses && !rec.awaiting_read
+                && !["active", "expired", "terminated", "superseded"].includes(rec.lifecycle) && (
+                <div className="hint" style={{ marginTop: 10 }}>
+                  No clauses yet, so there are no rules to reflect. Attach the
+                  signed PDF under Documents (Wording, “This is the signed copy”),
+                  then read it.
+                </div>
+              )}
+              {ruleChanges && (
+                <div style={{ marginTop: 12 }}>
+                  {ruleChanges.setup && (
+                    <div className="hint">
+                      Written for the live setup{ruleChanges.setup.name ? ` “${ruleChanges.setup.name}”` : ""};
+                      its templates and column mapping were not changed.
+                    </div>
+                  )}
+                  <p style={{ margin: "6px 0" }}>
+                    Previous contract: <b>{ruleChanges.previous_count}</b> rules ·
+                    this renewal: <b>{ruleChanges.renewal_count}</b> ·
+                    unchanged <b>{ruleChanges.unchanged}</b> · new <b>{ruleChanges.added.length}</b> ·
+                    no longer present <b>{ruleChanges.removed.length}</b> ·
+                    changed <b>{ruleChanges.changed.length}</b>
+                  </p>
+                  {ruleChanges.margin_note && <div className="note">{ruleChanges.margin_note}</div>}
+                  {(ruleChanges.kept_disabled?.length ?? 0) > 0 && (
+                    <div className="hint">Kept switched off as on the previous contract:{" "}
+                      {ruleChanges.kept_disabled!.join(", ")}</div>
+                  )}
+                  {ruleChanges.dates_to_review.length > 0 && (
+                    <div className="note warn" style={{ marginTop: 10 }}>
+                      <b>Check these rules.</b> They hold dates that are not the
+                      contract's start or end, so they were left as written and
+                      are still active:
+                      <ul style={{ margin: "6px 0 0" }}>
+                        {ruleChanges.dates_to_review.map(r => (
+                          <li key={r.rule_id}>{r.rule_name} — {r.dates.join(", ")}</li>))}
+                      </ul>
+                    </div>
+                  )}
+                  {ruleChanges.uncertain.length > 0 && (
+                    <div className="note warn" style={{ marginTop: 10 }}>
+                      <b>Compare by hand.</b> More than one rule checks the same
+                      column, so they could not be paired:
+                      <ul style={{ margin: "6px 0 0" }}>
+                        {ruleChanges.uncertain.map((u, i) => (
+                          <li key={i}>{String(u.column || u.check || "—")}: previous{" "}
+                            {u.previous.join(", ") || "none"} · renewal {u.renewal.join(", ") || "none"}</li>))}
+                      </ul>
+                    </div>
+                  )}
+                  {ruleChanges.changed.length > 0 && (
+                    <details style={{ marginTop: 10 }}>
+                      <summary>Changed ({ruleChanges.changed.length})</summary>
+                      <ul>{ruleChanges.changed.map(c => (
+                        <li key={c.rule_id}>{c.rule_name}{c.settings.length ? ` — ${c.settings.join(", ")}` : ""}
+                          {c.previous_status !== c.status ? ` (was ${c.previous_status}, now ${c.status})` : ""}</li>))}</ul>
+                    </details>
+                  )}
+                  {ruleChanges.added.length > 0 && (
+                    <details style={{ marginTop: 6 }}>
+                      <summary>New ({ruleChanges.added.length})</summary>
+                      <ul>{ruleChanges.added.map(a => <li key={a.rule_id}>{a.rule_name}</li>)}</ul>
+                    </details>
+                  )}
+                  {ruleChanges.removed.length > 0 && (
+                    <details style={{ marginTop: 6 }}>
+                      <summary>No longer present ({ruleChanges.removed.length})</summary>
+                      <ul>{ruleChanges.removed.map((r, i) => <li key={i}>{r.rule_name}</li>)}</ul>
+                    </details>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── renewal history ── Contract PERIODS linked by renewal, oldest
+            first, the same from every contract in the chain. Kept apart from
+            the Documents panel, which is the history of files on THIS one. */}
+        {(rec.renewal_history?.length ?? 0) > 1 && (() => {
+          const hist = rec.renewal_history ?? [];
+          const at = hist.findIndex(h => h.is_current);
+          const prev = at > 0 ? hist[at - 1] : null;
+          const next = at >= 0 && at < hist.length - 1 ? hist[at + 1] : null;
+          return (
+            <div className="card" style={{ marginBottom: 18 }}>
+              <div className="card-h">
+                <h3>Renewal history</h3>
+                <InfoTip text="Every contract period linked to this one by renewal, oldest first. Files attached to a contract are listed under Documents." />
+              </div>
+              <div style={{ padding: "16px 20px" }}>
+                {(prev || next) && (
+                  <div className="hint" style={{ marginBottom: 10 }}>
+                    {prev && (
+                      <Link to={`/contracts/${prev.id}`} className="linkish">
+                        ← Previous contract (Version {prev.version})
+                      </Link>
+                    )}
+                    {prev && next && " · "}
+                    {next && (
+                      <Link to={`/contracts/${next.id}`} className="linkish">
+                        Next contract (Version {next.version}) →
+                      </Link>
+                    )}
+                  </div>
+                )}
+                {hist.map(h => (
+                  <div key={h.id} style={{ display: "flex", flexWrap: "wrap",
+                                           alignItems: "center", gap: 8,
+                                           padding: "6px 0" }}>
+                    <b>Version {h.version}</b>
+                    <span className="sub">
+                      {h.inception_dt ? fmtDate(h.inception_dt) : "—"}
+                      {" – "}
+                      {h.expiry_dt ? fmtDate(h.expiry_dt) : "—"}
+                    </span>
+                    <span className={`badge ${STATE[h.lifecycle]?.cls ?? "b-mut"}`}>
+                      {STATE[h.lifecycle]?.label ?? h.lifecycle}
+                    </span>
+                    {h.is_current
+                      ? <span className="sub">(this contract)</span>
+                      : <Link to={`/contracts/${h.id}`} className="linkish">{h.name}</Link>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
         </>)}
 
         {curTab === "contract" && (<>
@@ -2674,8 +3205,12 @@ function ContractRecordView() {
 
           </div>
 
+          {!sideEmpty && (
           <div className="rec-side">
-          {/* ── documents ── */}
+          {/* ── documents ── Hidden while renewing when there is nothing to
+              list: uploading is paused then, so the card would hold only a
+              message. With files on it, the list stays visible. */}
+          {!hideDocs && (
           <div className="card" style={{ marginBottom: 18 }}>
             <div className="card-h">
               <Paperclip size={16} className="ci" />
@@ -2684,12 +3219,12 @@ function ContractRecordView() {
             </div>
             <div style={{ padding: "16px 20px" }}>
               {active.length === 0 ? (
-                <div className="empty" style={{ padding: "12px 10px" }}>
-                  {authored
-                    ? "Nothing attached, and nothing needs to be — this "
-                      + "contract's wording is written above."
-                    : "Nothing attached yet — without a wording this contract "
-                      + "has no clauses."}
+                <div className="empty" style={{ padding: "12px 10px", textAlign: "left" }}>
+                  <b>{documentsEmptyMessage({ authored, filename: rec.filename }).title}</b>
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18, listStyle: "disc outside" }}>
+                    {documentsEmptyMessage({ authored, filename: rec.filename }).bullets
+                      .map(b => <li key={b} style={{ display: "list-item", listStyle: "disc outside" }}>{b}</li>)}
+                  </ul>
                 </div>
               ) : (
                 /* A grid of tiles rather than wide rows: in a side column a
@@ -2737,7 +3272,7 @@ function ContractRecordView() {
                           </button>
                         </>
                       )}
-                      {a.upload_documents && (
+                      {a.upload_documents && !isBrokerSeat() && (
                         <button
                           className="btn sm" type="button" disabled={!!busy}
                           title="Retire it — never deleted, because the active rules were read from it"
@@ -2772,7 +3307,16 @@ function ContractRecordView() {
                 </details>
               )}
 
-              {a.upload_documents && (
+              {a.upload_documents && showRenew && (
+                <>
+                  <div className="divider" />
+                  <div className="hint">
+                    Uploading is paused while you renew. The signed renewal PDF
+                    goes in the Renew form.
+                  </div>
+                </>
+              )}
+              {a.upload_documents && !showRenew && (
                 <>
                   <div className="divider" />
                   <div className="grid gap-12" style={{ marginBottom: 12 }}>
@@ -2845,6 +3389,7 @@ function ContractRecordView() {
               )}
             </div>
           </div>
+          )}
 
           {/* ── how it got here ── */}
           {history.length > 0 && (
@@ -2887,6 +3432,7 @@ function ContractRecordView() {
             </div>
           )}
           </div>
+          )}
         </div>
       </div>
     </div>

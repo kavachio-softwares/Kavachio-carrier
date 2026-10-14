@@ -875,6 +875,10 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
 
 class ReviewDecision(BaseModel):
     note: Optional[str] = None
+    # Release only: the contract to run it under. Asked when a file was held
+    # because its contract was renewed and the period did not say which term it
+    # belongs to — without it, the run would fall back to the setup's pin.
+    contract_id: Optional[int] = None
 
 
 def _arrival_for_review(s, arrival_id: int, principal: Principal) -> FileArrival:
@@ -919,6 +923,15 @@ def release_arrival(arrival_id: int, body: ReviewDecision = ReviewDecision(),
     """"This is fine, load it." Held files only — see intake_review.release."""
     with SessionLocal() as s:
         arrival = _arrival_for_review(s, arrival_id, principal)
+        if body.contract_id is not None:
+            import intake_service as svc
+            allowed = {c.id for c in svc.live_contracts(
+                s, arrival.tenant_id, arrival.program_id,
+                arrival.matched_broker_party_id)}
+            if body.contract_id not in allowed:
+                raise HTTPException(400, "That contract is not one this file's "
+                                         "programme and broker can be run under.")
+            arrival.contract_id = body.contract_id
         try:
             review.release(s, arrival, user_id=principal.user_id, note=body.note)
         except review.ReviewError as exc:
@@ -930,6 +943,28 @@ def release_arrival(arrival_id: int, body: ReviewDecision = ReviewDecision(),
         return {"arrival_id": arrival.id, "outcome": arrival.outcome,
                 "resolution": arrival.resolution,
                 "resolved_at": _iso_utc(arrival.resolved_at)}
+
+
+@router.get("/arrivals/{arrival_id}/contract-choices")
+def arrival_contract_choices(arrival_id: int,
+                             principal: Principal = Depends(require_role("carrier_admin"))):
+    """The contracts a held file can be released under: the live contracts of
+    its programme for its broker, with code and term, newest first."""
+    import intake_service as svc
+    from db import Contract
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        ids = [c.id for c in svc.live_contracts(
+            s, arrival.tenant_id, arrival.program_id, arrival.matched_broker_party_id)]
+        rows = (s.query(Contract).filter(Contract.id.in_(ids))
+                .order_by(Contract.id.desc()).all()) if ids else []
+        return {"choices": [{
+            "id": c.id, "name": c.name or c.filename or f"Contract {c.id}",
+            "code": svc.contract_code(c),
+            "inception_dt": str(c.inception_dt) if c.inception_dt else None,
+            "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None,
+            "renews_contract_id": c.renews_contract_id,
+        } for c in rows], "current": arrival.contract_id}
 
 
 @router.post("/arrivals/{arrival_id}/discard")

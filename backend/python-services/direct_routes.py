@@ -2175,6 +2175,15 @@ async def _render_landing(
         output_format = _norm_fmt(getattr(tpl, "output_format", None))
         tenant_id = rec.tenant_id
         eff_contract_id = contract_id or fallback_contract_id
+        # A file named under a renewal (or under the contract it renewed) is
+        # checked on THAT contract's rules on every sheet, even where the setup
+        # pinned another term of the same chain. renewal_chain.follow_pins.
+        if contract_id and sheet_contracts:
+            import renewal_chain as _rc
+            if _rc.routing_enabled():
+                sheet_contracts = _rc.follow_pins(
+                    sheet_contracts, int(contract_id),
+                    _rc.chain_ids(s, int(contract_id)))
 
         # ── Feature 7 §7.2 — Prior Period Files ──────────────────────────
         # The pin above answers "which contract governs this setup". For a late

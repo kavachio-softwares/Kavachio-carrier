@@ -435,6 +435,8 @@ export type ScopedContract = {
   broker_party_id: number | null; broker_name: string | null;
   inception_dt: string | null; expiry_dt: string | null;
   output_template_id: number | null;
+  /** Where the contract is: draft / active / expired / superseded / … */
+  lifecycle?: string;
 };
 
 // No `approved_only` any more: the endpoint dropped that parameter when the

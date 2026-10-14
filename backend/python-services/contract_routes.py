@@ -33,6 +33,7 @@ WHO MAY DO WHAT
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -197,12 +198,19 @@ def _missing_references(c: Contract, docs: list[ContractDocument]) -> list[str]:
     ("the Purchasing Guidelines on file") and the file is named by whoever saved
     it ("purchasing_guidelines_v4_FINAL.pdf"); requiring those to match exactly
     would make the gate impossible to clear.
+
+    A document the carrier chose to go on WITHOUT ("Continue anyway" after
+    creating a renewal; extracted.references_waived) is no longer missing: it
+    was a decision, not an oversight. A re-read rewrites `extracted` and so
+    asks again.
     """
+    waived = {str(n).strip().lower()
+              for n in ((c.extracted or {}).get("references_waived") or [])}
     supplied = [d for d in docs if d.kind == "reference" and d.is_active]
     if not supplied:
         return [n for n in (
             (r.get("document_name") or "").strip() for r in _external_references(c)
-        ) if n]
+        ) if n and n.lower() not in waived]
 
     def covers(doc: ContractDocument, named: str) -> bool:
         if (doc.satisfies_reference or "").strip().lower() == named.strip().lower():
@@ -216,7 +224,8 @@ def _missing_references(c: Contract, docs: list[ContractDocument]) -> list[str]:
     missing = []
     for r in _external_references(c):
         named = (r.get("document_name") or "").strip()
-        if named and not any(covers(d, named) for d in supplied):
+        if (named and named.lower() not in waived
+                and not any(covers(d, named) for d in supplied)):
             missing.append(named)
     return missing
 
@@ -346,9 +355,190 @@ def _codes():
     return intake_service
 
 
+_CHAIN_LIMIT = 50
+
+
+def _has_live_setup(s, c: Contract) -> bool:
+    import intake_autorun
+    return intake_autorun._live_pipeline(s, c.tenant_id, c.program_id,
+                                         c.broker_party_id) is not None
+
+
+def _has_clauses(s, contract_id: int) -> bool:
+    from sqlalchemy import text as _sql
+    return s.execute(_sql(
+        "SELECT 1 FROM clauses_extracted WHERE contract_id = :c LIMIT 1"),
+        {"c": contract_id}).first() is not None
+
+
+def _renewal_chain(c, get, successor_of) -> list:
+    """Every contract period linked to `c` by renewal, oldest first.
+
+    Worked out from `renews_contract_id` alone: back to the first contract,
+    then forward through each renewal. Nothing is stored for it. `get(id)` and
+    `successor_of(id)` are passed in so the walk can be tested without a
+    database. A loop or a broken link stops the walk rather than spinning.
+    """
+    seen = {c.id}
+    first = c
+    while first.renews_contract_id and len(seen) < _CHAIN_LIMIT:
+        prev = get(first.renews_contract_id)
+        if prev is None or prev.id in seen:
+            break
+        seen.add(prev.id)
+        first = prev
+    chain = [first]
+    ids = {first.id}
+    while len(chain) < _CHAIN_LIMIT:
+        nxt = successor_of(chain[-1].id)
+        if nxt is None or nxt.id in ids:
+            break
+        ids.add(nxt.id)
+        chain.append(nxt)
+    if c.id not in ids:
+        # The walk forward took another branch; the history is at least
+        # everything up to and including this contract.
+        back = []
+        cur = c
+        while cur is not None and len(back) < _CHAIN_LIMIT:
+            back.append(cur)
+            if cur.id == first.id or not cur.renews_contract_id:
+                break
+            cur = get(cur.renews_contract_id)
+        chain = list(reversed(back))
+    return chain
+
+
+_RENEWAL_WINDOW_DEFAULT = 30
+
+
+def _renewal_window_days() -> int:
+    """How many days before its expiry an ACTIVE contract may be renewed.
+
+    RENEWAL_WINDOW_DAYS in the environment; 30 when unset or not a whole
+    number. Renewing earlier set up next year's contract months ahead, from one
+    stray click."""
+    try:
+        return max(0, int(os.getenv("RENEWAL_WINDOW_DAYS",
+                                    str(_RENEWAL_WINDOW_DEFAULT)).strip()))
+    except ValueError:
+        return _RENEWAL_WINDOW_DEFAULT
+
+
+def renewal_gate(state: str, expiry: Optional[dt.date], today: dt.date,
+                 window_days: int, successor=None) -> dict:
+    """May this contract be renewed now? The ONE rule, read by the Renew
+    button (actions.renew) and enforced by POST /renew.
+
+      * already renewed (a draft or live renewal exists) → no: the screen links
+        to that renewal instead, and a second one is refused;
+      * expired or terminated → yes (the term is over either way; a
+        terminated contract stays terminated when its renewal goes live);
+      * active → yes from `window_days` before expiry (inclusive), and on the
+        expiry day itself; before that, no, and `opens_on` says when. An
+        active contract with no expiry has no date to wait for → yes;
+      * superseded, and anything not yet in force → no.
+
+    Returns {allowed, reason, opens_on}; reason is None when allowed, else
+    "already_renewed" | "too_early" | "not_renewable". Pure, so the boundary
+    days can be tested without a database.
+    """
+    if successor is not None:
+        return {"allowed": False, "reason": "already_renewed", "opens_on": None}
+    if state in ("expired", "terminated"):
+        return {"allowed": True, "reason": None, "opens_on": None}
+    if state == "active":
+        if expiry is None:
+            return {"allowed": True, "reason": None, "opens_on": None}
+        opens = expiry - dt.timedelta(days=window_days)
+        if today >= opens:
+            return {"allowed": True, "reason": None, "opens_on": None}
+        return {"allowed": False, "reason": "too_early", "opens_on": opens}
+    return {"allowed": False, "reason": "not_renewable", "opens_on": None}
+
+
+def _successors(s, ids: list[int]) -> dict[int, Contract]:
+    """{contract id: the renewal that renews it} for many contracts in one
+    query — the first by id, the same one POST /renew finds."""
+    if not ids:
+        return {}
+    out: dict[int, Contract] = {}
+    for r in (s.query(Contract).filter(Contract.renews_contract_id.in_(ids))
+              .order_by(Contract.id).all()):
+        out.setdefault(r.renews_contract_id, r)
+    return out
+
+
+def _renewal_dict(s, c: Contract, p: Principal | None,
+                  successors: dict[int, Contract] | None) -> dict:
+    """What the Renew area of the screen shows, and whether Renew is allowed.
+
+    `existing` (the renewal already made, with its state) and `opens_on` are
+    for the carrier only: a broker never renews, and a draft renewal is not
+    theirs to see."""
+    succ = (successors.get(c.id) if successors is not None
+            else _successors(s, [c.id]).get(c.id))
+    window = _renewal_window_days()
+    gate = renewal_gate(_effective_lifecycle(c), c.expiry_dt, _today(),
+                        window, succ)
+    carrier = bool(p and not p.is_broker)
+    return {
+        "allowed": gate["allowed"],
+        "reason": gate["reason"],
+        "opens_on": (str(gate["opens_on"]) if carrier and gate["opens_on"]
+                     else None),
+        "window_days": window,
+        "existing": ({"id": succ.id,
+                      "name": succ.name or succ.filename or f"Contract {succ.id}",
+                      "lifecycle": _effective_lifecycle(succ)}
+                     if carrier and succ is not None else None),
+    }
+
+
+def _renewal_history(s, c: Contract, p: Principal | None) -> list[dict]:
+    """The contract's renewal periods, for the Renewal history card.
+
+    Contract PERIODS only — the files attached to each one are document
+    history, served separately under `documents`. Empty when the contract was
+    never renewed and renews nothing. Versions the caller may not open are left
+    out rather than shown as links that would refuse them; the numbering still
+    counts them, so a version keeps the same number for everyone.
+    """
+    chain = _renewal_chain(
+        c,
+        lambda cid: s.get(Contract, cid),
+        lambda cid: (s.query(Contract)
+                     .filter(Contract.renews_contract_id == cid)
+                     .order_by(Contract.id).first()))
+    if len(chain) < 2:
+        return []
+
+    def visible(k: Contract) -> bool:
+        if k.id == c.id:
+            return True
+        if p is None:
+            return k.tenant_id == c.tenant_id
+        try:
+            _contract_access(s, p, k.id)
+            return True
+        except HTTPException:
+            return False
+
+    return [{
+        "id": k.id,
+        "version": i,
+        "name": k.name or k.filename or f"Contract {k.id}",
+        "inception_dt": str(k.inception_dt) if k.inception_dt else None,
+        "expiry_dt": str(k.expiry_dt) if k.expiry_dt else None,
+        "lifecycle": _effective_lifecycle(k),
+        "is_current": k.id == c.id,
+    } for i, k in enumerate(chain, start=1) if visible(k)]
+
+
 def _record(s, c: Contract, *, with_docs: bool = True,
             p: Principal | None = None,
-            rule_counts: dict[int, dict] | None = None) -> dict:
+            rule_counts: dict[int, dict] | None = None,
+            successors: dict[int, Contract] | None = None) -> dict:
     """The contract, as the screens need it.
 
     Deliberately fat: a contract screen that had to make five calls to say what
@@ -358,6 +548,7 @@ def _record(s, c: Contract, *, with_docs: bool = True,
     `rule_counts` is each contract's rules counted by source (_rule_tallies),
     passed in rather than counted here so the LIST can answer it for every row
     in one query instead of one per row. Left out, this counts its own.
+    `successors` (_successors) is the same idea for "has it been renewed".
     """
     prog = s.get(Program, c.program_id) if c.program_id else None
     counterparty = s.get(Party, c.broker_party_id) if c.broker_party_id else None
@@ -398,6 +589,7 @@ def _record(s, c: Contract, *, with_docs: bool = True,
                    or any(d.kind == "contract" and d.is_active for d in active_docs)
                    or bool(c.blob_ref or c.blob))
     signed_copy_due = _awaiting_signed_copy(s, c)
+    renewal = _renewal_dict(s, c, p, successors)
 
     return {
         "id": c.id,
@@ -450,6 +642,13 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         "terminated_date": str(c.terminated_date) if c.terminated_date else None,
         "termination_reason": c.termination_reason,
         "renews_contract_id": c.renews_contract_id,
+        # Every period in this contract's renewal chain (see _renewal_history).
+        # Only on the full record: the list view would pay a walk per row.
+        "renewal_history": _renewal_history(s, c, p) if with_docs else None,
+        # The Renew area: whether Renew is offered (see renewal_gate), the
+        # renewal already made (linked instead of a second Renew), and the date
+        # Renew opens for an active contract not yet in its window.
+        "renewal": renewal,
         "submitted_at": _iso_utc(c.submitted_at),
         "created_at": _iso_utc(c.created_at),
 
@@ -473,6 +672,20 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # A renewal of an uploaded contract with no signed copy attached yet:
         # the screen asks for that copy instead of offering review or signing.
         "awaiting_signed_copy": signed_copy_due,
+        # Has this contract any clauses yet? "Reflect new contract rules in BDX
+        # setup" is only offered once it has — before that there is nothing to
+        # turn into rules, whatever else the page says.
+        "has_clauses": (_has_clauses(s, c.id) if with_docs else None),
+        # A renewal's programme has a live Bordereau Setup to reflect its rules
+        # in (the one auto-run uses). Without one the screen points at Setup.
+        "has_live_setup": (_has_live_setup(s, c)
+                           if with_docs and c.renews_contract_id else None),
+        # A renewal whose signed PDF is attached but has not been read yet: no
+        # clauses, so nothing to check files against until it is.
+        "awaiting_read": (with_docs and bool(c.renews_contract_id)
+                          and _effective_lifecycle(c) not in ("terminated", "superseded")
+                          and any(d.kind == "contract" for d in active_docs)
+                          and not _has_clauses(s, c.id)),
         # Each section BOTH ways: `body` keeps the tokens the editor turns into
         # chips, `rendered` is the same sentence with today's values in it. The
         # screen reads one and edits the other, and neither has to know how a
@@ -513,7 +726,8 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # contract may not be submitted or activated until it is cleared.
         "missing_references": missing,
         "actions": _allowed_actions(c, missing, p, _unsigned_sides(sigs),
-                                    has_wording, signed_copy_due),
+                                    has_wording, signed_copy_due,
+                                    renewable=renewal["allowed"]),
         # Whose move it is — "carrier", "broker", or null when nobody is
         # waiting. Both sides read this, so neither has to infer it from a
         # state name written for the other one.
@@ -782,7 +996,8 @@ def _allowed_actions(c: Contract, missing: list[str],
                      p: Principal | None = None,
                      unsigned: list[str] | None = None,
                      has_wording: bool = True,
-                     signed_copy_due: bool = False) -> dict[str, bool]:
+                     signed_copy_due: bool = False,
+                     renewable: bool | None = None) -> dict[str, bool]:
     """What may be done to this contract right now, by THIS caller.
 
     Computed on the server because the rules are the server's: a screen that
@@ -834,8 +1049,12 @@ def _allowed_actions(c: Contract, missing: list[str],
         # the broker to look, sending it back puts it in `draft`, where this
         # button is offered exactly as it always was.
         # Not on the renewal of an uploaded contract — see _awaiting_signed_copy.
+        # Never for an UPLOADED contract: it was signed on paper, so there are
+        # no terms left to agree — the carrier accepts it (submit_for_approval)
+        # and the broker is told by email when it goes in force.
         "send_for_review": (
             is_carrier and not blocked and not signed_copy_due
+            and not _is_uploaded(c)
             and (state in ("draft", "changes_requested")
                  # An AUTHORED contract should never be in `pending` — one
                  # written here goes straight to the broker. But a row left
@@ -937,8 +1156,14 @@ def _allowed_actions(c: Contract, missing: list[str],
                              and state in ("draft", "agreed", "signed")
                              and "counterparty" in unsigned and has_wording),
         "terminate": state in ("active", "expired") and is_carrier,
-        "renew": state in ("active", "expired", "terminated") and is_carrier,
-        "upload_documents": state not in ("terminated", "superseded"),
+        # renewal_gate: expired or terminated, or active within the renewal
+        # window, and not already renewed. Never superseded. `renewable` is
+        # that answer worked out by _record; without it, the state part alone.
+        "renew": is_carrier and (renewable if renewable is not None
+                                 else state in ("active", "expired", "terminated")),
+        # The carrier's documents. A broker reviews and signs; it does not
+        # attach or retire the carrier's wording or references.
+        "upload_documents": state not in ("terminated", "superseded") and is_carrier,
         "generate_rules": (state not in ("terminated", "superseded")
                            and not blocked),
     }
@@ -1154,7 +1379,9 @@ def list_contracts(
             rows = (query.order_by(Contract.id.desc())
                     .offset((page - 1) * size).limit(size).all())
             counts = _rule_tallies(s, [c.id for c in rows])
-            return {"items": [_record(s, c, with_docs=False, p=p, rule_counts=counts)
+            succ = _successors(s, [c.id for c in rows])
+            return {"items": [_record(s, c, with_docs=False, p=p, rule_counts=counts,
+                                      successors=succ)
                               for c in rows],
                     "total": int(total), "page": page, "page_size": size}
 
@@ -1164,7 +1391,9 @@ def list_contracts(
         # be one round trip per contract, which on a carrier with a few hundred
         # of them is the whole cost of the screen.
         counts = _rule_tallies(s, [c.id for c in rows])
-        out = [_record(s, c, with_docs=False, p=p, rule_counts=counts)
+        succ = _successors(s, [c.id for c in rows])
+        out = [_record(s, c, with_docs=False, p=p, rule_counts=counts,
+                       successors=succ)
                for c in rows]
         if lifecycle:
             out = [r for r in out if r["lifecycle"] == lifecycle]
@@ -2146,6 +2375,111 @@ def _move(c: Contract, to: str) -> None:
                     else ", because that is where its life ended."))
     c.lifecycle = to
     c.lifecycle_effective_date = _today()
+    if to == "active" and c.renews_contract_id:
+        _supersede_predecessor(c)
+        _mark_renewal_live(c)
+
+
+def _supersede_predecessor(c: Contract) -> None:
+    """A renewal has gone in force: the contract it renews is now history.
+
+    Done here, on the renewal's own move to `active`, because every road into
+    force (both signatures, the executed copy accepted, the signed PDF
+    submitted, e-signing) passes through _move — so none of them can forget it.
+    The old contract keeps its dates and terms; only its state changes.
+    """
+    from sqlalchemy.orm import object_session
+    s = object_session(c)
+    old = s.get(Contract, c.renews_contract_id) if s is not None else None
+    if old is None or _effective_lifecycle(old) not in ("active", "expired"):
+        return
+    old.lifecycle = "superseded"
+    old.lifecycle_effective_date = _today()
+    old.status = "superseded"
+
+
+def _mark_renewal_live(c: Contract) -> None:
+    """A renewal has gone in force: let it govern files, and tell the broker.
+
+    Contracts raised in Kavachio start with status_ops 'drafted', which every
+    "live contract" lookup skips (contract_asof.NON_GOVERNING_STATUSES) — so an
+    active renewal would never be offered to the broker or matched by intake.
+    It becomes 'active' here, on the one move that means "in force", and
+    nowhere earlier. Renewals only: other contracts are a separate change.
+
+    The broker is emailed the new code and dates AFTER the commit, so a
+    rolled-back activation never sends anything. Never raises.
+    """
+    if (c.status or "").strip().lower() in ("", "drafted"):
+        c.status = "active"
+    try:
+        from sqlalchemy import event
+        from sqlalchemy.orm import object_session
+        s = object_session(c)
+        if s is None or not c.broker_party_id:
+            return
+        sends = _renewal_email_thunks(s, c)
+        if sends:
+            def _after_commit(_session):
+                for _addr, send in sends:
+                    try:
+                        send()
+                    except Exception:  # noqa: BLE001
+                        log.exception("renewal email to %s failed", _addr)
+            event.listen(s, "after_commit", _after_commit, once=True)
+    except Exception:  # noqa: BLE001
+        log.exception("could not prepare the renewal email for contract %s", c.id)
+
+
+def _renewal_email_thunks(s, c: Contract) -> list:
+    """Everything the "your contract was renewed" email needs, read now."""
+    from intake_service import contract_code
+    from submission_calendar_service import broker_contacts
+    from db import Tenant
+    prog = s.get(Program, c.program_id) if c.program_id else None
+    carrier = s.get(Tenant, c.tenant_id) if c.tenant_id else None
+    carrier_name = ((carrier.legal_name or carrier.tenant_name) if carrier else None) \
+        or "Your carrier"
+    program_name = (prog.name if prog else None) or "your programme"
+    old = s.get(Contract, c.renews_contract_id) if c.renews_contract_id else None
+    code = contract_code(c)
+    old_code = contract_code(old) if old is not None else None
+    name = c.name or c.filename or f"Contract {c.id}"
+    start = c.inception_dt.strftime("%d %b %Y") if c.inception_dt else "—"
+    end = c.expiry_dt.strftime("%d %b %Y") if c.expiry_dt else "—"
+    contacts = broker_contacts(s, [c.broker_party_id]).get(c.broker_party_id, [])
+
+    def _sender(person: dict):
+        def send() -> None:
+            from email_utils import send_email, renewal_live_email_html
+            send_email(
+                person["email"], f"{carrier_name} renewed your contract on {program_name}",
+                renewal_live_email_html(person.get("name"), carrier_name, program_name,
+                                        name, code, start, end, old_code),
+                text=(f"{carrier_name} has put the renewal of your contract on "
+                      f"{program_name} in force. New contract code: {code}. Period: "
+                      f"{start} to {end}. Late files for the previous period still go "
+                      f"under the previous contract."),
+                account="NOTIFY")
+        return send
+
+    return [(p_["email"], _sender(p_)) for p_ in contacts if p_.get("email")]
+
+
+def _recheck_renewal_parties(s, p: Principal, c: Contract) -> None:
+    """Before a renewal goes out, the people it names must still be valid.
+
+    A year is long enough for a broker to be taken off the programme. The
+    contract being renewed was fine when it was made; this one is a new
+    agreement and is held to today's facts.
+    """
+    if not c.renews_contract_id:
+        return
+    if c.program_id:
+        _program_access(s, p, c.program_id)
+    if c.broker_party_id is not None:
+        _check_counterparty(s, p, ct.spec(c.contract_type or ct.DEFAULT_TYPE),
+                            c.program_id, c.broker_party_id, c.tenant_id)
 
 
 class Note(BaseModel):
@@ -2215,6 +2549,11 @@ def send_for_review(contract_id: int, body: ReviewRequest = ReviewRequest(),
             raise HTTPException(
                 409, "this contract has no broker on it, so there is nobody to "
                      "send it to")
+        if _is_uploaded(c):
+            raise HTTPException(
+                409, "this contract was uploaded already signed, so there are no "
+                     "terms for the broker to agree — accept it to make it active")
+        _recheck_renewal_parties(s, p, c)
 
         try:
             ct.validate(c.contract_type or "", {
@@ -2402,6 +2741,7 @@ def _accept_uploaded(s, c: Contract, p: Principal,
     contract there has ever been. Both moves it makes — pending → signed and
     signed → active — are ordinary transitions; see LIFECYCLE_TRANSITIONS.
     """
+    _recheck_renewal_parties(s, p, c)
     now = dt.datetime.now(dt.timezone.utc)
     # Only if the carrier has not already put its name to this. A second row
     # would claim the company signed twice, which is not a thing that happened.
@@ -3535,6 +3875,35 @@ def activate_contract(contract_id: int, p: Principal = Depends(current_principal
         return _record(s, c, p=p)
 
 
+@router.post("/contracts/{contract_id}/continue-without-references")
+def continue_without_references(contract_id: int,
+                                p: Principal = Depends(current_principal)):
+    """The carrier goes on without the document(s) the wording defers to.
+
+    Asked right after a renewal's new PDF is read: upload them now, or continue
+    anyway. Continuing records the names on the contract so the missing-
+    reference gate stops blocking it; the clauses pointing at them still make
+    no rules. Drafts only — a contract in force was cleared already.
+    """
+    _require_carrier(p)
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        if _effective_lifecycle(c) != "draft":
+            raise HTTPException(409, "only a draft contract can go on without "
+                                     "its referenced documents")
+        docs = s.query(ContractDocument).filter(
+            ContractDocument.contract_id == c.id).all()
+        missing = _missing_references(c, docs)
+        if missing:
+            ext = dict(c.extracted or {})
+            ext["references_waived"] = sorted(
+                set(ext.get("references_waived") or []) | set(missing))
+            c.extracted = ext
+            s.commit()
+            s.refresh(c)
+        return _record(s, c, p=p)
+
+
 class Termination(BaseModel):
     reason: str
     terminated_date: Optional[str] = None
@@ -3597,6 +3966,128 @@ class Renewal(BaseModel):
     # (extraction does not fill it), yet the type requires it, so without
     # this its renewal could not be saved at all. One that has it carries it.
     class_of_business: Optional[str] = None
+    # UPLOADED contracts only: no new signed PDF — the renewal keeps the old
+    # contract's PDF and gets its own copy of the clauses, terms and checks
+    # (see _copy_contract_rules). Off by default: a new PDF is the normal road.
+    same_wording: bool = False
+
+
+def _copy_contract_rules(s, old_id: int, new_id: int,
+                         moves: Optional[dict] = None) -> dict:
+    """Give the renewal its OWN copy of the old contract's clauses, checks,
+    clause routing and extracted terms. Used by "renew on the same wording".
+
+    New rows only — nothing on the old contract is read for write. Clause ids
+    are generated by the database, so each copied clause gets a new id and the
+    rows that point at clauses (a rule's source clause, a routing row) are
+    re-pointed at the copy. Columns are read from the live table so a column
+    added later is carried too. Timestamps start fresh.
+
+    Clauses written from authored wording (`created_by='contract_wording'`) are
+    left out: renew regenerates those from the copied wording itself.
+
+    `moves` ({old term date: new term date}) re-dates each copied rule — its
+    settings, compiled query, name and message — where a date EXACTLY equals
+    the old term's start or end (renewal_chain.redate_rule). Any other date is
+    left as written; the rule stays active and is flagged for review under
+    rule_spec.renewal_review. A tolerance a person set by hand before
+    tolerance_source existed is recorded against the OLD rule id, so the copy
+    is marked tolerance_source='rule' to keep it.
+    """
+    import json as _json
+    import renewal_chain as rc
+    from contract_margin import rules_with_legacy_own_tolerance
+    from sqlalchemy import text as _sql
+
+    def cols(table: str, skip: set[str]) -> list[str]:
+        names = s.execute(_sql(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = :t "
+            "ORDER BY ordinal_position"), {"t": table}).scalars().all()
+        return [n for n in names if n not in skip]
+
+    def copy_row(table: str, pk: str, pk_val, overrides: dict, skip: set[str]):
+        keep = [c for c in cols(table, skip | {pk}) if c not in overrides]
+        names = keep + list(overrides)
+        exprs = [f'"{c}"' for c in keep] + [f":ov_{c}" for c in overrides]
+        params = {f"ov_{c}": v for c, v in overrides.items()}
+        params["pk"] = pk_val
+        quoted = ", ".join(f'"{n}"' for n in names)
+        return s.execute(_sql(
+            f"INSERT INTO {table} ({quoted}) "
+            f"SELECT {', '.join(exprs)} FROM {table} WHERE \"{pk}\" = :pk "
+            f"RETURNING \"{pk}\""), params).scalar()
+
+    stamps = {"created_at", "updated_at", "modified_at"}
+    clause_map: dict[int, int] = {}
+    for cid in s.execute(_sql(
+            "SELECT clause_id FROM clauses_extracted WHERE contract_id = :c "
+            "AND COALESCE(created_by, '') <> 'contract_wording' "
+            "ORDER BY clause_id"), {"c": old_id}).scalars():
+        clause_map[cid] = copy_row("clauses_extracted", "clause_id", cid,
+                                   {"contract_id": new_id}, stamps)
+
+    rules, redated, review = 0, 0, []
+    old_rules = s.execute(_sql(
+        "SELECT rule_id, source_clause_id, rule_contract_id, rule_spec, "
+        "rule_name, error_message FROM validation_rule WHERE contract_id = :c "
+        "ORDER BY rule_id"), {"c": old_id}).all()
+    legacy = rules_with_legacy_own_tolerance(s, [r[0] for r in old_rules])
+    for rid, src, rcid, spec, rname, msg in old_rules:
+        new_rid = copy_row("validation_rule", "rule_id", rid, {
+            "contract_id": new_id,
+            "source_clause_id": clause_map.get(src) if src is not None else None,
+            "rule_contract_id": new_id if rcid == old_id else rcid,
+        }, stamps)
+        rules += 1
+        spec_d = spec if isinstance(spec, dict) else (
+            _json.loads(spec) if isinstance(spec, str) and spec.strip() else None)
+        out = rc.redate_rule(spec_d, rname, msg, moves or {})
+        new_spec = out["spec"] if isinstance(out["spec"], dict) else spec_d
+        touched = out["changed"]
+        if isinstance(new_spec, dict):
+            if rid in legacy and new_spec.get("tolerance_source") is None:
+                new_spec = {**new_spec, "tolerance_source": "rule"}
+                touched = True
+            if out["other_dates"]:
+                new_spec = {**new_spec, "renewal_review": {
+                    "other_dates": out["other_dates"],
+                    "note": "Copied from the previous contract with dates that "
+                            "are not its start or end; left as written."}}
+                touched = True
+        if touched:
+            s.execute(_sql(
+                "UPDATE validation_rule SET rule_spec = CAST(:sp AS jsonb), "
+                "rule_name = :n, error_message = :m WHERE rule_id = :r"),
+                {"sp": _json.dumps(new_spec) if new_spec is not None else None,
+                 "n": out["name"], "m": out["message"], "r": new_rid})
+        if out["changed"]:
+            redated += 1
+        if out["other_dates"]:
+            review.append({"rule_id": new_rid, "rule_name": out["name"],
+                           "dates": out["other_dates"]})
+
+    routing = 0
+    for rid, cl in s.execute(_sql(
+            "SELECT routing_id, clause_id FROM contract_clause_routing "
+            "WHERE contract_id = :c ORDER BY routing_id"), {"c": old_id}).all():
+        copy_row("contract_clause_routing", "routing_id", rid, {
+            "contract_id": new_id,
+            "clause_id": clause_map.get(cl) if cl is not None else None,
+        }, stamps)
+        routing += 1
+
+    terms = 0
+    for tid in s.execute(_sql(
+            "SELECT term_id FROM contract_term WHERE term_contract_id = :c "
+            "ORDER BY term_id"), {"c": old_id}).scalars().all():
+        copy_row("contract_term", "term_id", tid,
+                 {"term_contract_id": new_id}, stamps)
+        terms += 1
+
+    return {"clauses": len(clause_map), "checks": rules,
+            "clause_routing": routing, "terms": terms,
+            "checks_redated": redated, "checks_to_review": review}
 
 
 @router.post("/contracts/{contract_id}/renew")
@@ -3609,23 +4100,36 @@ def renew_contract(contract_id: int, body: Renewal,
     bordereaux were being checked against it — moving its term would silently
     re-date every decision already made under it.
 
-    The successor starts as a draft with no documents: last year's wording is
-    not this year's, and copying it forward would produce rules from a document
-    that does not govern the new term.
+    The successor starts as a DRAFT carrying last year's agreed terms and
+    wording, with no documents. The carrier reviews and edits it, then sends it
+    on the ordinary road (send-for-review to the broker; or, for an uploaded
+    contract, the signed PDF and acceptance). Nothing goes out from here. The
+    contract it replaces is superseded when this one goes in force, not now.
     """
     _require_carrier(p)
     with SessionLocal() as s:
         old = _contract_access(s, p, contract_id)
+        # Locked, so two Renew clicks at once cannot both find "not renewed
+        # yet" and make two renewals.
+        s.query(Contract.id).filter(Contract.id == old.id).with_for_update().first()
         state = _effective_lifecycle(old)
-        if state not in ("active", "expired", "terminated"):
-            raise HTTPException(409, f"a {state} contract cannot be renewed yet")
-
         existing = (s.query(Contract)
-                    .filter(Contract.renews_contract_id == old.id).first())
-        if existing:
+                    .filter(Contract.renews_contract_id == old.id)
+                    .order_by(Contract.id).first())
+        # The same rule the Renew button is shown by (renewal_gate).
+        gate = renewal_gate(state, old.expiry_dt, _today(),
+                            _renewal_window_days(), existing)
+        if gate["reason"] == "already_renewed":
             raise HTTPException(
                 409, f"this contract has already been renewed — see contract "
                      f"{existing.id}.")
+        if gate["reason"] == "too_early":
+            raise HTTPException(
+                409, f"renewal opens on {gate['opens_on']:%d %b %Y}, "
+                     f"{_renewal_window_days()} days before this contract "
+                     f"expires.")
+        if not gate["allowed"]:
+            raise HTTPException(409, f"a {state} contract cannot be renewed")
 
         new = Contract(
             program_id=old.program_id,
@@ -3657,6 +4161,41 @@ def renew_contract(contract_id: int, body: Renewal,
                                   if body.premium_cap_amount is not None
                                   else old.premium_cap_amount)
         new.lifecycle_effective_date = _today()
+        # Last year's agreed terms and wording travel with it, for the carrier
+        # to review and edit before anything goes to the broker. Documents do
+        # not: a signed PDF belongs to the term it was signed for.
+        if old.commercial_terms:
+            new.commercial_terms = copy.deepcopy(old.commercial_terms)
+        if old.wording_sections:
+            new.wording_sections = copy.deepcopy(old.wording_sections)
+        if body.same_wording:
+            if not _is_uploaded(old):
+                raise HTTPException(400, {
+                    "message": "Only an uploaded contract can be renewed on its "
+                               "previous PDF. A contract written here carries "
+                               "its terms and wording over already.",
+                    "errors": {"same_wording": "not an uploaded contract"}})
+            # The same PDF, pointed at — nothing deletes a contract's file, so
+            # two rows can share it. What the PDF said (its extracted values,
+            # margin, referenced documents) comes too; its identity hashes do
+            # not, or the renewal would read as "the same upload" to the
+            # duplicate checks.
+            new.filename = old.filename
+            new.blob_ref = old.blob_ref
+            if not old.blob_ref and old.blob:
+                new.blob = old.blob
+            if old.extracted:
+                import renewal_chain as _rc
+                ext = copy.deepcopy(old.extracted)
+                if isinstance(ext, dict):
+                    ext.pop("identity", None)
+                    # Values read from the PDF that ARE the old term (written
+                    # into output columns) follow the new term; nothing else.
+                    ext = _rc.redate_json(ext, _rc.term_moves(
+                        old.inception_dt, old.expiry_dt,
+                        new.inception_dt, new.expiry_dt))
+                new.extracted = ext
+        _recheck_renewal_parties(s, p, new)
 
         try:
             ct.validate(new.contract_type or ct.DEFAULT_TYPE, {
@@ -3669,17 +4208,224 @@ def renew_contract(contract_id: int, body: Renewal,
 
         s.add(new)
         s.flush()
+        if new.wording_sections:
+            _store_authored_clauses(
+                s, new, (new.wording_sections or {}).get("sections"))
+        if body.same_wording:
+            import renewal_chain as _rc
+            copied = _copy_contract_rules(s, old.id, new.id, _rc.term_moves(
+                old.inception_dt, old.expiry_dt, new.inception_dt, new.expiry_dt))
+        else:
+            copied = None
 
-        # The old one is superseded only once it has actually run its course.
-        # Renewing an ACTIVE contract early must not switch it off — both are
-        # live until the term rolls over.
-        if state == "expired":
-            _move(old, "superseded")
-            old.status = "superseded"
+        # The old one stays as it is until the renewal goes in force; _move
+        # supersedes it at that moment (see _supersede_predecessor). Until
+        # then late files still meet the contract that governed the term.
 
         s.commit()
         s.refresh(new)
-        return _record(s, new, p=p)
+        out = _record(s, new, p=p)
+        if copied is not None:
+            out["copied_from_previous"] = copied
+        return out
+
+
+def _rule_key(spec, output_template_id) -> tuple:
+    """What a rule checks, independent of its id and wording: its template, the
+    column(s) it reads and the output template it is written for."""
+    import json as _json
+    if isinstance(spec, str):
+        try:
+            spec = _json.loads(spec)
+        except Exception:
+            spec = None
+    ir = (spec or {}).get("ir") if isinstance(spec, dict) else None
+    ir = ir if isinstance(ir, dict) else {}
+    params = ir.get("params") if isinstance(ir.get("params"), dict) else {}
+    fields = params.get("fields") or params.get("field") or ""
+    if isinstance(fields, list):
+        fields = tuple(sorted(str(f) for f in fields))
+    return (ir.get("template"), fields, output_template_id)
+
+
+def _rule_rows(s, contract_id: int) -> list[dict]:
+    from sqlalchemy import text as _sql
+    return [dict(r._mapping) for r in s.execute(_sql(
+        "SELECT rule_id, rule_name, rule_status, severity, rule_spec, "
+        "output_template_id FROM validation_rule WHERE contract_id = :c "
+        "ORDER BY rule_id"), {"c": contract_id}).all()]
+
+
+def _params_of(spec) -> dict:
+    import json as _json
+    if isinstance(spec, str):
+        try:
+            spec = _json.loads(spec)
+        except Exception:
+            return {}
+    ir = (spec or {}).get("ir") if isinstance(spec, dict) else None
+    return dict((ir or {}).get("params") or {}) if isinstance(ir, dict) else {}
+
+
+def _renewal_rule_changes(s, c: Contract) -> dict:
+    """The renewal's rules against the contract it renews.
+
+    Matched on what a rule checks (_rule_key), so a rule that was re-dated or
+    regenerated with new wording still pairs with its predecessor. A key held by
+    more than one rule on either side cannot be paired with certainty and is
+    listed as uncertain for a person to compare.
+    """
+    old_rows = _rule_rows(s, c.renews_contract_id) if c.renews_contract_id else []
+    new_rows = _rule_rows(s, c.id)
+    from collections import defaultdict
+    by_old, by_new = defaultdict(list), defaultdict(list)
+    for r in old_rows:
+        by_old[_rule_key(r["rule_spec"], r["output_template_id"])].append(r)
+    for r in new_rows:
+        by_new[_rule_key(r["rule_spec"], r["output_template_id"])].append(r)
+    added, removed, changed, uncertain, same = [], [], [], [], 0
+    for key in set(by_old) | set(by_new):
+        o, n = by_old.get(key, []), by_new.get(key, [])
+        if len(o) > 1 or len(n) > 1:
+            uncertain.append({"check": key[0], "column": key[1],
+                              "previous": [r["rule_name"] for r in o],
+                              "renewal": [r["rule_name"] for r in n]})
+        elif o and not n:
+            removed.append({"rule_name": o[0]["rule_name"], "check": key[0],
+                            "column": key[1]})
+        elif n and not o:
+            added.append({"rule_id": n[0]["rule_id"], "rule_name": n[0]["rule_name"],
+                          "check": key[0], "column": key[1]})
+        else:
+            po = {k: v for k, v in _params_of(o[0]["rule_spec"]).items()}
+            pn = {k: v for k, v in _params_of(n[0]["rule_spec"]).items()}
+            diff = sorted(k for k in set(po) | set(pn) if po.get(k) != pn.get(k))
+            if diff or o[0]["rule_status"] != n[0]["rule_status"]:
+                changed.append({"rule_id": n[0]["rule_id"],
+                                "rule_name": n[0]["rule_name"],
+                                "previous_name": o[0]["rule_name"],
+                                "settings": diff,
+                                "previous_status": o[0]["rule_status"],
+                                "status": n[0]["rule_status"]})
+            else:
+                same += 1
+    review = []
+    import json as _json
+    for r in new_rows:
+        sp = r["rule_spec"]
+        if isinstance(sp, str):
+            try:
+                sp = _json.loads(sp)
+            except Exception:
+                sp = None
+        flag = (sp or {}).get("renewal_review") if isinstance(sp, dict) else None
+        if flag:
+            review.append({"rule_id": r["rule_id"], "rule_name": r["rule_name"],
+                           "dates": flag.get("other_dates") or []})
+    return {"previous_contract_id": c.renews_contract_id,
+            "previous_count": len(old_rows), "renewal_count": len(new_rows),
+            "unchanged": same, "added": added, "removed": removed,
+            "changed": changed, "uncertain": uncertain,
+            "dates_to_review": review}
+
+
+@router.get("/contracts/{contract_id}/renewal-rule-changes")
+def renewal_rule_changes(contract_id: int, p: Principal = Depends(current_principal)):
+    """Preview: how this renewal's rules differ from the previous contract's.
+    Nothing here runs on a bordereau until the renewal is accepted and active."""
+    _require_carrier(p)
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        if not c.renews_contract_id:
+            raise HTTPException(400, "this contract is not a renewal")
+        return _renewal_rule_changes(s, c)
+
+
+@router.post("/contracts/{contract_id}/reflect-setup")
+def reflect_setup(contract_id: int, p: Principal = Depends(current_principal)):
+    """"Reflect new contract rules in BDX setup" — for a renewal read from its
+    new PDF.
+
+    Reuses the programme's live Bordereau Setup as it is: its input template,
+    column mapping and output template are not touched. The renewal's clauses
+    are turned into rules for that setup's output template by the existing
+    clause → rule step (app_routes.contract_generate_rules — no PDF re-read,
+    cached AI answers), which replaces the renewal's OWN rules only.
+
+    Then, where a new rule checks exactly what one previous rule checked (one
+    on each side), a previous rule a person had DISABLED stays disabled.
+    Everything else — changed limits, a tolerance or column someone edited,
+    rules that cannot be paired — is listed for review, never guessed.
+
+    Allowed only while the renewal is not in force, so nothing it writes can
+    reach a bordereau before the carrier accepts it.
+    """
+    _require_carrier(p)
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        if not c.renews_contract_id:
+            raise HTTPException(400, "this contract is not a renewal")
+        state = _effective_lifecycle(c)
+        if state in ("active", "expired", "terminated", "superseded"):
+            raise HTTPException(409, "the renewal is already in force — its rules "
+                                     "are changed in Bordereau Setup now")
+        if not _has_clauses(s, c.id):
+            raise HTTPException(400, "read the signed PDF first — this renewal has "
+                                     "no clauses to turn into rules yet")
+        import intake_autorun
+        pipe = intake_autorun._live_pipeline(s, c.tenant_id, c.program_id,
+                                             c.broker_party_id)
+        if pipe is None or not pipe.output_template_id:
+            raise HTTPException(409, "this programme has no live Bordereau Setup to "
+                                     "reflect the rules in — set one up first")
+        program_id, template_id = c.program_id, pipe.output_template_id
+        setup = {"pipeline_id": pipe.id, "name": pipe.name,
+                 "output_template_id": template_id}
+
+    import app_routes
+    app_routes.contract_generate_rules(
+        program_id, contract_id,
+        app_routes.ContractGenerateRulesBody(output_template_id=template_id),
+        principal=p)
+
+    from sqlalchemy import text as _sql
+    with SessionLocal() as s:
+        c = s.get(Contract, contract_id)
+        old_rows = _rule_rows(s, c.renews_contract_id)
+        new_rows = _rule_rows(s, c.id)
+        from collections import Counter
+        ko = Counter(_rule_key(r["rule_spec"], r["output_template_id"]) for r in old_rows)
+        kn = Counter(_rule_key(r["rule_spec"], r["output_template_id"]) for r in new_rows)
+        disabled_old = {_rule_key(r["rule_spec"], r["output_template_id"])
+                        for r in old_rows if r["rule_status"] == "disabled"}
+        carried = []
+        for r in new_rows:
+            k = _rule_key(r["rule_spec"], r["output_template_id"])
+            if k in disabled_old and ko[k] == 1 and kn[k] == 1 \
+                    and r["rule_status"] != "disabled":
+                s.execute(_sql("UPDATE validation_rule SET rule_status = 'disabled', "
+                               "updated_at = now() WHERE rule_id = :r"),
+                          {"r": r["rule_id"]})
+                carried.append(r["rule_name"])
+        # Margin is a carrier setting, not wording: the previous contract's
+        # stays unless the renewal already has its own.
+        old = s.get(Contract, c.renews_contract_id)
+        from contract_margin import contract_margin_pct
+        margin_note = None
+        if old is not None:
+            om, nm = contract_margin_pct(old.extracted), contract_margin_pct(c.extracted)
+            if om and not nm:
+                ext = dict(c.extracted or {}) if isinstance(c.extracted, dict) else {}
+                ext["settings"] = {**(ext.get("settings") or {}), "margin_pct": om}
+                c.extracted = ext
+                margin_note = f"Margin {om:g}% carried from the previous contract."
+            elif om and nm and om != nm:
+                margin_note = (f"The renewal's margin ({nm:g}%) differs from the "
+                               f"previous contract's ({om:g}%). Check it.")
+        s.commit()
+        out = _renewal_rule_changes(s, c)
+    out.update({"setup": setup, "kept_disabled": carried, "margin_note": margin_note})
+    return out
 
 
 # =============================================================================
@@ -3732,6 +4478,7 @@ async def upload_document(
     discarding the rules currently in force are different decisions, and the
     second one costs a long pipeline run. Call generate-rules when ready.
     """
+    _require_carrier(p)
     if kind not in DOC_KINDS:
         raise HTTPException(400, f"kind must be one of {', '.join(DOC_KINDS)}")
     if not file.filename:
@@ -3781,6 +4528,14 @@ async def upload_document(
             c.filename = file.filename
             if not c.name:
                 c.name = file.filename
+            # A renewal is first named after the contract it renews
+            # ("old.pdf — renewal"). Once its own new PDF is attached, that
+            # name points at last year's file, so it takes the new file's
+            # name — the way an uploaded contract is named. Drafts only, and
+            # only while it still carries the automatic name.
+            elif (c.renews_contract_id and _effective_lifecycle(c) == "draft"
+                    and c.name.endswith(" — renewal")):
+                c.name = file.filename
 
         s.commit()
         s.refresh(doc)
@@ -3803,7 +4558,11 @@ def deactivate_document(contract_id: int, document_id: int,
     The rules currently in force were generated from these documents. Deleting
     one would leave rules nobody can explain, so it is deactivated: out of the
     next generation, still on the record for the last one.
+
+    Carrier only: a broker reviewing a contract must not be able to take the
+    carrier's wording or references off it.
     """
+    _require_carrier(p)
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
         doc = s.get(ContractDocument, document_id)
@@ -4527,7 +5286,16 @@ async def generate_rules(contract_id: int,
             c2 = s2.get(Contract, contract_id)
             if c2 is not None and template_id:
                 c2.output_template_id = template_id
-                s2.commit()
+            # The persister marks the row status_ops='active' as a side effect
+            # of reading it. A renewal that is not in force must not govern
+            # files (brokers' lists, intake, auto-run) — it becomes 'active'
+            # only when it goes in force (_mark_renewal_live).
+            if (c2 is not None and c2.renews_contract_id
+                    and _effective_lifecycle(c2) not in ("active", "expired",
+                                                         "superseded", "terminated")
+                    and (c2.status or "").lower() == "active"):
+                c2.status = "drafted"
+            s2.commit()
             record = _record(s2, s2.get(Contract, contract_id), p=p)
 
         return {

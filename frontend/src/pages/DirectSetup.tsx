@@ -800,6 +800,15 @@ function DirectSetupScreen() {
     return missing;
   }
 
+  // The part of that list the CURRENT tab can do something about. Setup
+  // Details picks the programme, broker and contract; uploads (the input
+  // template, a contract file) happen on Documents.
+  function missingOnTab(): string[] {
+    const all = missingForBuild();
+    if (tab !== "details") return all;
+    return all.filter(m => m !== "the input template" && m !== "a contract");
+  }
+
   // The two things the output template is worked out from, and whether each is
   // here yet. An input format already saved on the loaded setup counts as the
   // input side; a contract already on file for the scope counts as the contract
@@ -2018,10 +2027,14 @@ function DirectSetupScreen() {
                 disabled:!text-ink-soft disabled:ring-1 disabled:ring-inset disabled:ring-border">
               {"Set Up Bordereau Pipeline"}
             </Button>
-            {!building && (brokerMissing || !inputFile || staged.length === 0) && (
+            {/* Only what can be done on THIS tab. Setup Details has no upload,
+                so the input template (and uploading a contract) are named on
+                Documents, not here — "Next: Documents" is the way there. */}
+            {!building && (brokerMissing || !inputFile || staged.length === 0)
+              && missingOnTab().length > 0 && (
               <span className="inline-flex items-center gap-1.5 text-[12.5px] text-warn">
                 <AlertTriangle size={14} className="shrink-0" />
-                Still needed: {missingForBuild().join(", ")}
+                Still needed: {missingOnTab().join(", ")}
               </span>
             )}
             {/* Deliberately NOT gated on having an output template: without one
@@ -2037,10 +2050,16 @@ function DirectSetupScreen() {
                 be clicked in any order, but nothing on the first tab said that
                 the form continues past it — so somebody who filled it in and
                 found the build button disabled had no next move on screen.
-                Secondary, and only up to the last tab: it moves you through the
-                form, it is not what the form is for. */}
+                Only up to the last tab. HIGHLIGHTED while the build cannot run
+                yet — then going forward is the next move (e.g. the input
+                template is uploaded on Documents); plain once the build button
+                is live, so the two never compete. */}
             {nextTab && (
-              <Button variant="secondary" className="ml-auto"
+              <Button
+                variant={!building && !nextTab.disabled
+                         && (brokerMissing || !inputFile || staged.length === 0)
+                  ? "primary" : "secondary"}
+                className="ml-auto"
                 disabled={!!nextTab.disabled}
                 title={nextTab.disabled ? nextTab.disabledReason : undefined}
                 onClick={() => setTab(nextTab.key)}>

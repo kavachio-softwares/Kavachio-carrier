@@ -406,6 +406,51 @@ def broker_added_back_email_html(name: str | None, carrier: str, program_name: s
 </body></html>"""
 
 
+def renewal_live_email_html(name: str | None, carrier: str, program_name: str,
+                            contract_name: str, code: str, start: str, end: str,
+                            old_code: str | None) -> str:
+    """A carrier's renewed contract has gone in force: the broker's new code and
+    dates, and what happens to files sent under the old code."""
+    greeting = f"Hi {escape_html(name)}," if (name or "").strip() else "Hi,"
+    c, p = escape_html(carrier), escape_html(program_name)
+    k, n = escape_html(code), escape_html(contract_name)
+    s_, e_ = escape_html(start), escape_html(end)
+    old = (f"<li>Files sent under the old code {escape_html(old_code)} for a month in "
+           f"this new period are filed under the renewal automatically; anything "
+           f"unclear is held for {c} to check.</li>") if old_code else ""
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
+        Your contract on {p} has been renewed
+      </h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        <b>{c}</b> has put the renewal of your contract on <b>{p}</b> in force.
+      </p>
+      <ul style="font-size:14px;color:#566071;line-height:1.7;margin:0 0 14px;padding-left:20px">
+        <li>Contract: <b>{n}</b></li>
+        <li>New contract code: <b>{k}</b> &mdash; use it in email subjects and file names.</li>
+        <li>Period: <b>{s_}</b> to <b>{e_}</b></li>
+        {old}
+        <li>Late files for the previous period still go under the previous contract.</li>
+      </ul>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        If you have any questions, please contact {c}.
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a notice from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
 def bordereau_sent_email_html(program_name: str, period: str, due_date: str | None,
                               sent_date: str) -> str:
     """A broker sending a processed bordereau on to the carrier. The file

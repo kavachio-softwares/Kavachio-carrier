@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  arrivalContractChoices, type ContractChoice,
   discardArrival, downloadArrival, isHeld, listArrivals, releaseArrival, rerunArrival,
   type Arrival, type Channel, type RunResult,
 } from "../api/intake";
@@ -931,6 +932,19 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival, onCompare 
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  // Held because the contract was renewed and the period did not say which
+  // term the file belongs to: the person picks the contract to run it under.
+  const renewalHold = st === "held" && !arrival?.resolution
+    && /choose the contract and release it/i.test(arrival?.turned_away_reason ?? "");
+  const [choices, setChoices] = useState<ContractChoice[]>([]);
+  const [pick, setPick] = useState<number | null>(null);
+  useEffect(() => {
+    setChoices([]); setPick(null);
+    if (!arrival || !renewalHold) return;
+    arrivalContractChoices(arrival.arrival_id)
+      .then(r => setChoices(r.choices))
+      .catch(() => setChoices([]));
+  }, [arrival?.arrival_id, renewalHold]);
   // The checklist and the minor facts start folded away: the verdict at the
   // top is what a first-time reader needs, the rest is one click down.
   const [showMore, setShowMore] = useState(false);
@@ -975,7 +989,8 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival, onCompare 
     if (!arrival) return;
     setBusy(true); setErr(null);
     try {
-      if (what === "release") await releaseArrival(arrival.arrival_id, note);
+      if (what === "release") await releaseArrival(arrival.arrival_id, note,
+                                                   renewalHold ? pick : null);
       else await discardArrival(arrival.arrival_id, note);
       onResolved();
       onClose();
@@ -1166,6 +1181,22 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival, onCompare 
             {/* Why somebody decided is the half of the record that is worth
                 having three months later. Optional, and asked for at the moment
                 of deciding rather than in a separate screen nobody opens. */}
+            {renewalHold && (
+              <label className="kv" style={{ marginTop: 12, display: "block" }}>
+                <span className="k">Run it under which contract?</span>
+                <select className="inp" value={pick ?? ""} disabled={busy}
+                  onChange={e => setPick(e.target.value ? Number(e.target.value) : null)}
+                  style={{ width: "100%" }}>
+                  <option value="">Choose a contract…</option>
+                  {choices.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.code}) · {c.inception_dt ? fmtDate(c.inception_dt) : "—"}
+                      {" – "}{c.expiry_dt ? fmtDate(c.expiry_dt) : "—"}
+                    </option>
+                  ))}
+                </select>
+              </label>)}
+
             {st !== "ok" && !arrival.resolution && (
               <label className="kv" style={{ marginTop: 12, display: "block" }}>
                 <span className="k">Note (optional)</span>
@@ -1187,7 +1218,7 @@ function ArrivalDrawer({ arrival, onClose, onResolved, onOpenArrival, onCompare 
                 could not read — releasing a PDF would hand processing something
                 broken, and the fix is a file we can open, not an override. */}
             {st === "held" && !arrival.resolution && (
-              <button className="btn pri" disabled={busy}
+              <button className="btn pri" disabled={busy || (renewalHold && !pick)}
                 title="Accept this file despite the hold reason and check it against the contract"
                 onClick={() => decide("release")}>
                 {busy ? "Accepting…" : "Accept & Process"}</button>)}

@@ -378,8 +378,15 @@ def _resolve_contract_latest(s, template_id: int, tenant_id) -> Optional[int]:
         return None
     # Latest contract directly linked to this output template (status column on the
     # ops contract table is 'status_ops'; we don't filter on it — latest wins).
+    # Except a renewal that is not in force yet: it copies its predecessor's
+    # template the moment it is created, and as the newest row it would win
+    # here while still a draft. A renewal governs once it is active
+    # (contract_routes._mark_renewal_live sets status_ops then).
     cid = s.execute(
         text("SELECT contract_id FROM contract WHERE output_template_id = :t "
+             "AND NOT (contract_renews_contract_id IS NOT NULL "
+             "AND COALESCE(status_ops, '') IN ('drafted', 'rejected', 'failed', "
+             "'cancelled', 'extracting')) "
              "ORDER BY contract_id DESC LIMIT 1"),
         {"t": template_id},
     ).scalar()
@@ -596,8 +603,12 @@ def _resolve_contract_id(s, body, policy_id, on_date=None) -> Optional[int]:
     # gets the as-of wrap; the exceptionId path above does NOT, because the
     # contract that produced an exception is already the right version to
     # re-validate against, by construction.
+    # A renewal not yet in force is skipped, as in the lookup above.
     cid = s.execute(
         text("SELECT contract_id FROM contract WHERE output_template_id = :t "
+             "AND NOT (contract_renews_contract_id IS NOT NULL "
+             "AND COALESCE(status_ops, '') IN ('drafted', 'rejected', 'failed', "
+             "'cancelled', 'extracting')) "
              "ORDER BY contract_id DESC LIMIT 1"),
         {"t": body.templateId},
     ).scalar()
