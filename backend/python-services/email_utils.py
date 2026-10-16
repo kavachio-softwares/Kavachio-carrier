@@ -451,6 +451,52 @@ def renewal_live_email_html(name: str | None, carrier: str, program_name: str,
 </body></html>"""
 
 
+def period_change_email_html(name: str | None, carrier: str, program_name: str,
+                             contract_name: str, code: str, period_old: str,
+                             period_new: str, reason: str, undone: bool = False) -> str:
+    """A carrier corrected the dates of a broker's contract (Change period), or
+    undid a correction: the old and new period and the carrier's REASON. Takes
+    nothing else on purpose — the carrier's internal note and its evidence are
+    never passed to this function, so they cannot reach the broker."""
+    greeting = f"Hi {escape_html(name)}," if (name or "").strip() else "Hi,"
+    c, p = escape_html(carrier), escape_html(program_name)
+    k, n = escape_html(code), escape_html(contract_name)
+    o, w, r = escape_html(period_old), escape_html(period_new), escape_html(reason)
+    what = ("undone an earlier correction to the dates of" if undone
+            else "corrected the dates of")
+    title = ("A date correction on your contract was undone" if undone
+             else "The dates of your contract were corrected")
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">{title}</h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        <b>{c}</b> has {what} your contract on <b>{p}</b>.
+      </p>
+      <ul style="font-size:14px;color:#566071;line-height:1.7;margin:0 0 14px;padding-left:20px">
+        <li>Contract: <b>{n}</b> ({k})</li>
+        <li>Was: <b>{o}</b></li>
+        <li>Now: <b>{w}</b></li>
+        <li>Reason: {r}</li>
+      </ul>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        Files you have already sent are not changed. If you have any questions,
+        please contact {c}.
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a notice from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
 def bordereau_sent_email_html(program_name: str, period: str, due_date: str | None,
                               sent_date: str) -> str:
     """A broker sending a processed bordereau on to the carrier. The file

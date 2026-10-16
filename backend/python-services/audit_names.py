@@ -109,6 +109,9 @@ ACTION_NAME_KIND = {
     "contract_uploaded": "contract", "contract_awaiting_signature": "contract",
     "contract_pushed_back": "contract", "contract_sent_back": "contract",
     "contract_accepted": "contract", "contract_awaiting_review": "contract",
+    "contract_term_gap_confirmed": "contract",
+    "contract_period_corrected": "contract",
+    "contract_period_correction_undone": "contract",
     "program_created": "program", "program_updated": "program",
     "party_created": "party", "party_updated": "party",
     "broker_added": "broker", "broker_linked": "broker",
@@ -993,7 +996,35 @@ def _rows_saved(names, d):
     return parts
 
 
+def _period_change(names, d):
+    """A contract date correction, or its undo: the dates as they moved, the
+    reason the broker was given, and the internal note. Only the carrier's own
+    trail and Kavachio's hold these rows — a broker's never does — so the note
+    is read where it was written for. Without this the row printed its stored
+    keys ("Change ref …", "Kind correction")."""
+    parts = []
+    old = d.get("old") if isinstance(d.get("old"), dict) else {}
+    new = d.get("new") if isinstance(d.get("new"), dict) else {}
+    for key, label in (("inception_dt", "Start"), ("expiry_dt", "End")):
+        a, b = old.get(key), new.get(key)
+        if a != b:
+            parts.append((f"{label} {date_words(a) or '—'} → {date_words(b) or '—'}", None))
+    if (d.get("large") or {}).get("large"):
+        parts.append(("Large correction", None))
+    elif d.get("reverses_large"):
+        parts.append(("Undid a large correction", None))
+    if d.get("reason"):
+        parts.append((f"Reason: {_clip(d['reason'], 200)}", None))
+    if d.get("internal_note"):
+        parts.append((f"Internal note: {_clip(d['internal_note'], 200)}", None))
+    if d.get("evidence_filename"):
+        parts.append((f"Evidence: {_clip(d['evidence_filename'], 80)}", None))
+    return parts
+
+
 _SPECIAL = {
+    "contract_period_corrected": _period_change,
+    "contract_period_correction_undone": _period_change,
     "datamodel.ingest": _rows_saved,
     "bordereau_sent": _bordereau_sent,
     "bdx_fix_link_validated": _fix_validated,

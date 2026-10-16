@@ -30,6 +30,9 @@ export type AuditRow = {
   /** A bulk save ("Corrected 40 values in one bulk update"): how many changes
    *  it holds, and the key getAuditGroup opens them with. Null otherwise. */
   group: { key: string; count: number; noun: string } | null;
+  /** Kavachio's rows only: the evidence behind a large contract date
+   *  correction, opened with downloadCorrectionEvidence. Null otherwise. */
+  evidence?: { event_id: number; filename: string } | null;
 };
 
 export type AuditPage = {
@@ -120,4 +123,10 @@ export async function getAuditOptions(): Promise<AuditOptions> {
 export async function downloadAuditLogs(q: AuditQuery, format: "csv" | "xlsx") {
   const search = new URLSearchParams({ ...params(q), format }).toString();
   await downloadFile(`/audit/export?${search}`);
+}
+
+/** Kavachio: the evidence file behind a large contract date correction, by
+ *  that correction's audit row — the only way Kavachio reaches it. */
+export async function downloadCorrectionEvidence(eventId: number, filename: string) {
+  await downloadFile(`/admin/contract-period-evidence/${eventId}/file`, filename);
 }

@@ -289,7 +289,8 @@ def ensure_auto_schedule(session, program_id: int, tenant_id) -> Optional[Submis
 
 def materialize_schedule(session, schedule: SubmissionSchedule,
                          today: Optional[date] = None,
-                         horizon_months: Optional[int] = None) -> dict:
+                         horizon_months: Optional[int] = None,
+                         keep_periods: Optional[set] = None) -> dict:
     """Resolve → generate → upsert ExpectedSubmission rows for this program.
 
     ONE ROW PER (BROKER, PERIOD). A programme is reported by several brokers and
@@ -302,6 +303,10 @@ def materialize_schedule(session, schedule: SubmissionSchedule,
     received_export_id and version history are preserved), so re-running never
     loses a "received" mark. Produces nothing when the schedule is unresolved.
     Caller commits.
+
+    `keep_periods`: periods never removed here whatever else is true — a date
+    correction passes every period that has a file against it, so a shortened
+    term can never delete a period with files (Change period, Phase B).
     """
     today = today or datetime.utcnow().date()
     resolved, program, contract = resolve_for_schedule(session, schedule)
@@ -393,6 +398,8 @@ def materialize_schedule(session, schedule: SubmissionSchedule,
     for e in list(existing_rows):
         if e.received_at is not None or (e.version_count or 0):
             continue                       # something was submitted — keep it
+        if keep_periods and e.period in keep_periods:
+            continue                       # the caller says files exist for it
         stale_period = e.period not in wanted
         dropped_broker = (brokers and e.broker_party_id is not None
                           and e.broker_party_id not in brokers

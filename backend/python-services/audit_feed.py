@@ -339,6 +339,9 @@ ACTION_WORDS = {
     "contract_activated":         "Activated a contract",
     "contract_terminated":        "Terminated a contract",
     "contract_renewed":           "Renewed a contract",
+    "contract_term_gap_confirmed": "Confirmed a gap between contract versions",
+    "contract_period_corrected": "Corrected a contract's dates",
+    "contract_period_correction_undone": "Undid a contract date correction",
     "contract_signed":            "Signed a contract",
     "contract_signed_copy_submitted": "Submitted the signed contract",
     "contract_document_attached": "Attached a document to a contract",
@@ -600,6 +603,8 @@ _ACCESS_WORDS = [
     (re.compile(r"^/uploads/\d+/file"),          "Downloaded the original file as received"),
     (re.compile(r"^/uploads/\d+/source-rows"),   "Opened the original file's rows"),
     (re.compile(r"^/mapper/\d+/file"),           "Downloaded a sample file"),
+    (re.compile(r"^/admin/contract-period-evidence/\d+/file"),
+     "Downloaded the evidence for a large contract date correction"),
     (re.compile(r"^/audit/export"),              "Downloaded the audit log"),
     (re.compile(r"^/dwh"),                       "Opened the data model"),
 ]
@@ -1171,6 +1176,8 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "contract_pushed_back",
       "contract_changes_requested", "contract_approved", "contract_rejected",
       "contract_activated", "contract_terminated", "contract_renewed",
+      "contract_term_gap_confirmed",
+      "contract_period_corrected", "contract_period_correction_undone",
       "contract_document_attached", "contract_wording_saved",
       "contract_wording_drafted", "contract_endorsed", "contract_checks_bound",
       "contract_mapped_to_template", "contract_review_skipped"),
@@ -2207,7 +2214,22 @@ def render(s, namer: ActorNamer, raw: dict, names=None) -> dict:
         "carrier": namer.tenant_name(raw["tenant_id"]) if raw["tenant_id"] else None,
         # The download only: "Change 3 of 19 in one bulk update".
         "bulk": raw.get("bulk"),
+        "evidence": _evidence_link(raw, namer.v),
     }
+
+
+def _evidence_link(raw: dict, v: Viewer) -> Optional[dict]:
+    """Kavachio's button to the evidence behind a large contract date
+    correction (contract_routes.period_evidence_for_kavachio). On Kavachio's
+    rows only: the carrier opens its evidence from the contract's Documents,
+    and a broker's trail never holds a correction row at all."""
+    if not v.is_platform or raw.get("kind") != "activity" \
+            or raw.get("action") != "contract_period_corrected":
+        return None
+    d = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+    if not d.get("evidence_document_id"):
+        return None
+    return {"event_id": raw["id"], "filename": d.get("evidence_filename") or "Evidence"}
 
 
 def page(s, v: Viewer, f: Filters, page_no: int, page_size: int) -> dict:

@@ -19,8 +19,9 @@ import {
   AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, ChevronDown,
   ChevronRight, Download, ExternalLink,
   Eye, FileText, History, MessagesSquare, Paperclip, PenLine, Plus, RefreshCw,
-  Send, ShieldCheck, Trash2, Upload, XCircle,
+  Send, ShieldCheck, Trash2, Upload, XCircle, CalendarRange, Undo2,
 } from "lucide-react";
+import { ChangePeriodDialog, UndoPeriodDialog } from "../components/ChangePeriodDialog";
 import { currentMga, getTenantBrand, isBrokerSeat } from "../auth";
 import { SignaturePlacer, signerTargets }
   from "../components/SignaturePlacer";
@@ -60,6 +61,8 @@ import {
   downloadContractPdf, previewWording,
   updateContract, uploadDocument, fieldErrors, continueWithoutReferences,
   getRenewalRuleChanges, reflectSetup, type RenewalRuleChanges,
+  renewalCheck, type TermConflict,
+  periodReview, periodUndoPreview, type PeriodReviewItem, type UndoPreview,
   type ContractDocumentKind, type ContractField, type ContractRecord as Rec,
   type AgreedLimits, type AgreedLimitSpec, type ContractTypeSpec, type FieldErrors,
   type Lifecycle, type LimitGroup,
@@ -68,6 +71,17 @@ import {
   type ContractClause, type ContractClauseRule,
   type ProposedChange, type WordingSection,
 } from "../api/contractRecord";
+
+/** History rows written by Change period, in words. */
+const HISTORY_ACTION: Record<string, string> = {
+  period_corrected: "Dates corrected",
+  period_correction_undone: "Date correction undone",
+};
+/** The two fields a date correction moves, as History names them. */
+const DATE_FIELD_LABEL: Record<string, string> = {
+  inception_dt: "Start date",
+  expiry_dt: "End date",
+};
 
 const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
   // The note is filled in per contract — a carrier's own draft has nobody to
@@ -119,6 +133,12 @@ const DOC_KIND: Record<ContractDocumentKind, { label: string; blurb: string }> =
     label: "Endorsement",
     blurb: "A change agreed after the contract was made.",
   },
+  // Attached from Change period (a large date correction), never from the
+  // kind list below. The server never shows it to the broker.
+  evidence: {
+    label: "Evidence",
+    blurb: "Supports a date correction. Your organisation only.",
+  },
 };
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -160,7 +180,7 @@ function ContractRecordView() {
     { notice?: string; acceptError?: string } | null;
   const handoff = navState?.notice;
   // A renewal is accepted automatically once created; if that was refused,
-  // the reason arrives here and the page offers to try again.
+  // the reason arrives here and is shown with "Make it active".
   const acceptError = navState?.acceptError;
 
   const [rec, setRec] = useState<Rec | null>(null);
@@ -214,6 +234,24 @@ function ContractRecordView() {
   const [showRenew, setShowRenew] = useState(false);
   const [renewFrom, setRenewFrom] = useState("");
   const [renewTo, setRenewTo] = useState("");
+  // The server's answer for the dates in the Renew form (renewal-check):
+  // an overlap with this contract is refused, a gap needs a tick.
+  const [renewCheck, setRenewCheck] = useState<{
+    conflicts: TermConflict[]; blocked: boolean; needs_confirm: boolean;
+  } | null>(null);
+  const [renewGapOk, setRenewGapOk] = useState(false);
+  // "Make it active" on an uploaded renewal: why the last press was refused
+  // (when the record's own blockers do not already say it), and the tick for
+  // a gap nobody has confirmed yet.
+  const [activateErr, setActivateErr] = useState("");
+  const [activateGapOk, setActivateGapOk] = useState(false);
+  // Change period (Phase B): the two dialogs, whether the latest correction
+  // can be undone (asked of the server, so a refused Undo says why), and the
+  // files now outside the term.
+  const [showPeriod, setShowPeriod] = useState(false);
+  const [showUndo, setShowUndo] = useState(false);
+  const [undoInfo, setUndoInfo] = useState<UndoPreview | null>(null);
+  const [periodItems, setPeriodItems] = useState<PeriodReviewItem[]>([]);
   // Asked only when this contract has none (an uploaded one) — the type
   // requires it, so the successor could not be saved without it.
   const [renewClass, setRenewClass] = useState("");
@@ -329,6 +367,20 @@ function ContractRecordView() {
   }, [id]);
   useEffect(load, [load]);
 
+  // Change period: once a correction exists, ask whether the latest one can be
+  // undone (the button says why when it can't) and which files now fall
+  // outside the term. Both read-only; carrier side, switch on.
+  const periodLatest = rec?.period_change?.history?.[0];
+  useEffect(() => {
+    if (!rec?.period_change || !periodLatest) { setUndoInfo(null); setPeriodItems([]); return; }
+    if (periodLatest.kind === "correction") {
+      periodUndoPreview(id).then(setUndoInfo).catch(() => setUndoInfo(null));
+    } else {
+      setUndoInfo(null);
+    }
+    periodReview(id).then(r => setPeriodItems(r.items)).catch(() => setPeriodItems([]));
+  }, [rec, periodLatest, id]);
+
   // An authored contract cannot take a replacement wording, so never leave the
   // picker sitting on a kind that is not offered.
   useEffect(() => {
@@ -392,6 +444,29 @@ function ContractRecordView() {
     nav(`/contracts/${newId}`, acceptError ? { state: { acceptError } } : undefined);
   }
 
+  /** "Make it active" on an uploaded renewal (rec.activation). The server
+   *  checks everything again — signed copy, read, references, people, dates —
+   *  and refuses with the reason; a refusal is shown once, in the card. */
+  async function makeActive() {
+    setBusy("activate"); setErr(""); setNote(""); setActivateErr("");
+    try {
+      const r = rec?.actions.accept_contract
+        ? await acceptContract(id, undefined, activateGapOk)
+        : await submitForApproval(id, undefined, activateGapOk);
+      // Clears a refused automatic accept carried in from Create renewal.
+      nav(`/contracts/${id}`, { replace: true });
+      if (r.lifecycle === "active") setNote("The renewal is active now.");
+    } catch (e) {
+      // A gap is answered by the tick in the card, so it is not repeated.
+      const d = (e as { response?: { data?: { detail?: { needs_confirm?: boolean } } } })
+        ?.response?.data?.detail;
+      if (!d?.needs_confirm) setActivateErr(fieldErrors(e).message);
+    } finally {
+      setBusy("");
+      load();
+    }
+  }
+
   /** Terms → checks. See bindChecks: the server resolves which bordereau
    *  template this contract reports into, so there is nothing to choose. */
   async function doGenerate() {
@@ -421,6 +496,21 @@ function ContractRecordView() {
       }
     });
   }
+
+  // Overlap / gap check for the Renew form's dates, asked of the server so the
+  // form and POST /renew can never disagree. Debounced: typing a date fires
+  // one request, not one per keystroke.
+  useEffect(() => {
+    if (!showRenew || !renewFrom) { setRenewCheck(null); return; }
+    let live = true;
+    const t = window.setTimeout(() => {
+      renewalCheck(id, renewFrom, renewTo)
+        .then(r => { if (live) setRenewCheck(r); })
+        .catch(() => { if (live) setRenewCheck(null); });
+    }, 300);
+    setRenewGapOk(false);
+    return () => { live = false; window.clearTimeout(t); };
+  }, [id, showRenew, renewFrom, renewTo]);
 
   // ── hooks stop here ──────────────────────────────────────────────────────
   // Every hook on this screen has to be ABOVE the guard below. React counts
@@ -511,7 +601,7 @@ function ContractRecordView() {
   // Changing an authored contract's wording means changing its terms, or
   // endorsing it.
   const attachableKinds = (Object.keys(DOC_KIND) as ContractDocumentKind[])
-    .filter(k => !(authored && k === "contract"));
+    .filter(k => k !== "evidence" && !(authored && k === "contract"));
 
   const spec = specs.find(t => t.key === rec.contract_type) ?? null;
   // The counterparty is not editable here: for a broker's own contract it is
@@ -813,13 +903,28 @@ function ContractRecordView() {
           : f.kind === "decimal" ? Number.parseFloat(raw)
           : raw;
       }
-      await updateContract(id, {
+      const save = (confirmGap: boolean) => updateContract(id, {
         ...(body as Record<string, unknown>),
         // Sent together so one save covers the whole contract — the identity
         // and the substance change in one step, or not at all.
         agreed_limits: draftLimits,
         ...(draftSig ? { signature_layout: draftSig } : {}),
+        ...(confirmGap ? { confirm_gap: true } : {}),
       });
+      try {
+        await save(false);
+      } catch (e) {
+        // New dates leave a gap next to a neighbouring version: allowed once
+        // the person says so (recorded in the audit log). An overlap is not
+        // asked about — it is refused, and shown like any other error.
+        const detail = (e as { response?: { data?: { detail?: {
+          needs_confirm?: boolean; message?: string } } } })?.response?.data?.detail;
+        if (!detail?.needs_confirm) throw e;
+        if (!window.confirm(`${detail.message ?? "These dates leave a gap."}\n\nSave anyway?`)) {
+          return;
+        }
+        await save(true);
+      }
       setEditing(false);
       setNote("Contract updated.");
       load();
@@ -883,6 +988,15 @@ function ContractRecordView() {
 
   return (
     <div className="proto">
+      {showPeriod && (
+        <ChangePeriodDialog rec={rec} onClose={() => setShowPeriod(false)}
+          onEvidenceAdded={load}
+          onDone={msg => { setShowPeriod(false); setErr(""); setNote(msg); load(); }} />
+      )}
+      {showUndo && (
+        <UndoPeriodDialog rec={rec} onClose={() => setShowUndo(false)}
+          onDone={msg => { setShowUndo(false); setErr(""); setNote(msg); load(); }} />
+      )}
       {refPrompt && (
         // Not closable by clicking outside: the renewal already exists, and
         // one of the two choices has to be made for it.
@@ -927,7 +1041,7 @@ function ContractRecordView() {
                 onChange={setRefFiles}
                 hint="PDF, Word, Excel or text"
                 disabled={!!refBusy} />
-              {refErr && <div className="note bad" style={{ marginTop: 10, textAlign: "left" }}>{refErr}</div>}
+              {refErr && <div className="note crit" style={{ marginTop: 10, textAlign: "left" }}>{refErr}</div>}
               <p style={{ margin: "12px 0 0", fontSize: 11.5, color: "var(--p-muted)" }}>
                 Continue anyway skips {refPrompt.names.length === 1 ? "it" : "them"}: the renewal can still be accepted, but those clauses won't be checked.
               </p>
@@ -1015,22 +1129,117 @@ function ContractRecordView() {
         {note && (
           <div className="note ok" style={{ marginBottom: 14, maxWidth: 700 }}>{note}</div>
         )}
-        {acceptError && rec.lifecycle === "draft" && !note && (
-          <div className="note warn" style={{ marginBottom: 14, maxWidth: 700 }}>
-            <b>The renewal was created but could not be made active.</b>{" "}
-            {acceptError}{" "}
-            {a.submit_for_approval && (
-              <button className="btn pri sm" type="button" disabled={!!busy}
-                style={{ marginLeft: 6 }}
-                onClick={() => run("approval", async () => {
-                  await submitForApproval(id);
-                  nav(`/contracts/${id}`, { replace: true });
-                })}>
-                {busy === "approval" ? "Trying…" : "Try again"}
-              </button>
-            )}
+        {/* Reported, never fixed here: an overlap with the version this
+            renews (or the one renewing it) is resolved by a person. */}
+        {!isBrokerSeat() && (rec.period_conflicts ?? []).map(c => {
+          const block = c.severity === "block";
+          const tone = block ? "crit" : "warn";
+          const other = c.with_id ? `contract ${c.with_id}` : "another version";
+          const chip: React.CSSProperties = {
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "5px 10px", borderRadius: 8, fontSize: 12.5,
+            background: "var(--p-surface)", color: "var(--p-ink)",
+            border: "1px solid var(--p-border)",
+          };
+          return (
+            <div key={`${c.code}-${c.with_id}`} style={{
+              display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap",
+              marginBottom: 14, padding: "14px 16px", borderRadius: 12,
+              background: `var(--p-${tone}-soft)`,
+              border: `1px solid color-mix(in srgb, var(--p-${tone}) 30%, transparent)`,
+            }}>
+              <div style={{
+                flex: "none", width: 34, height: 34, borderRadius: "50%",
+                display: "grid", placeItems: "center",
+                background: `color-mix(in srgb, var(--p-${tone}) 18%, transparent)`,
+                color: `var(--p-${tone})`,
+              }}>
+                <AlertTriangle size={17} />
+              </div>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, color: "var(--p-ink)" }}>
+                  {block ? `Dates overlap ${other}` : `Gap between this contract and ${other}`}
+                </div>
+                <div style={{ fontSize: 12.5, color: "var(--p-muted)",
+                              marginTop: 3, lineHeight: 1.45 }}>
+                  {c.span_from
+                    ? (block
+                        ? "Both contracts claim the same days, so a file for those days could match either one."
+                        : "These days belong to no contract, so a file for them has nothing to match.")
+                    : c.message}
+                </div>
+                {c.span_from && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                    <span style={chip}>
+                      <b>{block ? "Overlap" : "Gap"}</b>
+                      {fmtDate(c.span_from)} – {fmtDate(c.span_to)}
+                      {c.days != null && ` · ${c.days} day${c.days === 1 ? "" : "s"}`}
+                    </span>
+                    {c.earliest_start && (
+                      <span style={chip}>
+                        <b>Earliest start</b> {fmtDate(c.earliest_start)}
+                      </span>
+                    )}
+                    {c.with_name && (
+                      <span style={chip} title={c.with_name}>
+                        <FileText size={13} style={{ color: `var(--p-${tone})` }} />
+                        <span style={{ maxWidth: 280, overflow: "hidden",
+                                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {c.with_name}
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                )}
+                <div style={{ fontSize: 12, color: "var(--p-muted)", marginTop: 8 }}>
+                  {rec.actions.edit
+                    ? <>Correct the dates under <b>The contract</b> → <b>Edit terms</b>.</>
+                    : "Reported only — nothing is changed automatically."}
+                </div>
+              </div>
+              {c.with_id && (
+                <Link to={`/contracts/${c.with_id}`} className="btn sm"
+                      style={{ alignSelf: "center" }}>
+                  Open contract {c.with_id} <ArrowRight size={13} />
+                </Link>
+              )}
+            </div>
+          );
+        })}
+        {/* Change period: files and results already handled that the
+            corrected dates leave outside the term. Listed for review only —
+            nothing about them was changed (what to do is a later phase). */}
+        {!isBrokerSeat() && periodItems.length > 0 && (
+          <div style={{
+            marginBottom: 14, padding: "14px 16px", borderRadius: 12,
+            background: "var(--p-warn-soft)",
+            border: "1px solid color-mix(in srgb, var(--p-warn) 30%, transparent)",
+          }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "var(--p-ink)" }}>
+              Files to review after the date change
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--p-muted)", marginTop: 3 }}>
+              {periodItems.length} already handled under this contract
+              {periodItems.length === 1 ? " falls" : " fall"} outside its term now.
+              Nothing about {periodItems.length === 1 ? "it" : "them"} was changed.
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+              {periodItems.map(i => (
+                <span key={`${i.kind}-${i.id}`} style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  padding: "5px 10px", borderRadius: 8, fontSize: 12.5,
+                  background: "var(--p-surface)", color: "var(--p-ink)",
+                  border: "1px solid var(--p-border)",
+                }}>
+                  <FileText size={13} style={{ color: "var(--p-warn)" }} />
+                  {i.label ?? `#${i.id}`} · <b>{i.period}</b>
+                </span>
+              ))}
+            </div>
           </div>
         )}
+        {/* A refused automatic accept (acceptError) is shown in the
+            "Make it active" card on the Summary tab, not here. */}
         {handoff && !note && (
           <div className="note warn" style={{ marginBottom: 14, maxWidth: 700 }}>{handoff}</div>
         )}
@@ -1446,7 +1655,7 @@ function ContractRecordView() {
             {/* The renewal of an uploaded contract: same road as the one it
                 renews — attach the signed copy, then accept. No review, no
                 signing in Kavachio. See contract_routes._awaiting_signed_copy. */}
-            {rec.awaiting_signed_copy && !isBrokerSeat() && (
+            {rec.awaiting_signed_copy && !rec.activation && !isBrokerSeat() && (
               <div className="note" style={{ marginTop: 14 }}>
                 <b>Next: attach the signed renewal contract.</b>{" "}
                 Contract {rec.renews_contract_id} was uploaded, so this renewal
@@ -1456,7 +1665,7 @@ function ContractRecordView() {
               </div>
             )}
 
-            {rec.awaiting_read && !isBrokerSeat() && (
+            {rec.awaiting_read && !rec.activation && !isBrokerSeat() && (
               <div className="note" style={{ marginTop: 14 }}>
                 {/* The PDF is read automatically on Create renewal; this only
                     shows when that read did not finish. */}
@@ -1473,6 +1682,92 @@ function ContractRecordView() {
                 )}
               </div>
             )}
+
+            {/* An uploaded renewal not in force yet. Stays until it is: ready
+                to make active, or each thing in the way with what to do about
+                it. The list is the server's (contract_routes.
+                _renewal_activation) and "Make it active" checks it all again
+                — nothing here is waived. Said once: a refusal lands in this
+                card, not in a second note above it. */}
+            {rec.activation && !isBrokerSeat() && (() => {
+              const act = rec.activation;
+              const ready = act.ready;
+              const canPress = a.submit_for_approval || a.accept_contract
+                || a.carrier_admin_seat;
+              const gapUnticked = ready && act.gaps.length > 0 && !activateGapOk;
+              const lastErr = act.blockers.length ? "" : (activateErr || acceptError || "");
+              const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+              const line = (b: { code: string; message: string; with_id?: number | null }) => {
+                switch (b.code) {
+                  case "signed_copy":
+                    return <>Attach the signed renewal contract: under{" "}
+                      <b>Documents</b>, choose <b>Wording</b>, tick{" "}
+                      <b>This is the signed copy</b> and attach the PDF.</>;
+                  case "unread":
+                    return <>Read the new contract, so files have clauses to be
+                      checked against.{" "}
+                      {a.generate_rules && (
+                        <button className="btn sm" type="button" disabled={!!busy}
+                                onClick={doGenerate} style={{ marginLeft: 6 }}>
+                          {busy === "rules" ? "Reading…" : "Read it now"}
+                        </button>
+                      )}</>;
+                  case "references":
+                    return <>Upload the reference documents named at the top of
+                      the page.</>;
+                  case "dates":
+                    return <>Its dates overlap{" "}
+                      {b.with_id ? `contract ${b.with_id}` : "another version"}.
+                      Correct them under <b>The contract</b> →{" "}
+                      <b>Edit terms</b>.</>;
+                  default:
+                    return cap(b.message);
+                }
+              };
+              return (
+                <div className={ready ? "note" : "note warn"} style={{ marginTop: 14 }}>
+                  <b>{ready ? "Ready but not active yet." : "Not ready to go in force yet."}</b>{" "}
+                  {ready
+                    ? <>Making it active puts it in force{rec.inception_dt
+                        ? ` from ${fmtDate(rec.inception_dt)}` : ""}
+                        {rec.renews_contract_id
+                          ? ` and replaces contract ${rec.renews_contract_id}` : ""}.</>
+                    : act.blockers.length === 1 ? line(act.blockers[0]) : null}
+                  {!ready && act.blockers.length > 1 && (
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                      {act.blockers.map(b => <li key={b.code}>{line(b)}</li>)}
+                    </ul>
+                  )}
+                  {/* The gap itself is described in the note at the top of
+                      the page (period_conflicts); here only the tick. */}
+                  {ready && act.gaps.length > 0 && (
+                    <label style={{ display: "flex", gap: 8, alignItems: "center",
+                                    marginTop: 8, fontWeight: 500 }}>
+                      <input type="checkbox" checked={activateGapOk}
+                             onChange={e => setActivateGapOk(e.target.checked)} />
+                      I confirm the gap is intended
+                      {` (${act.gaps.map(g => `${g.days} day${g.days === 1 ? "" : "s"}`).join(", ")}, shown above)`}
+                    </label>
+                  )}
+                  {lastErr && (
+                    <div style={{ marginTop: 8, color: "var(--p-crit-ink)" }}>
+                      <b>Not made active.</b> {lastErr}
+                    </div>
+                  )}
+                  {canPress && (
+                    <div style={{ marginTop: 10 }}>
+                      <button className="btn pri" type="button"
+                              disabled={!!busy || !ready || gapUnticked}
+                              onClick={makeActive}>
+                        <ShieldCheck size={13} />
+                        {busy === "activate" ? "Making it active…"
+                          : a.carrier_admin_seat ? "Make it active" : "Send to the carrier"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Said once, above the buttons, because no state name on this
                 page says it: the contract is inside the carrier and the broker
@@ -1550,8 +1845,9 @@ function ContractRecordView() {
                   that genuinely does need the broker to look — it is just no
                   longer the road the screen points at. */}
               {/* Not on an uploaded renewal: Create renewal accepts it itself
-                  (finishRenewal); a refusal shows its own Try again above. */}
-              {a.submit_for_approval && !(rec.renews_contract_id && isUploaded) && (
+                  (finishRenewal), and until it is active the "Make it
+                  active" card above is its one button. */}
+              {a.submit_for_approval && !rec.activation && (
                 <button
                   className="btn pri" type="button" disabled={!!busy}
                   onClick={() => run("approval", () => submitForApproval(id))}
@@ -1564,7 +1860,7 @@ function ContractRecordView() {
                     : "Send to the carrier"}
                 </button>
               )}
-              {a.accept_contract && (
+              {a.accept_contract && !rec.activation && (
                 <button
                   className="btn pri" type="button" disabled={!!busy}
                   onClick={() => run("accept-contract", () => acceptContract(id))}
@@ -1659,7 +1955,15 @@ function ContractRecordView() {
               )}
               {a.renew && (
                 <button className="btn" type="button"
-                        onClick={() => setShowRenew(v => !v)}>
+                        onClick={() => {
+                          // Starts on the day the rules allow first: a
+                          // handover for a "1 Oct – 1 Oct" term, else the day
+                          // after this one ends. The person can change it.
+                          if (!showRenew && !renewFrom && rec.renewal?.suggested_inception) {
+                            renewTerm.onInception(rec.renewal.suggested_inception);
+                          }
+                          setShowRenew(v => !v);
+                        }}>
                   <ArrowRight size={13} /> Renew
                 </button>
               )}
@@ -1683,6 +1987,13 @@ function ContractRecordView() {
                   Renewal opens on <b>{fmtDate(rec.renewal.opens_on)}</b>
                   {" "}({rec.renewal.window_days} days before expiry)
                 </span>
+              )}
+              {/* Change period (Phase B): correct dates entered wrongly.
+                  Never a termination — that stays the button beside it. */}
+              {rec.period_change?.can_change && !isBrokerSeat() && (
+                <button className="btn" type="button" onClick={() => setShowPeriod(true)}>
+                  <CalendarRange size={13} /> Change period
+                </button>
               )}
               {a.terminate && (
                 <button className="btn danger" type="button"
@@ -2034,6 +2345,26 @@ function ContractRecordView() {
                     )}
                   </div>
                 </div>
+                {/* Overlap with this contract: refused, said here before the
+                    button is pressed. A gap: allowed once ticked (it is
+                    recorded in the audit log with who confirmed it). */}
+                {renewCheck?.conflicts.filter(c => c.severity === "block").map(c => (
+                  <div key={c.code} className="note crit" style={{ marginTop: 12 }}>
+                    <b>These dates overlap this contract.</b> {c.message}
+                  </div>
+                ))}
+                {!renewCheck?.blocked && renewCheck?.conflicts
+                  .filter(c => c.severity === "warn").map(c => (
+                  <div key={c.code} className="note warn" style={{ marginTop: 12 }}>
+                    <b>Gap between the two contracts.</b> {c.message}
+                    <label style={{ display: "flex", gap: 8, alignItems: "center",
+                                    marginTop: 8, fontWeight: 500 }}>
+                      <input type="checkbox" checked={renewGapOk}
+                             onChange={e => setRenewGapOk(e.target.checked)} />
+                      I confirm the gap is intended
+                    </label>
+                  </div>
+                ))}
                 {!rec.class_of_business && (
                   <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
                     <label>Class of business</label>
@@ -2120,12 +2451,15 @@ function ContractRecordView() {
                     disabled={!renewFrom || !renewTo || !!busy
                               || (!rec.class_of_business && !renewClass.trim())
                               || (isUploaded && !renewNewDoc)
-                              || (isUploaded && renewNewDoc === "yes" && !renewFile)}
+                              || (isUploaded && renewNewDoc === "yes" && !renewFile)
+                              || !!renewCheck?.blocked
+                              || (!!renewCheck?.needs_confirm && !renewGapOk)}
                     onClick={() => run("renew", async () => {
                       const created = await renewContract(id, {
                         inception_dt: renewFrom, expiry_dt: renewTo,
                         ...(rec.class_of_business ? {} : { class_of_business: renewClass.trim() }),
-                        ...(isUploaded && renewNewDoc === "no" ? { same_wording: true } : {}) });
+                        ...(isUploaded && renewNewDoc === "no" ? { same_wording: true } : {}),
+                        ...(renewCheck?.needs_confirm && renewGapOk ? { confirm_gap: true } : {}) });
                       setRenewNewDoc("");
                       if (isUploaded && renewNewDoc === "yes" && renewFile) {
                         // The renewal exists either way; if the attach fails,
@@ -3409,8 +3743,39 @@ function ContractRecordView() {
                     <li key={i} className={i === history.length - 1 ? "now" : ""}>
                       <span className="dot" aria-hidden="true" />
                       <div className="what">
-                        {h.action.replace(/_/g, " ")}
+                        {HISTORY_ACTION[h.action] ?? h.action.replace(/_/g, " ")}
+                        {(() => {
+                          // Carrier-only facts about a date correction: the
+                          // "large" flag, and Undo on the latest one.
+                          const ref = (h.proposed_changes?.[0] as { ref?: string } | undefined)?.ref;
+                          const entry = ref ? rec.period_change?.history.find(x => x.ref === ref) : undefined;
+                          if (!entry) return null;
+                          return (<>
+                            {entry.large && (
+                              <span className="badge b-warn" style={{ marginLeft: 8 }}>
+                                <span className="d" />Large correction
+                              </span>
+                            )}
+                            {entry.kind === "correction" && periodLatest?.ref === entry.ref && undoInfo && (
+                              <button className="btn sm" type="button" style={{ marginLeft: 8 }}
+                                      disabled={undoInfo.blockers.length > 0}
+                                      title={undoInfo.blockers.map(b => b.message).join(" ")}
+                                      onClick={() => setShowUndo(true)}>
+                                <Undo2 size={12} /> Undo
+                              </button>
+                            )}
+                          </>);
+                        })()}
                       </div>
+                      {(() => {
+                        const ref = (h.proposed_changes?.[0] as { ref?: string } | undefined)?.ref;
+                        if (!ref || periodLatest?.ref !== ref || !undoInfo?.blockers.length) return null;
+                        return (
+                          <div className="sub" style={{ marginTop: 2 }}>
+                            Can't be undone: {undoInfo.blockers[0].message}
+                          </div>
+                        );
+                      })()}
                       <div className="when">
                         {fmtStamp(h.acted_at)}
                         {h.acted_by && <> · {h.acted_by.full_name}</>}
@@ -3418,10 +3783,14 @@ function ContractRecordView() {
                       {h.note && <div className="said">“{h.note}”</div>}
                       {h.proposed_changes?.length > 0 && h.proposed_changes.map((ch, j) => (
                         <div className="moved" key={j}>
-                          <b>{labelOf(ch.field)}</b>{" "}
-                          <span className="mono">{ch.current || "—"}</span>
+                          <b>{DATE_FIELD_LABEL[ch.field] ?? labelOf(ch.field)}</b>{" "}
+                          <span className="mono">
+                            {DATE_FIELD_LABEL[ch.field] ? fmtDate(ch.current) : (ch.current || "—")}
+                          </span>
                           <span className="arrow">→</span>
-                          <span className="mono">{ch.proposed || "—"}</span>
+                          <span className="mono">
+                            {DATE_FIELD_LABEL[ch.field] ? fmtDate(ch.proposed) : (ch.proposed || "—")}
+                          </span>
                           {ch.comment && <div className="sub">{ch.comment}</div>}
                         </div>
                       ))}

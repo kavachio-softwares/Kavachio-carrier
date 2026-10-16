@@ -70,7 +70,18 @@ router = APIRouter()
 # The kinds of document a contract can hold. See ContractDocument for what each
 # one MEANS — the difference between a reference and an endorsement is the whole
 # reason this is not a single blob column.
-DOC_KINDS = ("contract", "reference", "endorsement")
+DOC_KINDS = ("contract", "reference", "endorsement", "evidence")
+
+
+def _doc_visible(d: ContractDocument, p: Principal | None) -> bool:
+    """May this caller see this document at all? An `evidence` file (what a
+    large date correction rests on, Phase B / B1) is the carrier's own record:
+    never a broker's, and never served where the caller is not known. Applied
+    on the SERVER — the record, the document list and the download — so a
+    screen that forgot to hide it could still not show it."""
+    if d.kind != "evidence":
+        return True
+    return p is not None and not p.is_broker
 
 
 # =============================================================================
@@ -482,17 +493,187 @@ def _renewal_dict(s, c: Contract, p: Principal | None,
     gate = renewal_gate(_effective_lifecycle(c), c.expiry_dt, _today(),
                         window, succ)
     carrier = bool(p and not p.is_broker)
+    import renewal_chain as _rc
+    suggested = _rc.suggested_inception(c)
     return {
         "allowed": gate["allowed"],
         "reason": gate["reason"],
         "opens_on": (str(gate["opens_on"]) if carrier and gate["opens_on"]
                      else None),
         "window_days": window,
+        # Where the Renew form starts its inception (renewal_chain.
+        # suggested_inception): the end date for a "1 Oct – 1 Oct" term (a
+        # handover), else the day after.
+        "suggested_inception": (str(suggested) if carrier and gate["allowed"]
+                                and suggested else None),
         "existing": ({"id": succ.id,
                       "name": succ.name or succ.filename or f"Contract {succ.id}",
                       "lifecycle": _effective_lifecycle(succ)}
                      if carrier and succ is not None else None),
     }
+
+
+def _period_conflicts(s, c: Contract,
+                      successors: dict[int, Contract] | None = None) -> list[dict]:
+    """This version's overlaps and gaps with the version it renews and the one
+    that renews it (renewal_chain.term_conflicts). Reported, never fixed."""
+    import renewal_chain as _rc
+    prev = s.get(Contract, c.renews_contract_id) if c.renews_contract_id else None
+    nxt = (successors.get(c.id) if successors is not None
+           else _successors(s, [c.id]).get(c.id))
+    if prev is None and nxt is None:
+        return []
+    return _rc.term_conflicts(c.inception_dt, c.expiry_dt, prev=prev,
+                              next_version=nxt)
+
+
+def _gap_already_confirmed(s, c: Contract, gap: dict) -> bool:
+    """Has somebody already said this gap is intended (D2)? Read from the audit
+    log: a contract_term_gap_confirmed row for either side of the gap, naming
+    the other side and the same number of days. Dates moved since then make a
+    different gap, which is asked about again."""
+    from db import ActivityEvent
+    other = gap.get("with_id")
+    pairs = {(c.id, other), (other, c.id)}
+    # A gap confirmed while correcting a contract's dates (Change period) is
+    # recorded on that correction or undo row, as `gaps_confirmed`.
+    rows = (s.query(ActivityEvent.target, ActivityEvent.details)
+            .filter(ActivityEvent.action.in_(("contract_term_gap_confirmed",
+                                              "contract_period_corrected",
+                                              "contract_period_correction_undone")),
+                    ActivityEvent.tenant_id == c.tenant_id,
+                    ActivityEvent.target.in_([f"contract:{c.id}",
+                                              f"contract:{other}"]))
+            .all())
+    for target, details in rows:
+        try:
+            owner = int(str(target).split(":", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        d = details or {}
+        for g in (d.get("gaps") or []) + (d.get("gaps_confirmed") or []):
+            if ((owner, g.get("with_id")) in pairs
+                    and g.get("days") == gap.get("days")):
+                return True
+    return False
+
+
+def _detail_text(detail) -> str:
+    """An HTTPException's detail as one sentence."""
+    if isinstance(detail, dict):
+        return str(detail.get("message") or detail)
+    return str(detail)
+
+
+def _parties_reason(s, c: Contract, e: HTTPException) -> str:
+    """_recheck_renewal_parties' refusal, said so a person can act on it. Its
+    404s ("contract not found") are written not to reveal another carrier's
+    records to an outsider — but this is the carrier's own contract naming its
+    own broker, and "not found" on a page showing the contract explains
+    nothing."""
+    if e.status_code != 404:
+        return _detail_text(e.detail)
+    party = s.get(Party, c.broker_party_id) if c.broker_party_id else None
+    if party is not None and not _carrier_works_with(s, c.broker_party_id,
+                                                     party.tenant_id, c.tenant_id):
+        return (f"its broker, {party.legal_name}, is recorded under another "
+                f"organisation, not as one of this carrier's brokers. The "
+                f"broker needs to be set up for this carrier first.")
+    return "its programme is not open to this carrier any more."
+
+
+def _renewal_activation(s, c: Contract, docs: list[ContractDocument],
+                        missing: list[str], signed_copy_due: bool,
+                        p: Principal | None,
+                        successors: dict[int, Contract] | None = None
+                        ) -> Optional[dict]:
+    """Can this UPLOADED renewal be made active now — and if not, why not.
+
+    Its "Make it active" stays on the page until it is (B5), so the page needs
+    the same answer the server will give when it is pressed:
+    _check_renewal_activation refuses on exactly these blockers. Nothing here
+    is waived — the signed copy, the read, the references, the people it names
+    and its dates are what an uploaded renewal needs to go in force. A gap is
+    not a blocker; it is asked about once (D2) and then remembered.
+
+    None when it does not apply: not a renewal, not on the uploaded road, past
+    the point of activating, or a broker asking.
+    """
+    if (not c.renews_contract_id or p is None or p.is_broker
+            or _effective_lifecycle(c) not in ("draft", "pending")
+            or not (signed_copy_due or _is_uploaded(c))):
+        return None
+    blockers: list[dict] = []
+    wording = [d for d in docs if d.is_active and d.kind == "contract"]
+    if signed_copy_due:
+        blockers.append({
+            "code": "signed_copy",
+            "message": "the signed renewal contract (PDF) is not attached yet."})
+    elif wording and not any(d.is_executed_copy for d in wording):
+        blockers.append({
+            "code": "signed_copy_unmarked",
+            "message": "the renewal PDF on file is not marked as the signed "
+                       "copy. Attach the signed PDF again under Documents with "
+                       "“This is the signed copy” ticked."})
+    if wording and not _has_clauses(s, c.id):
+        blockers.append({
+            "code": "unread",
+            "message": "the new contract has not been read yet, so there is "
+                       "nothing to check files against."})
+    if missing:
+        blockers.append({
+            "code": "references",
+            "message": "it refers to documents that are not on file: "
+                       + ", ".join(missing) + "."})
+    try:
+        _recheck_renewal_parties(s, p, c)
+    except HTTPException as e:
+        blockers.append({"code": "parties", "message": _parties_reason(s, c, e)})
+    gaps: list[dict] = []
+    import renewal_chain as _rc
+    if _rc.overlap_check_enabled():
+        conflicts = _period_conflicts(s, c, successors)
+        blockers += [{"code": "dates", "message": b["message"],
+                      "with_id": b["with_id"]} for b in _rc.blocking(conflicts)]
+        gaps = [w for w in _rc.warnings(conflicts)
+                if not _gap_already_confirmed(s, c, w)]
+    return {"ready": not blockers, "blockers": blockers, "gaps": gaps}
+
+
+def _check_renewal_activation(s, c: Contract, p: Principal, *,
+                              confirmed: bool) -> list[dict]:
+    """Refuse to put an uploaded renewal in force while _renewal_activation
+    names anything in the way, and ask about a gap nobody has confirmed yet.
+    Returns the gaps confirmed now, for the audit log after the commit."""
+    docs = s.query(ContractDocument).filter(
+        ContractDocument.contract_id == c.id).all()
+    act = _renewal_activation(s, c, docs, _missing_references(c, docs),
+                              _awaiting_signed_copy(s, c), p)
+    if act is None:
+        return []
+    if act["blockers"]:
+        raise HTTPException(409, {
+            "message": ("This renewal cannot go in force yet: "
+                        + act["blockers"][0]["message"]),
+            "errors": {},
+            "blockers": act["blockers"]})
+    if act["gaps"] and not confirmed:
+        g = act["gaps"][0]
+        raise HTTPException(409, {
+            "message": g["message"] + " Confirm the gap is intended to go ahead.",
+            "errors": {},
+            "conflicts": act["gaps"],
+            "needs_confirm": True})
+    return act["gaps"]
+
+
+def _period_change_info(s, c: Contract, p: Principal | None) -> Optional[dict]:
+    import period_change as pc
+    if not pc.enabled() or p is None or p.is_broker:
+        return None
+    allowed = pc.allowed(_effective_lifecycle(c))
+    return {"allowed": allowed, "can_change": any(allowed.values()),
+            "large_days": pc.large_days(), "history": _period_history(s, c)}
 
 
 def _renewal_history(s, c: Contract, p: Principal | None) -> list[dict]:
@@ -556,10 +737,11 @@ def _record(s, c: Contract, *, with_docs: bool = True,
             if c.output_template_id else None)
     docs = []
     if with_docs:
-        docs = (s.query(ContractDocument)
-                .filter(ContractDocument.contract_id == c.id)
-                .order_by(ContractDocument.created_at.desc())
-                .all())
+        docs = [d for d in (s.query(ContractDocument)
+                            .filter(ContractDocument.contract_id == c.id)
+                            .order_by(ContractDocument.created_at.desc())
+                            .all())
+                if _doc_visible(d, p)]
 
     ctype = (c.contract_type or "")
     known_type = ctype in ct.CONTRACT_TYPES
@@ -649,6 +831,20 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # renewal already made (linked instead of a second Renew), and the date
         # Renew opens for an active contract not yet in its window.
         "renewal": renewal,
+        # This version against the ones either side of it (D1/D2): overlaps and
+        # gaps, for the amber note. Carrier side only; full record only.
+        "period_conflicts": (_period_conflicts(s, c, successors)
+                             if with_docs and p is not None and not p.is_broker
+                             else None),
+        # An uploaded renewal not yet in force: ready to make active, or what
+        # is in the way (B5). Carrier side only; full record only.
+        "activation": (_renewal_activation(s, c, docs, missing, signed_copy_due,
+                                           p, successors)
+                       if with_docs else None),
+        # Change period (Phase B): which dates this carrier may correct now,
+        # and the corrections made (newest first, never the internal note).
+        # Carrier side, full record, only while the switch is on.
+        "period_change": _period_change_info(s, c, p) if with_docs else None,
         "submitted_at": _iso_utc(c.submitted_at),
         "created_at": _iso_utc(c.created_at),
 
@@ -1520,6 +1716,22 @@ def _as_date(v: Any) -> Optional[dt.date]:
     return dt.date.fromisoformat(str(v)[:10])
 
 
+def _carrier_works_with(s, party_id: int, party_tenant_id: Optional[int],
+                        tenant_id: int) -> bool:
+    """Is this organisation one of this carrier's? Its own (or a shared,
+    tenant-less) party — or a broker it has an active relationship with.
+
+    A broker works with several carriers (carrier_broker, 21–27 Sep); its party
+    row stays under the carrier that first brought it in. Testing the row's
+    tenant alone refused every later carrier's contract with that broker as
+    "contract not found" (7758 and its predecessor 3813, 16 Oct 2026). One
+    definition of "works with": db.carrier_broker_ids."""
+    if party_tenant_id in (None, tenant_id):
+        return True
+    from db import carrier_broker_ids
+    return party_id in carrier_broker_ids(s, tenant_id)
+
+
 def _check_counterparty(s, p: Principal, spec: dict, program_id: int,
                         party_id: Optional[int], tenant_id: int) -> None:
     """The counterparty must be the RIGHT KIND of organisation for the type.
@@ -1535,7 +1747,7 @@ def _check_counterparty(s, p: Principal, spec: dict, program_id: int,
     if party is None:
         raise HTTPException(400, {"message": "That organisation does not exist.",
                                   "errors": {"counterparty_party_id": "not found"}})
-    if party.tenant_id not in (None, tenant_id):
+    if not _carrier_works_with(s, party_id, party.tenant_id, tenant_id):
         raise HTTPException(404, "contract not found")
 
     want = spec["counterparty_party_type"]
@@ -2108,6 +2320,12 @@ def update_contract(contract_id: int, body: dict,
     """
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
+        # A date edit is checked against the neighbouring versions further
+        # down. Lock this row and theirs first — before anything on `c` is
+        # changed, in the order a date correction takes them — and read them
+        # again once held, so a correction committed meanwhile is seen.
+        if isinstance(body, dict) and ({"inception_dt", "expiry_dt"} & set(body)):
+            _period_neighbours(s, c, lock=True)
         state = _effective_lifecycle(c)
         # `changes_requested` is editable BY THE CARRIER and nobody else: the
         # broker asked for a change and this is the carrier answering it. Left
@@ -2166,12 +2384,24 @@ def update_contract(contract_id: int, body: dict,
                 raise _bad_fields(e)
             c.contract_type = new_type
 
+        dates_before = (c.inception_dt, c.expiry_dt)
         for name, value in clean.items():
             if name == "counterparty_party_id":
                 continue
             attr = ct.FIELDS[name]["attr"]
             kind = ct.FIELDS[name]["kind"]
             setattr(c, attr, _as_date(value) if kind == "date" else value)
+
+        # New dates next to the versions either side of this one (D1/D2/D8):
+        # an overlap is refused, a gap needs body["confirm_gap"].
+        term_gap: list[dict] = []
+        if (c.inception_dt, c.expiry_dt) != dates_before:
+            prev_v = s.get(Contract, c.renews_contract_id) if c.renews_contract_id else None
+            next_v = _successors(s, [c.id]).get(c.id)
+            if prev_v is not None or next_v is not None:
+                term_gap = _check_term(c.inception_dt, c.expiry_dt, prev=prev_v,
+                                       next_version=next_v,
+                                       confirmed=bool(body.get("confirm_gap")))
 
         # The SUBSTANCE of the contract, not just its identity. A draft is a
         # contract nobody has agreed to yet, so everything about it has to be
@@ -2281,6 +2511,8 @@ def update_contract(contract_id: int, body: dict,
 
         s.commit()
         s.refresh(c)
+        if term_gap:
+            _log_gap_confirmed(s, c, p, term_gap)
 
         # A TERM THAT MOVED TAKES ITS CHECK WITH IT. Only for a contract whose
         # checks were already written: binding one that nobody has bound would
@@ -2373,11 +2605,34 @@ def _move(c: Contract, to: str) -> None:
             409, f"a {frm} contract cannot become {to}"
                  + (f" — only {', '.join(allowed)}." if allowed
                     else ", because that is where its life ended."))
+    if to == "active" and c.renews_contract_id:
+        _check_live_term(c)
     c.lifecycle = to
     c.lifecycle_effective_date = _today()
     if to == "active" and c.renews_contract_id:
         _supersede_predecessor(c)
         _mark_renewal_live(c)
+
+
+def _check_live_term(c: Contract) -> None:
+    """The last line of defence (D1): a renewal does not go in force while its
+    dates overlap the version it renews — whichever road brought it here.
+    Gaps were confirmed when the dates were set and are not asked again."""
+    import renewal_chain as _rc
+    if not _rc.overlap_check_enabled():
+        return
+    from sqlalchemy.orm import object_session
+    s = object_session(c)
+    prev = s.get(Contract, c.renews_contract_id) if s is not None else None
+    if prev is None:
+        return
+    blocks = _rc.blocking(_rc.term_conflicts(
+        getattr(c, "inception_dt", None), getattr(c, "expiry_dt", None), prev=prev))
+    if blocks:
+        raise HTTPException(409, {
+            "message": "This renewal cannot go in force yet: " + blocks[0]["message"],
+            "errors": _term_field_errors(blocks),
+            "conflicts": blocks})
 
 
 def _supersede_predecessor(c: Contract) -> None:
@@ -2484,6 +2739,13 @@ def _recheck_renewal_parties(s, p: Principal, c: Contract) -> None:
 
 class Note(BaseModel):
     note: Optional[str] = None
+
+
+class AcceptNote(Note):
+    """Accepting an uploaded contract. `confirm_gap`: for a renewal whose dates
+    leave days that belong to no version — the person has seen and accepted
+    the gap (D2)."""
+    confirm_gap: bool = False
 
 
 # =============================================================================
@@ -2771,7 +3033,7 @@ def _accept_uploaded(s, c: Contract, p: Principal,
 
 
 @router.post("/contracts/{contract_id}/submit-for-approval")
-def submit_for_approval(contract_id: int, body: Note = Note(),
+def submit_for_approval(contract_id: int, body: AcceptNote = AcceptNote(),
                         p: Principal = Depends(current_principal)):
     """Send an uploaded contract up to the carrier admin to be accepted.
 
@@ -2785,14 +3047,20 @@ def submit_for_approval(contract_id: int, body: Note = Note(),
         if state != "draft":
             raise HTTPException(
                 409, f"only a draft goes up for approval — this one is {state}.")
+        # With the approval flow off (the default) nobody waits: accepted now.
+        from carrier_scope import carrier_approvals_enabled
+        admin = _speaks_for_carrier(p) or not carrier_approvals_enabled()
+        # An uploaded renewal is held to everything it needs before anything
+        # is written, so a refusal names the missing piece (B5) — ahead of the
+        # check below, which would call a renewal still waiting for its signed
+        # copy "written here".
+        gaps = (_check_renewal_activation(s, c, p, confirmed=body.confirm_gap)
+                if admin else [])
         if not _is_uploaded(c):
             raise HTTPException(
                 409, "this contract was written here, so it takes the ordinary "
                      "road: the broker agrees the terms, then your carrier "
                      "signs it.")
-        # With the approval flow off (the default) nobody waits: accepted now.
-        from carrier_scope import carrier_approvals_enabled
-        admin = _speaks_for_carrier(p) or not carrier_approvals_enabled()
         blocked_by = None
         if admin:
             blocked_by = _accept_uploaded(s, c, p, body.note)
@@ -2808,6 +3076,8 @@ def submit_for_approval(contract_id: int, body: Note = Note(),
         s.commit()
         s.refresh(c)
         rec = _record(s, c, p=p)
+        if gaps:
+            _log_gap_confirmed(s, c, p, gaps)
         if admin:
             _log_contract_event(s, c, p, "contract_accepted", body.note)
         else:
@@ -2820,7 +3090,7 @@ def submit_for_approval(contract_id: int, body: Note = Note(),
 
 
 @router.post("/contracts/{contract_id}/accept")
-def accept_contract(contract_id: int, body: Note = Note(),
+def accept_contract(contract_id: int, body: AcceptNote = AcceptNote(),
                     p: Principal = Depends(current_principal)):
     """The carrier admin accepts an uploaded contract, and it goes in force."""
     _require_carrier(p)
@@ -2831,11 +3101,14 @@ def accept_contract(contract_id: int, body: Note = Note(),
             raise HTTPException(
                 409, f"this contract is not waiting on you — it is {state}.")
         _assert_speaks_for_carrier(p, "accept a contract")
+        gaps = _check_renewal_activation(s, c, p, confirmed=body.confirm_gap)
         author = c.submitted_by_user_id
         blocked_by = _accept_uploaded(s, c, p, body.note)
         s.commit()
         s.refresh(c)
         rec = _record(s, c, p=p)
+        if gaps:
+            _log_gap_confirmed(s, c, p, gaps)
         _log_contract_event(s, c, p, "contract_accepted", body.note)
         _notify_contract_accepted(s, c, p, author)
         rec["signature_note"] = (
@@ -3316,7 +3589,7 @@ def submit_signed(contract_id: int, body: SignedSubmission = SignedSubmission(),
         doc = None
         if body.document_id is not None:
             doc = s.get(ContractDocument, body.document_id)
-            if not doc or doc.contract_id != c.id:
+            if not doc or doc.contract_id != c.id or not _doc_visible(doc, p):
                 raise HTTPException(404, "that document is not on this contract")
             if doc.kind != "contract":
                 raise HTTPException(
@@ -3726,8 +3999,15 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
         doc_id = None
         if body.document_id is not None:
             doc = s.get(ContractDocument, body.document_id)
-            if not doc or doc.contract_id != c.id:
+            # An evidence file is not found for a broker (B1), and no
+            # reference, endorsement or evidence file can be the signed copy —
+            # the same rule as submit_signed.
+            if not doc or doc.contract_id != c.id or not _doc_visible(doc, p):
                 raise HTTPException(404, "that document is not on this contract")
+            if doc.kind != "contract":
+                raise HTTPException(
+                    400, "the signed copy is the WORDING, not a reference, an "
+                         "endorsement or an evidence file")
             doc.is_executed_copy = True
             doc_id = doc.id
 
@@ -3970,6 +4250,68 @@ class Renewal(BaseModel):
     # contract's PDF and gets its own copy of the clauses, terms and checks
     # (see _copy_contract_rules). Off by default: a new PDF is the normal road.
     same_wording: bool = False
+    # A gap between the renewed contract's end and this start is allowed, but
+    # only once somebody has said so (renewal_chain.term_conflicts, D2).
+    confirm_gap: bool = False
+
+
+def _check_term(new_inception, new_expiry, *, prev, next_version,
+                confirmed: bool) -> list[dict]:
+    """Refuse dates that overlap a neighbouring version (D1), and a gap nobody
+    confirmed (D2). Returns the confirmed gap warnings (to be recorded), or [].
+
+    409 shapes the screens read: {"message", "conflicts"} for an overlap, and
+    {"message", "conflicts", "needs_confirm": true} for an unconfirmed gap.
+    RENEWAL_OVERLAP_CHECK=false skips all of it."""
+    import renewal_chain as _rc
+    if not _rc.overlap_check_enabled():
+        return []
+    found = _rc.term_conflicts(new_inception, new_expiry, prev=prev,
+                               next_version=next_version)
+    blocks = _rc.blocking(found)
+    if blocks:
+        raise HTTPException(409, {"message": blocks[0]["message"],
+                                  "errors": _term_field_errors(blocks),
+                                  "conflicts": found})
+    gaps = _rc.warnings(found)
+    if gaps and not confirmed:
+        raise HTTPException(409, {"message": gaps[0]["message"]
+                                  + " Confirm the gap to continue.",
+                                  "errors": _term_field_errors(gaps),
+                                  "conflicts": found, "needs_confirm": True})
+    return gaps
+
+
+# Which date field each conflict is about — so the screens (fieldErrors) show
+# the server's sentence and mark the date, instead of "That could not be saved."
+_TERM_FIELD = {"overlaps_previous": "inception_dt", "gap_after_previous": "inception_dt",
+               "no_days": "inception_dt", "overlaps_next": "expiry_dt",
+               "overlaps_draft_renewal": "expiry_dt", "gap_before_next": "expiry_dt",
+               "expiry_before_inception": "expiry_dt"}
+
+
+def _term_field_errors(conflicts: list[dict]) -> dict:
+    out: dict = {}
+    for c in conflicts:
+        out.setdefault(_TERM_FIELD.get(c["code"], "inception_dt"), c["message"])
+    return out
+
+
+def _log_gap_confirmed(s, c: Contract, p: Principal, gaps: list[dict]) -> None:
+    """Who accepted a gap between two versions, and how long it was (D2)."""
+    try:
+        from audit import log_activity
+        log_activity(c.tenant_id, _principal_email_for(s, p),
+                     "contract_term_gap_confirmed",
+                     target=f"contract:{c.id}",
+                     details={"contract_id": c.id,
+                              "name": c.name or c.filename or f"Contract {c.id}",
+                              "gaps": [{"code": g["code"], "days": g["days"],
+                                        "with_id": g["with_id"],
+                                        "message": g["message"]} for g in gaps]},
+                     principal=p)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _copy_contract_rules(s, old_id: int, new_id: int,
@@ -4110,8 +4452,10 @@ def renew_contract(contract_id: int, body: Renewal,
     with SessionLocal() as s:
         old = _contract_access(s, p, contract_id)
         # Locked, so two Renew clicks at once cannot both find "not renewed
-        # yet" and make two renewals.
-        s.query(Contract.id).filter(Contract.id == old.id).with_for_update().first()
+        # yet" and make two renewals — and read again once held, so a date
+        # correction committed while we waited is what the checks below see.
+        (s.query(Contract).filter(Contract.id == old.id)
+         .with_for_update().populate_existing().first())
         state = _effective_lifecycle(old)
         existing = (s.query(Contract)
                     .filter(Contract.renews_contract_id == old.id)
@@ -4130,6 +4474,11 @@ def renew_contract(contract_id: int, body: Renewal,
                      f"expires.")
         if not gate["allowed"]:
             raise HTTPException(409, f"a {state} contract cannot be renewed")
+        # The new term next to the one it renews (D1/D2): an overlap is
+        # refused, a gap needs confirm_gap. Nothing is created before this.
+        gap = _check_term(_as_date(body.inception_dt), _as_date(body.expiry_dt),
+                          prev=old, next_version=None,
+                          confirmed=body.confirm_gap)
 
         new = Contract(
             program_id=old.program_id,
@@ -4224,9 +4573,72 @@ def renew_contract(contract_id: int, body: Renewal,
 
         s.commit()
         s.refresh(new)
+        if gap:
+            _log_gap_confirmed(s, new, p, gap)
         out = _record(s, new, p=p)
         if copied is not None:
             out["copied_from_previous"] = copied
+        return out
+
+
+@router.get("/contracts/{contract_id}/renewal-check")
+def renewal_check(contract_id: int, inception_dt: Optional[str] = None,
+                  expiry_dt: Optional[str] = None,
+                  p: Principal = Depends(current_principal)):
+    """The Renew form asks this as the dates change: would a renewal of this
+    contract with these dates overlap it (refused) or leave a gap (to
+    confirm)? The same rule POST /renew applies. Writes nothing."""
+    _require_carrier(p)
+    import renewal_chain as _rc
+    with SessionLocal() as s:
+        old = _contract_access(s, p, contract_id)
+        found = (_rc.term_conflicts(_as_date(inception_dt), _as_date(expiry_dt),
+                                    prev=old)
+                 if _rc.overlap_check_enabled() else [])
+        sugg = _rc.suggested_inception(old)
+        return {
+            "conflicts": found,
+            "blocked": bool(_rc.blocking(found)),
+            "needs_confirm": bool(_rc.warnings(found)),
+            "suggested_inception": str(sugg) if sugg else None,
+            "previous_ends": (str(_rc.term_end(old)) if _rc.term_end(old) else None),
+        }
+
+
+@router.get("/renewal-conflicts")
+def renewal_conflicts(p: Principal = Depends(current_principal)):
+    """Every renewal whose dates overlap, or leave a gap with, the version it
+    renews — a carrier's own, or every carrier's for Kavachio staff. A REPORT:
+    nothing here changes a contract; a person resolves each one."""
+    if p.is_broker:
+        raise HTTPException(403, "brokers do not see this report")
+    import renewal_chain as _rc
+    with SessionLocal() as s:
+        q = s.query(Contract).filter(Contract.renews_contract_id.isnot(None))
+        if not getattr(p, "is_platform_admin", False):
+            q = q.filter(Contract.tenant_id == p.tenant_id)
+        rows = q.order_by(Contract.id).all()
+        prevs = {c.id: c for c in s.query(Contract).filter(
+            Contract.id.in_([r.renews_contract_id for r in rows])).all()} if rows else {}
+        out = []
+        for new in rows:
+            old = prevs.get(new.renews_contract_id)
+            if old is None:
+                continue
+            for f in _rc.term_conflicts(new.inception_dt, new.expiry_dt, prev=old):
+                out.append({
+                    "kind": "overlap" if f["severity"] == "block" else "gap",
+                    "days": f["days"], "message": f["message"],
+                    "previous": {"id": old.id, "name": old.name or old.filename,
+                                 "lifecycle": _effective_lifecycle(old),
+                                 "inception_dt": str(old.inception_dt) if old.inception_dt else None,
+                                 "expiry_dt": str(old.expiry_dt) if old.expiry_dt else None},
+                    "renewal": {"id": new.id, "name": new.name or new.filename,
+                                "lifecycle": _effective_lifecycle(new),
+                                "inception_dt": str(new.inception_dt) if new.inception_dt else None,
+                                "expiry_dt": str(new.expiry_dt) if new.expiry_dt else None},
+                    "tenant_id": new.tenant_id,
+                })
         return out
 
 
@@ -4440,7 +4852,7 @@ def list_documents(contract_id: int, p: Principal = Depends(current_principal)):
                 .filter(ContractDocument.contract_id == c.id)
                 .order_by(ContractDocument.created_at.desc()).all())
         return {
-            "documents": [_doc_dict(d) for d in docs],
+            "documents": [_doc_dict(d) for d in docs if _doc_visible(d, p)],
             "missing_references": _missing_references(c, docs),
             # What the wording ASKED for, whether or not it has been supplied —
             # so the screen can show the request next to the answer.
@@ -4488,13 +4900,38 @@ async def upload_document(
     if not data:
         raise HTTPException(400, "that file is empty")
 
+    if kind == "evidence":
+        # The document a large date correction rests on (Phase B). Part of
+        # Change period, so off with it; never a reference, never a wording.
+        import period_change as _pc
+        if not _pc.enabled():
+            raise HTTPException(400, "Evidence files belong to Change period, "
+                                     "which is switched off.")
+        if satisfies_reference:
+            raise HTTPException(400, "An evidence file can't stand in for a "
+                                     "reference document.")
+        is_executed_copy = False
+        effective_from = None
+
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
         state = _effective_lifecycle(c)
-        if state in ("terminated", "superseded"):
+        # Evidence is the one thing still attached to a superseded or
+        # terminated contract: its end date can be corrected (D3), and a large
+        # correction needs it.
+        if state in ("terminated", "superseded") and kind != "evidence":
             raise HTTPException(
                 409, f"this contract is {state}, so nothing more can be "
                      f"attached to it")
+        # ...and only where Change period can correct a date (D3): a draft's
+        # dates are edited in its terms, with nothing to evidence.
+        if kind == "evidence":
+            import period_change as _pc
+            if not any(_pc.allowed(state).values()):
+                raise HTTPException(
+                    409, f"Evidence supports a date correction, and this "
+                         f"contract's dates are not corrected that way while it "
+                         f"is {state.replace('_', ' ')}.")
 
         blob_ref, blob = await run_in_threadpool(
             storage.store_or_keep, "contract-documents", c.tenant_id,
@@ -4568,6 +5005,9 @@ def deactivate_document(contract_id: int, document_id: int,
         doc = s.get(ContractDocument, document_id)
         if not doc or doc.contract_id != c.id:
             raise HTTPException(404, "document not found")
+        if doc.kind == "evidence" and _evidence_in_use(s, c, doc.id):
+            raise HTTPException(409, "This evidence supports a recorded date "
+                                     "correction, so it stays on the contract.")
         doc.is_active = False
         s.commit()
         docs = s.query(ContractDocument).filter(
@@ -4605,7 +5045,9 @@ def download_document(contract_id: int, document_id: int,
     with SessionLocal() as s:
         c = _contract_access(s, p, contract_id)
         doc = s.get(ContractDocument, document_id)
-        if not doc or doc.contract_id != c.id:
+        # Not found, rather than forbidden: a broker is not told an evidence
+        # file exists.
+        if not doc or doc.contract_id != c.id or not _doc_visible(doc, p):
             raise HTTPException(404, "document not found")
         data = storage.resolve_bytes(doc.blob_ref, doc.blob)
         if data is None:
@@ -5339,3 +5781,1038 @@ async def generate_rules(contract_id: int,
     return StreamingResponse(
         _stream(), media_type="application/json",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# =============================================================================
+#  Change period — Phase B: correcting a contract's dates
+# =============================================================================
+#
+# A CORRECTION: the dates on file were wrong. Never a termination, never an
+# endorsement, never the prior-period dates (B3). The rules are in
+# period_change.py (D3 who may change which date, D4 large, B2 the typed code
+# and its preview token, B4 when an undo is safe); this section reads the facts
+# and writes the result. Switched off unless CONTRACT_PERIOD_CHANGE_ENABLED.
+#
+# What a correction writes, in ONE transaction: the two dates, the rules whose
+# dates EXACTLY equal the old start or end (re-dated, with a snapshot of each
+# rule before), the reporting calendar (refreshed; a period with files is never
+# removed), a contract_approval row (the reason only — the broker reads it) and
+# an activity_events row (everything, including the internal note). The broker
+# email and, for a large one, the Kavachio notice go out after the commit.
+# It never writes: terminated_date, termination_reason, lifecycle,
+# lifecycle_effective_date, status_ops, contract_effective_from/_to, files,
+# results, exceptions or deliveries.
+
+
+class PeriodChange(BaseModel):
+    inception_dt: str
+    expiry_dt: str
+    reason: Optional[str] = None
+    internal_note: Optional[str] = None
+    confirm_gap: bool = False
+    evidence_document_id: Optional[int] = None
+    confirm_text: Optional[str] = None
+    preview_token: Optional[str] = None
+
+
+class PeriodDates(BaseModel):
+    inception_dt: str
+    expiry_dt: str
+
+
+class PeriodUndo(BaseModel):
+    reason: Optional[str] = None
+    internal_note: Optional[str] = None
+    confirm_gap: bool = False
+    confirm_text: Optional[str] = None
+    preview_token: Optional[str] = None
+
+
+def _period_dates(body) -> tuple:
+    """The two dates asked for; a date that is not YYYY-MM-DD is refused
+    plainly (400), not left to fail as a server error."""
+    out, bad = [], {}
+    for field in ("inception_dt", "expiry_dt"):
+        try:
+            out.append(_as_date(getattr(body, field)))
+        except (TypeError, ValueError):
+            out.append(None)
+            bad[field] = "not a date"
+    if bad:
+        raise HTTPException(400, {"message": "Write the dates as YYYY-MM-DD.",
+                                  "errors": bad})
+    return out[0], out[1]
+
+
+def _period_gate(s, p: Principal, contract_id: int) -> Contract:
+    """Switched on, the carrier, its own contract. Kavachio is refused at the
+    door by _contract_access (it never opens a contract record); a broker here."""
+    import period_change as pc
+    if not pc.enabled():
+        raise HTTPException(404, "Change period is switched off.")
+    _require_carrier(p)
+    return _contract_access(s, p, contract_id)
+
+
+def _period_neighbours(s, c: Contract, lock: bool = False):
+    """(previous version, next version) of `c`. With `lock`, the three rows are
+    locked and READ AGAIN once held: the versions were first loaded before the
+    lock, and a correction committed to a neighbour while we waited must be
+    what every check after this sees (populate_existing — a locking query does
+    not refresh rows already in the session). A renewal created while we
+    waited is picked up and locked too."""
+    prev = s.get(Contract, c.renews_contract_id) if c.renews_contract_id else None
+    nxt = _successors(s, [c.id]).get(c.id)
+    if not lock:
+        return prev, nxt
+    locked: set = set()
+    for _ in range(3):
+        ids = {x.id for x in (c, prev, nxt) if x is not None}
+        if ids <= locked:
+            break
+        (s.query(Contract).filter(Contract.id.in_(sorted(ids | locked)))
+         .order_by(Contract.id).with_for_update().populate_existing().all())
+        locked |= ids
+        prev = s.get(Contract, c.renews_contract_id) if c.renews_contract_id else None
+        nxt = _successors(s, [c.id]).get(c.id)
+    return prev, nxt
+
+
+def _nb_state(prev, nxt) -> dict:
+    def one(v):
+        return ([v.id, str(v.inception_dt) if v.inception_dt else None,
+                 str(v.expiry_dt) if v.expiry_dt else None] if v is not None else None)
+    return {"prev": one(prev), "next": one(nxt)}
+
+
+def _period_rule_rows(s, contract_id: int, ids: Optional[list] = None) -> list:
+    from sqlalchemy import text as _sql
+    q = ("SELECT rule_id, rule_spec, rule_name, error_message, rule_description "
+         "FROM validation_rule WHERE contract_id = :c")
+    params: dict = {"c": contract_id}
+    if ids is not None:
+        if not ids:
+            return []
+        q += " AND rule_id = ANY(:ids)"
+        params["ids"] = [int(i) for i in ids]
+    rows = s.execute(_sql(q + " ORDER BY rule_id"), params).all()
+    out = []
+    for rid, spec, name, msg, desc in rows:
+        if isinstance(spec, str) and spec.strip():
+            try:
+                spec = json.loads(spec)
+            except ValueError:
+                pass
+        out.append((rid, spec, name, msg, desc))
+    return out
+
+
+def _period_rules(s, c: Contract, moves: dict) -> dict:
+    """Which of this contract's rules a correction re-dates, and to what.
+
+    Only a date EXACTLY equal to the old start or end moves
+    (renewal_chain.redate_rule) — in the rule's settings and compiled query,
+    its name, message and description. A rule holding any other date is listed
+    for a person to look at and NOT changed. `source_verbatim_text` is the
+    contract's own words and stays as quoted."""
+    import period_change as pc
+    import renewal_chain as rc
+    redated, other = [], []
+    # The contract's own start and end — now and as corrected — are not
+    # "other" dates: those are the ones a correction moves (or leaves be).
+    own = {str(d) for d in (c.inception_dt, c.expiry_dt) if d} \
+        | {str(d) for pair in (moves or {}).items() for d in pair if d}
+    for rid, spec, name, msg, desc in _period_rule_rows(s, c.id):
+        spec_in = spec if isinstance(spec, (dict, list)) else None
+        out = rc.redate_rule(spec_in, name, msg, moves or {})
+        new_desc = rc._swap_text(desc, moves or {})
+        new_spec = out["spec"] if spec_in is not None else spec
+        if out["changed"] or new_desc != desc:
+            redated.append({
+                "rule_id": rid, "name": out["name"] or name,
+                "before": {"rule_spec": spec, "rule_name": name,
+                           "error_message": msg, "rule_description": desc},
+                "after": {"rule_spec": new_spec, "rule_name": out["name"],
+                          "error_message": out["message"], "rule_description": new_desc},
+                "after_fp": pc.rule_fingerprint(new_spec, out["name"], out["message"],
+                                                new_desc),
+                "before_fp": pc.rule_fingerprint(spec, name, msg, desc)})
+        dates = [d for d in out["other_dates"] if d not in own]
+        if dates:
+            other.append({"rule_id": rid, "name": name, "dates": dates})
+    return {"redated": redated, "other_dates": other}
+
+
+def _write_rule(s, rid: int, v: dict) -> None:
+    from sqlalchemy import text as _sql
+    spec = v.get("rule_spec")
+    s.execute(_sql(
+        "UPDATE validation_rule SET rule_spec = CAST(:sp AS jsonb), rule_name = :n, "
+        "error_message = :m, rule_description = :d WHERE rule_id = :r"),
+        {"sp": json.dumps(spec) if spec is not None else None, "n": v.get("rule_name"),
+         "m": v.get("error_message"), "d": v.get("rule_description"), "r": rid})
+
+
+def _period_files(s, c: Contract) -> list[dict]:
+    """Files and results already handled under this contract, with the period
+    each covers — what a date change can leave outside the term."""
+    from sqlalchemy import text as _sql
+    out = []
+    for aid, name, period, ps, pe, outcome in s.execute(_sql(
+            "SELECT arrival_id, filename, reporting_period, period_start, period_end, "
+            "outcome FROM file_arrival WHERE contract_id = :c ORDER BY arrival_id"),
+            {"c": c.id}).all():
+        out.append({"kind": "file", "id": aid, "label": name, "period": period,
+                    "start": ps, "end": pe, "outcome": outcome})
+    for eid, name, ps, pe in s.execute(_sql(
+            "SELECT id, COALESCE(filename, template_name), period_start, period_end "
+            "FROM output_exports WHERE contract_id = :c ORDER BY id"), {"c": c.id}).all():
+        out.append({"kind": "result", "id": eid, "label": name, "period": None,
+                    "start": ps, "end": pe, "outcome": None})
+    return out
+
+
+def _review_items(files: list[dict], new_in, new_ex) -> list[dict]:
+    """Of those, the ones whose period is not wholly inside [new_in, new_ex]."""
+    import calendar as _cal
+    import re
+    import renewal_chain as rc
+    items = []
+    for f in files:
+        ps, pe = _as_date(f["start"]), _as_date(f["end"])
+        if ps is None and f.get("period"):
+            ps = rc.period_start(f["period"])
+            # A month ("2026-07") covers the whole month, not its first day.
+            if (ps is not None and pe is None
+                    and re.fullmatch(r"\d{4}-\d{2}", str(f["period"]).strip())):
+                pe = ps.replace(day=_cal.monthrange(ps.year, ps.month)[1])
+        if ps is None:
+            continue
+        pe = pe or ps
+        if new_in and new_ex and (ps < new_in or pe > new_ex):
+            why = ("outside the corrected term" if (pe < new_in or ps > new_ex)
+                   else "partly outside the corrected term")
+            items.append({"kind": f["kind"], "id": f["id"], "label": f["label"],
+                          "period": f.get("period") or f"{ps} – {pe}",
+                          "start": str(ps), "end": str(pe), "why": why})
+    return items
+
+
+def _period_marks(s, c: Contract) -> dict:
+    """Fingerprints of everything an undo must not run over: files received
+    and how they were handled, results, exceptions and decisions on them,
+    submission versions and deliveries, policy rows. Scoped to this contract
+    and its programme. An undo is refused if ANY of them differs from what the
+    correction left (period_change.undo_blockers)."""
+    from sqlalchemy import text as _sql
+    q = {
+        "arrivals": "SELECT md5(COALESCE(string_agg(concat_ws('|', arrival_id, outcome, "
+                    "resolution, run_state, run_export_id, version_status, delivered_at, "
+                    "contract_id, reporting_period), ',' ORDER BY arrival_id), '')) "
+                    "FROM file_arrival WHERE contract_id = :c OR program_id = :p",
+        "exports": "SELECT md5(COALESCE(string_agg(concat_ws('|', id, status, "
+                   "release_status, released_at, version_status, exception_count, "
+                   "signed_off_at), ',' ORDER BY id), '')) FROM output_exports "
+                   "WHERE contract_id = :c OR program_id = :p",
+        "exceptions": "SELECT md5(COALESCE(string_agg(concat_ws('|', e.exception_id, "
+                      "e.status, e.exception_status, e.resolved_at), ',' ORDER BY "
+                      "e.exception_id), '')) FROM validation_exception e JOIN "
+                      "validation_run r ON r.run_id = e.validation_run_id "
+                      "WHERE r.contract_id = :c",
+        "decisions": "SELECT md5(COALESCE(string_agg(id::text, ',' ORDER BY id), '')) "
+                     "FROM exception_decision_log WHERE program_id = :p",
+        "versions": "SELECT md5(COALESCE(string_agg(concat_ws('|', id, received_at, "
+                    "released_at, received_export_id), ',' ORDER BY id), '')) "
+                    "FROM submission_version WHERE program_id = :p",
+        "releases": "SELECT md5(COALESCE(string_agg(concat_ws('|', id, received_at, "
+                    "version_count, released_count, released_at), ',' ORDER BY id), '')) "
+                    "FROM expected_submission WHERE program_id = :p",
+        "policies": "SELECT md5(COALESCE(string_agg(policy_id::text, ',' ORDER BY "
+                    "policy_id), '')) FROM policy WHERE policy_contract_id = :c",
+        # A file uploaded, or a run started, that has no arrival, result or
+        # exception row yet — still activity an undo must not run over.
+        "uploads": "SELECT md5(COALESCE(string_agg(concat_ws('|', upload_id, "
+                   "upload_status, ingested_at), ',' ORDER BY upload_id), '')) "
+                   "FROM upload WHERE upload_contract_id = :c OR program_id = :p",
+        "bdx_uploads": "SELECT md5(COALESCE(string_agg(concat_ws('|', bdx_upload_id, "
+                       "status), ',' ORDER BY bdx_upload_id), '')) FROM bdx_upload "
+                       "WHERE contract_id = :c",
+        "runs": "SELECT md5(COALESCE(string_agg(concat_ws('|', run_id, status, "
+                "run_status, completed_at), ',' ORDER BY run_id), '')) "
+                "FROM validation_run WHERE contract_id = :c",
+    }
+    out = {}
+    for key, sql in q.items():
+        try:
+            with s.begin_nested():
+                out[key] = s.execute(_sql(sql), {"c": c.id,
+                                                 "p": c.program_id or -1}).scalar()
+        except Exception:  # noqa: BLE001 — a table this database lacks
+            out[key] = None
+    return out
+
+
+def _expected_snapshot(s, program_id: int) -> dict:
+    """{id: the whole row} of a programme's reporting calendar."""
+    from sqlalchemy import text as _sql
+    return {int(i): json.loads(r) for i, r in s.execute(_sql(
+        "SELECT id, row_to_json(e)::text FROM expected_submission e "
+        "WHERE program_id = :p"), {"p": program_id}).all()}
+
+
+# Worked out afresh from the dates and today; everything else on a removed
+# period (its id, created_at, chase count, the notified / emailed flags) is
+# history, and comes back exactly as it was.
+_CALENDAR_COMPUTED = ("tenant_id", "schedule_id", "period_start", "period_end",
+                      "due_date", "status")
+
+
+def _restore_expected(s, program_id: int, removed: list) -> dict:
+    """Put back the reporting periods a correction removed, as they were.
+
+    Undo re-runs the calendar for the restored dates, which recreates those
+    periods as NEW rows with fresh flags — so the next sweep would send their
+    overdue reminders again. Each recreated row is swapped for the original
+    (its id and history), with only the computed fields taken from the fresh
+    one. A period the calendar did not recreate is left out and named."""
+    from sqlalchemy import text as _sql
+    restored, not_restored = [], []
+    for snap in removed or []:
+        fresh = s.execute(_sql(
+            "SELECT row_to_json(e)::text FROM expected_submission e WHERE program_id = :p "
+            "AND period = :per AND broker_party_id IS NOT DISTINCT FROM :b"),
+            {"p": program_id, "per": snap.get("period"),
+             "b": snap.get("broker_party_id")}).scalar()
+        taken = s.execute(_sql("SELECT 1 FROM expected_submission WHERE id = :i"),
+                          {"i": snap.get("id")}).scalar()
+        if fresh is None or taken:
+            not_restored.append(snap.get("period"))
+            continue
+        fresh = json.loads(fresh)
+        if fresh.get("received_at") or (fresh.get("version_count") or 0):
+            not_restored.append(snap.get("period"))
+            continue
+        row = {**snap, **{k: fresh.get(k) for k in _CALENDAR_COMPUTED}}
+        s.execute(_sql("DELETE FROM expected_submission WHERE id = :i"), {"i": fresh["id"]})
+        s.execute(_sql("INSERT INTO expected_submission SELECT * FROM "
+                       "json_populate_record(NULL::expected_submission, CAST(:r AS json))"),
+                  {"r": json.dumps(row)})
+        restored.append(snap.get("period"))
+    return {"restored": sorted(set(restored)), "not_restored": sorted(set(not_restored))}
+
+
+def _period_calendar(s, c: Contract, dry: bool, restore: Optional[list] = None) -> dict:
+    """Refresh the programme's reporting calendar for the dates now on `c`.
+    Adds periods and removes unfiled ones only: every period with a file, a
+    received mark, a version or a delivery is kept (materialize_schedule's own
+    rule plus keep_periods). `dry` runs it inside a savepoint and rolls back —
+    the preview's view of the effect, with nothing kept.
+
+    For real, the whole rows of the periods it removes come back as
+    `removed_rows` (kept in the correction's audit row, never sent to a
+    screen), and `restore` — an undo — puts such rows back as they were."""
+    from sqlalchemy import text as _sql
+    from db import SubmissionSchedule, ExpectedSubmission
+    import submission_calendar_service as cal
+    if not c.program_id:
+        return {"schedule": False}
+    sched = (s.query(SubmissionSchedule)
+             .filter(SubmissionSchedule.program_id == c.program_id).first())
+    if sched is None:
+        return {"schedule": False}
+    keep = set(s.execute(_sql(
+        "SELECT DISTINCT reporting_period FROM file_arrival WHERE program_id = :p "
+        "AND reporting_period IS NOT NULL UNION SELECT DISTINCT period FROM "
+        "submission_version WHERE program_id = :p"), {"p": c.program_id}).scalars())
+
+    def rows():
+        return {(e.broker_party_id, e.period) for e in s.query(ExpectedSubmission)
+                .filter(ExpectedSubmission.program_id == c.program_id).all()}
+
+    sp = s.begin_nested() if dry else None
+    try:
+        before = rows()
+        snap = _expected_snapshot(s, c.program_id) if not dry else {}
+        res = cal.materialize_schedule(s, sched, keep_periods=keep)
+        after = rows()
+    finally:
+        if sp is not None:
+            sp.rollback()
+    added = sorted({p_ for _, p_ in after - before})
+    removed = sorted({p_ for _, p_ in before - after})
+    out = {"schedule": True, "added": added, "removed": removed,
+           "kept_with_files": sorted(p_ for p_ in keep if p_),
+           "covers_until": res.get("covers_until"),
+           "bounded_by": res.get("bounded_by")}
+    if not dry:
+        now_ids = set(_expected_snapshot(s, c.program_id))
+        out["removed_rows"] = [r for i, r in sorted(snap.items()) if i not in now_ids]
+        if restore:
+            out.update(_restore_expected(s, c.program_id, restore))
+    return out
+
+
+def _calendar_public(calendar: Optional[dict]) -> Optional[dict]:
+    """The calendar effect as a screen reads it — without the stored rows."""
+    if not isinstance(calendar, dict):
+        return calendar
+    return {k: v for k, v in calendar.items() if k != "removed_rows"}
+
+
+def _new_blocking(new_conf: list, cur_conf: list, start_same: bool,
+                  end_same: bool) -> tuple[list, list]:
+    """(blocking conflicts the change CREATES, the ones already there that it
+    leaves alone). An overlap that exists today on a side the change does not
+    touch — a superseded contract's locked start overlapping the version before
+    it, say — is not this change's to fix and must not stop it; it stays on the
+    record (the overlap card) and is reported, not hidden."""
+    import renewal_chain as rc
+    untouched = {"overlaps_previous": start_same, "overlaps_next": end_same,
+                 "overlaps_draft_renewal": end_same}
+    existing = {(w["code"], w["with_id"]) for w in rc.blocking(cur_conf)}
+    new, kept = [], []
+    for w in rc.blocking(new_conf):
+        if (w["code"], w["with_id"]) in existing and untouched.get(w["code"]):
+            kept.append(w)
+        else:
+            new.append(w)
+    return new, kept
+
+
+def _period_plan(s, c: Contract, new_in, new_ex) -> dict:
+    """Everything the preview shows and the save re-checks, for these dates."""
+    import period_change as pc
+    import renewal_chain as rc
+    old_in, old_ex = c.inception_dt, c.expiry_dt
+    lifecycle = _effective_lifecycle(c)
+    term = c.terminated_date
+    errors = pc.field_errors(lifecycle, old_in, old_ex, new_in, new_ex, term)
+    prev, nxt = _period_neighbours(s, c)
+
+    def eff(ex):
+        # A terminated contract's days end at its termination (D1, §6b.2), so
+        # correcting the written end date changes no ownership of days.
+        return min(ex, term) if (term and ex and term < ex) else ex
+
+    conflicts, gaps, blocking, existing = [], [], [], []
+    if not errors:
+        conflicts = rc.term_conflicts(new_in, eff(new_ex), prev=prev, next_version=nxt)
+        current = rc.term_conflicts(old_in, eff(old_ex), prev=prev, next_version=nxt)
+        before = {(w["code"], w["with_id"], w["days"]) for w in rc.warnings(current)}
+        gaps = [w for w in rc.warnings(conflicts)
+                if (w["code"], w["with_id"], w["days"]) not in before
+                and not _gap_already_confirmed(s, c, w)]
+        blocking, existing = _new_blocking(conflicts, current, new_in == old_in,
+                                           new_ex == old_ex)
+    big = pc.large(old_in, old_ex, new_in, new_ex)
+    moves = rc.term_moves(old_in, old_ex, new_in, new_ex) if not errors else {}
+    rules = _period_rules(s, c, moves)
+    files = _period_files(s, c)
+    stored = (c.lifecycle or "").strip()
+    after = ("expired" if (stored == "active" and new_ex and new_ex < _today())
+             else ("active" if stored == "active" else lifecycle))
+    # What the preview showed rests on all of this: the dates, the versions
+    # either side, the rules it re-dates, the contract's state and termination,
+    # and any file, result or delivery activity — any of it changing before the
+    # save means the person reviews the impact again (stale_preview).
+    state = [str(old_in), str(old_ex), _nb_state(prev, nxt),
+             sorted([r["rule_id"], r["before_fp"]] for r in rules["redated"]),
+             lifecycle, str(term) if term else None, _period_marks(s, c)]
+    return {
+        "lifecycle": lifecycle, "lifecycle_after": after,
+        "allowed": pc.allowed(lifecycle),
+        "current": {"inception_dt": str(old_in) if old_in else None,
+                    "expiry_dt": str(old_ex) if old_ex else None},
+        "proposed": {"inception_dt": str(new_in) if new_in else None,
+                     "expiry_dt": str(new_ex) if new_ex else None},
+        "errors": errors,
+        "conflicts": blocking, "existing_conflicts": existing, "gaps": gaps,
+        "large": big, "moves": {str(a): str(b) for a, b in moves.items()},
+        "rules": rules, "files": files,
+        "review_items": _review_items(files, new_in, new_ex) if not errors else [],
+        "termination": ({"date": str(term), "reason": c.termination_reason}
+                        if term else None),
+        "prev": prev, "next": nxt,
+        "preview_token": pc.preview_token(c.id, new_in, new_ex, state),
+    }
+
+
+def _period_public(s, c: Contract, plan: dict, calendar: Optional[dict] = None) -> dict:
+    """The preview as the carrier's screen reads it (no snapshots)."""
+    import period_change as pc
+    contacts = _period_broker_contacts(s, c)
+    evidence = [{"id": d.id, "filename": d.filename, "created_at": _iso_utc(d.created_at)}
+                for d in s.query(ContractDocument).filter(
+                    ContractDocument.contract_id == c.id,
+                    ContractDocument.kind == "evidence",
+                    ContractDocument.is_active.is_(True))
+                .order_by(ContractDocument.created_at.desc()).all()]
+    large = plan["large"]["large"]
+    return {
+        "lifecycle": plan["lifecycle"], "lifecycle_after": plan["lifecycle_after"],
+        "allowed": plan["allowed"], "current": plan["current"],
+        "proposed": plan["proposed"], "errors": plan["errors"],
+        "conflicts": plan["conflicts"], "gaps": plan["gaps"],
+        "existing_conflicts": plan["existing_conflicts"],
+        "large": plan["large"], "moves": plan["moves"],
+        "rules": {"redated": [{"rule_id": r["rule_id"], "name": r["name"]}
+                              for r in plan["rules"]["redated"]],
+                  "other_dates": plan["rules"]["other_dates"]},
+        "calendar": calendar, "review_items": plan["review_items"],
+        "termination": plan["termination"],
+        "broker_recipients": [x.get("name") or x.get("email") for x in contacts],
+        "prior_period": "Unchanged: the prior-period dates are kept as they are.",
+        "requires": {"reason": True, "evidence": large, "code": large,
+                     "gap_confirmation": bool(plan["gaps"])},
+        "endorsement_suggested": large,
+        "code": _codes().contract_code(c) if large else None,
+        "evidence_documents": evidence if large else [],
+        "preview_token": plan["preview_token"],
+        "ready": not plan["errors"] and not plan["conflicts"],
+        "switch": pc.SWITCH,
+    }
+
+
+def _period_activity(s, c: Contract, p: Principal, action: str, details: dict) -> None:
+    """The audit row, in the SAME transaction as the change it records — so a
+    correction can never exist without the snapshot its undo needs."""
+    from db import ActivityEvent
+    from auth_deps import normalize_role
+    s.add(ActivityEvent(
+        tenant_id=c.tenant_id, actor=_principal_email_for(s, p), action=action,
+        target=f"contract:{c.id}", details=details,
+        actor_user_id=p.user_id, actor_role=normalize_role(p.role),
+        actor_broker_party_id=None))
+
+
+def _period_broker_contacts(s, c: Contract) -> list[dict]:
+    """Who the broker email goes to — the broker's admins, and only while the
+    broker is still on the programme: one taken off it (broker removal) is not
+    told about the contract's dates any more. The preview names the same list."""
+    from submission_calendar_service import broker_contacts
+    from carrier_scope import link_is_live
+    if not c.broker_party_id:
+        return []
+    if c.program_id:
+        link = (s.query(ProgramBroker)
+                .filter(ProgramBroker.program_id == c.program_id,
+                        ProgramBroker.broker_party_id == c.broker_party_id).first())
+        if link is None or not link_is_live(link):
+            return []
+    return broker_contacts(s, [c.broker_party_id]).get(c.broker_party_id, [])
+
+
+def _period_email_thunks(s, c: Contract, kind: str, old: tuple, new: tuple,
+                         reason: str) -> list:
+    """The broker's email: the old and new dates and the REASON. Built only
+    from those — the internal note and the evidence are never passed in."""
+    from db import Tenant
+    if not c.broker_party_id:
+        return []
+    prog = s.get(Program, c.program_id) if c.program_id else None
+    carrier = s.get(Tenant, c.tenant_id) if c.tenant_id else None
+    carrier_name = ((carrier.legal_name or carrier.tenant_name) if carrier else None) \
+        or "Your carrier"
+    program_name = (prog.name if prog else None) or "your programme"
+    code = _codes().contract_code(c)
+    name = c.name or c.filename or f"Contract {c.id}"
+
+    def fmt(d):
+        return d.strftime("%d %b %Y") if d else "—"
+
+    period_old, period_new = (f"{fmt(old[0])} to {fmt(old[1])}",
+                              f"{fmt(new[0])} to {fmt(new[1])}")
+    contacts = _period_broker_contacts(s, c)
+
+    def _sender(person: dict):
+        def send() -> None:
+            from email_utils import send_email, period_change_email_html
+            send_email(
+                person["email"],
+                (f"{carrier_name} undid a correction to the dates of your contract "
+                 f"on {program_name}" if kind == "undo" else
+                 f"{carrier_name} corrected the dates of your contract on {program_name}"),
+                period_change_email_html(person.get("name"), carrier_name, program_name,
+                                         name, code, period_old, period_new, reason,
+                                         undone=(kind == "undo")),
+                text=(f"{carrier_name} has "
+                      + ("undone a correction to" if kind == "undo" else "corrected")
+                      + f" the dates of your contract {code} "
+                      f"on {program_name}: {period_old} → {period_new}. Reason: {reason}"),
+                account="NOTIFY")
+        return send
+    return [(x["email"], _sender(x)) for x in contacts if x.get("email")]
+
+
+def _after_commit(s, thunks: list, what: str) -> None:
+    from sqlalchemy import event
+    if not thunks:
+        return
+
+    def run(_session):
+        for addr, send in thunks:
+            try:
+                send()
+            except Exception:  # noqa: BLE001
+                log.exception("%s email to %s failed", what, addr)
+    event.listen(s, "after_commit", run, once=True)
+
+
+def _notify_large(c: Contract, p: Principal, s, title: str, facts: list) -> None:
+    try:
+        from notifications import notify_platform_admins
+        # The link opens Kavachio's Audit Logs on "Contracts and rules" (a group
+        # the Action type list offers), where the correction's row carries the
+        # button to its evidence.
+        notify_platform_admins(
+            "contract_period_large_correction", title, tenant_id=c.tenant_id,
+            actor=_principal_email_for(s, p), target=f"contract:{c.id}",
+            facts=facts, label="large contract date correction",
+            label_plural="large contract date corrections",
+            link_path="/audit?action=contracts",
+            link_label="Open in Audit Logs")
+    except Exception:  # noqa: BLE001
+        log.exception("Kavachio notice for the large correction of %s failed", c.id)
+
+
+def _period_latest(s, c: Contract):
+    """The latest Change period row for this contract (correction or undo)."""
+    import period_change as pc
+    from db import ActivityEvent
+    return (s.query(ActivityEvent)
+            .filter(ActivityEvent.target == f"contract:{c.id}",
+                    ActivityEvent.tenant_id == c.tenant_id,
+                    ActivityEvent.action.in_([pc.ACTION_CORRECTED, pc.ACTION_UNDONE]))
+            .order_by(ActivityEvent.id.desc()).first())
+
+
+def _period_history(s, c: Contract) -> list[dict]:
+    """This contract's date corrections and undos, newest first — carrier side.
+    The reason, the dates and the large flag; never the internal note."""
+    import period_change as pc
+    from db import ActivityEvent
+    rows = (s.query(ActivityEvent)
+            .filter(ActivityEvent.target == f"contract:{c.id}",
+                    ActivityEvent.tenant_id == c.tenant_id,
+                    ActivityEvent.action.in_([pc.ACTION_CORRECTED, pc.ACTION_UNDONE]))
+            .order_by(ActivityEvent.id.desc()).all())
+    out = []
+    for r in rows:
+        d = r.details or {}
+        out.append({"ref": d.get("change_ref"),
+                    "kind": "undo" if r.action == pc.ACTION_UNDONE else "correction",
+                    "undoes": d.get("undoes"), "at": d.get("acted_at_utc"),
+                    "old": d.get("old"), "new": d.get("new"),
+                    "large": bool((d.get("large") or {}).get("large")),
+                    "reason": d.get("reason"), "by": r.actor})
+    return out
+
+
+def _undo_facts(s, c: Contract, target, latest) -> tuple[dict, dict]:
+    """(the correction as recorded, the world now) for period_change.undo_blockers.
+    `target` is the correction an undo would reverse; `latest` the newest
+    Change period row on the contract (the same row, unless an undo came after)."""
+    import period_change as pc
+    import renewal_chain as rc
+    d = dict(target.details or {})
+    change = {"ref": d.get("change_ref"),
+              "new": [d.get("new", {}).get("inception_dt"), d.get("new", {}).get("expiry_dt")],
+              "old": [d.get("old", {}).get("inception_dt"), d.get("old", {}).get("expiry_dt")],
+              "lifecycle_after": d.get("lifecycle_stored_after"),
+              "neighbours": d.get("neighbours"),
+              "rules_after": {str(r["rule_id"]): r["after_fp"] for r in d.get("rules") or []},
+              "marks": d.get("marks") or {}}
+    ld = latest.details or {}
+    prev, nxt = _period_neighbours(s, c)
+    rows = _period_rule_rows(s, c.id, [r["rule_id"] for r in d.get("rules") or []])
+    rules_now = {str(rid): pc.rule_fingerprint(spec, name, msg, desc)
+                 for rid, spec, name, msg, desc in rows}
+    old_in, old_ex = _as_date(change["old"][0]), _as_date(change["old"][1])
+    term = c.terminated_date
+    eff_ex = min(old_ex, term) if (term and old_ex and term < old_ex) else old_ex
+    cur_ex = c.expiry_dt
+    eff_now = min(cur_ex, term) if (term and cur_ex and term < cur_ex) else cur_ex
+    now = {"latest_ref": ld.get("change_ref"),
+           "latest_kind": "undo" if latest.action == pc.ACTION_UNDONE else "correction",
+           "latest_undoes": ld.get("undoes"),
+           "dates": [str(c.inception_dt) if c.inception_dt else None,
+                     str(c.expiry_dt) if c.expiry_dt else None],
+           "lifecycle": (c.lifecycle or "").strip(),
+           "neighbours": _nb_state(prev, nxt),
+           "rules": {k: rules_now.get(k) for k in change["rules_after"]},
+           "marks": _period_marks(s, c),
+           "conflicts": _new_blocking(
+               rc.term_conflicts(old_in, eff_ex, prev=prev, next_version=nxt),
+               rc.term_conflicts(c.inception_dt, eff_now, prev=prev, next_version=nxt),
+               old_in == c.inception_dt, old_ex == c.expiry_dt)[0]}
+    return change, now
+
+
+def _undo_target(s, c: Contract):
+    """(the latest correction, the latest Change period row). When an undo is
+    the latest row it names the correction it undid; that one is returned so
+    the refusal can say "already undone"."""
+    import period_change as pc
+    from db import ActivityEvent
+    latest = _period_latest(s, c)
+    if latest is None:
+        return None, None
+    if latest.action == pc.ACTION_CORRECTED:
+        return latest, latest
+    target = (s.query(ActivityEvent)
+              .filter(ActivityEvent.target == f"contract:{c.id}",
+                      ActivityEvent.tenant_id == c.tenant_id,
+                      ActivityEvent.action == pc.ACTION_CORRECTED)
+              .order_by(ActivityEvent.id.desc()).first())
+    return target, latest
+
+
+def _undo_plan(s, c: Contract) -> dict:
+    import period_change as pc
+    import renewal_chain as rc
+    target, latest = _undo_target(s, c)
+    if target is None:
+        return {"available": False, "blockers": [{"code": "nothing",
+                "message": "There is no date correction on this contract to undo."}]}
+    change, now = _undo_facts(s, c, target, latest)
+    blockers = pc.undo_blockers(change, now)
+    d = target.details or {}
+    old_in, old_ex = _as_date(d["old"]["inception_dt"]), _as_date(d["old"]["expiry_dt"])
+    prev, nxt = _period_neighbours(s, c)
+    term = c.terminated_date
+
+    def eff(ex):
+        return min(ex, term) if (term and ex and term < ex) else ex
+
+    before = {(w["code"], w["with_id"], w["days"]) for w in rc.warnings(
+        rc.term_conflicts(c.inception_dt, eff(c.expiry_dt), prev=prev, next_version=nxt))}
+    gaps = [w for w in rc.warnings(rc.term_conflicts(old_in, eff(old_ex), prev=prev,
+                                                     next_version=nxt))
+            if (w["code"], w["with_id"], w["days"]) not in before
+            and not _gap_already_confirmed(s, c, w)]
+    large = bool((d.get("large") or {}).get("large"))
+    state = [d.get("change_ref"), now["dates"], sorted(now["rules"].items()),
+             now["marks"], now["neighbours"], now["latest_ref"]]
+    return {"available": True, "target": target, "change_ref": d.get("change_ref"),
+            "blockers": blockers, "gaps": gaps, "large": large,
+            "restore": {"inception_dt": d["old"]["inception_dt"],
+                        "expiry_dt": d["old"]["expiry_dt"]},
+            "from": {"inception_dt": now["dates"][0], "expiry_dt": now["dates"][1]},
+            "rules": len(d.get("rules") or []),
+            "preview_token": pc.preview_token(c.id, old_in, old_ex, state)}
+
+
+@router.post("/contracts/{contract_id}/period/preview")
+def period_preview(contract_id: int, body: PeriodDates,
+                   p: Principal = Depends(current_principal)):
+    """What correcting these dates would do. Writes nothing: the calendar's
+    effect is worked out inside a savepoint that is rolled back."""
+    with SessionLocal() as s:
+        c = _period_gate(s, p, contract_id)
+        new_in, new_ex = _period_dates(body)
+        plan = _period_plan(s, c, new_in, new_ex)
+        calendar = None
+        if not plan["errors"] and not plan["conflicts"]:
+            sp = s.begin_nested()
+            try:
+                c.inception_dt, c.expiry_dt = new_in, new_ex
+                s.flush()
+                calendar = _period_calendar(s, c, dry=True)
+            finally:
+                sp.rollback()
+        out = _period_public(s, c, plan, calendar)
+        s.rollback()
+        return out
+
+
+@router.post("/contracts/{contract_id}/period")
+def period_correct(contract_id: int, body: PeriodChange,
+                   p: Principal = Depends(current_principal)):
+    """Correct the dates (kind: correction). Every check is made again here,
+    under a lock on this contract and its neighbours."""
+    import period_change as pc
+    import uuid as _uuid
+    with SessionLocal() as s:
+        c = _period_gate(s, p, contract_id)
+        _period_neighbours(s, c, lock=True)
+        s.refresh(c)
+        new_in, new_ex = _period_dates(body)
+        plan = _period_plan(s, c, new_in, new_ex)
+        if plan["errors"]:
+            raise HTTPException(400, {"message": next(iter(plan["errors"].values())),
+                                      "errors": plan["errors"]})
+        if plan["conflicts"]:
+            raise HTTPException(409, {"message": plan["conflicts"][0]["message"],
+                                      "errors": _term_field_errors(plan["conflicts"]),
+                                      "conflicts": plan["conflicts"]})
+        reason = (body.reason or "").strip()
+        if not reason:
+            raise HTTPException(400, {"message": "Give the reason for the correction — "
+                                                 "the broker will see it.",
+                                      "errors": {"reason": "required"}})
+        if body.preview_token != plan["preview_token"]:
+            raise HTTPException(409, {"message": "The impact has changed — review it again.",
+                                      "errors": {"_": "preview out of date"},
+                                      "stale_preview": True})
+        if plan["gaps"] and not body.confirm_gap:
+            raise HTTPException(409, {"message": plan["gaps"][0]["message"]
+                                      + " Confirm the gap is intended to go ahead.",
+                                      "errors": {}, "conflicts": plan["gaps"],
+                                      "needs_confirm": True})
+        large = plan["large"]
+        evidence = None
+        if large["large"]:
+            evidence = (s.get(ContractDocument, body.evidence_document_id)
+                        if body.evidence_document_id else None)
+            if (evidence is None or evidence.contract_id != c.id
+                    or evidence.kind != "evidence" or not evidence.is_active):
+                raise HTTPException(400, {
+                    "message": "A correction this large needs supporting evidence: "
+                               "attach it as an evidence file and choose it.",
+                    "errors": {"evidence_document_id": "required"}})
+            code = _codes().contract_code(c)
+            if not pc.code_matches(body.confirm_text, code):
+                raise HTTPException(400, {
+                    "message": f"Type the contract code {code} exactly to confirm.",
+                    "errors": {"confirm_text": "does not match"}})
+
+        old_in, old_ex = c.inception_dt, c.expiry_dt
+        # Untouched by design (§6b.2, B3) — checked again in the tests.
+        for r in plan["rules"]["redated"]:
+            _write_rule(s, r["rule_id"], r["after"])
+        c.inception_dt, c.expiry_dt = new_in, new_ex
+        s.flush()
+        calendar = _period_calendar(s, c, dry=False)
+        s.flush()
+        ref = _uuid.uuid4().hex[:12]
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        changes = [{"field": f, "current": str(a) if a else None,
+                    "proposed": str(b) if b else None, "ref": ref}
+                   for f, a, b in (("inception_dt", old_in, new_in),
+                                   ("expiry_dt", old_ex, new_ex)) if a != b]
+        s.add(ContractApproval(
+            tenant_id=c.tenant_id, contract_id=c.id, action=pc.APPROVAL_CORRECTED,
+            acted_by_user_id=p.user_id, acted_at=now_utc, note=reason,
+            proposed_changes=changes))
+        prev, nxt = plan["prev"], plan["next"]
+        _period_activity(s, c, p, pc.ACTION_CORRECTED, {
+            "change_ref": ref, "kind": "correction", "contract_id": c.id,
+            "name": c.name or c.filename or f"Contract {c.id}",
+            "reason": reason, "internal_note": (body.internal_note or "").strip() or None,
+            "old": plan["current"], "new": plan["proposed"],
+            "lifecycle_before": plan["lifecycle"], "lifecycle_after": plan["lifecycle_after"],
+            "lifecycle_stored_after": (c.lifecycle or "").strip(),
+            "termination": plan["termination"],
+            "large": large, "endorsement_suggested": large["large"],
+            "evidence_document_id": evidence.id if evidence else None,
+            "evidence_filename": evidence.filename if evidence else None,
+            "gaps_confirmed": [{k: g[k] for k in ("code", "days", "with_id", "message")}
+                               for g in plan["gaps"]],
+            "rules": [{"rule_id": r["rule_id"], "name": r["name"], "before": r["before"],
+                       "after_fp": r["after_fp"]} for r in plan["rules"]["redated"]],
+            "rules_other_dates": plan["rules"]["other_dates"],
+            "calendar": calendar, "review_items": plan["review_items"],
+            "neighbours": _nb_state(prev, nxt),
+            "marks": _period_marks(s, c),
+            "prior_period": "unchanged",
+            "acted_at_utc": now_utc.isoformat()})
+        _after_commit(s, _period_email_thunks(s, c, "correction", (old_in, old_ex),
+                                              (new_in, new_ex), reason), "period correction")
+        s.commit()
+        s.refresh(c)
+        if large["large"]:
+            _notify_large(c, p, s, "Large contract date correction", [
+                ("Contract", f"{c.name or c.filename} ({_codes().contract_code(c)})"),
+                ("From", f"{old_in} – {old_ex}"), ("To", f"{new_in} – {new_ex}"),
+                ("Why large", " ".join(large["reasons"])), ("Reason", reason),
+                ("Evidence", evidence.filename if evidence else "—")])
+        rec = _record(s, c, p=p)
+        rec["period_change_result"] = {"change_ref": ref, "rules_redated":
+                                       len(plan["rules"]["redated"]),
+                                       "calendar": _calendar_public(calendar),
+                                       "review_items": len(plan["review_items"])}
+        return rec
+
+
+@router.post("/contracts/{contract_id}/period/undo/preview")
+def period_undo_preview(contract_id: int, p: Principal = Depends(current_principal)):
+    with SessionLocal() as s:
+        c = _period_gate(s, p, contract_id)
+        u = _undo_plan(s, c)
+        u.pop("target", None)
+        if u.get("available") and u["large"]:
+            u["code"] = _codes().contract_code(c)
+        s.rollback()
+        return u
+
+
+@router.post("/contracts/{contract_id}/period/undo")
+def period_undo(contract_id: int, body: PeriodUndo,
+                p: Principal = Depends(current_principal)):
+    """Reverse the LATEST correction — only while nothing since makes that
+    unsafe or ambiguous (period_change.undo_blockers). A new, logged action:
+    the correction's own rows are never edited or removed."""
+    import period_change as pc
+    import uuid as _uuid
+    with SessionLocal() as s:
+        c = _period_gate(s, p, contract_id)
+        _period_neighbours(s, c, lock=True)
+        s.refresh(c)
+        u = _undo_plan(s, c)
+        if not u.get("available") or u["blockers"]:
+            b = u["blockers"]
+            raise HTTPException(409, {"message": "This correction can't be undone: "
+                                                 + b[0]["message"],
+                                      "errors": {}, "blockers": b})
+        reason = (body.reason or "").strip()
+        if not reason:
+            raise HTTPException(400, {"message": "Give the reason for undoing it — the "
+                                                 "broker will see it.",
+                                      "errors": {"reason": "required"}})
+        if body.preview_token != u["preview_token"]:
+            raise HTTPException(409, {"message": "The impact has changed — review it again.",
+                                      "errors": {"_": "preview out of date"},
+                                      "stale_preview": True})
+        if u["gaps"] and not body.confirm_gap:
+            raise HTTPException(409, {"message": u["gaps"][0]["message"]
+                                      + " Confirm the gap is intended to go ahead.",
+                                      "errors": {}, "conflicts": u["gaps"],
+                                      "needs_confirm": True})
+        code = _codes().contract_code(c)
+        if u["large"] and not pc.code_matches(body.confirm_text, code):
+            raise HTTPException(400, {
+                "message": f"This undoes a large correction. Type the contract code "
+                           f"{code} exactly to confirm.",
+                "errors": {"confirm_text": "does not match"}})
+        target = u["target"]
+        d = target.details or {}
+        cur_in, cur_ex = c.inception_dt, c.expiry_dt
+        back_in, back_ex = _as_date(u["restore"]["inception_dt"]), _as_date(
+            u["restore"]["expiry_dt"])
+        restored = []
+        for r in d.get("rules") or []:
+            _write_rule(s, int(r["rule_id"]), r["before"])
+            restored.append(int(r["rule_id"]))
+        c.inception_dt, c.expiry_dt = back_in, back_ex
+        s.flush()
+        calendar = _period_calendar(s, c, dry=False,
+                                    restore=(d.get("calendar") or {}).get("removed_rows"))
+        s.flush()
+        ref = _uuid.uuid4().hex[:12]
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        changes = [{"field": f, "current": str(a) if a else None,
+                    "proposed": str(b) if b else None, "ref": ref}
+                   for f, a, b in (("inception_dt", cur_in, back_in),
+                                   ("expiry_dt", cur_ex, back_ex)) if a != b]
+        s.add(ContractApproval(
+            tenant_id=c.tenant_id, contract_id=c.id, action=pc.APPROVAL_UNDONE,
+            acted_by_user_id=p.user_id, acted_at=now_utc, note=reason,
+            proposed_changes=changes))
+        prev, nxt = _period_neighbours(s, c)
+        _period_activity(s, c, p, pc.ACTION_UNDONE, {
+            "change_ref": ref, "kind": "undo", "undoes": u["change_ref"],
+            "contract_id": c.id, "name": c.name or c.filename or f"Contract {c.id}",
+            "reason": reason, "internal_note": (body.internal_note or "").strip() or None,
+            "old": u["from"], "new": u["restore"],
+            "large": {"large": False}, "reverses_large": u["large"],
+            "rules_restored": restored, "calendar": calendar,
+            "gaps_confirmed": [{k: g[k] for k in ("code", "days", "with_id", "message")}
+                               for g in u["gaps"]],
+            "neighbours": _nb_state(prev, nxt),
+            "acted_at_utc": now_utc.isoformat()})
+        _after_commit(s, _period_email_thunks(s, c, "undo", (cur_in, cur_ex),
+                                              (back_in, back_ex), reason), "period undo")
+        s.commit()
+        s.refresh(c)
+        if u["large"]:
+            _notify_large(c, p, s, "Large contract date correction undone", [
+                ("Contract", f"{c.name or c.filename} ({code})"),
+                ("From", f"{cur_in} – {cur_ex}"), ("Back to", f"{back_in} – {back_ex}"),
+                ("Reason", reason)])
+        rec = _record(s, c, p=p)
+        rec["period_change_result"] = {"change_ref": ref, "undoes": u["change_ref"],
+                                       "rules_restored": len(restored),
+                                       "calendar": _calendar_public(calendar)}
+        return rec
+
+
+@router.get("/contracts/{contract_id}/period-review")
+def period_review(contract_id: int, p: Principal = Depends(current_principal)):
+    """Files and results whose period falls outside the contract's term now,
+    and rules holding dates that are not its start or end. Read-only: what to
+    do about each is Phase D."""
+    import renewal_chain as rc
+    with SessionLocal() as s:
+        c = _period_gate(s, p, contract_id)
+        files = _period_files(s, c)
+        rules = _period_rules(s, c, {})
+        return {"items": _review_items(files, c.inception_dt, c.expiry_dt),
+                "rules_other_dates": rules["other_dates"],
+                "term": {"inception_dt": str(c.inception_dt) if c.inception_dt else None,
+                         "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None}}
+
+
+def _evidence_in_use(s, c: Contract, doc_id: int) -> bool:
+    """Does a recorded correction of this contract rest on this evidence file?
+    Then it is part of the audit trail and is not retired."""
+    import period_change as pc
+    from db import ActivityEvent
+    rows = (s.query(ActivityEvent.details)
+            .filter(ActivityEvent.action == pc.ACTION_CORRECTED,
+                    ActivityEvent.target == f"contract:{c.id}",
+                    ActivityEvent.tenant_id == c.tenant_id).all())
+    return any(str((d or {}).get("evidence_document_id")) == str(doc_id) for (d,) in rows)
+
+
+def _correction_evidence(s, event_id: int):
+    """The evidence file a recorded LARGE correction relied on — reached only
+    through that correction's own audit row, or None.
+
+    So a file uploaded as evidence and never used for a correction stays the
+    carrier's alone, and an id typed by hand reaches nothing: the row must be
+    a correction, name this contract, belong to the contract's carrier, and
+    point at an evidence document of that same contract."""
+    import period_change as pc
+    from db import ActivityEvent
+    ev = s.get(ActivityEvent, event_id)
+    if ev is None or ev.action != pc.ACTION_CORRECTED:
+        return None
+    d = ev.details if isinstance(ev.details, dict) else {}
+    doc_id, cid = d.get("evidence_document_id"), d.get("contract_id")
+    if (not doc_id or not cid or not (d.get("large") or {}).get("large")
+            or ev.target != f"contract:{cid}"):
+        return None
+    c = s.get(Contract, int(cid))
+    doc = s.get(ContractDocument, int(doc_id))
+    if (c is None or doc is None or c.tenant_id != ev.tenant_id
+            or doc.contract_id != c.id or doc.kind != "evidence"):
+        return None
+    return doc
+
+
+@router.get("/admin/contract-period-evidence/{event_id}/file")
+def period_evidence_for_kavachio(event_id: int,
+                                 p: Principal = Depends(current_principal)):
+    """Kavachio's one way to an evidence file (B1): the file behind a large
+    date correction it was told about, opened from that correction's row in
+    its Audit Logs.
+
+    Deliberately NOT a door into the contract: assert_can_open_contract still
+    refuses Kavachio the record, its terms and its other documents. The
+    carrier opens its evidence from the contract's Documents; a broker never
+    does. Not behind the switch: it is read-only oversight of corrections
+    already made, and while the switch has never been on there are none."""
+    if not p.is_platform_admin:
+        raise HTTPException(403, "Only Kavachio admins open evidence here. The "
+                                 "carrier opens it from the contract's Documents.")
+    with SessionLocal() as s:
+        doc = _correction_evidence(s, event_id)
+        if doc is None:
+            raise HTTPException(404, "evidence not found")
+        data = storage.resolve_bytes(doc.blob_ref, doc.blob)
+        if data is None:
+            raise HTTPException(404, "the file for this document is no longer stored")
+        return Response(
+            content=data, media_type=_media_type(doc.filename),
+            headers={"Content-Disposition":
+                     _content_disposition(doc.filename or "evidence")})

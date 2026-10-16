@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Download, Search } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { Download, Paperclip, Search } from "lucide-react";
 import {
-  downloadAuditLogs, getAuditGroup, getAuditLogs, getAuditOptions,
+  downloadAuditLogs, downloadCorrectionEvidence, getAuditGroup, getAuditLogs, getAuditOptions,
   type AuditOptions, type AuditQuery, type AuditRow,
 } from "../api/audit";
+import { downloadErrorText } from "../api/client";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useServerList } from "../hooks/useServerList";
 import { Pagination } from "../components/Pagination";
@@ -74,7 +76,10 @@ export default function AuditLogs() {
   const [from, setFrom] = useState(daysAgo(30));
   const [to, setTo] = useState(localDay(new Date()));
   const [actor, setActor] = useState("");
-  const [action, setAction] = useState("all");
+  // A notice can open this page on one Action type ("?action=contracts").
+  const [search] = useSearchParams();
+  const [action, setAction] = useState(search.get("action") || "all");
+  const [evidenceError, setEvidenceError] = useState("");
   const [typed, setTyped] = useState("");
   const q = useDebouncedValue(typed, 300);
   const [opts, setOpts] = useState<AuditOptions | null>(null);
@@ -198,6 +203,10 @@ export default function AuditLogs() {
           </div>
         </div>
 
+        {evidenceError && (
+          <div className="note crit" style={{ marginBottom: 14 }}>{evidenceError}</div>
+        )}
+
         <div className="card">
           {failed ? (
             <div className="empty">Could not load the audit trail.</div>
@@ -250,6 +259,20 @@ export default function AuditLogs() {
                             <button type="button" className="linkish audit-group-link"
                               onClick={() => setOpenGroup(r)}>
                               View all {r.group.count} {r.group.noun ?? "changes"} →
+                            </button>
+                          )}
+                          {/* The server sends this on Kavachio's rows only: the
+                              evidence behind a large contract date correction. */}
+                          {r.evidence && (
+                            <button type="button" className="linkish audit-group-link"
+                              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                              onClick={() => {
+                                setEvidenceError("");
+                                downloadCorrectionEvidence(r.evidence!.event_id, r.evidence!.filename)
+                                  .catch(async e => setEvidenceError(
+                                    await downloadErrorText(e, "Could not open the evidence.")));
+                              }}>
+                              <Paperclip size={12} /> Open evidence ({r.evidence.filename})
                             </button>
                           )}
                         </td>

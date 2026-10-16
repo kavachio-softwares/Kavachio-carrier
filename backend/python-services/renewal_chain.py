@@ -144,6 +144,158 @@ def follow_pins(sheet_contracts: dict, named_id: Optional[int],
             for sheet, cid in sheet_contracts.items()}
 
 
+# ── who owns which day (D1) and when two versions conflict (D2, D8) ────────
+#
+# THE RULE (approved 14 Oct 2026). Every calendar day belongs to exactly one
+# version of a contract. A version owns its days from inception to its LAST
+# DAY, both inclusive. Its last day is its expiry date — except:
+#   * HANDOVER: the next version starts ON that date → the day goes to the
+#     NEW version, so the last day is the day before;
+#   * TERMINATED earlier than its expiry → the termination date is its end, so
+#     a successor may start on it (a handover) or later;
+#   * OPEN-ENDED (no expiry) followed by a successor → it ends the day before
+#     the successor starts.
+# Two versions overlapping (both claiming a day) is refused; a gap is a warning
+# a person must confirm.
+
+def overlap_check_enabled() -> bool:
+    """RENEWAL_OVERLAP_CHECK=false turns the refusals off (the report stays)."""
+    return os.getenv("RENEWAL_OVERLAP_CHECK", "true").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def term_end(v) -> Optional[dt.date]:
+    """The date a version's term ends, as a successor must respect it: its
+    expiry, or its termination date when it was terminated before expiry."""
+    exp = getattr(v, "expiry_dt", None)
+    term = getattr(v, "terminated_date", None)
+    if term is not None and (exp is None or term < exp):
+        return term
+    return exp
+
+
+def last_day(v, next_version=None) -> Optional[dt.date]:
+    """The last day `v` owns (inclusive), given the version after it (if
+    any). None = open-ended with nothing after it."""
+    end = term_end(v)
+    nxt = getattr(next_version, "inception_dt", None) if next_version is not None else None
+    if end is None:
+        return (nxt - dt.timedelta(days=1)) if nxt is not None else None
+    if nxt is not None and nxt == end:
+        return end - dt.timedelta(days=1)
+    return end
+
+
+def _label(v) -> str:
+    return (getattr(v, "name", None) or f"contract {getattr(v, 'id', '?')}")
+
+
+def _fmt(d: dt.date) -> str:
+    return f"{d.day} {d:%b %Y}"
+
+
+def term_conflicts(new_inception: Optional[dt.date], new_expiry: Optional[dt.date],
+                   prev=None, next_version=None) -> list[dict]:
+    """What is wrong with giving a version these dates, next to the version it
+    renews (`prev`) and the version that renews it (`next_version`).
+
+    Each item: {code, severity: "block" | "warn", message, days, with_id}.
+    "block" is refused; "warn" needs a person's confirmation (a gap, D2).
+    Pure: the same answer for the Renew form, the server and the tests.
+    """
+    out: list[dict] = []
+
+    def add(code, severity, message, days=None, with_v=None, *,
+            span=None, earliest=None):
+        # The sentence, and the same facts as fields so a screen can lay them
+        # out: the other version's name, the days in question (first, last),
+        # and for an overlap with the previous version the earliest start.
+        out.append({"code": code, "severity": severity, "message": message,
+                    "days": days, "with_id": getattr(with_v, "id", None),
+                    "with_name": _label(with_v) if with_v is not None else None,
+                    "span_from": str(span[0]) if span else None,
+                    "span_to": str(span[1]) if span else None,
+                    "earliest_start": str(earliest) if earliest else None})
+
+    if new_inception and new_expiry and new_expiry < new_inception:
+        add("expiry_before_inception", "block",
+            "The expiry date is before the inception date.")
+        return out
+
+    if prev is not None and new_inception is not None:
+        end = term_end(prev)
+        if end is not None:
+            if new_inception < end:
+                shared = (end - new_inception).days + 1
+                add("overlaps_previous", "block",
+                    f"Starts {_fmt(new_inception)}, but {_label(prev)} runs until "
+                    f"{_fmt(end)}: both would claim {shared} day"
+                    f"{'' if shared == 1 else 's'} ({_fmt(new_inception)} – {_fmt(end)}). "
+                    f"Start on {_fmt(end)} (that day then passes to this one) or later.",
+                    shared, prev, span=(new_inception, end), earliest=end)
+            elif new_inception > end + dt.timedelta(days=1):
+                gap = (new_inception - end).days - 1
+                add("gap_after_previous", "warn",
+                    f"{gap} day{'' if gap == 1 else 's'} between {_label(prev)} "
+                    f"(ends {_fmt(end)}) and this one (starts {_fmt(new_inception)}) "
+                    f"belong to no contract.", gap, prev,
+                    span=(end + dt.timedelta(days=1), new_inception - dt.timedelta(days=1)))
+
+    if next_version is not None:
+        nxt_in = getattr(next_version, "inception_dt", None)
+        draft = (getattr(next_version, "lifecycle", None) or "") in (
+            "draft", "pending", "changes_requested")
+        if nxt_in is not None and new_expiry is not None:
+            if new_expiry > nxt_in:
+                shared = (new_expiry - nxt_in).days + 1
+                if draft:
+                    add("overlaps_draft_renewal", "block",
+                        f"Its draft renewal, {_label(next_version)}, starts "
+                        f"{_fmt(nxt_in)}: both would claim {shared} day"
+                        f"{'' if shared == 1 else 's'}. Correct the draft's dates first.",
+                        shared, next_version, span=(nxt_in, new_expiry))
+                else:
+                    add("overlaps_next", "block",
+                        f"{_label(next_version)} starts {_fmt(nxt_in)}: both would "
+                        f"claim {shared} day{'' if shared == 1 else 's'}.",
+                        shared, next_version, span=(nxt_in, new_expiry))
+            elif nxt_in > new_expiry + dt.timedelta(days=1):
+                gap = (nxt_in - new_expiry).days - 1
+                add("gap_before_next", "warn",
+                    f"{gap} day{'' if gap == 1 else 's'} between this one (ends "
+                    f"{_fmt(new_expiry)}) and {_label(next_version)} (starts "
+                    f"{_fmt(nxt_in)}) belong to no contract.", gap, next_version,
+                    span=(new_expiry + dt.timedelta(days=1), nxt_in - dt.timedelta(days=1)))
+        if (nxt_in is not None and new_inception is not None
+                and new_inception >= nxt_in):
+            add("no_days", "block",
+                f"It would own no days: {_label(next_version)} starts "
+                f"{_fmt(nxt_in)}, on or before this one's start.", None, next_version)
+    return out
+
+
+def blocking(conflicts: list[dict]) -> list[dict]:
+    return [c for c in conflicts if c["severity"] == "block"]
+
+
+def warnings(conflicts: list[dict]) -> list[dict]:
+    return [c for c in conflicts if c["severity"] == "warn"]
+
+
+def suggested_inception(prev) -> Optional[dt.date]:
+    """Where a renewal of `prev` should start by default: on its end date when
+    the term is written "1 Oct – 1 Oct" (a handover), else the day after
+    ("1 Jan – 31 Dec"). Either is allowed; this is only the starting value."""
+    end = term_end(prev)
+    if end is None:
+        return None
+    start = getattr(prev, "inception_dt", None)
+    if (start is not None and end.day == start.day
+            and getattr(prev, "terminated_date", None) is None):
+        return end
+    return end + dt.timedelta(days=1)
+
+
 # ── re-dating a copied rule ────────────────────────────────────────────────
 
 _ISO = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")

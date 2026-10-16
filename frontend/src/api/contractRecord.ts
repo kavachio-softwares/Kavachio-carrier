@@ -148,7 +148,9 @@ export type ContractActions = {
   generate_rules: boolean;
 };
 
-export type ContractDocumentKind = "contract" | "reference" | "endorsement";
+/** `evidence`: what a large date correction rests on (Change period). The
+ *  server never sends it to a broker. */
+export type ContractDocumentKind = "contract" | "reference" | "endorsement" | "evidence";
 
 export type ContractDocument = {
   id: number;
@@ -205,6 +207,27 @@ export type ContractRecord = {
    *  it was never renewed and renews nothing; null on list rows. Contract
    *  periods only — attached files are document history, in `documents`. */
   renewal_history?: RenewalVersion[] | null;
+  /** Overlaps / gaps with the version this renews and the one renewing it.
+   *  Carrier side, full record only. Reported, never fixed automatically. */
+  period_conflicts?: TermConflict[] | null;
+  /** An uploaded renewal not yet in force: ready to make active, or what is in
+   *  the way (the server refuses "Make it active" on exactly these). `gaps`
+   *  are days owned by no version that nobody has confirmed yet. Carrier side,
+   *  full record only; null when it does not apply. */
+  activation?: {
+    ready: boolean;
+    blockers: { code: string; message: string; with_id?: number | null }[];
+    gaps: TermConflict[];
+  } | null;
+  /** Change period (Phase B): which dates the carrier may correct now, and
+   *  the corrections made, newest first. Carrier side, only while the feature
+   *  switch is on; null otherwise. Never carries an internal note. */
+  period_change?: {
+    allowed: { inception_dt: boolean; expiry_dt: boolean };
+    can_change: boolean;
+    large_days: number;
+    history: PeriodHistoryEntry[];
+  } | null;
   /** The Renew area (server rule: expired, or active within the renewal
    *  window, and not already renewed). `existing` and `opens_on` are sent to
    *  the carrier only. */
@@ -214,6 +237,9 @@ export type ContractRecord = {
     /** Active, not yet in the window: the day Renew appears. */
     opens_on: string | null;
     window_days: number;
+    /** Where the Renew form starts its inception: the end date for a
+     *  "1 Oct – 1 Oct" term (a handover), else the day after. */
+    suggested_inception?: string | null;
     /** The renewal already made — linked instead of a second Renew. */
     existing: { id: number; name: string; lifecycle: Lifecycle } | null;
   } | null;
@@ -721,6 +747,8 @@ export const updateContract = (
     wording_sections?: WordingSection[];
     signers?: Signer[];
     signature_layout?: SignatureLayout | null;
+    /** New dates leave a gap next to a neighbouring version: confirmed. */
+    confirm_gap?: boolean;
   },
   // `wording_retied` names the terms a saved clause was tied back to: a figure
   // typed where a chip used to be is bound to the term it quotes, or the
@@ -767,14 +795,18 @@ export const sendBackContract = (id: number, note: string) =>
 /** Carrier: send an uploaded contract up to the carrier admin to be accepted.
  *  A carrier ADMIN pressing this accepts it there and then — their own act is
  *  the approval, exactly as it is on a bordereau setup. */
-export const submitForApproval = (id: number, note?: string) =>
+export const submitForApproval = (id: number, note?: string, confirmGap = false) =>
   api.post<ContractRecord>(`/contracts/${id}/submit-for-approval`,
-                           { note: note ?? null }).then(r => r.data);
+                           { note: note ?? null,
+                             ...(confirmGap ? { confirm_gap: true } : {}) })
+     .then(r => r.data);
 
 /** Carrier admin: accept an uploaded contract. It goes in force. */
-export const acceptContract = (id: number, note?: string) =>
+export const acceptContract = (id: number, note?: string, confirmGap = false) =>
   api.post<ContractRecord>(`/contracts/${id}/accept`,
-                           { note: note ?? null }).then(r => r.data);
+                           { note: note ?? null,
+                             ...(confirmGap ? { confirm_gap: true } : {}) })
+     .then(r => r.data);
 
 /** Broker: push back.
  *
@@ -827,7 +859,37 @@ export const renewContract = (id: number, body: {
   /** Uploaded contracts: keep the previous contract's wording, clauses,
    *  terms and checks instead of a new signed PDF. */
   same_wording?: boolean;
+  /** A gap after the previous version is allowed once somebody confirms it. */
+  confirm_gap?: boolean;
 }) => api.post<ContractRecord>(`/contracts/${id}/renew`, body).then(r => r.data);
+
+/** One problem with a version's dates next to its neighbours (the server's
+ *  renewal_chain.term_conflicts): "block" is refused, "warn" (a gap) needs
+ *  confirming. */
+export type TermConflict = {
+  code: string;
+  severity: "block" | "warn";
+  message: string;
+  days: number | null;
+  with_id: number | null;
+  /** The same facts as fields, for laying the note out: the other version's
+   *  name, the days in question (first, last) and, for an overlap with the
+   *  previous version, the earliest start that would not overlap. */
+  with_name?: string | null;
+  span_from?: string | null;
+  span_to?: string | null;
+  earliest_start?: string | null;
+};
+
+/** Would a renewal of this contract with these dates overlap it or leave a
+ *  gap? The same rule POST /renew applies. Writes nothing. */
+export const renewalCheck = (id: number, inception: string, expiry: string) =>
+  api.get<{
+    conflicts: TermConflict[]; blocked: boolean; needs_confirm: boolean;
+    suggested_inception: string | null; previous_ends: string | null;
+  }>(`/contracts/${id}/renewal-check`, {
+    params: { inception_dt: inception || undefined, expiry_dt: expiry || undefined },
+  }).then(r => r.data);
 
 export type RenewalRuleChanges = {
   previous_contract_id: number | null;
@@ -1147,3 +1209,97 @@ export const getContractClauses = (programId: number, contractId: number) =>
   api.get<{ clauses?: ContractClause[]; rules?: ContractClauseRule[] }>(
     `/programs/${programId}/contracts/${contractId}`,
   ).then(r => ({ clauses: r.data.clauses ?? [], rules: r.data.rules ?? [] }));
+
+
+// ── Change period (Phase B: corrections) ───────────────────────────────────
+
+export type PeriodHistoryEntry = {
+  ref: string | null;
+  kind: "correction" | "undo";
+  undoes: string | null;
+  at: string | null;
+  old: { inception_dt: string | null; expiry_dt: string | null } | null;
+  new: { inception_dt: string | null; expiry_dt: string | null } | null;
+  large: boolean;
+  reason: string | null;
+  by: string | null;
+};
+
+export type PeriodReviewItem = {
+  kind: "file" | "result";
+  id: number;
+  label: string | null;
+  period: string;
+  start: string;
+  end: string;
+  why: string;
+};
+
+export type PeriodPreview = {
+  lifecycle: string;
+  lifecycle_after: string;
+  allowed: { inception_dt: boolean; expiry_dt: boolean };
+  current: { inception_dt: string | null; expiry_dt: string | null };
+  proposed: { inception_dt: string | null; expiry_dt: string | null };
+  errors: Record<string, string>;
+  conflicts: TermConflict[];
+  gaps: TermConflict[];
+  /** Overlaps already on the record, on a side this correction leaves alone:
+   *  reported, and not this correction's to fix (they do not block it). */
+  existing_conflicts?: TermConflict[];
+  large: { large: boolean; limit: number; inception_days: number; expiry_days: number;
+           reasons: string[] };
+  /** Old term date → new term date, for each date that moves. */
+  moves: Record<string, string>;
+  rules: { redated: { rule_id: number; name: string | null }[];
+           other_dates: { rule_id: number; name: string | null; dates: string[] }[] };
+  calendar: { schedule: boolean; added?: string[]; removed?: string[];
+              kept_with_files?: string[] } | null;
+  review_items: PeriodReviewItem[];
+  termination: { date: string; reason: string | null } | null;
+  broker_recipients: string[];
+  prior_period: string;
+  requires: { reason: boolean; evidence: boolean; code: boolean; gap_confirmation: boolean };
+  endorsement_suggested: boolean;
+  code: string | null;
+  evidence_documents: { id: number; filename: string | null; created_at: string | null }[];
+  preview_token: string;
+  ready: boolean;
+};
+
+export type UndoPreview = {
+  available: boolean;
+  change_ref?: string;
+  blockers: { code: string; message: string }[];
+  gaps?: TermConflict[];
+  large?: boolean;
+  code?: string;
+  restore?: { inception_dt: string | null; expiry_dt: string | null };
+  from?: { inception_dt: string | null; expiry_dt: string | null };
+  rules?: number;
+  preview_token?: string;
+};
+
+export const periodPreview = (id: number, inception_dt: string, expiry_dt: string) =>
+  api.post<PeriodPreview>(`/contracts/${id}/period/preview`, { inception_dt, expiry_dt })
+     .then(r => r.data);
+
+export const periodCorrect = (id: number, body: {
+  inception_dt: string; expiry_dt: string; reason: string; internal_note?: string | null;
+  confirm_gap?: boolean; evidence_document_id?: number | null; confirm_text?: string | null;
+  preview_token: string;
+}) => api.post<ContractRecord>(`/contracts/${id}/period`, body).then(r => r.data);
+
+export const periodUndoPreview = (id: number) =>
+  api.post<UndoPreview>(`/contracts/${id}/period/undo/preview`).then(r => r.data);
+
+export const periodUndo = (id: number, body: {
+  reason: string; internal_note?: string | null; confirm_gap?: boolean;
+  confirm_text?: string | null; preview_token: string;
+}) => api.post<ContractRecord>(`/contracts/${id}/period/undo`, body).then(r => r.data);
+
+export const periodReview = (id: number) =>
+  api.get<{ items: PeriodReviewItem[];
+            rules_other_dates: { rule_id: number; name: string | null; dates: string[] }[];
+            term: { inception_dt: string | null; expiry_dt: string | null } }>(
+    `/contracts/${id}/period-review`).then(r => r.data);

@@ -357,6 +357,9 @@ def friendly_action(method: str, path: str) -> str:
 # captured generically by the middleware. (/auth/* is skipped separately and
 # handled by auth_audit.)
 _SELF_LOGGED = [
+    # Change period (Phase B) writes its own audit row, in the same transaction
+    # as the correction or undo it records; its previews write nothing at all.
+    ("POST",   re.compile(r"^/contracts/\d+/period(/undo)?(/preview)?$")),
     # The secure correction link writes its own audit rows (who, by email).
     ("POST",   re.compile(r"^/fix-link/[^/]+(/.*)?$")),
     # The carrier's delivery rule and channel notify list log themselves.
@@ -549,6 +552,8 @@ _ACCESS_PATHS = [
     re.compile(r"^/uploads/\d+$"),
     re.compile(r"^/mapper/\d+/file$"),
     re.compile(r"^/dwh$"),
+    # Kavachio opening the evidence behind a large contract date correction.
+    re.compile(r"^/admin/contract-period-evidence/\d+/file$"),
     # Taking the audit trail out of the building is itself worth a line in it.
     re.compile(r"^/audit/export$"),
 ]
