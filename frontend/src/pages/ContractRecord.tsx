@@ -12,7 +12,7 @@
  * button the API refuses, and the user would have no way to tell which of the
  * two was wrong.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { canAccessPath } from "../access";
 import {
@@ -28,6 +28,8 @@ import { SignaturePlacer, signerTargets }
 import { InfoTip } from "../components/InfoTip";
 import { ClauseText } from "../components/ClauseText";
 import { WordingEditor } from "../components/WordingEditor";
+import { TreatyRecordPanel } from "../components/treaty/TreatyRecordPanel";
+import { ReinsurerSharing } from "../components/treaty/ReinsurerSharing";
 import { fmtDate, fmtStamp } from "../utils/date";
 import { describeChecks } from "../utils/contractChecks";
 import { TermDurationField, useTermDuration } from "../components/TermDuration";
@@ -315,8 +317,13 @@ function ContractRecordView() {
   const [agreedOpen, setAgreedOpen] = useState(true);
   const [clausesOpen, setClausesOpen] = useState(true);
   const [rulesOpen, setRulesOpen] = useState(true);
+  // ?tab= opens a tab directly — the dashboard's treaty actions link to the
+  // one the action is about. Anything unknown falls back to the summary.
+  const tabParam = new URLSearchParams(useLocation().search).get("tab");
   const [tab, setTab] = useState<
-    "summary" | "contract" | "agreed" | "clauses" | "wording">("summary");
+    "summary" | "contract" | "agreed" | "clauses" | "wording" | "treaty"
+    | "access">(["contract", "agreed", "clauses", "wording", "treaty", "access"]
+      .includes(tabParam ?? "") ? tabParam as "treaty" : "summary");
   // Which heading is open for renaming. A heading is not part of the clause
   // text and must not be typed into by accident — it is the thing a reader
   // navigates by — so it is a label until it is asked to be an input.
@@ -383,9 +390,24 @@ function ContractRecordView() {
 
   // An authored contract cannot take a replacement wording, so never leave the
   // picker sitting on a kind that is not offered.
+  // A TREATY is the exception: the reinsurer signs outside Kavachio, so the
+  // signed copy they send back has to be attached as the wording — it is the
+  // only evidence of their signature (see the treaty rule in sign_contract).
   useEffect(() => {
-    if (rec?.wording_sections?.length && kind === "contract") setKind("reference");
+    if (!rec?.wording_sections?.length || kind !== "contract") return;
+    if (rec.contract_type !== "insurer_reinsurer") setKind("reference");
+    else setExecutedCopy(true);
   }, [rec, kind]);
+
+  // Bring a refusal into view. Every action on this page reports through the
+  // one banner under the header, but the buttons that fail are far below it —
+  // Renew and Terminate sit at the bottom of the record. Without this, pressing
+  // "Create successor" on an already-renewed contract looks like nothing
+  // happened: the server's reason is on screen, a thousand pixels up.
+  const errRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (err) errRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [err]);
 
   async function run(label: string, fn: () => Promise<unknown>) {
     setBusy(label);
@@ -572,6 +594,9 @@ function ContractRecordView() {
   // Was this contract WRITTEN here, or does it come from a document somebody
   // else drafted? The answer changes what may be attached to it.
   const authored = !!rec.wording_sections?.length;
+  // A reinsurance treaty (Phase 26). Its counterparty is the lead reinsurer,
+  // who — like every reinsurer — has no seat in Kavachio.
+  const isTreaty = rec.contract_type === "insurer_reinsurer";
   // No sections and no uploaded wording either: the contract exists as terms
   // alone. That is a legitimate way to start — the terms are what get
   // negotiated — but it must not be a dead end, so a draft in this state is
@@ -600,8 +625,12 @@ function ContractRecordView() {
   // agreed terms and a wording saying something else. So it is not offered.
   // Changing an authored contract's wording means changing its terms, or
   // endorsing it.
+  // Except on a treaty, where the "wording" attached is the SIGNED COPY the
+  // reinsurer returned: evidence of a signature made outside Kavachio, not a
+  // replacement text. It is ticked as the signed copy for that reason.
   const attachableKinds = (Object.keys(DOC_KIND) as ContractDocumentKind[])
-    .filter(k => k !== "evidence" && !(authored && k === "contract"));
+    .filter(k => k !== "evidence" && !(authored && k === "contract" && !isTreaty));
+  const signedCopyOnly = authored && isTreaty;
 
   const spec = specs.find(t => t.key === rec.contract_type) ?? null;
   // The counterparty is not editable here: for a broker's own contract it is
@@ -976,6 +1005,10 @@ function ContractRecordView() {
 
   const shownTabs = ([
     { key: "summary", label: "Summary", show: true },
+    { key: "treaty", label: "Treaty structure", show: isTreaty },
+    // The private read-only links — carrier only. A broker never sees a
+    // treaty, but the guard costs nothing.
+    { key: "access", label: "Reinsurer access", show: isTreaty && !isBrokerSeat() },
     { key: "contract", label: "The contract", show: true },
     { key: "agreed", label: "What was agreed",
       show: !!rec.agreed_limits && Object.keys(rec.agreed_limits).length > 0 },
@@ -1091,7 +1124,9 @@ function ContractRecordView() {
           <div className="t">
             <h2>{rec.name}</h2>
             <p>
-              {[rec.contract_type_label ?? "type not set",
+              {[rec.treaty?.type_label
+                  ? `${rec.contract_type_label} · ${rec.treaty.type_label}`
+                  : rec.contract_type_label ?? "type not set",
                 rec.counterparty?.name, rec.programme?.name]
                 .filter(Boolean).join(" · ")}
             </p>
@@ -1124,7 +1159,8 @@ function ContractRecordView() {
         </div>
 
         {err && (
-          <div className="note warn" style={{ marginBottom: 14, maxWidth: 700 }}>{err}</div>
+          <div ref={errRef} className="note warn"
+               style={{ marginBottom: 14, maxWidth: 700 }}>{err}</div>
         )}
         {note && (
           <div className="note ok" style={{ marginBottom: 14, maxWidth: 700 }}>{note}</div>
@@ -1341,7 +1377,50 @@ function ContractRecordView() {
           ))}
         </div>
 
+        {curTab === "treaty" && isTreaty && (
+          <TreatyRecordPanel contractId={id} onSaved={load} />
+        )}
+        {curTab === "access" && isTreaty && (
+          <ReinsurerSharing contractId={id} />
+        )}
+
         {curTab === "summary" && (<>
+        {/* ── the treaty, at a glance ── */}
+        {isTreaty && rec.treaty && (
+          <div className="card" style={{ marginBottom: 14 }}>
+            <div className="card-h">
+              <ShieldCheck size={16} className="ci" />
+              <h3>{rec.treaty.headline ?? "Treaty structure not set up yet"}</h3>
+              {rec.treaty.has_structure && (
+                <span className={`badge ${rec.treaty.fully_placed ? "b-ok" : "b-warn"}`}>
+                  <span className="d" />
+                  {rec.treaty.fully_placed ? "Fully placed"
+                    : `${rec.treaty.placed_pct ?? 0}% placed`}
+                </span>
+              )}
+              <span className="right">
+                <button className="btn sm" type="button" onClick={() => setTab("treaty")}>
+                  {rec.treaty.has_structure ? "See the structure" : "Set it up"}
+                  <ArrowRight size={12} />
+                </button>
+              </span>
+            </div>
+            <div style={{ padding: "12px 20px", display: "flex", gap: 8,
+                          flexWrap: "wrap", alignItems: "center" }}>
+              <span className="sub">Protects</span>
+              {rec.treaty.programmes.map(pg => (
+                <span key={pg.id} className="badge b-mut">
+                  <span className="d" />{pg.name}
+                </span>
+              ))}
+              {rec.treaty.type_label && (
+                <span className="sub" style={{ marginLeft: "auto" }}>
+                  {rec.treaty.type_label}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         {/* ── the signatures ──
             Shown wherever a contract is close to going live or already has,
             because "why is this not live yet" and "who signed this" are the
@@ -1595,7 +1674,48 @@ function ContractRecordView() {
                 Terminated {fmtDate(rec.terminated_date)} — {rec.termination_reason}
               </div>
             )}
-            {rec.lifecycle === "agreed" && !isUploaded && (
+            {isTreaty && !isBrokerSeat()
+              && ["draft", "agreed", "signed", "active"].includes(rec.lifecycle) && (
+              <div className="note" style={{ marginTop: 0, marginBottom: 10 }}>
+                {rec.lifecycle === "draft" ? (
+                  <><b>Get the reinsurers&apos; approval.</b> Share the treaty
+                    with them under{" "}
+                    <span className="linkish" role="button"
+                          onClick={() => setTab("access")}>Reinsurer access</span>
+                    {" "}— each approves on its private link, and once every one
+                    has, the terms are agreed.
+                    {rec.treaty?.approvals && (
+                      <> <b>{rec.treaty.approvals.approved} of {rec.treaty.approvals.total}</b>{" "}
+                        approved so far
+                        {rec.treaty.approvals.changes_requested
+                          ? `, ${rec.treaty.approvals.changes_requested} asked for a change`
+                          : ""}.</>
+                    )}{" "}
+                    You can also settle the terms yourself. Either way you then
+                    sign for the carrier and record the reinsurers&apos;
+                    signature against the signed copy.</>
+                ) : rec.lifecycle === "agreed" ? (
+                  <><b>Terms settled.</b>{" "}
+                    {rec.unsigned_sides.includes("carrier")
+                      ? "Sign for the carrier first. "
+                      : "The carrier has signed. "}
+                    The reinsurer signs outside Kavachio: attach the signed copy
+                    they return under Documents, then record their signature
+                    against it.</>
+                ) : rec.lifecycle === "signed" ? (
+                  <>Both sides have signed. It becomes active once nothing else
+                    is in the way.</>
+                ) : (
+                  <><b>In force.</b> The reinsurers can see their own lines
+                    through a private link.{" "}
+                    <span className="linkish" role="button"
+                          onClick={() => setTab("access")}>
+                      Share it with them →
+                    </span></>
+                )}
+              </div>
+            )}
+            {rec.lifecycle === "agreed" && !isUploaded && !isTreaty && (
               <div className="hint">
                 {rec.whose_turn === "broker"
                   ? "The carrier has signed. The broker signs and returns it, then the carrier activates it."
@@ -1620,7 +1740,7 @@ function ContractRecordView() {
                 bordereau setup for this programme × broker. Setup reads both
                 from the link, so it opens with them already chosen. Carrier
                 only — a broker does not set up bordereaux. */}
-            {rec.lifecycle === "active" && !isBrokerSeat()
+            {rec.lifecycle === "active" && !isBrokerSeat() && !isTreaty
               && rec.programme && rec.counterparty && (
               <div className="note" style={{
                 marginTop: 12, display: "flex", gap: 14, flexWrap: "wrap",
@@ -1894,7 +2014,9 @@ function ContractRecordView() {
               {a.skip_review && !isUploaded && (
                 <button className="btn" type="button" disabled={!!busy}
                         onClick={() => setShowSkip(v => !v)}>
-                  <PenLine size={13} /> Skip the review — sign it now
+                  <PenLine size={13} />{" "}
+                  {isTreaty ? "Settle the terms — sign it now"
+                            : "Skip the review — sign it now"}
                 </button>
               )}
               {a.accept_terms && (
@@ -3698,10 +3820,13 @@ function ContractRecordView() {
                     <label className="hint" style={{ display: "block", marginTop: 10 }}>
                       <input
                         type="checkbox" checked={executedCopy}
+                        disabled={signedCopyOnly}
                         onChange={e => setExecutedCopy(e.target.checked)}
                         style={{ marginRight: 6, width: "auto" }}
                       />
-                      This is the signed copy
+                      {signedCopyOnly
+                        ? "The signed copy the reinsurer sent back"
+                        : "This is the signed copy"}
                     </label>
                   )}
 
@@ -3713,10 +3838,17 @@ function ContractRecordView() {
                     </button>
                     <span className="sub">{DOC_KIND[kind].blurb}</span>
                   </div>
-                  {authored && (
+                  {authored && !isTreaty && (
                     <div className="hint">
                       This contract's wording was written here, not uploaded —
                       change it above rather than attaching a new one.
+                    </div>
+                  )}
+                  {signedCopyOnly && (
+                    <div className="hint">
+                      The wording was written here. Attach under <b>Wording</b>{" "}
+                      only the signed slip or wording the reinsurer returned — it
+                      is what their recorded signature points to.
                     </div>
                   )}
                 </>

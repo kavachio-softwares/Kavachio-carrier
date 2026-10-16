@@ -54,6 +54,10 @@ from segment_routes import router as segment_router
 # at all because the emailed token is the credential (esign_routes.py).
 from esign_routes import router as esign_router, public_router as esign_public_router
 from audit_routes import router as audit_router
+# Reinsurance treaties (Phase 26): a treaty's structure and the programmes it
+# protects (carrier side), and the reinsurer's private read-only link, unlocked
+# by an emailed one-time code (/treaty-view/…, no login).
+from treaty_routes import router as treaty_router, public_router as treaty_public_router
 # The broker exception loop: the secure correction link (public, token-
 # authenticated like e-sign) and the carrier's delivery rule / notify contacts.
 # No tables of its own — see submission_service.
@@ -139,6 +143,8 @@ app.include_router(segment_router)
 # could swallow it.
 app.include_router(esign_public_router)
 app.include_router(esign_router)
+app.include_router(treaty_public_router)
+app.include_router(treaty_router)
 # Audit Logs (/audit/…). Every seat has one; what differs is whose rows come
 # back, which audit_feed.scope_for decides — so there is no role guard here to
 # fall out of step with it.

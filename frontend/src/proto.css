@@ -1594,3 +1594,71 @@
    kept at the right edge — four buttons used to wrap Close onto a line alone. */
 .proto .drawer-f.one-row{flex-wrap:nowrap;align-items:center;gap:8px;padding:14px 16px}
 .proto .drawer-f.one-row .btn{white-space:nowrap;padding-left:12px;padding-right:12px;flex:0 0 auto}
+
+/* ── Reinsurance treaties (Phase 26) ─────────────────────────────────────────
+   The tower draws a non-proportional treaty bottom-up: the carrier's retention,
+   then each layer, each band's fill showing how much of it is placed. The split
+   draws a proportional one as ceded against retained. Shared by the create
+   flow, the contract record, the programme panel and the reinsurer's page. */
+.proto .tw{display:flex;flex-direction:column-reverse;gap:4px}
+.proto .tw-band{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;min-height:38px;padding:8px 12px;border-radius:var(--p-r-xs);border:1px solid var(--p-border);background:var(--p-surface-2);overflow:hidden}
+.proto .tw-band.ret{background:repeating-linear-gradient(135deg,var(--p-surface-2) 0 6px,var(--p-surface-3) 6px 12px);color:var(--p-muted)}
+.proto .tw-band .fill{position:absolute;left:0;top:0;bottom:0;background:var(--p-primary-soft);z-index:0}
+.proto .tw-band.full .fill{background:#D3ECEF}
+.proto .tw-band.mine{border-color:var(--p-primary);box-shadow:inset 3px 0 0 var(--p-primary)}
+.proto .tw-band > *:not(.fill){position:relative;z-index:1}
+.proto .tw-band .lbl{font-size:12.5px;font-weight:600;flex:1 1 170px;min-width:0}
+.proto .tw-band .rng{font-family:var(--p-mono);font-size:11.5px;color:var(--p-muted);white-space:nowrap}
+.proto .tw-band .pl{font-size:11.5px;font-weight:600;white-space:nowrap}
+.proto .tw-band .pl.short{color:var(--p-warn-ink)}
+.proto .tw-split{display:flex;height:34px;border-radius:var(--p-r-xs);overflow:hidden;border:1px solid var(--p-border)}
+.proto .tw-split > div{display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;white-space:nowrap;padding:0 8px;min-width:0}
+.proto .tw-split .ced{background:var(--p-primary);color:#fff}
+.proto .tw-split .ret{background:var(--p-surface-3);color:var(--p-muted)}
+.proto .tw-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11.5px;color:var(--p-muted)}
+.proto .tw-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.proto .placebar{height:6px;border-radius:var(--p-r-pill);background:var(--p-surface-3);overflow:hidden;min-width:80px}
+.proto .placebar > i{display:block;height:100%;background:var(--p-primary)}
+.proto .placebar.short > i{background:var(--p-warn)}
+.proto .placebar.over > i{background:var(--p-crit)}
+.proto .ttype{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+@media(max-width:1100px){.proto .ttype{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.proto .ttype button{text-align:left;border:1px solid var(--p-border-2);background:var(--p-surface);border-radius:var(--p-r-sm);padding:11px 12px;cursor:pointer;display:flex;flex-direction:column;gap:4px;font-family:inherit;color:var(--p-ink)}
+.proto .ttype button b{font-size:13px}
+.proto .ttype button span{font-size:11.5px;color:var(--p-muted);line-height:1.4}
+.proto .ttype button.on{border-color:var(--p-primary);background:var(--p-primary-soft);box-shadow:0 0 0 2px var(--p-primary-soft)}
+.proto .ttype button:disabled{cursor:not-allowed;opacity:.6}
+.proto .tlayer{border:1px solid var(--p-border);border-radius:var(--p-r-sm);padding:14px 16px;margin-bottom:12px;background:var(--p-surface)}
+.proto .tlayer-h{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.proto .tlayer-h input{border:1px solid transparent;background:transparent;font-weight:700;font-size:13.5px;padding:4px 6px;border-radius:var(--p-r-xs);font-family:inherit;color:var(--p-ink);min-width:0;flex:0 1 220px}
+.proto .tlayer-h input:hover{border-color:var(--p-border-2)}
+.proto .tlayer-h input:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .panel-tbl td,.proto .panel-tbl th{vertical-align:middle}
+.proto .panel-tbl input,.proto .panel-tbl select{width:100%;border:1px solid var(--p-border-2);border-radius:var(--p-r-xs);padding:7px 9px;font-size:13px;font-family:inherit;background:var(--p-surface);color:var(--p-ink)}
+.proto .panel-tbl input.bad,.proto .panel-tbl select.bad{border-color:var(--p-crit)}
+.proto .facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:2px 18px}
+.proto .facts .kv{padding:8px 0}
+.proto .evt{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--p-border);font-size:12.5px}
+.proto .evt:last-child{border-bottom:0}
+.proto .evt .t{color:var(--p-faint);font-size:11.5px;white-space:nowrap;min-width:118px}
+.proto .tedit{grid-template-columns:minmax(0,1.7fr) minmax(270px,1fr);align-items:start}
+@media(max-width:1250px){.proto .tedit{grid-template-columns:1fr}}
+.proto .panel-tbl{table-layout:fixed}
+.proto .panel-tbl thead th,.proto .panel-tbl tbody td{padding:8px 6px;text-align:left}
+.proto .panel-tbl thead th:first-child,.proto .panel-tbl tbody td:first-child{padding-left:10px}
+/* The reinsurer's public treaty page (/treaty-view): no app shell, phone-safe. */
+.proto.tv{min-height:100vh}
+.proto .tv-bar{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.96);border-bottom:1px solid var(--p-border);backdrop-filter:blur(6px)}
+.proto .tv-bar-in{max-width:980px;margin:0 auto;padding:12px 16px;display:flex;align-items:center;gap:12px}
+.proto .tv-wrap{max-width:980px;margin:0 auto;padding:22px 16px 60px}
+.proto .tv-gate{max-width:420px;margin:0 auto;padding:48px 16px}
+.proto .tv-digits{display:flex;justify-content:center;gap:8px;margin-top:22px}
+.proto .tv-digits input{width:44px;height:54px;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);text-align:center;font-size:22px;font-weight:600;font-family:inherit;color:var(--p-ink);background:var(--p-surface)}
+.proto .tv-digits input:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .tv-digits input.bad{border-color:var(--p-crit)}
+.proto .tv-mine{display:inline-flex;align-items:baseline;gap:6px;font-weight:700;font-size:20px;color:var(--p-primary-h)}
+@media(max-width:640px){.proto .tv-digits input{width:38px;height:48px;font-size:19px}}
+.proto .tw-explain{margin:12px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px;font-size:13px;line-height:1.5;color:var(--p-muted)}
+.proto .tw-explain li{padding-left:14px;position:relative}
+.proto .tw-explain li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;border-radius:99px;background:var(--p-primary)}
+.proto .tw-explain b{color:var(--p-ink)}

@@ -16,7 +16,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { FilePlus2, History, Upload } from "lucide-react";
+import { FilePlus2, History, Upload, Users } from "lucide-react";
 import { canAccessPath } from "../access";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import {
@@ -27,6 +27,7 @@ import { fmtDate } from "../utils/date";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useServerList } from "../hooks/useServerList";
 import { ListFilterBar } from "../components/ListFilterBar";
+import { UploadTreatyModal } from "../components/treaty/UploadTreatyModal";
 import { Pagination } from "../components/Pagination";
 import AddContractModal from "../components/AddContractModal";
 import { InfoTip } from "../components/InfoTip";
@@ -96,7 +97,19 @@ export default function Contracts() {
   // the URL, so clearing it clears like every other filter on this screen.
   const [waiting, setWaiting] = useState(params.get("waiting") === "mine");
   const [lifecycle, setLifecycle] = useState("");
-  const [type, setType] = useState("");
+  // ?type=insurer_reinsurer is the Treaties entry in the sidebar. Re-read when
+  // the URL changes, because clicking that entry while already on this list
+  // keeps the same page mounted and would otherwise change nothing.
+  const [type, setType] = useState(params.get("type") ?? "");
+  useEffect(() => { setType(params.get("type") ?? ""); }, [params]);
+  // quota_share | surplus | xol | stop_loss | facultative — only offered while
+  // the list is showing treaties.
+  const [treatyType, setTreatyType] = useState("");
+  // The Treaties page is the one the SIDEBAR opens (?type=insurer_reinsurer),
+  // not any list that happens to be filtered to reinsurers — picking that
+  // filter on Contracts must not turn the page into one with no way back.
+  const treaties = params.get("type") === "insurer_reinsurer";
+  useEffect(() => { if (!treaties) setTreatyType(""); }, [treaties]);
   const [q, setQ] = useState("");
   // Debounced because this search runs on the SERVER — filtering happens in
   // SQL, so an undebounced box is one request per keystroke.
@@ -113,7 +126,8 @@ export default function Contracts() {
   // thousands to show ten. The filters are folded into one key, which the hook
   // uses to snap back to page 1 — a filter that narrowed the list while you sat
   // on page 4 would otherwise show an empty table.
-  const filterKey = [programme, lifecycle, type, query.trim(), waiting].join("|");
+  const filterKey = [programme, lifecycle, type, treatyType, query.trim(), waiting]
+    .join("|");
   const {
     items: rows, total, page, pageCount, loading, setPage, reload,
   } = useServerList<ContractRecord>(
@@ -121,6 +135,7 @@ export default function Contracts() {
       program_id: programme ? Number(programme) : undefined,
       lifecycle: lifecycle || undefined,
       contract_type: type || undefined,
+      treaty_type: treatyType || undefined,
       waiting: waiting ? "mine" : undefined,
       q: query.trim() || undefined,
       page: pg, page_size: size,
@@ -131,7 +146,8 @@ export default function Contracts() {
     filterKey, PAGE_SIZE,
   );
 
-  const filtersActive = !!(programme || lifecycle || type || q || waiting);
+  const filtersActive = !!(programme || lifecycle || (type && !treaties)
+                           || treatyType || q || waiting);
 
   // Surfaced above the table because it is the one thing on this screen that
   // blocks work: a contract that names a document nobody supplied cannot be
@@ -145,11 +161,24 @@ export default function Contracts() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Contracts
-              <InfoTip text="Every contract you hold, across all your programmes and brokers." />
-            </h2>
+            {treaties ? (
+              <h2>Treaties
+                <InfoTip text={"Your reinsurance treaties — the contracts where you "
+                  + "cede risk to reinsurers. Reinsurers are not on Kavachio; you "
+                  + "record their shares and can send each a private, read-only link."} />
+              </h2>
+            ) : (
+              <h2>Contracts
+                <InfoTip text="Every contract you hold, across all your programmes and brokers." />
+              </h2>
+            )}
           </div>
           <div className="actions">
+            {treaties && (
+              <Link to="/parties?type=reinsurer" className="btn">
+                <Users size={14} /> Reinsurers
+              </Link>
+            )}
             {/* Where the Signatures sidebar tab went. Watching a signing round
                 is watching a contract, so the way in is from the contracts you
                 hold rather than a tab of its own — and the same link, carrying
@@ -160,10 +189,11 @@ export default function Contracts() {
               </Link>
             )}
             <button type="button" className="btn" onClick={() => setUploading(true)}>
-              <Upload size={14} /> Upload existing
+              <Upload size={14} /> {treaties ? "Upload signed treaty" : "Upload existing"}
             </button>
-            <Link to="/contracts/new" className="btn pri">
-              <FilePlus2 size={14} /> Configure Contract
+            <Link to={treaties ? "/contracts/new?type=insurer_reinsurer" : "/contracts/new"}
+                  className="btn pri">
+              <FilePlus2 size={14} /> {treaties ? "Raise a treaty" : "Configure Contract"}
             </Link>
           </div>
         </div>
@@ -196,7 +226,10 @@ export default function Contracts() {
                 options: [{ value: "", label: "All programmes" },
                   ...programmes.map(p => ({ value: String(p.id), label: p.name }))],
               },
-              {
+              // Not on the Treaties list: it IS the insurer ↔ reinsurer list,
+              // and switching it to broker contracts from inside would leave
+              // the sidebar saying Treaties over something else.
+              ...(treaties ? [] : [{
                 key: "type", ariaLabel: "Filter by type",
                 value: type, onChange: setType,
                 options: [
@@ -204,7 +237,19 @@ export default function Contracts() {
                   { value: "insurer_broker", label: "Insurer ↔ Broker" },
                   { value: "insurer_reinsurer", label: "Insurer ↔ Reinsurer" },
                 ],
-              },
+              }]),
+              ...(treaties ? [{
+                key: "treaty_type", ariaLabel: "Filter by treaty type",
+                value: treatyType, onChange: setTreatyType,
+                options: [
+                  { value: "", label: "All treaty types" },
+                  { value: "quota_share", label: "Quota Share" },
+                  { value: "surplus", label: "Surplus" },
+                  { value: "xol", label: "Excess of Loss" },
+                  { value: "stop_loss", label: "Stop Loss" },
+                  { value: "facultative", label: "Facultative" },
+                ],
+              }] : []),
               {
                 key: "state", ariaLabel: "Filter by state",
                 value: lifecycle, onChange: setLifecycle,
@@ -228,7 +273,10 @@ export default function Contracts() {
               },
             ]}
             onClear={() => {
-              setProgramme(""); setLifecycle(""); setType(""); setQ("");
+              // Clearing on the Treaties list keeps it the Treaties list.
+              setProgramme(""); setLifecycle(""); setQ("");
+              if (!treaties) setType("");
+              setTreatyType("");
               setWaiting(false);
             }}
             active={filtersActive}
@@ -238,7 +286,10 @@ export default function Contracts() {
             <table>
               <thead>
                 <tr>
-                  <th>Contract</th><th>Broker</th><th>Programme</th>
+                  <th>{treaties ? "Treaty" : "Contract"}</th>
+                  <th>{treaties ? "Lead reinsurer" : type === "insurer_broker"
+                    ? "Broker" : "Counterparty"}</th>
+                  <th>Programme</th>
                   <th>Term</th><th>State</th>
                   {/* Documents and Checks were taken off this list; both are
                       still on the contract's own page. A missing document is
@@ -261,11 +312,23 @@ export default function Contracts() {
                         <Link to={`/contracts/${c.id}`}><b>{c.name}</b></Link>
                         <div className="sub">
                           {c.code && <><span className="mono" title={CODE_TIP}>{c.code}</span> · </>}
-                          {c.contract_type
+                          {c.treaty?.type_label
+                            ? c.treaty.type_label
+                            : c.contract_type
                             ? TYPE_LABEL[c.contract_type] ?? c.contract_type
                             : "type not set"}
                           {c.umr && <> · {c.umr}</>}
                         </div>
+                        {c.treaty?.headline && (
+                          <div className="sub">
+                            {c.treaty.headline}
+                            {c.treaty.placed_pct != null && !c.treaty.fully_placed && (
+                              <span style={{ color: "var(--p-warn-ink)" }}>
+                                {" "}· {c.treaty.placed_pct}% placed
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td>
                         {c.counterparty?.name ?? "—"}
@@ -275,6 +338,11 @@ export default function Contracts() {
                       </td>
                       <td>
                         {c.programme?.name ?? "—"}
+                        {c.treaty && c.treaty.programmes.length > 1 && (
+                          <div className="sub">
+                            +{c.treaty.programmes.length - 1} more protected
+                          </div>
+                        )}
                         {c.programme?.code && (
                           <div className="sub mono" title={CODE_TIP}>{c.programme.code}</div>)}
                       </td>
@@ -300,7 +368,10 @@ export default function Contracts() {
                     purpose. "No contracts match those filters" is true and
                     answers a question nobody asked — the one being asked is
                     "is anything waiting on me?". */}
-                {waiting && !programme && !lifecycle && !type && !q
+                {treaties && !filtersActive
+                  ? "No treaties yet. Raise one to set out its layers and who "
+                    + "holds them."
+                  : waiting && !programme && !lifecycle && !type && !q
                   ? "Nothing is waiting on you. Every contract here is either "
                     + "with the broker or already active."
                   : filtersActive
@@ -317,8 +388,12 @@ export default function Contracts() {
         </div>
       </div>
 
+      {/* A treaty already signed takes its own upload: no broker, no reading
+          for rules, and it goes straight in force. */}
+      <UploadTreatyModal open={uploading && treaties}
+        onClose={() => setUploading(false)} />
       <AddContractModal
-        open={uploading}
+        open={uploading && !treaties}
         onClose={() => setUploading(false)}
         programmes={programmes}
         // The new contract belongs in the list — re-read it.

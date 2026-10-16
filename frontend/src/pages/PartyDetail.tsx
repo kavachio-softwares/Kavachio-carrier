@@ -5,6 +5,7 @@ import { SlidersHorizontal } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga, isTenantAdmin } from "../auth";
 import { toTitleCase } from "../api/validation";
+import ReinsurerDetail, { type ReinsurerParty } from "./ReinsurerDetail";
 
 type Party = {
   id: number; scope: string; party_type: string; legal_name: string;
@@ -98,6 +99,12 @@ export default function PartyDetail() {
         <button className="btn" style={{ marginTop: 14 }} onClick={() => nav("/parties")}>← Directory</button>
       </div></div>
     );
+  }
+  // A reinsurer is not a carrier and has no seat here: programmes and
+  // bordereau setups say nothing about it. Its own page shows its contacts
+  // (where treaty links go) and the treaties it is on.
+  if (p.party_type === "reinsurer") {
+    return <ReinsurerDetail party={p as unknown as ReinsurerParty} />;
   }
   const readOnly = p.scope === "global" || !isAdmin;
 

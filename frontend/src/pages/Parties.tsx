@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { Search } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Plus, Search } from "lucide-react";
+import { AddReinsurerModal } from "../components/treaty/AddReinsurerModal";
 import { api } from "../api/client";
 import { currentMga, isTenantAdmin } from "../auth";
 import { Pagination } from "../components/Pagination";
@@ -12,16 +13,12 @@ type Party = {
   dba_name?: string; is_active: boolean;
 };
 
-// Friendly type labels.
+// Friendly type labels. A legacy `insurer` row reads as Carrier. A reinsurer
+// is its own thing — the other side of a treaty, with no seat in Kavachio — so
+// it is labelled as one rather than folded into Carrier.
 const TYPE_LABEL: Record<string, string> = {
-  // Legacy rows may still carry `insurer`/`reinsurer`; both read as Carrier.
-  insurer: "Carrier", carrier: "Carrier", reinsurer: "Carrier",
+  insurer: "Carrier", carrier: "Carrier", reinsurer: "Reinsurer",
 };
-// Segmented filter — value sent to the API, label shown.
-const FILTERS = [
-  { v: "", label: "All" },
-  { v: "carrier", label: "Carrier" },
-];
 const PAGE_SIZE = 10;
 
 export default function Parties() {
@@ -29,7 +26,11 @@ export default function Parties() {
   const nav = useNavigate();
   const isAdmin = isTenantAdmin();
   const [q, setQ] = useState("");
-  const [type, setType] = useState("");
+  // ?type=reinsurer opens the list already filtered — the treaty screens link
+  // here that way.
+  const [params] = useSearchParams();
+  const [type, setType] = useState(params.get("type") ?? "");
+  const [adding, setAdding] = useState(false);
   const [status, setStatus] = useState("");
   const dq = useDebouncedValue(q, 300);
 
@@ -70,15 +71,18 @@ export default function Parties() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Carriers</h2>
-            <p>Your directory of carriers.</p>
+            <h2>Carriers &amp; Reinsurers</h2>
+            <p>Your directory of carriers, and of the reinsurers you cede to.</p>
           </div>
           {isAdmin && (
             <div className="actions">
-              {/* Adding is done in Users & Roles and nowhere else. This
-                  button added a carrier-shaped row to a COMPANY directory — a
-                  different thing wearing the same word — and gave a second
-                  front door to a list only one screen is supposed to own. */}
+              {/* Adding a CARRIER is done in Users & Roles and nowhere else —
+                  it is a company with a seat. A reinsurer has no seat: it is a
+                  record the carrier keeps for its treaties, so it is added
+                  here, and nothing is sent to anybody. */}
+              <button className="btn pri" type="button" onClick={() => setAdding(true)}>
+                <Plus size={14} /> Add reinsurer
+              </button>
             </div>
           )}
         </div>
@@ -87,15 +91,15 @@ export default function Parties() {
           <div className="card-h" style={{ gap: 14, flexWrap: "wrap" }}>
             <div className="search">
               <Search className="ic" />
-              <input placeholder="Search carriers…" value={q}
+              <input placeholder="Search carriers and reinsurers…" value={q}
                 onChange={e => setQ(e.target.value)} />
             </div>
-            {/* <div className="seg sm">
-              {FILTERS.map(f => (
-                <button key={f.v} className={type === f.v ? "on" : ""}
-                  onClick={() => setType(f.v)}>{f.label}</button>
-              ))}
-            </div> */}
+            <select className="fbar-select" aria-label="Filter by type"
+              value={type} onChange={e => setType(e.target.value)}>
+              <option value="">All Types</option>
+              <option value="carrier">Carriers</option>
+              <option value="reinsurer">Reinsurers</option>
+            </select>
             <select className="fbar-select" aria-label="Filter by status"
               value={status} onChange={e => setStatus(e.target.value)}>
               <option value="">All Statuses</option>
@@ -113,7 +117,7 @@ export default function Parties() {
             <table>
               <thead>
                 <tr>
-                  <th>Carrier</th>
+                  <th>Name</th>
                   <th>Type</th>
                   <th>Status</th>
                   <th>Actions</th>
@@ -160,9 +164,11 @@ export default function Parties() {
           </div>
           {totalItems > 0 && (
             <Pagination page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
-              totalItems={totalItems} onPageChange={setPage} noun="carriers" />
+              totalItems={totalItems} onPageChange={setPage} noun="parties" />
           )}
         </div>
+        <AddReinsurerModal open={adding} onClose={() => setAdding(false)}
+          onCreated={r => nav(`/parties/${r.id}`)} />
       </div>
     </div>
   );
