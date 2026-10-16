@@ -2152,9 +2152,28 @@ def init_db():
                 logging.getLogger("bdx.db").info("renamed %s", line)
     except Exception as e:  # noqa: BLE001 — never what stops the app starting
         import logging
-        logging.getLogger("bdx.db").warning("ITD tables not renamed: %s", e)
+        logging.getLogger("bdx.db").error("ITD tables not renamed: %s", e)
+    # A rename that failed must not be followed by empty tables under the new
+    # names beside the old ones and their rows (the split migration 40 had to
+    # repair). Held back, ITD finds no tables and holds its files instead.
+    held_back: set = set()
+    try:
+        import itd_store
+        with engine.connect() as conn:
+            held_back = itd_store.tables_to_hold_back(conn)
+        if held_back:
+            import logging
+            logging.getLogger("bdx.db").error(
+                "ITD tables %s not created: the old tables are still there and were "
+                "not renamed — run migrations/39_itd_table_names.sql", sorted(held_back))
+    except Exception:  # noqa: BLE001 — never what stops the app starting
+        held_back = set()
     # Canonical 53-table xlsx-derived schema on the canonical Postgres DB.
-    canonical_metadata.create_all(canonical_engine)
+    if held_back:
+        canonical_metadata.create_all(canonical_engine, tables=[
+            t for t in canonical_metadata.sorted_tables if t.name not in held_back])
+    else:
+        canonical_metadata.create_all(canonical_engine)
 
     # Lightweight migrations for columns added after the initial schema.
     # Done with SQLAlchemy inspector so it works on SQLite AND Postgres.

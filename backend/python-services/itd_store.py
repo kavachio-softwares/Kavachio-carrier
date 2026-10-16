@@ -179,7 +179,9 @@ def rename_old_tables(conn) -> list[str]:
             done.append(f"{old} -> {new}")
             insp = inspect(conn)
         elif insp.has_table(old):
-            log.warning("both %s and %s exist; %s left as it is", old, new, old)
+            log.error("both %s and %s exist; %s left as it is — the ITD history is "
+                      "split and ITD files are held until it is repaired "
+                      "(migrations/40_itd_table_names_repair.sql)", old, new, old)
         if not insp.has_table(new):
             continue
         cols = [c["name"] for c in insp.get_columns(new)]
@@ -198,6 +200,29 @@ def rename_old_tables(conn) -> list[str]:
                 kind = "SEQUENCE" if old.endswith("_seq") else "INDEX"
                 conn.exec_driver_sql(f'ALTER {kind} "{old}" RENAME TO "{new}"')
     return done
+
+
+def old_tables_left(bind) -> list[str]:
+    """The old ITD table names still in the database — the rename has not
+    happened, so the feed's history is not where the app reads it. By
+    reflection on the engine, never by a probe in the caller's transaction
+    (see rule_scope._column_present). `bind` may be a Session, a Connection
+    or an Engine."""
+    from sqlalchemy import inspect
+    if hasattr(bind, "get_bind"):
+        bind = bind.get_bind()
+    insp = inspect(bind)
+    return [old for old in OLD_TABLES if insp.has_table(old)]
+
+
+def tables_to_hold_back(conn) -> set[str]:
+    """New ITD table names create_all must NOT build: their old table is still
+    there and the rename did not run. Building them would put an empty second
+    pair beside the history — the split migration 40 had to repair."""
+    from sqlalchemy import inspect
+    insp = inspect(conn)
+    return {new for old, new in OLD_TABLES.items()
+            if insp.has_table(old) and not insp.has_table(new)}
 
 
 def _t(name: str):

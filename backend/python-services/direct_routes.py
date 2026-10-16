@@ -4379,6 +4379,8 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
                 check_only=check_only)
         except itd_run.OlderItdFile as e:
             raise HTTPException(409, {"code": "older_itd", "message": str(e)})
+        except itd_run.ItdHistoryUnavailable as e:
+            raise HTTPException(409, {"code": "itd_history_unavailable", "message": str(e)})
 
         # Supplement: capture the setup's stored supplementary sheets alongside the
         # BDX (no policy-number join — a supplement file just carries extra data).
