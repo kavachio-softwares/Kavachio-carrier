@@ -32,6 +32,13 @@ import { ArrowLeft, Check, Download, FileText, PenLine, Plus, Trash2 } from "luc
 import { canAccessPath } from "../access";
 import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
 import AddContractModal from "../components/AddContractModal";
+import { UploadTreatyModal } from "../components/treaty/UploadTreatyModal";
+import {
+  EMPTY_TREATY, TreatyEditor, firstTreatyError, treatyForSave,
+} from "../components/treaty/TreatyEditor";
+import {
+  getTreaty, getTreatyTypes, type TreatyInput, type TreatyTypeSpec,
+} from "../api/treaty";
 import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
 import { SubSteps } from "../components/FlowStepper";
 import { InfoTip } from "../components/InfoTip";
@@ -128,7 +135,9 @@ export default function ContractNew() {
   const sevLabel = (k?: string | null) =>
     sevSpec.find(x => x.key === k)?.label ?? k ?? "—";
   const [sigLayout, setSigLayout] = useState<SignatureLayout | null>(null);
-  const [typeKey, setTypeKey] = useState("");
+  // ?type=insurer_reinsurer arrives from the Treaties list and a programme's
+  // Reinsurance page, so "Raise a treaty" opens on the treaty already.
+  const [typeKey, setTypeKey] = useState(params.get("type") ?? "");
 
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
   const [programId, setProgramId] = useState(params.get("program_id") ?? "");
@@ -145,6 +154,17 @@ export default function ContractNew() {
 
   const [values, setValues] = useState<Record<string, string>>({});
   const [limits, setLimits] = useState<AgreedLimits>({});
+
+  // A reinsurance treaty's structure (Phase 26) — only asked for when the type
+  // is insurer ↔ reinsurer. Its form is built from the server's treaty spec.
+  const [treatyTypes, setTreatyTypes] = useState<TreatyTypeSpec[] | null>(null);
+  const [treaty, setTreaty] = useState<TreatyInput>(EMPTY_TREATY);
+  // Programmes the treaty protects besides the one it is raised on.
+  const [treatyProgs, setTreatyProgs] = useState<number[]>([]);
+  const [treatyErrors, setTreatyErrors] = useState<Record<string, string>>({});
+  useEffect(() => {
+    getTreatyTypes().then(setTreatyTypes).catch(() => setTreatyTypes([]));
+  }, []);
 
   const [sections, setSections] = useState<WordingSection[] | null>(null);
   const [activeSection, setActiveSection] = useState(0);
@@ -196,12 +216,14 @@ export default function ContractNew() {
     const out: Record<string, string> = {
       contract_name: "Contract name", inception: "Start date",
       expiry: "End date", class_of_business: "Class of business",
-      carrier_name: "Carrier", counterparty_name: "Broker",
+      carrier_name: "Carrier",
+      // A treaty's counterparty is its lead reinsurer, not a broker.
+      counterparty_name: typeKey === "insurer_reinsurer" ? "Lead reinsurer" : "Broker",
       programme_name: "Programme", notice_period_days: "Notice to cancel",
     };
     limitSpec.forEach(l => { out[l.name] = l.question; });
     return out;
-  }, [limitSpec]);
+  }, [limitSpec, typeKey]);
 
   useEffect(() => {
     getContractTypes()
@@ -311,6 +333,16 @@ export default function ContractNew() {
           ? String(prior.notice_period_days) : (v.notice_period_days ?? ""),
       }));
       if (prior.agreed_limits) setLimits(prior.agreed_limits);
+      // A treaty brings its structure and programmes: the same markets on the
+      // same layers is the ordinary renewal, so the carrier edits what moved.
+      if (prior.contract_type === "insurer_reinsurer") {
+        const t = await getTreaty(prior.id).catch(() => null);
+        if (t?.structure) {
+          setTreaty({ treaty_type: t.structure.treaty_type,
+                      terms: t.structure.terms, layers: t.structure.layers });
+        }
+        if (t) setTreatyProgs(t.programmes.filter(p => !p.is_home).map(p => p.id));
+      }
       // Its wording too, so the broker reads the same document with new numbers.
       if (prior.wording_sections?.length) {
         setSections(prior.wording_sections);
@@ -377,6 +409,17 @@ export default function ContractNew() {
   // reinsurer has no such gate, so making it wait for a programme would be a
   // condition the server does not impose.
   const gatedOnProgramme = spec?.counterparty_must_be_on_programme ?? true;
+  const isTreaty = typeKey === "insurer_reinsurer";
+  // ON A TREATY THE PANEL NAMES THE REINSURER. The lead — the starred share
+  // on the first layer — is who the contract is with, so The basics does not
+  // ask for it separately: two pickers for one fact drift apart, and a
+  // reinsurer not yet on file could only be added in the panel anyway.
+  const treatyLead = treaty.layers[0]?.shares.find(sh => sh.is_lead)
+    ?.reinsurer_party_id ?? null;
+  useEffect(() => {
+    if (!isTreaty) return;
+    setBrokerId(treatyLead != null ? String(treatyLead) : "");
+  }, [isTreaty, treatyLead]);
   const counterpartyLabel = spec?.counterparty_label ?? "Counterparty";
 
   useEffect(() => {
@@ -513,11 +556,14 @@ export default function ContractNew() {
     // Sections and terms deleted here, so the server's top-up leaves them out.
     dropped_sections: dropped.sections,
     dropped_terms: dropped.terms,
+    // A treaty's clauses are written from its structure, so the wording a
+    // carrier reads on step 2 already states the layers and the cession.
+    treaty: isTreaty && treaty.treaty_type ? treatyForSave(treaty) : null,
     // No `signers`: nobody is named at this step any more, so the draft prints
     // the two unnamed blocks — "For the Carrier" over a ruled line — which is
     // what an unsigned contract looks like on paper anyway.
   }), [typeKey, values, limits, carrierName, counterparty, programme,
-       sigLayout, dropped]);
+       sigLayout, dropped, isTreaty, treaty]);
 
   /** The document the signature blocks are dragged onto, on step 4.
    *
@@ -749,13 +795,18 @@ export default function ContractNew() {
     const out: string[] = [];
     if (!programId) out.push("Choose the programme this contract sits on.");
     if (!brokerId && spec) {
-      out.push(`Choose the ${spec.counterparty_label.toLowerCase()} this `
-               + `contract is with.`);
+      out.push(isTreaty
+        ? "Star the lead reinsurer on the first layer under Treaty structure."
+        : `Choose the ${spec.counterparty_label.toLowerCase()} this `
+          + `contract is with.`);
     }
     for (const f of basicFields) {
       if (f.required && !(values[f.name] ?? "").trim()) {
         out.push(`${f.label} is required.`);
       }
+    }
+    if (isTreaty && !treaty.treaty_type) {
+      out.push("Pick the treaty type under Treaty structure.");
     }
     return out;
   }
@@ -766,9 +817,9 @@ export default function ContractNew() {
       if (gaps.length) {
         setTouched(true);
         setMessage(gaps[0]);
-        // Everything `missing()` names lives in The basics, so open it rather
-        // than leaving the message pointing at a panel that is not on screen.
-        setSec("basics");
+        // Open the section the first gap lives in, rather than leaving the
+        // message pointing at a panel that is not on screen.
+        setSec(gaps[0].includes("Treaty structure") ? "treaty" : "basics");
         return;
       }
     }
@@ -829,6 +880,10 @@ export default function ContractNew() {
         dropped_sections: dropped.sections,
         dropped_terms: dropped.terms,
         create_as: mode === "sign" ? "draft" : mode,
+        ...(isTreaty ? {
+          treaty: treaty.treaty_type ? treatyForSave(treaty) : null,
+          program_ids: treatyProgs,
+        } : {}),
       } as never);
       if (mode === "sign") {
         // The draft is SAVED at this point. If settling the terms is refused —
@@ -854,6 +909,18 @@ export default function ContractNew() {
       nav(`/contracts/${created.id}`);
     } catch (err) {
       const { message: m, errors: fe } = fieldErrors(err);
+      // The treaty structure's own objections point at its own boxes, so they
+      // go to the editor and the carrier is taken to it.
+      const tKeys = Object.keys(fe).filter(k =>
+        k === "treaty_type" || k === "layers" || k.startsWith("terms.")
+        || k.startsWith("layers."));
+      if (tKeys.length) {
+        setTreatyErrors(fe as Record<string, string>);
+        setMessage(`${m} ${firstTreatyError(fe as Record<string, string>) ?? ""}`.trim());
+        setStep(0);
+        setSec("treaty");
+        return;
+      }
       // Name the fields in the message. The server's own sentence says only
       // that something is missing, which is no use on step 4 where none of
       // those inputs are on screen.
@@ -883,7 +950,9 @@ export default function ContractNew() {
   const [showAllLimits, setShowAllLimits] = useState(false);
   // Which section of step 1 is open. The step asks exactly what it always
   // asked — the one long card is cut into panels and the rail picks one.
-  const [sec, setSec] = useState("start");
+  // Opens on "Who is it with?", the first section of a new contract. An
+  // endorsement has no such section, and the rail falls back to its first.
+  const [sec, setSec] = useState("with");
   const [showMoreBasics, setShowMoreBasics] = useState(false);
   const [openBecomes, setOpenBecomes] = useState<string | null>(null);
 
@@ -1217,7 +1286,10 @@ export default function ContractNew() {
             <label>Programme</label>
             <select
               value={programId}
-              onChange={e => { setProgramId(e.target.value); setBrokerId(""); }}
+              // A broker must be on the programme, so changing it clears the
+              // broker. A treaty's lead comes from its panel and is kept.
+              onChange={e => { setProgramId(e.target.value);
+                               if (!isTreaty) setBrokerId(""); }}
               style={touched && !programId
                 ? { borderColor: "var(--p-crit)" } : undefined}
             >
@@ -1228,6 +1300,13 @@ export default function ContractNew() {
             </select>
 
           </div>
+          {isTreaty ? (
+          <div className="field">
+            <label>Lead reinsurer</label>
+            <input className="ro" readOnly
+                   value={counterparty?.name ?? "Star one in Treaty structure"} />
+          </div>
+          ) : (
           <div className="field">
             <label>{counterpartyLabel}</label>
             <select
@@ -1247,6 +1326,7 @@ export default function ContractNew() {
             </select>
 
           </div>
+          )}
         </div>
 
 
@@ -1284,6 +1364,37 @@ export default function ContractNew() {
             )}
           </div>
         )}
+    </>
+  );
+  const secTreaty = (
+    <>
+      <div className="fh">
+        Treaty structure
+        <InfoTip text={"The kind of treaty, its layers, and which reinsurers "
+          + "hold what share. Its clauses are written into the wording from "
+          + "this, so the two always agree."} />
+      </div>
+      <div className="note" style={{ marginBottom: 14 }}>
+        Add the reinsurers on each layer and <b>star the lead</b> on the first
+        layer — the treaty is with them. A reinsurer not on file yet can be
+        added from the panel.
+      </div>
+      <TreatyEditor
+        value={treaty}
+        onChange={v => { setTreaty(v); setTreatyErrors({}); }}
+        types={treatyTypes}
+        reinsurers={(counterparties ?? []).map(c => ({ id: c.id, name: c.name }))}
+        onReinsurerAdded={r => setCounterparties(list => [...(list ?? []),
+          { id: r.id, name: r.name, party_type: "reinsurer" }])}
+        errors={treatyErrors}
+        showErrors={touched}
+        programmes={{
+          all: programmes.map(p => ({ id: p.id, name: p.name })),
+          selected: treatyProgs,
+          homeId: programId ? Number(programId) : null,
+          onChange: setTreatyProgs,
+        }}
+      />
     </>
   );
   const limitsHead = (
@@ -1465,7 +1576,7 @@ export default function ContractNew() {
 
   /* What the rail lists, in the order the card used to run. The counts are
      read off the answers already in state — nothing new is stored. */
-  const basicsShort = (programId ? 0 : 1) + (brokerId || !spec ? 0 : 1)
+  const basicsShort = (programId ? 0 : 1) + (brokerId || !spec || isTreaty ? 0 : 1)
     + basicFields.filter(f => f.required && !(values[f.name] ?? "").trim()).length;
   const limitsSet = (key: string) =>
     limitSpec.filter(l => l.group === key && limits[l.name] !== undefined).length;
@@ -1501,14 +1612,22 @@ export default function ContractNew() {
         : "No change yet",
       done: endorseChanges > 0, short: false, body: endorseAttach },
   ] : [
+    { key: "with", label: "Who is it with?",
+      meta: spec?.label ?? "—", done: !!typeKey, short: false,
+      body: secWho },
     { key: "start", label: "What are you making?",
       meta: KINDS.find(k => k.key === kind)?.title ?? "—",
       done: kind !== "renew" || !!renewsId,
       short: kind === "renew" && !renewsId,
       body: secKind },
-    { key: "with", label: "Who is it with?",
-      meta: spec?.label ?? "—", done: !!typeKey, short: false,
-      body: secWho },
+    ...(isTreaty ? [{
+      key: "treaty", label: "Treaty structure",
+      meta: !treaty.treaty_type ? "Type not chosen"
+        : !brokerId ? "No lead reinsurer yet"
+        : treatyTypes?.find(t => t.key === treaty.treaty_type)?.label ?? "",
+      done: !!treaty.treaty_type && !!brokerId,
+      short: !treaty.treaty_type || !brokerId,
+      body: secTreaty }] : []),
     { key: "basics", label: "The basics",
       meta: basicsShort ? `${basicsShort} still to answer` : "All answered",
       done: basicsShort === 0, short: basicsShort > 0,
@@ -1700,13 +1819,18 @@ export default function ContractNew() {
                 {kind !== "endorse" && (
                 <p className="muted" style={{ fontSize: 12.5, lineHeight: 1.6,
                      textAlign: "center", margin: "16px auto 0", maxWidth: 640 }}>
-                  Already have a contract somebody else drafted?{" "}
+                  {isTreaty ? "Already signed with the reinsurers?"
+                            : "Already have a contract somebody else drafted?"}{" "}
                   <span className="linkish" role="button" onClick={() => setUploading(true)}>
-                    Upload the signed PDF instead →
+                    {isTreaty ? "Upload the signed treaty instead →"
+                              : "Upload the signed PDF instead →"}
                   </span>
-                  <InfoTip text={"Kavachio reads the terms out of it and builds "
-                    + "what checks it can — but a contract written from its own "
-                    + "terms never has a clause the checks cannot read."} />
+                  <InfoTip text={isTreaty
+                    ? "Record its terms and who holds it, attach the signed copy, "
+                      + "and it goes straight in force — no review and no signing here."
+                    : "Kavachio reads the terms out of it and builds "
+                      + "what checks it can — but a contract written from its own "
+                      + "terms never has a clause the checks cannot read."} />
                 </p>
                 )}
                 </div>
@@ -2108,9 +2232,14 @@ export default function ContractNew() {
               foot={`${signPane + 1} of 3 · nothing is emailed from this step`}
               nextLabel={signPane < 2
                 ? "Next →"
-                : busy === "create" ? "Creating…" : "Create and send it for review"}
+                : busy === "create" ? "Creating…"
+                // A reinsurer has no seat in Kavachio, so a treaty has nobody
+                // to review it — the server refuses "review" for one. Its
+                // road is settle-and-sign.
+                : isTreaty ? "Create and sign it now" : "Create and send it for review"}
               nextDisabled={signPane === 2 && (!!busy || blocksUnplaced)}
-              onNext={() => (signPane < 2 ? setSignPane(signPane + 1) : create("review"))}
+              onNext={() => (signPane < 2 ? setSignPane(signPane + 1)
+                             : create(isTreaty ? "sign" : "review"))}
             >
               {/* What the signature page ASKS FOR. Every contract used to get
                   the same four lines because they were written into the
@@ -2290,6 +2419,18 @@ export default function ContractNew() {
                   {(() => {
                     const other = counterparty?.name
                       ?? `the ${spec?.counterparty_label?.toLowerCase() ?? "broker"}`;
+                    if (isTreaty) return (
+                      <ul className="hint" style={{ paddingLeft: 18, listStyle: "disc" }}>
+                        <li><b>Save as a draft</b> — only you can see it. You can
+                          still change the structure.</li>
+                        <li><b>Create and sign it now</b> — the terms are settled
+                          and you sign for the carrier. {other} is not on Kavachio,
+                          so nobody on their side reviews it here.</li>
+                        <li>It becomes active once you record {other}&apos;s
+                          signature against the signed slip or wording they send
+                          back.</li>
+                      </ul>
+                    );
                     return (
                       <ul className="hint" style={{ paddingLeft: 18, listStyle: "disc" }}>
                         <li><b>Save as a draft</b> — only you can see it. {other} is
@@ -2315,12 +2456,14 @@ export default function ContractNew() {
                         counterparty has no seat here to read it. Kept out of the
                         primary slot: not asking the other side is the exception,
                         and it should not be the easiest button to hit. */}
+                    {!isTreaty && (
                     <button className="btn" type="button"
                             disabled={!!busy || blocksUnplaced}
                             onClick={() => create("sign")}>
                       <PenLine size={14} />
                       {busy === "create" ? "Creating…" : "Create and sign it now"}
                     </button>
+                    )}
                   </div>
                 </>
               )}
@@ -2335,8 +2478,12 @@ export default function ContractNew() {
         )}
       </div>
 
+      {/* A treaty signed outside Kavachio has its own upload. */}
+      <UploadTreatyModal open={uploading && isTreaty}
+        programId={programId ? Number(programId) : undefined}
+        onClose={() => setUploading(false)} />
       <AddContractModal
-        open={uploading}
+        open={uploading && !isTreaty}
         onClose={() => setUploading(false)}
         programId={programId ? Number(programId) : undefined}
         brokerId={brokerId ? Number(brokerId) : undefined}

@@ -57,6 +57,7 @@ import { InviteBrokerModal } from "../components/InviteBrokerModal";
 import { InviteSentModal } from "../components/InviteSentModal";
 import AddContractModal from "../components/AddContractModal";
 import { fetchContractOriginal, fetchDocument, getContract } from "../api/contractRecord";
+import { getProgrammeTreaties } from "../api/treaty";
 import { Pagination } from "../components/Pagination";
 import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { getSegments, addSegment, type Segment } from "../api/segments";
@@ -198,6 +199,15 @@ export default function AddProgram() {
   // Which section is on screen. The stepper at the top moves between them; each
   // section also moves on to the next by itself once it is saved.
   const [stage, setStage] = useState<1 | 2 | 3 | 4>(1);
+  // How many treaties protect this programme, for the link to its
+  // Reinsurance page (Phase 26.2). Reinsurance is not a step of the set-up —
+  // a programme takes files without it — so it is a link, not a fifth pill.
+  const [treatyCount, setTreatyCount] = useState<number | null>(null);
+  useEffect(() => {
+    if (programId == null) return;
+    getProgrammeTreaties(programId).then(d => setTreatyCount(d.live_count))
+      .catch(() => setTreatyCount(null));
+  }, [programId]);
   // The programme as saved: its brokers, their contracts and setups. Read once
   // it exists, and again after each thing done here, so steps 3 and 4 show
   // what is really on it — including contracts raised on other screens.
@@ -661,6 +671,14 @@ export default function AddProgram() {
                 <div className="flex w-full items-center justify-between gap-3">
                   <p className="text-sm font-medium text-ok">
                     {resumeId != null ? "Programme configured." : "Programme configured — now assign its brokers."}
+                    {programId != null && (
+                      <Link to={`/programs/${programId}/reinsurance`}
+                            className="ml-3 font-semibold text-navy hover:underline">
+                        Reinsurance: {treatyCount == null ? "…"
+                          : treatyCount === 0 ? "none yet"
+                          : `${treatyCount} treat${treatyCount === 1 ? "y" : "ies"}`} →
+                      </Link>
+                    )}
                   </p>
                   <button
                     className="shrink-0 rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark"

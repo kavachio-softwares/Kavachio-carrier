@@ -291,8 +291,10 @@ api.interceptors.response.use(
     // person holding that link may have no account here at all, so refreshing
     // a token they never had and then bouncing them to /login would throw a
     // signer off a contract mid-signature. Their page handles the 401 itself.
+    // The reinsurer's treaty link (/treaty-view/…) is the same kind of page:
+    // no account behind it, and its 401 means "enter the code".
     const isPublicSigning = typeof cfg?.url === "string"
-      && cfg.url.includes("/esign/sign/");
+      && (cfg.url.includes("/esign/sign/") || cfg.url.includes("/treaty-view/"));
 
     if (status === 401 && cfg && !cfg._retry && !isAuthCall && !isPublicSigning) {
       cfg._retry = true;
