@@ -942,17 +942,7 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # carrier ends up believing a file is being measured against terms
         # nothing has ever looked at. See _checks_summary.
         "checks": _checks_summary(s, c, rule_counts),
-        # A reinsurance treaty's type, headline, placement and programmes
-        # (treaty_routes.record_summary). NULL on an insurer ↔ broker contract.
-        "treaty": _treaty_summary(s, c),
     }
-
-
-def _treaty_summary(s, c: Contract) -> Optional[dict]:
-    if (c.contract_type or "") != "insurer_reinsurer":
-        return None
-    import treaty_routes
-    return treaty_routes.record_summary(s, c)
 
 
 def _rule_tallies(s, contract_ids: list[int]) -> dict[int, dict]:
@@ -1512,8 +1502,6 @@ def list_contracts(
     program_id: Optional[int] = Query(None),
     counterparty_id: Optional[int] = Query(None),
     contract_type: Optional[str] = Query(None),
-    treaty_type: Optional[str] = Query(
-        None, description="quota_share | surplus | xol | stop_loss | facultative"),
     lifecycle: Optional[str] = Query(None),
     waiting: Optional[str] = Query(
         None, description='"mine" — only contracts it is YOUR side\'s move on'),
@@ -1561,10 +1549,6 @@ def list_contracts(
             query = query.filter(Contract.broker_party_id == counterparty_id)
         if contract_type:
             query = query.filter(Contract.contract_type == contract_type)
-        if treaty_type:
-            from db import Treaty
-            query = query.join(Treaty, Treaty.contract_id == Contract.id) \
-                .filter(Treaty.treaty_type == treaty_type)
         if q:
             like = f"%{q.strip()}%"
             query = query.filter(or_(Contract.name.ilike(like),
@@ -1707,11 +1691,6 @@ class ContractIn(BaseModel):
     # `send_for_review` is still honoured when this is absent, so nothing that
     # called the old shape changes behaviour.
     create_as: Optional[str] = None
-    # A reinsurance treaty's structure (Phase 26.1) — its type, layers and
-    # panel, in treaty_types' shape — and the programmes it protects besides
-    # the one it is raised on (26.2). Ignored on an insurer ↔ broker contract.
-    treaty: Optional[dict] = None
-    program_ids: Optional[list[int]] = None
 
 
 def _bad_fields(e: ct.ContractTypeError):
@@ -1856,15 +1835,6 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
             # send is discarded, so it cannot file under someone else.
             payload["counterparty_party_id"] = resolve_broker_party_id(s, p)
 
-        # A treaty's counterparty IS the lead on its panel. Taken from there
-        # when one is starred, so the contract and its panel cannot name two
-        # different reinsurers as the one the treaty is with.
-        if body.contract_type == "insurer_reinsurer" and body.treaty:
-            import treaty_types as _tt
-            lead = _tt.lead_of(body.treaty)
-            if lead is not None:
-                payload["counterparty_party_id"] = lead
-
         try:
             clean = ct.validate(body.contract_type, payload)
         except ct.ContractTypeError as e:
@@ -1872,14 +1842,6 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
 
         counterparty_id = clean.get("counterparty_party_id")
         _check_counterparty(s, p, spec, body.program_id, counterparty_id, tenant_id)
-
-        # The treaty is checked BEFORE the contract row exists, so a panel that
-        # adds up to 120% refuses the create rather than leaving a treaty with
-        # no structure behind it.
-        import treaty_routes as tr
-        is_treaty = body.contract_type == tr.REINSURER
-        treaty_clean = (tr.validate_for_create(s, tenant_id, body.treaty)
-                        if is_treaty and body.treaty else None)
 
         if body.output_template_id:
             tmpl = s.get(ExportTemplate, body.output_template_id)
@@ -1947,12 +1909,6 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
                 type_label=ctx["type_label"],
                 dropped_sections=body.dropped_sections,
                 dropped_terms=body.dropped_terms)
-            if treaty_clean:
-                # The clauses the preview wrote from the structure, rewritten
-                # from the structure actually being saved — the two cannot
-                # differ, whatever the client sent.
-                import treaty_types as _tt
-                kept = _tt.merge_sections(kept, _tt.build_sections(treaty_clean))
             authored_sections = kept
             c.wording_sections = {
                 "sections": kept,
@@ -2027,10 +1983,6 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
 
         s.add(c)
         s.flush()
-        if is_treaty:
-            if treaty_clean:
-                tr.save_structure(s, c, treaty_clean, p.user_id)
-            tr.set_programmes(s, c, body.program_ids)
         if c.lifecycle == "in_review":
             # The thread starts at the moment the terms go out, so the broker's
             # answer has something to answer.
@@ -2173,8 +2125,6 @@ class WordingPreviewIn(BaseModel):
     # meant.
     dropped_sections: Optional[list] = None
     dropped_terms: Optional[list] = None
-    # A treaty's structure, so its clauses are in the wording being previewed.
-    treaty: Optional[dict] = None
 
 
 @router.post("/contract-wording/preview")
@@ -2214,14 +2164,6 @@ def wording_preview(body: WordingPreviewIn,
             sections, values=body.values, limits=limits, type_label=type_label,
             dropped_sections=body.dropped_sections,
             dropped_terms=body.dropped_terms)
-
-    if body.treaty and (body.contract_type or "") == "insurer_reinsurer":
-        # The treaty's clauses, from the structure as it stands on screen.
-        # Lenient: a half-typed panel previews what it has.
-        import treaty_types as tt
-        treaty = tt.validate(body.treaty, strict=False)
-        if treaty.get("treaty_type"):
-            sections = tt.merge_sections(sections, tt.build_sections(treaty))
 
     tokens = cw.token_values(
         values=body.values, limits=limits,
@@ -4054,20 +3996,6 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
                          "it there, so your signature lands on the document "
                          "itself. Open it from the Sign button.")
 
-        # A treaty's counterparty signs OUTSIDE Kavachio — the reinsurer has no
-        # seat here — so the only evidence of that signature is the signed copy
-        # that came back. Recording it without one would leave a treaty in
-        # force on the strength of a name typed into a box.
-        if (body.recorded and side == "counterparty"
-                and (c.contract_type or "") == "insurer_reinsurer"
-                and body.document_id is None):
-            raise HTTPException(400, {
-                "message": "Attach the signed slip or wording the reinsurer "
-                           "sent back, and pick it here. A reinsurer signs "
-                           "outside Kavachio, so that document is the proof "
-                           "of their signature.",
-                "errors": {"document_id": "required for a treaty"}})
-
         doc_id = None
         if body.document_id is not None:
             doc = s.get(ContractDocument, body.document_id)
@@ -4629,11 +4557,6 @@ def renew_contract(contract_id: int, body: Renewal,
 
         s.add(new)
         s.flush()
-        if (new.contract_type or "") == "insurer_reinsurer":
-            # Last year's structure and programmes come across; the carrier
-            # edits what moved. See treaty_routes.copy_structure.
-            import treaty_routes
-            treaty_routes.copy_structure(s, old, new)
         if new.wording_sections:
             _store_authored_clauses(
                 s, new, (new.wording_sections or {}).get("sections"))

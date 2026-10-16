@@ -21,8 +21,6 @@ import BrokerBordereau from "./pages/BrokerBordereau";
 import TenantDetail from "./pages/TenantDetail";
 import Parties from "./pages/Parties";
 import PartyDetail from "./pages/PartyDetail";
-import ProgrammeReinsurance from "./pages/ProgrammeReinsurance";
-import TreatyView from "./pages/TreatyView";
 import Programs from "./pages/Programs";
 import ProgramManagement from "./pages/ProgramManagement";
 import AddProgram from "./pages/AddProgram";
@@ -144,10 +142,6 @@ export default function App() {
           /sign: no Layout, no session — the token is the credential, for one
           submission only. */}
       <Route path="/fix/:token" element={<FixLink />} />
-      {/* A reinsurer's private, read-only view of a treaty. No Layout, no
-          session: the emailed token finds the link and the one-time code
-          emailed with it unlocks it — reinsurers have no seat in Kavachio. */}
-      <Route path="/treaty-view" element={<TreatyView />} />
       {/* /welcome is the tenant-admin first-run wizard — it has no Layout shell,
           so it carries the guards itself. */}
       <Route path="/welcome" element={<RequireAuth><RequireAccess><Welcome /></RequireAccess></RequireAuth>} />
@@ -194,8 +188,6 @@ export default function App() {
         <Route path="/programs/new" element={<AddProgram />} />
         {/* The same flow, picked up for a programme that already exists. */}
         <Route path="/programs/:programId/setup" element={<AddProgram />} />
-        {/* The treaties protecting one programme (Phase 26.2). */}
-        <Route path="/programs/:programId/reinsurance" element={<ProgrammeReinsurance />} />
         {/* The contract as a RECORD — terms, documents, lifecycle. The
             programme-scoped route below is what it PRODUCED: clauses and rules. */}
         <Route path="/contracts" element={<Contracts />} />

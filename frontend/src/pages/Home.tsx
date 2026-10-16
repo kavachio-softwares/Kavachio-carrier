@@ -14,7 +14,6 @@ import { isHeld, listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
 import { StatCard } from "../components/StatCard";
 import { ArrivalsCard } from "../components/ArrivalsCard";
-import { ReinsurancePanel } from "../components/treaty/ReinsurancePanel";
 import BrokerPerformance from "../components/BrokerPerformance";
 import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 import { clickedDayIndex } from "../components/BrokerCharts";
@@ -810,11 +809,6 @@ export default function Home() {
             <BrokerPerformance mga={mga} />
           </div>
         )}
-
-        {/* Reinsurance (Phase 26): the carrier's treaties — placement,
-            signatures, and the reinsurers' private links. Carrier seats
-            only: a treaty is between the carrier and its reinsurers. */}
-        {carrierAdmin && <ReinsurancePanel />}
 
         {/* ONE month for the cards below — Overdue Bordereaux (carrier admin),
             and Bordereaux Processed. They used to count the current

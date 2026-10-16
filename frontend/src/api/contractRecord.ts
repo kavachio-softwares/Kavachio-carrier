@@ -13,7 +13,6 @@
  */
 import { api, downloadFile } from "./client";
 import type { TermSpec } from "../utils/term";
-import type { TreatyInput, TreatyRecordSummary } from "./treaty";
 
 /** How the server renders one input. `kind` says what to draw, not how to store. */
 export type ContractFieldKind =
@@ -313,9 +312,6 @@ export type ContractRecord = {
    *  chosen there are no columns. So `rules` can be 0 while `checkable` is 10,
    *  and that gap is the thing this field exists to make visible. */
   checks: ContractChecks;
-  /** A reinsurance treaty's type, headline, placement and the programmes it
-   *  protects. Null on an insurer ↔ broker contract. */
-  treaty?: TreatyRecordSummary | null;
   /** Only present on a termination response. */
   warning?: string | null;
 };
@@ -406,11 +402,6 @@ export type ContractInput = {
   //    "review"  sent to the broker to agree or push back
   // There is no "live". A contract goes in force because both sides signed it.
   create_as?: "draft" | "review";
-  /** A reinsurance treaty's structure (Phase 26.1), saved with the contract
-   *  in one request — a panel the server refuses refuses the whole create. */
-  treaty?: TreatyInput | null;
-  /** Programmes the treaty protects besides the one it is raised on (26.2). */
-  program_ids?: number[];
 };
 
 /** The server's per-field complaint, so the form can mark the actual inputs
@@ -516,8 +507,6 @@ export type WordingInput = {
    *  thing you cannot do. */
   dropped_sections?: string[];
   dropped_terms?: string[];
-  /** A treaty's structure, so its clauses are in the wording being previewed. */
-  treaty?: TreatyInput | null;
 };
 
 /** The three headings the limits table is grouped under, served so neither the
@@ -715,8 +704,6 @@ export type ContractFilters = {
   program_id?: number;
   counterparty_id?: number;
   contract_type?: string;
-  /** quota_share | surplus | xol | stop_loss | facultative */
-  treaty_type?: string;
   lifecycle?: string;
   /** "mine" — only the contracts it is YOUR side's move on. Derived per row
    *  from the lifecycle and from who has already signed, so no lifecycle

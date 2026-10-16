@@ -111,11 +111,6 @@ export default function ContractSignature() {
   const [round, setRound] = useState<ContractRound | null>(null);
   const [signName, setSignName] = useState("");
   const [signTitle, setSignTitle] = useState("");
-  // The signed copy that came back, when the counterparty's signature is
-  // RECORDED. Required on a treaty: the reinsurer signs outside Kavachio, so
-  // that document is the only evidence of their signature (the server refuses
-  // without it).
-  const [signedDoc, setSignedDoc] = useState("");
   const [signing, setSigning] = useState(false);
   // Unpicked until somebody clicks: whoever can sign right now lands on the
   // signing tab, everybody else starts at the document.
@@ -160,9 +155,7 @@ export default function ContractSignature() {
       const r = await signContract(id, {
         signer_name: signName.trim(),
         signer_title: signTitle.trim() || null,
-        ...(recorded ? { recorded: true, side: "counterparty" as const,
-                         document_id: signedDoc ? Number(signedDoc) : null }
-                     : {}),
+        ...(recorded ? { recorded: true, side: "counterparty" as const } : {}),
       });
       setRec(r);
       setSaved(r.signature_note
@@ -336,10 +329,6 @@ export default function ContractSignature() {
    *  it. It is also the only way an insurer ↔ reinsurer contract is ever
    *  signed on both sides. */
   const maySignHere = !!rec?.actions.sign && !round?.started;
-  const isTreaty = rec?.contract_type === "insurer_reinsurer";
-  // Wordings attached to this contract — the signed copy is one of them.
-  const signedCopies = (rec?.documents ?? [])
-    .filter(d => d.kind === "contract" && d.is_active && d.has_file);
 
 
   if (!rec) {
@@ -777,7 +766,7 @@ export default function ContractSignature() {
                 </div>
                 {/* The carrier's next step, straight from the last signature:
                     setup for this programme × broker, both pre-chosen. */}
-                {!isBrokerSeat() && !isTreaty && rec.programme && rec.counterparty && (
+                {!isBrokerSeat() && rec.programme && rec.counterparty && (
                   <Link className="btn pri"
                     to={`/direct/setup?program_id=${rec.programme.id}`
                       + `&broker_party_id=${rec.counterparty.id}`}>
@@ -788,7 +777,7 @@ export default function ContractSignature() {
             ) : rec.unsigned_sides.length === 0 ? (
               <div className="note warn" style={{ marginBottom: 14 }}>
                 <b>Both sides have signed, but it is not active yet.</b>{" "}
-                Something else is in the way — see the contract’s page.
+                Something else is in the way — see the contract\u2019s page.
               </div>
             ) : round?.can_sign ? (
               <div className="note" style={{ marginBottom: 14 }}>
@@ -801,18 +790,6 @@ export default function ContractSignature() {
                   : "Nothing goes to the other side until you have signed — "
                     + "they are emailed the document carrying your signature, "
                     + "and it also appears on their dashboard."}
-              </div>
-            ) : isTreaty && !round?.started ? (
-              <div className="note" style={{ marginBottom: 14 }}>
-                <b>How a treaty is signed.</b>{" "}
-                {rec.unsigned_sides.includes("carrier")
-                  ? "First, sign for the carrier below. Then"
-                  : "The carrier has signed. Now"}{" "}
-                attach the signed slip or wording the reinsurers sent back (on
-                the treaty&rsquo;s page, under Documents) and record their
-                signature against it. The reinsurers sign outside Kavachio, so
-                that document is the proof — and recording it puts the treaty
-                in force.
               </div>
             ) : round?.started && !round.can_sign ? (
               <div className="note warn" style={{ marginBottom: 14 }}>
@@ -904,42 +881,10 @@ export default function ContractSignature() {
                   </div>
                 ) : (
                   <div className="hint" style={{ marginBottom: 10 }}>
-                    <b>Recording the counterparty’s signature.</b> Use this
+                    <b>Recording the counterparty\u2019s signature.</b> Use this
                     only when they signed on paper or through a provider. It is
                     stored as recorded rather than signed here, and attributed
-                    to you as the person who entered it — never to them.
-                  </div>
-                )}
-
-                {/* Only at the reinsurers' step. While the carrier is signing,
-                    asking for the reinsurers' signed copy is asking for the
-                    next step before this one. */}
-                {rec.actions.record_signature && isTreaty && !maySignHere && (
-                  <div className="field" style={{ marginBottom: 12, maxWidth: 520 }}>
-                    <label>
-                      The signed copy they sent back
-                      <span style={{ color: "var(--p-crit-ink)" }}>*</span>
-                    </label>
-                    <select value={signedDoc}
-                            onChange={e => setSignedDoc(e.target.value)}>
-                      <option value="">
-                        {signedCopies.length ? "Choose the signed slip or wording…"
-                                             : "Nothing attached yet"}
-                      </option>
-                      {signedCopies.map(d => (
-                        <option key={d.id} value={String(d.id)}>{d.filename}</option>
-                      ))}
-                    </select>
-                    <div className="hint">
-                      The reinsurer is not on Kavachio and signs outside it, so
-                      the document they returned is the proof of their
-                      signature.{" "}
-                      {!signedCopies.length && (
-                        <Link className="linkish" to={`/contracts/${id}`}>
-                          Attach it on the contract first.
-                        </Link>
-                      )}
-                    </div>
+                    to you as the person who entered it \u2014 never to them.
                   </div>
                 )}
 
@@ -960,8 +905,7 @@ export default function ContractSignature() {
                     <label>&nbsp;</label>
                     <button
                       className="btn pri" type="button"
-                      disabled={!signName.trim() || !!signing
-                        || (!maySignHere && isTreaty && !signedDoc)}
+                      disabled={!signName.trim() || !!signing}
                       onClick={() => doSign(!maySignHere)}
                     >
                       <PenLine size={14} />{" "}
@@ -975,14 +919,13 @@ export default function ContractSignature() {
                 {/* Both are offered when the carrier can do either, so
                     recording somebody else\u2019s is a deliberate second click
                     and never the default. */}
-                {maySignHere && rec.actions.record_signature && !isTreaty && (
+                {maySignHere && rec.actions.record_signature && (
                   <div className="hint" style={{ marginTop: 10 }}>
                     Signed on paper by{" "}
                     {rec.counterparty?.name ?? "the counterparty"}?{" "}
                     <span
                       className="linkish" role="button" tabIndex={0}
-                      aria-disabled={isTreaty && !signedDoc}
-                      onClick={() => (!isTreaty || signedDoc) && doSign(true)}
+                      onClick={() => doSign(true)}
                     >
                       Record their signature instead
                     </span>{" "}

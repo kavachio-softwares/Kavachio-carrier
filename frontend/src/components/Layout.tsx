@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, CalendarDays, ScrollText, History, ShieldCheck,
+  FileCheck, CalendarDays, ScrollText, History,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
@@ -138,10 +138,6 @@ const GROUPS: {
     // bordereau setup. Reading the section top to bottom IS the flow.
     items: [
       { to: "/programs", label: "Programmes", icon: Layers },
-      // Reinsurance treaties (Phase 26): the contracts list, narrowed to the
-      // insurer ↔ reinsurer ones. Its own entry because a treaty is not reached
-      // from a broker — it protects the book, not one broker's part of it.
-      { to: "/contracts?type=insurer_reinsurer", label: "Treaties", icon: ShieldCheck },
       // Party and Contracts are hidden from the sidebar for now. Both routes
       // and both access rules are unchanged — only the nav entries are
       // commented out, the same as Program Management above and Files below.
@@ -263,10 +259,6 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // lit rather than pointing at a row that is no longer drawn, which would
   // leave nothing highlighted at all.
   if (under("/brokers")) return "/home";
-  // A treaty — the filtered list, or one opened from it — lights Treaties.
-  if (pathname === "/contracts"
-      && new URLSearchParams(search).get("type") === "insurer_reinsurer")
-    return "/contracts?type=insurer_reinsurer";
   if (under("/contracts")) return "/home";
   // An output template is part of a Bordereau Setup, and that is where the user
   // came from — highlighting anything else while they review a template they
@@ -500,12 +492,7 @@ export default function Layout() {
                 return (
                   <NavLink
                     key={to} to={to} end title={label}
-                    // An entry that carries a query (Treaties is the contracts
-                    // list, filtered) cannot trust isActive — NavLink matches
-                    // the path alone, which would light it on every contract
-                    // list. subScreenOwner reads the query and decides.
-                    className={({ isActive }) => `item${(isActive && !to.includes("?"))
-                      || subScreenActive ? " active" : ""}`}
+                    className={({ isActive }) => `item${isActive || subScreenActive ? " active" : ""}`}
                   >
                     <Icon className="ic" strokeWidth={1.8} />
                     <span className="item-label">{label}</span>

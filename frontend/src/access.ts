@@ -125,13 +125,6 @@ export const ROUTE_ACCESS: {
   { pattern: "/programs", requires: "carrier_admin" },
   { pattern: "/programs/new", requires: "carrier_admin" },
   { pattern: "/programs/:programId/setup", requires: "carrier_admin" },
-  // A programme's reinsurance (Phase 26.2): the treaties protecting it. The
-  // carrier's book — `only`, like the contract screens it links to, because a
-  // treaty is between the carrier and its reinsurers and Kavachio is not a
-  // party to it. The reinsurer's own view is /treaty-view, which is public
-  // and unlisted for the same reason /sign is: it has no session at all.
-  { pattern: "/programs/:programId/reinsurance", requires: "carrier_admin",
-    only: ["carrier_admin"] },
   // `only`, not `requires`: a bare `requires` lets kavachio_admin in by rank,
   // and this is the contract record by another route.
   { pattern: "/programs/:programId/contracts/:contractId",

@@ -934,13 +934,6 @@ def _live_round(s, contract_id: int) -> EsignEnvelope | None:
 # signer still has to be able to get in.
 SIGNABLE_STATES = ("agreed", "signed")
 
-# Reinsurance treaties (treaty_routes) are signed without a round — see
-# contract_round. One sentence, used by both the status and the refusal.
-TREATY_TYPE = "insurer_reinsurer"
-TREATY_SIGNING = ("a treaty is signed on its signature page: the carrier signs "
-                  "there, and the reinsurers' signature is recorded against the "
-                  "signed copy they send back")
-
 
 def _assert_terms_settled(c: Contract) -> None:
     """Refuse to open a round on terms that are still moving.
@@ -1159,8 +1152,6 @@ def signing_session(contract_id: int, request: Request,
                     409, "the carrier has not sent this for signature yet. You "
                          "will be emailed when it is your turn, and it will "
                          "show on your dashboard.")
-            if (c.contract_type or "") == TREATY_TYPE:
-                raise HTTPException(409, TREATY_SIGNING)
             _assert_terms_settled(c)
 
     # Outside the session on purpose: opening a round composes a PDF and reads
@@ -1219,17 +1210,6 @@ def contract_round(contract_id: int, p: Principal = Depends(current_principal)):
         import contract_routes
         state = contract_routes._effective_lifecycle(c)
 
-        if env is None and (c.contract_type or "") == TREATY_TYPE:
-            # A treaty never runs an electronic round: its other side is a
-            # panel of reinsurers with no seat here. The carrier signs on the
-            # signature page; the reinsurers' signature is recorded against the
-            # signed copy. Said here so no screen offers a button that 409s.
-            return {
-                "envelope_id": None, "status": None, "started": False,
-                "can_sign": False, "my_turn": False, "i_have_signed": False,
-                "waiting_on": None, "waiting_on_name": None,
-                "treaty": True, "why": TREATY_SIGNING,
-            }
         if env is None:
             startable = (not p.is_broker) and state in SIGNABLE_STATES
             return {

@@ -26,7 +26,6 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Sk } from "../components/ui/Skeleton";
 import { getHierarchy, onProgramme, type HierarchyProgramme } from "../api/hierarchy";
-import { getTreatyCounts } from "../api/treaty";
 import { Pagination } from "../components/Pagination";
 import { ProgrammeStepper, flowUrl, nextStep, programmeSteps } from "../components/ProgrammeStepper";
 import { fmtDate, localDayStart, localDayEnd } from "../utils/date";
@@ -99,13 +98,6 @@ export default function Programs() {
   useEffect(() => {
     getHierarchy().then(h => setRows(h.programmes))
       .catch(() => setErr("Could not load your programmes."));
-  }, []);
-  // Live treaties per programme (Phase 26.2) — one call for the whole list.
-  // A programme with none is not broken, so it says "None" quietly rather
-  // than in the red the stepper keeps for what stops files.
-  const [treatyCounts, setTreatyCounts] = useState<Record<string, number>>({});
-  useEffect(() => {
-    getTreatyCounts().then(setTreatyCounts).catch(() => setTreatyCounts({}));
   }, []);
 
   // Filtered BEFORE the page slice, so the pager counts what you can see.
@@ -230,7 +222,6 @@ export default function Programs() {
                   <tr>
                     <th>Programme</th>
                     <th>How far it's got</th>
-                    <th>Reinsurance</th>
                     {/* Named for what the button is: the one thing that moves
                         this programme along the steps beside it. */}
                     <th className="text-right">Next step</th>
@@ -272,16 +263,6 @@ export default function Programs() {
                       <td className="align-middle">
                         {/* Each pill opens its own step for this programme. */}
                         <ProgrammeStepper programme={p} />
-                      </td>
-                      <td className="whitespace-nowrap align-middle">
-                        <Link to={`/programs/${p.id}/reinsurance`}
-                              onClick={e => e.stopPropagation()}
-                              className="text-[12.5px] font-semibold text-navy hover:underline"
-                              title="The treaties protecting this programme">
-                          {treatyCounts[String(p.id)]
-                            ? `${treatyCounts[String(p.id)]} treat${treatyCounts[String(p.id)] === 1 ? "y" : "ies"}`
-                            : <span className="font-medium text-ink-muted">None</span>}
-                        </Link>
                       </td>
                       <td className="whitespace-nowrap text-right align-middle">
                         {next ? (
