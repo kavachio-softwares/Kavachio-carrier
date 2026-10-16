@@ -249,10 +249,17 @@ def test_a_treaty_signature_needs_the_signed_copy(w):
 
 
 def test_a_renewal_carries_the_structure_forward(w):
-    cid = _create(w, program_ids=[w["p2"]]).json()["id"]
+    import datetime as _dt
+    # Renewal opens only in the last days of a term, so this one ends soon.
+    today = _dt.date.today()
+    end = today + _dt.timedelta(days=10)
+    cid = _create(w, program_ids=[w["p2"]],
+                  inception_dt=(today - _dt.timedelta(days=300)).isoformat(),
+                  expiry_dt=end.isoformat()).json()["id"]
     _set_state(cid, "active")
     r = client.post(f"/contracts/{cid}/renew", headers=w["ch"], json={
-        "inception_dt": "2100-01-01", "expiry_dt": "2100-12-31"})
+        "inception_dt": (end + _dt.timedelta(days=1)).isoformat(),
+        "expiry_dt": (end + _dt.timedelta(days=366)).isoformat()})
     assert r.status_code == 200, r.text
     new = r.json()
     assert new["treaty"]["treaty_type"] == "xol"

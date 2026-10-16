@@ -779,7 +779,7 @@ async def upload_signed_treaty(
     # force; a carrier user's sends it up to them.
     return await run_in_threadpool(
         cr.submit_for_approval, cid,
-        cr.Note(note="Signed treaty uploaded."), p)
+        cr.AcceptNote(note="Signed treaty uploaded."), p)
 
 
 def _protected_bordereaux(s, tid: int, programme_ids: set[int]) -> dict:
