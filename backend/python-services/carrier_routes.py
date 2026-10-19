@@ -520,15 +520,23 @@ def contract_bordereau_periods(scope: CarrierScope = Depends(contract_scope)):
     """
     from datetime import datetime
     from db import ExpectedSubmission
+    import renewal_chain as rc
     today = datetime.utcnow().date()
     def _rows(s):
-        return (s.query(ExpectedSubmission)
-                .filter(ExpectedSubmission.tenant_id == scope.carrier_id,
-                        ExpectedSubmission.program_id == scope.program_id,
-                        ExpectedSubmission.broker_party_id == scope.broker_party_id,
-                        ExpectedSubmission.period_end <= today)
-                .order_by(ExpectedSubmission.due_date.desc())
-                .limit(24).all())
+        q = (s.query(ExpectedSubmission)
+             .filter(ExpectedSubmission.tenant_id == scope.carrier_id,
+                     ExpectedSubmission.program_id == scope.program_id,
+                     ExpectedSubmission.broker_party_id == scope.broker_party_id,
+                     ExpectedSubmission.period_end <= today))
+        # A contract in a renewal chain answers for its OWN term only: the
+        # previous term lists its (late) months, the renewal its new ones —
+        # filtered before the cut, so old months are never pushed off the list.
+        own = rc.own_term(s, scope.contract_id)
+        if own is not None and own.inception_dt is not None:
+            q = q.filter(ExpectedSubmission.period_start >= own.inception_dt)
+            if own.expiry_dt is not None:
+                q = q.filter(ExpectedSubmission.period_start < own.expiry_dt)
+        return q.order_by(ExpectedSubmission.due_date.desc()).limit(24).all()
     with SessionLocal() as s:
         rows = _rows(s)
         if not rows:
@@ -585,6 +593,20 @@ async def contract_bordereau_run(
                  "expects at GET .../periods.")
     with SessionLocal() as s:
         cpid = _carrier_party_id(s, scope.carrier_id)
+        # A renewal-chain contract takes files for its own term only — a 2025
+        # month goes to the renewal, a missing 2024 month to the previous term.
+        if period:
+            import renewal_chain as rc
+            own = rc.own_term(s, scope.contract_id)
+            day = rc.period_start(period)
+            if own is not None and day is not None and not rc.covers(own, day):
+                raise HTTPException(
+                    400, f"{day:%B %Y} is outside this contract's term "
+                         f"({own.inception_dt:%d %b %Y} to {own.expiry_dt:%d %b %Y}). "
+                         "Pick the contract whose term covers that month."
+                    if own.inception_dt and own.expiry_dt else
+                    f"{day:%B %Y} is outside this contract's term. Pick the "
+                    "contract whose term covers that month.")
     return await _direct.direct_run(
         mga=scope.mga,
         carrier_party_id=cpid,

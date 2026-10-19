@@ -460,6 +460,15 @@ export async function saveExportDecisions(
 export type DownloadAbout = {
   programme: string | null; broker: string | null; contract: string | null;
   reporting_period: string | null; version_no: number | null;
+  /** Set once this (current) version was delivered to the carrier. It stays
+   *  correctable while a critical or warning exception is open (`open`) or a
+   *  decision is waiting to be sent (`unsent`); `locked` once neither. */
+  delivery?: DeliveryState | null;
+};
+
+export type DeliveryState = {
+  delivered: boolean; delivered_at?: string | null; flagged?: boolean;
+  open: number; unsent: number; locked: boolean;
 };
 
 /** A generated download's output-stage exceptions, plus what the file is for. */

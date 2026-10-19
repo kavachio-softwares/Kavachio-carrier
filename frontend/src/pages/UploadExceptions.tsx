@@ -14,7 +14,7 @@ import { LoadingOverlay } from "../components/Busy";
 import BdxInlineReview from "../components/BdxInlineReview";
 import ResultsPanel from "../components/ResultsPanel";
 import Modal from "../components/ui/Modal";
-import { periodLabel } from "../utils/date";
+import { fmtDateTime, periodLabel } from "../utils/date";
 
 /** Fix & re-run reloads the page — the success toast crosses the reload here. */
 const RERUN_TOAST_KEY = "kavachio.rerun-toast";
@@ -36,7 +36,7 @@ export default function UploadExceptions() {
   // carrier seats read it and nothing more. The API refuses them too
   // (carrier_scope.assert_can_amend); this keeps the screen from offering what
   // would only fail.
-  const viewOnly = !canAmendExceptions();
+  const roleViewOnly = !canAmendExceptions();
   const navigate = useNavigate();
   // Set when the reviewer comes back from a rule's Decisions screen having
   // recorded decisions — we prompt them that Approved/Fixed values are NOT in
@@ -54,6 +54,13 @@ export default function UploadExceptions() {
   }, [reviewed]);
   const [data, setData] = useState<UploadExceptionsResponse | null>(null);
   const [about, setAbout] = useState<DownloadAbout | null>(null);
+  // Delivered to the carrier: still correctable while a critical or warning
+  // exception is open or a decision is unsent (each Fix & Validate sends the
+  // carrier a corrected version); locked once neither — the server refuses
+  // changes then too (submission_service.delivery_state).
+  const delivery = about?.delivery ?? null;
+  const locked = !!delivery?.locked;
+  const viewOnly = roleViewOnly || locked;
   const [loading, setLoading] = useState(true);
   const [revalidating, setRevalidating] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
@@ -356,7 +363,19 @@ export default function UploadExceptions() {
             <p className="text-[15px] font-medium text-ink leading-relaxed">{msg}</p>
           </div>
         </Modal>
-        {viewOnly && (
+        {delivery?.delivered && (
+          <div className={`note${locked ? "" : " warn"}`} data-testid="delivery-note"
+            style={{ marginBottom: 18 }}>
+            <b>{delivery.flagged ? "Delivered to the carrier with open exceptions" : "Delivered to the carrier"}
+              {delivery.delivered_at ? ` on ${fmtDateTime(delivery.delivered_at)}` : ""}.</b>{" "}
+            {locked
+              ? "Every critical and warning exception is resolved, so this version is locked."
+              : roleViewOnly
+                ? "The broker can still resolve the open exceptions; each Fix & Validate sends you a corrected version."
+                : "You can still resolve the open exceptions. Each Fix & Validate makes a new version and sends it to the carrier as the corrected file; this one is kept."}
+          </div>
+        )}
+        {roleViewOnly && (
           <div className="note" style={{ marginBottom: 18 }}>
             <b>View only.</b> You can open every rule and the BDX, but only the broker who sent
             this file can approve, fix, dismiss or re-validate it.
@@ -396,7 +415,7 @@ export default function UploadExceptions() {
               Exceptions
             </button>
             <button role="tab" className={tab === "results" ? "on" : ""} onClick={() => setTab("results")}>
-              Results
+              Check Summary
             </button>
           </div>
         )}

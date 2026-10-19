@@ -5,6 +5,7 @@ import { canAccessPath } from "../access";
 import { Pagination } from "../components/Pagination";
 import { InfoTip } from "../components/InfoTip";
 import { fmtDateTime, periodLabel } from "../utils/date";
+import { NotCountedBadge, SupersededTag } from "../components/ContractTag";
 
 const PAGE_SIZE = 20;
 
@@ -71,10 +72,13 @@ export default function BrokerRuns() {
                           {r.contract_id != null
                             ? <Link className="linkish" to={`/contracts/${r.contract_id}`}>{r.contract ?? `Contract #${r.contract_id}`}</Link>
                             : <span className="muted">{r.contract ?? "—"}</span>}
+                          {(r.contract_replaced || r.contract_renewed) && <div><SupersededTag replaced={r.contract_replaced} renewed={r.contract_renewed} style={{ marginLeft: 0, marginTop: 4 }} /></div>}
                         </td>
                         <td>{r.rows ?? "—"}</td>
                         <td>
-                          {r.exception_count > 0
+                          {r.exception_count > 0 && r.counted === false
+                            ? <NotCountedBadge open={exceptionsLeft(r).open} total={r.exception_count} />
+                            : r.exception_count > 0
                             ? (exceptionsLeft(r).open > 0
                               ? <span className="badge b-warn" title={exceptionsLeft(r).title}><span className="d" />
                                   {exceptionsLeft(r).open} of {r.exception_count} open</span>

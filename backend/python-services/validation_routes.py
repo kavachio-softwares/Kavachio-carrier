@@ -1666,6 +1666,12 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
         assert_can_read_export(s, principal, SimpleNamespace(
             tenant_id=exp["tenant_id"], program_id=exp["program_id"],
             broker_party_id=exp["broker_party_id"]))
+        # Delivered and every critical/warning answered and sent: final.
+        import submission_service as _subs
+        try:
+            _subs.assert_not_locked(s, export_id)
+        except _subs.CannotCorrect as exc:
+            raise HTTPException(409, str(exc))
         # Direct-lane export? (output built from a landing_record, not canonical)
         landing = s.execute(
             text("SELECT id FROM landing_record WHERE output_export_id = :id "

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Search } from "lucide-react";
 import { api, downloadFile } from "../api/client";
-import { currentMga } from "../auth";
+import { currentMga, isKavachioAdmin } from "../auth";
 import { canAccessPath } from "../access";
 import { fmtStamp, localDayStart, localDayEnd, periodLabel } from "../utils/date";
 import { Pagination } from "../components/Pagination";
@@ -10,6 +10,7 @@ import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { InfoTip } from "../components/InfoTip";
 import { PartyMultiSelect } from "../components/PartyMultiSelect";
+import { NotCountedBadge, SupersededTag } from "../components/ContractTag";
 
 type Party = { id: number; legal_name: string };
 type Run = {
@@ -37,6 +38,11 @@ type Run = {
   // Which version of its submission this file is — each submission is listed
   // once, as its newest version — and the month it is for.
   version_no?: number | null;
+  /** Checked against a contract since replaced; `counted` false once the
+   *  newer contract's file answers the same month (kept for audit). */
+  contract_replaced?: boolean;
+  contract_renewed?: boolean;
+  counted?: boolean;
   reporting_period?: string | null;
 };
 
@@ -60,6 +66,9 @@ export default function RecentRuns() {
   // highlighted while the user continues on from here.
   const fromParam = searchParams.get("from") === "direct" ? "direct" : "home";
 
+  // Only Kavachio staff look across carriers. A carrier seat's list is already
+  // its own company's, so a carrier picker there is a choice of one.
+  const pickCarrier = isKavachioAdmin();
   const [carriers, setCarriers] = useState<Party[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
@@ -68,7 +77,7 @@ export default function RecentRuns() {
   // ids are honoured too).
   const [q, setQ] = useState("");
   const dq = useDebouncedValue(q, 300);
-  const [carrierIds, setCarrierIds] = useState<number[]>(() =>
+  const [carrierIds, setCarrierIds] = useState<number[]>(() => !pickCarrier ? [] :
     (searchParams.get("carrier") ?? "")
       .split(",").map(s => Number(s.trim())).filter(n => Number.isFinite(n) && n > 0));
   const [result, setResult] = useState<string>("");
@@ -76,10 +85,11 @@ export default function RecentRuns() {
   const [dateTo, setDateTo] = useState("");
 
   useEffect(() => {
+    if (!pickCarrier) return;
     api.get(`/parties`, { params: { mga, party_type: "carrier" } })
       .then(r => setCarriers(Array.isArray(r.data) ? r.data : (r.data?.items ?? [])))
       .catch(() => setCarriers([]));
-  }, [mga]);
+  }, [mga, pickCarrier]);
 
   const hasExc = (r: Run) => r.status !== "clean" && r.exception_count > 0;
   // The checks never ran on this file — not clean, but no findings either.
@@ -165,8 +175,10 @@ export default function RecentRuns() {
               <input placeholder="Search by file, broker, program or contract…" value={q}
                 onChange={e => setQ(e.target.value)} />
             </div>
-            <PartyMultiSelect parties={carriers} selected={carrierIds} onChange={setCarrierIds}
-              noun="Carrier" nounPlural="Carriers" />
+            {pickCarrier && (
+              <PartyMultiSelect parties={carriers} selected={carrierIds} onChange={setCarrierIds}
+                noun="Carrier" nounPlural="Carriers" />
+            )}
             <div className="seg sm">
               {RESULT_FILTERS.map(f => (
                 <button key={f.v} className={result === f.v ? "on" : ""}
@@ -219,14 +231,20 @@ export default function RecentRuns() {
                       </td>
                       <td className="muted">{r.broker_name ?? "—"}</td>
                       <td className="muted">{r.program_name ?? "—"}</td>
-                      <td className="muted">{r.contract_name ?? "—"}</td>
+                      <td className="muted">
+                        {r.contract_name ?? "—"}
+                        {(r.contract_replaced || r.contract_renewed) && <div><SupersededTag replaced={r.contract_replaced} renewed={r.contract_renewed} style={{ marginLeft: 0, marginTop: 4 }} /></div>}
+                      </td>
                       <td>{r.reporting_period ? periodLabel(r.reporting_period) : <span className="muted">—</span>}</td>
                       <td>
+                        {hasExc(r) && r.counted === false
+                          ? <NotCountedBadge open={0} total={r.exception_count} />
+                          : (
                         <span className={`badge ${notValidated(r) ? "b-warn" : hasExc(r) ? "b-crit" : "b-ok"}`}>
                           <span className="d" />
                           {notValidated(r) ? "Not Validated"
                             : hasExc(r) ? `${r.exception_count.toLocaleString()} exceptions` : "Clean"}
-                        </span>
+                        </span>)}
                       </td>
                       <td className="muted">{fmtStamp(r.created_at, "")}</td>
                       <td className="r">

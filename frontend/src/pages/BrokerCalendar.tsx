@@ -24,6 +24,7 @@ import { canAccessPath } from "../access";
 import { InfoTip } from "../components/InfoTip";
 import { Pagination } from "../components/Pagination";
 import { fmtDateTime } from "../utils/date";
+import { ContractHeading, SupersededTag } from "../components/ContractTag";
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
@@ -269,7 +270,10 @@ export default function BrokerCalendar() {
                     <tr key={r.id}>
                       {showCarrier && <td className="muted">{r.carrier_name ?? "—"}</td>}
                       <td><b>{r.program_name}</b></td>
-                      <td>{contractCell(r.contract_id, r.contract_name)}</td>
+                      <td>
+                        {contractCell(r.contract_id, r.contract_name)}
+                        {(r.contract_replaced || r.contract_renewed) && <div><SupersededTag replaced={r.contract_replaced} renewed={r.contract_renewed} style={{ marginLeft: 0, marginTop: 4 }} /></div>}
+                      </td>
                       <td className="mono">{r.period}</td>
                       <td className="mono">{fmtDay(r.due_date)}</td>
                       <td className="mono">
@@ -297,6 +301,11 @@ export default function BrokerCalendar() {
                               <span className={`badge ${r.version_count > 1 ? "b-warn" : "b-mut"}`}>
                                 <span className="d" />{r.version_label}
                               </span>
+                              {(r.other_contract_files ?? 0) > 0 && (
+                                <div className="sub" style={{ marginTop: 3 }}>
+                                  + {r.other_contract_files} under a replaced contract
+                                </div>
+                              )}
                               {r.uploaded_at && (
                                 <div className="sub" style={{ marginTop: 3 }}>
                                   uploaded {fmtDateTime(r.uploaded_at)}
@@ -423,8 +432,10 @@ function VersionPanel({ row, onClose }: { row: BrokerCalendarRow; onClose: () =>
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, viewing]);
 
+  // Each contract keeps its own history: a file's number is its number
+  // within its contract — what Exception Triage calls it.
   const label = (v: SubmissionVersionRow) =>
-    `Version ${v.version_no}`;
+    `Version ${v.file_version_no ?? v.version_no}`;
   // The newest version is the file that counts; every earlier one was replaced.
   const newest = versions?.length ? versions[versions.length - 1] : null;
 
@@ -449,8 +460,15 @@ function VersionPanel({ row, onClose }: { row: BrokerCalendarRow; onClose: () =>
           </p>
           {versions === null && !err && <p className="muted" style={{ fontSize: 13 }}>Loading…</p>}
           {versions?.length === 0 && <div className="note">Nothing has been sent for this period yet.</div>}
-          {versions?.map(v => (
-            <div key={v.id} className="card" style={{ marginBottom: 12, padding: "12px 14px", boxShadow: "none" }}>
+          {versions?.map((v, i) => (
+            <div key={v.id}>
+            {/* A heading wherever the contract changes, so a replaced
+                contract's files read as their own, kept history. */}
+            {versions.some(x => x.contract_id !== versions[0].contract_id)
+              && (i === 0 || versions[i - 1].contract_id !== v.contract_id) && (
+              <ContractHeading name={v.contract_name} replaced={v.contract_replaced} renewed={v.contract_renewed} />
+            )}
+            <div className="card" style={{ marginBottom: 12, padding: "12px 14px", boxShadow: "none" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                 <span className={`badge ${v.kind === "original" ? "b-mut" : "b-warn"}`}>
                   <span className="d" />{label(v)}
@@ -471,7 +489,9 @@ function VersionPanel({ row, onClose }: { row: BrokerCalendarRow; onClose: () =>
                 </div>)}
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
                 {newest && v.id !== newest.id ? (
-                  <span className="badge b-mut"><span className="d" />Replaced by {label(newest)}</span>
+                  <span className="badge b-mut"><span className="d" />Replaced by {label(newest)}
+                    {newest.contract_id != null && v.contract_id !== newest.contract_id
+                      ? " of the current contract" : ""}</span>
                 ) : (
                   <span className="badge b-ok"><span className="d" />The file that counts</span>
                 )}
@@ -480,6 +500,7 @@ function VersionPanel({ row, onClose }: { row: BrokerCalendarRow; onClose: () =>
                     onClick={() => setViewing(v)}>View file →</span>
                 )}
               </div>
+            </div>
             </div>
           ))}
         </div>

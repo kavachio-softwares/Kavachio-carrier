@@ -162,6 +162,25 @@ def _resolve(s, tid: int, carrier_party_id: Optional[int], program_id: Optional[
             hit = s.get(ExportTemplate, c.output_template_id)
             if hit and hit.tenant_id == tid:
                 return hit, EXACT
+        # The same agreement in another term: a renewal and its previous term
+        # are one contract over time, so a late file sent under the previous
+        # term uses the layout agreed for the chain (newest term first). Not
+        # sideways — only the contract's own renewal chain is asked.
+        try:
+            import renewal_chain as rc
+            others = (sorted(rc.chain_ids(s, contract_id) - {contract_id}, reverse=True)
+                      if rc.routing_enabled() else [])
+        except Exception:  # noqa: BLE001 — no chain answer, the ladder goes on
+            others = []
+        for other in others:
+            hit = _base().filter(ExportTemplate.contract_id == other).first()
+            if hit:
+                return hit, EXACT
+            oc = s.get(Contract, other)
+            if oc and oc.output_template_id:
+                hit = s.get(ExportTemplate, oc.output_template_id)
+                if hit and hit.tenant_id == tid:
+                    return hit, EXACT
 
     if program_id and broker_party_id:
         hit = (_base()

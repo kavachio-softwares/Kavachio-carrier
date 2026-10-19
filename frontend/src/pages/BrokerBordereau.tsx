@@ -51,7 +51,7 @@ import {
 } from "../api/brokerBordereau";
 import { Dropzone } from "../components/Dropzone";
 import { PeriodPicker } from "../components/PeriodPicker";
-import { ContractPicker, ProgrammePicker, isRunnable, type BrokerProgramme } from "../components/ContractPicker";
+import { ContractPicker, ProgrammePicker, defaultContractId, isRunnable, type BrokerProgramme } from "../components/ContractPicker";
 import { RunResult, ColumnToggles, fetchPreview, type RunResp, type LayoutChanges } from "../components/RunResult";
 import { type Sheet } from "../components/OutputRows";
 import { LoadingOverlay } from "../components/Busy";
@@ -128,7 +128,8 @@ export default function BrokerBordereau() {
         // the broker get on with the actual task.
         const progs = new Set(live.map(c => c.programme.id).filter(id => id != null));
         if (progs.size === 1) setProgrammeId([...progs][0] as number);
-        if (live.length === 1) setContractId(live[0].id);
+        // The renewal, not its previous term, when both are on the list.
+        if (progs.size === 1) setContractId(defaultContractId(live));
       })
       .catch(() => setContracts([]));
   }, [carrierId]);
@@ -165,7 +166,7 @@ export default function BrokerBordereau() {
   function pickProgramme(id: number) {
     setProgrammeId(id);
     const on = programmes.find(p => p.id === id)?.contracts ?? [];
-    setContractId(on.length === 1 ? on[0].id : "");
+    setContractId(defaultContractId(on));
   }
 
   /** The full chain this run is addressed at. Null until everything resolves. */

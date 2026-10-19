@@ -4937,6 +4937,12 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         # "Exceptions to review" tile — real exception totals across generated
         # outputs (replaces the previous hardcoded 0). Counts every flagged
         # exception; per-exception resolution state is not yet subtracted.
+        # Current files only (exception_tally.current_export_ids): each
+        # month's newest version, and not a file under a replaced contract
+        # once the newer contract has a file for that month — those are kept
+        # for audit, not counted as work. Summing every run ever made counted
+        # each re-send's exceptions again.
+        from exception_tally import current_export_ids
         exc_sum, exc_runs, sev_crit, sev_warn, sev_info = s.query(
             func.coalesce(func.sum(OutputExport.exception_count), 0),
             func.count(OutputExport.id),
@@ -4946,6 +4952,7 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         ).filter(
             OutputExport.tenant_id == tid,
             OutputExport.status == "has_exceptions",
+            OutputExport.id.in_(current_export_ids(s, tenant_id=tid) or {-1}),
         ).one()
         # Runs whose checks never ran (validation_outcome) — no findings to
         # review, but they still need someone's attention, so counted apart.
@@ -5360,8 +5367,11 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
     since = datetime.utcnow() - timedelta(days=days)
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
-        from exception_tally import current_export_ids, export_tally, export_versions
-        live = current_export_ids(s, tenant_id=tid)
+        from exception_tally import (contract_flags, current_export_ids,
+                                     export_tally, export_versions)
+        # Listed with files under a replaced contract (labelled, for audit);
+        # counted without the ones a newer contract's file has answered.
+        live = current_export_ids(s, tenant_id=tid, include_replaced=True)
         eids = [i for (i,) in s.query(OutputExport.id)
                 .filter(OutputExport.tenant_id == tid,
                         OutputExport.broker_party_id == broker_party_id,
@@ -5373,6 +5383,7 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
         prog_names = {pid: nm for pid, nm in s.query(Program.id, Program.name)
                       .filter(Program.tenant_id == tid).all()}
         versions = export_versions(s, eids)
+        flags = contract_flags(s, eids)
 
         items, by_prog = [], {}
         lo, hi = (page - 1) * page_size, (page - 1) * page_size + page_size
@@ -5386,9 +5397,12 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
                 "name": prog_names.get(r.program_id) or "No programme",
                 "files": 0, "rows": 0, "exceptions": 0, "open": 0, "put_right": 0,
             })
-            g["files"] += 1
-            for k in ("rows", "exceptions", "open", "put_right"):
-                g[k] += t[k]
+            f = flags.get(r.id) or {"contract_replaced": False, "contract_renewed": False,
+                                    "counted": True}
+            if f["counted"]:
+                g["files"] += 1
+                for k in ("rows", "exceptions", "open", "put_right"):
+                    g[k] += t[k]
             if lo <= n < hi:
                 v = versions.get(r.id) or {}
                 items.append({
@@ -5403,6 +5417,7 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
                     "status": r.status,
                     "created_at": _iso_utc(r.created_at),
                     **t,
+                    **f,
                 })
             s.expunge(r)
         con_ids = {i["contract_id"] for i in items if i["contract_id"]}
@@ -5420,7 +5435,7 @@ def dashboard_broker_files(broker_party_id: int, mga: str,
             "items": items,
             "total": len(eids),
             "by_programme": programmes,
-            "totals": {"files": len(eids),
+            "totals": {"files": sum(g["files"] for g in programmes),
                        **{k: sum(g[k] for g in programmes)
                           for k in ("rows", "exceptions", "open", "put_right")}},
         }

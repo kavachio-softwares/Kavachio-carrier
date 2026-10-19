@@ -456,6 +456,9 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
         held = _contracts_awaiting_approval(s, prog_ids)
 
         from intake_service import contract_code, programme_code
+        # A superseded contract that a renewal replaced is the PREVIOUS TERM:
+        # still pickable on Process Bordereau for its own late months.
+        renewal_of = {c.renews_contract_id: c for c in rows if c.renews_contract_id}
         out = []
         for c in rows:
             if c.id in held:
@@ -472,6 +475,10 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
                 "code": contract_code(c),
                 "contract_type": c.contract_type,
                 "lifecycle": state,
+                "previous_term": state == "superseded" and c.id in renewal_of,
+                "renewed_by": ({"id": renewal_of[c.id].id,
+                                "name": renewal_of[c.id].name or renewal_of[c.id].filename}
+                               if c.id in renewal_of else None),
                 # Who the contract is waiting on. The SAME function the
                 # carrier's record uses, not a second copy of the rule — the
                 # two sides disagreeing about whose move it is would be worse
@@ -1075,8 +1082,9 @@ def broker_insights(days: int = Query(30, ge=7, le=90),
 def _run_rows(s, exports) -> list[dict]:
     """The run rows both the dashboard and the run history show."""
     from app_routes import _iso_utc
-    from exception_tally import export_versions
+    from exception_tally import contract_flags, export_versions
     vers = export_versions(s, [e.id for e in exports]) if exports else {}
+    flags = contract_flags(s, [e.id for e in exports]) if exports else {}
     tallies = {e.id: _export_tally(e) for e in exports}
     prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
                    .filter(Program.id.in_({e.program_id for e in exports})).all()}
@@ -1111,6 +1119,11 @@ def _run_rows(s, exports) -> list[dict]:
         # 23 for a file whose review screen says 13 are left.
         **{k: tallies[e.id][k] for k in ("open", "put_right")},
         "exception_count": tallies[e.id]["exceptions"],
+        # Checked against a contract that has since been replaced, and — when
+        # `counted` is False — answered by the newer contract's file for the
+        # same month: kept for audit, left out of Exceptions to Review.
+        **(flags.get(e.id) or {"contract_replaced": False, "contract_renewed": False,
+                               "counted": True}),
     } for e in exports]
 
 
@@ -1643,7 +1656,27 @@ def broker_exceptions(carrier_id: Optional[int] = Query(None),
                 **{k: sum(f[k] for f in items)
                    for k in ("exceptions", "open", "put_right")},
             },
+            # Not counted above: files under a replaced contract whose month
+            # the newer contract has answered. Kept for audit; said here so the
+            # number never drops without a reason on the page.
+            "replaced": _replaced_contract_files(s, bid, prog_ids),
         }
+
+
+def _replaced_contract_files(s, bid: int, prog_ids: list[int]) -> dict:
+    """How much is kept for audit under replaced contracts, not counted."""
+    from db import OutputExport
+    from exception_tally import replaced_contract_runs
+    if not prog_ids:
+        return {"files": 0, "open": 0}
+    ids = replaced_contract_runs(
+        s, current_export_ids(s, broker_party_id=bid, include_replaced=True))
+    if not ids:
+        return {"files": 0, "open": 0}
+    rows = (s.query(OutputExport)
+             .filter(OutputExport.id.in_(ids),
+                     OutputExport.program_id.in_(prog_ids)).all())
+    return {"files": len(rows), "open": sum(_export_tally(r)["open"] for r in rows)}
 
 
 @router.get("/broker/calendar/{expected_id}/versions")
@@ -1761,7 +1794,9 @@ def broker_runs(page: int = Query(1, ge=1),
         prog_ids = [l.program_id for l in _links(s, bid)]
         if not prog_ids:
             return {"items": [], "total": 0}
-        live = current_export_ids(s, broker_party_id=bid)
+        # Files under a replaced contract stay on the list, labelled — the
+        # history is kept for audit; only the counts leave them out.
+        live = current_export_ids(s, broker_party_id=bid, include_replaced=True)
         q = s.query(OutputExport).filter(OutputExport.broker_party_id == bid,
                                          OutputExport.program_id.in_(prog_ids),
                                          OutputExport.id.in_(live or {-1}))

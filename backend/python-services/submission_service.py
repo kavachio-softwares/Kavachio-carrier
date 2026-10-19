@@ -1511,14 +1511,19 @@ def _queue_result_email(s, th: Thread, ver: Optional[Version], arrival, *,
     if out is not None:
         state = export_state(s, out)
         p = progress(s, th, state)
-        if status in ("with_exceptions", "ready", "delivered_flagged"):
+        if status in ("with_exceptions", "ready", "delivered", "delivered_flagged"):
             rows = report_rows(s, out, th.current.landing_id, rule=state["rule"],
                                decorated=state["exceptions"])
             open_rows = [r for r in rows if r["status"] == "open"]
             if open_rows:
                 csv_text = report_csv(th.ref, ver.no, open_rows)
+    # A delivered file whose critical or warning exceptions are still open can
+    # still be corrected (delivery_state), so its email carries the link too.
+    still_open = (status in DELIVERED_STATUSES and out is not None
+                  and delivery_state(s, th)["open"] > 0)
     for email in rcpts:
-        token = mint_link(th, email) if status == "with_exceptions" else None
+        token = (mint_link(th, email)
+                 if status == "with_exceptions" or still_open else None)
         payload = _email_payload(s, th, ver, event, status, names, rows, p,
                                  token=token, csv_text=csv_text,
                                  export_id=out.id if out is not None else None)
@@ -1592,6 +1597,16 @@ def _email_payload(s, th, ver, event, status, names, rows, p, *, token, csv_text
     elif status == "delivered_flagged":
         title = "Delivered with open exceptions"
         body = [f"Your bordereau was delivered to {carrier} with {exc(n_open)} still open."]
+        if token:
+            body.append(f"You can still resolve them using the secure link below. Each "
+                        f"correction you submit is sent to {carrier} as a new version.")
+    elif token:
+        # Delivered with warnings still open: the delivery rule let it go, and
+        # the broker can still put them right (delivery_state).
+        title = "Delivered — exceptions still open"
+        body = [f"Your bordereau has been delivered to {carrier} with {exc(n_open)} still open.",
+                f"You can still resolve them using the secure link below. Each correction "
+                f"you submit is sent to {carrier} as a new version."]
     else:
         title = "Delivered"
         body = [f"Your bordereau has been delivered to {carrier}. No action is needed."]
@@ -1636,12 +1651,12 @@ def _email_payload(s, th, ver, event, status, names, rows, p, *, token, csv_text
                                        f"padding:0 24px 24px'>{table}</div></body>", 1)
     txt = _email_text(title, "\n\n".join(body), facts, link)
     att = None
-    if csv_text and status in ("with_exceptions", "delivered_flagged"):
+    if csv_text and (status in ("with_exceptions", "delivered_flagged") or token):
         att = {"name": f"{_file_stem(file_name)}-exceptions.csv", "csv": csv_text}
     # The bordereau itself with its exceptions highlighted — the same file
     # "Download BDX" gives. Only its id is queued; the bytes are read at send.
     bdx = ({"export_id": export_id} if export_id and open_rows
-           and status in ("with_exceptions", "delivered_flagged") else None)
+           and (status in ("with_exceptions", "delivered_flagged") or token) else None)
     reply_to = None
     if th.channel == "email" and th.route_id:
         try:
@@ -1776,7 +1791,10 @@ def _correction_inputs(s, th: Thread) -> dict:
     from db import OutputExport
     if th.current_export_id is None:
         raise ValueError("nothing to correct")
-    if th.status not in OPEN_STATUSES:
+    if th.status in DELIVERED_STATUSES:
+        if delivery_state(s, th)["locked"]:
+            raise ValueError("this bordereau was delivered and is locked")
+    elif th.status not in OPEN_STATUSES:
         raise ValueError("this submission is not waiting for answers")
     old = s.get(OutputExport, th.current_export_id)
     landing_id = th.current.landing_id or s.execute(text(
@@ -2002,6 +2020,64 @@ class CannotCorrect(ValueError):
     what the broker reads."""
 
 
+DELIVERED_STATUSES = ("delivered", "delivered_flagged")
+# The severities that keep a delivered file open for corrections (19 Oct
+# decision): while one of these is unanswered the broker may still decide it
+# and Fix & Validate it, each time as a new version sent to the carrier.
+EDITABLE_AFTER_DELIVERY_SEVERITIES = ("critical", "warning")
+
+
+def delivery_state(s, th: Thread) -> dict:
+    """Where a DELIVERED current version stands for corrections.
+
+    `open` — critical or warning exceptions nobody has answered yet.
+    `unsent` — decisions saved since the delivery that no version carries yet
+    (Fix & Validate has not been pressed for them).
+    `locked` — neither: everything that mattered was answered and sent, so the
+    delivered file is final. A version that is not delivered is never locked
+    here (the ordinary rules apply)."""
+    from db import OutputExport
+    if th is None or th.status not in DELIVERED_STATUSES or th.current_export_id is None:
+        return {"delivered": False, "open": 0, "unsent": 0, "locked": False}
+    out = s.get(OutputExport, th.current_export_id)
+    from broker_tally import settled
+    open_ = [e for e in (_decorated(out) if out is not None else [])
+             if not settled(e)
+             and str(e.get("severity") or "").lower() in EDITABLE_AFTER_DELIVERY_SEVERITIES]
+    landing_id = th.current.landing_id or s.execute(text(
+        "SELECT id FROM landing_record WHERE output_export_id = :e "
+        "ORDER BY id DESC LIMIT 1"), {"e": th.current_export_id}).scalar()
+    unsent = 0
+    if landing_id is not None and th.head.delivered_at is not None:
+        # decided_at is a plain timestamp written by the database's now(), so
+        # the delivery moment is turned into the same clock before comparing.
+        # Decisions carried onto this version from the one before keep their
+        # original time, so they never count as unsent.
+        unsent = s.execute(text(
+            "SELECT COUNT(*) FROM landing_correction WHERE landing_id = :l "
+            "AND decided_at > (CAST(:d AS timestamptz) AT TIME ZONE current_setting('TimeZone'))"),
+            {"l": int(landing_id), "d": _aware(th.head.delivered_at)}).scalar() or 0
+    return {"delivered": True, "delivered_at": _iso(th.head.delivered_at),
+            "flagged": th.status == "delivered_flagged",
+            "open": len(open_), "unsent": int(unsent),
+            "locked": not open_ and not unsent}
+
+
+def assert_not_locked(s, export_id: int) -> None:
+    """Refuse a change to a delivered file whose exceptions are all answered
+    and sent (delivery_state). Raises CannotCorrect with the broker's words."""
+    from db import OutputExport
+    out = s.get(OutputExport, export_id)
+    th = load(s, getattr(out, "submission_ref", None)) if out is not None else None
+    if th is None or th.current_export_id != export_id:
+        return
+    if delivery_state(s, th)["locked"]:
+        raise CannotCorrect(
+            "This bordereau was delivered to the carrier and every critical and "
+            "warning exception on it is resolved, so it is locked. Send a "
+            "corrected file if something still needs to change.")
+
+
 def correctable_thread(s, export_id: int) -> Optional[Thread]:
     """The submission this export is the CURRENT version of, if it can take a
     correction now. None when the export belongs to no submission (outputs
@@ -2013,16 +2089,23 @@ def correctable_thread(s, export_id: int) -> Optional[Thread]:
     th = load(s, getattr(out, "submission_ref", None)) if out is not None else None
     if th is None:
         return None
-    if th.status in ("delivered", "delivered_flagged"):
-        raise CannotCorrect(
-            "This bordereau has already been delivered to the carrier, so it can "
-            "no longer be changed here. Send a corrected file instead.")
     if th.current_export_id != export_id:
         mine = th.by_export(export_id)
         was = f"Version {mine.no}" if mine is not None else "This version"
         raise CannotCorrect(
             f"{was} has been replaced by Version {th.current.no}. Open Version "
             f"{th.current.no} to fix its exceptions.")
+    if th.status in DELIVERED_STATUSES:
+        # Delivered is not final while a critical or warning exception is open
+        # or a decision is waiting to be sent (19 Oct): Fix & Validate makes the
+        # next version, which goes to the carrier as the corrected file, and
+        # the delivered one is kept as it was.
+        if delivery_state(s, th)["locked"]:
+            raise CannotCorrect(
+                "This bordereau was delivered to the carrier and every critical "
+                "and warning exception on it is resolved, so it is locked. Send "
+                "a corrected file if something still needs to change.")
+        return th
     if th.status not in OPEN_STATUSES:
         raise CannotCorrect(
             f"This version is {STATUS_WORDS.get(th.status, th.status).lower()}, so "

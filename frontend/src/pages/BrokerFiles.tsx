@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import { currentMga } from "../auth";
 import { fmtDateTime, periodLabel } from "../utils/date";
 import { InfoTip } from "../components/InfoTip";
+import { NotCountedBadge, SupersededTag } from "../components/ContractTag";
 
 const DAYS = 30;
 
@@ -14,6 +15,10 @@ type File = {
   status: string | null; created_at: string | null;
   rows: number; rows_flagged: number;
   exceptions: number; open: number; put_right: number;
+  /** Checked against a contract since replaced; `counted` false once the
+   *  newer contract's file answers the same month — kept for audit, left out
+   *  of the programme's totals. */
+  contract_replaced?: boolean; contract_renewed?: boolean; counted?: boolean;
 };
 
 type Programme = {
@@ -140,7 +145,14 @@ export default function BrokerFiles() {
                               {f.version_no != null && f.version_no > 1 && (
                                 <span className="vchip" style={{ marginLeft: 8 }}>Version {f.version_no}</span>)}
                               {f.contract && (
-                                <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{f.contract}</div>)}
+                                <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                                  {f.contract}
+                                  <SupersededTag replaced={f.contract_replaced} renewed={f.contract_renewed} />
+                                </div>)}
+                              {f.counted === false && f.exceptions > 0 && (
+                                <div style={{ marginTop: 4 }}>
+                                  <NotCountedBadge open={f.open} total={f.exceptions} />
+                                </div>)}
                             </td>
                             <td>{f.reporting_period ? periodLabel(f.reporting_period)
                               : <span className="muted">—</span>}</td>

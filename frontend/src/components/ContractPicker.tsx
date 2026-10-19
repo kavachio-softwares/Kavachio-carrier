@@ -24,9 +24,20 @@ export type BrokerProgramme = {
   contracts: BrokerContract[];
 };
 
-/** Live, or ended but still owed bordereaux for the months of its term. */
+/** Live, or ended but still owed bordereaux for the months of its term — and
+ *  a renewed contract's PREVIOUS TERM, for the months of that term a broker
+ *  never sent (the server lists only those months for it). */
 export const isRunnable = (c: BrokerContract) =>
-  c.lifecycle === "active" || c.lifecycle === "expired";
+  c.lifecycle === "active" || c.lifecycle === "expired" || !!c.previous_term;
+
+/** The contract to pre-select among a programme's: the only one, or the one
+ *  in force when the rest are previous terms — the renewal stays the default
+ *  for its own months; a previous term is picked on purpose. */
+export function defaultContractId(list: BrokerContract[]): number | "" {
+  if (list.length === 1) return list[0].id;
+  const current = list.filter(c => !c.previous_term);
+  return current.length === 1 ? current[0].id : "";
+}
 
 function Row({ title, sub, badge }: { title: string; sub?: ReactNode; badge?: ReactNode }) {
   return (
@@ -166,6 +177,11 @@ export function ProgrammePicker({ value, onChange, programmes }: {
 
 /** The term in a few words — and, once it has ended, that it has. */
 function termOf(c: BrokerContract): string | null {
+  if (c.previous_term) {
+    const span = c.inception_dt && c.expiry_dt
+      ? `${fmtDate(c.inception_dt)} – ${fmtDate(c.expiry_dt)}` : null;
+    return [span, "for months of this term not yet sent"].filter(Boolean).join(" · ");
+  }
   if (c.lifecycle === "expired") return c.expiry_dt ? `Term ended ${fmtDate(c.expiry_dt)}` : "Term ended";
   return c.expiry_dt ? `In force until ${fmtDate(c.expiry_dt)}` : null;
 }
@@ -176,12 +192,18 @@ export function ContractPicker({ value, onChange, contracts }: {
   contracts: BrokerContract[];
 }) {
   return (
-    <ChoicePicker items={contracts} value={value} onChange={onChange} keyOf={c => c.id}
+    <ChoicePicker value={value} onChange={onChange} keyOf={c => c.id}
+      // The contract in force first; a previous term after it.
+      items={[...contracts].sort((a, b) => Number(!!a.previous_term) - Number(!!b.previous_term))}
       placeholder="Select Contract…" empty="No active contract yet"
       render={c => (
         <Row title={c.name || c.filename || `Contract ${c.id}`}
           sub={[c.code, c.carrier.name, termOf(c)].filter(Boolean).join(" · ")}
-          badge={c.lifecycle === "expired"
+          badge={c.previous_term
+            ? <span className="badge b-info" style={{ flex: "none" }}
+                title={c.renewed_by?.name ? `Renewed as ${c.renewed_by.name}` : "Renewed"}>
+                <span className="d" />Previous term</span>
+            : c.lifecycle === "expired"
             ? <span className="badge b-warn" style={{ flex: "none" }}><span className="d" />Ended</span>
             : null} />
       )} />

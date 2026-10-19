@@ -65,6 +65,23 @@ export default function BrokerExceptions() {
           </div>
         </div>
 
+        {(data?.replaced?.files ?? 0) > 0 && (
+          <div className="note" data-testid="replaced-note"
+            style={{ marginBottom: 18, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span>
+              Not counted: {data!.replaced!.files} file{data!.replaced!.files === 1 ? "" : "s"} under
+              a replaced contract{data!.replaced!.open > 0
+                ? `, ${data!.replaced!.open.toLocaleString()} exception${data!.replaced!.open === 1 ? "" : "s"} still open`
+                : ""}.
+            </span>
+            <InfoTip text={"When a contract is replaced, its files are kept for audit. Once the "
+              + "new contract has a file for the same month, the old file's exceptions are no "
+              + "longer yours to work, so they are left out of these numbers. You can still open "
+              + "those files from Processed Files."} />
+            <Link className="linkish" to="/broker/runs">Processed Files →</Link>
+          </div>
+        )}
+
         <div className="card">
           {err ? (
             <div className="empty">Could not load your exceptions.</div>

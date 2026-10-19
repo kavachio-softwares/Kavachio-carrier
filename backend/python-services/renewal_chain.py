@@ -109,6 +109,34 @@ def route_by_period(members: list, named_id: Optional[int],
                   f"Choose the contract and release it.")
 
 
+def own_term(session, cid: Optional[int]):
+    """The contract row when it is part of a renewal chain (it renews one, or
+    one renews it), else None. A chain member's files belong to its OWN term:
+    the previous term takes its late months, the renewal its new ones."""
+    if not cid:
+        return None
+    from db import Contract
+    c = session.get(Contract, cid)
+    if c is None:
+        return None
+    if c.renews_contract_id or session.query(Contract.id).filter(
+            Contract.renews_contract_id == cid).first() is not None:
+        return c
+    return None
+
+
+def chain_start(session, c, limit: int = 50) -> Optional[dt.date]:
+    """The earliest inception back along `c`'s renewal chain (c included)."""
+    from db import Contract
+    seen, starts, cur = set(), [], c
+    while cur is not None and cur.id not in seen and len(seen) < limit:
+        seen.add(cur.id)
+        if getattr(cur, "inception_dt", None):
+            starts.append(cur.inception_dt)
+        cur = session.get(Contract, cur.renews_contract_id) if cur.renews_contract_id else None
+    return min(starts) if starts else None
+
+
 def chain_ids(session, cid: int, limit: int = 50) -> set[int]:
     """Every contract id in `cid`'s renewal chain (back and forward)."""
     from db import Contract

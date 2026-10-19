@@ -5,11 +5,10 @@ import {
 } from "../api/validation";
 import { downloadFile } from "../api/client";
 import { InfoTip } from "./ui/InfoTip";
-import { Pagination } from "./Pagination";
 
-/** The Results tab of one checked file (plan 21–22): what happened to EVERY
- *  row, not only the ones that failed — Summary, All Records, and History &
- *  Downloads (each version with its own Excel and CSV). Read-only for
+/** The Check Summary tab of one checked file (plan 21–22): what happened to EVERY
+ *  row, not only the ones that failed — Summary, History & Downloads (each
+ *  version with its own Excel and CSV), then All Records. Read-only for
  *  everyone; deciding stays on the Exceptions tab. */
 
 const OUTCOME: Record<RowOutcome, { label: string; badge: string }> = {
@@ -24,7 +23,65 @@ const SOURCE: Record<string, string> = {
   secure_link: "Secure Link", fix_validate: "Fix & Validate",
 };
 
-const PAGE = 50;
+const PAGE = 20;
+/** History & Downloads shows this many versions a page. */
+const VERSIONS_PAGE = 5;
+
+/** Page numbers to show: all of them up to 9, otherwise the first, the last
+ *  and a window round the current page, with "…" for the gaps. */
+function pageList(page: number, pages: number): (number | "…")[] {
+  if (pages <= 9) return Array.from({ length: pages }, (_, i) => i + 1);
+  const from = Math.max(2, Math.min(page - 3, pages - 7));
+  const to = Math.min(pages - 1, from + 6);
+  const out: (number | "…")[] = [1];
+  if (from > 2) out.push("…");
+  for (let n = from; n <= to; n++) out.push(n);
+  if (to < pages - 1) out.push("…");
+  out.push(pages);
+  return out;
+}
+
+function NumberedPager({ page, pages, pageSize, total, onPage, unit = "rows", testId = "results" }: {
+  page: number; pages: number; pageSize: number; total: number;
+  onPage: (p: number) => void; unit?: string; testId?: string;
+}) {
+  if (total === 0) return null;
+  const cell: React.CSSProperties = {
+    minWidth: 28, height: 28, borderRadius: 6, border: "none", background: "transparent",
+    fontSize: 12, fontWeight: 600, color: "var(--p-ink, #334155)", cursor: "pointer",
+  };
+  const arrow = (dir: -1 | 1) => {
+    const off = dir < 0 ? page <= 1 : page >= pages;
+    return (
+      <button type="button" aria-label={dir < 0 ? "Previous page" : "Next page"} disabled={off}
+        data-testid={`${testId}-${dir < 0 ? "prev" : "next"}`}
+        onClick={() => onPage(page + dir)}
+        style={{ ...cell, color: off ? "var(--p-border, #cbd5e1)" : "var(--p-primary, #077282)",
+                 cursor: off ? "default" : "pointer", fontSize: 16 }}>
+        {dir < 0 ? "‹" : "›"}
+      </button>
+    );
+  };
+  return (
+    <div className="card-h" style={{ justifyContent: "space-between", borderBottom: "none", borderTop: "1px solid var(--p-border)" }}>
+      <span className="sub">
+        {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total} {unit}
+      </span>
+      {pages > 1 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }} data-testid={`${testId}-pager`}>
+          {arrow(-1)}
+          {pageList(page, pages).map((n, i) => n === "…"
+            ? <span key={`gap${i}`} className="sub" style={{ minWidth: 20, textAlign: "center" }}>…</span>
+            : <button type="button" key={n} onClick={() => onPage(n)} aria-current={n === page ? "page" : undefined}
+                style={n === page
+                  ? { ...cell, background: "var(--p-primary, #077282)", color: "#fff", cursor: "default" }
+                  : cell}>{n}</button>)}
+          {arrow(1)}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function when(iso: string | null) {
   if (!iso) return "—";
@@ -45,12 +102,19 @@ export default function ResultsPanel({ exportId, uploadId, fromParam }: {
   const [q, setQ] = useState("");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [vPage, setVPage] = useState(1);
 
   // Typing settles for a moment before it asks the server.
   useEffect(() => {
     const t = setTimeout(() => { setQuery(q); setPage(1); }, 300);
     return () => clearTimeout(t);
   }, [q]);
+
+  // History opens on the page that holds the version on screen.
+  const viewingAt = (res?.versions ?? []).findIndex(v => String(v.export_id) === String(exportId));
+  useEffect(() => {
+    setVPage(viewingAt >= 0 ? Math.floor(viewingAt / VERSIONS_PAGE) + 1 : 1);
+  }, [exportId, viewingAt]);
 
   useEffect(() => {
     let live = true;
@@ -63,12 +127,21 @@ export default function ResultsPanel({ exportId, uploadId, fromParam }: {
   }, [exportId, outcome, query, page]);
 
   const s = res?.summary;
-  const tile = (k: string, v: number | undefined, info: string, color?: string, o?: RowOutcome) => (
+  const rows = (n: number) => `${n === 1 ? "row" : "rows"}`;
+  const tile = (k: string, v: number | undefined, info: string, color?: string, o?: RowOutcome,
+                extra?: string) => (
     <div className={`tile${o ? " click" : ""}`} style={{ cursor: o ? "pointer" : undefined,
       outline: o && outcome === o ? "2px solid var(--p-primary)" : undefined }}
       onClick={() => { if (o) { setOutcome(outcome === o ? "" : o); setPage(1); } }}>
       <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>{k} <InfoTip text={info} /></div>
-      <div className="v" style={{ color }}>{v ?? "—"}</div>
+      <div className="v" style={{ color }} data-testid={o ? `tile-${o}` : "tile-total"}>
+        {v ?? "—"}
+        {v != null && (
+          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--p-muted)", marginLeft: 6 }}>
+            {rows(v)}{extra ? ` · ${extra}` : ""}
+          </span>
+        )}
+      </div>
     </div>
   );
 
@@ -80,6 +153,10 @@ export default function ResultsPanel({ exportId, uploadId, fromParam }: {
     if (fromParam) qs.set("from", fromParam);
     navigate(`/uploads/${uploadId}/exceptions?${qs.toString()}`);
   };
+  const viewing = (eid: number | null) => eid != null && String(eid) === String(exportId);
+  const versions = res?.versions ?? [];
+  const vPages = Math.max(1, Math.ceil(versions.length / VERSIONS_PAGE));
+  const vShown = versions.slice((vPage - 1) * VERSIONS_PAGE, vPage * VERSIONS_PAGE);
   const save = (path: string) => downloadFile(path)
     .catch(() => alert("We couldn't download that file — please try again."));
 
@@ -96,7 +173,8 @@ export default function ResultsPanel({ exportId, uploadId, fromParam }: {
         <div className="tiles five">
           {tile("Total rows", s?.total, "Every data row in this version of the file.")}
           {tile("Passed", s?.passed, "Checked, and no rule raised anything on the row.", "var(--p-ok)", "passed")}
-          {tile("Failed / open", s?.open, "The row has at least one exception still waiting for a decision.", "var(--p-crit)", "open")}
+          {tile("Failed / open", s?.open, "The row has at least one exception still waiting for a decision. One row can carry more than one exception, so the exception count can be higher than the row count.", "var(--p-crit)", "open",
+            s ? `${s.exceptions_open} exception${s.exceptions_open === 1 ? "" : "s"}` : undefined)}
           {tile("Resolved", s?.resolved, "The row had exceptions and every one has been approved, fixed, dismissed or rejected.", "var(--p-primary)", "resolved")}
           {tile("Not checked", s?.not_checked, "The rules never looked at the row: the file could not be validated, or the row is blank, a total line or a repeated header.", "var(--p-muted)", "not_checked")}
         </div>
@@ -107,6 +185,80 @@ export default function ResultsPanel({ exportId, uploadId, fromParam }: {
         )}
       </div>
 
+      {/* ── History & Downloads ── */}
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div className="card-h">
+          <h3 style={{ margin: 0 }}>
+            History &amp; Downloads
+            {versions.length > 0 && (
+              <span className="muted" data-testid="versions-total" style={{ fontWeight: 500 }}>
+                {" "}· {versions.length} version{versions.length === 1 ? "" : "s"}
+              </span>
+            )}
+          </h3>
+          <span className="sub">Each version keeps its own results and files</span>
+        </div>
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th style={{ width: 110 }}>Version</th>
+                <th>Received</th>
+                <th>How</th>
+                <th>Status</th>
+                <th style={{ width: 110 }}>Exceptions</th>
+                <th style={{ width: 290 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {vShown.map(v => (
+                <tr key={`${v.version}-${v.export_id}`} className={viewing(v.export_id) ? "sel" : undefined}>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    <b>Version {v.version}</b>
+                    {viewing(v.export_id) && (
+                      <span className="badge b-info" data-testid="viewing-version" style={{ marginLeft: 8 }}>Viewing</span>
+                    )}
+                  </td>
+                  <td>{when(v.created_at)}</td>
+                  <td>{v.source ? (SOURCE[v.source] ?? v.source) : "—"}</td>
+                  <td>
+                    {v.current
+                      ? <span className="badge b-ok">Current</span>
+                      : v.replaced_by
+                        ? <span className="badge b-mut">Replaced by Version {v.replaced_by}</span>
+                        : <span className="muted">{v.status_text ?? "—"}</span>}
+                    {v.current && v.status_text ? <span className="muted" style={{ marginLeft: 6 }}>{v.status_text}</span> : null}
+                  </td>
+                  <td>{v.exceptions ?? "—"}</td>
+                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    {v.export_id ? (
+                      <div style={{ display: "inline-flex", gap: 6 }}>
+                        {!viewing(v.export_id) && (
+                          <button className="btn sm" onClick={() => openVersion(v.export_id)}>Open</button>
+                        )}
+                        <button className="btn sm" onClick={() => save(`/export/downloads/${v.export_id}/file`)}>
+                          Excel
+                        </button>
+                        <button className="btn sm" onClick={() => save(`/export/downloads/${v.export_id}/results.csv`)}>
+                          CSV
+                        </button>
+                      </div>
+                    ) : <span className="muted">Not checked yet</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {versions.length > VERSIONS_PAGE && (
+          <NumberedPager page={vPage} pages={vPages} pageSize={VERSIONS_PAGE}
+            total={versions.length} onPage={setVPage} unit="versions" testId="versions" />
+        )}
+        <p className="muted" style={{ fontSize: 12, margin: "10px 16px 14px" }}>
+          Excel is the file as it was made, with a Results sheet of counts. CSV has every row
+          with its result and exceptions.
+        </p>
+      </div>
       {/* ── All Records ── */}
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-h" style={{ flexWrap: "wrap", gap: 10 }}>
@@ -167,70 +319,11 @@ export default function ResultsPanel({ exportId, uploadId, fromParam }: {
           </table>
         </div>
         {res && (
-          <Pagination page={res.records.page} pageCount={res.records.pages}
-            pageSize={res.records.page_size} totalItems={res.records.total}
-            onPageChange={setPage} noun="rows" />
+          <NumberedPager page={res.records.page} pages={res.records.pages}
+            pageSize={res.records.page_size} total={res.records.total} onPage={setPage} />
         )}
       </div>
 
-      {/* ── History & Downloads ── */}
-      <div className="card">
-        <div className="card-h">
-          <h3 style={{ margin: 0 }}>History &amp; Downloads</h3>
-          <span className="sub">Each version keeps its own results and files</span>
-        </div>
-        <div className="tbl-wrap">
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th style={{ width: 110 }}>Version</th>
-                <th>Received</th>
-                <th>How</th>
-                <th>Status</th>
-                <th style={{ width: 110 }}>Exceptions</th>
-                <th style={{ width: 290 }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {(res?.versions ?? []).map(v => (
-                <tr key={`${v.version}-${v.export_id}`}>
-                  <td style={{ whiteSpace: "nowrap" }}><b>Version {v.version}</b></td>
-                  <td>{when(v.created_at)}</td>
-                  <td>{v.source ? (SOURCE[v.source] ?? v.source) : "—"}</td>
-                  <td>
-                    {v.current
-                      ? <span className="badge b-ok">Current</span>
-                      : v.replaced_by
-                        ? <span className="badge b-mut">Replaced by Version {v.replaced_by}</span>
-                        : <span className="muted">{v.status_text ?? "—"}</span>}
-                    {v.current && v.status_text ? <span className="muted" style={{ marginLeft: 6 }}>{v.status_text}</span> : null}
-                  </td>
-                  <td>{v.exceptions ?? "—"}</td>
-                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                    {v.export_id ? (
-                      <div style={{ display: "inline-flex", gap: 6 }}>
-                        {String(v.export_id) !== String(exportId) && (
-                          <button className="btn sm" onClick={() => openVersion(v.export_id)}>Open</button>
-                        )}
-                        <button className="btn sm" onClick={() => save(`/export/downloads/${v.export_id}/file`)}>
-                          Excel
-                        </button>
-                        <button className="btn sm" onClick={() => save(`/export/downloads/${v.export_id}/results.csv`)}>
-                          CSV
-                        </button>
-                      </div>
-                    ) : <span className="muted">Not checked yet</span>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p className="muted" style={{ fontSize: 12, margin: "10px 16px 14px" }}>
-          Excel is the file as it was made, with a Results sheet of counts. CSV has every row
-          with its result and exceptions.
-        </p>
-      </div>
     </div>
   );
 }

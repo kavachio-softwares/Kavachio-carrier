@@ -140,6 +140,15 @@ export type BoardRow = {
    *  against, or the programme x broker contract covering the period. */
   contract_id?: number | null;
   contract_name?: string | null;
+  /** That contract has since been replaced (renewed, or a new contract for the
+   *  same programme and broker). */
+  contract_replaced?: boolean;
+  /** That contract has been renewed (its previous term). */
+  contract_renewed?: boolean;
+  /** Files for this period under another (replaced) contract — kept, and
+   *  listed in View Versions. `version_label` numbers the newest file within
+   *  its own contract, as Exception Triage does. */
+  other_contract_files?: number;
   /** True when the programme has no broker on it — it owes nothing. */
   unassigned: boolean;
   period: string;
@@ -234,6 +243,15 @@ export type SubmissionVersionRow = {
   released_by: string | null;
   release_ref: string | null;
   note: string | null;
+  /** Its number within its own contract's history — what Exception Triage
+   *  calls it. `version_no` is the period's running count across contracts. */
+  file_version_no?: number | null;
+  /** The contract the file was checked against, and whether it has since
+   *  been replaced. */
+  contract_id?: number | null;
+  contract_name?: string | null;
+  contract_replaced?: boolean;
+  contract_renewed?: boolean;
 };
 
 /** `carrier`/`broker` are the platform dashboard's own filters (tenant id /
