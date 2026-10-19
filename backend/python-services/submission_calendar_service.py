@@ -14,7 +14,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, text
 
 log = logging.getLogger("bdx.calendar")
 
@@ -25,8 +25,12 @@ from db import (
 )
 from submission_calendar import (
     resolve_schedule, generate_expected, derive_status, ResolvedSchedule, _add_months,
-    period_for_date, parse_period_hint, horizon_months_for,
+    period_for_date, parse_period_hint, horizon_months_for, closes_on_for,
     DEFAULT_DUE_OFFSET_DAYS, DEFAULT_SOON_WINDOW_DAYS,
+)
+from submission_case import (
+    case_dict, sweep_cases, on_file_received, NO_CHASE, days_over as case_days_over,
+    OVERDUE as CASE_OVERDUE, DELINQUENT, IN_DISPUTE, EXTENDED, RESOLVED,
 )
 
 # Send Bordereau's outbound email, OFF for now on request — everything ELSE
@@ -308,8 +312,17 @@ def ensure_auto_schedule(session, program_id: int, tenant_id) -> Optional[Submis
 def materialize_schedule(session, schedule: SubmissionSchedule,
                          today: Optional[date] = None,
                          horizon_months: Optional[int] = None,
+                         recheck_past: bool = False,
                          keep_periods: Optional[set] = None) -> dict:
     """Resolve → generate → upsert ExpectedSubmission rows for this program.
+
+    A FILE ALREADY SENT KEEPS ITS DUE DATE, and so its On time / Arrived late
+    result (MOPR 39.3). Changing the deadline used to move every row, so a file
+    sent on the 15th against "due on the 10th" quietly turned On time when the
+    day became the 20th — re-judged under a rule that did not exist when it was
+    sent, with nothing recorded. Only files still waiting move. `recheck_past`
+    is for when the old date was simply wrong: then sent files move too, and
+    every result that changes is returned in `rechecked` so it can be logged.
 
     ONE ROW PER (BROKER, PERIOD). A programme is reported by several brokers and
     each owes its own file, so the calendar fans the periods out across the
@@ -385,6 +398,8 @@ def materialize_schedule(session, schedule: SubmissionSchedule,
 
     targets: list[Optional[int]] = list(brokers) if brokers else [None]
     written = 0
+    moved = kept_past = 0                  # waiting files moved / sent files kept
+    rechecked: list[dict] = []             # sent files whose result changed
     for bid in targets:
         for r in rows:
             e = by_key.get((bid, r["period"]))
@@ -397,10 +412,42 @@ def materialize_schedule(session, schedule: SubmissionSchedule,
             e.schedule_id = schedule.id
             e.period_start = r["period_start"]
             e.period_end = r["period_end"]
-            e.due_date = r["due_date"]
-            e.status = derive_status(r["due_date"], today,
-                                     resolved.soon_window_days, e.received_at)
+            old_due = e.due_date
+            changed = old_due is not None and old_due != r["due_date"]
+            if e.received_at is not None and changed and not recheck_past:
+                kept_past += 1             # sent: keeps its date and its result
+                if e.closes_on is None:
+                    e.closes_on = r["closes_on"]
+            else:
+                if changed and e.received_at is not None:
+                    was = result_words(e.received_at, old_due)
+                    now = result_words(e.received_at, r["due_date"])
+                    if was != now:
+                        rechecked.append({"period": e.period,
+                                          "broker_party_id": e.broker_party_id,
+                                          "old": was, "new": now})
+                elif changed:
+                    moved += 1
+                e.due_date = r["due_date"]
+                e.closes_on = r["closes_on"]
+            e.status = derive_status(e.due_date, today,
+                                     resolved.soon_window_days, e.received_at,
+                                     e.closes_on)
             written += 1
+    if rechecked:
+        names = {b.id: b.legal_name for b in session.query(Party).filter(
+            Party.id.in_({x["broker_party_id"] for x in rechecked
+                          if x["broker_party_id"] is not None})).all()}
+        for x in rechecked:
+            x["broker"] = names.get(x["broker_party_id"])
+
+    # Rows kept but not rebuilt above — a filed period the frequency no longer
+    # produces, or a past period of a broker since taken off — still need a day
+    # to stop waiting. Without one they would read Overdue for ever, and
+    # heal_calendars would rebuild this calendar on every view trying to fill it.
+    for e in existing_rows:
+        if e.closes_on is None and e.period_end is not None:
+            e.closes_on = closes_on_for(resolved, e.period_end)
 
     # WHAT NO LONGER BELONGS. Two ways a row can be left over:
     #
@@ -428,12 +475,211 @@ def materialize_schedule(session, schedule: SubmissionSchedule,
     session.flush()
     return {"resolved": True, "count": written, "periods": len(rows),
             "brokers": len(brokers),
+            # MOPR 39.3 — what a deadline change did to files already in the
+            # calendar: waiting ones moved, sent ones kept (or re-checked).
+            "moved": moved, "kept_past": kept_past, "rechecked": rechecked,
             "frequency": resolved.frequency, "anchor": resolved.anchor.isoformat(),
             # Which bound stopped it, so a caller can say "the calendar ends here
             # because the contract does" rather than leaving it unexplained.
             "bounded_by": bounded_by,
             "covers_until": cover_end.isoformat() if cover_end else None,
             "last_period_end": end.isoformat()}
+
+
+# --- MOPR 39.3: a deadline change, recorded ---------------------------------
+#
+# Changing a programme's deadlines is a manual override of what the contract
+# (or the last change) said. It is recorded as old → new for every field that
+# moved, with the reason given, and what it did to the files in the calendar.
+
+SCHEDULE_FIELD_WORDS = {
+    "frequency": "How often it is due",
+    "anchor": "Starting from",
+    "due_day_of_month": "Due on day of month",
+    "due_offset_days": "Days allowed after the week ends",
+    "soon_window_days": "Warn this many days early",
+    "delinquent_after_days": "Delinquent after (days late)",
+}
+_FREQ_WORDS = {"weekly": "Weekly", "monthly": "Monthly", "quarterly": "Quarterly",
+               "half_yearly": "Half-yearly", "yearly": "Yearly"}
+# Fields that move due dates — changing one is when "re-check files already
+# sent" means anything.
+DATE_FIELDS = ("frequency", "anchor", "due_day_of_month", "due_offset_days")
+
+
+def result_words(received_on: date, due: date) -> str:
+    """A sent file's result in words: "On time" or "Arrived late (5 days)"."""
+    if received_on <= due:
+        return "On time"
+    n = (received_on - due).days
+    return f"Arrived late ({n} day{'' if n == 1 else 's'})"
+
+
+def schedule_snapshot(session, schedule: SubmissionSchedule) -> dict:
+    """The values IN FORCE — an edit where there is one, otherwise the
+    contract's or the default — so "old" is what the calendar was actually
+    using, not a blank override column."""
+    from submission_calendar import _norm_freq
+    from submission_case import delinquent_after_days
+    resolved, program, contract = resolve_for_schedule(session, schedule)
+    offset = (schedule.due_offset_days if schedule.due_offset_days is not None
+              else DEFAULT_DUE_OFFSET_DAYS)
+    return {
+        "frequency": resolved.frequency if resolved else _norm_freq(
+            schedule.frequency_override or (program.bdx_frequency if program else None)),
+        "anchor": resolved.anchor if resolved else (
+            schedule.anchor_date_override or _contract_inception(contract)),
+        # The day-of-month falls back to the offset — the same number for a
+        # schedule saved before the field existed (see db.init_db's backfill).
+        "due_day_of_month": (schedule.due_day_of_month
+                             if schedule.due_day_of_month is not None else offset),
+        "due_offset_days": offset,
+        "soon_window_days": (schedule.soon_window_days
+                             if schedule.soon_window_days is not None
+                             else DEFAULT_SOON_WINDOW_DAYS),
+        "delinquent_after_days": delinquent_after_days(schedule),
+    }
+
+
+def _field_word(key: str, value) -> str:
+    if value is None:
+        return "not set"
+    if key == "frequency":
+        return _FREQ_WORDS.get(value, str(value))
+    if key == "anchor":
+        return value.strftime("%d %b %Y") if hasattr(value, "strftime") else str(value)
+    return str(value)
+
+
+def schedule_changes(before: dict, after: dict) -> list[dict]:
+    """Every field that moved, as {field, label, old, new, was_set}. The two
+    deadline fields belong to different frequencies — the day of the month to
+    calendar periods, days-after to weekly — so each is listed only where it
+    means something."""
+    weekly = "weekly" in (before.get("frequency"), after.get("frequency"))
+    all_weekly = before.get("frequency") == after.get("frequency") == "weekly"
+    out = []
+    for key, label in SCHEDULE_FIELD_WORDS.items():
+        if key == "due_offset_days" and not weekly:
+            continue
+        if key == "due_day_of_month" and all_weekly:
+            continue
+        old, new = before.get(key), after.get(key)
+        if old != new:
+            out.append({"field": key, "label": label,
+                        "old": _field_word(key, old), "new": _field_word(key, new),
+                        "was_set": old is not None})
+    return out
+
+
+def schedule_has_history(session, program_id: int,
+                         today: Optional[date] = None) -> bool:
+    """Whether any file of this programme has fallen due or been sent. Until
+    then a change is still setting the programme up; after it, the change
+    overrides deadlines files were already held to, and needs a reason."""
+    today = today or datetime.utcnow().date()
+    return session.query(ExpectedSubmission.id).filter(
+        ExpectedSubmission.program_id == program_id,
+        or_(ExpectedSubmission.received_at.isnot(None),
+            ExpectedSubmission.due_date < today)).first() is not None
+
+
+def reason_needed(changes: list[dict], has_history: bool) -> bool:
+    """A reason is asked for once a value that was in force is changed on a
+    programme whose files have started falling due — not while setting up."""
+    return has_history and any(c["was_set"] for c in changes)
+
+
+def notify_brokers_of_new_dates(session, program, changes: list[dict], result: dict,
+                                carrier_name: str, changed_by: Optional[str] = None,
+                                today: Optional[date] = None) -> int:
+    """Email each broker on the programme that its due dates moved.
+
+    Only for a change that moves DATES (DATE_FIELDS) and actually moved a file
+    — a new reminder window or delinquency threshold is the carrier's own
+    setting, and a change that touched nothing owed tells the broker nothing.
+    One email per broker, to its admins (broker_contacts), saying what changed
+    and when its next file is now due; any of ITS sent files whose result a
+    re-check changed are listed too. The carrier who made the change is copied
+    and answers replies. The reason given is NOT sent — it is written for the
+    carrier's own record, and may say things like "our typo".
+
+    Returns how many brokers had somebody to tell. Never raises: the change is
+    already saved."""
+    try:
+        date_changes = [c for c in changes if c.get("field") in DATE_FIELDS]
+        rechecked = result.get("rechecked") or []
+        if not date_changes or not (result.get("moved") or rechecked):
+            return 0
+        from notifications import notify_people
+        today = today or datetime.utcnow().date()
+        brokers = active_broker_ids(session, program.id)
+        contacts = broker_contacts(session, brokers)
+        told = 0
+        for bid in brokers:
+            people = [{"email": c["email"], "name": c.get("name")}
+                      for c in contacts.get(bid, []) if c.get("email")]
+            if not people:
+                continue
+            nxt = (session.query(ExpectedSubmission)
+                   .filter(ExpectedSubmission.program_id == program.id,
+                           ExpectedSubmission.broker_party_id == bid,
+                           ExpectedSubmission.received_at.is_(None),
+                           ExpectedSubmission.due_date >= today)
+                   .order_by(ExpectedSubmission.due_date).first())
+            facts = [("Carrier", carrier_name), ("Programme", program.name)]
+            facts += [(c["label"], f"{c['old']} → {c['new']}") for c in date_changes]
+            if nxt is not None:
+                facts.append(("Next file due", f"{nxt.period} · {nxt.due_date:%d %b %Y}"))
+            for x in [x for x in rechecked if x.get("broker_party_id") == bid][:5]:
+                facts.append((f"Re-checked {x['period']}", f"{x['old']} → {x['new']}"))
+            notify_people(
+                people, f"Your due dates for {program.name} have changed",
+                body=(f"{carrier_name} changed when your bordereaux for {program.name} "
+                      "are due. Your Bordereau Calendar already shows the new dates."),
+                facts=facts, link_path="/broker/calendar",
+                link_label="Open your Bordereau Calendar",
+                footer=("You're receiving this because you're a contact for this "
+                        "broker on Kavachio."),
+                cc=[changed_by] if changed_by else None, reply_to=changed_by)
+            told += 1
+        return told
+    except Exception as ex:  # noqa: BLE001 — telling never undoes the change
+        log.warning("could not email brokers about new due dates: %s", ex)
+        return 0
+
+
+def schedule_change_words(details: dict) -> str:
+    """The Audit Logs line for one deadline change, from what was stored."""
+    d = details if isinstance(details, dict) else {}
+    parts = []
+    changes = d.get("changes") or []
+    if changes:
+        parts.append("; ".join(f"{c.get('label')} {c.get('old')} → {c.get('new')}"
+                               for c in changes))
+    if d.get("reason"):
+        parts.append(f"Reason: “{d['reason']}”")
+    moved = d.get("moved") or 0
+    if moved:
+        parts.append(f"{moved} waiting file{'' if moved == 1 else 's'} moved to the new date")
+    rechecked = d.get("rechecked") or []
+    if d.get("recheck_past"):
+        if rechecked:
+            shown = "; ".join(
+                f"{x.get('broker') or 'Broker'} {x.get('period')}: {x.get('old')} → {x.get('new')}"
+                for x in rechecked[:5])
+            more = f" (+{len(rechecked) - 5} more)" if len(rechecked) > 5 else ""
+            parts.append(f"Past files re-checked: {shown}{more}")
+        else:
+            parts.append("Past files re-checked: no result changed")
+    elif d.get("kept_past"):
+        n = d["kept_past"]
+        parts.append(f"{n} file{'' if n == 1 else 's'} already sent kept "
+                     f"{'its' if n == 1 else 'their'} result")
+    told = d.get("brokers_emailed") or 0
+    if told:
+        parts.append("Broker emailed" if told == 1 else f"{told} brokers emailed")
+    return " · ".join(parts)
 
 
 def heal_calendars(session, tenant_id: Optional[int] = None,
@@ -465,8 +711,14 @@ def heal_calendars(session, tenant_id: Optional[int] = None,
     programme is attributed nothing else makes it run — so an over-long calendar
     would sit there until somebody happened to re-save the schedule.
 
-    Both checks are cheap: an indexed lookup per schedule, and no writes at all
-    once a tenant is settled. Caller commits.
+    THIRD CASE — a calendar with no close date on its rows. `closes_on` (when
+    an overdue period becomes Never arrived, MOPR 39.1) is written by
+    materialize_schedule, so every row built before it existed has none and
+    would stay Overdue for ever. Rebuilding fills it from the programme's own
+    schedule; materialize_schedule fills every row it keeps, so this fires once.
+
+    All three checks are cheap: an indexed lookup per schedule, and no writes at
+    all once a tenant is settled. Caller commits.
     """
     today = today or datetime.utcnow().date()
     q = session.query(SubmissionSchedule)
@@ -496,6 +748,14 @@ def heal_calendars(session, tenant_id: Optional[int] = None,
                            .first())
                 if overrun is not None:
                     reason = "past_contract_end"
+
+        if reason is None:
+            unclosed = (session.query(ExpectedSubmission.id)
+                        .filter(ExpectedSubmission.program_id == sch.program_id,
+                                ExpectedSubmission.closes_on.is_(None))
+                        .first())
+            if unclosed is not None:
+                reason = "no_close_date"
 
         if reason is None:
             continue
@@ -670,6 +930,8 @@ def mark_received(session, program_id: int, received_on: Optional[date] = None,
         target.received_export_id = export_id
         target.status = derive_status(target.due_date, received_on,
                                       received_on=received_on)
+        # MOPR 39.2 — the file arriving closes any case still going on it.
+        on_file_received(session, target, received_on)
     session.flush()
     return {"expected_id": target.id, "period": target.period,
             "broker_party_id": target.broker_party_id,
@@ -1021,8 +1283,11 @@ def record_chase(session, expected_ids: list[int], *, actor: Optional[str] = Non
     today = today or datetime.utcnow().date()
     rows = (session.query(ExpectedSubmission)
             .filter(ExpectedSubmission.id.in_(expected_ids or [])).all())
+    # Not while a dispute waits on the carrier, more time has been agreed, or
+    # the case is closed (MOPR 39.2) — nobody is chased about those.
     due = [e for e in rows if e.broker_party_id is not None
-           and e.received_at is None and e.due_date is not None and e.due_date < today]
+           and e.received_at is None and e.due_date is not None and e.due_date < today
+           and e.case_state not in NO_CHASE]
     contacts = broker_contacts(session, [e.broker_party_id for e in due])
     programs = {p.id: p for p in session.query(Program)
                 .filter(Program.id.in_({e.program_id for e in due})).all()}
@@ -1061,7 +1326,7 @@ def record_chase(session, expected_ids: list[int], *, actor: Optional[str] = Non
                     overdue_reminder_email_html(
                         c.get("name"), program_name, e.period,
                         e.due_date.isoformat(), days_over, note),
-                    account="NOTIFY", cc=actor,
+                    account="NOTIFY", cc=actor, reply_to=actor,
                 )
                 mailed += 1
             except Exception as ex:  # noqa: BLE001 — one dead mailbox must not sink the chase
@@ -1303,6 +1568,29 @@ def submission_versions(session, expected_id: int) -> list[dict]:
     return out
 
 
+# One sweep at a time, database-wide. Any key will do so long as nothing else
+# takes it; this one reads as "MOPR 39.2".
+SWEEP_LOCK_KEY = 39_200_001
+
+
+def _take_sweep_turn(session) -> bool:
+    """Whether this transaction may sweep now.
+
+    The sweep runs from several places — the daily job, and lazily from the
+    calendar endpoints, two of which the Home dashboard calls at the same
+    moment. Two sweeps that overlap both read "no case yet" and both write the
+    same automatic moves, so a file's history said "Became overdue" three
+    times. A transaction-scoped advisory lock lets exactly one through; the
+    others skip, which is safe — the one that ran does the same work, and the
+    lock is released when its transaction commits or rolls back.
+
+    Postgres only. Elsewhere (the SQLite tests) there is nobody to race."""
+    if session.get_bind().dialect.name != "postgresql":
+        return True
+    return bool(session.execute(text("SELECT pg_try_advisory_xact_lock(:k)"),
+                                {"k": SWEEP_LOCK_KEY}).scalar())
+
+
 def sweep_overdue(session, today: Optional[date] = None,
                   tenant_id: Optional[int] = None) -> dict:
     """Raise the three deadline reminders for unreceived expected submissions.
@@ -1317,6 +1605,11 @@ def sweep_overdue(session, today: Optional[date] = None,
     There is no grace period: the day after the due date the row is overdue. See
     submission_calendar.derive_status.
 
+    Once the period CLOSES as well (`closes_on` — the next period's due date)
+    the stored status moves on to never_arrived, which is what the dashboard
+    counts read. No bell for that: the overdue one has already rung, and a
+    second reminder about the same missing file would only be noise.
+
     A row can legitimately ring more than one bell over its life, and a sweep
     that first sees a row long after its due date rings only `overdue` — the
     earlier moments have passed and warning about them now would be noise. Each
@@ -1326,8 +1619,20 @@ def sweep_overdue(session, today: Optional[date] = None,
     Self-directed only — it reminds the broker's own team, never contacts or
     escalates to the carrier. Safe to run daily (a cron/ping) or lazily when the
     calendar is viewed. Caller commits.
+
+    Only one sweep runs at a time (_take_sweep_turn); one that finds another
+    already running returns at once with `skipped` set and changes nothing.
     """
     today = today or datetime.utcnow().date()
+    if not _take_sweep_turn(session):
+        return {"newly_late": 0, "rows": [], "newly_due_today": 0, "due_today": [],
+                "newly_due_soon": 0, "due_soon": [], "cases": {}, "skipped": True}
+    # Read every row fresh. This session may have loaded some of them before it
+    # got its turn, while another sweep moved them on and committed; deciding
+    # from those stale copies is how a move got written twice. Flush first —
+    # sessions here do not autoflush, and populate_existing would otherwise
+    # throw away changes the caller has not written yet.
+    session.flush()
     sched_q = session.query(SubmissionSchedule)
     if tenant_id is not None:
         sched_q = sched_q.filter(SubmissionSchedule.tenant_id == tenant_id)
@@ -1335,7 +1640,7 @@ def sweep_overdue(session, today: Optional[date] = None,
 
     # All unreceived rows; the per-row flags make each reminder fire exactly
     # once, so scanning already-notified rows is cheap and safe.
-    q = session.query(ExpectedSubmission).filter(
+    q = session.query(ExpectedSubmission).populate_existing().filter(
         ExpectedSubmission.received_at.is_(None))
     if tenant_id is not None:
         q = q.filter(ExpectedSubmission.tenant_id == tenant_id)
@@ -1359,6 +1664,9 @@ def sweep_overdue(session, today: Optional[date] = None,
                 e.status = "overdue"
                 e.overdue_notified = True
                 ring(e, "submission_overdue", newly)
+            if (e.closes_on is not None and today > e.closes_on
+                    and e.status != "never_arrived"):
+                e.status = "never_arrived"
         elif today == e.due_date:
             if not e.due_today_notified:
                 e.status = "due_today"
@@ -1370,10 +1678,16 @@ def sweep_overdue(session, today: Optional[date] = None,
                 e.due_soon_notified = True
                 ring(e, "submission_due_soon", newly_soon)
     session.flush()
+    # MOPR 39.2 — the same check moves late files' cases along (Overdue →
+    # Delinquent, more time running out, a dispute waiting on the carrier).
+    # Here so every caller of this sweep (the daily job, opening a calendar)
+    # does both.
+    cases = sweep_cases(session, today=today, tenant_id=tenant_id)
     # `newly_late` keeps its name: the scheduler logs it and the tests read it.
     return {"newly_late": len(newly), "rows": newly,
             "newly_due_today": len(newly_today), "due_today": newly_today,
-            "newly_due_soon": len(newly_soon), "due_soon": newly_soon}
+            "newly_due_soon": len(newly_soon), "due_soon": newly_soon,
+            "cases": cases}
 
 
 def pending_email_rows(session, tenant_id: Optional[int] = None) -> list[dict]:
@@ -1598,7 +1912,7 @@ def calendar_rows(session, tenant_id: Optional[int], today: Optional[date] = Non
     for e in rows:
         sch = schedules.get(e.program_id)
         soon = sch.soon_window_days if sch and sch.soon_window_days is not None else DEFAULT_SOON_WINDOW_DAYS
-        status = derive_status(e.due_date, today, soon, e.received_at)
+        status = derive_status(e.due_date, today, soon, e.received_at, e.closes_on)
         out.append({
             "id": e.id,
             "program_id": e.program_id,
@@ -1608,6 +1922,8 @@ def calendar_rows(session, tenant_id: Optional[int], today: Optional[date] = Non
             "period_start": e.period_start.isoformat() if e.period_start else None,
             "period_end": e.period_end.isoformat() if e.period_end else None,
             "due_date": e.due_date.isoformat() if e.due_date else None,
+            # Still nothing after this day and the period is Never arrived.
+            "closes_on": e.closes_on.isoformat() if e.closes_on else None,
             "status": status,
             "received_at": e.received_at.isoformat() if e.received_at else None,
             "received_export_id": e.received_export_id,
@@ -1624,6 +1940,8 @@ def calendar_rows(session, tenant_id: Optional[int], today: Optional[date] = Non
             "latest_version_released": latest_sent.get(e.id, False),
             "chased_at": e.chased_at.isoformat() if e.chased_at else None,
             "chase_count": e.chase_count or 0,
+            # MOPR 39.2 — what is being done about it, if it is missing.
+            "case": case_dict(e),
         })
     return out
 
@@ -1886,8 +2204,13 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         if f.get("contract_id"):
             contract_of[exp_id] = (f["contract_id"], f["contract_name"])
     kinds = _superseded_kinds(session, {c for c, _ in contract_of.values()})
-    rows, counts = [], {"due": 0, "on_time": 0, "late": 0, "never": 0,
-                        "released": 0, "unsent_correction": 0}
+    # The four ways a due file can stand (MOPR 39.1): arrived on time, arrived
+    # late, overdue (still waited for) and never (the period closed empty).
+    rows, counts = [], {"due": 0, "on_time": 0, "late": 0, "overdue": 0,
+                        "never": 0, "released": 0, "unsent_correction": 0}
+    # MOPR 39.2 — the same month's files by where their case stands.
+    case_counts = {s: 0 for s in (CASE_OVERDUE, DELINQUENT, IN_DISPUTE,
+                                  EXTENDED, RESOLVED)}
     programmes_in_month = set()
 
     for e in all_rows:
@@ -1895,11 +2218,10 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             continue
         sch = schedules.get(e.program_id)
         soon = sch.soon_window_days if sch and sch.soon_window_days is not None else DEFAULT_SOON_WINDOW_DAYS
-        status = derive_status(e.due_date, today, soon, e.received_at)
+        status = derive_status(e.due_date, today, soon, e.received_at, e.closes_on)
         unassigned = e.broker_party_id is None
-        days_over = ((today - e.due_date).days
-                     if e.received_at is None and e.due_date and today > e.due_date
-                     else None)
+        # Stops counting once the carrier settled it (submission_case.days_over).
+        days_over = case_days_over(e, today)
         days_late = ((e.received_at - e.due_date).days
                      if e.received_at and e.due_date and e.received_at > e.due_date
                      else None)
@@ -1924,6 +2246,8 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             "unassigned": unassigned,
             "period": e.period,
             "due_date": e.due_date.isoformat() if e.due_date else None,
+            # Still nothing after this day and the period is Never arrived.
+            "closes_on": e.closes_on.isoformat() if e.closes_on else None,
             "received_at": e.received_at.isoformat() if e.received_at else None,
             "latest_received_at": e.latest_received_at.isoformat()
                 if e.latest_received_at else None,
@@ -1943,6 +2267,8 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             # Who would be told, if this row were chased. Empty when the broker
             # has no user account — the screen says so rather than pretending.
             "contacts": contacts.get(e.broker_party_id, []),
+            # MOPR 39.2 — what is being done about it, if it is missing.
+            "case": case_dict(e),
         })
         # Nobody owes anything on a programme with no broker, so it is counted
         # nowhere — including in "due this month".
@@ -1950,11 +2276,15 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             continue
         programmes_in_month.add(e.program_id)
         counts["due"] += 1
+        if e.case_state in case_counts:
+            case_counts[e.case_state] += 1
         if status == "on_time":
             counts["on_time"] += 1
         elif status == "received_late":
             counts["late"] += 1
         elif status == "overdue":
+            counts["overdue"] += 1
+        elif status == "never_arrived":
             counts["never"] += 1
         if (e.released_count or 0) > 0:
             counts["released"] += 1
@@ -2005,6 +2335,7 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
         "months": months,
         "rows": rows,
         "counts": counts,
+        "case_counts": case_counts,
         "programme_count": len(programmes_in_month),
         "schedules": schedule_rows,
     }

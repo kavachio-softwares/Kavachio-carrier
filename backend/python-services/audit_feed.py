@@ -306,7 +306,7 @@ ACTION_WORDS = {
     "treaty_link_revoked":            "Withdrew a reinsurer's treaty link",
     "program_created":  "Created a programme",
     "program_updated":  "Updated a programme",
-    "submission_schedule_updated": "Updated a submission schedule",
+    "submission_schedule_updated": "Changed a programme's deadlines",
     # contracts + rules
     "contract.rules_generated":  "Built the checks from a contract's terms",
     "contract.rules_built":      "Built the contract rules",
@@ -465,6 +465,18 @@ ACTION_WORDS = {
     "submission_due_soon":  "Reminded that a bordereau is due soon",
     "submission_due_today": "Reminded that a bordereau is due today",
     "submission_chased":    "Chased a broker for a late bordereau",
+    # MOPR 39.2 — the case on a missing bordereau (submission_case.py)
+    "submission_delinquent":       "Marked a late bordereau as delinquent",
+    "submission_dispute_raised":   "Disputed a late bordereau",
+    "submission_dispute_entered":  "Entered a dispute for a broker",
+    "submission_dispute_waiting":  "Reminded the carrier a dispute is waiting",
+    "submission_dispute_accepted": "Accepted a dispute on a late bordereau",
+    "submission_dispute_rejected": "Rejected a dispute on a late bordereau",
+    "submission_waived":           "Marked a late bordereau as not needed",
+    "submission_extended":         "Gave a broker more time for a bordereau",
+    "submission_case_reopened":    "Reopened a late bordereau — extra time ran out",
+    "submission_case_reopened_by_carrier": "Reopened a closed late-file case",
+    "submission_case_resolved":    "Closed a late bordereau's case — the file arrived",
 }
 
 # What the badge says, and how it is coloured. Everything not listed is read
@@ -1221,6 +1233,11 @@ ACTION_GROUPS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
       "program_created", "program_updated", "party_created", "party_updated",
       "party_contact_added", "party_contact_removed",
       "submission_schedule_updated", "submission_chased",
+      "submission_delinquent", "submission_dispute_raised",
+      "submission_dispute_entered", "submission_dispute_waiting",
+      "submission_dispute_accepted", "submission_dispute_rejected",
+      "submission_waived", "submission_extended", "submission_case_reopened",
+      "submission_case_reopened_by_carrier", "submission_case_resolved",
       "bdx_delivery_rule_updated"), CARRIER_SEATS),
     # How files reach the CARRIER — mailboxes, routes and keys. The broker
     # sends; it is the carrier that sets up the ways in.
@@ -1830,12 +1847,27 @@ def _safe_detail(details) -> str:
         return ""
 
 
+def _schedule_detail(details) -> Optional[str]:
+    """A deadline change (MOPR 39.3) in full — every field's old → new, the
+    reason and what it did to the calendar. The generic wording would clip it
+    at 80 characters and print the list of changes as "3 items"."""
+    if not (isinstance(details, dict) and details.get("changes")):
+        return None
+    try:
+        from submission_calendar_service import schedule_change_words
+        return schedule_change_words(details)
+    except Exception:  # noqa: BLE001 — never fail the page over one row
+        return None
+
+
 def _activity_raw(e) -> dict:
     """One stored activity row as a feed row."""
     return {
         "kind": "activity", "id": e.id, "at": e.created_at,
         "action": e.action, "target": e.target, "details": e.details,
-        "detail": _safe_detail(e.details),
+        "detail": ((_schedule_detail(e.details)
+                    if e.action == "submission_schedule_updated" else None)
+                   or _safe_detail(e.details)),
         "actor": e.actor, "user_id": getattr(e, "actor_user_id", None),
         "role": getattr(e, "actor_role", None),
         "broker_party_id": getattr(e, "actor_broker_party_id", None),

@@ -2121,6 +2121,9 @@ class SubmissionSchedule(Base):
     # cannot express their deadline. Still the fallback for NULL day-of-month.
     due_offset_days = Column(Integer, default=10)             # due = period_end + this
     soon_window_days = Column(Integer, default=5)             # 'due soon' starts this early
+    # MOPR 39.2 — how many days late a missing file becomes Delinquent. NULL
+    # reads as submission_case.DEFAULT_DELINQUENT_AFTER_DAYS.
+    delinquent_after_days = Column(Integer, default=15)
     # DEPRECATED and no longer read by anything. A deadline is now either met or
     # missed — the day after the due date the bordereau is overdue, with no grace.
     # Kept only so existing rows load without a migration; do not reintroduce.
@@ -2152,7 +2155,13 @@ class ExpectedSubmission(Base):
     period_start = Column(Date, nullable=False)
     period_end = Column(Date, nullable=False)
     due_date = Column(Date, nullable=False, index=True)
-    # scheduled | due_soon | due_today | overdue | on_time | received_late
+    # The day we stop waiting: the NEXT period's due date. Still unreceived
+    # after it, the period is never_arrived rather than overdue (see
+    # submission_calendar.closes_on_for). NULL on rows built before it existed
+    # until heal_calendars rebuilds them; a NULL period simply never closes.
+    closes_on = Column(Date, nullable=True)
+    # scheduled | due_soon | due_today | overdue | never_arrived | on_time |
+    # received_late
     # ('late' is retired — it only ever meant "overdue past the grace period",
     #  and there is no grace period any more. Stored rows are migrated below.)
     status = Column(String, default="scheduled", index=True)
@@ -2200,6 +2209,24 @@ class ExpectedSubmission(Base):
     overdue_emailed = Column(Boolean, default=False)
     due_soon_emailed = Column(Boolean, default=False)
     due_today_emailed = Column(Boolean, default=False)
+    # --- MOPR 39.2: what is being done about a missing file -----------------
+    # The CASE, kept apart from `status` on purpose: status says whether the
+    # file came (39.1); the case says how the chase stands. Every move is also
+    # written to submission_case_event. See submission_case.py.
+    # NULL | overdue | delinquent | in_dispute | extended | resolved
+    case_state = Column(String, nullable=True, index=True)
+    case_since = Column(Date, nullable=True)        # the day it entered case_state
+    case_until = Column(Date, nullable=True)        # extended: more time agreed until
+    case_resolution = Column(String, nullable=True)  # file_received | waived | accepted
+    dispute_reason = Column(String, nullable=True)  # submission_case.DISPUTE_REASONS key
+    dispute_note = Column(Text, nullable=True)
+    dispute_raised_on = Column(Date, nullable=True)
+    dispute_by_carrier = Column(Boolean, default=False)  # entered by the carrier for the broker
+    # A rejected dispute cannot be raised again by the broker — only the
+    # carrier can reopen it — or disputes could pause the chase for ever.
+    dispute_locked = Column(Boolean, default=False)
+    # The carrier was reminded once that this dispute is waiting on them.
+    dispute_reminded = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     __table_args__ = (
@@ -2268,6 +2295,41 @@ class SubmissionVersion(Base):
     )
 
 
+class SubmissionCaseEvent(Base):
+    """MOPR 39.2 — every move of a missing file's case, in order. APPEND-ONLY.
+
+    expected_submission.case_* holds where a case stands NOW; this holds how it
+    got there — opened, became delinquent, disputed, accepted or rejected,
+    waived, given more time, closed by the file arriving — with who did it, the
+    day it counts from and why. Never updated or deleted by the app, so it is
+    the record a dispute is settled against and what the MOPR pack counts.
+
+    The actor is the login (or "system" for the daily check), never anything
+    the browser sends.
+    """
+    __tablename__ = "submission_case_event"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, index=True, nullable=True)
+    expected_id = Column(Integer, index=True, nullable=False)  # FK -> expected_submission.id
+    program_id = Column(Integer, index=True, nullable=True)
+    broker_party_id = Column(Integer, index=True, nullable=True)
+    period = Column(String, nullable=True)          # denormalised for readable history
+    # opened | delinquent | dispute_raised | dispute_accepted | dispute_rejected
+    # | waived | extended | reopened | file_received | cleared | carrier_reminded
+    kind = Column(String, nullable=False)
+    from_state = Column(String, nullable=True)
+    to_state = Column(String, nullable=True)
+    effective_on = Column(Date, nullable=True)      # the business day it counts from
+    reason = Column(String, nullable=True)          # dispute reason / resolution code
+    note = Column(Text, nullable=True)
+    details = Column(JSON, nullable=True)           # e.g. {"until": "2026-10-30"}
+    actor = Column(String, nullable=True)           # email, or "system"
+    actor_user_id = Column(Integer, nullable=True)
+    actor_role = Column(String, nullable=True)
+    actor_broker_party_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 def _ensure_column(conn, inspector, table: str, column: str, ddl_type: str) -> None:
     """Add `column` to `table` if it isn't already there. Dialect-agnostic
     column inspection so this works on both SQLite and PostgreSQL."""
@@ -2333,6 +2395,18 @@ def _sqlite_relax_expected_submission_key(conn) -> bool:
         except Exception:
             pass
         return False
+
+
+# Keep the first of each repeated AUTOMATIC case move — same file, same move,
+# same day. Written by sweeps that overlapped before sweep_overdue took a lock
+# (see submission_calendar_service._take_sweep_turn). Never touches a move a
+# person made. Run by init_db off RLS; migration 42 is the same statement.
+DEDUPE_CASE_EVENTS_SQL = (
+    "DELETE FROM submission_case_event "
+    "WHERE actor = 'system' AND id NOT IN ("
+    "  SELECT MIN(id) FROM submission_case_event "
+    "  WHERE actor = 'system' "
+    "  GROUP BY expected_id, kind, effective_on)")
 
 
 def init_db():
@@ -2564,6 +2638,33 @@ def init_db():
         _ensure_column(conn, inspector, "expected_submission", "chased_at", "DATE")
         _ensure_column(conn, inspector, "expected_submission", "chase_count",
                        "INTEGER DEFAULT 0")
+        # MOPR 39.1 — when an overdue period becomes Never arrived. Left NULL
+        # here: heal_calendars fills it on the next calendar view, from each
+        # programme's own schedule, so no date is guessed in SQL.
+        _ensure_column(conn, inspector, "expected_submission", "closes_on", "DATE")
+        # MOPR 39.2 — the case on a missing file (submission_case.py). All NULL /
+        # false on existing rows: the daily check opens cases for files that are
+        # late. submission_case_event itself is built by create_all.
+        for _c, _ddl in (("case_state", "VARCHAR"), ("case_since", "DATE"),
+                         ("case_until", "DATE"), ("case_resolution", "VARCHAR"),
+                         ("dispute_reason", "VARCHAR"), ("dispute_note", "TEXT"),
+                         ("dispute_raised_on", "DATE"),
+                         ("dispute_by_carrier", "BOOLEAN DEFAULT FALSE"),
+                         ("dispute_locked", "BOOLEAN DEFAULT FALSE"),
+                         ("dispute_reminded", "BOOLEAN DEFAULT FALSE")):
+            _ensure_column(conn, inspector, "expected_submission", _c, _ddl)
+        _ensure_column(conn, inspector, "submission_schedule", "delinquent_after_days",
+                       "INTEGER DEFAULT 15")
+        # Sweeps that overlapped (before sweep_overdue took a lock) each wrote
+        # the same automatic moves, so a history read "Became overdue" three
+        # times. Keep the first of each repeat. Only automatic rows, never one a
+        # person made. Idempotent; migration 42 is the same under RLS. In a
+        # savepoint so a first boot, before the table exists, aborts nothing.
+        try:
+            with conn.begin_nested():
+                conn.exec_driver_sql(DEDUPE_CASE_EVENTS_SQL)
+        except Exception:
+            pass    # table not there yet; create_all builds it empty
         # Backfill the roll-ups for rows that arrived before versions existed:
         # a period already marked received has exactly one submission behind it.
         try:

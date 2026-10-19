@@ -7,7 +7,7 @@
  * back inside the data.
  */
 import { api } from "./client";
-import type { CalendarStatus } from "./calendar";
+import type { CalendarStatus, CaseInfo, CasePayload, CaseState } from "./calendar";
 
 export type BrokerCarrier = { id: number; name: string; programme_count: number };
 
@@ -147,6 +147,8 @@ export type BrokerCalendarRow = {
   other_contract_files?: number;
   /** When the newest version was uploaded — exact time, UTC ISO. */
   uploaded_at: string | null;
+  /** MOPR 39.2 — what is being done about it, if it is missing. */
+  case: CaseInfo;
 };
 
 export type BrokerCalendar = {
@@ -154,7 +156,9 @@ export type BrokerCalendar = {
   months: string[];
   rows: BrokerCalendarRow[];
   /** The carrier calendar's own headline counts, for this broker only. */
-  counts: { due: number; on_time: number; late: number; never: number };
+  counts: { due: number; on_time: number; late: number; overdue: number; never: number };
+  /** MOPR 39.2 — this broker's files that month by where their case stands. */
+  case_counts: Record<CaseState, number>;
   schedules: {
     program_id: number; program_name: string; carrier_name: string | null;
     frequency: string | null; frequency_label: string; due_rule: string;
@@ -194,6 +198,15 @@ export const getBrokerCalendarVersions = (expectedId: number) =>
   api.get<{ expected_id: number; period: string;
             versions: import("./calendar").SubmissionVersionRow[] }>(
     `/broker/calendar/${expectedId}/versions`).then(r => r.data);
+
+/** MOPR 39.2 — the case on one of this broker's late files. */
+export const getBrokerCase = (expectedId: number) =>
+  api.get<CasePayload>(`/broker/calendar/${expectedId}/case`).then(r => r.data);
+
+/** MOPR 39.2 — say a late mark is wrong. The carrier decides. */
+export const raiseBrokerDispute = (expectedId: number, reason: string, note: string) =>
+  api.post<CasePayload>(`/broker/calendar/${expectedId}/dispute`, { reason, note })
+    .then(r => r.data);
 
 export const getBrokerCalendar = (month?: string, carrierId?: number | null) =>
   api.get<BrokerCalendar>("/broker/calendar", {

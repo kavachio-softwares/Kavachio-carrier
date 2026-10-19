@@ -810,9 +810,16 @@ def test_board_groups_by_due_month_and_counts_only_real_obligations():
     assert board["month"] == "2026-02"
     assert board["counts"]["due"] == 2
     assert board["counts"]["on_time"] == 1
-    assert board["counts"]["never"] == 1
+    # Still waited for: February's file (due 10 Mar) has not fallen due yet.
+    assert board["counts"]["overdue"] == 1
+    assert board["counts"]["never"] == 0
     assert board["schedules"][0]["frequency"] == "monthly"
     assert board["schedules"][0]["due_rule"] == "10th of the following month"
+
+    # Once February's file is due too, January closes empty.
+    board = svc.calendar_board(s, 1, month="2026-02", today=date(2026, 3, 11))
+    assert board["counts"]["overdue"] == 0
+    assert board["counts"]["never"] == 1
 
 
 def test_board_shows_a_programme_with_no_broker_as_owing_nothing():
@@ -822,7 +829,7 @@ def test_board_shows_a_programme_with_no_broker_as_owing_nothing():
     board = svc.calendar_board(s, 1, month="2026-02", today=date(2026, 3, 1))
     assert board["rows"] and all(r["unassigned"] for r in board["rows"])
     # Nobody can be late when there is nobody to be late.
-    assert board["counts"] == {"due": 0, "on_time": 0, "late": 0,
+    assert board["counts"] == {"due": 0, "on_time": 0, "late": 0, "overdue": 0,
                                "never": 0, "released": 0, "unsent_correction": 0}
 
 
@@ -1221,3 +1228,308 @@ def test_an_over_long_calendar_shrinks_itself_on_view():
 
     # And it settles: a second pass finds nothing left to do.
     assert svc.heal_calendars(s, tenant_id=1, today=date(2026, 2, 6))["healed"] == 0
+
+
+# ---- MOPR 39.1: overdue vs never arrived ------------------------------------
+# A period stops being waited for once the NEXT period's file is due as well;
+# still empty after that, it is Never arrived rather than Overdue.
+
+def _monthly(day=10):
+    return resolve_schedule(contract_frequency="monthly",
+                            contract_inception=date(2026, 1, 1),
+                            due_day_of_month=day)
+
+
+def test_a_period_closes_on_the_next_periods_due_date():
+    # July is due 10 Aug and closes on 10 Sep — August's due date.
+    assert sc.closes_on_for(_monthly(), date(2026, 7, 31)) == date(2026, 9, 10)
+
+
+def test_close_date_scales_with_the_frequency():
+    def r(freq):
+        return resolve_schedule(contract_frequency=freq,
+                                contract_inception=date(2026, 1, 1),
+                                due_day_of_month=10)
+    assert sc.closes_on_for(r("quarterly"), date(2026, 9, 30)) == date(2027, 1, 10)
+    assert sc.closes_on_for(r("half_yearly"), date(2026, 6, 30)) == date(2027, 1, 10)
+    assert sc.closes_on_for(r("yearly"), date(2026, 12, 31)) == date(2028, 1, 10)
+
+
+def test_weekly_close_date_is_one_week_after_its_due_date():
+    r = resolve_schedule(contract_frequency="weekly",
+                         contract_inception=date(2026, 1, 5), due_offset_days=3)
+    # Week 5-11 Jan is due 14 Jan; the next week's file is due 21 Jan.
+    assert sc.closes_on_for(r, date(2026, 1, 11)) == date(2026, 1, 21)
+
+
+def test_a_31st_deadline_closes_on_the_next_months_real_31st():
+    # January is due 28 Feb (clamped); it closes on 31 Mar, not on 28 Mar —
+    # the close date is the next period's own due date, never a shifted one.
+    r = _monthly(day=31)
+    assert due_date_for(r, date(2026, 1, 31)) == date(2026, 2, 28)
+    assert sc.closes_on_for(r, date(2026, 1, 31)) == date(2026, 3, 31)
+
+
+def test_generated_rows_close_when_the_next_row_falls_due():
+    rows = generate_expected(_monthly(), date(2026, 1, 1), date(2026, 6, 30))
+    for this, nxt in zip(rows, rows[1:]):
+        assert this["closes_on"] == nxt["due_date"]
+
+
+def test_overdue_up_to_and_on_the_close_date_then_never_arrived():
+    due, closes = date(2026, 8, 10), date(2026, 9, 10)
+    assert derive_status(due, date(2026, 8, 11), closes_on=closes) == "overdue"
+    assert derive_status(due, closes, closes_on=closes) == "overdue"
+    assert derive_status(due, date(2026, 9, 11), closes_on=closes) == "never_arrived"
+
+
+def test_a_file_after_the_close_date_still_counts_as_arrived_late():
+    due, closes = date(2026, 8, 10), date(2026, 9, 10)
+    assert derive_status(due, date(2026, 10, 1), received_on=date(2026, 9, 20),
+                         closes_on=closes) == "received_late"
+
+
+def test_without_a_close_date_a_period_stays_overdue():
+    # How a row saved before closes_on existed reads until it is healed.
+    assert derive_status(date(2026, 8, 10), date(2027, 8, 10)) == "overdue"
+
+
+def test_materialize_stores_the_close_date():
+    import db
+    s = _mem_session(); _seed_monthly(s)
+    jan = s.query(db.ExpectedSubmission).filter_by(period="2026-01").one()
+    assert jan.due_date == date(2026, 2, 10)
+    assert jan.closes_on == date(2026, 3, 10)
+
+
+def test_sweep_moves_a_closed_period_to_never_arrived_without_a_second_bell():
+    import submission_calendar_service as svc, db
+    s = _mem_session(); p = _seed_monthly(s)
+    svc.sweep_overdue(s, today=date(2026, 2, 20), tenant_id=1); s.commit()
+    jan = s.query(db.ExpectedSubmission).filter_by(period="2026-01").one()
+    assert jan.status == "overdue"
+
+    svc.sweep_overdue(s, today=date(2026, 3, 11), tenant_id=1); s.commit()
+    s.refresh(jan)
+    assert jan.status == "never_arrived"
+    assert len(_bells(s, p.id)) == 2    # Jan and Feb each rang overdue once — no extra bell
+
+
+def test_a_sweep_that_first_sees_a_closed_period_rings_overdue_once():
+    import submission_calendar_service as svc, db
+    s = _mem_session(); p = _seed_monthly(s)
+    svc.sweep_overdue(s, today=date(2026, 3, 11), tenant_id=1); s.commit()
+    jan = s.query(db.ExpectedSubmission).filter_by(period="2026-01").one()
+    assert jan.status == "never_arrived"
+    assert jan.overdue_notified is True
+
+
+def test_a_never_arrived_period_that_finally_arrives_is_arrived_late():
+    import submission_calendar_service as svc
+    s = _mem_session(); p = _seed_monthly(s)
+    svc.mark_received(s, p.id, received_on=date(2026, 3, 20), export_id=1,
+                      period="2026-01")
+    s.commit()
+    rows = {r["period"]: r for r in svc.calendar_rows(s, 1, today=date(2026, 3, 25))}
+    assert rows["2026-01"]["status"] == "received_late"
+
+
+def test_the_calendar_shows_the_close_date():
+    import submission_calendar_service as svc
+    s = _mem_session(); _seed_monthly(s)
+    rows = {r["period"]: r for r in svc.calendar_rows(s, 1, today=date(2026, 3, 11))}
+    assert rows["2026-01"]["closes_on"] == "2026-03-10"
+    assert rows["2026-01"]["status"] == "never_arrived"
+    assert rows["2026-02"]["status"] == "overdue"
+
+
+def test_a_calendar_built_before_close_dates_heals_itself_once():
+    # The state a live database is in after upgrading: rows with no closes_on.
+    import db, submission_calendar_service as svc
+    s = _mem_session()
+    _seed_with_brokers(s, n=2)
+    for e in s.query(db.ExpectedSubmission).all():
+        e.closes_on = None
+    s.commit()
+
+    res = svc.heal_calendars(s, tenant_id=1, today=date(2026, 2, 6))
+    s.commit()
+    assert res["healed"] == 1
+    assert res["programs"][0]["reason"] == "no_close_date"
+    assert all(e.closes_on is not None for e in s.query(db.ExpectedSubmission).all())
+    assert svc.heal_calendars(s, tenant_id=1, today=date(2026, 2, 6))["healed"] == 0
+
+
+def test_a_kept_row_the_schedule_no_longer_builds_still_gets_a_close_date():
+    # A filed yearly period survives a switch to monthly; it is not rebuilt, so
+    # materialize has to fill its close date itself or heal would loop on it.
+    import db, submission_calendar_service as svc
+    s = _mem_session()
+    p = db.Program(tenant_id=1, name="Cat layer", bdx_frequency="annual")
+    s.add(p); s.flush()
+    s.add(db.Contract(program_id=p.id, tenant_id=1, inception_dt=date(2026, 1, 1)))
+    s.flush()
+    sched = db.SubmissionSchedule(tenant_id=1, program_id=p.id); s.add(sched); s.flush()
+    svc.materialize_schedule(s, sched, today=date(2026, 6, 1))
+    svc.mark_received(s, p.id, received_on=date(2026, 5, 1), export_id=1, period="2026")
+    for e in s.query(db.ExpectedSubmission).all():
+        e.closes_on = None
+    s.commit()
+
+    sched.frequency_override = "monthly"
+    svc.materialize_schedule(s, sched, today=date(2026, 6, 1))
+    s.commit()
+    kept = s.query(db.ExpectedSubmission).filter_by(period="2026").one()
+    assert kept.closes_on is not None
+    assert svc.heal_calendars(s, tenant_id=1, today=date(2026, 6, 1))["healed"] == 0
+
+
+# --- MOPR 39.3: a deadline change is a recorded override ---------------------
+
+def _late_january(s):
+    """Monthly from Jan 2026, due the 10th; January sent 15 Feb — 5 days late."""
+    import submission_calendar_service as svc
+    p = _seed_monthly(s)
+    svc.mark_received(s, p.id, received_on=date(2026, 2, 15), period="2026-01")
+    s.commit()
+    return p
+
+
+def _row(s, period):
+    import db
+    return s.query(db.ExpectedSubmission).filter_by(period=period).one()
+
+
+def test_a_deadline_change_keeps_the_result_of_files_already_sent():
+    import db, submission_calendar_service as svc
+    s = _mem_session(); p = _late_january(s)
+    sched = s.query(db.SubmissionSchedule).filter_by(program_id=p.id).one()
+    sched.due_day_of_month = 20
+    res = svc.materialize_schedule(s, sched, today=date(2026, 3, 12))
+    s.commit()
+    jan, feb = _row(s, "2026-01"), _row(s, "2026-02")
+    assert jan.due_date == date(2026, 2, 10)             # sent: keeps its date
+    assert jan.status == "received_late"                  # and its result
+    assert feb.due_date == date(2026, 3, 20)             # waiting: moves
+    assert res["kept_past"] == 1 and res["moved"] >= 1
+    assert res["rechecked"] == []
+
+
+def test_re_checking_past_files_moves_them_and_says_what_changed():
+    import db, submission_calendar_service as svc
+    s = _mem_session(); p = _late_january(s)
+    sched = s.query(db.SubmissionSchedule).filter_by(program_id=p.id).one()
+    sched.due_day_of_month = 20
+    res = svc.materialize_schedule(s, sched, today=date(2026, 3, 12), recheck_past=True)
+    s.commit()
+    jan = _row(s, "2026-01")
+    assert jan.due_date == date(2026, 2, 20) and jan.status == "on_time"
+    assert res["kept_past"] == 0
+    assert [(x["period"], x["old"], x["new"]) for x in res["rechecked"]] == [
+        ("2026-01", "Arrived late (5 days)", "On time")]
+
+
+def test_the_change_is_listed_old_to_new_and_asks_why_once_files_are_due():
+    import db, submission_calendar_service as svc
+    s = _mem_session(); p = _late_january(s)
+    sched = s.query(db.SubmissionSchedule).filter_by(program_id=p.id).one()
+    before = svc.schedule_snapshot(s, sched)
+    sched.due_day_of_month = 20
+    sched.delinquent_after_days = 30
+    changes = svc.schedule_changes(before, svc.schedule_snapshot(s, sched))
+    assert [(c["label"], c["old"], c["new"]) for c in changes] == [
+        ("Due on day of month", "10", "20"),
+        ("Delinquent after (days late)", "15", "30")]
+    assert svc.schedule_has_history(s, p.id, today=date(2026, 3, 12))
+    assert svc.reason_needed(changes, has_history=True)
+    # Nothing due or sent yet: still setting up, no reason asked.
+    assert not svc.reason_needed(changes, has_history=False)
+    # Nothing changed: nothing to record.
+    assert svc.schedule_changes(before, before) == []
+
+
+def test_setting_a_value_for_the_first_time_needs_no_reason():
+    import submission_calendar_service as svc
+    changes = svc.schedule_changes({"frequency": None}, {"frequency": "monthly"})
+    assert changes[0]["old"] == "not set" and changes[0]["new"] == "Monthly"
+    assert not svc.reason_needed(changes, has_history=True)
+
+
+def test_only_the_deadline_field_of_the_frequency_is_listed():
+    import submission_calendar_service as svc
+    monthly = {"frequency": "monthly", "due_day_of_month": 10, "due_offset_days": 10}
+    hidden = dict(monthly, due_offset_days=7)            # weekly's field, unused
+    assert svc.schedule_changes(monthly, hidden) == []
+    weekly = {"frequency": "weekly", "due_day_of_month": 10, "due_offset_days": 5}
+    assert [c["field"] for c in svc.schedule_changes(
+        weekly, dict(weekly, due_offset_days=7, due_day_of_month=20))] == ["due_offset_days"]
+
+
+def test_the_audit_line_says_what_changed_why_and_what_it_did():
+    import submission_calendar_service as svc
+    line = svc.schedule_change_words({
+        "changes": [{"label": "Due on day of month", "old": "10", "new": "20"}],
+        "reason": "Contract amendment signed", "moved": 2, "kept_past": 1,
+        "recheck_past": False, "rechecked": []})
+    assert line == ("Due on day of month 10 → 20 · Reason: “Contract amendment signed”"
+                    " · 2 waiting files moved to the new date"
+                    " · 1 file already sent kept its result")
+    line = svc.schedule_change_words({
+        "changes": [{"label": "Due on day of month", "old": "10", "new": "20"}],
+        "reason": "The 10th was a typo", "moved": 0, "recheck_past": True,
+        "rechecked": [{"broker": "MOPR Broker Org", "period": "2026-07",
+                       "old": "Arrived late (5 days)", "new": "On time"}]})
+    assert line.endswith("Past files re-checked: MOPR Broker Org 2026-07: "
+                         "Arrived late (5 days) → On time")
+
+
+def _broker_admin(s, broker, email):
+    import db
+    s.add(db.AppUser(email=email, full_name=email.split("@")[0], role="broker_admin",
+                     status="active", broker_party_id=broker.id))
+    s.commit()
+
+
+def _capture_notify(monkeypatch):
+    import notifications
+    sent = []
+    monkeypatch.setattr(notifications, "notify_people",
+                        lambda people, title, **kw: sent.append((people, title, kw)))
+    return sent
+
+
+def test_brokers_are_emailed_when_their_due_dates_move(monkeypatch):
+    import submission_calendar_service as svc
+    s = _mem_session(); p, brokers, sched = _seed_with_brokers(s, n=2)
+    _broker_admin(s, brokers[0], "admin1@b.test")        # broker 2 has nobody
+    sent = _capture_notify(monkeypatch)
+    before = svc.schedule_snapshot(s, sched)
+    sched.due_day_of_month = 20
+    changes = svc.schedule_changes(before, svc.schedule_snapshot(s, sched))
+    res = svc.materialize_schedule(s, sched, today=date(2026, 2, 6)); s.commit()
+
+    told = svc.notify_brokers_of_new_dates(s, p, changes, res, "Acceltree",
+                                           changed_by="carrier@x.test",
+                                           today=date(2026, 2, 6))
+    assert told == 1
+    people, title, kw = sent[0]
+    assert [x["email"] for x in people] == ["admin1@b.test"]
+    assert title == "Your due dates for Acme have changed"
+    assert kw["cc"] == ["carrier@x.test"] and kw["reply_to"] == "carrier@x.test"
+    facts = dict(kw["facts"])
+    assert facts["Due on day of month"] == "10 → 20"
+    assert facts["Next file due"] == "2026-01 · 20 Feb 2026"
+    assert "Contract" not in str(kw)                     # the reason is not sent
+
+
+def test_no_email_when_no_date_moved(monkeypatch):
+    import submission_calendar_service as svc
+    s = _mem_session(); p, brokers, sched = _seed_with_brokers(s, n=1)
+    _broker_admin(s, brokers[0], "admin1@b.test")
+    sent = _capture_notify(monkeypatch)
+    before = svc.schedule_snapshot(s, sched)
+    sched.delinquent_after_days = 30                     # not a date
+    changes = svc.schedule_changes(before, svc.schedule_snapshot(s, sched))
+    res = svc.materialize_schedule(s, sched, today=date(2026, 2, 6)); s.commit()
+    assert svc.notify_brokers_of_new_dates(s, p, changes, res, "Acceltree") == 0
+    assert sent == []

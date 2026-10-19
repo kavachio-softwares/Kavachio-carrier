@@ -19,6 +19,7 @@ import { getBrokerCalendar, getBrokerCalendarVersions, type BrokerCalendar as Bo
          type BrokerCalendarRow } from "../api/broker";
 import type { SubmissionVersionRow } from "../api/calendar";
 import { ExportFileViewer } from "../components/ExportFileViewer";
+import { CaseModal, caseBadge } from "../components/CaseModal";
 import { useBrokerCarrierId } from "../brokerCarrier";
 import { canAccessPath } from "../access";
 import { InfoTip } from "../components/InfoTip";
@@ -67,12 +68,21 @@ function daysUntil(iso: string | null): number | null {
 
 const DONE = new Set(["on_time", "received_late"]);
 
+// MOPR 39.2 — a late file has a case: one already going, or one the daily
+// check is about to open. Only Overdue and Delinquent can be disputed, once.
+const LATE = new Set(["overdue", "never_arrived"]);
+const hasCase = (r: BrokerCalendarRow) => !!r.case?.state || LATE.has(r.status);
+const canDispute = (r: BrokerCalendarRow) => !r.case?.dispute_locked
+  && (r.case?.state ? ["overdue", "delinquent"].includes(r.case.state) : LATE.has(r.status));
+
 /** "Arrival Status" — the carrier calendar's wording, so both sides read one
  *  row the same way. */
 function statusBadge(r: BrokerCalendarRow): { label: string; cls: string } {
   switch (r.status) {
     case "overdue":
       return { label: `${plural(r.days_over ?? 0, "day")} over, nothing yet`, cls: "b-crit" };
+    case "never_arrived":
+      return { label: `Never sent · ${plural(r.days_over ?? 0, "day")} over`, cls: "b-crit" };
     case "due_today":
       return { label: "Due today", cls: "b-warn" };
     case "due_soon": {
@@ -110,6 +120,8 @@ export default function BrokerCalendar() {
   const [openRow, setOpenRow] = useState<BrokerCalendarRow | null>(null);
   // The period whose processed file is open in the viewer.
   const [viewRow, setViewRow] = useState<BrokerCalendarRow | null>(null);
+  // MOPR 39.2 — the late file whose case is open (raise a dispute, history).
+  const [caseFor, setCaseFor] = useState<number | null>(null);
   const [schedPage, setSchedPage] = useState(1);
   // The month's files and the deadlines behind them on two tabs, as on the
   // carrier's calendar. ?tab=deadlines opens the second one.
@@ -140,7 +152,7 @@ export default function BrokerCalendar() {
   // What needs doing first: overdue, then due today, then soonest; done last.
   const sorted = useMemo(() => {
     const rank: Record<string, number> = {
-      overdue: 0, due_today: 1, due_soon: 2, scheduled: 3,
+      never_arrived: 0, overdue: 0, due_today: 1, due_soon: 2, scheduled: 3,
       received_late: 4, on_time: 5,
     };
     return [...rows].sort((a, b) => {
@@ -160,7 +172,7 @@ export default function BrokerCalendar() {
   // One carrier chosen in the sidebar: every row is theirs, so the column
   // would say the same thing on every line.
   const showCarrier = carrierId == null;
-  const cols = showCarrier ? 9 : 8;
+  const cols = showCarrier ? 10 : 9;
   // The contract name, opening the contract — "—" when there is none yet.
   const contractCell = (id?: number | null, name?: string | null) =>
     id == null ? <span className="muted">—</span>
@@ -190,8 +202,8 @@ export default function BrokerCalendar() {
 
         {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
 
-        {/* ---- the four headline counts, as on the carrier's calendar ------ */}
-        <div className="tiles" style={{ marginBottom: 18 }}>
+        {/* ---- the headline counts, as on the carrier's calendar ---------- */}
+        <div className="tiles t5" style={{ marginBottom: 18 }}>
           <div className="tile">
             <div className="k">Due this month</div>
             <div className="v">{counts?.due ?? "—"}</div>
@@ -204,9 +216,19 @@ export default function BrokerCalendar() {
             <div className="k">Sent late</div>
             <div className="v" style={{ color: "var(--p-warn)" }}>{counts?.late ?? "—"}</div>
           </div>
+          <div className={`tile${(counts?.overdue ?? 0) > 0 ? " alert" : ""}`}>
+            <div className="k">
+              Overdue
+              <InfoTip text="Past its due date and not sent yet. It becomes Never sent once the next period's file is due as well." />
+            </div>
+            <div className="v" style={{ color: "var(--p-crit)" }}>{counts?.overdue ?? "—"}</div>
+          </div>
           <div className={`tile${(counts?.never ?? 0) > 0 ? " alert" : ""}`}>
-            <div className="k">Never sent</div>
-            <div className="v" style={{ color: "var(--p-crit)" }}>{counts?.never ?? "—"}</div>
+            <div className="k">
+              Never sent
+              <InfoTip text="Still not sent after the next period's file fell due as well. Sending it later still counts — as Sent late." />
+            </div>
+            <div className="v" style={{ color: "var(--p-crit-ink)" }}>{counts?.never ?? "—"}</div>
           </div>
         </div>
 
@@ -249,7 +271,7 @@ export default function BrokerCalendar() {
                   {showCarrier && <th>Carrier</th>}
                   {/* No Broker column: every row here is the signed-in broker's own. */}
                   <th>Programme</th><th>Contract</th><th>Period</th><th>Due by</th>
-                  <th>Sent On</th><th>Arrival Status</th><th>Version</th><th>Action</th>
+                  <th>Sent On</th><th>Arrival Status</th><th>Case</th><th>Version</th><th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -288,10 +310,29 @@ export default function BrokerCalendar() {
                             about — the most direct "this one is wanted" there is. */}
                         {r.chase_count > 0 && (
                           <div className="sub" style={{ marginTop: 3 }}>
-                            carrier reminded you {r.chase_count > 1 ? `${r.chase_count}× · ` : ""}
-                            {fmtDay(r.chased_at)}
+                            {r.chase_count > 1
+                              ? `Carrier reminded you ${r.chase_count} times · last ${fmtDay(r.chased_at)}`
+                              : `Carrier reminded you once · ${fmtDay(r.chased_at)}`}
                           </div>
                         )}
+                      </td>
+                      <td>
+                        {(() => {
+                          const cb = caseBadge(r.case);
+                          if (!cb) return <span className="muted">—</span>;
+                          return (
+                            <>
+                              <span className={`badge ${cb.cls}`}><span className="d" />{cb.label}</span>
+                              {r.case.state === "in_dispute" && (
+                                <div className="sub" style={{ marginTop: 3 }}>waiting for the carrier</div>
+                              )}
+                              {r.case.dispute_locked && r.case.state !== "resolved"
+                                && r.case.state !== "in_dispute" && (
+                                <div className="sub" style={{ marginTop: 3 }}>dispute rejected — please send the file</div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </td>
                       <td>
                         {r.version_count === 0
@@ -315,22 +356,28 @@ export default function BrokerCalendar() {
                           )}
                       </td>
                       <td style={{ whiteSpace: "nowrap" }}>
-                        <span style={{ display: "inline-flex", gap: 10 }}>
+                        <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
                         {r.version_count > 0 && (
-                          <span className="linkish" onClick={() => setOpenRow(r)}
-                            title="Every file you sent for this period">View Versions →</span>
+                          <button type="button" className="btn sm" onClick={() => setOpenRow(r)}
+                            title="Every file you sent for this period">View Versions →</button>
                         )}
                         {done && r.export_id != null && (
-                          <span className="linkish" onClick={() => setViewRow(r)}
-                            title="Open the processed bordereau your carrier received">View File →</span>
+                          <button type="button" className="btn sm" onClick={() => setViewRow(r)}
+                            title="Open the processed bordereau your carrier received">View File →</button>
                         )}
                         {!done && canProcess && r.status !== "scheduled" && (
-                          <Link className="linkish" to="/broker/bordereau"
+                          <Link className="btn sm" to="/broker/bordereau"
                             title="Upload and process this period's bordereau">Process File →</Link>
+                        )}
+                        {hasCase(r) && (
+                          <button type="button" className="btn sm" onClick={() => setCaseFor(r.id)}
+                            title="Dispute this late mark, or see what has happened to it">
+                            {canDispute(r) ? "Raise Dispute →" : "View Details →"}
+                          </button>
                         )}
                         {/* No action yet: say so rather than leave a blank cell. */}
                         {r.version_count === 0 && !(done && r.export_id != null)
-                          && !(!done && canProcess && r.status !== "scheduled") && (
+                          && !(!done && canProcess && r.status !== "scheduled") && !hasCase(r) && (
                           <span className="muted">—</span>
                         )}
                         </span>
@@ -400,6 +447,10 @@ export default function BrokerCalendar() {
       </div>
 
       {openRow && <VersionPanel row={openRow} onClose={() => setOpenRow(null)} />}
+      {caseFor != null && (
+        <CaseModal expectedId={caseFor} side="broker"
+          onClose={() => setCaseFor(null)} onChanged={() => load(month)} />
+      )}
       {viewRow?.export_id != null && (
         <ExportFileViewer exportId={viewRow.export_id}
           title={`${viewRow.program_name} · ${viewRow.period}`}

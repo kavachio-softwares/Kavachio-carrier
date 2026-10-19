@@ -65,7 +65,10 @@ type Platform = {
     carriers_clear: number; brokers_clear: number;
   };
   // on_time / late: absent on an older server, and the box shows "—".
-  overdue: { total: number; brokers: number; carriers: number; on_time?: number; late?: number };
+  /** `total` is every missing file: `waiting` still overdue, `never` the ones
+   *  whose period has closed. */
+  overdue: { total: number; brokers: number; carriers: number; on_time?: number; late?: number;
+             waiting: number; never: number };
   signatures: { awaiting: number; over_7d: number };
   tenants_table: {
     tenant_id: number; code: string; name: string; users: number; brokers: number;
@@ -367,7 +370,8 @@ export default function KavachioAdminDashboard() {
             info="Still waiting on files run in this period. Pick All time for the whole backlog."
             tone={ox.critical > 0 ? "alert" : undefined}
             subtitle={ox.total ? `across ${plural(brokersWithOpen, "broker", "brokers")}` : "nothing waiting"} />
-          <ArrivalsCard onTime={d.overdue.on_time} late={d.overdue.late} never={d.overdue.total}
+          <ArrivalsCard onTime={d.overdue.on_time} late={d.overdue.late}
+            overdue={d.overdue.waiting} never={d.overdue.never}
             info="Bordereaux due this calendar month, by how they arrived — the same month the Bordereau Calendar opens on, regardless of the period picked above."
             subtitle={d.overdue.total ? `Overdue from ${plural(d.overdue.brokers, "broker", "brokers")}` : "Nothing overdue"}
             // Carries this card's own carrier/broker scope onto the calendar it

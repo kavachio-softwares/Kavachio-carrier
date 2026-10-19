@@ -31,6 +31,23 @@ export const NOTIFY: Record<string, {
   submission_overdue:   { label: "Bordereau overdue",   tone: "#c0392b", to: "/calendar" },
   submission_due_today: { label: "Bordereau due today", tone: "#b7791f", to: "/calendar" },
   submission_due_soon:  { label: "Bordereau due soon",  tone: "#2c6fbb", to: "/calendar" },
+  // MOPR 39.2 — the case on a late file. Each lands on the Bordereau Calendar
+  // month the file was due in, where its case opens from the row.
+  submission_delinquent: {
+    label: "Bordereau delinquent", tone: "#c0392b", to: "/bordereau-calendar",
+    link: d => d.due_date ? `/bordereau-calendar?month=${String(d.due_date).slice(0, 7)}` : null },
+  submission_case_reopened: {
+    label: "Extra time ran out", tone: "#c0392b", to: "/bordereau-calendar",
+    link: d => d.due_date ? `/bordereau-calendar?month=${String(d.due_date).slice(0, 7)}` : null },
+  // Only the carrier admin decides a dispute, so only they are told.
+  submission_dispute_raised: {
+    seat: "admin",
+    label: "Dispute to decide", tone: "#b7791f", to: "/bordereau-calendar",
+    link: d => d.due_date ? `/bordereau-calendar?month=${String(d.due_date).slice(0, 7)}` : null },
+  submission_dispute_waiting: {
+    seat: "admin",
+    label: "Dispute still waiting", tone: "#b7791f", to: "/bordereau-calendar",
+    link: d => d.due_date ? `/bordereau-calendar?month=${String(d.due_date).slice(0, 7)}` : null },
   // A broker's file came in for a programme with no live Bordereau Setup. The
   // file is kept and runs by itself once a setup is live, so this is the cue to
   // build one — straight to that step. Amber: nothing is late, a file waits.

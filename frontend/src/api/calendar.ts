@@ -4,10 +4,12 @@ import { currentMga } from "../auth";
 // Group 3 — "Never miss a deadline": the broker's own submission calendar.
 
 // The deadline ladder, in order: nothing owed yet → warned → the day itself →
-// missed. There is no grace period, so "overdue" is the only past-due state —
-// the retired "late" was a second name for the same thing.
+// missed → given up on. There is no grace period: the day after the due date
+// is "overdue" (the retired "late" was a second name for it). "never_arrived"
+// is overdue whose period has CLOSED — the next period's file has fallen due
+// as well and this one still has not come (MOPR 39.1).
 export type CalendarStatus =
-  | "scheduled" | "due_soon" | "due_today" | "overdue"
+  | "scheduled" | "due_soon" | "due_today" | "overdue" | "never_arrived"
   | "on_time" | "received_late";
 
 export type CalendarRow = {
@@ -21,6 +23,9 @@ export type CalendarRow = {
   period_start: string | null;
   period_end: string | null;
   due_date: string | null;
+  /** The next period's due date: still nothing after it and this period is
+   *  Never arrived rather than Overdue. */
+  closes_on?: string | null;
   status: CalendarStatus;
   // The FIRST arrival, and the only one that decides on-time vs late.
   received_at: string | null;
@@ -59,6 +64,11 @@ export type ScheduleState = {
   due_day_of_month?: number | null;      // monthly/quarterly deadline
   due_offset_days?: number | null;       // weekly deadline
   soon_window_days?: number | null;
+  /** MOPR 39.2 — days late before a missing file is Delinquent. */
+  delinquent_after_days?: number | null;
+  /** MOPR 39.3 — a file has fallen due or been sent, so changing the
+   *  deadlines is an override and asks for a reason. */
+  has_history?: boolean;
   effective_frequency?: string;
   effective_anchor?: string;
 };
@@ -69,7 +79,18 @@ export type ScheduleBody = {
   due_day_of_month?: number | null;
   due_offset_days?: number | null;
   soon_window_days?: number | null;
+  delinquent_after_days?: number | null;
   contract_id?: number | null;
+  /** MOPR 39.3 — why the deadlines are changing (required once files are due). */
+  reason?: string | null;
+  /** Re-check files already sent against the new date (the old one was wrong). */
+  recheck_past?: boolean;
+};
+
+/** A sent file whose On time / Arrived late result changed on a re-check. */
+export type RecheckedFile = {
+  period: string; broker_party_id: number | null; broker?: string | null;
+  old: string; new: string;
 };
 
 // `party_id` is the carrier FK and the authoritative link — `lead_carrier` is a
@@ -95,7 +116,17 @@ export async function getSchedule(programId: number): Promise<ScheduleState> {
 
 export async function putSchedule(
   programId: number, body: ScheduleBody,
-): Promise<{ schedule: ScheduleState; calendar: { resolved: boolean; count: number } }> {
+): Promise<{
+  schedule: ScheduleState;
+  calendar: {
+    resolved: boolean; count: number;
+    // MOPR 39.3 — what the change did: waiting files moved, sent files kept,
+    // and (when re-checked) each sent file whose result changed.
+    moved?: number; kept_past?: number; rechecked?: RecheckedFile[];
+  };
+  /** How many brokers were emailed their new due dates. */
+  brokers_emailed?: number;
+}> {
   const { data } = await api.put(`/programs/${programId}/schedule`, body);
   return data;
 }
@@ -153,6 +184,9 @@ export type BoardRow = {
   unassigned: boolean;
   period: string;
   due_date: string | null;
+  /** The next period's due date: still nothing after it and this period is
+   *  Never arrived rather than Overdue. */
+  closes_on?: string | null;
   received_at: string | null;
   latest_received_at: string | null;
   status: CalendarStatus;
@@ -170,6 +204,8 @@ export type BoardRow = {
   version_label: string;
   chased_at: string | null;
   chase_count: number;
+  /** MOPR 39.2 — what is being done about it, if it is missing. */
+  case: CaseInfo;
 };
 
 export type BrokerContact = {
@@ -215,10 +251,14 @@ export type BoardResponse = {
   month: string;                       // 'YYYY-MM' — the due month on screen
   months: string[];                    // every month that has anything in it
   rows: BoardRow[];
+  /** `overdue` is still waited for; `never` is overdue whose period has
+   *  closed (the next file is due too). */
   counts: { due: number; on_time: number; late: number;
-            never: number; released: number;
+            overdue: number; never: number; released: number;
             /** Corrected after being sent, and the correction never went out. */
             unsent_correction: number };
+  /** MOPR 39.2 — the same month's files by where their case stands. */
+  case_counts: Record<CaseState, number>;
   programme_count: number;
   schedules: BoardSchedule[];
 };
@@ -313,3 +353,94 @@ export async function chase(expectedIds?: number[], note?: string)
     { params: { mga: currentMga() } });
   return data;
 }
+
+// ---------------------------------------------------------------------------
+// MOPR 39.2 — the case on a missing file: Overdue → Delinquent → In Dispute →
+// Resolved (backend submission_case.py). 39.1's `status` says whether the file
+// came; the case says what is being done about one that did not.
+// ---------------------------------------------------------------------------
+
+export type CaseState = "overdue" | "delinquent" | "in_dispute" | "extended" | "resolved";
+
+export type CaseInfo = {
+  state: CaseState | null;
+  state_label: string | null;
+  /** The day it entered this stage. */
+  since: string | null;
+  /** More time given: waited for until this day. */
+  until: string | null;
+  resolution: "file_received" | "waived" | "accepted" | null;
+  resolution_label: string | null;
+  dispute_reason: string | null;
+  dispute_reason_label: string | null;
+  dispute_note: string | null;
+  dispute_raised_on: string | null;
+  /** Entered by the carrier for the broker. */
+  dispute_by_carrier: boolean;
+  /** A dispute was rejected — the broker cannot raise another one. */
+  dispute_locked: boolean;
+};
+
+export type CaseEvent = {
+  id: number;
+  kind: string;
+  kind_label: string;
+  from_state: string | null;
+  to_state: string | null;
+  to_label: string;
+  /** The business day it counts from. */
+  on: string | null;
+  /** When it was recorded (UTC ISO). */
+  at: string | null;
+  reason: string | null;
+  reason_label: string | null;
+  note: string | null;
+  details: Record<string, any>;
+  /** Who did it, in the words this viewer may see — "Automatic" for the daily check. */
+  by: string;
+};
+
+export type CaseActions = {
+  raise_dispute?: boolean;
+  accept?: boolean;
+  reject?: boolean;
+  waive?: boolean;
+  extend?: boolean;
+  /** MOPR 39.3 — take back an accepted dispute or a "no file needed". */
+  reopen?: boolean;
+};
+
+export type CasePayload = {
+  expected_id: number;
+  program_id: number;
+  program_name: string;
+  broker_party_id: number | null;
+  broker_name: string | null;
+  carrier_name: string;
+  period: string;
+  due_date: string | null;
+  closes_on: string | null;
+  received_at: string | null;
+  status: CalendarStatus;
+  days_over: number | null;
+  delinquent_after_days: number;
+  case: CaseInfo;
+  history: CaseEvent[];
+  can: CaseActions;
+  reasons: { key: string; label: string }[];
+};
+
+export type CaseDecision = "accept" | "reject" | "waive" | "extend" | "reopen";
+
+export const getCase = (expectedId: number) =>
+  api.get<CasePayload>(`/calendar/${expectedId}/case`).then(r => r.data);
+
+/** The carrier enters a dispute for the broker (or reopens a rejected one). */
+export const enterDispute = (expectedId: number, reason: string, note: string) =>
+  api.post<CasePayload>(`/calendar/${expectedId}/case/dispute`, { reason, note })
+    .then(r => r.data);
+
+export const decideCase = (expectedId: number, decision: CaseDecision, note: string,
+                           extendTo?: string | null) =>
+  api.post<CasePayload>(`/calendar/${expectedId}/case/decision`,
+    { decision, note, extend_to: extendTo || null }).then(r => r.data);

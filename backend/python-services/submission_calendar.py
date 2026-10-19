@@ -8,9 +8,11 @@ testable. It answers three questions:
      contract.inception_dt); manual overrides win (C-6). If neither resolves,
      it returns None and NO calendar is produced (we never guess a deadline).
   2. generate_expected() — walk the periods from the anchor by frequency and
-     compute each period's due date (period_end + offset).
-  3. derive_status()     — given a due date, today, the due-soon window and
-     whether a file was received, return the plain status.
+     compute each period's due date (period_end + offset), and the day we stop
+     waiting for it (closes_on_for — the next period's due date).
+  3. derive_status()     — given a due date, today, the due-soon window,
+     whether a file was received and when the period closes, return the plain
+     status: on time, arrived late, overdue or never arrived (or not due yet).
 
 Nothing here touches the database; the service layer feeds these functions the
 resolved inputs and persists the results.
@@ -259,6 +261,34 @@ def due_date_for(resolved: ResolvedSchedule, period_end: date) -> date:
     return date(nxt.year, nxt.month, min(resolved.due_day_of_month, last))
 
 
+# Months in one period, for every frequency whose periods are whole months.
+_PERIOD_MONTHS = {"monthly": 1, "quarterly": 3, "half_yearly": 6, "yearly": 12}
+
+
+def closes_on_for(resolved: ResolvedSchedule, period_end: date) -> date:
+    """The last day we still wait for this period's file: the NEXT period's
+    due date.
+
+    Overdue and never arrived are two different answers to "where is it?".
+    Overdue is still being waited for — it may come tomorrow. Never arrived is
+    the period closed with nothing in it, and the point where that happens is
+    one nobody can argue with: the next file has fallen due as well. A monthly
+    July file due 10 Aug is overdue from 11 Aug and never arrived from 11 Sep.
+    A quarterly file waits a quarter and a yearly one a year, so the wait
+    scales with how often the programme reports and needs no setting of its own.
+
+    A file that turns up after this is still recorded: the period then reads
+    Arrived late, because that has become the truth.
+    """
+    if resolved.frequency == "weekly":
+        return due_date_for(resolved, period_end + timedelta(days=7))
+    # period_end is the last day of a month; the next period ends on the last
+    # day of the month one period further on — the same end _period_bounds gives.
+    y, m = _add_months(period_end.year, period_end.month,
+                       _PERIOD_MONTHS.get(resolved.frequency, 1))
+    return due_date_for(resolved, date(y, m, monthrange(y, m)[1]))
+
+
 def generate_expected(
     resolved: Optional[ResolvedSchedule],
     start: date,
@@ -291,6 +321,7 @@ def generate_expected(
                 "period_start": p_start,
                 "period_end": p_end,
                 "due_date": due_date_for(resolved, p_end),
+                "closes_on": closes_on_for(resolved, p_end),
             })
         i += 1
         if i > 10_000:   # safety valve against a bad frequency/anchor
@@ -383,20 +414,28 @@ def derive_status(
     today: date,
     soon_window_days: int = DEFAULT_SOON_WINDOW_DAYS,
     received_on: Optional[date] = None,
+    closes_on: Optional[date] = None,
 ) -> str:
     """Plain status for one expected submission.
 
     received  → on_time (on/before due) or received_late.
-    not yet   → scheduled → due_soon → due_today → overdue.
+    not yet   → scheduled → due_soon → due_today → overdue → never_arrived.
 
     Three moments matter to a broker chasing a file, and each gets its own state
     so each can raise its own reminder: a warning some days ahead, a prompt on
     the day itself, and a flag once the date has passed. The due date used to be
     swallowed by `due_soon`, so the one day the file actually had to go out
     looked no different from four days earlier.
+
+    `closes_on` (closes_on_for — the next period's due date) is where waiting
+    stops: past it, a period with nothing in it is never_arrived, not overdue.
+    None never closes, which is how a row saved before the column existed reads.
+    A file that arrives later still wins — received is checked first.
     """
     if received_on is not None:
         return "on_time" if received_on <= due_date else "received_late"
+    if closes_on is not None and today > closes_on:
+        return "never_arrived"
     # "due soon" begins exactly soon_window_days before the due date, so anything
     # strictly earlier than that edge is still just scheduled.
     if today < due_date - timedelta(days=soon_window_days):

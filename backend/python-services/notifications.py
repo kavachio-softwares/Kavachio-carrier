@@ -330,7 +330,9 @@ def _send_emails(recipients: list[dict], title: str, body: Optional[str],
                  facts: Sequence[tuple[str, Any]], link: Optional[str],
                  link_label: str, subject: str,
                  action: Optional[str] = None,
-                 footer: str = PLATFORM_ADMIN_FOOTER) -> None:
+                 footer: str = PLATFORM_ADMIN_FOOTER,
+                 cc: Optional[Sequence[str]] = None,
+                 reply_to: Optional[str] = None) -> None:
     """Mail every recipient, one message each. Per-recipient failures are logged
     and skipped so one bad address can't stop the rest.
 
@@ -338,6 +340,12 @@ def _send_emails(recipients: list[dict], title: str, body: Optional[str],
     not the event — see the constants above. It defaults to the platform
     wording because that is what every caller predating carrier notifications
     meant.
+
+    `cc` rides on the first message that goes out, not on every one: one
+    message per recipient would otherwise hand the copied person a copy for
+    each of them. Anyone already a recipient is not copied as well. `reply_to`
+    goes on every message, so an answer reaches a person rather than the
+    NOTIFY mailbox.
     """
     try:
         from email_utils import send_email
@@ -345,6 +353,9 @@ def _send_emails(recipients: list[dict], title: str, body: Optional[str],
         log.warning("notify: email transport unavailable (%s) — feed row still written", e)
         return
     text = _email_text(title, body, facts, link, action)
+    told = {(p.get("email") or "").strip().lower() for p in recipients}
+    copy = [c for c in dict.fromkeys((c or "").strip() for c in (cc or []))
+            if c and c.lower() not in told]
     for person in recipients:
         try:
             send_email(
@@ -353,7 +364,9 @@ def _send_emails(recipients: list[dict], title: str, body: Optional[str],
                                         greeting_name=person.get("name"),
                                         action=action, footer=footer),
                 text=text, account=NOTIFY_MAIL_ACCOUNT,
+                cc=copy or None, reply_to=reply_to,
             )
+            copy = []      # copied once — a failed send keeps it for the next
         except Exception as e:  # noqa: BLE001
             log.warning("notify: email to %s failed: %s", person["email"], e)
 
@@ -437,8 +450,13 @@ def notify_people(recipients: list[dict], title: str, *,
                   subject: Optional[str] = None,
                   action: Optional[str] = None,
                   footer: str = PLATFORM_ADMIN_FOOTER,
-                  send_email_async: bool = True) -> None:
+                  send_email_async: bool = True,
+                  cc: Optional[Sequence[str]] = None,
+                  reply_to: Optional[str] = None) -> None:
     """Email an already-resolved set of people. Records nothing.
+
+    `cc` and `reply_to` as in _send_emails: a copy for somebody who should
+    hold one, and where an answer to the message should land.
 
     The deliberate difference from notify_platform_admins: that one writes a
     PlatformNotification, which is the CROSS-TENANT feed behind Kavachio's own
@@ -454,7 +472,7 @@ def notify_people(recipients: list[dict], title: str, *,
         return
     try:
         args = (recipients, title, body, list(facts or []), _app_link(link_path),
-                link_label, subject or title, action, footer)
+                link_label, subject or title, action, footer, list(cc or []), reply_to)
         if send_email_async:
             threading.Thread(target=_send_emails, args=args, daemon=True,
                              name="notify-people").start()

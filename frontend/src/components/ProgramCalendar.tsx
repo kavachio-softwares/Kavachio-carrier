@@ -51,6 +51,8 @@ const STATUS_META: Record<CalendarStatus, { label: string; cls: string }> = {
   due_soon:      { label: "Due soon",          cls: "b-info" },
   due_today:     { label: "Due today",         cls: "b-warn" },
   overdue:       { label: "Overdue",           cls: "b-crit" },
+  // Overdue whose period has closed: the next file is due too (MOPR 39.1).
+  never_arrived: { label: "Never sent",        cls: "b-crit" },
   on_time:       { label: "Sent on time",      cls: "b-ok" },
   received_late: { label: "Sent late",         cls: "b-mut" },
 };
@@ -82,9 +84,10 @@ const REASON_TEXT: Record<string, string> = {
 // Triage order: what needs chasing first, then what is settled. Drives both the
 // status filter and the header pills, so the two always agree.
 const STATUS_ORDER: CalendarStatus[] =
-  ["overdue", "due_today", "due_soon", "scheduled", "on_time", "received_late"];
+  ["never_arrived", "overdue", "due_today", "due_soon", "scheduled", "on_time",
+   "received_late"];
 const SUMMARY: CalendarStatus[] =
-  ["overdue", "due_today", "due_soon", "scheduled", "on_time"];
+  ["never_arrived", "overdue", "due_today", "due_soon", "scheduled", "on_time"];
 
 type Form = {
   frequency_override: string;
@@ -92,6 +95,8 @@ type Form = {
   due_day_of_month: number;
   due_offset_days: number;
   soon_window_days: number;
+  /** MOPR 39.2 — days late before a missing file is Delinquent. */
+  delinquent_after_days: number;
 };
 
 /** Whole days from `fromISO` to `toISO`. Both are parsed at local midnight, so
@@ -178,7 +183,14 @@ export default function ProgramCalendar({
   const [form, setForm] = useState<Form>({
     frequency_override: "", anchor_date_override: "",
     due_day_of_month: 10, due_offset_days: 10, soon_window_days: 5,
+    delinquent_after_days: 15,
   });
+  // MOPR 39.3 — the values as loaded (or last saved), so a change can be shown
+  // as old → new before it is saved; why it is being made; and whether files
+  // already sent are re-checked against the new date.
+  const [initial, setInitial] = useState<Form | null>(null);
+  const [why, setWhy] = useState("");
+  const [recheck, setRecheck] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -212,7 +224,7 @@ export default function ProgramCalendar({
         // asked for collapsed keeps it shut either way.
         setOpen(prev => prev ?? (!defaultCollapsed
                                  && (st.resolved || c.rows.length > 0)));
-        setForm({
+        const loaded: Form = {
           frequency_override: st.frequency_override ?? "",
           anchor_date_override: st.anchor_date_override ?? "",
           // Falls back to the offset, not to a bare 10: a schedule saved before
@@ -223,7 +235,11 @@ export default function ProgramCalendar({
           due_day_of_month: st.due_day_of_month ?? st.due_offset_days ?? 10,
           due_offset_days: st.due_offset_days ?? 10,
           soon_window_days: st.soon_window_days ?? 5,
-        });
+          delinquent_after_days: st.delinquent_after_days ?? 15,
+        };
+        setForm(loaded);
+        setInitial(loaded);
+        setWhy(""); setRecheck(false);
       } catch (e: any) {
         if (live) setErr(e?.response?.data?.detail ?? e?.message ?? "Failed to load calendar.");
       } finally { if (live) setLoading(false); }
@@ -257,9 +273,47 @@ export default function ProgramCalendar({
     || "").toLowerCase();
   const isWeekly = effectiveFreq === "weekly";
 
+  // MOPR 39.3 — what this save would change, old → new, in the words the form
+  // uses. Compared on what is IN FORCE (an empty override means the contract's
+  // value), so picking the contract's own frequency explicitly is no change.
+  // The server works the same list out for itself and records it; this is so
+  // the person sees it before they save.
+  const changes = useMemo(() => {
+    if (!initial) return [] as { key: string; label: string; old: string; new: string }[];
+    const freqWord = (f: Form) => {
+      const v = f.frequency_override || sched?.contract_frequency || "";
+      return v ? (FREQ_LABEL[v] ?? FREQ_LABEL[v.toLowerCase()] ?? v) : "not set";
+    };
+    const anchorWord = (f: Form) => {
+      const v = f.anchor_date_override || sched?.contract_anchor || "";
+      return v ? fmtDate(v) : "not set";
+    };
+    const list = [
+      { key: "frequency", label: "How often it is due", old: freqWord(initial), new: freqWord(form) },
+      { key: "anchor", label: "Starting from", old: anchorWord(initial), new: anchorWord(form) },
+      isWeekly
+        ? { key: "due_offset_days", label: "Days allowed after the week ends",
+            old: String(initial.due_offset_days), new: String(form.due_offset_days) }
+        : { key: "due_day_of_month", label: "Due on day of month",
+            old: String(initial.due_day_of_month), new: String(form.due_day_of_month) },
+      { key: "soon_window_days", label: "Warn this many days early",
+        old: String(initial.soon_window_days), new: String(form.soon_window_days) },
+      { key: "delinquent_after_days", label: "Delinquent after (days late)",
+        old: String(initial.delinquent_after_days), new: String(form.delinquent_after_days) },
+    ];
+    return list.filter(c => c.old !== c.new);
+  }, [initial, form, sched, isWeekly]);
+  // Re-checking means something only when a DATE moves.
+  const dateChanged = changes.some(c =>
+    ["frequency", "anchor", "due_day_of_month", "due_offset_days"].includes(c.key));
+  // Once files have fallen due, changing a value that was in force is an
+  // override and needs a reason; setting one up for the first time does not.
+  const needWhy = !!sched?.has_history && changes.some(c => c.old !== "not set");
+
   async function save() {
     setSaving(true); setErr(null); setMsg(null);
     try {
+      const rechecking = recheck && dateChanged && !!sched?.has_history;
       // BOTH deadline fields go every time, whichever one is on screen. The
       // server picks by frequency (submission_calendar.due_date_for ignores
       // day-of-month for weekly), so the value the hidden control holds stays
@@ -270,12 +324,36 @@ export default function ProgramCalendar({
         due_day_of_month: Number(form.due_day_of_month),
         due_offset_days: Number(form.due_offset_days),
         soon_window_days: Number(form.soon_window_days),
+        delinquent_after_days: Number(form.delinquent_after_days),
+        reason: why.trim() || null,
+        recheck_past: rechecking,
       });
       setSched(res.schedule);
+      setInitial(form);
+      setWhy(""); setRecheck(false);
       await loadCalendar();
-      setMsg(res.calendar.resolved
-        ? `Saved — ${res.calendar.count} deadlines set.`
-        : "Saved, but we still need how often it is due and when it starts.");
+      if (!res.calendar.resolved) {
+        setMsg("Saved, but we still need how often it is due and when it starts.");
+      } else {
+        // What the change did to the files already in the calendar.
+        const moved = res.calendar.moved ?? 0;
+        const kept = res.calendar.kept_past ?? 0;
+        const rechecked = res.calendar.rechecked ?? [];
+        const bits = [`Saved — ${res.calendar.count} deadlines set.`];
+        if (moved > 0) bits.push(`${plural(moved, "waiting file")} moved to the new date.`);
+        if (kept > 0) bits.push(`${plural(kept, "file")} already sent kept `
+          + `${kept === 1 ? "its" : "their"} result.`);
+        if (rechecking) bits.push(rechecked.length > 0
+          ? `Re-checked files already sent: ${plural(rechecked.length, "result")} changed `
+            + `(${rechecked.slice(0, 3).map(x => `${x.period} ${x.old} → ${x.new}`).join("; ")}`
+            + `${rechecked.length > 3 ? "; …" : ""}).`
+          : "Re-checked files already sent: no result changed.");
+        const told = res.brokers_emailed ?? 0;
+        if (told > 0) bits.push(told === 1
+          ? "The broker has been emailed the new dates."
+          : `${told} brokers have been emailed the new dates.`);
+        setMsg(bits.join(" "));
+      }
     } catch (e: any) {
       setErr(e?.response?.data?.detail ?? e?.message ?? "Save failed.");
     } finally { setSaving(false); }
@@ -413,7 +491,8 @@ export default function ProgramCalendar({
   const outstanding = rows.filter(r => !r.received_at && r.due_date);
   const nextDue = outstanding.find(
     r => r.status === "scheduled" || r.status === "due_soon" || r.status === "due_today") ?? null;
-  const oldestLate = outstanding.find(r => r.status === "overdue") ?? null;
+  const oldestLate = outstanding.find(
+    r => r.status === "overdue" || r.status === "never_arrived") ?? null;
 
   // Which of the two contract-backed fields are currently overridden. Only these
   // two fall back to the contract (resolve_schedule: override -> contract ->
@@ -623,6 +702,11 @@ export default function ProgramCalendar({
               <input type="number" min={0} value={form.soon_window_days}
                 onChange={e => setForm(f => ({ ...f, soon_window_days: Number(e.target.value) }))} />
             </div>
+            <div className="field">
+              <label>Delinquent after this many days late <InfoTip text="A missing file is Overdue the day after its due date, and Delinquent once it is this many days late. A dispute raised by the broker pauses it until you decide." /></label>
+              <input type="number" min={1} max={365} value={form.delinquent_after_days}
+                onChange={e => setForm(f => ({ ...f, delinquent_after_days: Number(e.target.value) }))} />
+            </div>
           </div>
 
           {/* The whole rule in plain words, built from the numbers actually in the
@@ -643,6 +727,15 @@ export default function ProgramCalendar({
             </li>
             <li style={LI}>Each reminder is sent once, not repeated.</li>
             <li style={LI}>No grace period — one day late is overdue.</li>
+            <li style={LI}>
+              Still not sent when the next period's file is due as well, a period
+              is marked <b>never sent</b>. If it comes after that, it counts as sent late.
+            </li>
+            <li style={LI}>
+              Still missing <b>{form.delinquent_after_days} day
+              {Number(form.delinquent_after_days) === 1 ? "" : "s"}</b> after the due date,
+              it is marked <b>delinquent</b>.
+            </li>
             <li style={LI}>
             {/* Says which fields the contract actually drives, and — the part the
                 old wording left out — that filling one STOPS it tracking the
@@ -689,8 +782,56 @@ export default function ProgramCalendar({
             )}
             </li>
           </ul>
-          <button className="btn pri" onClick={save} disabled={saving || !canSave}
-            title={canSave ? "" : `Set ${missing.join(" and ")} first`}>
+          {/* MOPR 39.3 — the change, before it is saved: old → new for each
+              field, whether files already sent are re-checked, and why. All of
+              it lands in Audit Logs with the person and the time. */}
+          {changes.length > 0 && (
+            <div className="note" style={{ margin: "0 0 12px" }}>
+              <b>You're changing:</b>
+              <ul style={{ margin: "6px 0 0", padding: "0 0 0 16px" }}>
+                {changes.map(c => (
+                  <li key={c.key} style={LI}>
+                    {c.label}: <b>{c.old}</b> → <b>{c.new}</b>
+                  </li>
+                ))}
+              </ul>
+              {dateChanged && (
+                <div className="sub" style={{ marginTop: 6 }}>
+                  The brokers on this programme will be emailed their new due dates.
+                </div>
+              )}
+              {sched?.has_history && dateChanged && (
+                <label style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                  marginTop: 10, cursor: "pointer" }}>
+                  <input type="checkbox" checked={recheck}
+                    onChange={e => setRecheck(e.target.checked)} style={{ marginTop: 3 }} />
+                  <span>
+                    <b>The old date was wrong. Re-check files already sent.</b>
+                    <span className="sub" style={{ display: "block" }}>
+                      Leave unticked if the new due date applies only from now on.
+                      Previously submitted files will keep their original status.
+                    </span>
+                  </span>
+                </label>
+              )}
+              {needWhy && (
+                <div className="field" style={{ margin: "12px 0 0" }}>
+                  <label>
+                    Why are you changing this?{" "}
+                    <span style={{ fontWeight: 400, color: "var(--p-faint)" }}>(required)</span>{" "}
+                    <InfoTip text="Saved in Audit Logs with what changed, who changed it and when. It is not sent to the broker." />
+                  </label>
+                  <textarea value={why} onChange={e => setWhy(e.target.value)} rows={2}
+                    style={{ resize: "vertical" }}
+                    placeholder="e.g. contract amendment signed on 12 Oct" />
+                </div>
+              )}
+            </div>
+          )}
+          <button className="btn pri" onClick={save}
+            disabled={saving || !canSave || (needWhy && !why.trim())}
+            title={!canSave ? `Set ${missing.join(" and ")} first`
+              : needWhy && !why.trim() ? "Say why you're changing the deadlines" : ""}>
             {saving ? "Saving…" : "Save deadlines"}
           </button>
 
@@ -707,7 +848,8 @@ export default function ProgramCalendar({
               <div className="card" style={{ marginTop: 18, padding: "12px 16px",
                 display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10,
                 borderLeft: `3px solid var(--p-${
-                  currentRow.status === "overdue" ? "crit"
+                  currentRow.status === "overdue"
+                    || currentRow.status === "never_arrived" ? "crit"
                     : currentRow.status === "due_today" ? "warn"
                     : done ? "ok" : "info"})` }}>
                 <span style={{ fontWeight: 700, fontSize: 13 }}>
@@ -835,7 +977,7 @@ export default function ProgramCalendar({
                         <td colSpan={4} style={{ padding: "10px 12px" }}>
                           <span className="muted" style={{ fontSize: 12.5 }}>
                             {plural(backlog.count, "earlier period")} ({backlog.from} – {backlog.to})
-                            {backlog.overdue > 0 && <> · <b>{backlog.overdue} never sent</b></>}
+                            {backlog.overdue > 0 && <> · <b>{backlog.overdue} not sent</b></>}
                             {backlog.sent > 0 && <> · {backlog.sent} sent</>}
                           </span>{" "}
                           <span className="linkish" onClick={() => setShowBacklog(true)}>

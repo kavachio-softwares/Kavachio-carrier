@@ -1701,6 +1701,62 @@ def broker_calendar_versions(expected_id: int,
                 "versions": submission_versions(s, expected_id)}
 
 
+def _own_period(s, p: Principal, expected_id: int):
+    """One period this broker owes, on a programme it is still on — or 404,
+    exactly as broker_calendar_versions decides it."""
+    from db import ExpectedSubmission
+    bid = _broker_party_id(s, p)
+    e = s.get(ExpectedSubmission, expected_id)
+    prog_ids = {l.program_id for l in _links(s, bid)}
+    if e is None or e.broker_party_id != bid or e.program_id not in prog_ids:
+        raise HTTPException(404, "period not found")
+    return e, bid
+
+
+@router.get("/broker/calendar/{expected_id}/case")
+def broker_calendar_case(expected_id: int,
+                         p: Principal = Depends(current_principal)):
+    """MOPR 39.2 — the case on one of this broker's late files: where it
+    stands, every move so far, and whether it can still dispute it."""
+    from app_routes import _case_payload
+    with SessionLocal() as s:
+        e, _bid = _own_period(s, p, expected_id)
+        return _case_payload(s, e, p, side="broker", carrier_admin=False)
+
+
+class BrokerDisputeBody(BaseModel):
+    reason: str                    # submission_case.DISPUTE_REASONS key
+    note: Optional[str] = None
+
+
+@router.post("/broker/calendar/{expected_id}/dispute")
+def broker_calendar_dispute(expected_id: int, body: BrokerDisputeBody,
+                            p: Principal = Depends(current_principal)):
+    """MOPR 39.2 — the broker says a late mark is wrong. The case goes In
+    Dispute, nothing automatic happens to it until the carrier decides, and the
+    carrier admin is emailed. Once the carrier has rejected a dispute on this
+    file, only the carrier can reopen it."""
+    import submission_case as sc
+    from app_routes import _case_http, _case_payload, _case_schedule
+    from audit import actor_email, actor_for
+    with SessionLocal() as s:
+        e, bid = _own_period(s, p, expected_id)
+        who = {"actor": actor_for(p), "user_id": p.user_id, "role": p.role,
+               "broker_party_id": bid}
+        try:
+            sc.raise_dispute(s, e, who=who, reason=body.reason, note=body.note,
+                             n=sc.delinquent_after_days(_case_schedule(s, e)))
+        except sc.CaseError as ex:
+            s.rollback()
+            raise _case_http(ex)
+        s.commit()
+        payload = _case_payload(s, e, p, side="broker", carrier_admin=False)
+        sc.notify_dispute_raised(s, e, payload["program_name"],
+                                 payload["broker_name"] or "A broker",
+                                 raised_by=actor_email(p.user_id))
+        return payload
+
+
 @router.get("/broker/runs-on-day")
 def broker_runs_on_day(day: dt.date = Query(..., description="YYYY-MM-DD"),
                        p: Principal = Depends(current_principal)):

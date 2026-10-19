@@ -1737,19 +1737,30 @@ class ScheduleBody(BaseModel):
     due_day_of_month: Optional[int] = None         # monthly/quarterly deadline
     due_offset_days: Optional[int] = None          # weekly deadline
     soon_window_days: Optional[int] = None
+    # MOPR 39.2 — days late before a missing file is Delinquent (1–365).
+    delinquent_after_days: Optional[int] = None
+    # MOPR 39.3 — why the deadlines are being changed (required once files have
+    # started falling due), and whether files already sent are re-checked
+    # against the new date (only when the old one was wrong). Not columns.
+    reason: Optional[str] = None
+    recheck_past: bool = False
     contract_id: Optional[int] = None
 
 
 def _schedule_dict(sched: Optional[SubmissionSchedule], resolved, reason=None,
-                   contract_frequency=None, contract_anchor=None) -> dict:
+                   contract_frequency=None, contract_anchor=None,
+                   has_history: bool = False) -> dict:
     """Serialise a schedule + whether it resolves. `resolved` is a ResolvedSchedule
     or None; when None the UI shows the 'set it up' prompt (reason says what's missing).
     contract_frequency/anchor tell the UI what the contract supplies, so 'Save' can be
-    enabled when the schedule would resolve even without a manual override."""
+    enabled when the schedule would resolve even without a manual override.
+    `has_history` — a file has fallen due or been sent, so a change from here on
+    is an override and asks why (MOPR 39.3)."""
     base = {
         "exists": sched is not None,
         "resolved": resolved is not None,
         "reason": reason,
+        "has_history": has_history,
         "contract_frequency": contract_frequency,
         "contract_anchor": contract_anchor.isoformat()
             if hasattr(contract_anchor, "isoformat") else contract_anchor,
@@ -1764,6 +1775,7 @@ def _schedule_dict(sched: Optional[SubmissionSchedule], resolved, reason=None,
             "due_day_of_month": sched.due_day_of_month,
             "due_offset_days": sched.due_offset_days,
             "soon_window_days": sched.soon_window_days,
+            "delinquent_after_days": sched.delinquent_after_days,
         })
     if resolved is not None:
         base.update({
@@ -1786,7 +1798,7 @@ def program_schedule_get(program_id: int, principal: Principal = Depends(current
     """
     from submission_calendar_service import (
         resolve_for_schedule, _unresolved_reason, program_contract_basis,
-        ensure_auto_schedule,
+        ensure_auto_schedule, schedule_has_history,
     )
     with SessionLocal() as s:
         p = s.get(Program, program_id)
@@ -1803,16 +1815,24 @@ def program_schedule_get(program_id: int, principal: Principal = Depends(current
         resolved, program, contract = resolve_for_schedule(s, sched)
         reason = None if resolved else _unresolved_reason(sched, program, contract)
         return _schedule_dict(sched, resolved, reason,
-                              contract_frequency=c_freq, contract_anchor=c_anchor)
+                              contract_frequency=c_freq, contract_anchor=c_anchor,
+                              has_history=schedule_has_history(s, program_id))
 
 
 @router.put("/programs/{program_id}/schedule")
 def program_schedule_put(program_id: int, body: ScheduleBody,
                          principal: Principal = Depends(current_principal)):
-    """Create/update the schedule (C-6/C-8 override), then (re)build the calendar."""
+    """Create/update the schedule (C-6/C-8 override), then (re)build the calendar.
+
+    MOPR 39.3 — a change is a manual override and is recorded: every field
+    that moved as old → new, the reason (required once the programme's files
+    have started falling due), and what it did to the calendar. Files already
+    sent keep their result unless `recheck_past` says the old date was wrong."""
     from submission_calendar_service import (
         resolve_for_schedule, materialize_schedule, _unresolved_reason,
-        program_contract_basis,
+        program_contract_basis, schedule_snapshot, schedule_changes,
+        schedule_has_history, reason_needed, DATE_FIELDS,
+        notify_brokers_of_new_dates,
     )
     with SessionLocal() as s:
         p = s.get(Program, program_id)
@@ -1824,19 +1844,49 @@ def program_schedule_put(program_id: int, body: ScheduleBody,
         if sched is None:
             sched = SubmissionSchedule(tenant_id=p.tenant_id, program_id=program_id)
             s.add(sched); s.flush()
-        for k, v in body.model_dump(exclude_unset=True).items():
+        dad = body.delinquent_after_days
+        if dad is not None and not 1 <= dad <= 365:
+            raise HTTPException(400, "Delinquent after must be between 1 and 365 days late.")
+        before = schedule_snapshot(s, sched)
+        history = schedule_has_history(s, program_id)
+        for k, v in body.model_dump(exclude_unset=True,
+                                    exclude={"reason", "recheck_past"}).items():
             setattr(sched, k, v)
-        result = materialize_schedule(s, sched)
+        changes = schedule_changes(before, schedule_snapshot(s, sched))
+        why = (body.reason or "").strip() or None
+        if why is None and reason_needed(changes, history):
+            s.rollback()
+            raise HTTPException(400, "Say why you're changing the deadlines.")
+        # Re-checking only means something when a date actually moved.
+        recheck = bool(body.recheck_past) and any(
+            c["field"] in DATE_FIELDS for c in changes)
+        result = materialize_schedule(s, sched, recheck_past=recheck)
         s.commit(); s.refresh(sched)
         resolved, program, contract = resolve_for_schedule(s, sched)
         reason = None if resolved else _unresolved_reason(sched, program, contract)
         c_freq, c_anchor = program_contract_basis(s, program_id)
         mga = _tenant_name(s, p.tenant_id)
-        _log(mga, _actor(principal), "submission_schedule_updated", target=str(program_id),
-             details={"resolved": result.get("resolved"), "count": result.get("count")})
+        # Nothing changed, nothing to record — a second Save is not an override.
+        told = 0
+        if changes:
+            changed_by = _actor(principal)
+            # The brokers whose due dates moved are told (after the commit —
+            # the change stands whether or not the mail goes).
+            told = notify_brokers_of_new_dates(
+                s, p, changes, result, _carrier_label(s, p.tenant_id),
+                changed_by=changed_by)
+            _log(mga, changed_by, "submission_schedule_updated",
+                 target=str(program_id), principal=principal,
+                 details={"program_name": p.name, "changes": changes, "reason": why,
+                          "moved": result.get("moved", 0),
+                          "kept_past": result.get("kept_past", 0),
+                          "recheck_past": recheck,
+                          "rechecked": result.get("rechecked", []),
+                          "brokers_emailed": told})
         return {"schedule": _schedule_dict(sched, resolved, reason,
-                                           contract_frequency=c_freq, contract_anchor=c_anchor),
-                "calendar": result}
+                                           contract_frequency=c_freq, contract_anchor=c_anchor,
+                                           has_history=schedule_has_history(s, program_id)),
+                "calendar": result, "changes": changes, "brokers_emailed": told}
 
 
 @router.get("/calendar")
@@ -2027,6 +2077,149 @@ def calendar_sweep(mga: Optional[str] = None,
         result = sweep_overdue(s, tenant_id=tid)
         s.commit()
         return result
+
+
+# ---- MOPR 39.2: the case on a missing file ----------------------------------
+# Overdue → Delinquent → In Dispute → Resolved (submission_case.py). The broker
+# raises a dispute from its own calendar (broker_routes); everything here is
+# the carrier's side: read a case, enter a dispute for the broker, decide one.
+
+class CaseDisputeBody(BaseModel):
+    reason: str                          # submission_case.DISPUTE_REASONS key
+    note: Optional[str] = None
+
+
+class CaseDecisionBody(BaseModel):
+    decision: str                        # accept | reject | waive | extend | reopen
+    note: Optional[str] = None           # required — the broker is told it
+    extend_to: Optional[date] = None     # extend only: the new date
+
+
+def _case_http(ex) -> HTTPException:
+    """A refused move → 400 when the request itself is wrong, 409 when the case
+    is not in a state that allows it."""
+    bad_input = ("bad_reason", "note_required", "bad_decision", "bad_date")
+    return HTTPException(400 if ex.code in bad_input else 409, str(ex))
+
+
+def _case_schedule(s, e) -> Optional[SubmissionSchedule]:
+    return (s.query(SubmissionSchedule)
+            .filter(SubmissionSchedule.program_id == e.program_id).first())
+
+
+def _carrier_label(s, tenant_id) -> str:
+    t = s.get(Tenant, tenant_id) if tenant_id else None
+    return ((t.legal_name or (t.tenant_name or "").title()) if t else None) or "Your carrier"
+
+
+def _case_payload(s, e, principal: Principal, *, side: str, carrier_admin: bool) -> dict:
+    """One period's case: where it stands, every move so far (named the way
+    this viewer may see them), and what this viewer may do next. Shared by the
+    carrier's and the broker's calendar."""
+    import submission_case as sc
+    from decision_log import Labeller
+    from submission_calendar import derive_status, DEFAULT_SOON_WINDOW_DAYS
+    today = datetime.utcnow().date()
+    sched = _case_schedule(s, e)
+    prog = s.get(Program, e.program_id)
+    broker = s.get(Party, e.broker_party_id) if e.broker_party_id else None
+    soon = (sched.soon_window_days if sched and sched.soon_window_days is not None
+            else DEFAULT_SOON_WINDOW_DAYS)
+    return {
+        "expected_id": e.id,
+        "program_id": e.program_id,
+        "program_name": prog.name if prog else f"Programme {e.program_id}",
+        "broker_party_id": e.broker_party_id,
+        "broker_name": broker.legal_name if broker else None,
+        "carrier_name": _carrier_label(s, e.tenant_id),
+        "period": e.period,
+        "due_date": e.due_date.isoformat() if e.due_date else None,
+        "closes_on": e.closes_on.isoformat() if e.closes_on else None,
+        "received_at": e.received_at.isoformat() if e.received_at else None,
+        "status": derive_status(e.due_date, today, soon, e.received_at, e.closes_on),
+        "days_over": sc.days_over(e, today),
+        "delinquent_after_days": sc.delinquent_after_days(sched),
+        "case": sc.case_dict(e),
+        "history": sc.history(s, e.id, Labeller(s, principal).label),
+        "can": sc.allowed(e, side=side, carrier_admin=carrier_admin, today=today),
+        "reasons": [{"key": k, "label": v} for k, v in sc.DISPUTE_REASONS.items()],
+    }
+
+
+def _owned_case_row(s, expected_id: int, principal: Principal) -> ExpectedSubmission:
+    e = s.get(ExpectedSubmission, expected_id)
+    if e is None:
+        raise HTTPException(404, "period not found")
+    assert_tenant_owns(principal, e.tenant_id)
+    return e
+
+
+def _acting_carrier(principal: Principal) -> None:
+    if principal.is_platform_admin:
+        raise HTTPException(403, "Kavachio staff can read a case but not act on it — "
+                                 "the carrier does.")
+
+
+@router.get("/calendar/{expected_id}/case")
+def calendar_case(expected_id: int,
+                  principal: Principal = Depends(current_principal)):
+    """A late file's case, as the carrier sees it."""
+    with SessionLocal() as s:
+        e = _owned_case_row(s, expected_id, principal)
+        admin = (not principal.is_platform_admin) and is_carrier_admin_seat(s, principal)
+        return _case_payload(s, e, principal, side="carrier", carrier_admin=admin)
+
+
+@router.post("/calendar/{expected_id}/case/dispute")
+def calendar_case_dispute(
+        expected_id: int, body: CaseDisputeBody,
+        principal: Principal = Depends(require_carrier_admin("enter a dispute for a broker"))):
+    """The carrier enters a dispute FOR the broker — it phoned or emailed
+    instead of using its calendar. Also how a dispute the carrier rejected is
+    reopened (the broker itself cannot raise a second one)."""
+    import submission_case as sc
+    with SessionLocal() as s:
+        e = _owned_case_row(s, expected_id, principal)
+        _acting_carrier(principal)
+        who = {"actor": _actor(principal), "user_id": principal.user_id,
+               "role": principal.role, "broker_party_id": None}
+        try:
+            sc.raise_dispute(s, e, who=who, reason=body.reason, note=body.note,
+                             by_carrier=True,
+                             n=sc.delinquent_after_days(_case_schedule(s, e)))
+        except sc.CaseError as ex:
+            s.rollback()
+            raise _case_http(ex)
+        s.commit()
+        return _case_payload(s, e, principal, side="carrier", carrier_admin=True)
+
+
+@router.post("/calendar/{expected_id}/case/decision")
+def calendar_case_decision(
+        expected_id: int, body: CaseDecisionBody,
+        principal: Principal = Depends(require_carrier_admin("decide a late file's case"))):
+    """The carrier's decision: accept or reject a dispute, waive the period
+    (nil return), or give more time. The broker's contacts are emailed the
+    decision and the note after it is saved."""
+    import submission_case as sc
+    with SessionLocal() as s:
+        e = _owned_case_row(s, expected_id, principal)
+        _acting_carrier(principal)
+        who = {"actor": _actor(principal), "user_id": principal.user_id,
+               "role": principal.role, "broker_party_id": None}
+        try:
+            sc.decide(s, e, who=who, decision=body.decision, note=body.note,
+                      extend_to=body.extend_to,
+                      n=sc.delinquent_after_days(_case_schedule(s, e)))
+        except sc.CaseError as ex:
+            s.rollback()
+            raise _case_http(ex)
+        s.commit()
+        payload = _case_payload(s, e, principal, side="carrier", carrier_admin=True)
+        sc.notify_decision(s, e, body.decision, (body.note or "").strip(),
+                           payload["program_name"], payload["carrier_name"],
+                           decided_by=_actor(principal))
+        return payload
 
 
 # @router.post("/programs/{program_id}/contracts")
@@ -5569,7 +5762,9 @@ def program_management_carriers(
             .join(Program, Program.id == ExpectedSubmission.program_id)
             .where(Program.party_id == Party.id,
                    Program.tenant_id == tid,
-                   ExpectedSubmission.status.in_(("overdue", "late")))
+                   # Past due and nothing in — still waited for (overdue) or
+                   # given up on (never_arrived) alike.
+                   ExpectedSubmission.status.in_(("overdue", "late", "never_arrived")))
             .correlate(Party)
             .scalar_subquery()
         )
@@ -5665,6 +5860,8 @@ def program_management_stats(
         # 'late' is the retired pre-grace-removal spelling of 'overdue'. init_db
         # folds those rows over, but RLS deployments skip that migration, so it
         # stays in the filter rather than silently dropping their backlog.
+        # 'never_arrived' is overdue whose period has closed (MOPR 39.1) — the
+        # file is just as missing, so it still counts here.
         overdue_by_program: dict[int, int] = {}
         schedules_configured = 0
         if pids:
@@ -5673,7 +5870,7 @@ def program_management_stats(
             ).filter(
                 ExpectedSubmission.tenant_id == tid,
                 ExpectedSubmission.program_id.in_(pids),
-                ExpectedSubmission.status.in_(("overdue", "late")),
+                ExpectedSubmission.status.in_(("overdue", "late", "never_arrived")),
             ).group_by(ExpectedSubmission.program_id).all():
                 overdue_by_program[prog_id] = int(cnt)
             schedules_configured = s.query(SubmissionSchedule).filter(
@@ -6344,19 +6541,22 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
 
         overdue_by_tenant: dict = {}
         overdue_brokers: set = set()
-        arrived_on_time = arrived_late = 0
+        arrived_on_time = arrived_late = never_arrived = 0
         for e in due_rows:
             soon = soon_by_program.get(e.program_id)
             status = derive_status(e.due_date, today,
                                    soon if soon is not None else DEFAULT_SOON_WINDOW_DAYS,
-                                   e.received_at)
+                                   e.received_at, e.closes_on)
             if status == "on_time":
                 arrived_on_time += 1
             elif status == "received_late":
                 arrived_late += 1
-            elif status == "overdue":
+            elif status in ("overdue", "never_arrived"):
+                # Both are missing files; the card shows them apart (MOPR 39.1).
                 overdue_by_tenant[e.tenant_id] = overdue_by_tenant.get(e.tenant_id, 0) + 1
                 overdue_brokers.add(e.broker_party_id)
+                if status == "never_arrived":
+                    never_arrived += 1
 
         # --- Contracts sent for signature and not yet signed by everyone ---
         week_ago = now - timedelta(days=7)
@@ -6512,7 +6712,11 @@ def platform_dashboard(window: str = Query("30d", alias="range"),
             },
             "seats": seats,
             "open_exceptions": open_ex,
+            # `total` is every missing file: `waiting` still overdue, `never`
+            # the ones whose period has closed.
             "overdue": {"total": sum(overdue_by_tenant.values()),
+                        "waiting": sum(overdue_by_tenant.values()) - never_arrived,
+                        "never": never_arrived,
                         "brokers": len(overdue_brokers),
                         "carriers": sum(1 for v in overdue_by_tenant.values() if v),
                         "on_time": int(arrived_on_time or 0),

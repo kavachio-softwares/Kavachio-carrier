@@ -28,6 +28,7 @@ import { parseUtc } from "../utils/date";
 import NotificationBell from "../components/NotificationBell";
 import { InfoTip } from "../components/InfoTip";
 import { ExportFileViewer } from "../components/ExportFileViewer";
+import { CaseModal, caseBadge } from "../components/CaseModal";
 import { Pagination } from "../components/Pagination";
 import { flowUrl } from "../components/ProgrammeStepper";
 import { ContractHeading, SupersededTag } from "../components/ContractTag";
@@ -39,9 +40,28 @@ const STATUS_META: Record<CalendarStatus, { label: string; cls: string }> = {
   due_soon:      { label: "Due soon",     cls: "b-info" },
   due_today:     { label: "Due today",    cls: "b-warn" },
   overdue:       { label: "Overdue",      cls: "b-crit" },
+  never_arrived: { label: "Never arrived", cls: "b-crit" },
   on_time:       { label: "On time",      cls: "b-ok" },
   received_late: { label: "Arrived late", cls: "b-warn" },
 };
+
+// Both are a file that has not come. Never arrived is overdue whose period has
+// closed — still worth a reminder, and still sorted to the top.
+const MISSING = new Set<string>(["overdue", "never_arrived"]);
+
+// MOPR 39.2 — nobody is reminded while a dispute waits on the carrier, more
+// time has been agreed, or the case is closed. The server skips these too.
+const NO_CHASE = new Set<string>(["in_dispute", "extended", "resolved"]);
+const chaseable = (r: BoardRow) => MISSING.has(r.status) && !NO_CHASE.has(r.case?.state ?? "");
+/** A row with a case to open: one already going, or a late file the daily
+ *  check is about to open one for. */
+const hasCase = (r: BoardRow) => !!r.case?.state || MISSING.has(r.status);
+/** The case button says what a click is for: something to do, or only
+ *  something to read. Kavachio staff can only read. */
+const caseVerb = (r: BoardRow, platform: boolean): { label: string; pri: boolean } =>
+  platform || r.case?.state === "resolved" ? { label: "View Details →", pri: false }
+  : r.case?.state === "in_dispute" ? { label: "Review Dispute →", pri: true }
+  : { label: "Take Action →", pri: false };
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
@@ -113,6 +133,9 @@ export default function BordereauCalendar() {
   const scopeBroker = platform ? Number(qs.get("broker")) || undefined : undefined;
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [month, setMonth] = useState<string | undefined>(undefined);
+  // ?month=YYYY-MM opens that due-month — how a bell reminder about a late
+  // file lands on the month the file was due in.
+  const startMonth = /^\d{4}-\d{2}$/.test(qs.get("month") ?? "") ? qs.get("month")! : undefined;
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -125,6 +148,8 @@ export default function BordereauCalendar() {
   // The rows a pending chase would cover. null = no dialog open. One row for
   // "Chase them", every late row for "Chase what is late".
   const [chasing, setChasing] = useState<BoardRow[] | null>(null);
+  // MOPR 39.2 — the row whose case is open (dispute, decision, history).
+  const [caseFor, setCaseFor] = useState<number | null>(null);
   const [schedPage, setSchedPage] = useState(1);
   // The month's files and the deadlines behind them sit on two tabs — for
   // everyone now, not only the platform view, so each table gets the page to
@@ -150,7 +175,7 @@ export default function BordereauCalendar() {
     }
   }, [platform, scopeCarrier, scopeBroker]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(startMonth); }, [load, startMonth]);
 
   const rows = board?.rows ?? [];
   const counts = board?.counts;
@@ -167,7 +192,7 @@ export default function BordereauCalendar() {
   // for the same reason they are excluded from the counts: there is nobody to
   // chase on a programme with no broker.
   const overdue = useMemo(
-    () => rows.filter(r => !r.unassigned && r.status === "overdue"), [rows]);
+    () => rows.filter(r => !r.unassigned && chaseable(r)), [rows]);
 
   // CHASING ASKS FIRST. A chase is a message about somebody being late, so the
   // screen names who it is about and who would hear about it before anything is
@@ -192,7 +217,7 @@ export default function BordereauCalendar() {
     // Most overdue first, then the rest by due date. The row that needs doing
     // something about should not be somewhere in the middle of the table.
     const rank: Record<string, number> = {
-      overdue: 0, due_today: 1, due_soon: 2, received_late: 3,
+      never_arrived: 0, overdue: 0, due_today: 1, due_soon: 2, received_late: 3,
       scheduled: 4, on_time: 5,
     };
     return [...rows].sort((a, b) => {
@@ -244,8 +269,10 @@ export default function BordereauCalendar() {
         {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
         {msg && <div className="note" style={{ marginBottom: 16 }}>{msg}</div>}
 
-        {/* ---- the four headline counts ---------------------------------- */}
-        <div className="tiles" style={{ marginBottom: 18 }}>
+        {/* ---- the headline counts: what was due, and the four ways it
+             stood — on time, late, overdue (still waited for) and never
+             arrived (its period closed with nothing in it) -------------- */}
+        <div className="tiles t5" style={{ marginBottom: 18 }}>
           <div className="tile">
             <div className="k">Due this month</div>
             <div className="v">{counts?.due ?? "—"}</div>
@@ -275,9 +302,19 @@ export default function BordereauCalendar() {
               })()}
             </div> */}
           </div>
+          <div className={`tile${(counts?.overdue ?? 0) > 0 ? " alert" : ""}`}>
+            <div className="k">
+              Overdue
+              <InfoTip text="Past its due date with nothing in yet, and still being waited for. It becomes Never arrived once the next period's file is due as well." />
+            </div>
+            <div className="v" style={{ color: "var(--p-crit)" }}>{counts?.overdue ?? "—"}</div>
+          </div>
           <div className={`tile${(counts?.never ?? 0) > 0 ? " alert" : ""}`}>
-            <div className="k">Never arrived</div>
-            <div className="v" style={{ color: "var(--p-crit)" }}>{counts?.never ?? "—"}</div>
+            <div className="k">
+              Never arrived
+              <InfoTip text="Still nothing in after the next period's file fell due as well — the period has closed empty. If the file does turn up later it is counted as Arrived late." />
+            </div>
+            <div className="v" style={{ color: "var(--p-crit-ink)" }}>{counts?.never ?? "—"}</div>
             {/* <div className="foot">
               {overdue.length === 0 ? "nothing outstanding"
                 : (() => {
@@ -289,6 +326,32 @@ export default function BordereauCalendar() {
             </div> */}
           </div>
         </div>
+
+        {/* ---- MOPR 39.2: the same month's late files by where their case
+             stands. Counted on the server from the same rows as the tiles. */}
+        {board?.case_counts && (
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8,
+            margin: "-6px 0 16px" }}>
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--p-muted)",
+              display: "flex", alignItems: "center", gap: 5 }}>
+              Late-file cases
+              <InfoTip text={"What is being done about each missing file due this month. Overdue the "
+                + "day after the due date; Delinquent once it is the programme's set number of days "
+                + "late (15 unless changed); In Dispute while the broker contests it and you decide; "
+                + "More time when you agreed a new date; Resolved when the file came, you accepted "
+                + "the dispute, or you marked it as no file needed."} />
+            </span>
+            {([
+              ["overdue", "Overdue", "b-crit"], ["delinquent", "Delinquent", "b-crit"],
+              ["in_dispute", "In Dispute", "b-warn"], ["extended", "More time", "b-info"],
+              ["resolved", "Resolved", "b-ok"],
+            ] as const).map(([k, label, cls]) => (
+              <span key={k} className={`badge ${(board.case_counts[k] ?? 0) > 0 ? cls : "b-mut"}`}>
+                <span className="d" />{label}: {board.case_counts[k] ?? 0}
+              </span>
+            ))}
+          </div>
+        )}
 
         <div className="tabs" style={{ alignItems: "center" }}>
           <button className={tab === "month" ? "on" : ""} onClick={() => setTab("month")}>
@@ -330,17 +393,17 @@ export default function BordereauCalendar() {
                 <tr>
                   {platform && <th>Carrier</th>}
                   <th>Programme</th><th>Broker</th><th>Contract</th><th>Period</th><th>Due by</th>
-                  <th>Received On</th><th>Arrival Status</th>
+                  <th>Received On</th><th>Arrival Status</th><th>Case</th>
                   <th>Version</th><th>Action</th>
                 </tr>
               </thead>
               <tbody>
                 {loading && (
-                  <tr><td colSpan={platform ? 10 : 9} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={platform ? 11 : 10} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">Loading…</td></tr>
                 )}
                 {!loading && worstFirst.length === 0 && (
-                  <tr><td colSpan={platform ? 10 : 9} style={{ padding: "18px 12px", textAlign: "center" }}
+                  <tr><td colSpan={platform ? 11 : 10} style={{ padding: "18px 12px", textAlign: "center" }}
                     className="muted">
                     Nothing is due in this month.{" "}
                     <Link className="linkish" to="/programs">Set a programme's frequency →</Link>
@@ -363,6 +426,7 @@ export default function BordereauCalendar() {
                         <td className="muted">—</td>
                         <td><span className="badge b-mut"><span className="d" />Nothing is owed</span></td>
                         <td className="muted">—</td>
+                        <td className="muted">—</td>
                         <td>
                           {!platform && (
                             <Link className="linkish" to={flowUrl(r.program_id, "brokers")}
@@ -380,6 +444,8 @@ export default function BordereauCalendar() {
                   // which the badge cannot carry.
                   const detail = r.status === "overdue"
                     ? `${plural(r.days_over ?? 0, "day")} over, nothing yet`
+                    : r.status === "never_arrived"
+                    ? `Never arrived · ${plural(r.days_over ?? 0, "day")} over`
                     : r.days_late != null ? `${plural(r.days_late, "day")} late` : null;
                   return (
                     <tr key={r.id}>
@@ -410,10 +476,25 @@ export default function BordereauCalendar() {
                           {detail ?? m.label}</span>
                         {r.chase_count > 0 && (
                           <div className="sub" style={{ marginTop: 3 }}>
-                            followed up {r.chase_count > 1 ? `${r.chase_count}×` : ""}{" "}
-                            {fmtDay(r.chased_at)}
+                            {r.chase_count > 1
+                              ? `Reminded ${r.chase_count} times · last ${fmtDay(r.chased_at)}`
+                              : `Reminded once · ${fmtDay(r.chased_at)}`}
                           </div>
                         )}
+                      </td>
+                      <td>
+                        {(() => {
+                          const cb = caseBadge(r.case);
+                          if (!cb) return <span className="muted">—</span>;
+                          return (
+                            <>
+                              <span className={`badge ${cb.cls}`}><span className="d" />{cb.label}</span>
+                              {r.case.state !== "resolved" && r.case.since && (
+                                <div className="sub" style={{ marginTop: 3 }}>since {fmtDay(r.case.since)}</div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </td>
                       <td>
                         {r.version_count === 0
@@ -432,24 +513,35 @@ export default function BordereauCalendar() {
                           )}
                       </td>
                       <td style={{ whiteSpace: "nowrap" }}>
+                        <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
                         {r.version_count > 0 && (
-                          <span className="linkish" onClick={() => setOpenRow(r)}
+                          <button type="button" className="btn sm" onClick={() => setOpenRow(r)}
                             title="Every file received for this period, and where it was sent">
                             View Versions →
-                          </span>
+                          </button>
                         )}
-                        {!platform && r.status === "overdue" && (
-                          <span className="linkish" style={{ marginLeft: r.version_count > 0 ? 8 : 0 }}
-                            onClick={() => setChasing([r])}
+                        {!platform && chaseable(r) && (
+                          <button type="button" className="btn sm" onClick={() => setChasing([r])}
                             title="Email the broker a reminder that this file is late">
                             Send Reminder →
-                          </span>
+                          </button>
+                        )}
+                        {hasCase(r) && (
+                          // A dispute waiting on the carrier is the one row that
+                          // needs them, so it is the one filled button.
+                          <button type="button"
+                            className={`btn sm${caseVerb(r, platform).pri ? " pri" : ""}`}
+                            onClick={() => setCaseFor(r.id)}
+                            title="The case on this late file: dispute, decision and history">
+                            {caseVerb(r, platform).label}
+                          </button>
                         )}
                         {/* Nothing owed yet and nothing received: no action, and
                             the dash says so rather than leaving a blank cell. */}
-                        {r.version_count === 0 && (platform || r.status !== "overdue") && (
+                        {r.version_count === 0 && !hasCase(r) && (
                           <span className="muted">—</span>
                         )}
+                        </span>
                       </td>
                     </tr>
                   );
@@ -605,6 +697,11 @@ export default function BordereauCalendar() {
       {chasing && (
         <ChaseModal rows={chasing} onClose={() => setChasing(null)}
           onConfirm={confirmChase} />
+      )}
+
+      {caseFor != null && (
+        <CaseModal expectedId={caseFor} side="carrier"
+          onClose={() => setCaseFor(null)} onChanged={() => load(month)} />
       )}
     </div>
   );

@@ -207,7 +207,8 @@ export default function Home() {
   // simply owed nothing.
   const boardNow = board?.period === period ? board.data : null;
   const due = boardNow
-    ? (boardNow.month === period ? boardNow.counts : { on_time: 0, late: 0, never: 0 })
+    ? (boardNow.month === period ? boardNow.counts
+      : { on_time: 0, late: 0, overdue: 0, never: 0 })
     : null;
 
   // Both directories are carrier-scoped. A broker seat carries no tenant, so
@@ -851,7 +852,8 @@ export default function Home() {
              Bordereaux Processed on the right at the same height. */
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 18 }}>
             <div style={{ display: "grid" }}>
-              <ArrivalsCard onTime={due?.on_time} late={due?.late} never={due?.never}
+              <ArrivalsCard onTime={due?.on_time} late={due?.late}
+                overdue={due?.overdue} never={due?.never}
                 subtitle={due ? `Due in ${periodName(period)}` : undefined}
                 info={`Bordereaux your brokers owed${infoWhen}, by how they arrived.`} />
             </div>
