@@ -41,6 +41,11 @@ export type BrokerContract = {
   source: "carrier" | "broker";
   submitted_at: string | null;
   created_at: string | null;
+  /** Superseded by a renewal now in force: the PREVIOUS TERM. Still pickable
+   *  on Process Bordereau, for the late months of its own term only. */
+  previous_term?: boolean;
+  /** The renewal that replaced it. */
+  renewed_by?: { id: number; name: string | null } | null;
 };
 
 /** Mirrors the carrier-side type; `expired` is derived from the term. */
@@ -134,6 +139,12 @@ export type BrokerCalendarRow = {
   /** The contract this period answers to. */
   contract_id?: number | null;
   contract_name?: string | null;
+  /** That contract has since been replaced, or renewed. */
+  contract_replaced?: boolean;
+  contract_renewed?: boolean;
+  /** Files for this period under another (replaced) contract, kept in
+   *  View Versions for audit. */
+  other_contract_files?: number;
   /** When the newest version was uploaded — exact time, UTC ISO. */
   uploaded_at: string | null;
 };
@@ -171,6 +182,9 @@ export const getBrokerExceptions = (carrierId?: number | null) =>
     items: BrokerExceptionFile[];
     totals: { files: number; files_open: number; exceptions: number;
               open: number; put_right: number };
+    /** Left out of the totals: files under a replaced contract whose month
+     *  the newer contract's file answers. Kept for audit. */
+    replaced?: { files: number; open: number };
   }>("/broker/exceptions", {
     params: carrierId ? { carrier_id: carrierId } : {},
   }).then(r => r.data);
@@ -303,6 +317,14 @@ export type OperatorRun = {
   /** Still open / put right — the same count Exceptions to Review shows. */
   open?: number;
   put_right?: number;
+  /** The contract this file was checked against has since been replaced
+   *  (renewed, or a new contract for the same programme and broker). */
+  contract_replaced?: boolean;
+  /** The contract has been renewed: its files stay counted and editable. */
+  contract_renewed?: boolean;
+  /** False when the newer contract's file answers the same month of a
+   *  REPLACED contract: kept for audit, left out of Exceptions to Review. */
+  counted?: boolean;
 };
 
 /** "13 of 23 open" — what a file's badge says, the way Exceptions to Review

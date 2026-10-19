@@ -304,7 +304,14 @@ def run_one(arrival_id: int) -> None:
         submission_service.carry_decisions(arrival_id, prep["landing_id"])
         result = await dr._render_prepared(prep, filename=None, actor=ACTOR,
                                            mark_calendar=not calendar_done,
-                                           period=run_period)
+                                           # The arrival's own month when it
+                                           # has one: a Fix & Validate or
+                                           # secure-link version of a file
+                                           # first sent on Process Bordereau
+                                           # has no channel to tick it, and
+                                           # left to guess the run ticked the
+                                           # OLDEST open month instead.
+                                           period=run_period or arrival_period)
         result["_landing_id"] = prep["landing_id"]
         return result
 

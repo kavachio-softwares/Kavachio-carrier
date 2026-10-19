@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useSearchParams, useNavigate } from "react-router-dom";
 import {
-  getUploadExceptions, getDownloadExceptions, type UploadExceptionsResponse,
+  getUploadExceptions, getDownloadExceptions, getDownloadReview, type UploadExceptionsResponse,
 } from "../api/validation";
 import { groupByRule, tallyDecisions, type RuleGroup } from "../components/ExceptionCards";
 import ExceptionDecisionTable, { recoParts } from "../components/ExceptionDecisionTable";
@@ -102,6 +102,15 @@ export default function RuleReview() {
     catch (e: any) { setErr(e?.response?.data?.message ?? e?.message ?? "Failed to load."); }
   }
   useEffect(() => { load(); }, [uploadId, downloadId]);
+  // A delivered file whose critical and warning exceptions are all resolved is
+  // locked (the server refuses changes); read-only here too.
+  const [locked, setLocked] = useState(false);
+  useEffect(() => {
+    if (!downloadId) return;
+    getDownloadReview(downloadId)
+      .then(r => setLocked(!!r.about?.delivery?.locked)).catch(() => setLocked(false));
+  }, [downloadId]);
+  const canAmend = canAmendExceptions() && !locked;
 
   const groups = groupByRule(data?.exceptions ?? []);
   // A rule can head more than one card (its own violations, and rows it flagged
@@ -194,7 +203,7 @@ export default function RuleReview() {
               {/* What the rule requires, why these rows failed and what to do —
                   the contract wording sits behind "Where this comes from". */}
               {hasExplanation(group.explanation) || group.contractClause ? (() => {
-                const sum = ruleSummary(group, canAmendExceptions());
+                const sum = ruleSummary(group, canAmend);
                 return (
                   <>
                     {/* Chips stay on top: what KIND of rule this is. */}
@@ -249,7 +258,7 @@ export default function RuleReview() {
               templateId={data?.output_template_id ?? undefined}
               contractId={data?.run?.contract_id ?? undefined}
               exportId={downloadId ?? undefined}
-              readOnly={!canAmendExceptions()}
+              readOnly={!canAmend}
               onSaved={() => { setSavedThisSession(true); return load(); }}
               backLink={backLink} backState={backState} />
           </>

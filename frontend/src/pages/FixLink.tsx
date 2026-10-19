@@ -38,6 +38,12 @@ type Tab = "sheet" | "rules";
 // A version the broker can review and decide on (anything else is read-only).
 const REVIEWABLE = ["with_exceptions", "ready", "held_at_deadline"];
 
+/** Open for answers: waiting on the broker, or DELIVERED while a critical or
+ *  warning exception is still open (the server says so in `can_submit`) —
+ *  the same rule as the portal's Fix & Validate. */
+const reviewable = (d: FixSubmission) =>
+  REVIEWABLE.includes(d.status) || (d.status.startsWith("delivered") && d.can_submit);
+
 /** What decides how the grid looks: each exception's identity and decision.
  *  A refresh that changes none of it keeps the export object it already has,
  *  so nothing downstream re-indexes or re-renders. */
@@ -100,7 +106,7 @@ export default function FixLink() {
     const seq = ++refreshSeq.current;
     try {
       const d = await loadSubmission(token, s);
-      const x = REVIEWABLE.includes(d.status) ? await loadExport(token, s) : null;
+      const x = reviewable(d) ? await loadExport(token, s) : null;
       if (seq !== refreshSeq.current) return;
       setDoc(d);
       applyExport(x);
@@ -343,10 +349,13 @@ export default function FixLink() {
   const p = doc.progress;
   const pct = p.total ? Math.round((p.fixed / p.total) * 100) : 100;
   const delivered = doc.status.startsWith("delivered");
+  // Delivered and nothing left to answer: the page is a receipt. Delivered
+  // with exceptions still open stays a review, with a note saying so.
+  const final = delivered && !doc.can_submit;
   const nextVersion = (doc.version ?? 0) + 1;
 
   return (
-    <div className="proto" style={{ minHeight: "100vh", paddingBottom: delivered ? 32 : 96 }}>
+    <div className="proto" style={{ minHeight: "100vh", paddingBottom: final ? 32 : 96 }}>
       {header}
       <main style={{ maxWidth: 1280, margin: "0 auto", padding: "22px 24px" }}>
 
@@ -377,9 +386,18 @@ export default function FixLink() {
           <CheckCircle2 size={15} /> {msg}</div>}
         {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
 
-        {check && !delivered && <ValidationResult check={check} />}
+        {delivered && !final && (
+          <div className="note warn" data-testid="delivered-open-note" style={{ marginBottom: 14 }}>
+            <b>Delivered to {doc.carrier ?? "the carrier"}
+              {doc.delivered_at ? ` on ${fmtDate(doc.delivered_at)}` : ""}.</b>{" "}
+            You can still resolve the open exceptions. When you submit, {doc.carrier ?? "the carrier"} receives
+            the corrected file as version {nextVersion}; version {doc.version} is kept.
+          </div>
+        )}
 
-        {delivered ? (
+        {check && !final && <ValidationResult check={check} />}
+
+        {final ? (
           <div className="card" style={{ padding: 36, textAlign: "center" }}>
             <div style={{ width: 52, height: 52, borderRadius: 99, display: "grid", placeItems: "center", margin: "0 auto 12px",
                           background: "var(--p-ok-soft)", color: "var(--p-ok)" }}>
@@ -387,7 +405,8 @@ export default function FixLink() {
             </div>
             <div style={{ fontSize: 16, fontWeight: 600 }}>Delivered to {doc.carrier ?? "the carrier"}</div>
             <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 4 }}>
-              Version {doc.version}{doc.delivered_at ? ` · ${fmtDate(doc.delivered_at)}` : ""}. No further action needed.
+              Version {doc.version}{doc.delivered_at ? ` · ${fmtDate(doc.delivered_at)}` : ""}.
+              {doc.delivery?.locked ? " Every critical and warning exception is resolved." : ""} No further action needed.
             </div>
           </div>
         ) : processing ? (
@@ -398,7 +417,7 @@ export default function FixLink() {
               Your corrected data has been received. The result will appear here in about a minute.
             </div>
           </div>
-        ) : !REVIEWABLE.includes(doc.status) ? (
+        ) : !reviewable(doc) ? (
           <div className="card" style={{ padding: 36, textAlign: "center" }}>
             <div style={{ fontSize: 16, fontWeight: 600 }}>{doc.status_text}</div>
             {doc.message && <div style={{ fontSize: 13, color: "var(--p-muted)", marginTop: 4 }}>{doc.message}</div>}
@@ -486,7 +505,7 @@ export default function FixLink() {
         {doc.versions.length > 1 && <VersionHistory versions={doc.versions} current={doc.version} />}
       </main>
 
-      {REVIEWABLE.includes(doc.status) && (
+      {reviewable(doc) && (
         <footer style={{ position: "fixed", insetInline: 0, bottom: 0, zIndex: 40, background: "rgba(255,255,255,.97)",
                          borderTop: "1px solid var(--p-border)", backdropFilter: "blur(6px)" }}>
           <div style={{ maxWidth: 1280, margin: "0 auto", padding: "12px 24px",

@@ -79,6 +79,11 @@ export type FixSubmission = {
   exceptions?: FixException[];
   can_submit: boolean;
   drafts: number;
+  /** Delivered: when, and whether it can still be corrected — open while a
+   *  critical or warning exception is unanswered or a decision unsent,
+   *  `locked` once neither (the portal's rule too). */
+  delivery?: { delivered: boolean; delivered_at?: string | null; flagged?: boolean;
+               open: number; unsent: number; locked: boolean } | null;
 };
 
 export type FixAnswer = { key: string; action: "correct" | "keep"; value?: string; reason?: string };

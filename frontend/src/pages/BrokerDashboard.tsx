@@ -23,6 +23,7 @@ import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 import { api } from "../api/client";
 import { InfoTip } from "../components/InfoTip";
 import { ChartCard, StatCard } from "../components/StatCard";
+import { NotCountedBadge, SupersededTag } from "../components/ContractTag";
 
 /** The window the status chart describes. */
 const DAYS = 30;
@@ -307,9 +308,14 @@ function RecentFiles() {
                     {r.programme ?? "—"}
                     {r.reporting_period && <> · {periodLabel(r.reporting_period)}</>}
                     {" "}· {fmtDateTime(r.created_at)}
+                    {/* On this line, not the file name's: a long name is cut
+                        off with "…" and would take the label with it. */}
+                    <SupersededTag replaced={r.contract_replaced} renewed={r.contract_renewed} />
                   </div>
                 </div>
-                {r.exception_count > 0
+                {r.exception_count > 0 && r.counted === false
+                  ? <NotCountedBadge open={exceptionsLeft(r).open} total={r.exception_count} />
+                  : r.exception_count > 0
                   ? (exceptionsLeft(r).open > 0
                     ? <span className="badge b-crit" title={exceptionsLeft(r).title}><span className="d" />
                         {exceptionsLeft(r).open} of {r.exception_count} open</span>

@@ -71,15 +71,30 @@ def _link(s, token: str) -> tuple[dict, "svc.Thread"]:
     return doc, th
 
 
+def _correctable(s, th) -> bool:
+    """Can this submission still take answers and a new version? Open, or
+    DELIVERED while a critical or warning exception is unanswered or a
+    decision is unsent — the same rule as the portal's Fix & Validate
+    (submission_service.delivery_state), so a broker gets the same answer
+    whichever way they reach their exceptions."""
+    if th.status in svc.OPEN_STATUSES:
+        return True
+    return th.status in svc.DELIVERED_STATUSES and not svc.delivery_state(s, th)["locked"]
+
+
 def _open(th) -> None:
-    if th.status not in svc.OPEN_STATUSES:
-        raise HTTPException(409, "This file is not waiting for your review.")
-    # A link emailed before the carrier took this broker off the programme is
-    # still validly signed, so the link alone cannot say whether they may
-    # still fix the file. The page stays readable; changing it does not.
     from carrier_scope import assert_broker_on_programme
     from db import SessionLocal
     with SessionLocal() as s:
+        if not _correctable(s, th):
+            if th.status in svc.DELIVERED_STATUSES:
+                raise HTTPException(409, "This bordereau was delivered and every critical "
+                                         "and warning exception on it is resolved, so it "
+                                         "is locked.")
+            raise HTTPException(409, "This file is not waiting for your review.")
+        # A link emailed before the carrier took this broker off the programme
+        # is still validly signed, so the link alone cannot say whether they
+        # may still fix the file. The page stays readable; changing it does not.
         assert_broker_on_programme(s, th.broker_party_id, th.program_id)
 
 
@@ -202,7 +217,11 @@ def get_submission(token: str, x_fix_session: Optional[str] = Header(default=Non
     with SessionLocal() as s:
         _, th = _session(s, token, x_fix_session)
         doc = svc.status_json(s, th, include_exceptions=True)
-        doc["can_submit"] = th.status in svc.OPEN_STATUSES
+        doc["can_submit"] = _correctable(s, th)
+        # Delivered: when, and whether it can still be corrected (locked once
+        # every critical and warning exception is answered and sent).
+        doc["delivery"] = (svc.delivery_state(s, th)
+                           if th.status in svc.DELIVERED_STATUSES else None)
         doc["drafts"] = _draft_count(s, th)
         return doc
 

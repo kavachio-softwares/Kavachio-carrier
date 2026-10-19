@@ -3955,7 +3955,24 @@ def _export_about(s, r: OutputExport) -> dict:
         "contract": (con.name or con.filename) if con else None,
         "reporting_period": v.get("reporting_period"),
         "version_no": v.get("version_no"),
+        # Delivered to the carrier, and whether it can still be corrected:
+        # open while a critical or warning exception is unanswered or a
+        # decision is unsent, locked once neither (submission_service).
+        "delivery": _export_delivery(s, r),
     }
+
+
+def _export_delivery(s, r: OutputExport) -> Optional[dict]:
+    try:
+        import submission_service as subs
+        th = subs.load(s, getattr(r, "submission_ref", None)) if r.submission_ref else None
+        if th is None or th.current_export_id != r.id:
+            return None
+        st = subs.delivery_state(s, th)
+        return st if st["delivered"] else None
+    except Exception:  # noqa: BLE001 — a banner; never what breaks the screen
+        log.warning("could not read delivery state of export %s", r.id, exc_info=True)
+        return None
 
 
 @app.get("/export/downloads/{export_id}/file")

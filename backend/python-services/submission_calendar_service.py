@@ -206,6 +206,24 @@ def program_contract_basis(session, program_id: int):
     return (p.bdx_frequency, _contract_inception(contract))
 
 
+def _chain_inception(session, contract: Optional[Contract]) -> Optional[date]:
+    """Where the calendar starts: the FIRST inception of the contract's renewal
+    chain, not the renewal's own. A renewal is the newest contract, and
+    anchoring on it alone moved the calendar's start to the new term — so the
+    old term's months that never got a file were deleted as stale instead of
+    staying overdue, and nobody could send them late under the previous term."""
+    own = _contract_inception(contract)
+    if contract is None or not getattr(contract, "renews_contract_id", None):
+        return own
+    try:
+        import renewal_chain as rc
+        first = rc.chain_start(session, contract)
+    except Exception:  # noqa: BLE001 — fall back to the contract's own start
+        log.debug("could not walk the renewal chain of %s", contract.id, exc_info=True)
+        return own
+    return min(d for d in (own, first) if d is not None) if (own or first) else None
+
+
 def resolve_for_schedule(session, schedule: SubmissionSchedule):
     """Resolve (frequency, anchor) for a schedule: manual override → contract → None.
     Returns (ResolvedSchedule|None, program, contract)."""
@@ -215,7 +233,7 @@ def resolve_for_schedule(session, schedule: SubmissionSchedule):
         frequency_override=schedule.frequency_override,
         anchor_override=schedule.anchor_date_override,
         contract_frequency=(program.bdx_frequency if program else None),
-        contract_inception=_contract_inception(contract),
+        contract_inception=_chain_inception(session, contract),
         # No default here: NULL must stay NULL so due_date_for falls back to the
         # offset, which is how a schedule saved before this field existed keeps
         # producing exactly the dates it always did.
@@ -1148,6 +1166,81 @@ def _ways_in(session, export_ids: set) -> dict:
     return out
 
 
+def _file_contracts(session, export_ids) -> dict:
+    """{export id: {version_no, contract_id, contract_name, contract_replaced}}.
+
+    Each contract keeps its own history: the file's `version_no` is its number
+    within its contract's submission (what Exception Triage and the file lists
+    say), not the calendar's running count of every file for the period."""
+    ids = {i for i in export_ids if i}
+    if not ids:
+        return {}
+    try:
+        from exception_tally import export_versions, superseded_kinds
+        vers = export_versions(session, ids)
+        own = {eid: cid for eid, cid in session.query(OutputExport.id, OutputExport.contract_id)
+               .filter(OutputExport.id.in_(ids)).all()}
+        cid_of = {eid: (vers.get(eid) or {}).get("contract_id") or own.get(eid) for eid in ids}
+        cids = {c for c in cid_of.values() if c}
+        kinds = superseded_kinds(session, cids)
+        cons = ({cid: (name or fname or f"Contract #{cid}", kinds.get(cid))
+                 for cid, name, fname in
+                 session.query(Contract.id, Contract.name, Contract.filename)
+                 .filter(Contract.id.in_(cids)).all()} if cids else {})
+    except Exception:  # noqa: BLE001 — labels; never what breaks the calendar
+        log.debug("could not read the contracts behind files", exc_info=True)
+        return {}
+    out = {}
+    for eid in ids:
+        cid = cid_of.get(eid)
+        name, kind = cons.get(cid, (None, None))
+        out[eid] = {"version_no": (vers.get(eid) or {}).get("version_no"),
+                    "contract_id": cid if cid in cons else None,
+                    "contract_name": name,
+                    "contract_replaced": kind == "replaced",
+                    "contract_renewed": kind == "renewed"}
+    return out
+
+
+def _newest_files(session, expected_ids) -> dict:
+    """{expected_id: the newest file's facts} — what a calendar row names.
+
+    The period's newest version is the file that counts; its contract is the
+    contract the row answers to, and its number is its number WITHIN that
+    contract (so the row and Exception Triage say the same "Version N").
+    `other_contract_files` counts the period's files under any other contract
+    (a replaced one), which stay in View Versions for audit."""
+    ids = [i for i in expected_ids if i is not None]
+    if not ids:
+        return {}
+    by_exp: dict = {}
+    for exp_id, eid in (session.query(SubmissionVersion.expected_id,
+                                      SubmissionVersion.received_export_id)
+                        .filter(SubmissionVersion.expected_id.in_(ids),
+                                SubmissionVersion.received_export_id.isnot(None))
+                        .order_by(SubmissionVersion.version_no.asc()).all()):
+        by_exp.setdefault(exp_id, []).append(eid)
+    facts = _file_contracts(session, {e for l in by_exp.values() for e in l})
+    out = {}
+    for exp_id, eids in by_exp.items():
+        newest = facts.get(eids[-1])
+        if not newest:
+            continue
+        out[exp_id] = {**newest, "export_id": eids[-1],
+                       "other_contract_files": sum(
+                           1 for e in eids
+                           if (facts.get(e) or {}).get("contract_id") != newest["contract_id"])}
+    return out
+
+
+def _row_version_label(e, newest: Optional[dict]) -> str:
+    """The row's "Version N": the newest file's number within its contract,
+    or the calendar's own count for a file that belongs to no submission."""
+    if newest and newest.get("version_no"):
+        return f"Version {newest['version_no']}"
+    return _version_label(e)
+
+
 def submission_versions(session, expected_id: int) -> list[dict]:
     """Every file ever submitted for one period, oldest first.
 
@@ -1178,6 +1271,8 @@ def submission_versions(session, expected_id: int) -> list[dict]:
     came_by = _ways_in(session, {v.received_export_id or (arrived[v.id].run_export_id
                                                           if v.id in arrived else None)
                                  for v in versions} - {None})
+    contract_of = _file_contracts(session, {v.received_export_id or (
+        arrived[v.id].run_export_id if v.id in arrived else None) for v in versions} - {None})
     out = []
     for v in versions:
         a = arrived.get(v.id)
@@ -1196,6 +1291,14 @@ def submission_versions(session, expected_id: int) -> list[dict]:
             "released_at": v.released_at.isoformat() if v.released_at else None,
             "released_to": v.released_to, "released_by": v.released_by,
             "release_ref": v.release_ref, "note": v.note,
+            # Which contract the file was checked against, and its number in
+            # THAT contract's history (`file_version_no`). A replaced
+            # contract's files stay here for audit, labelled.
+            "file_version_no": (contract_of.get(export_id) or {}).get("version_no"),
+            "contract_id": (contract_of.get(export_id) or {}).get("contract_id"),
+            "contract_name": (contract_of.get(export_id) or {}).get("contract_name"),
+            "contract_replaced": bool((contract_of.get(export_id) or {}).get("contract_replaced")),
+            "contract_renewed": bool((contract_of.get(export_id) or {}).get("contract_renewed")),
         })
     return out
 
@@ -1489,6 +1592,7 @@ def calendar_rows(session, tenant_id: Optional[int], today: Optional[date] = Non
     rows = q.order_by(ExpectedSubmission.due_date.asc()).all()
     names = _party_names(session, [e.broker_party_id for e in rows])
     latest_sent = _latest_release_state(session, [e.id for e in rows])
+    newest = _newest_files(session, [e.id for e in rows if e.version_count])
 
     out = []
     for e in rows:
@@ -1509,7 +1613,10 @@ def calendar_rows(session, tenant_id: Optional[int], today: Optional[date] = Non
             "received_export_id": e.received_export_id,
             # Requirement 17.2 — the released and corrected halves.
             "version_count": e.version_count or 0,
-            "version_label": _version_label(e),
+            "version_label": _row_version_label(e, newest.get(e.id)),
+            "contract_replaced": bool((newest.get(e.id) or {}).get("contract_replaced")),
+            "contract_renewed": bool((newest.get(e.id) or {}).get("contract_renewed")),
+            "other_contract_files": (newest.get(e.id) or {}).get("other_contract_files", 0),
             "latest_received_at": e.latest_received_at.isoformat()
                 if e.latest_received_at else None,
             "released_at": e.released_at.isoformat() if e.released_at else None,
@@ -1679,6 +1786,12 @@ def _schedule_brokers(session, pid: int, broker_ids: list[int], today: date) -> 
     return out
 
 
+def _superseded_kinds(session, cids) -> dict:
+    """{contract id: "renewed" | "replaced"} (exception_tally.superseded_kinds)."""
+    from exception_tally import superseded_kinds
+    return superseded_kinds(session, cids)
+
+
 def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = None,
                    today: Optional[date] = None, broker_id: Optional[int] = None,
                    program_ids: Optional[list[int]] = None) -> dict:
@@ -1764,7 +1877,15 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
     contacts = broker_contacts(session, [e.broker_party_id for e in all_rows])
     latest_sent = _latest_release_state(
         session, [e.id for e in all_rows if shown(e)])
+    newest = _newest_files(session, [e.id for e in all_rows
+                                     if shown(e) and e.version_count])
     contract_of = _row_contracts(session, [e for e in all_rows if shown(e)])
+    # A period answers to its NEWEST file's contract: the first file may have
+    # been checked against a contract that has since been replaced.
+    for exp_id, f in newest.items():
+        if f.get("contract_id"):
+            contract_of[exp_id] = (f["contract_id"], f["contract_name"])
+    kinds = _superseded_kinds(session, {c for c, _ in contract_of.values()})
     rows, counts = [], {"due": 0, "on_time": 0, "late": 0, "never": 0,
                         "released": 0, "unsent_correction": 0}
     programmes_in_month = set()
@@ -1793,6 +1914,13 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             # The contract this period answers to (see _row_contracts).
             "contract_id": (contract_of.get(e.id) or (None, None))[0],
             "contract_name": (contract_of.get(e.id) or (None, None))[1],
+            # That contract has since been replaced (renewed, or a new
+            # contract uploaded for the programme and broker).
+            "contract_replaced": kinds.get((contract_of.get(e.id) or (None, None))[0]) == "replaced",
+            "contract_renewed": kinds.get((contract_of.get(e.id) or (None, None))[0]) == "renewed",
+            # Files for this period under any OTHER contract — a replaced
+            # one's history, kept and shown in View Versions.
+            "other_contract_files": (newest.get(e.id) or {}).get("other_contract_files", 0),
             "unassigned": unassigned,
             "period": e.period,
             "due_date": e.due_date.isoformat() if e.due_date else None,
@@ -1809,7 +1937,7 @@ def calendar_board(session, tenant_id: Optional[int], *, month: Optional[str] = 
             # holding a version we have since superseded.
             "latest_version_released": latest_sent.get(e.id, False),
             "version_count": e.version_count or 0,
-            "version_label": _version_label(e),
+            "version_label": _row_version_label(e, newest.get(e.id)),
             "chased_at": e.chased_at.isoformat() if e.chased_at else None,
             "chase_count": e.chase_count or 0,
             # Who would be told, if this row were chased. Empty when the broker

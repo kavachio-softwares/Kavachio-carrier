@@ -4067,8 +4067,10 @@ def direct_runs(
         # One row per SUBMISSION: a later file for the same programme, contract
         # and month is the next version and replaces the earlier one here; the
         # older versions stay in the database and in the submission's history.
-        from exception_tally import current_export_ids, export_versions
-        query = query.filter(OutputExport.id.in_(current_export_ids(s, tenant_id=tid) or {-1}))
+        # A file under a replaced contract stays listed (labelled), for audit.
+        from exception_tally import contract_flags, current_export_ids, export_versions
+        query = query.filter(OutputExport.id.in_(
+            current_export_ids(s, tenant_id=tid, include_replaced=True) or {-1}))
         if result == "clean":
             query = query.filter(OutputExport.status == vo.CLEAN)
         elif result == "exceptions":
@@ -4129,9 +4131,12 @@ def direct_runs(
                broker_party_id_, broker_name, contract_id_, contract_name) in rows]
 
         vers = export_versions(s, [i["export_id"] for i in items])
+        flags = contract_flags(s, [i["export_id"] for i in items])
         for i in items:
             v = vers.get(i["export_id"]) or {}
             i["version_no"], i["reporting_period"] = v.get("version_no"), v.get("reporting_period")
+            i.update(flags.get(i["export_id"]) or {"contract_replaced": False,
+                                                   "contract_renewed": False, "counted": True})
 
         if page is not None:
             return {"items": items, "total": int(total), "page": page, "page_size": page_size or 20}
