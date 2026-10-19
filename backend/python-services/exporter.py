@@ -782,6 +782,15 @@ _HEURISTIC_RULES: list[tuple[re.Pattern, str | None, str]] = [
     (re.compile(r"accounting.?(yr|period|yrmo)"),
      "yyyymm", "premium_transaction_accounting_date"),
     # --- Transaction ----------------------------------------------------------
+    # A heading that names the TRANSACTION and its effective / expiry date —
+    # Lloyd's "Effective Date of Transaction" / "Expiry Date of Transaction",
+    # "Transaction Effective Date", "TransactionEffectiveDate". These used to
+    # fall through to the generic policy-date rules at the bottom, so every
+    # Lloyd's v5.2 template labelled its transaction dates as the POLICY's.
+    (re.compile(r"^(?=.*\b(?:transaction|trans\b|tran\b|txn\b))(?=.*(?:effective|\beff\b))"),
+     None, "premium_transaction_effective_date"),
+    (re.compile(r"^(?=.*\b(?:transaction|trans\b|tran\b|txn\b))(?=.*(?:expir|\bexp\b))"),
+     None, "premium_transaction_expiry_date"),
     (re.compile(r"transaction.?type|trans.?type|tran.?type"),
      None, "premium_transaction_type"),
     (re.compile(r"transaction.?date|trans.?date|tran.?date"),

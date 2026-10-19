@@ -2094,6 +2094,7 @@ async def _render_landing(
     run_by_user_id: Optional[int] = None,
     mark_calendar: bool = True,
     period: Optional[str] = None,
+    arrival_id: Optional[int] = None,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -2529,6 +2530,25 @@ async def _render_landing(
                 "Checked": _dt.now(_tz.utc).replace(microsecond=0)})
         except Exception as e:  # noqa: BLE001
             log.warning("results sheet skipped: %s", e)
+        # Previous Submission Reconciliation (plan 23): this version against
+        # the last ACCEPTED (delivered) version of the same period, rows
+        # matched on policy + transaction type + effective date + reported
+        # period. Only when such a version exists; read-only and information
+        # only; a failure costs the sheet, never the file.
+        try:
+            import version_diff_store as _vds
+            if _vds.sheet_enabled():
+                with SessionLocal() as _s:
+                    _vr = _vds.reconcile(_s, arrival_id=arrival_id,
+                                         export_id=reuse_export_id,
+                                         landing_id=landing_id, pipeline_id=pipeline_id)
+                if _vr.get("state") in ("compared", "not_compared"):
+                    import version_diff_sheet as _vsh
+                    from datetime import datetime as _dt, timezone as _tz
+                    output_bytes = _vsh.add_sheet(output_bytes, _vr, about=_vsh.about_for(
+                        _vr, checked=_dt.now(_tz.utc).replace(microsecond=0)))
+        except Exception as e:  # noqa: BLE001
+            log.warning("previous submission sheet skipped: %s", e)
         # LAST step on purpose: highlighting re-saves the workbook via openpyxl,
         # which would drop injected formulas/cached values. Patches each detected
         # totals cell with =SUM(...) + a cached value recomputed from the
@@ -4434,7 +4454,7 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
     return {"landing_id": landing_id, "pipeline_id": pipeline_id,
             "contract_id": contract_id, "eff_contract_id": eff_contract_id,
             "run_scope": run_scope, "drift": drift, "supp_stats": supp_stats,
-            "itd": itd_plan,
+            "itd": itd_plan, "arrival_id": arrival_id,
             "layout_changes": layout_changes}
 
 
@@ -4453,7 +4473,7 @@ async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Option
         filename, actor, {}, auto_ingest=not check_only,
         pipeline_id=prep["pipeline_id"], check_only=check_only,
         scope=prep["run_scope"], run_by_user_id=run_by_user_id,
-        mark_calendar=mark_calendar, period=period)
+        mark_calendar=mark_calendar, period=period, arrival_id=prep.get("arrival_id"))
     result["format_drift"] = prep["drift"]
     result["layout_changes"] = prep.get("layout_changes")
     if prep["supp_stats"] is not None:

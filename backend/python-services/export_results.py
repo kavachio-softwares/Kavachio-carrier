@@ -39,6 +39,9 @@ OUTCOME_WORDS = {
 # own sheet name in practice; a clash is avoided by suffixing (see _free_name).
 RESULTS_SHEET = "Results"
 RESULTS_TITLE = "Validation results"
+# Report sheets added after the template's own (never data): this module's
+# counts and the Previous Submission Reconciliation (version_diff_sheet.TITLE).
+REPORT_TITLES = (RESULTS_TITLE, "Previous submission reconciliation")
 
 _STATUS_WORDS = {
     "approved": "approved", "fixed": "fixed", "dismissed": "dismissed",
@@ -503,8 +506,8 @@ def grid_to_sheets(grid: list[dict], data_only: bool = True) -> tuple[dict, dict
         rows = g.get("rows") or []
         if not rows:
             continue
-        # The counts sheet this module adds to the Excel is not data.
-        if rows[0] and str(rows[0][0]).strip() == RESULTS_TITLE:
+        # The report sheets added to the Excel are not data.
+        if rows[0] and str(rows[0][0]).strip() in REPORT_TITLES:
             continue
         header = [str(h) if h not in (None, "") else f"Column {i + 1}"
                   for i, h in enumerate(rows[0])]
