@@ -18,12 +18,21 @@ status, exception, delivery and email stays exactly as it was.
   - fixes recorded on the versions in between (Fix & Validate / secure link),
     so a corrected amount is not called a silent restatement.
 
+The comparison is worked out when the "Previous Submission" tab asks for it
+(`screen`), never while a file is processed, and remembered: paging,
+filtering and searching the tab reuse it until something it depends on
+changes (`_depends_on`).
+
 Every function takes the caller's session; none opens one.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
+import threading
+from collections import OrderedDict
 from typing import Optional
 
 import row_key as rk
@@ -31,13 +40,6 @@ import version_diff as vd
 from itd_run import DELIVERED
 
 log = logging.getLogger("kavachio.version_diff")
-
-
-def sheet_enabled() -> bool:
-    """The "Previous submission" sheet in the BDX output — on unless
-    PREVIOUS_SUBMISSION_SHEET is 0/false/off (read each time, no restart)."""
-    return os.getenv("PREVIOUS_SUBMISSION_SHEET", "1").strip().lower() not in (
-        "0", "false", "off", "no")
 
 
 def _setting_int(name: str, default: int) -> int:
@@ -51,6 +53,12 @@ def max_rows() -> int:
     """Rows per version above which a file is not compared
     (PREVIOUS_SUBMISSION_MAX_ROWS)."""
     return _setting_int("PREVIOUS_SUBMISSION_MAX_ROWS", 200_000)
+
+
+def cache_rows() -> int:
+    """Rows of worked-out comparisons kept in memory, all files together
+    (PREVIOUS_SUBMISSION_CACHE_ROWS); the least recently used go first."""
+    return _setting_int("PREVIOUS_SUBMISSION_CACHE_ROWS", 200_000)
 
 
 # ── which versions ──────────────────────────────────────────────────────────
@@ -242,6 +250,54 @@ def _version_info(v) -> dict:
             "received_at": v.created_at.isoformat() if getattr(v, "created_at", None) else None}
 
 
+def _prepare(s, *, arrival_id: Optional[int] = None, export_id: Optional[int] = None,
+             landing_id: Optional[int] = None, pipeline_id: Optional[int] = None) -> dict:
+    """Which versions, and how each setup reads them — the cheap part. `done`
+    is the result already when there is nothing to compare."""
+    th, me, base = find_versions(s, arrival_id=arrival_id, export_id=export_id,
+                                 landing_id=landing_id)
+    if th is None:
+        out = vd._empty("not_in_submission",
+                        "Nothing to compare: this file is not part of a broker submission.")
+        out.update(accepted=None, this={}, submission_ref=None)
+        return {"done": out}
+    cur_landing = landing_id or me.landing_id
+    meta = {"submission_ref": th.ref if hasattr(th, "ref") else None,
+            "this": {**_version_info(me), "landing_id": cur_landing},
+            "accepted": _version_info(base) or None}
+    done = None
+    if base is None:
+        done = vd._empty("no_accepted_version",
+                         "Nothing to compare yet: no earlier version of this period "
+                         "was sent to the carrier.")
+    elif cur_landing and base.landing_id == cur_landing:
+        done = vd._empty("same_file", "Nothing to compare: this is the version that was "
+                                      "sent to the carrier.")
+    if done is not None:
+        done.update(meta)
+        return {"done": done}
+    setups = {base.landing_id: setup_for(s, base.landing_id)}
+    if cur_landing:
+        setups[cur_landing] = setup_for(s, cur_landing, pipeline_id)
+    return {"done": None, "th": th, "me": me, "base": base, "cur_landing": cur_landing,
+            "meta": meta, "setups": setups}
+
+
+def _compare(s, prep: dict, current_data: Optional[dict] = None) -> dict:
+    """The comparison itself — the costly part: both versions' rows."""
+    th, me, base, cur_landing = prep["th"], prep["me"], prep["base"], prep["cur_landing"]
+    setups = prep["setups"]
+    cur = current_data if current_data is not None else (
+        landing_rows(s, cur_landing, as_delivered=False) if cur_landing else {})
+    acc = landing_rows(s, base.landing_id, as_delivered=True)
+    fixes = corrections_between(s, th, base, me, setups)
+    res = vd.diff_versions(acc, cur, accepted_setup=setups[base.landing_id],
+                           current_setup=setups.get(cur_landing) or {},
+                           corrections=fixes, max_rows=max_rows())
+    res.update(prep["meta"])
+    return res
+
+
 def reconcile(s, *, arrival_id: Optional[int] = None, export_id: Optional[int] = None,
               landing_id: Optional[int] = None, pipeline_id: Optional[int] = None,
               current_data: Optional[dict] = None) -> dict:
@@ -251,65 +307,95 @@ def reconcile(s, *, arrival_id: Optional[int] = None, export_id: Optional[int] =
       no_accepted_version  no earlier version was delivered yet (D1)
       same_file            the accepted version is this very landing
       itd_file / too_large / not_compared / compared  (version_diff)"""
-    th, me, base = find_versions(s, arrival_id=arrival_id, export_id=export_id,
-                                 landing_id=landing_id)
-    if th is None:
-        out = vd._empty("not_in_submission",
-                        "Not compared — this file is not part of a submission "
-                        "(a self-check, or a file with no broker).")
-        out.update(accepted=None, this={}, submission_ref=None)
-        return out
-    cur_landing = landing_id or me.landing_id
-    meta = {"submission_ref": th.ref if hasattr(th, "ref") else None,
-            "this": {**_version_info(me), "landing_id": cur_landing},
-            "accepted": _version_info(base) or None}
-    if base is None:
-        out = vd._empty("no_accepted_version",
-                        "No accepted version yet for this period — nothing to compare "
-                        "against. (Accepted = delivered to the carrier.)")
-        out.update(meta)
-        return out
-    if cur_landing and base.landing_id == cur_landing:
-        out = vd._empty("same_file", "This is the accepted version itself.")
-        out.update(meta)
-        return out
-    setups = {base.landing_id: setup_for(s, base.landing_id)}
-    if cur_landing:
-        setups[cur_landing] = setup_for(s, cur_landing, pipeline_id)
-    cur = current_data if current_data is not None else (
-        landing_rows(s, cur_landing, as_delivered=False) if cur_landing else {})
-    acc = landing_rows(s, base.landing_id, as_delivered=True)
-    fixes = corrections_between(s, th, base, me, setups)
-    res = vd.diff_versions(acc, cur, accepted_setup=setups[base.landing_id],
-                           current_setup=setups.get(cur_landing) or {},
-                           corrections=fixes, max_rows=max_rows())
-    res.update(meta)
-    return res
+    prep = _prepare(s, arrival_id=arrival_id, export_id=export_id, landing_id=landing_id,
+                    pipeline_id=pipeline_id)
+    return prep["done"] or _compare(s, prep, current_data)
 
 
-def refresh_download(s, export_id: int, data: bytes, filename: Optional[str]) -> bytes:
-    """An output as "Download BDX" serves it. The "Previous submission" sheet
-    is written into the file when it is processed, so an older output would
-    keep the layout — and the result — of that day: one processed before a
-    setup fix still says "Not compared". When the stored file has the sheet,
-    it is rebuilt now: same versions (the accepted one is always the last
-    delivered BEFORE this one, so the comparison itself does not move), the
-    current layout and setup. A sheet already built with today's layout, and
-    compared, is served as stored (re-opening a large workbook costs seconds
-    per download). Anything else, or any failure: the stored bytes,
-    untouched."""
-    if not data or not sheet_enabled() or not str(filename or "").lower().endswith(".xlsx"):
+# ── the tab: worked out once, remembered ────────────────────────────────────
+
+_LOCK = threading.Lock()
+_REMEMBERED: "OrderedDict[int, tuple[str, dict]]" = OrderedDict()   # export → (stamp, entry)
+_WORKING: dict[int, threading.Lock] = {}
+
+
+def _depends_on(s, prep: dict) -> str:
+    """A stamp of everything the comparison reads: the engine, the two
+    versions, the fixes saved on them and on the versions between (only the
+    accepted landing's fixes change what it says; the others decide whether a
+    restatement was asked for), and how each setup reads its columns. The
+    landings' own rows are a capture that never changes."""
+    from sqlalchemy import text
+    th, me, base = prep["th"], prep["me"], prep["base"]
+    landings = sorted({v.landing_id for v in th.versions
+                       if v.landing_id and base.no <= v.no < me.no})
+    fixes = s.execute(text(
+        "SELECT count(*), md5(coalesce(string_agg(id::text || ':' || coalesce(kind, '') || ':' "
+        "|| coalesce(input_sheet, '') || ':' || coalesce(input_row_index::text, '') || ':' "
+        "|| coalesce(source_column, '') || ':' || coalesce(new_value, ''), ',' ORDER BY id), '')) "
+        "FROM landing_correction WHERE landing_id = ANY(:l)"),
+        {"l": landings or [0]}).one()
+    key = [vd.ENGINE_VERSION, me.no, prep["cur_landing"], base.no, base.landing_id,
+           list(fixes), prep["setups"]]
+    return hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _size(entry: dict) -> int:
+    return sum(len(sh.get("entries") or []) for sh in entry["screen"].get("sheets") or [])
+
+
+def _remember(export_id: int, stamp: str, entry: dict) -> None:
+    with _LOCK:
+        _REMEMBERED[export_id] = (stamp, entry)
+        _REMEMBERED.move_to_end(export_id)
+        budget = cache_rows()
+        while len(_REMEMBERED) > 1 and sum(_size(e) for _s, e in _REMEMBERED.values()) > budget:
+            _REMEMBERED.popitem(last=False)
+
+
+def _recall(export_id: int, stamp: str) -> Optional[dict]:
+    with _LOCK:
+        hit = _REMEMBERED.get(export_id)
+        if hit and hit[0] == stamp:
+            _REMEMBERED.move_to_end(export_id)
+            return hit[1]
+    return None
+
+
+def screen(s, export_id: int) -> dict:
+    """What the "Previous Submission" tab shows for one output
+    (version_diff_sheet.screen), and what its CSV lists (`result`):
+    {"screen", "result"}. Worked out on the first request and remembered
+    until something the comparison reads changes; requests for the same
+    output while it is being worked out wait for it rather than repeating
+    it."""
+    import version_diff_sheet as vsh
+    prep = _prepare(s, export_id=export_id)
+    if prep["done"] is not None:
+        return {"screen": vsh.screen(prep["done"]), "result": prep["done"]}
+    stamp = _depends_on(s, prep)
+    hit = _recall(export_id, stamp)
+    if hit is not None:
+        return hit
+    with _LOCK:
+        working = _WORKING.setdefault(export_id, threading.Lock())
+    with working:
+        hit = _recall(export_id, stamp)
+        if hit is not None:
+            return hit
+        res = _compare(s, prep)
+        entry = {"screen": vsh.screen(res),
+                 # the CSV's source: the rows that differ, not both files
+                 "result": {k: v for k, v in res.items() if k != "view"}}
+        _remember(export_id, stamp, entry)
+        return entry
+
+
+def clean_download(data: bytes, filename: Optional[str]) -> bytes:
+    """An output as "Download BDX" serves it: the bordereau alone. One made
+    before 19 Oct 2026 has a "Previous submission" sheet in it, taken out
+    here (the comparison is on screen now); the stored file is not changed."""
+    if not data or not str(filename or "").lower().endswith(".xlsx"):
         return data
-    try:
-        import version_diff_sheet as vsh
-        if vsh.is_current(data) or not vsh.has_sheet(data):
-            return data
-        res = reconcile(s, export_id=export_id)
-        if res.get("state") not in ("compared", "not_compared"):
-            return data
-        from datetime import datetime, timezone
-        about = vsh.about_for(res, checked=datetime.now(timezone.utc).replace(microsecond=0))
-        return vsh.add_sheet(data, res, about=about, replace=True)
-    except Exception as e:  # noqa: BLE001 — a download never fails over this sheet
-        log.warning("previous submission sheet not refreshed for export %s: %s", export_id, e)
-        return data
+    import version_diff_sheet as vsh
+    return vsh.strip_sheet(data)

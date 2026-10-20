@@ -35,6 +35,7 @@ No database and no web imports, so it can be tested on its own.
 """
 from __future__ import annotations
 
+import functools
 import re
 from datetime import date, datetime
 from typing import Any, Iterable, Optional
@@ -67,7 +68,30 @@ NAME_FIELD = "policyholder_legal_name"
 
 _ISO = "%Y-%m-%d"
 
+# Cleaning a cell depends on nothing but the cell (and the setup's date
+# format), and a bordereau repeats the same headings, dates and ids on
+# thousands of rows: each distinct value is worked out once and remembered,
+# up to this many (the oldest are forgotten first).
+_REMEMBERED = 65_536
 
+
+def _remembered(fn):
+    """`fn` with its answers remembered. `typed`: 1, 1.0 and True stay
+    different values. A cell that cannot be remembered (unhashable) is
+    worked out every time."""
+    cached = functools.lru_cache(maxsize=_REMEMBERED, typed=True)(fn)
+
+    @functools.wraps(fn)
+    def call(*args):
+        try:
+            return cached(*args)
+        except TypeError:
+            return fn(*args)
+    call.cache_clear = cached.cache_clear
+    return call
+
+
+@_remembered
 def heading(name: Any) -> str:
     """A column heading as plain lower-case words, for matching one column
     across two versions: 'Policy No.' → 'policy no',
@@ -76,11 +100,13 @@ def heading(name: Any) -> str:
     return " ".join(re.sub(r"[^0-9a-z%]+", " ", s.lower()).split())
 
 
+@_remembered
 def clean_text(v: Any) -> Optional[str]:
     """An id or a word, spelt one way (itd.norm_value — the ITD key rule)."""
     return itd.norm_value(v)
 
 
+@_remembered
 def clean_policy(v: Any) -> Optional[str]:
     """A policy number, or None when there is none — including the values
     ingest itself treats as no policy number (ingester._POLICY_NUMBER_PLACEHOLDERS,
@@ -92,6 +118,7 @@ def clean_policy(v: Any) -> Optional[str]:
     return text
 
 
+@_remembered
 def clean_date(v: Any, from_fmt: Optional[str] = None) -> Optional[str]:
     """A date-like cell as 'YYYY-MM-DD', read the way the setup reads it:
     a real date, an Excel serial number (mapper's rule), or text parsed by
@@ -118,6 +145,7 @@ def clean_date(v: Any, from_fmt: Optional[str] = None) -> Optional[str]:
         return itd.norm_value(v)
 
 
+@_remembered
 def clean_period(v: Any, from_fmt: Optional[str] = None) -> Optional[str]:
     """The reported period as 'YYYY-MM', compared by month (itd.period_of,
     or the setup's date format when its rule names one); a value neither

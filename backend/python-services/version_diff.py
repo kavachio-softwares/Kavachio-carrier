@@ -155,8 +155,16 @@ def is_money(col: str, canonical: Optional[str] = None) -> bool:
     return (canonical or "").strip() in MONEY_FIELDS
 
 
+# The same cells are read many times over (pairing, comparing, totals):
+# each distinct value is worked out once (row_key._remembered).
+_norm = rk._remembered(itd.norm_value)
+_number = rk._remembered(itd.to_number)
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@rk._remembered
 def _money(v: Any, rate: bool) -> Decimal:
-    n = itd.to_number(v)
+    n = _number(v)
     if n is None:
         return Decimal(0)
     return Decimal(str(n)).quantize(_MICRO if rate else _CENT, rounding=ROUND_HALF_UP)
@@ -165,17 +173,16 @@ def _money(v: Any, rate: bool) -> Decimal:
 def _same_value(a: Any, b: Any) -> bool:
     """Two non-money cells hold the same value: blank = blank, 98000.0 = '98000',
     '6,185.60' = 6185.6, 2025-08-15 = '15/08/2025'."""
-    na, nb = itd.norm_value(a), itd.norm_value(b)
+    na, nb = _norm(a), _norm(b)
     if na == nb:
         return True
     if na is None or nb is None:
         return False
-    xa, xb = itd.to_number(a), itd.to_number(b)
+    xa, xb = _number(a), _number(b)
     if xa is not None and xb is not None:
         return abs(xa - xb) < 1e-9
     da, db = rk.clean_date(a), rk.clean_date(b)
-    iso = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-    return bool(da and db and iso.match(da) and iso.match(db) and da == db)
+    return bool(da and db and _ISO_DAY.match(da) and _ISO_DAY.match(db) and da == db)
 
 
 def _plain(v: Any) -> Any:
@@ -240,7 +247,7 @@ def _signature(entry: dict, cols: list[str], money: dict) -> tuple:
         if c in money:
             out.append(str(_money(row.get(c), money[c])))
         else:
-            out.append(itd.norm_value(row.get(c)) or "")
+            out.append(_norm(row.get(c)) or "")
     return tuple(out)
 
 
@@ -392,8 +399,9 @@ def _compare_sheet(name: str, bsheet: dict, csheet: dict, bset: dict, cset: dict
                  "this": len(csheet.get("rows") or [])},
     }
     bcolset, ccolset = list(bsheet.get("columns") or []), list(csheet.get("columns") or [])
-    info["columns_added"] = [c for c in ccolset if rk.heading(c) not in {rk.heading(x) for x in bcolset}]
-    info["columns_removed"] = [c for c in bcolset if rk.heading(c) not in {rk.heading(x) for x in ccolset}]
+    bheads, cheads = {rk.heading(x) for x in bcolset}, {rk.heading(x) for x in ccolset}
+    info["columns_added"] = [c for c in ccolset if rk.heading(c) not in bheads]
+    info["columns_removed"] = [c for c in bcolset if rk.heading(c) not in cheads]
     if parts is None:
         gaps = []
         for p in rk.MANDATORY:
@@ -412,7 +420,7 @@ def _compare_sheet(name: str, bsheet: dict, csheet: dict, bset: dict, cset: dict
     info["skipped_lines"] = {"accepted": bside.skipped, "this": cside.skipped}
     key_heads = {rk.heading(c) for c in (*bcols.values(), *ccols.values()) if c}
     canon = {**(bset.get("canonical_of") or {}), **(cset.get("canonical_of") or {})}
-    common = [c for c in ccolset if rk.heading(c) in {rk.heading(x) for x in bcolset}]
+    common = [c for c in ccolset if rk.heading(c) in bheads]
     bname = {rk.heading(x): x for x in bcolset}
     mapped = cset.get("mapped_columns")
     compared, money = [], {}

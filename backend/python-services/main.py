@@ -2686,11 +2686,17 @@ def _export_blob_digest(s, export_id: int) -> "str | None":
 
 def _export_blob_bytes(export_id: int) -> "bytes | None":
     """Fetch an export's bytes in a session of their own — called lazily, from
-    inside a streaming response, after the request's own session has closed."""
+    inside a streaming response, after the request's own session has closed.
+    As "Download BDX" serves them: an output made before 19 Oct 2026 without
+    its "Previous submission" sheet (version_diff_store.clean_download)."""
+    import version_diff_store
     with SessionLocal() as s:
         r = s.get(OutputExport, export_id, options=[load_only(
-            OutputExport.blob, OutputExport.blob_ref)])
-        return storage.resolve_bytes(r.blob_ref, r.blob) if r else None
+            OutputExport.blob, OutputExport.blob_ref, OutputExport.filename)])
+        if not r:
+            return None
+        return version_diff_store.clean_download(storage.resolve_bytes(r.blob_ref, r.blob),
+                                                 r.filename)
 
 
 def _export_data_sheet_names(s, rec) -> set:
@@ -4002,9 +4008,10 @@ def export_download_file(export_id: int,
 
 def export_file_bytes(s, export_id: int, row=None):
     """The generated BDX exactly as "Download BDX" serves it — exceptions
-    highlighted, each with its note, and the "Previous submission" sheet
-    rebuilt in today's layout — as (filename, bytes, media type), or None.
-    Also what the broker's exception email attaches."""
+    highlighted, each with its note — as (filename, bytes, media type), or
+    None. Also what the broker's exception email attaches. An output made
+    before 19 Oct 2026 loses its "Previous submission" sheet on the way out
+    (the comparison is the exceptions screen's Previous Submission tab now)."""
     r = row if row is not None else _export_file_row(s, export_id)
     if not r:
         return None
@@ -4012,7 +4019,7 @@ def export_file_bytes(s, export_id: int, row=None):
     if not data:
         return None
     import version_diff_store
-    data = version_diff_store.refresh_download(s, export_id, data, r.filename)
+    data = version_diff_store.clean_download(data, r.filename)
     from output_serializers import content_type_for_filename
     return r.filename, data, content_type_for_filename(r.filename)
 
@@ -4129,72 +4136,83 @@ def export_download_results_csv(export_id: int,
 
 def _export_previous_submission(s, export_id: int, principal) -> tuple:
     """This export against the last accepted version of its submission
-    (version_diff_store.reconcile) — read-only, worked out on request."""
+    (version_diff_store.screen) — read-only, worked out on the first request
+    and remembered for the next ones."""
     import version_diff_store as vds
     r = _export_file_row(s, export_id)
     if not r:
         raise HTTPException(404, "export not found")
     assert_can_read_export(s, principal, r)
-    full = s.get(OutputExport, export_id)
-    return full, vds.reconcile(s, export_id=export_id)
+    return r, vds.screen(s, export_id)
 
 
 @app.get("/export/downloads/{export_id}/previous-submission")
-def export_download_previous_submission(export_id: int, outcome: str | None = None,
-                                        q: str | None = None, page: int = 1,
-                                        page_size: int = 50,
+def export_download_previous_submission(export_id: int,
                                         principal: Principal = Depends(current_principal)):
-    """Previous Submission Reconciliation (plan 23): this file against the
-    last accepted (delivered) version of the same period, rows matched on
-    policy number + transaction type + transaction effective date + reported
-    period. Summary (outcomes, restatements, new rows, amounts), the sheets
-    and the rows that are not unchanged, filtered and paged here. `outcome`
-    is one of New, Changed, Disappeared, Restated (version_diff.OUTCOME_WORDS
-    or its codes)."""
+    """The "Previous Submission" tab (plan 23): this file against the last
+    accepted (delivered) version of the same period, rows matched on policy
+    number + transaction type + transaction effective date + reported period.
+    The sentences, the counts with what each means, the colour key, and each
+    sheet's columns and row counts — the rows themselves come a window at a
+    time from …/previous-submission/rows."""
+    with SessionLocal() as s:
+        _r, got = _export_previous_submission(s, export_id, principal)
+    scr = got["screen"]
+    return {"export_id": export_id,
+            **{k: v for k, v in scr.items() if k != "sheets"},
+            "sheets": [{**{k: v for k, v in sh.items() if k != "entries"},
+                        "rows": len(sh["entries"])} for sh in scr["sheets"]]}
+
+
+@app.get("/export/downloads/{export_id}/previous-submission/rows")
+def export_download_previous_submission_rows(export_id: int, sheet: str | None = None,
+                                             outcome: str | None = None,
+                                             q: str | None = None,
+                                             offset: int = 0, limit: int = 200,
+                                             principal: Principal = Depends(current_principal)):
+    """One sheet of the tab, in file order, `limit` rows from `offset`.
+    `outcome`: all (default), changes (every row that is not unchanged) or
+    one outcome (version_diff.OUTCOME_WORDS or its code). `q` finds text in
+    any cell or in what happened to the row."""
     import version_diff as vd
     with SessionLocal() as s:
-        _full, res = _export_previous_submission(s, export_id, principal)
-    rows = res.get("rows") or []
-    if outcome:
-        o = outcome.strip().lower()
-        rows = [x for x in rows if o in (str(x.get("outcome")).lower(),
-                                         vd.OUTCOME_WORDS.get(x.get("outcome"), "").lower())]
+        _r, got = _export_previous_submission(s, export_id, principal)
+    sheets = got["screen"]["sheets"]
+    sh = (next((x for x in sheets if x["sheet"] == sheet), None) if sheet
+          else next((x for x in sheets if x["entries"]), sheets[0] if sheets else None))
+    if sh is None:
+        raise HTTPException(404, "sheet not found")
+    rows = sh["entries"]
+    want = (outcome or "all").strip().lower()
+    if want == "changes":
+        rows = [e for e in rows if e["outcome"] != vd.UNCHANGED]
+    elif want != "all":
+        code = next((k for k, w in vd.OUTCOME_WORDS.items() if want in (k, w.lower())), None)
+        if code is None:
+            raise HTTPException(400, f"Unknown outcome: {outcome}")
+        rows = [e for e in rows if e["outcome"] == code]
     if q and q.strip():
         needle = q.strip().lower()
-        rows = [x for x in rows if needle in str(x.get("policy") or "").lower()
-                or needle in str(x.get("insured") or "").lower()
-                or needle in str(x.get("key") or "").lower()]
-    page_size = max(1, min(int(page_size or 50), 500))
-    pages = max(1, -(-len(rows) // page_size))
-    page = max(1, min(int(page or 1), pages))
-    return {
-        "export_id": export_id,
-        "state": res.get("state"),
-        "submission_ref": res.get("submission_ref"),
-        "this": res.get("this"),
-        "accepted": res.get("accepted"),
-        "summary": res.get("summary"),
-        "sheets": res.get("sheets"),
-        "outcome_words": dict(vd.OUTCOME_WORDS),
-        "records": {"items": rows[(page - 1) * page_size: page * page_size],
-                    "total": len(rows), "page": page, "page_size": page_size,
-                    "pages": pages},
-    }
+        rows = [e for e in rows if needle in e["note"].lower()
+                or any(needle in c.lower() for c in e["cells"])]
+    offset = max(0, int(offset or 0))
+    limit = max(1, min(int(limit or 200), 1000))
+    return {"sheet": sh["sheet"], "columns": sh["columns"], "total": len(rows),
+            "offset": offset, "rows": rows[offset:offset + limit]}
 
 
 @app.get("/export/downloads/{export_id}/previous-submission.csv")
 def export_download_previous_submission_csv(export_id: int,
                                             principal: Principal = Depends(current_principal)):
-    """The row-by-row list as CSV: one line per value that differs, for every
-    row that is not unchanged (the sheet in the BDX stops at
-    PREVIOUS_SUBMISSION_MAX_LINES lines)."""
+    """The tab as CSV: one line per value that differs, for every row that is
+    not unchanged."""
     import re
     import version_diff_sheet as vsh
     with SessionLocal() as s:
-        full, res = _export_previous_submission(s, export_id, principal)
-        name = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", (full.filename if full else None)
+        r, got = _export_previous_submission(s, export_id, principal)
+        name = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", (r.filename if r else None)
                       or f"export_{export_id}")
-    return Response(content=vsh.to_csv(res).encode("utf-8-sig"), media_type="text/csv",
+    return Response(content=vsh.to_csv(got["result"]).encode("utf-8-sig"), media_type="text/csv",
                     headers={"Content-Disposition":
                              f'attachment; filename="{name}-previous-submission.csv"'})
 

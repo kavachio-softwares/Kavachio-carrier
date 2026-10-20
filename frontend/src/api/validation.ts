@@ -626,3 +626,72 @@ export async function getExportResults(
   });
   return data;
 }
+
+
+// ── Previous Submission tab (plan 23): this version against the last one sent ──
+
+export type PrevOutcome = "new" | "changed" | "disappeared" | "restated" | "unchanged";
+
+/** One outcome as the server words and colours it (version_diff_sheet). */
+export type PrevOutcomeInfo = {
+  code: PrevOutcome; word: string; count: number;
+  meaning: string; legend: string;
+  fill: string; ink: string; cell: string | null;
+};
+
+export type PrevSheet = {
+  sheet: string; columns: string[]; rows: number;
+  counts: Partial<Record<PrevOutcome, number>>;
+  /** Why the sheet was not compared; null when it was. */
+  message: string | null;
+};
+
+export type PreviousSubmission = {
+  export_id: number;
+  state: string;
+  /** Why nothing was compared; null when the file was compared. */
+  message: string | null;
+  this: { version?: number; received_at?: string | null };
+  accepted: { version?: number; received_at?: string | null } | null;
+  about: string[];
+  warnings: string[];
+  total: number;
+  all_meaning: string;
+  outcomes: PrevOutcomeInfo[];
+  sheets: PrevSheet[];
+};
+
+export type PrevRow = {
+  outcome: PrevOutcome;
+  row: number | null;
+  accepted_row: number | null;
+  /** Each column's value as shown; `was` holds the old value of a changed one, by column index. */
+  cells: string[];
+  was: Record<string, string>;
+  note: string;
+  /** A row only the earlier version had. */
+  gone: boolean;
+};
+
+export type PrevRows = { sheet: string; columns: string[]; total: number; offset: number; rows: PrevRow[] };
+
+/** "changes" = every row that is not unchanged. */
+export type PrevFilter = "changes" | "all" | PrevOutcome;
+
+export async function getPreviousSubmission(exportId: number | string): Promise<PreviousSubmission> {
+  const { data } = await api.get(`/export/downloads/${exportId}/previous-submission`);
+  return data;
+}
+
+export async function getPreviousSubmissionRows(
+  exportId: number | string,
+  opts: { sheet: string; filter: PrevFilter; q?: string; offset: number; limit: number },
+  signal?: AbortSignal,
+): Promise<PrevRows> {
+  const { data } = await api.get(`/export/downloads/${exportId}/previous-submission/rows`, {
+    params: { sheet: opts.sheet, outcome: opts.filter, q: opts.q?.trim() || undefined,
+              offset: opts.offset, limit: opts.limit },
+    signal,
+  });
+  return data;
+}
