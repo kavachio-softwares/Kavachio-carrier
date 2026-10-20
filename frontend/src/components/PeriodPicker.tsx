@@ -41,7 +41,7 @@ function friendlyDue(due: string | null): string {
 }
 
 export function PeriodPicker({
-  value, onChange, periods, placeholder, emptyLabel,
+  value, onChange, periods, placeholder, emptyLabel, hideDue = false,
 }: {
   value: string;
   onChange: (period: string) => void;
@@ -51,6 +51,8 @@ export function PeriodPicker({
   /** Shown when `periods` is an empty array — who "nothing set up" is about
    *  differs by caller (a contract, a broker, …). */
   emptyLabel?: string;
+  /** Leave the due date off the closed box (it stays on the open list). */
+  hideDue?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -101,9 +103,11 @@ export function PeriodPicker({
             <span style={{ fontSize: 13.5, fontWeight: 600, color: "var(--p-ink)" }}>
               {friendlyPeriod(current.period)}
             </span>
-            <span style={{ fontSize: 12.5, color: "var(--p-faint)" }}>
-              Due {friendlyDue(current.due_date)}
-            </span>
+            {!hideDue && (
+              <span style={{ fontSize: 12.5, color: "var(--p-faint)" }}>
+                Due {friendlyDue(current.due_date)}
+              </span>
+            )}
             {current.processed && (
               <span className="badge b-warn" style={{ marginLeft: "auto", flex: "none" }}>
                 Resubmit
