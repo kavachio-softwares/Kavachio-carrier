@@ -19,7 +19,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Ban, CheckCircle2, Eye, KeyRound, Lock, Mail, MessageSquare, RefreshCw, Send,
-  ShieldCheck, Download, XCircle,
+  ShieldCheck, Download, XCircle, PenLine,
 } from "lucide-react";
 import { InfoTip } from "../InfoTip";
 import { fieldErrors } from "../../api/contractRecord";
@@ -48,6 +48,8 @@ const EVENT: Record<AccessEvent["type"], { label: string; icon: React.ElementTyp
   refused: { label: "Tried a closed link", icon: XCircle },
   approved: { label: "Approved the treaty", icon: CheckCircle2 },
   changes_requested: { label: "Asked for a change", icon: MessageSquare },
+  sign_requested: { label: "Sent a link to sign", icon: PenLine },
+  signed: { label: "Signed the treaty", icon: PenLine },
 };
 
 const APPROVAL: Record<string, { label: string; cls: string }> = {

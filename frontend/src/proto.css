@@ -1663,3 +1663,4 @@
 .proto .tw-explain li{padding-left:14px;position:relative}
 .proto .tw-explain li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;border-radius:99px;background:var(--p-primary)}
 .proto .tw-explain b{color:var(--p-ink)}
+.proto .panel-tbl input[type=checkbox]{width:auto;flex:0 0 auto}

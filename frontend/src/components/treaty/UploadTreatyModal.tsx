@@ -27,7 +27,9 @@ import { EMPTY_TREATY, TreatyEditor, treatyForSave } from "./TreatyEditor";
 
 type Stage = "file" | "reading" | "check";
 
-export function UploadTreatyModal({ open, onClose, programId: initialProgramId }: {
+export function UploadTreatyModal({ open, onClose, programId: initialProgramId, switcher }: {
+  /** The Contracts list's broker / reinsurance choice, at the top. */
+  switcher?: React.ReactNode;
   open: boolean;
   onClose: () => void;
   programId?: number;
@@ -200,6 +202,7 @@ export function UploadTreatyModal({ open, onClose, programId: initialProgramId }
            size={stage === "check" ? "4xl" : "lg"}
            title="Upload a signed treaty" footer={footer}>
       <div className="proto proto-embed">
+        {stage === "file" && switcher}
         {stage !== "check" ? (
           <>
             <p className="sub" style={{ marginTop: 0 }}>

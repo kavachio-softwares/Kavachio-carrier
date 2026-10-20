@@ -24,7 +24,9 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
    *  ignored while this is set — the labels below are the titles, and each
    *  carries its own `hint` where a single `subtitle` would have to describe
    *  both at once. */
-  split?: { label: string; value: string | number; hint?: string }[];
+  split?: { label: string; value: string | number; hint?: string;
+            /** Opens this half's own list instead of the tile's. */
+            onClick?: () => void }[];
 }) {
   const alert = tone === "alert";
   return (
@@ -53,7 +55,9 @@ export function StatCard({ title, value, icon: Icon, trend, subtitle, tone, onCl
         <div>
           <div style={{ display: "flex", alignItems: "stretch" }}>
           {split.map((sp, i) => (
-            <div key={sp.label} style={{
+            <div key={sp.label}
+              onClick={sp.onClick ? (e) => { e.stopPropagation(); sp.onClick!(); } : undefined}
+              style={{
               flex: 1, minWidth: 0,
               // A rule rather than a gap: two numbers this close together read
               // as one figure and its footnote without something between them.

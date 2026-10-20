@@ -350,6 +350,9 @@ _FRIENDLY = {
     # --- reinsurance treaties (treaty_routes)
     ("PUT",    "/contracts/{id}/treaty"):            "treaty_structure_saved",
     ("POST",   "/treaties/upload"):                  "signed_treaty_uploaded",
+    ("POST",   "/reinsurance/bordereaux"):           "reinsurance_bordereau_prepared",
+    ("PUT",    "/reinsurance/setups/{id}"):          "reinsurance_setup_saved",
+    ("POST",   "/reinsurance/setups/{id}/send-back"): "reinsurance_setup_sent_back",
     ("PUT",    "/contracts/{id}/treaty/programmes"): "treaty_programmes_updated",
     ("POST",   "/programs/{id}/treaties"):           "treaty_attached_to_programme",
     ("DELETE", "/programs/{id}/treaties/{id}"):      "treaty_detached_from_programme",
@@ -420,6 +423,10 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/contract-wording/preview$")),
     ("POST",   re.compile(r"^/treaty/preview$")),
     ("POST",   re.compile(r"^/treaties/read$")),
+    # Sending writes its own row (reinsurance_bordereau_sent).
+    ("POST",   re.compile(r"^/reinsurance/bordereaux/\d+/send$")),
+    ("POST",   re.compile(r"^/reinsurance/setups/\d+/activate$")),
+    ("POST",   re.compile(r"^/reinsurance/setups/\d+/preview$")),
     # The reinsurer's link has no Kavachio user behind it; every code, unlock
     # and download is written to reinsurer_access_event by the route itself.
     ("POST",   re.compile(r"^/treaty-view/[^/]+(/.*)?$")),

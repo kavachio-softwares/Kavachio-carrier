@@ -132,6 +132,17 @@ export const ROUTE_ACCESS: {
   // and unlisted for the same reason /sign is: it has no session at all.
   { pattern: "/programs/:programId/reinsurance", requires: "carrier_admin",
     only: ["carrier_admin"] },
+  // Reinsurance (ceded) bordereaux — the carrier's statements to its
+  // reinsurers. Its book, and Kavachio is not a party to it.
+  { pattern: "/reinsurance/bordereaux", requires: "carrier_admin",
+    only: ["carrier_admin"] },
+  { pattern: "/reinsurance/bordereaux/:id", requires: "carrier_admin",
+    only: ["carrier_admin"] },
+  { pattern: "/reinsurance/setups", requires: "carrier_admin", only: ["carrier_admin"] },
+  { pattern: "/reinsurance/setups/:contractId", requires: "carrier_admin",
+    only: ["carrier_admin"] },
+  { pattern: "/reinsurance/setups/:contractId/edit", requires: "carrier_admin",
+    only: ["carrier_admin"] },
   // `only`, not `requires`: a bare `requires` lets kavachio_admin in by rank,
   // and this is the contract record by another route.
   { pattern: "/programs/:programId/contracts/:contractId",

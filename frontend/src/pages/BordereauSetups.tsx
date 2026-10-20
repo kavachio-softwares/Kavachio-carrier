@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { Boxes, FileSpreadsheet } from "lucide-react";
+import { ArrowRight, Boxes, FileSpreadsheet, ShieldCheck, Upload } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
 import { fmtStamp } from "../utils/date";
@@ -11,6 +11,18 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { InfoTip } from "../components/InfoTip";
 import { getHierarchy } from "../api/hierarchy";
 import { readyForSetupUrl } from "../components/ProgrammeStepper";
+import { SETUP_STATUS as RI_STATUS } from "./ReinsuranceSetups";
+import { listSetups, type SetupListItem } from "../api/ceded";
+import { Modal } from "../components/ui/Modal";
+
+/** The two kinds of bordereau setup a carrier has, as the list names them. */
+type SetupType = "broker" | "reinsurance";
+const SETUP_TYPE: Record<SetupType, { label: string; cls: string; what: string }> = {
+  broker: { label: "Broker bordereau", cls: "b-info",
+            what: "The files your brokers send you — read, checked against the contract and written to your output template." },
+  reinsurance: { label: "Reinsurance bordereau", cls: "b-ok",
+                 what: "The statements you send your reinsurers — worked out per treaty from your brokers' bordereaux." },
+};
 
 type SetupContract = { contract_id: number; sheet_key: string | null; filename: string | null };
 type Setup = {
@@ -63,7 +75,22 @@ export default function BordereauSetups() {
   // every row named the same carrier and the filter had one option.
   // ?program_id= opens the list filtered to one programme (the Programmes
   // stepper links here once a programme's setups are all in place).
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
+  // Which kind of setup to list — a filter, like the others. ?tab=reinsurance
+  // (the dashboard, Reinsurance Bordereaux and a treaty's setup link here)
+  // opens it on the reinsurance setups.
+  const [setupType, setSetupType] = useState<"" | SetupType>(
+    params.get("tab") === "reinsurance" ? "reinsurance"
+      : params.get("tab") === "broker" ? "broker" : "");
+  void setParams;
+  // The treaties' setups — one per live treaty, few enough to filter here.
+  const [riItems, setRiItems] = useState<SetupListItem[] | null>(null);
+  useEffect(() => {
+    listSetups().then(setRiItems).catch(() => setRiItems([]));
+  }, [mga]);
+  // "What are you setting up?" — asked before a new setup is started.
+  const [choosing, setChoosing] = useState(false);
+  const [treatyPick, setTreatyPick] = useState("");
   const [program, setProgram] = useState(params.get("program_id") ?? "");   // program_id, as a string
   // ?status= opens the list filtered to one state — how the carrier admin's
   // "waiting on you" tile and the approval email both land on exactly the
@@ -97,8 +124,24 @@ export default function BordereauSetups() {
     PAGE_SIZE,
   );
 
-  const filtersActive = q !== "" || program !== "" || status !== "";
-  function clearFilters() { setQ(""); setProgram(""); setStatus(""); }
+  const filtersActive = q !== "" || program !== "" || status !== "" || setupType !== "";
+  function clearFilters() { setQ(""); setProgram(""); setStatus(""); setSetupType(""); }
+
+  // Which halves of the list show. A treaty's setup has no single programme,
+  // so a programme filter shows broker setups only.
+  const showBroker = setupType !== "reinsurance";
+  const showRi = setupType !== "broker" && program === "";
+  // Only setups that exist — a treaty nobody has started a setup for is not
+  // a setup. It is started from "Bordereau Setup" → Reinsurance bordereau.
+  const riRows = (riItems ?? []).filter(i => i.status != null
+    && (!status || i.status === status)
+    && (!dq.trim() || `${i.treaty} ${i.type_label ?? ""}`.toLowerCase()
+      .includes(dq.trim().toLowerCase())));
+  // Treaty setups sit at the top of the first page; the pages are the broker
+  // setups', which can run to hundreds.
+  const riShown = showRi && page === 1 ? riRows : [];
+  const brokerRows = showBroker ? items : [];
+  const shownTotal = (showBroker ? total : 0) + (showRi ? riRows.length : 0);
 
   // Does this carrier have ANY setup? Only learnt from an unfiltered answer —
   // a filtered empty page says nothing about the rest. Null until known, so
@@ -123,14 +166,9 @@ export default function BordereauSetups() {
   // programme and broker, the same place the Programmes list's button goes.
   const noSetups = hasAny === false;
   const shut = noSetups && !readyUrl;
+  const startBroker = () => nav(noSetups && readyUrl ? readyUrl : "/direct/setup");
   const newSetup = (
-    <button type="button" className="btn pri"
-      onClick={() => nav(noSetups && readyUrl ? readyUrl : "/direct/setup")}
-      disabled={shut}
-      title={shut
-        ? "Finish a programme first — it needs a broker and a signed contract "
-          + "(Programmes → Configure Program)."
-        : undefined}>
+    <button type="button" className="btn pri" onClick={() => setChoosing(true)}>
       <FileSpreadsheet size={15} /> Bordereau Setup
     </button>
   );
@@ -141,7 +179,9 @@ export default function BordereauSetups() {
         <div className="page-head">
           <div className="t">
             <h2>Bordereau Setups
-              <InfoTip text="Every setup created across your programmes — open one to review its mapping." />
+              <InfoTip text={"Every bordereau setup: broker bordereaux (the files your "
+                + "brokers send you) and reinsurance bordereaux (the statements you "
+                + "send your reinsurers). Open one to review it."} />
             </h2>
           </div>
           <div className="actions">{newSetup}</div>
@@ -151,6 +191,13 @@ export default function BordereauSetups() {
           <ListFilterBar
             search={{ value: q, onChange: setQ, placeholder: "Search setups…" }}
             selects={[
+              {
+                key: "type", ariaLabel: "Filter by setup type",
+                value: setupType, onChange: v => setSetupType(v as "" | SetupType),
+                options: [{ value: "", label: "All setup types" },
+                  { value: "broker", label: "Broker bordereau" },
+                  { value: "reinsurance", label: "Reinsurance bordereau" }],
+              },
               {
                 key: "programme", ariaLabel: "Filter by programme",
                 value: program, onChange: setProgram,
@@ -170,53 +217,74 @@ export default function BordereauSetups() {
           />
 
           <div className="tbl-wrap">
-            {loading && items.length === 0 ? (
+            {(showBroker && loading && items.length === 0) || (showRi && riItems === null) ? (
               <div className="empty">Loading…</div>
-            ) : total === 0 && !filtersActive ? (
-              /* Genuinely no setups (vs "none match the filters" below). Derived
-                 from an unfiltered empty result rather than a full row fetch. */
+            ) : shownTotal === 0 && !filtersActive ? (
               <div className="empty">
                 <Boxes size={26} style={{ margin: "0 auto 10px", display: "block" }} />
                 No setups yet.
                 <div className="sub" style={{ marginTop: 6 }}>
-                  {readyUrl
-                    ? <>A programme is ready for its setup — use <b>Bordereau
-                        Setup</b> at the top right.</>
-                    : <>A setup needs a programme with a broker and a signed
-                        contract. Finish one in{" "}
-                        <Link to="/programs" className="linkish">Programmes</Link> first.</>}
+                  Use <b>Bordereau Setup</b> at the top right and pick what you are
+                  setting up.
                 </div>
               </div>
-            ) : total === 0 && status === "pending_approval"
+            ) : shownTotal === 0 && status === "pending_approval"
                  && q === "" && program === "" ? (
-              /* Arrived from the carrier admin's Pending Approvals tile, which
-                 is clickable at zero on purpose. "No setups match your filters"
-                 would be true and would answer a question nobody asked — the
-                 one being asked is "is anything waiting on me?". */
               <div className="empty">
                 <Boxes size={26} style={{ margin: "0 auto 10px", display: "block" }} />
                 Nothing is waiting for your approval.
                 <div className="sub" style={{ marginTop: 6 }}>
                   A setup appears here when a colleague finishes one and sends
-                  it up. Until you approve it, the broker has none of it.
+                  it up.
                 </div>
               </div>
-            ) : total === 0 ? (
+            ) : shownTotal === 0 ? (
               <div className="empty">No setups match your filters.</div>
             ) : (
               <table>
                 <thead>
                   <tr>
-                    <th>Programme</th>
-                    <th>Broker</th>
+                    <th>Setup type</th>
+                    <th>Programme / Treaty</th>
+                    <th>Broker / Treaty type</th>
                     <th>Status</th>
                     <th>Modified</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {items.map(r => (
+                  {riShown.map(r => {
+                    const st = RI_STATUS[r.status ?? "none"];
+                    const to = `/reinsurance/setups/${r.contract_id}`;
+                    return (
+                      <tr key={`ri-${r.contract_id}`} style={{ cursor: "pointer" }}
+                          onClick={() => nav(to)}>
+                        <td><span className={`badge ${SETUP_TYPE.reinsurance.cls}`}>
+                          <ShieldCheck size={11} /> {SETUP_TYPE.reinsurance.label}</span></td>
+                        <td><b>{r.treaty}</b>
+                          <div className="sub">{r.programmes} programme{r.programmes === 1 ? "" : "s"} feed it</div></td>
+                        <td>{r.type_label ?? "—"}
+                          {r.frequency && (
+                            <div className="sub">
+                              {{ monthly: "Monthly", quarterly: "Quarterly", annually: "Yearly" }[r.frequency]}
+                              {r.send_mode ? ` · ${r.send_mode === "auto" ? "sent automatically" : "sent on Send"}` : ""}
+                            </div>
+                          )}</td>
+                        <td><span className={`badge ${st.cls}`}><span className="d" />{st.label}</span></td>
+                        <td className="mono">{fmtStamp(r.updated_at, "—")}</td>
+                        <td>
+                          <span className="linkish" role="button" tabIndex={0}
+                            onClick={e => { e.stopPropagation(); nav(to); }}>
+                            View
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {brokerRows.map(r => (
                     <tr key={r.id}>
+                      <td><span className={`badge ${SETUP_TYPE.broker.cls}`}>
+                        <Upload size={11} /> {SETUP_TYPE.broker.label}</span></td>
                       <td><b>{r.program_name ?? "—"}</b></td>
                       <td>{r.broker_name ?? "—"}</td>
                       <td>
@@ -239,9 +307,63 @@ export default function BordereauSetups() {
             )}
           </div>
 
-          <Pagination page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
-            totalItems={total} onPageChange={setPage} noun="setups" />
+          {showBroker && total > PAGE_SIZE && (
+            <Pagination page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
+              totalItems={total} onPageChange={setPage} noun="broker setups" />
+          )}
         </div>
+
+        {/* What kind of setup — asked first, because the two are built from
+            different things: a broker's file, or a treaty. */}
+        <Modal open={choosing} size="3xl" title="What are you setting up?"
+          onClose={() => { setChoosing(false); setTreatyPick(""); }}>
+          <div className="proto" style={{ background: "transparent" }}>
+            <div className="startpick" style={{ gridTemplateColumns: "repeat(2, minmax(0,1fr))" }}>
+              <div className="sp" style={shut ? { opacity: .55, cursor: "not-allowed" } : undefined}
+                   onClick={() => { if (!shut) startBroker(); }}
+                   title={shut ? "Finish a programme first — it needs a broker and a signed contract (Programmes → Configure Program)." : undefined}>
+                <b><Upload size={14} style={{ verticalAlign: "-2px" }} /> {SETUP_TYPE.broker.label}</b>
+                <span>{SETUP_TYPE.broker.what}</span>
+                <span style={{ marginTop: 8, fontWeight: 600, color: "var(--p-primary)" }}>
+                  {shut ? "Finish a programme first"
+                    : <>Pick the programme and broker <ArrowRight size={12} style={{ verticalAlign: "-2px" }} /></>}
+                </span>
+              </div>
+              <div className="sp" style={{ cursor: "default" }}>
+                <b><ShieldCheck size={14} style={{ verticalAlign: "-2px" }} /> {SETUP_TYPE.reinsurance.label}</b>
+                <span>{SETUP_TYPE.reinsurance.what}</span>
+                {(riItems ?? []).length === 0 ? (
+                  <span style={{ marginTop: 8 }}>
+                    No treaty yet.{" "}
+                    <Link className="linkish" to="/contracts/new?type=insurer_reinsurer">Raise one</Link>
+                  </span>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}
+                       onClick={e => e.stopPropagation()}>
+                    {/* .field gives it the form look every other dropdown has. */}
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label>Treaty</label>
+                    <select value={treatyPick} onChange={e => setTreatyPick(e.target.value)}
+                            style={{ width: "100%" }}>
+                      <option value="">Choose the treaty…</option>
+                      {(riItems ?? []).map(t => (
+                        <option key={t.contract_id} value={String(t.contract_id)}>
+                          {t.treaty}{t.status ? ` — ${RI_STATUS[t.status].label.toLowerCase()}` : " — not set up yet"}
+                        </option>
+                      ))}
+                    </select>
+                    </div>
+                    <button type="button" className="btn pri" disabled={!treatyPick}
+                            style={{ alignSelf: "flex-start" }}
+                            onClick={() => nav(`/reinsurance/setups/${treatyPick}`)}>
+                      Continue <ArrowRight size={13} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </Modal>
       </div>
     </div>
   );

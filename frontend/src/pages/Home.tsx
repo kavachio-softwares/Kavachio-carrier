@@ -14,7 +14,7 @@ import { isHeld, listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
 import { StatCard } from "../components/StatCard";
 import { ArrivalsCard } from "../components/ArrivalsCard";
-import { ReinsurancePanel } from "../components/treaty/ReinsurancePanel";
+import { getReinsuranceDashboard, type ReinsuranceDashboard } from "../api/treaty";
 import BrokerPerformance from "../components/BrokerPerformance";
 import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
 import { clickedDayIndex } from "../components/BrokerCharts";
@@ -157,6 +157,8 @@ export default function Home() {
   const [progCount, setProgCount] = useState<number | null>(null);
   const [partyCount, setPartyCount] = useState<number | null>(null);
   const [contractCount, setContractCount] = useState<number | null>(null);
+  const [brokerCount, setBrokerCount] = useState<number | null>(null);
+  const [treatyCount, setTreatyCount] = useState<number | null>(null);
   // Bordereau setups a colleague has sent up and this carrier admin has not
   // decided on. The carrier admin's ONLY "waiting on me" — a setup sitting
   // here is a broker who cannot send a file yet, so it belongs on the first
@@ -192,6 +194,18 @@ export default function Home() {
   useEffect(() => {
     getCalendar().then(c => setCalCounts(c.counts ?? {})).catch(() => setCalCounts({}));
   }, [mga]);
+
+  // Reinsurance, folded into the cards that already exist rather than a
+  // section of its own: treaties in the Contracts tile, and the reinsurance
+  // bordereaux of the Monthly Activity month beside Bordereaux Processed.
+  const [rei, setRei] = useState<ReinsuranceDashboard | null>(null);
+  useEffect(() => {
+    if (userRole() !== "carrier_admin") return;
+    let live = true;
+    getReinsuranceDashboard(period === ALL ? undefined : period)
+      .then(d => { if (live) setRei(d); }).catch(() => { if (live) setRei(null); });
+    return () => { live = false; };
+  }, [mga, period]);
 
   // Both carrier seats; Kavachio staff have the box on their own dashboard.
   useEffect(() => {
@@ -236,6 +250,12 @@ export default function Home() {
     listContractsPaged({ page: 1, page_size: 1 })
       .then(r => setContractCount(r.total))
       .catch(() => setContractCount(null));
+    // The same count split by who the contract is with — brokers, or the
+    // carrier's own reinsurers — so the tile says which is which.
+    listContractsPaged({ page: 1, page_size: 1, contract_type: "insurer_broker" })
+      .then(r => setBrokerCount(r.total)).catch(() => setBrokerCount(null));
+    listContractsPaged({ page: 1, page_size: 1, contract_type: "insurer_reinsurer" })
+      .then(r => setTreatyCount(r.total)).catch(() => setTreatyCount(null));
   }, [mga, carrierSeat]);
 
   // Only the carrier admin can decide on these, so only they are asked to.
@@ -526,6 +546,47 @@ export default function Home() {
     + "Click to see each result.";
 
   // Recent runs
+  /** The month's reinsurance bordereaux — what was ceded to reinsurers from
+   *  the inward files — under Bordereaux Processed, in the same month. */
+  const reinsuranceCard = (d: ReinsuranceDashboard) => {
+    const c = d.ceded;
+    const chips = [
+      { n: c.ready_to_send, label: "ready to send", tone: "b-info" },
+      { n: c.overdue, label: "overdue", tone: "b-crit" },
+      { n: c.sent, label: "sent", tone: "b-mut" },
+      { n: c.queried, label: "queried", tone: "b-warn" },
+      { n: c.agreed, label: "agreed", tone: "b-ok" },
+    ].filter(x => x.n);
+    return (
+      <div className="card" style={{ padding: "16px 20px", cursor: "pointer" }}
+           onClick={() => nav("/reinsurance/bordereaux")}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Reinsurance Bordereaux</h3>
+            <InfoTip text={`Statements for your reinsurers${infoWhen}, worked out from the bordereaux above — one per treaty and period.`} />
+          </div>
+          <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+            <span style={{ fontSize: 22, fontWeight: 600 }}>{fmt(c.total ?? 0)}</span>
+            <span className="sub">{(c.total ?? 0) === 1 ? "statement" : "statements"} {countWhen}</span>
+          </span>
+        </div>
+        {(chips.length > 0 || c.not_set_up > 0) && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+            {chips.map(x => (
+              <span key={x.label} className={`badge ${x.tone}`}><span className="d" />{x.n} {x.label}</span>
+            ))}
+            {c.not_set_up > 0 && (
+              <Link className="badge b-warn" to="/direct/setups?tab=reinsurance"
+                    onClick={e => e.stopPropagation()}>
+                {c.not_set_up} {c.not_set_up === 1 ? "treaty" : "treaties"} not set up
+              </Link>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const recentCard = (
     <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", border: "none", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/runs?from=home")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgba(15,23,42,0.4), 0 4px 6px -4px rgba(15,23,42,0.4)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
       <div>
@@ -597,10 +658,23 @@ export default function Home() {
 
               {/* The sub-line appears only when something is about to run out
                   — a "0 expiring" line would be one more thing to read past. */}
-              {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")}
-                subtitle={expiringSoon
-                  ? `${expiringSoon} ${expiringSoon === 1 ? "contract" : "contracts"} expiring in the next ${expiringDays} days`
-                  : ""} />)}
+              {/* Two kinds of contract, two numbers: with brokers (the business
+                  coming in) and with reinsurers (the risk passed on). One total
+                  left a carrier guessing which it was looking at. */}
+              {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText}
+                onClick={() => nav("/contracts")}
+                info={"Broker contracts are with the brokers who send you business. "
+                  + "Reinsurance treaties are with the reinsurers you cede risk to."}
+                split={[
+                  { label: "Broker contracts", value: fmt(brokerCount),
+                    onClick: () => nav("/contracts?type=insurer_broker"),
+                    hint: expiringSoon
+                      ? `${expiringSoon} expiring in ${expiringDays} days` : undefined },
+                  { label: "Reinsurance treaties", value: fmt(treatyCount),
+                    onClick: () => nav("/contracts?type=insurer_reinsurer"),
+                    hint: rei?.counts.expiring_soon
+                      ? `${rei.counts.expiring_soon} expiring in 90 days` : undefined },
+                ]} />)}
 
               {carrierAdmin && cell(3, signaturesTile)}
 
@@ -812,11 +886,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* Reinsurance (Phase 26): the carrier's treaties — placement,
-            signatures, and the reinsurers' private links. Carrier seats
-            only: a treaty is between the carrier and its reinsurers. */}
-        {carrierAdmin && <ReinsurancePanel />}
-
         {/* ONE month for the cards below — Overdue Bordereaux (carrier admin),
             and Bordereaux Processed. They used to count the current
             month only; this lets a carrier look back a month at a time, or at
@@ -857,8 +926,9 @@ export default function Home() {
                 subtitle={due ? `Due in ${periodName(period)}` : undefined}
                 info={`Bordereaux your brokers owed${infoWhen}, by how they arrived.`} />
             </div>
-            <div style={{ display: "grid" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               {recentCard}
+              {rei && reinsuranceCard(rei)}
             </div>
           </div>
         ) : (

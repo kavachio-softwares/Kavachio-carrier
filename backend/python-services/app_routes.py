@@ -4847,6 +4847,28 @@ def contract_generate_rules(program_id: int, contract_id: int,
               f"interrupted earlier attempt on contract {contract_id}")
 
     clauses = [dict(r) for r in rows]
+    from_previous = None
+    if not clauses and not authored:
+        # A RENEWAL made without its wording has no clauses of its own — but it
+        # renews on last year's terms, so last year's clauses are what its rules
+        # are written from (copied as its own rows). Attaching a new wording and
+        # re-reading it replaces them.
+        from contract_routes import clauses_from_renewal_chain
+        with SessionLocal() as s:
+            from_previous = clauses_from_renewal_chain(s, s.get(Contract, contract_id))
+            if from_previous:
+                s.commit()
+                rows = s.execute(
+                    text("""SELECT clause_id, contract_id, clause_type, title, text,
+                                   page_number, section_header
+                              FROM clauses_extracted
+                             WHERE contract_id = :cid
+                             ORDER BY clause_id"""),
+                    {"cid": contract_id}).mappings().all()
+                clauses = [dict(r) for r in rows]
+                print(f"[generate-rules] contract {contract_id} is a renewal with no "
+                      f"clauses of its own — took {len(clauses)} from contract "
+                      f"{from_previous}")
     if not clauses:
         # An authored contract reaching here is ORDINARY, not an error. A
         # Bordereau Setup calls this for every contract it binds, and a
@@ -4864,7 +4886,10 @@ def contract_generate_rules(program_id: int, contract_id: int,
         # document that was read and yielded nothing. That stays an error,
         # because silence there would hide a failed extraction.
         raise HTTPException(
-            400, "this contract has no extracted clauses to build rules from")
+            400, "this contract has no extracted clauses to build rules from — "
+                 "nothing in it, or in a contract it renews, has been read. "
+                 "Attach its wording on the contract's page and read it, or "
+                 "upload the contract here instead of using the one on file.")
 
     # Heavy: the same batched model calls a fresh upload makes, minus the
     # extraction call. FastAPI runs a sync route in a worker thread, so blocking

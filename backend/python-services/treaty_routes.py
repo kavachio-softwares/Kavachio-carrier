@@ -41,14 +41,14 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from jose import JWTError, jwt
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 import esign_otp
 import treaty_types as tt
 from app_routes import _iso_utc, assert_tenant_owns, resolve_tenant_id
 from auth_deps import Principal, current_principal
 from db import (
-    Contract, ContractDocument, Party, PartyContact, Program,
+    Contract, ContractDocument, ContractSignature, Party, PartyContact, Program,
     ReinsurerAccessEvent, ReinsurerAccessLink, ReinsurerApproval,
     SessionLocal, Tenant, Treaty,
     TreatyLayer, TreatyProgramme, TreatyShare,
@@ -826,7 +826,8 @@ def _protected_bordereaux(s, tid: int, programme_ids: set[int]) -> dict:
 
 
 @router.get("/reinsurance/dashboard")
-def reinsurance_dashboard(p: Principal = Depends(current_principal)):
+def reinsurance_dashboard(period: Optional[str] = Query(None),
+                          p: Principal = Depends(current_principal)):
     """The carrier's reinsurance at a glance, for the Home dashboard.
 
     Built only from what Kavachio actually holds — treaties, their placement,
@@ -939,6 +940,9 @@ def reinsurance_dashboard(p: Principal = Depends(current_principal)):
             # Bordereaux received this month on programmes a treaty protects —
             # the business a reinsurance bordereau will be built from.
             "bordereaux": bdx,
+            # The reinsurance (ceded) bordereaux themselves.
+            # Follows the dashboard's Monthly Activity month when one is given.
+            "ceded": __import__("ceded_routes").dashboard_counts(s, tid, period),
             # Treaties running out within 90 days, soonest first, and whether
             # a renewal has been raised for each — the dashboard's one list.
             "expiring": sorted(expiring, key=lambda e: e["days_left"]),
@@ -1056,11 +1060,35 @@ def _link_json(s, link: ReinsurerAccessLink, c: Contract,
         "sent_at": _iso(link.sent_at), "first_opened_at": _iso(link.first_opened_at),
         "last_viewed_at": _iso(link.last_viewed_at),
         "expires_at": _iso(link.expires_at), "revoked_at": _iso(link.revoked_at),
+        # Asked to sign on this link, and whether they have.
+        "sign_requested_at": _iso(link.sign_requested_at),
+        "signed_at": (lambda g: _iso(g.signed_at) if g is not None else None)(
+            _link_signature(s, link)),
         # The last DAY it works, as a date. The timestamp is the end of that
         # day in UTC, which a browser east of Greenwich would show as the next
         # morning — "works until 1 Jan" for a treaty that ends on 31 Dec.
         "expires_on": _aware(link.expires_at).date().isoformat(),
     }
+
+
+def _link_signature(s, link: ReinsurerAccessLink):
+    """The signature this person gave on their link, if they have."""
+    return (s.query(ContractSignature)
+            .filter(ContractSignature.contract_id == link.contract_id,
+                    ContractSignature.method == "link",
+                    func.lower(ContractSignature.signer_email) == (link.email or "").lower())
+            .order_by(ContractSignature.id.desc()).first())
+
+
+def _signing(s, c: Contract) -> dict:
+    """Whether the lead reinsurer can be asked to sign on its link now."""
+    cr = _cr()
+    why = cr.counterparty_signing_block(s, c)
+    sigs = cr._signatures(s, c.id)
+    return {"lead_party_id": c.broker_party_id, "can_request": why is None,
+            "why_not": why,
+            "carrier_signed": any(g.side == "carrier" for g in sigs),
+            "counterparty_signed": any(g.side == "counterparty" for g in sigs)}
 
 
 def _issue(s, link: ReinsurerAccessLink, c: Contract, p: Principal) -> tuple[str, str]:
@@ -1084,13 +1112,24 @@ def _issue(s, link: ReinsurerAccessLink, c: Contract, p: Principal) -> tuple[str
 
 
 def _send_link_email(s, link: ReinsurerAccessLink, c: Contract,
-                     token: str, code: str) -> bool:
+                     token: str, code: str, *, sign: bool = False) -> bool:
     import treaty_email
     carrier = _carrier_name(s, c)
     party = s.get(Party, link.party_id)
     summ = tt.summarise(load_structure(s, c.id, names=False))
     term = (f"{c.inception_dt:%d %b %Y} to {c.expiry_dt:%d %b %Y}"
             if c.inception_dt and c.expiry_dt else "")
+    if sign:
+        html = treaty_email.sign_email(
+            link=_view_link(token), name=link.name, carrier=carrier,
+            reinsurer=getattr(party, "legal_name", "") or "",
+            treaty=c.name or f"Treaty {c.id}",
+            type_label=(summ or {}).get("type_label") or "Reinsurance treaty",
+            term=term, expires=f"{_aware(link.expires_at):%d %b %Y}", otp=code)
+        return treaty_email.safe_send(
+            link.email, f"{carrier} asks you to sign {c.name or 'a treaty'}", html,
+            text=(f"{carrier} asks you to sign a treaty on Kavachio. Open "
+                  f"{_view_link(token)}, enter the code {code}, and sign it there."))
     html = treaty_email.share_email(
         link=_view_link(token), name=link.name, carrier=carrier,
         reinsurer=getattr(party, "legal_name", "") or "",
@@ -1141,6 +1180,7 @@ def reinsurer_access(contract_id: int, p: Principal = Depends(current_principal)
                        "Kavachio.")
         return {
             "approvals": approvals(s, c, names=names),
+            "signing": _signing(s, c),
             "can_share": why_not is None,
             "why_not": why_not,
             "links": [_link_json(s, lk, c, names) for lk in links],
@@ -1164,6 +1204,9 @@ def reinsurer_access(contract_id: int, p: Principal = Depends(current_principal)
 
 class ShareIn(BaseModel):
     contact_ids: list[int]
+    # Ask them to SIGN the treaty on the link, not only view and approve it.
+    # Only people at the lead reinsurer — the treaty's counterparty.
+    sign: bool = False
 
 
 @router.post("/contracts/{contract_id}/reinsurer-access")
@@ -1187,12 +1230,21 @@ def share_with_reinsurer(contract_id: int, body: ShareIn,
             raise HTTPException(409, "set up the treaty structure before "
                                      "sharing it")
         panel = _panel_party_ids(s, c)
+        if body.sign:
+            why = cr.counterparty_signing_block(s, c)
+            if why:
+                raise HTTPException(409, f"the reinsurer cannot sign yet — {why}")
         sends = []
         for cid in dict.fromkeys(body.contact_ids):
             contact = s.get(PartyContact, cid)
             if contact is None or contact.party_id not in panel:
                 raise HTTPException(400, "one of those people is not a contact "
                                          "at a reinsurer on this treaty")
+            if body.sign and contact.party_id != c.broker_party_id:
+                raise HTTPException(
+                    400, "the lead reinsurer signs the treaty — pick someone "
+                         "there. The other reinsurers approve their lines on "
+                         "their own links.")
             if not (contact.email or "").strip():
                 raise HTTPException(400, f"{contact.full_name} has no email "
                                          f"address to send the link to")
@@ -1215,11 +1267,15 @@ def share_with_reinsurer(contract_id: int, body: ShareIn,
             link.name = contact.full_name or contact.email
             link.email = contact.email.strip()
             token, code = _issue(s, link, c, p)
-            _event(s, link, "sent", actor=cr._principal_email_for(s, p))
+            if body.sign:
+                link.sign_requested_at = _now()
+                link.sign_requested_by_user_id = p.user_id
+            _event(s, link, "sign_requested" if body.sign else "sent",
+                   actor=cr._principal_email_for(s, p))
             sends.append((link, token, code))
         s.commit()
         for link, token, code in sends:
-            ok = _send_link_email(s, link, c, token, code)
+            ok = _send_link_email(s, link, c, token, code, sign=body.sign)
             results.append({"link_id": link.id, "name": link.name,
                             "email": link.email, "emailed": ok})
     return {"sent": results, **reinsurer_access(contract_id, p)}
@@ -1247,8 +1303,11 @@ def resend_link(contract_id: int, link_id: int,
         token, code = _issue(s, link, c, p)
         _event(s, link, "sent", actor=cr._principal_email_for(s, p),
                detail={"resend": True})
+        sign = (link.sign_requested_at is not None
+                and _link_signature(s, link) is None
+                and cr.counterparty_signing_block(s, c) is None)
         s.commit()
-        ok = _send_link_email(s, link, c, token, code)
+        ok = _send_link_email(s, link, c, token, code, sign=sign)
     return {"emailed": ok, **reinsurer_access(contract_id, p)}
 
 
@@ -1404,6 +1463,11 @@ def _public_view(s, link: ReinsurerAccessLink, c: Contract) -> dict:
         "wording_pdf": written and not docs,
         # This reinsurer's own answer, and whether it can give one now.
         "approval": _my_approval(s, c, link, st),
+        # Whether they were asked to sign it here, and where that stands.
+        "signature": _my_signature(s, c, link),
+        # Its reinsurance bordereaux for this treaty (ceded_routes).
+        "statements": __import__("ceded_routes").statements_for_link(
+            s, c.id, link.party_id),
         "expires_at": _iso(link.expires_at),
         "expires_on": _aware(link.expires_at).date().isoformat(),
     }
@@ -1436,6 +1500,89 @@ def _my_approval(s, c: Contract, link: ReinsurerAccessLink,
         # what settles them.
         "settles_terms": state == "draft",
     }
+
+
+def _my_signature(s, c: Contract, link: ReinsurerAccessLink) -> Optional[dict]:
+    if link.sign_requested_at is None:
+        return None
+    mine = _link_signature(s, link)
+    why = None if mine else _cr().counterparty_signing_block(s, c)
+    return {
+        "requested_at": _iso(link.sign_requested_at),
+        "signed": None if mine is None else {
+            "name": mine.signer_name, "title": mine.signer_title,
+            "at": _iso(mine.signed_at)},
+        "can_sign": mine is None and why is None,
+        "why_not": why,
+        "active": _state(c) == "active",
+    }
+
+
+class SignIn(BaseModel):
+    signer_name: str
+    signer_title: Optional[str] = None
+    # They ticked the box saying they sign for their organisation.
+    consent: bool = False
+
+
+@public_router.post("/{token}/sign")
+def sign_treaty(token: str, body: SignIn, request: Request,
+                session: str = Query("", alias="session"),
+                x_treaty_session: str = Header(default="")):
+    """The lead reinsurer signs the treaty on its private link.
+
+    Theirs, not the carrier's word about them: the code emailed to this
+    address was entered to open the page, and they typed their name against
+    the treaty. Stored with method 'link', the address and the IP — and, as
+    the second signature, it puts the treaty in force."""
+    cr = _cr()
+    name = (body.signer_name or "").strip()
+    if not name:
+        raise HTTPException(400, "Type your name to sign.")
+    if not body.consent:
+        raise HTTPException(400, "Tick the box to confirm you sign for your "
+                                 "organisation.")
+    sess = _session_value(x_treaty_session, session)
+    with SessionLocal() as s:
+        link, c = _require_open(s, token, sess)
+        if link.sign_requested_at is None:
+            raise HTTPException(403, "You have not been asked to sign this "
+                                     "treaty. Ask the carrier if you should.")
+        if link.party_id != c.broker_party_id:
+            raise HTTPException(403, "The lead reinsurer signs this treaty.")
+        if _link_signature(s, link) is not None:
+            raise HTTPException(409, "You have already signed this treaty.")
+        why = cr.counterparty_signing_block(s, c)
+        if why:
+            raise HTTPException(409, f"It cannot be signed now — {why}.")
+        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        ip = fwd or (request.client.host if request.client else None)
+        party = s.get(Party, link.party_id)
+        org = getattr(party, "legal_name", None)
+        title = (body.signer_title or "").strip() or None
+        s.add(ContractSignature(
+            tenant_id=c.tenant_id, contract_id=c.id, side="counterparty",
+            signer_name=name, signer_title=title, signer_email=link.email,
+            method="link", by_user_id=None, signed_at=_now(),
+            note=(f"Signed for {org or 'the reinsurer'} on the private treaty "
+                  f"link sent to {link.email}, after the emailed code was "
+                  f"entered" + (f" (IP {ip})" if ip else "") + ".")))
+        s.flush()
+        _sigs, both, blocked_by = cr.settle_signatures(s, c)
+        _event(s, link, "signed", actor=link.email, request=request,
+               detail={"signer_name": name, "signer_title": title})
+        s.commit()
+        try:
+            from audit import log_activity
+            log_activity(c.tenant_id, link.email, "treaty_signed_by_reinsurer",
+                         target=f"contract:{c.id}",
+                         details={"contract_id": c.id, "name": c.name,
+                                  "reinsurer": org, "signer_name": name,
+                                  "in_force": both and not blocked_by})
+        except Exception:  # noqa: BLE001 — the signature stands without the trail
+            pass
+        return {"ok": True, "in_force": both and not blocked_by,
+                "blocked_by": blocked_by, "view": _public_view(s, link, c)}
 
 
 class ApproveIn(BaseModel):

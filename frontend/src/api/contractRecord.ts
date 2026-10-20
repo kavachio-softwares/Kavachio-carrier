@@ -332,7 +332,7 @@ export type ContractSignature = {
   signer_name: string;
   signer_title: string | null;
   signer_email: string | null;
-  method: "typed" | "recorded";
+  method: "typed" | "recorded" | "link";
   by_user_id: number | null;
   signed_at: string | null;
   document_id: number | null;

@@ -18,17 +18,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Ban, CalendarClock, CheckCircle2, Download, FileText, KeyRound, Loader2,
-  Lock, Mail, MessageSquare, ShieldCheck, Star,
+  Lock, Mail, MessageSquare, PenLine, ShieldCheck, Star,
 } from "lucide-react";
 import KavachioLogo from "../components/KavachioLogo";
 import { TreatyTower } from "../components/treaty/TreatyTower";
 import {
   approveTreaty, clearViewSession, downloadTreatyDocument,
   downloadTreatyWording, openTreatyView, requestTreatyChanges,
-  resendTreatyCode, verifyTreatyCode,
+  resendTreatyCode, signTreatyOnLink, verifyTreatyCode,
   type TreatyView as View, type TreatyViewLocked, type TreatyViewOpen,
 } from "../api/treaty";
 import { fmtDate } from "../utils/date";
+import {
+  answerLinkStatement, downloadLinkStatement, type LinkStatement,
+} from "../api/ceded";
 
 const LIFE: Record<string, string> = {
   draft: "Draft — not yet in force", pending: "Being settled",
@@ -349,7 +352,16 @@ function Treaty({ token, v, onLock, onView }: {
           </div>
         </div>
 
+        {v.signature && (
+          <SignCard token={token} v={v} onView={onView} onLock={onLock} />
+        )}
+
         <ApprovalCard token={token} v={v} onView={onView} onLock={onLock} />
+
+        {!!v.statements?.length && (
+          <StatementsCard token={token} v={v} onLock={onLock}
+                          onStatements={sts => onView({ ...v, statements: sts })} />
+        )}
 
         <div className="grid g-2" style={{ alignItems: "start", marginBottom: 16 }}>
           <div className="card">
@@ -491,6 +503,113 @@ function Treaty({ token, v, onLock, onView }: {
  *  is what shows they hold the mailbox the link was sent to. An answer is
  *  tied to the treaty as it stands — if the carrier changes it afterwards,
  *  the reinsurer is asked again. */
+/** The lead reinsurer was asked to sign — the signature box, on the treaty
+ *  they have just read. Their name, typed here after the emailed code, is
+ *  their signature; it is stored with this address and the time. */
+function SignCard({ token, v, onView, onLock }: {
+  token: string; v: TreatyViewOpen; onView: (v: TreatyViewOpen) => void;
+  onLock: () => void;
+}) {
+  const sg = v.signature!;
+  const [name, setName] = useState(v.viewer.name ?? "");
+  const [title, setTitle] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState("");
+  const org = v.viewer.organisation ?? "your organisation";
+
+  async function sign() {
+    setBusy(true); setErr("");
+    try {
+      const r = await signTreatyOnLink(token, name.trim(), title.trim(), consent);
+      onView(r.view);
+      setDone(r.in_force
+        ? `Signed. Both sides have now signed, so the treaty is in force — ${v.carrier} sees your signature on their side.`
+        : r.blocked_by
+          ? `Signed. ${v.carrier} still has to sort out one thing before it is in force: ${r.blocked_by}.`
+          : `Signed. ${v.carrier} sees your signature on their side.`);
+    } catch (e) {
+      const status = (e as { response?: { status?: number } })?.response?.status;
+      if (status === 401) { onLock(); return; }
+      setErr(errText(e, "That did not go through. Try again."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16, borderColor: sg.signed ? undefined : "var(--p-primary)" }}>
+      <div className="card-h">
+        <PenLine size={16} className="ci" />
+        <h3>Sign the treaty</h3>
+        <span className={`badge ${sg.signed ? "b-ok" : "b-info"}`}>
+          <span className="d" />{sg.signed ? "Signed" : "Waiting for your signature"}
+        </span>
+      </div>
+      <div style={{ padding: "14px 20px 16px" }}>
+        {done && <div className="note ok" style={{ marginBottom: 12 }}>{done}</div>}
+        {err && <div className="note warn" style={{ marginBottom: 12 }}>{err}</div>}
+
+        {sg.signed ? (
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
+            Signed for {org} by <b>{sg.signed.name}</b>
+            {sg.signed.title ? `, ${sg.signed.title}` : ""}
+            {sg.signed.at ? ` on ${fmtDate(sg.signed.at)}` : ""}.
+            {sg.active ? " The treaty is in force." : ""}
+          </p>
+        ) : sg.can_sign ? (
+          <>
+            <p className="muted" style={{ margin: "0 0 12px", fontSize: 13.5 }}>
+              {v.carrier} has signed this treaty and asks you to sign it for {org}.
+              Read the treaty below and its wording under Documents, then type
+              your name. Your signature is recorded with your name, your email
+              ({v.viewer.email}) and the time.
+            </p>
+            <div className="grid g-2" style={{ gap: 12 }}>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Your full name</label>
+                <input value={name} onChange={e => setName(e.target.value)} />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Your title <span className="muted" style={{ fontWeight: 500 }}>— optional</span></label>
+                <input value={title} onChange={e => setTitle(e.target.value)}
+                       placeholder="Underwriter" />
+              </div>
+            </div>
+            {name.trim() && (
+              <div style={{ marginTop: 12, padding: "10px 14px", borderBottom: "1.5px solid var(--p-ink)",
+                            fontFamily: "'Brush Script MT', 'Segoe Script', cursive", fontSize: 26,
+                            maxWidth: 420 }}>
+                {name.trim()}
+              </div>
+            )}
+            <label style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                            marginTop: 12, fontSize: 13, color: "var(--p-ink)" }}>
+              <input type="checkbox" checked={consent} style={{ marginTop: 3 }}
+                     onChange={e => setConsent(e.target.checked)} />
+              <span>
+                I am authorised to sign for <b>{org}</b>, and I sign this treaty,
+                as shown on this page and in its wording, on its behalf.
+              </span>
+            </label>
+            <div className="rowacts">
+              <button className="btn pri" type="button"
+                      disabled={busy || !name.trim() || !consent} onClick={sign}>
+                <PenLine size={14} /> {busy ? "Signing…" : "Sign the treaty"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="sub" style={{ margin: 0 }}>
+            It cannot be signed right now{sg.why_not ? ` — ${sg.why_not}` : ""}.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ApprovalCard({ token, v, onView, onLock }: {
   token: string; v: TreatyViewOpen; onView: (v: TreatyViewOpen) => void;
   onLock: () => void;
@@ -643,6 +762,123 @@ function ApprovalCard({ token, v, onView, onLock }: {
           <p className="sub" style={{ marginTop: 10 }}>{a.why_not}</p>
         )}
       </div>
+    </div>
+  );
+}
+
+
+// ── the reinsurer's bordereaux ───────────────────────────────────────────────
+/** Every reinsurance bordereau the carrier has sent this reinsurer for the
+ *  treaty: its own totals, the workbook, and its answer — agreed, or a query. */
+function StatementsCard({ token, v, onLock, onStatements }: {
+  token: string; v: TreatyViewOpen; onLock: () => void;
+  onStatements: (s: LinkStatement[]) => void;
+}) {
+  const [open, setOpen] = useState<{ id: number; mode: "agree" | "query" } | null>(null);
+  const [name, setName] = useState(v.viewer.name ?? "");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const m = (x: number | null | undefined, cur: string | null) =>
+    x == null ? "—" : `${cur ? cur + " " : ""}${x.toLocaleString(undefined,
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  async function answer() {
+    if (!open) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await answerLinkStatement(token, open.id, open.mode, name.trim(), note.trim());
+      onStatements(r.statements);
+      setOpen(null); setNote("");
+    } catch (e) {
+      const status = (e as { response?: { status?: number } })?.response?.status;
+      if (status === 401) { onLock(); return; }
+      setErr(errText(e, "That did not go through."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-h">
+        <FileText size={16} className="ci" />
+        <h3>Your bordereaux</h3>
+        <span className="sub">your share of every line, period by period</span>
+      </div>
+      {err && <div className="note warn" style={{ margin: "12px 20px 0" }}>{err}</div>}
+      <div className="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th>Period</th><th>Ceded premium</th><th>Net premium due</th>
+                <th>Recovery</th><th>Your answer</th><th /></tr>
+          </thead>
+          <tbody>
+            {(v.statements ?? []).map(st => (
+              <tr key={st.id} style={st.superseded ? { opacity: .55 } : undefined}>
+                <td className="mono">
+                  {st.period}
+                  {st.version_no > 1 && <div className="sub">version {st.version_no}</div>}
+                  {st.superseded && <div className="sub">replaced by a newer version</div>}
+                </td>
+                <td className="mono">{m(st.totals.ceded_premium, st.currency)}</td>
+                <td className="mono">{m(st.totals.net_premium, st.currency)}</td>
+                <td className="mono">{m(st.totals.recovery, st.currency)}</td>
+                <td>
+                  <span className={`badge ${st.status === "agreed" ? "b-ok"
+                    : st.status === "queried" ? "b-warn" : "b-mut"}`}>
+                    <span className="d" />
+                    {st.status === "agreed" ? "Agreed" : st.status === "queried"
+                      ? "Query raised" : "Waiting for you"}
+                  </span>
+                  {st.answer_note && <div className="sub">&ldquo;{st.answer_note}&rdquo;</div>}
+                </td>
+                <td style={{ whiteSpace: "nowrap" }}>
+                  <button className="btn sm" type="button"
+                          onClick={() => downloadLinkStatement(token, st).catch(e => {
+                            const s = (e as { response?: { status?: number } })?.response?.status;
+                            if (s === 401) onLock(); else setErr("That download did not work.");
+                          })}>
+                    <Download size={12} /> Excel
+                  </button>{" "}
+                  {!st.superseded && st.status !== "agreed" && (
+                    <button className="btn sm pri" type="button"
+                            onClick={() => setOpen({ id: st.id, mode: "agree" })}>Agree</button>
+                  )}{" "}
+                  {!st.superseded && (
+                    <button className="btn sm" type="button"
+                            onClick={() => setOpen({ id: st.id, mode: "query" })}>Query</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {open && (
+        <div className="note" style={{ margin: "0 20px 16px" }}>
+          <b>{open.mode === "agree" ? "Agree this statement" : "Raise a query"}</b>
+          <div className="grid g-2" style={{ gap: 12, marginTop: 10 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Your name</label>
+              <input value={name} onChange={e => setName(e.target.value)} />
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>{open.mode === "agree" ? "Note — optional" : "What is wrong?"}</label>
+              <input value={note} onChange={e => setNote(e.target.value)}
+                     placeholder={open.mode === "query" ? "e.g. policy KVC-01001 is not on our line" : ""} />
+            </div>
+          </div>
+          <div className="rowacts">
+            <button className="btn pri" type="button"
+                    disabled={busy || !name.trim() || (open.mode === "query" && !note.trim())}
+                    onClick={answer}>
+              {busy ? "Sending…" : open.mode === "agree" ? "Agree" : "Send query"}
+            </button>
+            <button className="btn" type="button" onClick={() => setOpen(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

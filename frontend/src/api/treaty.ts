@@ -237,11 +237,16 @@ export type AccessLink = {
   /** The last day it works, as a date — show this rather than expires_at. */
   expires_on: string | null;
   revoked_at: string | null;
+  /** Asked to sign the treaty on this link (the lead reinsurer only). */
+  sign_requested_at?: string | null;
+  /** When they signed it there. */
+  signed_at?: string | null;
 };
 
 export type AccessEventType =
   "sent" | "code_sent" | "code_failed" | "locked" | "unlocked" | "viewed"
-  | "downloaded" | "revoked" | "refused" | "approved" | "changes_requested";
+  | "downloaded" | "revoked" | "refused" | "approved" | "changes_requested"
+  | "sign_requested" | "signed";
 
 export type AccessEvent = {
   id: number;
@@ -266,6 +271,10 @@ export type ShareableParty = {
 export type ReinsurerAccess = {
   approvals: { parties: ReinsurerApproval[]; approved: number; total: number;
                changes_requested: number; all_approved: boolean };
+  /** Whether the lead reinsurer can be asked to sign on its link now. */
+  signing?: { lead_party_id: number | null; can_request: boolean;
+              why_not: string | null; carrier_signed: boolean;
+              counterparty_signed: boolean };
   can_share: boolean;
   why_not: string | null;
   links: AccessLink[];
@@ -277,10 +286,13 @@ export const getReinsurerAccess = (contractId: number) =>
   api.get<ReinsurerAccess>(`/contracts/${contractId}/reinsurer-access`)
     .then(r => r.data);
 
-export const shareWithReinsurers = (contractId: number, contactIds: number[]) =>
+/** `sign` asks them to SIGN the treaty on the link — the lead reinsurer only,
+ *  once the carrier has signed. */
+export const shareWithReinsurers = (contractId: number, contactIds: number[],
+                                    sign = false) =>
   api.post<ReinsurerAccess & {
     sent: { link_id: number; name: string; email: string; emailed: boolean }[];
-  }>(`/contracts/${contractId}/reinsurer-access`, { contact_ids: contactIds })
+  }>(`/contracts/${contractId}/reinsurer-access`, { contact_ids: contactIds, sign })
     .then(r => r.data);
 
 export const resendReinsurerLink = (contractId: number, linkId: number) =>
@@ -349,6 +361,16 @@ export type TreatyViewOpen = {
   documents: { id: number; filename: string | null; is_executed_copy: boolean;
                uploaded_at: string | null }[];
   wording_pdf: boolean;
+  /** The reinsurance bordereaux this reinsurer has been sent for the treaty. */
+  statements?: import("./ceded").LinkStatement[];
+  /** Set when they were asked to sign it on this link. */
+  signature?: {
+    requested_at: string | null;
+    signed: { name: string; title: string | null; at: string | null } | null;
+    can_sign: boolean;
+    why_not: string | null;
+    active: boolean;
+  } | null;
   /** This reinsurer's own answer to the treaty. */
   approval: Partial<ReinsurerApproval> & {
     status: ApprovalStatus;
@@ -369,6 +391,14 @@ export const approveTreaty = (token: string, signerName: string,
   api.post<{ ok: boolean; terms_agreed: boolean; view: TreatyViewOpen }>(
     `/treaty-view/${encodeURIComponent(token)}/approve`,
     { signer_name: signerName, signer_title: signerTitle || null },
+    { headers: { "X-Treaty-Session": getViewSession(token) } }).then(r => r.data);
+
+export const signTreatyOnLink = (token: string, signerName: string,
+                                 signerTitle: string, consent: boolean) =>
+  api.post<{ ok: boolean; in_force: boolean; blocked_by: string | null;
+             view: TreatyViewOpen }>(
+    `/treaty-view/${encodeURIComponent(token)}/sign`,
+    { signer_name: signerName, signer_title: signerTitle || null, consent },
     { headers: { "X-Treaty-Session": getViewSession(token) } }).then(r => r.data);
 
 export const requestTreatyChanges = (token: string, note: string) =>
@@ -486,6 +516,10 @@ export type ReinsuranceDashboard = {
   bordereaux: { since: string; total: number; clean: number;
                 with_exceptions: number; not_validated: number;
                 programmes: number };
+  /** The reinsurance (ceded) statements, by state. */
+  ceded: { period?: string | null; total?: number;
+           not_set_up: number; ready_to_send: number; sent: number; sent_this_month: number;
+           queried: number; agreed: number; overdue: number };
   /** Treaties running out within 90 days, soonest first. */
   expiring: { contract_id: number; name: string; lead_reinsurer: string | null;
               type_label: string | null; expiry_dt: string; days_left: number;
@@ -500,8 +534,11 @@ export type ReinsuranceDashboard = {
                      who: string | null; party: string | null }[];
 };
 
-export const getReinsuranceDashboard = () =>
-  api.get<ReinsuranceDashboard>("/reinsurance/dashboard", { silent: true })
+/** `period` ('2027-03', '2027') narrows the ceded counts to that month or
+ *  year — the dashboard's Monthly Activity pick. Omitted: every period. */
+export const getReinsuranceDashboard = (period?: string) =>
+  api.get<ReinsuranceDashboard>("/reinsurance/dashboard",
+    { silent: true, params: period ? { period } : undefined })
     .then(r => r.data);
 
 // ── a treaty signed outside Kavachio ─────────────────────────────────────────

@@ -300,7 +300,7 @@ def sent(monkeypatch):
     """Captures what would have been emailed: (link_id, token, code)."""
     out = []
 
-    def fake(s, link, c, token, code):
+    def fake(s, link, c, token, code, **kw):
         out.append((link.id, token, code))
         return True
     monkeypatch.setattr(treaty_routes, "_send_link_email", fake)
@@ -670,3 +670,75 @@ def test_a_treaty_never_opens_an_electronic_round(w):
     assert r["can_sign"] is False and r["treaty"] is True
     r = client.post(f"/esign/contracts/{cid}/signing-session", headers=w["ch"])
     assert r.status_code == 409 and "signature page" in r.json()["detail"]
+
+
+# ── the lead reinsurer signs on its link ────────────────────────────────────
+def _carrier_signed(w):
+    cid = _create(w).json()["id"]                       # Swiss is the lead
+    _set_state(cid, "agreed")
+    with SessionLocal() as s:
+        c = s.get(Contract, cid)
+        c.wording_sections = {"sections": [{"key": "parties", "title": "P",
+                                            "body": "1.1  x"}]}
+        s.commit()
+    return cid
+
+
+def test_a_signing_link_waits_for_the_carrier_to_sign_first(w, sent):
+    cid = _carrier_signed(w)
+    r = client.post(f"/contracts/{cid}/reinsurer-access", headers=w["ch"],
+                    json={"contact_ids": [w["c_swiss"]], "sign": True})
+    assert r.status_code == 409 and "carrier signs first" in r.text
+
+
+def test_only_the_lead_reinsurer_is_asked_to_sign(w, sent):
+    cid = _carrier_signed(w)
+    client.post(f"/contracts/{cid}/sign", headers=w["ch"],
+                json={"signer_name": "Dana"})
+    r = client.post(f"/contracts/{cid}/reinsurer-access", headers=w["ch"],
+                    json={"contact_ids": [w["c_munich"]], "sign": True})
+    assert r.status_code == 400 and "lead reinsurer" in r.text
+
+
+def test_the_lead_reinsurer_signs_on_its_link_and_the_treaty_goes_live(w, sent):
+    cid = _carrier_signed(w)
+    r = client.post(f"/contracts/{cid}/sign", headers=w["ch"],
+                    json={"signer_name": "Dana"})
+    assert r.status_code == 200, r.text
+    acc = client.get(f"/contracts/{cid}/reinsurer-access", headers=w["ch"]).json()
+    assert acc["signing"]["can_request"] is True
+
+    # Munich's plain link carries no signature box.
+    ((t_m, h_m),) = _links_for(w, cid, sent, [w["c_munich"]])
+    assert client.get(f"/treaty-view/{t_m}", headers=h_m).json()["signature"] is None
+    assert client.post(f"/treaty-view/{t_m}/sign", headers=h_m, json={
+        "signer_name": "Mia", "consent": True}).status_code == 403
+
+    r = client.post(f"/contracts/{cid}/reinsurer-access", headers=w["ch"],
+                    json={"contact_ids": [w["c_swiss"]], "sign": True})
+    assert r.status_code == 200, r.text
+    lid, token, code = sent[-1]
+    # Not without the code.
+    assert client.post(f"/treaty-view/{token}/sign", json={
+        "signer_name": "Sam Swiss", "consent": True}).status_code == 401
+    h = _unlock(token, code)
+    view = client.get(f"/treaty-view/{token}", headers=h).json()
+    assert view["signature"]["can_sign"] is True
+    assert client.post(f"/treaty-view/{token}/sign", headers=h, json={
+        "signer_name": "Sam Swiss"}).status_code == 400            # no consent
+    r = client.post(f"/treaty-view/{token}/sign", headers=h, json={
+        "signer_name": "Sam Swiss", "signer_title": "Underwriter", "consent": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["in_force"] is True
+    assert r.json()["view"]["signature"]["signed"]["name"] == "Sam Swiss"
+
+    rec = client.get(f"/contracts/{cid}", headers=w["ch"]).json()
+    assert rec["lifecycle"] == "active"
+    theirs = [g for g in rec["signatures"] if g["side"] == "counterparty"]
+    assert len(theirs) == 1 and theirs[0]["method"] == "link"
+    assert client.post(f"/treaty-view/{token}/sign", headers=h, json={
+        "signer_name": "Sam Swiss", "consent": True}).status_code == 409
+    acc = client.get(f"/contracts/{cid}/reinsurer-access", headers=w["ch"]).json()
+    mine = next(x for x in acc["links"] if x["id"] == lid)
+    assert mine["sign_requested_at"] and mine["signed_at"]
+    assert any(e["type"] == "signed" for e in acc["events"])

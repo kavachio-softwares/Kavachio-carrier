@@ -3919,6 +3919,49 @@ def _signed_envelope(s, contract_id: int):
             .first())
 
 
+def settle_signatures(s, c: Contract) -> tuple[list, bool, Optional[str]]:
+    """After a signature: if both sides have now signed, put the contract in
+    force — or stop at `signed` and say what is in the way. Shared by signing
+    here and a reinsurer signing on its private link (treaty_routes).
+
+    Returns (signatures, both signed, what blocks it or None)."""
+    sigs = _signatures(s, c.id)
+    both = not _unsigned_sides(sigs)
+    blocked_by = None
+    if both:
+        c.executed_date = c.executed_date or _today()
+        docs = s.query(ContractDocument).filter(
+            ContractDocument.contract_id == c.id).all()
+        missing = _missing_references(c, docs)
+        if missing:
+            blocked_by = ("it defers to document(s) nobody has supplied: "
+                          + ", ".join(missing))
+        # Signed by both, but something else genuinely in the way: recorded as
+        # signed and said plainly, rather than activated with a hole in it or
+        # refused after the signature was given.
+        if _effective_lifecycle(c) != "signed":
+            _move(c, "signed")
+        if not blocked_by:
+            _move(c, "active")
+    return sigs, both, blocked_by
+
+
+def counterparty_signing_block(s, c: Contract) -> Optional[str]:
+    """Why the counterparty cannot sign this contract right now, or None.
+    The same rules as sign_contract, for the reinsurer's signing link."""
+    state = _effective_lifecycle(c)
+    if state in ("in_review", "changes_requested", "pending"):
+        return "its terms are still being settled"
+    if state in ("active", "expired", "terminated", "superseded"):
+        return f"it is {state}, so it is not waiting on a signature"
+    sigs = _signatures(s, c.id)
+    if "counterparty" not in _unsigned_sides(sigs):
+        return "the reinsurer's side has already signed"
+    if "carrier" in _unsigned_sides(sigs):
+        return "the carrier has not signed it yet — the carrier signs first"
+    return None
+
+
 class SignatureIn(BaseModel):
     """One signature. `side` is only accepted from a carrier recording the
     other party's — everybody else signs for their own side and cannot say
@@ -4094,27 +4137,7 @@ def sign_contract(contract_id: int, body: SignatureIn = SignatureIn(),
             document_id=doc_id, note=(body.note or "").strip() or None))
         s.flush()
 
-        sigs = _signatures(s, c.id)
-        both = not _unsigned_sides(sigs)
-        blocked_by = None
-        if both:
-            c.executed_date = c.executed_date or _today()
-            docs = s.query(ContractDocument).filter(
-                ContractDocument.contract_id == c.id).all()
-            missing = _missing_references(c, docs)
-            if missing:
-                blocked_by = ("it defers to document(s) nobody has supplied: "
-                              + ", ".join(missing))
-            if blocked_by:
-                # Signed by both, but something else is genuinely in the way.
-                # Recorded as signed and said plainly, rather than activated
-                # with a hole in it or refused after the signature was given.
-                if _effective_lifecycle(c) != "signed":
-                    _move(c, "signed")
-            else:
-                if _effective_lifecycle(c) != "signed":
-                    _move(c, "signed")
-                _move(c, "active")
+        sigs, both, blocked_by = settle_signatures(s, c)
 
         author = c.submitted_by_user_id
         s.commit()
@@ -4384,6 +4407,53 @@ def _log_gap_confirmed(s, c: Contract, p: Principal, gaps: list[dict]) -> None:
                      principal=p)
     except Exception:  # noqa: BLE001
         pass
+
+
+def clauses_from_renewal_chain(s, contract: Contract) -> Optional[int]:
+    """Give a renewal that has no clauses of its own a copy of the clauses of
+    the nearest contract it renews that has some — its own new rows, so the
+    rules written from them belong to the renewal. Returns that contract's
+    id, or None when nothing up the chain was ever read.
+
+    A renewal carries last year's terms; one made without "renew on the same
+    wording" was given no document, and so nothing to write its rules from.
+    Building a bordereau setup on it then failed outright ("no extracted
+    clauses"). Last year's clauses are the terms it renewed on until a new
+    wording is attached — and attaching one and re-reading it replaces them."""
+    from sqlalchemy import text as _sql
+    seen: set[int] = set()
+    prev_id = contract.renews_contract_id
+    source = None
+    while prev_id and prev_id not in seen:
+        seen.add(prev_id)
+        n = s.execute(_sql(
+            "SELECT COUNT(*) FROM clauses_extracted WHERE contract_id = :c "
+            "AND COALESCE(created_by, '') <> 'contract_wording'"),
+            {"c": prev_id}).scalar() or 0
+        if n:
+            source = prev_id
+            break
+        prev = s.get(Contract, prev_id)
+        prev_id = prev.renews_contract_id if prev is not None else None
+    if source is None:
+        return None
+    skip = {"clause_id", "contract_id", "created_at", "updated_at", "modified_at"}
+    names = [n for n in s.execute(_sql(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = 'clauses_extracted' "
+        "ORDER BY ordinal_position")).scalars().all() if n not in skip]
+    quoted = ", ".join(f'"{n}"' for n in names)
+    s.execute(_sql(
+        f"INSERT INTO clauses_extracted ({quoted}, contract_id) "
+        f"SELECT {quoted}, :new FROM clauses_extracted WHERE contract_id = :old "
+        f"AND COALESCE(created_by, '') <> 'contract_wording' ORDER BY clause_id"),
+        {"new": contract.id, "old": source})
+    # Copied clauses start un-ruled: their rules are written for the renewal.
+    if "rule_generation_status" in names:
+        s.execute(_sql(
+            "UPDATE clauses_extracted SET rule_generation_status = 'in_review', "
+            "generated_rule_count = 0 WHERE contract_id = :c"), {"c": contract.id})
+    return source
 
 
 def _copy_contract_rules(s, old_id: int, new_id: int,

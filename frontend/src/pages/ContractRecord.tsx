@@ -29,6 +29,7 @@ import { InfoTip } from "../components/InfoTip";
 import { ClauseText } from "../components/ClauseText";
 import { WordingEditor } from "../components/WordingEditor";
 import { TreatyRecordPanel } from "../components/treaty/TreatyRecordPanel";
+import TreatySetupNudge from "../components/treaty/TreatySetupNudge";
 import { ReinsurerSharing } from "../components/treaty/ReinsurerSharing";
 import { fmtDate, fmtStamp } from "../utils/date";
 import { describeChecks } from "../utils/contractChecks";
@@ -1399,6 +1400,16 @@ function ContractRecordView() {
                 </span>
               )}
               <span className="right">
+                {rec.treaty.has_structure && !isBrokerSeat() && (
+                  <Link className="btn sm" to={`/reinsurance/setups/${id}`}>
+                    Bordereau setup
+                  </Link>
+                )}{" "}
+                {rec.treaty.has_structure && (
+                  <Link className="btn sm" to={`/reinsurance/bordereaux?treaty=${id}`}>
+                    Bordereaux
+                  </Link>
+                )}{" "}
                 <button className="btn sm" type="button" onClick={() => setTab("treaty")}>
                   {rec.treaty.has_structure ? "See the structure" : "Set it up"}
                   <ArrowRight size={12} />
@@ -1485,7 +1496,9 @@ function ContractRecordView() {
                               g.signed_at && fmtDate(g.signed_at),
                               g.method === "typed"
                                 ? "signed in Kavachio"
-                                : "signed elsewhere, recorded here"]
+                                : g.method === "link"
+                                  ? "signed by them on their private link"
+                                  : "signed elsewhere, recorded here"]
                               .filter(Boolean).join(" · ")}
                           </div>
                         </div>
@@ -1740,6 +1753,10 @@ function ContractRecordView() {
                 bordereau setup for this programme × broker. Setup reads both
                 from the link, so it opens with them already chosen. Carrier
                 only — a broker does not set up bordereaux. */}
+            {/* The same next step for a treaty: its reinsurance bordereau. */}
+            {rec.lifecycle === "active" && !isBrokerSeat() && isTreaty && (
+              <TreatySetupNudge contractId={id} />
+            )}
             {rec.lifecycle === "active" && !isBrokerSeat() && !isTreaty
               && rec.programme && rec.counterparty && (
               <div className="note" style={{

@@ -58,6 +58,9 @@ from audit_routes import router as audit_router
 # protects (carrier side), and the reinsurer's private read-only link, unlocked
 # by an emailed one-time code (/treaty-view/…, no login).
 from treaty_routes import router as treaty_router, public_router as treaty_public_router
+# Reinsurance (ceded) bordereaux: prepared from the inward ones, per treaty and
+# period, sent to each reinsurer, answered on the reinsurer's private link.
+from ceded_routes import router as ceded_router, public_router as ceded_public_router
 # The broker exception loop: the secure correction link (public, token-
 # authenticated like e-sign) and the carrier's delivery rule / notify contacts.
 # No tables of its own — see submission_service.
@@ -145,6 +148,8 @@ app.include_router(esign_public_router)
 app.include_router(esign_router)
 app.include_router(treaty_public_router)
 app.include_router(treaty_router)
+app.include_router(ceded_public_router)
+app.include_router(ceded_router)
 # Audit Logs (/audit/…). Every seat has one; what differs is whose rows come
 # back, which audit_feed.scope_for decides — so there is no role guard here to
 # fall out of step with it.

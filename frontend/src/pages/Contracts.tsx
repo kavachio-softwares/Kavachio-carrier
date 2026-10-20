@@ -83,6 +83,19 @@ const TYPE_LABEL: Record<string, string> = {
   insurer_reinsurer: "Insurer ↔ Reinsurer",
 };
 
+/** The two kinds of contract a carrier holds, as the list names them. */
+const KIND: Record<string, { label: string; who: string; cls: string }> = {
+  insurer_broker: { label: "Broker contract", who: "Broker", cls: "b-info" },
+  insurer_reinsurer: { label: "Reinsurance treaty", who: "Lead reinsurer", cls: "b-ok" },
+};
+
+/** The contract-type filter's choices. */
+const KIND_TABS = [
+  { key: "", label: "All contracts" },
+  { key: "insurer_broker", label: "Broker contracts" },
+  { key: "insurer_reinsurer", label: "Reinsurance treaties" },
+] as const;
+
 export default function Contracts() {
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -97,20 +110,47 @@ export default function Contracts() {
   // the URL, so clearing it clears like every other filter on this screen.
   const [waiting, setWaiting] = useState(params.get("waiting") === "mine");
   const [lifecycle, setLifecycle] = useState("");
-  // ?type=insurer_reinsurer is the Treaties entry in the sidebar. Re-read when
-  // the URL changes, because clicking that entry while already on this list
-  // keeps the same page mounted and would otherwise change nothing.
+  // ?type=insurer_reinsurer opens the list on the reinsurance treaties — the
+  // dashboard's Contracts tile links there. Re-read when the URL changes, as
+  // a link to this list while it is open keeps the same page mounted.
   const [type, setType] = useState(params.get("type") ?? "");
   useEffect(() => { setType(params.get("type") ?? ""); }, [params]);
   // quota_share | surplus | xol | stop_loss | facultative — only offered while
   // the list is showing treaties.
   const [treatyType, setTreatyType] = useState("");
-  // The Treaties page is the one the SIDEBAR opens (?type=insurer_reinsurer),
-  // not any list that happens to be filtered to reinsurers — picking that
-  // filter on Contracts must not turn the page into one with no way back.
-  const treaties = params.get("type") === "insurer_reinsurer";
+  // Showing reinsurance treaties: the treaty-type filter and the treaty
+  // actions (upload a signed treaty, raise one, the reinsurers) follow.
+  const treaties = type === "insurer_reinsurer";
   useEffect(() => { if (!treaties) setTreatyType(""); }, [treaties]);
   const [q, setQ] = useState("");
+  // Which kind of contract "Upload existing" adds. Follows the type filter;
+  // with "All contracts" the dialog offers both, as two tabs.
+  const [uploadPick, setUploadPick] = useState<"broker" | "reinsurance">("broker");
+  const uploadKind: "broker" | "reinsurance" = type === "insurer_reinsurer" ? "reinsurance"
+    : type === "insurer_broker" ? "broker" : uploadPick;
+  const uploadSwitcher = type === "" ? (
+    // .proto so the tabs keep their look inside the broker dialog, which
+    // is not a .proto page.
+    <div className="proto" style={{ background: "transparent" }}>
+    <div className="tabs" style={{ marginBottom: 14 }}>
+      {([["broker", "Broker contract"], ["reinsurance", "Reinsurance treaty"]] as const)
+        .map(([k, label]) => (
+          <button key={k} type="button" className={uploadPick === k ? "on" : ""}
+                  onClick={() => setUploadPick(k)}>{label}</button>
+        ))}
+    </div>
+    </div>
+  ) : undefined;
+  // How many of each kind — in the type filter, so the split is visible
+  // before anything is picked. Whole-book counts, like the dashboard tile.
+  const [kindCounts, setKindCounts] = useState<Record<string, number | null>>({});
+  useEffect(() => {
+    for (const k of ["", "insurer_broker", "insurer_reinsurer"]) {
+      listContractsPaged({ page: 1, page_size: 1, contract_type: k || undefined })
+        .then(r => setKindCounts(c => ({ ...c, [k]: r.total })))
+        .catch(() => setKindCounts(c => ({ ...c, [k]: null })));
+    }
+  }, []);
   // Debounced because this search runs on the SERVER — filtering happens in
   // SQL, so an undebounced box is one request per keystroke.
   const query = useDebouncedValue(q, 300);
@@ -146,7 +186,7 @@ export default function Contracts() {
     filterKey, PAGE_SIZE,
   );
 
-  const filtersActive = !!(programme || lifecycle || (type && !treaties)
+  const filtersActive = !!(programme || lifecycle || type
                            || treatyType || q || waiting);
 
   // Surfaced above the table because it is the one thing on this screen that
@@ -161,17 +201,11 @@ export default function Contracts() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            {treaties ? (
-              <h2>Treaties
-                <InfoTip text={"Your reinsurance treaties — the contracts where you "
-                  + "cede risk to reinsurers. Reinsurers are not on Kavachio; you "
-                  + "record their shares and can send each a private, read-only link."} />
-              </h2>
-            ) : (
-              <h2>Contracts
-                <InfoTip text="Every contract you hold, across all your programmes and brokers." />
-              </h2>
-            )}
+            <h2>Contracts
+              <InfoTip text={"Every contract you hold: broker contracts with the brokers "
+                + "who send you business, and reinsurance treaties with the "
+                + "reinsurers you cede risk to."} />
+            </h2>
           </div>
           <div className="actions">
             {treaties && (
@@ -229,14 +263,16 @@ export default function Contracts() {
               // Not on the Treaties list: it IS the insurer ↔ reinsurer list,
               // and switching it to broker contracts from inside would leave
               // the sidebar saying Treaties over something else.
-              ...(treaties ? [] : [{
-                key: "type", ariaLabel: "Filter by type",
+              // Which kind of contract — with the count of each, so the split
+              // shows without opening anything.
+              ...([{
+                key: "type", ariaLabel: "Filter by contract type",
                 value: type, onChange: setType,
-                options: [
-                  { value: "", label: "All types" },
-                  { value: "insurer_broker", label: "Insurer ↔ Broker" },
-                  { value: "insurer_reinsurer", label: "Insurer ↔ Reinsurer" },
-                ],
+                options: KIND_TABS.map(t => ({
+                  value: t.key,
+                  label: kindCounts[t.key] != null
+                    ? `${t.label} (${kindCounts[t.key]})` : t.label,
+                })),
               }]),
               ...(treaties ? [{
                 key: "treaty_type", ariaLabel: "Filter by treaty type",
@@ -275,7 +311,8 @@ export default function Contracts() {
             onClear={() => {
               // Clearing on the Treaties list keeps it the Treaties list.
               setProgramme(""); setLifecycle(""); setQ("");
-              if (!treaties) setType("");
+              // Clearing on the Treaties list keeps it the Treaties list.
+              setType("");
               setTreatyType("");
               setWaiting(false);
             }}
@@ -286,9 +323,9 @@ export default function Contracts() {
             <table>
               <thead>
                 <tr>
-                  <th>{treaties ? "Treaty" : "Contract"}</th>
-                  <th>{treaties ? "Lead reinsurer" : type === "insurer_broker"
-                    ? "Broker" : "Counterparty"}</th>
+                  <th>Contract</th>
+                  <th>{treaties ? "Lead reinsurer"
+                    : type === "insurer_broker" ? "Broker" : "With"}</th>
                   <th>Programme</th>
                   <th>Term</th><th>State</th>
                   {/* Documents and Checks were taken off this list; both are
@@ -304,12 +341,23 @@ export default function Contracts() {
                   // broker.
                   const note = c.lifecycle !== "agreed" ? st.note
                     : c.whose_turn === "carrier" ? "the carrier signs next"
-                    : c.whose_turn === "broker" ? "the broker signs next"
+                    : c.whose_turn === "broker"
+                      ? (c.contract_type === "insurer_reinsurer"
+                          ? "the reinsurer signs next" : "the broker signs next")
                     : st.note;
                   return (
                     <tr key={c.id}>
                       <td>
                         <Link to={`/contracts/${c.id}`}><b>{c.name}</b></Link>
+                        {/* Which kind it is, first and in colour — on the
+                            mixed list it is the one thing to tell apart. */}
+                        {c.contract_type && KIND[c.contract_type] && (
+                          <div style={{ margin: "4px 0 2px" }}>
+                            <span className={`badge ${KIND[c.contract_type].cls}`}>
+                              {KIND[c.contract_type].label}
+                            </span>
+                          </div>
+                        )}
                         <div className="sub">
                           {c.code && <><span className="mono" title={CODE_TIP}>{c.code}</span> · </>}
                           {c.treaty?.type_label
@@ -332,9 +380,10 @@ export default function Contracts() {
                       </td>
                       <td>
                         {c.counterparty?.name ?? "—"}
-                        {/* {c.counterparty && (
-                          <div className="sub">{c.counterparty.party_type}</div>
-                        )} */}
+                        {c.counterparty && type === "" && c.contract_type
+                          && KIND[c.contract_type] && (
+                          <div className="sub">{KIND[c.contract_type].who}</div>
+                        )}
                       </td>
                       <td>
                         {c.programme?.name ?? "—"}
@@ -368,7 +417,7 @@ export default function Contracts() {
                     purpose. "No contracts match those filters" is true and
                     answers a question nobody asked — the one being asked is
                     "is anything waiting on me?". */}
-                {treaties && !filtersActive
+                {treaties && !programme && !lifecycle && !treatyType && !q && !waiting
                   ? "No treaties yet. Raise one to set out its layers and who "
                     + "holds them."
                   : waiting && !programme && !lifecycle && !type && !q
@@ -390,10 +439,12 @@ export default function Contracts() {
 
       {/* A treaty already signed takes its own upload: no broker, no reading
           for rules, and it goes straight in force. */}
-      <UploadTreatyModal open={uploading && treaties}
+      <UploadTreatyModal open={uploading && uploadKind === "reinsurance"}
+        switcher={uploadSwitcher}
         onClose={() => setUploading(false)} />
       <AddContractModal
-        open={uploading && !treaties}
+        open={uploading && uploadKind === "broker"}
+        switcher={uploadSwitcher}
         onClose={() => setUploading(false)}
         programmes={programmes}
         // The new contract belongs in the list — re-read it.

@@ -22,6 +22,11 @@ import TenantDetail from "./pages/TenantDetail";
 import Parties from "./pages/Parties";
 import PartyDetail from "./pages/PartyDetail";
 import ProgrammeReinsurance from "./pages/ProgrammeReinsurance";
+import ReinsuranceBordereaux from "./pages/ReinsuranceBordereaux";
+import CededBordereauDetail from "./pages/CededBordereauDetail";
+import ReinsuranceSetups from "./pages/ReinsuranceSetups";
+import ReinsuranceSetupEdit from "./pages/ReinsuranceSetupEdit";
+import ReinsuranceSetupView from "./pages/ReinsuranceSetupView";
 import TreatyView from "./pages/TreatyView";
 import Programs from "./pages/Programs";
 import ProgramManagement from "./pages/ProgramManagement";
@@ -196,6 +201,15 @@ export default function App() {
         <Route path="/programs/:programId/setup" element={<AddProgram />} />
         {/* The treaties protecting one programme (Phase 26.2). */}
         <Route path="/programs/:programId/reinsurance" element={<ProgrammeReinsurance />} />
+        {/* Reinsurance (ceded) bordereaux: per treaty and period, sent to
+            each reinsurer, answered on its private link. */}
+        <Route path="/reinsurance/bordereaux" element={<ReinsuranceBordereaux />} />
+        <Route path="/reinsurance/bordereaux/:id" element={<CededBordereauDetail />} />
+        {/* Each treaty's reinsurance bordereau setup — nothing is prepared for
+            a treaty until it is active. */}
+        <Route path="/reinsurance/setups" element={<ReinsuranceSetups />} />
+        <Route path="/reinsurance/setups/:contractId" element={<ReinsuranceSetupView />} />
+        <Route path="/reinsurance/setups/:contractId/edit" element={<ReinsuranceSetupEdit />} />
         {/* The contract as a RECORD — terms, documents, lifecycle. The
             programme-scoped route below is what it PRODUCED: clauses and rules. */}
         <Route path="/contracts" element={<Contracts />} />

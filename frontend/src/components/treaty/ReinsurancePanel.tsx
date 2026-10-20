@@ -137,17 +137,38 @@ export function ReinsurancePanel() {
 
         <DashCard icon={<FileSpreadsheet size={18} strokeWidth={2.5} />}
                   tint={["#eff6ff", "#2563eb"]} title="Reinsurance Bordereaux"
-                  info={"Bordereaux received this month on programmes a treaty protects — "
-                    + "the business a reinsurance bordereau is built from. Sending ceded "
-                    + "bordereaux to reinsurers is not in Kavachio yet."}
-                  to="/runs?from=home" alert={(b?.with_exceptions ?? 0) > 0}>
-          <Big n={b?.total} caption={`in ${month}`} />
+                  info={"What you cede to your reinsurers, per treaty and period, worked "
+                    + "out from the bordereaux your brokers sent. Prepared automatically; "
+                    + "sent when you press Send."}
+                  to="/reinsurance/bordereaux"
+                  alert={(d?.ceded.overdue ?? 0) > 0 || (d?.ceded.queried ?? 0) > 0}>
+          <Big n={d?.ceded.sent_this_month} caption={`sent in ${month}`} />
           <Rows rows={[
-            { label: "Clean", v: b?.clean, c: "var(--p-ok)" },
-            { label: "With exceptions", v: b?.with_exceptions, c: "var(--p-warn)" },
-            { label: "Sent to reinsurers", v: null, c: "var(--p-border-2)",
-              tip: "Ceded bordereaux are not produced in Kavachio yet" },
+            { label: "Ready to send", v: d?.ceded.ready_to_send, c: "var(--p-info)" },
+            { label: "Waiting for the reinsurer", v: d?.ceded.sent, c: "var(--p-faint)" },
+            { label: "Queried", v: d?.ceded.queried, c: "var(--p-warn)" },
+            { label: "Agreed", v: d?.ceded.agreed, c: "var(--p-ok)" },
           ]} />
+          {!!d?.ceded.overdue && (
+            <div style={{ fontSize: 12.5, color: "var(--p-crit-ink)", fontWeight: 600 }}>
+              {d.ceded.overdue} overdue — past {"30"} days after the period ended
+            </div>
+          )}
+          {!!d?.ceded.not_set_up && (
+            <Link to="/direct/setups?tab=reinsurance" onClick={e => e.stopPropagation()}
+                  style={{ fontSize: 12.5, color: "var(--p-warn-ink)", fontWeight: 600 }}>
+              {d.ceded.not_set_up} treat{d.ceded.not_set_up === 1 ? "y needs" : "ies need"} a
+              setup before {d.ceded.not_set_up === 1 ? "its" : "their"} statements can be prepared →
+            </Link>
+          )}
+          <div style={{ fontSize: 12.5, color: "var(--p-muted)" }}>
+            From {b?.total ?? 0} inward bordereau{(b?.total ?? 0) === 1 ? "" : "x"} this
+            month on protected programmes.
+          </div>
+          <Link to="/reinsurance/bordereaux" onClick={e => e.stopPropagation()}
+                className="btn pri sm" style={{ alignSelf: "flex-start" }}>
+            Process reinsurance bordereaux <ArrowRight size={12} />
+          </Link>
         </DashCard>
 
         <DashCard icon={<CalendarClock size={18} strokeWidth={2.5} />}

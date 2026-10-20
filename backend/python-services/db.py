@@ -729,8 +729,11 @@ class ContractSignature(Base):
       recorded  somebody signed on paper or through a provider elsewhere and
                 the carrier recorded the fact here. `by_user_id` is whoever
                 recorded it — never the signatory, who was never in this
-                system. It is the only honest way to hold a reinsurance
-                contract, whose counterparty has no seat here at all.
+                system.
+      link      a reinsurer signed it themselves, on the private link the
+                carrier sent them, after the emailed code proved they hold that
+                mailbox. `by_user_id` is NULL — nobody logged in signed it —
+                and `signer_email` is the address the link and code went to.
 
     A SIGNATURE IS ON A VERSION. Editing a draft's terms or its wording deletes
     the signatures on it. A signature that outlived the words it was under
@@ -1342,6 +1345,11 @@ class ReinsurerAccessLink(Base):
                             default=0, server_default=text("0"))
     otp_last_sent_at = Column("ral_otp_last_sent_at", DateTime(timezone=True),
                               nullable=True)
+    # Asked to SIGN the treaty on this link, not only to view and approve it
+    # (migration 42). Their signature lands in contract_signature, method 'link'.
+    sign_requested_at = Column("ral_sign_requested_at", DateTime(timezone=True),
+                               nullable=True)
+    sign_requested_by_user_id = Column("ral_sign_requested_by", Integer, nullable=True)
     created_at = Column("ral_created_at", DateTime(timezone=True),
                         default=datetime.utcnow, server_default=func.now())
 
@@ -1378,6 +1386,165 @@ class ReinsurerApproval(Base):
     ip = Column("rap_ip", String, nullable=True)
     at = Column("rap_at", DateTime(timezone=True), nullable=False,
                 default=datetime.utcnow, server_default=func.now())
+
+
+class CededSetup(Base):
+    """How one treaty's reinsurance bordereaux are made and sent — the
+    reinsurance counterpart of a broker's Bordereau Setup. No statement is
+    prepared for a treaty until its setup is active.
+
+    draft → (a carrier user) pending_approval → active; the carrier admin
+    activates directly. Editing an active setup puts it back to draft, so a
+    change is approved before it is used.
+    """
+    __tablename__ = "ceded_setup"
+    id = Column("csu_id", Integer, primary_key=True)
+    tenant_id = Column("csu_tenant_id", Integer, nullable=True, index=True)
+    contract_id = Column("csu_contract_id", Integer,
+                         ForeignKey("contract.contract_id"), nullable=False,
+                         unique=True)
+    # draft | pending_approval | active
+    status = Column("csu_status", String, nullable=False, default="draft")
+    # monthly | quarterly | annually
+    frequency = Column("csu_frequency", String, nullable=False, default="monthly")
+    due_days = Column("csu_due_days", Integer, nullable=False, default=30)
+    # Programmes whose bordereaux feed it — a subset of those the treaty
+    # protects. NULL = all of them.
+    program_ids = Column("csu_program_ids", JSON, nullable=True)
+    # [{key, heading, column_index?, keep?}] in order — see ceded_layout for
+    # what a key can be.
+    columns = Column("csu_columns", JSON, nullable=True)
+    # Whose layout the file follows (ceded_layout): {"source": kavachio |
+    # uploaded | standard, "filename", "sheet_name", "header_row",
+    # "data_start_row", "standard"}. NULL = Kavachio's own.
+    layout = Column("csu_layout", JSON, nullable=True)
+    # The carrier's own file (uploaded), or the Lloyd's sheet it was built
+    # from (standard) — filled in for every statement.
+    layout_blob = Column("csu_layout_blob", LargeBinary, nullable=True)
+    # Where the statement is READ from (ceded_layout): {"source": "brokers"}
+    # — the processed bordereaux of the programmes it protects, the default —
+    # or {"source": "own", "filename", "sheet_name", "header_row",
+    # "data_start_row", "columns": [{name, column_index, field}]}: a file of
+    # the carrier's own, uploaded each period (CededInput).
+    input_layout = Column("csu_input_layout", JSON, nullable=True)
+    # The treaty's rules as the carrier set them (treaty_rules): which are on,
+    # Blocking or Warning, and those read from the wording. NULL = the rules
+    # the treaty's terms imply, all on.
+    rules = Column("csu_rules", JSON, nullable=True)
+    # xlsx | csv
+    file_format = Column("csu_file_format", String, nullable=False, default="xlsx")
+    # {party_id: [contact_id, ...]} — NULL entry = every contact with an email.
+    recipients = Column("csu_recipients", JSON, nullable=True)
+    cc = Column("csu_cc", JSON, nullable=True)
+    # manual | auto
+    send_mode = Column("csu_send_mode", String, nullable=False, default="manual")
+    note = Column("csu_note", Text, nullable=True)
+    submitted_by_user_id = Column("csu_submitted_by", Integer, nullable=True)
+    submitted_at = Column("csu_submitted_at", DateTime(timezone=True), nullable=True)
+    approved_by_user_id = Column("csu_approved_by", Integer, nullable=True)
+    approved_at = Column("csu_approved_at", DateTime(timezone=True), nullable=True)
+    updated_by_user_id = Column("csu_updated_by", Integer, nullable=True)
+    created_at = Column("csu_created_at", DateTime(timezone=True),
+                        default=datetime.utcnow, server_default=func.now())
+    updated_at = Column("csu_updated_at", DateTime(timezone=True),
+                        default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CededBordereau(Base):
+    """A reinsurance (ceded) bordereau: one treaty, one reporting period, one
+    version — built from the live inward bordereaux on the programmes the
+    treaty protects (ceded_engine). A corrected inward file after sending makes
+    the next version, and the earlier one is marked superseded.
+    Requires migration 41_ceded_bordereaux.sql on RLS/prod.
+    """
+    __tablename__ = "ceded_bordereau"
+    __table_args__ = (
+        Index("uq_ceded_bordereau_version", "cb_contract_id", "cb_period",
+              "cb_version_no", unique=True),
+    )
+    id = Column("cb_id", Integer, primary_key=True)
+    tenant_id = Column("cb_tenant_id", Integer, nullable=True, index=True)
+    contract_id = Column("cb_contract_id", Integer,
+                         ForeignKey("contract.contract_id"), nullable=False)
+    period = Column("cb_period", String, nullable=False)
+    version_no = Column("cb_version_no", Integer, nullable=False, default=1)
+    # draft | sent | queried | agreed | superseded
+    status = Column("cb_status", String, nullable=False, default="draft")
+    currency = Column("cb_currency", String, nullable=True)
+    totals = Column("cb_totals", JSON, nullable=True)
+    notes = Column("cb_notes", JSON, nullable=True)
+    skipped = _payload(Column("cb_skipped", JSON, nullable=True))
+    lines = _payload(Column("cb_lines", JSON, nullable=True))
+    # [{export_id, program_id, programme, broker, period, version_no, rows}]
+    sources = Column("cb_sources", JSON, nullable=True)
+    # Protected programmes with no inward bordereau for the period.
+    missing = Column("cb_missing", JSON, nullable=True)
+    # The treaty's rules that the rows broke (treaty_rules.check).
+    checks = Column("cb_checks", JSON, nullable=True)
+    # The inward versions this was built from, so a correction is noticed.
+    source_key = Column("cb_source_key", String, nullable=True)
+    previous_id = Column("cb_previous_id", Integer, nullable=True)
+    auto_prepared = Column("cb_auto_prepared", Boolean, default=False)
+    built_at = Column("cb_built_at", DateTime(timezone=True), nullable=True)
+    built_by_user_id = Column("cb_built_by", Integer, nullable=True)
+    sent_at = Column("cb_sent_at", DateTime(timezone=True), nullable=True)
+    sent_by_user_id = Column("cb_sent_by", Integer, nullable=True)
+    created_at = Column("cb_created_at", DateTime(timezone=True),
+                        default=datetime.utcnow, server_default=func.now())
+
+
+class CededInput(Base):
+    """One period's file of the carrier's own — when a treaty's setup reads
+    the reinsurance bordereau from it instead of from the brokers' bordereaux.
+    A new upload for the same period is the next version; the latest counts."""
+    __tablename__ = "ceded_input"
+    id = Column("cin_id", Integer, primary_key=True)
+    tenant_id = Column("cin_tenant_id", Integer, nullable=True, index=True)
+    contract_id = Column("cin_contract_id", Integer,
+                         ForeignKey("contract.contract_id"), nullable=False, index=True)
+    period = Column("cin_period", String, nullable=False)
+    version_no = Column("cin_version_no", Integer, nullable=False, default=1)
+    filename = Column("cin_filename", String, nullable=True)
+    blob = Column("cin_blob", LargeBinary, nullable=True)
+    rows = Column("cin_rows", Integer, nullable=True)
+    # How this file's columns were read — the setup's own input layout, or,
+    # for a setup that reads the brokers' bordereaux, one matched from this
+    # file's headings when it was uploaded.
+    layout = Column("cin_layout", JSON, nullable=True)
+    uploaded_by_user_id = Column("cin_uploaded_by", Integer, nullable=True)
+    uploaded_at = Column("cin_uploaded_at", DateTime(timezone=True),
+                         default=datetime.utcnow, server_default=func.now())
+
+
+class CededStatement(Base):
+    """One reinsurer's part of a ceded bordereau: its share of every line, its
+    totals, its own workbook, and its answer (agreed, or a query)."""
+    __tablename__ = "ceded_statement"
+    __table_args__ = (
+        Index("ix_ceded_statement_cb", "cs_cb_id"),
+        Index("ix_ceded_statement_reinsurer", "cs_reinsurer_party_id"),
+    )
+    id = Column("cs_id", Integer, primary_key=True)
+    cb_id = Column("cs_cb_id", Integer, ForeignKey("ceded_bordereau.cb_id"),
+                   nullable=False)
+    contract_id = Column("cs_contract_id", Integer, nullable=False)
+    tenant_id = Column("cs_tenant_id", Integer, nullable=True)
+    reinsurer_party_id = Column("cs_reinsurer_party_id", Integer,
+                                ForeignKey("party.party_id"), nullable=False)
+    shares = Column("cs_shares", JSON, nullable=True)
+    totals = Column("cs_totals", JSON, nullable=True)
+    previous_totals = Column("cs_previous_totals", JSON, nullable=True)
+    filename = Column("cs_filename", String, nullable=True)
+    blob = _payload(Column("cs_blob", LargeBinary, nullable=True))
+    blob_ref = Column("cs_blob_ref", String, nullable=True)
+    # pending | sent | agreed | queried
+    status = Column("cs_status", String, nullable=False, default="pending")
+    sent_at = Column("cs_sent_at", DateTime(timezone=True), nullable=True)
+    sent_to = Column("cs_sent_to", JSON, nullable=True)
+    answered_at = Column("cs_answered_at", DateTime(timezone=True), nullable=True)
+    answered_by = Column("cs_answered_by", String, nullable=True)
+    answer_note = Column("cs_answer_note", Text, nullable=True)
+    answer_ip = Column("cs_answer_ip", String, nullable=True)
 
 
 class ReinsurerAccessEvent(Base):
@@ -2781,6 +2948,40 @@ def init_db():
         # Pipeline model, for the reason rule_scope is not: read and written
         # through itd_store so a database without it keeps working.
         _ensure_column(conn, inspector, "pipeline", "itd_config", json_type)
+        # Migration 41 — a reinsurance setup's own layout (ceded_layout).
+        # Migration 42 — a reinsurer asked to sign on its private link.
+        if inspector.has_table("reinsurer_access_link"):
+            _ensure_column(conn, inspector, "reinsurer_access_link",
+                           "ral_sign_requested_at",
+                           "TIMESTAMP WITH TIME ZONE" if dialect == "postgresql"
+                           else "TIMESTAMP")
+            _ensure_column(conn, inspector, "reinsurer_access_link",
+                           "ral_sign_requested_by", "INTEGER")
+        # …and a signature can be 'link' (migration 42). Widened only when the
+        # old check is still there, so a normal start does no DDL.
+        if dialect == "postgresql" and inspector.has_table("contract_signature"):
+            _chk = conn.exec_driver_sql(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'contract_signature_contract_signature_method_check'"
+            ).scalar()
+            if _chk and "'link'" not in _chk:
+                conn.exec_driver_sql(
+                    "ALTER TABLE contract_signature DROP CONSTRAINT "
+                    "contract_signature_contract_signature_method_check")
+                conn.exec_driver_sql(
+                    "ALTER TABLE contract_signature ADD CONSTRAINT "
+                    "contract_signature_contract_signature_method_check CHECK "
+                    "(contract_signature_method IN ('typed', 'recorded', 'link'))")
+        if inspector.has_table("ceded_setup"):
+            _ensure_column(conn, inspector, "ceded_setup", "csu_layout", json_type)
+            _ensure_column(conn, inspector, "ceded_setup", "csu_layout_blob",
+                           "BYTEA" if dialect == "postgresql" else "BLOB")
+            _ensure_column(conn, inspector, "ceded_setup", "csu_input_layout", json_type)
+            _ensure_column(conn, inspector, "ceded_setup", "csu_rules", json_type)
+        if inspector.has_table("ceded_bordereau"):
+            _ensure_column(conn, inspector, "ceded_bordereau", "cb_checks", json_type)
+        if inspector.has_table("ceded_input"):
+            _ensure_column(conn, inspector, "ceded_input", "cin_layout", json_type)
         if inspector.has_table("intake_route"):
             _ensure_column(conn, inspector, "intake_route", "notify_emails", json_type)
             if not _had_run_state:
