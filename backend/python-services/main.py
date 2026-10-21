@@ -3425,6 +3425,7 @@ def _resolve_export_target(s, template_id, upload_id, policy_ids, principal=None
         "active_contract_info": active_contract_info,
         "ids": ids,
         "program_id": program_id,
+        "tenant_id": t.tenant_id,
     }
 
 
@@ -3628,6 +3629,17 @@ def export_validate(
             import traceback as _tb
             _tb.print_exc()
             print(f"[validate-only persist] skipped: {persist_exc}")
+
+    # MOPR 40.1 — a dry run is a check run too (never a file handled): every
+    # rule passed or failed, and every error, in the shared record.
+    import check_record as _cr
+    _cr.record_run(
+        lane=_cr.CANONICAL, kind=_cr.DRY_RUN, tenant_id=tgt.get("tenant_id"),
+        status=status, status_reason=status_reason,
+        rules=contract_validation_rules, dv=_dv, exceptions=exceptions,
+        structure=structure, blocks=records, upload_id=upload_id,
+        program_id=tgt.get("program_id"), contract_id=active_contract_id,
+        run_by_user_id=principal.user_id)
 
     return {
         "exception_count": len(violations),
@@ -3907,6 +3919,18 @@ def export_generate(
         ))
         s.commit()
         s.refresh(rec)
+        # MOPR 40.1 — the shared record of every check run (check_record):
+        # the same record the direct lane writes, so both halves are counted
+        # as one.
+        import check_record as _cr
+        _cr.record_run(
+            lane=_cr.CANONICAL, kind=_cr.RUN, tenant_id=template_tid,
+            status=status, status_reason=status_reason,
+            rules=contract_validation_rules, dv=_dv, exceptions=exceptions,
+            structure=structure, blocks=records, export_id=rec.id,
+            upload_id=upload_id, program_id=program_id,
+            contract_id=active_contract_id, filename=fname,
+            run_by=actor, run_by_user_id=principal.user_id)
         out = _export_to_dict(rec, with_exceptions=True, mga=_tenant_name(s, rec.tenant_id))
         out["unprocessable_rules"] = unprocessable
         out["status_reason"] = status_reason

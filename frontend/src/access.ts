@@ -229,6 +229,8 @@ export const ROUTE_ACCESS: {
   { pattern: "/runs", requires: "carrier_admin" },
   { pattern: "/calendar", requires: "carrier_admin" },
   { pattern: "/bordereau-calendar", requires: "carrier_admin" },
+  // MOPR 40 — the carrier's month of files, checks and volumes.
+  { pattern: "/data-quality", requires: "carrier_admin" },
   // How files reach this carrier, and everything that has landed. Carrier-only:
   // the routes name the carrier's brokers and their folder addresses.
   { pattern: "/files", requires: "carrier_admin" },

@@ -2094,6 +2094,7 @@ async def _render_landing(
     run_by_user_id: Optional[int] = None,
     mark_calendar: bool = True,
     period: Optional[str] = None,
+    check_kind: Optional[str] = None,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -2108,7 +2109,11 @@ async def _render_landing(
     validation and produce the (downloadable, highlighted) output file, but treat
     it as a throwaway — do NOT link it to the landing (so it stays out of run
     history) and do NOT raise an admin mapping task. Combine with
-    ``auto_ingest=False`` so nothing reaches the data model."""
+    ``auto_ingest=False`` so nothing reaches the data model.
+
+    ``check_kind`` is what the shared check record (MOPR 40.1, check_record)
+    calls this run when the flags above do not say: "preview" for the setup
+    preview. Otherwise a self-check, a re-generate or a run."""
     with SessionLocal() as s:
         rec = s.get(LandingRecord, landing_id)
         if not rec:
@@ -2305,6 +2310,9 @@ async def _render_landing(
     exceptions: list[dict] = []
     dv = None                  # run_validation's result, once it has returned
     validation_error = None    # what stopped it, if something did
+    # Read back by the shared check record even when validation fails early.
+    rules: list[dict] = []
+    column_types: dict = {}
     try:
         rules: list[dict] = []
         if governing_ids:
@@ -2471,8 +2479,9 @@ async def _render_landing(
     # one informational entry that is shown but never counted.
     projected_rows = sum(len(v) for v in projected.values())
     stats = (dv or {}).get("stats")
+    input_rows = vo.input_row_count(landing_data, supplement_cfg)
     status, status_reason = vo.outcome(
-        input_rows=vo.input_row_count(landing_data, supplement_cfg),
+        input_rows=input_rows,
         # the file's rows on the sheets the routing reads — tells a sheet
         # mismatch from a filter that let nothing through
         routed_rows=vo.routed_row_count(landing_data, supplement_cfg, routing),
@@ -2627,6 +2636,21 @@ async def _render_landing(
         s.commit()
         s.refresh(out)
         export_id = out.id
+        # MOPR 40.1 — the shared record of every check run: each rule and type
+        # check passed or failed, every error, and the rows and transaction
+        # types this run handled. Never costs the run (record_run swallows).
+        import check_record as _cr
+        _cr.record_run(
+            lane=_cr.DIRECT,
+            kind=check_kind or (_cr.SELF_CHECK if check_only
+                                else _cr.RERUN if reuse_export_id else _cr.RUN),
+            tenant_id=tenant_id, status=status, status_reason=status_reason,
+            rules=rules, column_types=column_types, dv=dv, exceptions=exceptions,
+            structure=structure, blocks=blocks, rows_in=input_rows,
+            export_id=export_id, landing_id=landing_id, arrival_id=arrival_id,
+            pipeline_id=out.pipeline_id, program_id=out.program_id,
+            broker_party_id=out.broker_party_id, contract_id=out.contract_id,
+            filename=fname, period=period, run_by=actor, run_by_user_id=run_by_user_id)
         # Set below when this run both satisfies a period AND is a broker's own
         # (out.broker_party_id set) — the outcome of the auto-send, surfaced on
         # the response so the screen can say what happened without a second
@@ -2808,7 +2832,8 @@ async def direct_render(
         except (ValueError, TypeError):
             extra = {}
     return await _render_landing(landing_id, contract_id, filename,
-                                 actor or _principal_email(principal), extra)
+                                 actor or _principal_email(principal), extra,
+                                 check_kind="preview")
 
 
 class RerenderRequest(BaseModel):

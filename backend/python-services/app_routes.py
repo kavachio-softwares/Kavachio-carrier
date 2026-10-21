@@ -5447,6 +5447,54 @@ def dashboard_stats(mga: str, principal: Principal = Depends(current_principal))
         }
 
 
+@router.get("/reports/data-quality")
+def report_data_quality(mga: str, month: Optional[str] = None,
+                        program_id: Optional[int] = None,
+                        broker_party_id: Optional[int] = None,
+                        principal: Principal = Depends(current_principal)):
+    """MOPR 40.2 / 40.3 — one month's data quality and volumes, read from the
+    shared check record (check_record.summary): files and rows handled,
+    policies split new / renewed / cancelled, checks passed and failed, errors
+    found, and how many files passed with no human help.
+
+    `month` is YYYY-MM (default: this month), by the day a file was checked."""
+    import check_record
+    month = month or datetime.utcnow().strftime("%Y-%m")
+    try:
+        start, end = check_record.month_bounds(month)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "month must be YYYY-MM")
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        out = check_record.summary(s, tid, start, end, program_id=program_id,
+                                   broker_party_id=broker_party_id)
+        # Names for the two breakdowns, and for the filters.
+        broker_ids = {r["id"] for r in out["by_broker"] if r["id"]}
+        prog_ids = {r["id"] for r in out["by_programme"] if r["id"]}
+        brokers = dict(s.query(Party.id, Party.legal_name)
+                       .filter(Party.id.in_(broker_ids)).all()) if broker_ids else {}
+        progs = dict(s.query(Program.id, Program.name)
+                     .filter(Program.id.in_(prog_ids)).all()) if prog_ids else {}
+        for r in out["by_broker"]:
+            r["name"] = brokers.get(r["id"]) or ("No broker" if not r["id"] else f"Broker {r['id']}")
+        for r in out["by_programme"]:
+            r["name"] = progs.get(r["id"]) or ("No programme" if not r["id"] else f"Programme {r['id']}")
+        for r in out["by_broker_programme"]:
+            b, p = r["broker_party_id"], r["program_id"]
+            r["broker_name"] = brokers.get(b) or ("No broker" if not b else f"Broker {b}")
+            r["programme_name"] = progs.get(p) or ("No programme" if not p else f"Programme {p}")
+        out["programmes"] = [{"id": p.id, "name": p.name} for p in (
+            s.query(Program).filter(Program.tenant_id == tid).order_by(Program.name).all())]
+        bp = (s.query(Party.id, Party.legal_name)
+              .join(ProgramBroker, ProgramBroker.broker_party_id == Party.id)
+              .join(Program, Program.id == ProgramBroker.program_id)
+              .filter(Program.tenant_id == tid).distinct().all())
+        out["brokers"] = sorted(({"id": i, "name": n} for i, n in bp),
+                                key=lambda b: (b["name"] or "").lower())
+        out["month"] = month
+        return out
+
+
 @router.get("/dashboard/broker-performance")
 def dashboard_broker_performance(mga: str,
                                  days: int = Query(30, ge=7, le=90),

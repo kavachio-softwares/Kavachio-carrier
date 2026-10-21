@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet,
+  FileCheck, CalendarDays, ScrollText, History, FileSpreadsheet, BarChart3,
 } from "lucide-react";
 import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
@@ -108,6 +108,9 @@ const GROUPS: {
       // belong inside one setup. It sits next to Process Bordereau because
       // "what is owed to me" and "run one" are the same job on two days.
       { to: "/bordereau-calendar", label: "Bordereau Calendar", icon: CalendarDays },
+      // MOPR 40: what the month's files were — how many, which transaction
+      // types, what the checks found and how many needed nobody.
+      { to: "/data-quality", label: "Data Quality", icon: BarChart3 },
       // My Calendar is deliberately NOT listed. Deadlines belong to a specific
       // carrier + program, so the calendar now lives inside that setup's own
       // screen where both are already fixed. The /calendar route still exists

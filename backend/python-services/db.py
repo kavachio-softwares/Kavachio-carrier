@@ -2497,6 +2497,122 @@ class SubmissionCaseEvent(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class CheckRun(Base):
+    """MOPR 40.1 — ONE shared record of every check run. APPEND-ONLY.
+
+    Before it, each half of the system kept its own: the direct lane wrote its
+    findings onto the processed file (output_exports.exceptions, overwritten by
+    a re-generate), the canonical lane into validation_run/validation_exception
+    (and only when something failed), and the file-arrival checks kept just the
+    reason a file was refused. A check that ran and found nothing was recorded
+    nowhere. Every one of them now writes here (check_record.record_run): one
+    row per run, its checks in check_result, its errors in check_error.
+
+    lane   intake | direct | canonical
+    kind   file_arrival | run | rerun | self_check | preview | dry_run
+           — only `run` is a file handled; the rest are looks at one.
+    The volumes (rows, policies, transaction types) are counted from the rows
+    the run checked, so 40.2 reads them here rather than re-reading files.
+    """
+    __tablename__ = "check_run"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, index=True, nullable=True)
+    lane = Column(String, nullable=False)
+    kind = Column(String, nullable=False)
+    status = Column(String, nullable=True)        # clean | has_exceptions | not_validated
+                                                  # | accepted | held | turned_away
+    status_reason = Column(Text, nullable=True)
+    # what was checked, and for whom
+    export_id = Column(Integer, index=True, nullable=True)     # output_exports.id
+    landing_id = Column(Integer, index=True, nullable=True)
+    arrival_id = Column(Integer, index=True, nullable=True)    # file_arrival.id
+    upload_id = Column(Integer, index=True, nullable=True)
+    pipeline_id = Column(Integer, nullable=True)
+    program_id = Column(Integer, index=True, nullable=True)
+    broker_party_id = Column(Integer, index=True, nullable=True)
+    contract_id = Column(Integer, nullable=True)
+    filename = Column(String, nullable=True)
+    period = Column(String, nullable=True)                     # reporting period, when known
+    submission_ref = Column(String, nullable=True)
+    version_no = Column(Integer, nullable=True)
+    # The same file across its re-runs and corrected versions (submission_ref,
+    # else its landing, else its export) — what an error is followed along.
+    chain_key = Column(String, index=True, nullable=True)
+    # Why a person was already involved before the checks ran:
+    # ["corrected_version", "released_from_hold"]. Empty = nobody.
+    human_touch = Column(JSON, nullable=True)
+    # the checks
+    checks_total = Column(Integer, default=0)
+    checks_passed = Column(Integer, default=0)
+    checks_failed = Column(Integer, default=0)
+    checks_not_run = Column(Integer, default=0)
+    errors_total = Column(Integer, default=0)
+    critical_count = Column(Integer, default=0)
+    warning_count = Column(Integer, default=0)
+    info_count = Column(Integer, default=0)
+    # the volumes (40.2)
+    rows_in = Column(Integer, nullable=True)          # rows the file carried
+    rows_out = Column(Integer, nullable=True)         # rows handled (written out)
+    rows_checked = Column(Integer, nullable=True)     # rows the rules ran over
+    rows_with_errors = Column(Integer, nullable=True)
+    policies = Column(Integer, nullable=True)         # distinct policy numbers; None = no policy column
+    # {type: {"rows": n, "policies": m}} — type as the system reads it at
+    # ingest (new, renewal, cancellation, …, "unknown")
+    transaction_types = Column(JSON, nullable=True)
+    run_by = Column(String, nullable=True)
+    run_by_user_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class CheckResult(Base):
+    """MOPR 40.1 — every check a run made, passed or not. APPEND-ONLY."""
+    __tablename__ = "check_result"
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, index=True, nullable=False)      # check_run.id
+    tenant_id = Column(Integer, index=True, nullable=True)
+    check_key = Column(String, nullable=False)   # "rule:12" | "type:Sheet:Column" | "intake:size"
+    kind = Column(String, nullable=False)        # contract_rule | type_check | intake
+    rule_id = Column(Integer, nullable=True)
+    name = Column(String, nullable=True)
+    severity = Column(String, nullable=True)
+    outcome = Column(String, nullable=False)     # passed | failed | not_run
+    error_count = Column(Integer, default=0)
+    message = Column(Text, nullable=True)        # why it did not run / why it failed
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CheckError(Base):
+    """MOPR 40.1 — every error a run found. APPEND-ONLY.
+
+    `fingerprint` names the same problem on the same policy/cell across the
+    re-runs and corrected versions of one file (`chain_key`), and
+    `first_found_at` is when that problem was first seen — so how long it
+    took to fix (MOPR 41) is measured from when it was found, not from the
+    last re-run."""
+    __tablename__ = "check_error"
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, index=True, nullable=False)      # check_run.id
+    tenant_id = Column(Integer, index=True, nullable=True)
+    lane = Column(String, nullable=True)
+    export_id = Column(Integer, index=True, nullable=True)
+    program_id = Column(Integer, nullable=True)
+    broker_party_id = Column(Integer, nullable=True)
+    chain_key = Column(String, index=True, nullable=True)
+    check_key = Column(String, nullable=True)
+    rule_id = Column(Integer, nullable=True)
+    code = Column(String, nullable=True)
+    severity = Column(String, nullable=True)
+    sheet = Column(String, nullable=True)
+    row = Column(Integer, nullable=True)
+    field = Column(String, nullable=True)
+    policy_number = Column(String, nullable=True)
+    actual_value = Column(Text, nullable=True)
+    message = Column(Text, nullable=True)
+    fingerprint = Column(String, index=True, nullable=True)
+    first_found_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 def _ensure_column(conn, inspector, table: str, column: str, ddl_type: str) -> None:
     """Add `column` to `table` if it isn't already there. Dialect-agnostic
     column inspection so this works on both SQLite and PostgreSQL."""

@@ -1016,26 +1016,34 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
         return _RouteFor(route, ident.get("program_id")) if route is not None else None
 
     reason: Optional[str] = None
-    for check in (
+    # Each check is named (check_record.INTAKE_CHECK_WORDS) so the shared check
+    # record (MOPR 40.1) can say which passed, which stopped the file, and
+    # which were never reached.
+    checks = (
         # ── settled without opening the file ────────────────────────────────
-        lambda: safety.check_size(file_bytes, max_bytes, size=declared_size),
-        lambda: _check_is_spreadsheet(filename, file_bytes),
-        lambda: safety.check_safe_to_open(filename, file_bytes),
-        lambda: _check_known_sender(route),
-        lambda: refusal,
-        _identified,
+        ("size", lambda: safety.check_size(file_bytes, max_bytes, size=declared_size)),
+        ("is_spreadsheet", lambda: _check_is_spreadsheet(filename, file_bytes)),
+        ("safe_to_open", lambda: safety.check_safe_to_open(filename, file_bytes)),
+        ("known_sender", lambda: _check_known_sender(route)),
+        ("channel", lambda: refusal),
+        ("identified", _identified),
         # Scanned before anything else is decided about it — the same order as
         # a manual upload, and the order Files Received shows.
-        lambda: safety.scan_for_malware(filename, file_bytes),
-        lambda: _check_not_duplicate(session, tenant_id, sha, route, scope=ident),
+        ("malware", lambda: safety.scan_for_malware(filename, file_bytes)),
+        ("not_duplicate", lambda: _check_not_duplicate(session, tenant_id, sha, route,
+                                                       scope=ident)),
         # ── from here on the file gets opened ───────────────────────────────
-        lambda: _check_can_open(rows()),
-        lambda: _check_has_rows(rows()),
-        lambda: required_fields.check(session, _scoped(), filename, file_bytes),
-        lambda: _check_live_contract(session, _scoped()),
-    ):
+        ("can_open", lambda: _check_can_open(rows())),
+        ("has_rows", lambda: _check_has_rows(rows())),
+        ("required_columns", lambda: required_fields.check(session, _scoped(), filename,
+                                                           file_bytes)),
+        ("live_contract", lambda: _check_live_contract(session, _scoped())),
+    )
+    stopped_by: Optional[str] = None
+    for key, check in checks:
         reason = check()
         if reason:
+            stopped_by = key
             break
 
     row_count = _counted[0] if _counted else None
@@ -1076,6 +1084,23 @@ def land_file(session, *, tenant_id: int, filename: str, file_bytes: bytes,
     session.add(arrival)
     session.flush()
     keep_copy(session, arrival, file_bytes)
+
+    # MOPR 40.1 — the arrival checks go to the same shared record as the data
+    # checks a run makes later: every one passed, failed or not reached.
+    # Inside the caller's transaction (it commits the arrival), behind its own
+    # savepoint, so a failure here never loses the arrival.
+    import check_record
+    check_record.record_run(
+        lane=check_record.INTAKE, kind=check_record.FILE_ARRIVAL, tenant_id=tenant_id,
+        status=outcome, status_reason=reason,
+        results=check_record.intake_results([k for k, _c in checks], stopped_by,
+                                            reason, outcome),
+        exceptions=check_record.intake_errors(stopped_by, reason, outcome),
+        rows_in=row_count, arrival_id=arrival.id,
+        program_id=ident.get("program_id"),
+        broker_party_id=route.broker_party_id if route is not None else None,
+        contract_id=ident.get("contract_id"), filename=filename,
+        period=ident.get("period"), run_by=claimed_sender, session=session)
 
     # THE CALENDAR'S "turned up" MOMENT (requirement 17.2). An accepted file on a
     # route pinned to a programme satisfies that programme's period for this
