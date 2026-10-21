@@ -212,7 +212,10 @@ def test_a_processed_file_is_read_back_by_data_model_field():
     assert rows == [{"policy_number": "P1", "policy_sum_insured_amount": 1000,
                      "premium_transaction_gross_premium_amount": 50,
                      # …and every column by its own heading, for exact copies.
-                     "_col": {"Policy": "P1", "Sum Insured": 1000, "Gross Premium": 50}}]
+                     "_col": {"Policy": "P1", "Sum Insured": 1000, "Gross Premium": 50},
+                     # …and which column gave each field, for a value fixed on Exceptions.
+                     "_from": {"policy_number": "Policy", "policy_sum_insured_amount": "Sum Insured",
+                               "premium_transaction_gross_premium_amount": "Gross Premium"}}]
 
 
 def test_period_shapes():
@@ -829,3 +832,101 @@ def test_a_draft_setup_can_be_deleted_an_active_one_cannot(w):
     cid2 = _treaty(w, _qs(w, 8), "QS delete active")
     r = client.delete(f"/reinsurance/setups/{cid2}", headers=w["ch"])
     assert r.status_code == 409 and "active" in r.text
+
+
+def test_exceptions_are_decided_row_by_row(w, mail):
+    """The broker's exception resolution, for a reinsurance bordereau: each
+    row a Critical rule catches is Approved (the value the rule recommends),
+    Fixed (a value entered) or Dismissed (kept). Saving records them; Fix &
+    Validate prepares the statement with them and checks every row again."""
+    period = "2027-03"
+    _inward(w, [("PX1", 500_000, 1000, None, None), ("PX2", 900_000, 2000, None, None),
+                ("PX3", 100_000, 500, None, None), ("PX4", 700_000, 800, None, None)],
+            period=period)
+    cid = _treaty(w, _qs(w, 50), "QS exceptions")
+    d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
+    rule = {"id": "wording_1_si_max", "label": "Sum insured at most 200,000",
+            "kind": "max", "subject": "sum_insured", "params": {"value": 200_000},
+            "severity": "critical", "enabled": True, "source": "wording", "clause": "x"}
+    base = {k: v for k, v in d["setup"].items()
+            if k in ("frequency", "due_days", "program_ids", "columns", "layout",
+                     "input_layout", "file_format", "recipients", "cc", "send_mode")}
+    _setup(w, cid, **{**base, "rules": d["setup"]["rules"] + [rule]})
+    cb = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                     json={"contract_id": cid, "period": period}).json()
+    chk = next(c for c in cb["checks"] if c["id"] == rule["id"])
+    assert chk["recommendation"] == "200000"
+    items = {it["policy"]: it for it in chk["items"]}
+    assert set(items) == {"PX1", "PX2", "PX4"} and chk["open"] == 3
+    assert cb["can_send"] is False
+    url = f"/reinsurance/bordereaux/{cb['id']}/decide"
+
+    # A fix must be a number for a money field.
+    assert client.post(url, headers=w["ch"], json={"decisions": [
+        {"key": items["PX2"]["key"], "kind": "fix", "value": "lots"}]}).status_code == 400
+    r = client.post(url, headers=w["ch"], json={"decisions": [
+        {"key": items["PX1"]["key"], "kind": "approve"},
+        {"key": items["PX2"]["key"], "kind": "fix", "value": "150000"},
+        {"key": items["PX4"]["key"], "kind": "dismiss", "reason": "Agreed with the lead"}]})
+    assert r.status_code == 200, r.text
+    cb = r.json()
+    # Recorded, not yet in the statement: Send waits for Fix & Validate.
+    assert cb["updated"] == 3 and cb["unapplied"] == 3 and cb["can_send"] is False
+    got = {it["policy"]: it for it in next(c for c in cb["checks"] if c["id"] == rule["id"])["items"]}
+    assert (got["PX1"]["status"], got["PX1"]["new_value"]) == ("approved", "200000")
+    assert (got["PX2"]["status"], got["PX2"]["new_value"]) == ("fixed", "150000")
+    assert got["PX4"]["status"] == "dismissed" and got["PX4"]["reason"] == "Agreed with the lead"
+    assert client.post(f"/reinsurance/bordereaux/{cb['id']}/send", headers=w["ch"],
+                       json={}).status_code == 409
+
+    cb = client.post(f"/reinsurance/bordereaux/{cb['id']}/validate", headers=w["ch"]).json()
+    assert cb["unapplied"] == 0 and cb["can_send"] is True and cb["send_blocked_by"] == []
+    si = {ln["policy"]: ln["sum_insured"] for ln in cb["lines"]}
+    assert (si["PX1"], si["PX2"], si["PX4"]) == (200_000, 150_000, 700_000)
+    assert any("corrected" in n for n in cb["notes"])
+
+    # A fixed value that still breaks the rule is open again after Fix & Validate.
+    client.post(url, headers=w["ch"], json={"decisions": [
+        {"key": items["PX2"]["key"], "kind": "fix", "value": "250000"}]})
+    cb = client.post(f"/reinsurance/bordereaux/{cb['id']}/validate", headers=w["ch"]).json()
+    px2 = next(it for c in cb["checks"] if c["id"] == rule["id"] for it in c["items"]
+               if it["policy"] == "PX2")
+    assert px2["status"] == "open" and px2["still_fails"] is True
+    assert cb["unapplied"] == 0 and cb["can_send"] is False
+
+    # Decisions survive Prepare again; reopening one is recorded until validated.
+    cb = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                     json={"contract_id": cid, "period": period}).json()
+    assert cb["unapplied"] == 0
+    cb = client.post(url, headers=w["ch"], json={"decisions": [
+        {"key": items["PX1"]["key"], "kind": "reopen"}]}).json()
+    assert cb["unapplied"] == 1
+
+
+def test_a_treatys_agreed_limits_check_its_reinsurance_bordereau(w, mail):
+    """The limits typed on a treaty are the treaty's — only those a treaty has
+    are kept, they become rules on its reinsurance bordereau, and they are
+    never bound as checks on the brokers' files."""
+    period = "2027-05"
+    _inward(w, [("PL1", 900_000, 1000, None, None), ("PL2", 100_000, 500, None, None)],
+            period=period)
+    r = client.post("/contracts", headers=w["ch"], json={
+        "program_id": w["p"], "contract_type": "insurer_reinsurer", "name": "QS limits",
+        "inception_dt": "2027-01-01", "expiry_dt": "2027-12-31",
+        "year_of_account": "2027", "notice_period_days": 90, "create_as": "draft",
+        "treaty": _qs(w, 50),
+        "agreed_limits": {"max_sum_insured": {"value": 500_000, "severity": "critical"},
+                          "brokerage_pct": {"value": 5}}})
+    assert r.status_code == 200, r.text
+    cid = r.json()["id"]
+    with SessionLocal() as s:
+        from db import Contract
+        assert set(s.get(Contract, cid).commercial_terms) == {"max_sum_insured"}
+    assert client.post(f"/contracts/{cid}/bind-checks", headers=w["ch"],
+                       json={}).status_code == 409
+    _setup(w, cid)
+    cb = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                     json={"contract_id": cid, "period": period}).json()
+    chk = next(c for c in cb["checks"] if c["id"] == "limit_max_sum_insured")
+    assert chk["severity"] == "critical" and [it["policy"] for it in chk["items"]] == ["PL1"]
+    assert chk["recommendation"] == "500000" and cb["can_send"] is False

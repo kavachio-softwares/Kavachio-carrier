@@ -273,6 +273,8 @@ export default function SignContract() {
 
   if (!view) return null;
   const { envelope, me, others, already_signed } = view;
+  // A treaty's other side is its reinsurer; the round calls that side "broker".
+  const cp = envelope.counterparty ?? "broker";
   const readOnly = !me.my_turn || me.status === "signed" || me.status === "declined";
 
   return (
@@ -342,6 +344,7 @@ export default function SignContract() {
               token={token}
               pageNo={pageNo}
               version={envelope.pdf_version}
+              cp={cp}
               ratio={ratioFor(envelope.pages, pageNo)}
               fields={view.fields.filter(f => f.page === pageNo)}
               draft={draft}
@@ -374,10 +377,10 @@ export default function SignContract() {
                 Identified as
               </div>
               <div className="mt-0.5 text-[13px] font-medium text-ink">
-                {me.side === "insurer" ? "The insurer" : "The broker"} on this contract
+                {me.side === "insurer" ? "The insurer" : cp === "reinsurer" ? "The reinsurer" : "The broker"} on this contract
               </div>
               <div className="mt-1 text-[11.5px] leading-snug text-ink-soft">
-                Boxes marked for {sideLabel(me.side)} are yours. No other box on
+                Boxes marked for {sideLabel(me.side, cp)} are yours. No other box on
                 this document will accept your signature.
               </div>
             </div>
@@ -476,10 +479,11 @@ export default function SignContract() {
 // ── one page of the document, with its boxes laid over it ──────────────────
 function PageView({
   token, pageNo, version, ratio, fields, draft, sigImage, initialsImage,
-  readOnly, focus,
+  readOnly, focus, cp,
   onFocus, onChange, onSignature,
 }: {
   token: string; pageNo: number; version: number; ratio: number;
+  cp: "broker" | "reinsurer";
   fields: EsignField[]; draft: Draft;
   sigImage: string | null; initialsImage: string | null; readOnly: boolean;
   focus: number | null;
@@ -511,7 +515,7 @@ function PageView({
           <FieldBox
             key={f.id} f={f} value={draft[f.id] ?? f.value ?? ""}
             sigImage={f.type === "initial" ? initialsImage : sigImage}
-            readOnly={readOnly} focused={focus === f.id}
+            readOnly={readOnly} focused={focus === f.id} cp={cp}
             onFocus={onFocus} onChange={onChange} onSignature={onSignature}
           />
         ))}
@@ -523,10 +527,10 @@ function PageView({
 /** One box. Mine = fillable and teal. Theirs = locked, greyed, and labelled
  *  with whose it is — hiding it would make the document look altered. */
 function FieldBox({
-  f, value, sigImage, readOnly, focused, onFocus, onChange, onSignature,
+  f, value, sigImage, readOnly, focused, cp, onFocus, onChange, onSignature,
 }: {
   f: EsignField; value: string; sigImage: string | null; readOnly: boolean;
-  focused: boolean;
+  focused: boolean; cp: "broker" | "reinsurer";
   onFocus: (id: number | null) => void;
   onChange: (id: number, v: string) => void;
   onSignature: () => void;
@@ -541,7 +545,7 @@ function FieldBox({
     return (
       <div
         style={pos}
-        title={`${f.owner_org ?? "The other party"} — ${sideLabel(f.owner_side)}`}
+        title={`${f.owner_org ?? "The other party"} — ${sideLabel(f.owner_side, cp)}`}
         className={`absolute flex items-center gap-1 overflow-hidden rounded border
                     border-dashed px-1.5 text-[10px] leading-none
                     ${f.filled

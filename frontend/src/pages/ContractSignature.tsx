@@ -54,7 +54,6 @@ import {
 import { SignaturePlacer, signerTargets, type PlaceTarget }
   from "../components/SignaturePlacer";
 import { Modal } from "../components/ui/Modal";
-import TreatySignLink from "../components/treaty/TreatySignLink";
 import TreatySetupNudge from "../components/treaty/TreatySetupNudge";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
@@ -114,9 +113,9 @@ export default function ContractSignature() {
   const [signName, setSignName] = useState("");
   const [signTitle, setSignTitle] = useState("");
   // The signed copy that came back, when the counterparty's signature is
-  // RECORDED. Required on a treaty: the reinsurer signs outside Kavachio, so
-  // that document is the only evidence of their signature (the server refuses
-  // without it).
+  // RECORDED. Required on a treaty: a reinsurer that signed on paper instead
+  // of on the document leaves that copy as the only evidence of its signature
+  // (the server refuses without it).
   const [signedDoc, setSignedDoc] = useState("");
   const [signing, setSigning] = useState(false);
   // Unpicked until somebody clicks: whoever can sign right now lands on the
@@ -421,15 +420,15 @@ export default function ContractSignature() {
           <div className="note" style={{ marginBottom: 16 }}>
             <b>
               <PenLine size={13} style={{ verticalAlign: "-2px" }} />{" "}
-              You sign here; the reinsurer signs on a private link.
+              Signed on the document, as a broker&rsquo;s contract is.
             </b>{" "}
-            The reinsurer has no Kavachio account, so once you have signed, send
-            them a link from the Sign &amp; track tab. They open it with a
-            one-time code emailed to the same address and type their name
-            against the treaty — recorded as their own signature, with their
-            email and the time. If they signed on paper instead, record it
-            against the signed copy. Both sides signing is what puts the treaty
-            in force.
+            You sign first, on the treaty itself. The lead reinsurer is then
+            emailed the treaty carrying your signature, with a one-time code —
+            they have no Kavachio account and need none — and sign their box on
+            the same document: typed, drawn or uploaded. Both sides get the
+            sealed signed copy, and the second signature puts the treaty in
+            force. If they signed on paper instead, record it against the
+            signed copy.
           </div>
         )}
         {!isBrokerSeat() && !isTreaty && (
@@ -822,19 +821,6 @@ export default function ContractSignature() {
                     + "they are emailed the document carrying your signature, "
                     + "and it also appears on their dashboard."}
               </div>
-            ) : isTreaty && !round?.started ? (
-              <div className="note" style={{ marginBottom: 14 }}>
-                <b>How a treaty is signed.</b>{" "}
-                {rec.unsigned_sides.includes("carrier")
-                  ? "First, sign for the carrier below. Then send the lead "
-                    + "reinsurer a link to sign"
-                  : "The carrier has signed. Now send the lead reinsurer a "
-                    + "link to sign"}{" "}
-                — they sign it themselves, and that puts the treaty in force.
-                If they signed on paper instead, attach the signed copy (on the
-                treaty&rsquo;s page, under Documents) and record their
-                signature against it.
-              </div>
             ) : round?.started && !round.can_sign ? (
               <div className="note warn" style={{ marginBottom: 14 }}>
                 <b>Out for signature{round.waiting_on_name
@@ -854,11 +840,6 @@ export default function ContractSignature() {
                   ? `It cannot be signed yet — ${round.why}.`
                   : ""}
               </div>
-            )}
-
-            {isTreaty && !isBrokerSeat() && (
-              <TreatySignLink contractId={id}
-                onSigned={() => getContract(id).then(setRec).catch(() => {})} />
             )}
 
             <div className="grid g-2">
@@ -894,7 +875,7 @@ export default function ContractSignature() {
                             {g.method === "typed"
                               ? "Signed in Kavachio"
                               : g.method === "link"
-                                ? `Signed by them on their private link${g.signer_email ? ` (${g.signer_email})` : ""}`
+                                ? `Signed in Kavachio, on their private link${g.signer_email ? ` (${g.signer_email})` : ""}`
                                 : "Signed elsewhere, recorded here"}
                           </div>
                         </span>

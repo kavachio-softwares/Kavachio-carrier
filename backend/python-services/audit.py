@@ -351,6 +351,8 @@ _FRIENDLY = {
     ("PUT",    "/contracts/{id}/treaty"):            "treaty_structure_saved",
     ("POST",   "/treaties/upload"):                  "signed_treaty_uploaded",
     ("POST",   "/reinsurance/bordereaux"):           "reinsurance_bordereau_prepared",
+    ("POST",   "/reinsurance/bordereaux/{id}/decide"): "reinsurance_exception_decided",
+    ("POST",   "/reinsurance/bordereaux/{id}/validate"): "reinsurance_bordereau_validated",
     ("PUT",    "/reinsurance/setups/{id}"):          "reinsurance_setup_saved",
     ("POST",   "/reinsurance/setups/{id}/send-back"): "reinsurance_setup_sent_back",
     ("PUT",    "/contracts/{id}/treaty/programmes"): "treaty_programmes_updated",

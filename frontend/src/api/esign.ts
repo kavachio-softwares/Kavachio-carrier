@@ -160,6 +160,8 @@ export type SigningView = {
     page_count: number; pdf_version: number;
     pages: { width: number; height: number }[];
     programme: string; term: string;
+    /** Who the other side is — a treaty's is its reinsurer. */
+    counterparty?: "broker" | "reinsurer";
   };
   me: {
     id: number; name: string; email: string; title: string | null;
@@ -399,9 +401,11 @@ export const RECIPIENT_STATUS: Record<EsignRecipient["status"], { label: string;
  *  publishes how many carriers are on the platform. The role is what they
  *  actually need — it is what answers "are these boxes mine?" and what makes a
  *  wrongly-forwarded link obvious. */
-export function sideLabel(side: Side | null | undefined): string {
+export function sideLabel(side: Side | null | undefined,
+                          counterparty: "broker" | "reinsurer" = "broker"): string {
+  // A treaty's other side is its reinsurer — the round calls it "broker".
   return side === "insurer" ? "the insurer"
-       : side === "broker" ? "the broker"
+       : side === "broker" ? `the ${counterparty}`
        : "the other party";
 }
 

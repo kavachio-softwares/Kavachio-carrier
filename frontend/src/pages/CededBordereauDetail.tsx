@@ -60,12 +60,14 @@ export default function CededBordereauDetail() {
   const shownTotals = useMemo(() => TOTALS.filter(t =>
     d?.totals?.[t.key] != null), [d]);
 
-  async function rebuild() {
+  /** Prepare it again — and, with `resolve`, open its exceptions. */
+  async function rebuild(resolve = false) {
     if (!d) return;
     setBusy("prepare"); setErr(""); setNote("");
     try {
       const nd = await prepareCeded(d.contract_id, d.period);
-      if (nd.id !== d.id) nav(`/reinsurance/bordereaux/${nd.id}`);
+      if (resolve) nav(`/reinsurance/bordereaux/${nd.id}/exceptions`);
+      else if (nd.id !== d.id) nav(`/reinsurance/bordereaux/${nd.id}`);
       else { setD(nd); setNote("Prepared again from the latest bordereaux."); }
     } catch (e) {
       setErr(fieldErrors(e).message);
@@ -128,7 +130,7 @@ export default function CededBordereauDetail() {
             </Link>
             <Link to={`/contracts/${d.contract_id}?tab=treaty`} className="btn">Treaty</Link>
             {d.status === "draft" && (
-              <button className="btn" type="button" disabled={!!busy} onClick={rebuild}>
+              <button className="btn" type="button" disabled={!!busy} onClick={() => rebuild()}>
                 {busy === "prepare" ? <Loader2 size={14} className="animate-spin" />
                                     : <RefreshCw size={14} />} Prepare again
               </button>
@@ -154,7 +156,7 @@ export default function CededBordereauDetail() {
                 + "as ready to send, showing each reinsurer the difference."}
             {d.status === "draft" && (
               <button className="btn sm" type="button" style={{ marginLeft: 10 }}
-                      onClick={rebuild} disabled={!!busy}>Prepare again</button>
+                      onClick={() => rebuild()} disabled={!!busy}>Prepare again</button>
             )}
           </div>
         )}
@@ -235,15 +237,39 @@ export default function CededBordereauDetail() {
           </div>
         )}
 
-        {/* The treaty's rules — a Critical one stops Send. */}
-        {!!d.send_blocked_by?.length && d.status === "draft" && (
-          <div className="note warn" style={{ marginBottom: 14 }}>
-            <b>Not ready to send — the treaty&rsquo;s rules are broken:</b>{" "}
-            {d.send_blocked_by.join("; ")}. Correct the rows and prepare it again,
-            or set the rule to Warning on the treaty&rsquo;s setup.
-          </div>
-        )}
-        {d.checks && d.checks.length > 0 && <TreatyChecks checks={d.checks} />}
+        {/* The treaty's rules — the rows they caught are decided on
+            Exceptions, as a broker's are; a Critical one stops Send until
+            each of its rows is. */}
+        {(() => {
+          const decidable = (d.checks ?? []).filter(c => c.severity !== "untested" && c.items?.length);
+          if (!decidable.length) {
+            // Prepared before each row was kept: prepared again, it can be resolved.
+            return d.checks && d.checks.length > 0
+              ? <TreatyChecks checks={d.checks} busy={!!busy}
+                  onResolve={d.status === "draft" ? () => rebuild(true) : undefined} />
+              : null;
+          }
+          const total = decidable.reduce((n, c) => n + (c.items?.length ?? 0), 0);
+          const open = decidable.reduce((n, c) => n + (c.open ?? 0), 0);
+          const blocked = (!!d.send_blocked_by?.length || !!d.unapplied) && d.status === "draft";
+          return (
+            <div className={`note ${blocked ? "warn" : open ? "" : "ok"}`}
+                 style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <span style={{ flex: 1, minWidth: 260 }}>
+                {blocked ? <><b>Not ready to send — {d.unapplied ? "run Fix & Validate" : "decide the exceptions first"}.</b>{" "}
+                  {!!d.send_blocked_by?.length && <>Critical: {d.send_blocked_by.join("; ")}.</>}</>
+                  : <b>{total} exception{total === 1 ? "" : "s"} from the treaty&rsquo;s rules</b>}{" "}
+                {open ? `${open} still pending, ${total - open} resolved.`
+                      : "All resolved — approved, fixed or dismissed."}
+                {!!d.unapplied && d.status === "draft"
+                  && ` ${d.unapplied} decision${d.unapplied === 1 ? "" : "s"} recorded but not in the statement yet — run Fix & Validate.`}
+              </span>
+              <Link className="btn sm" to={`/reinsurance/bordereaux/${d.id}/exceptions`}>
+                {d.status === "draft" && open ? "Review exceptions →" : "View exceptions →"}
+              </Link>
+            </div>
+          );
+        })()}
 
         {/* totals */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",

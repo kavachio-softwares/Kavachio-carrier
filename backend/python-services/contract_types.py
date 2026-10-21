@@ -708,6 +708,68 @@ LIMIT_GROUPS = [
      "what the two of you are paying each other"),
 ]
 
+# ── the limits of a TREATY ──────────────────────────────────────────────────
+# A treaty (insurer_reinsurer) asks only the limits a treaty has, worded for a
+# reinsurer — not the broker's authority, commission or brokerage: nobody
+# writes under a treaty, and its cession, commission, currency and shares are
+# asked on its Treaty structure step. Each limit with a `rule` is checked on
+# the REINSURANCE BORDEREAU (treaty_rules.from_limits), never on the brokers'
+# files; the rest go into the wording only. Same keys as AGREED_LIMITS, so the
+# value is stored, cleaned and written into the wording exactly as before.
+#   rule: (treaty_rules kind, subject)
+TREATY_LIMITS: dict[str, dict[str, Any]] = {
+    "coverage": {
+        "question": "Classes of business the treaty covers",
+        "sub": "Separate several with commas. A risk of another class is not ceded under it.",
+        "rule": ("allowed", "class_of_business")},
+    "excluded_risks": {
+        "question": "Classes or risks the treaty excludes",
+        "sub": "Separate several with commas — e.g. nuclear, war, terrorism.",
+        "rule": ("excluded", "class_of_business")},
+    "territory": {
+        "question": "Where the risks may be",
+        "sub": "Countries or regions, separated by commas.",
+        "rule": ("allowed", "territory")},
+    "excluded_territory": {
+        "question": "Where the risks may not be",
+        "sub": "Countries or regions the treaty excludes.",
+        "rule": ("excluded", "territory")},
+    "max_sum_insured": {
+        "question": "Most sum insured on one risk",
+        "sub": "A bigger risk is outside the treaty — placed facultatively, or not ceded.",
+        "rule": ("max", "sum_insured")},
+    "referral_threshold": {
+        "question": "Sum insured above which a risk is referred to the lead reinsurer",
+        "sub": "Flagged on the reinsurance bordereau so the referral can be shown.",
+        "rule": ("max", "sum_insured")},
+    "payment_terms_days": {
+        "question": "Days to settle the accounts",
+        "sub": "After the end of each period's statement."},
+    "settlement_frequency": {
+        "question": "How often the accounts are settled",
+        "sub": "Usually the same rhythm as the reinsurance bordereau."},
+    "premium_basis": {
+        "question": "What the percentages are calculated on",
+        "sub": "Gross premium is before deductions, net is after."},
+    "tax_treatment": {
+        "question": "Tax treatment",
+        "sub": "Whether the ceded premium includes taxes and levies."},
+}
+# Ten rows — few enough to show them all, so none hides behind "more".
+TREATY_COMMON = tuple(TREATY_LIMITS)
+TREATY_GROUPS = {
+    "cover": ("What the treaty covers", "the risks that may be ceded under it at all"),
+    "authority": ("Limits per risk", "the most one risk may bring into the treaty"),
+    "financial": ("Accounts", "how the two of you settle — cession and commission "
+                              "are on the Treaty structure step"),
+}
+
+
+def treaty_limits(raw: dict | None) -> dict:
+    """A treaty's agreed limits: only those a treaty has."""
+    return {k: v for k, v in clean_agreed_limits(raw).items() if k in TREATY_LIMITS}
+
+
 # ── how hard a check bites ──────────────────────────────────────────────────
 # The vocabulary, once. `key` is what is stored on the row and on
 # validation_rule.severity; `label` is what a person sees; `action` says what
@@ -776,7 +838,10 @@ def clean_agreed_limits(raw: dict | None) -> dict:
 
 def limit_groups_spec() -> list[dict[str, str]]:
     """The table's headings, served so the form does not restate them."""
-    return [{"key": k, "label": lbl, "sub": sub} for k, lbl, sub in LIMIT_GROUPS]
+    return [{"key": k, "label": lbl, "sub": sub,
+             # The same heading, for a treaty.
+             "treaty_label": TREATY_GROUPS[k][0], "treaty_sub": TREATY_GROUPS[k][1]}
+            for k, lbl, sub in LIMIT_GROUPS]
 
 
 def agreed_limits_spec() -> list[dict[str, Any]]:
@@ -794,4 +859,8 @@ def agreed_limits_spec() -> list[dict[str, Any]]:
         "default_severity": s.get("default_severity"),
         # Shown before "show every term". See COMMON_LIMITS.
         "common": k in COMMON_LIMITS,
+        # How a treaty asks it — absent where a treaty has no such limit.
+        "treaty": ({"question": TREATY_LIMITS[k]["question"], "sub": TREATY_LIMITS[k]["sub"],
+                    "checkable": "rule" in TREATY_LIMITS[k], "common": k in TREATY_COMMON}
+                   if k in TREATY_LIMITS else None),
     } for k, s in AGREED_LIMITS.items()]

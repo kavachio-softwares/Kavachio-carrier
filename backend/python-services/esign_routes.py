@@ -504,10 +504,28 @@ def _resolve_broker_signer(s, tenant_id: int, broker_party_id: int | None,
     if not party:
         raise HTTPException(404, "that broker is not on file")
     org = party.legal_name or "The broker"
+    # A treaty's other side is its lead REINSURER, which has no seat here: it
+    # signs from the emailed link and its one-time code, as a broker's signer
+    # with no account does. Its signer is the contact the carrier holds for it.
+    reinsurer = (party.party_type or "") == "reinsurer"
+    role = "Reinsurer" if reinsurer else "Broker"
     if given and given.email:
         return SignerIn(side="broker", name=given.name, email=given.email,
-                        title=given.title or "Broker", org=given.org or org,
+                        title=given.title or role, org=given.org or org,
                         broker_party_id=bpid, order=2)
+    if reinsurer:
+        from db import PartyContact
+        ct = (s.query(PartyContact)
+              .filter(PartyContact.party_id == bpid,
+                      PartyContact.email.isnot(None), PartyContact.email != "")
+              .order_by(PartyContact.id).first())
+        if ct is None:
+            raise HTTPException(
+                400, f"{org} has nobody to sign — add a contact with an email "
+                     "on the reinsurer, or name its signer on the contract.")
+        return SignerIn(side="broker", name=ct.full_name or ct.email,
+                        email=ct.email, title=ct.title or role,
+                        org=org, broker_party_id=bpid, order=2)
     admin = (s.query(AppUser)
              .filter(AppUser.broker_party_id == bpid,
                      AppUser.role.in_(db_role_values("broker_admin")),
@@ -934,12 +952,18 @@ def _live_round(s, contract_id: int) -> EsignEnvelope | None:
 # signer still has to be able to get in.
 SIGNABLE_STATES = ("agreed", "signed")
 
-# Reinsurance treaties (treaty_routes) are signed without a round — see
-# contract_round. One sentence, used by both the status and the refusal.
+# Reinsurance treaties (treaty_routes) sign in the same round as a broker's
+# contract: the carrier signs on the document, then the lead reinsurer — which
+# has no seat here — is emailed its link and code, signs on the same document,
+# and both get the sealed copy.
 TREATY_TYPE = "insurer_reinsurer"
-TREATY_SIGNING = ("a treaty is signed on its signature page: the carrier signs "
-                  "there, and the reinsurers' signature is recorded against the "
-                  "signed copy they send back")
+
+
+def _counterparty_kind(env, s) -> str:
+    """'reinsurer' for a treaty's round, else 'broker' — for the page's words."""
+    c = s.get(Contract, env.contract_id) if getattr(env, "contract_id", None) else None
+    return "reinsurer" if c is not None and (c.contract_type or "") == TREATY_TYPE \
+        else "broker"
 
 
 def _assert_terms_settled(c: Contract) -> None:
@@ -1159,8 +1183,6 @@ def signing_session(contract_id: int, request: Request,
                     409, "the carrier has not sent this for signature yet. You "
                          "will be emailed when it is your turn, and it will "
                          "show on your dashboard.")
-            if (c.contract_type or "") == TREATY_TYPE:
-                raise HTTPException(409, TREATY_SIGNING)
             _assert_terms_settled(c)
 
     # Outside the session on purpose: opening a round composes a PDF and reads
@@ -1219,17 +1241,6 @@ def contract_round(contract_id: int, p: Principal = Depends(current_principal)):
         import contract_routes
         state = contract_routes._effective_lifecycle(c)
 
-        if env is None and (c.contract_type or "") == TREATY_TYPE:
-            # A treaty never runs an electronic round: its other side is a
-            # panel of reinsurers with no seat here. The carrier signs on the
-            # signature page; the reinsurers' signature is recorded against the
-            # signed copy. Said here so no screen offers a button that 409s.
-            return {
-                "envelope_id": None, "status": None, "started": False,
-                "can_sign": False, "my_turn": False, "i_have_signed": False,
-                "waiting_on": None, "waiting_on_name": None,
-                "treaty": True, "why": TREATY_SIGNING,
-            }
         if env is None:
             startable = (not p.is_broker) and state in SIGNABLE_STATES
             return {
@@ -1674,6 +1685,8 @@ def open_for_signing(token: str, request: Request,
                 "pages": esign_pdf.page_sizes(pdf),
                 "programme": _programme_name(env, s),
                 "term": _term_text(env, s),
+                # Who the other side is — a treaty's is its reinsurer.
+                "counterparty": _counterparty_kind(env, s),
             },
             # Who the link thinks you are. The page shows it back so a signer
             # who was forwarded somebody else's link notices immediately.

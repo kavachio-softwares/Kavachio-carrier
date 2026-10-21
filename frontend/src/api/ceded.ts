@@ -71,6 +71,10 @@ export type CededSource = {
 };
 
 export type CededDetail = CededSummary & {
+  /** Decisions saved since it was prepared — Fix & Validate takes them in. */
+  unapplied?: number;
+  /** Every rule the rows were checked against, broken or not. */
+  rules?: Pick<TreatyRule, "id" | "label" | "kind" | "subject" | "severity" | "source" | "clause">[];
   summary_headline: string | null;
   notes: string[];
   lines: CededLine[];
@@ -129,6 +133,16 @@ export const prepareCeded = (contractId: number, period: string) =>
 
 export const getCeded = (id: number) =>
   api.get<CededDetail>(`/reinsurance/bordereaux/${id}`).then(r => r.data);
+
+/** Approve, Fix, Dismiss or reopen rows a treaty rule caught — recorded only;
+ *  Fix & Validate takes them into the statement. */
+export const decideCeded = (id: number, decisions: CededDecision[]) =>
+  api.post<CededDetail & { updated: number; skipped: string[] }>(
+    `/reinsurance/bordereaux/${id}/decide`, { decisions }).then(r => r.data);
+
+/** Fix & Validate: prepare the draft again with the decisions, and check it again. */
+export const validateCeded = (id: number) =>
+  api.post<CededDetail>(`/reinsurance/bordereaux/${id}/validate`).then(r => r.data);
 
 export const sendCeded = (id: number, note?: string) =>
   api.post<CededDetail>(`/reinsurance/bordereaux/${id}/send`, { note: note || null })
@@ -230,6 +244,28 @@ export type TreatyCheck = {
   source?: string | null; clause?: string | null; rows: number;
   examples: { policy: string | null; value: string | null; why: string }[];
   why?: string;
+  kind?: TreatyRule["kind"]; subject?: string; field?: string | null;
+  /** The value a breaking row should hold — what Approve writes — or the choices. */
+  recommendation?: string | null; options?: string[];
+  /** Every row it caught, each with what was decided on it. */
+  items?: CheckItem[];
+  open?: number; approved?: number; fixed?: number; dismissed?: number; excluded?: number;
+};
+
+/** One row a treaty rule caught — decided like a broker's exception. */
+export type CheckItem = {
+  key: string; row: number; policy: string | null; value: string | null; why: string;
+  status?: "open" | "approved" | "fixed" | "dismissed" | "excluded";
+  /** The value Approve or Fix writes into the row. */
+  new_value?: string | null;
+  /** Fix & Validate checked the approved / fixed value again: still breaks the rule. */
+  still_fails?: boolean;
+  reason?: string | null; decided_by?: string | null; decided_at?: string | null;
+};
+
+export type CededDecision = {
+  key: string; kind: "approve" | "fix" | "dismiss" | "reopen";
+  value?: string | null; reason?: string | null;
 };
 
 export type SetupValues = {

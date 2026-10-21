@@ -224,13 +224,20 @@ def _rows_from_table(table: list[list], sh: dict) -> list[dict]:
         if not raw or all(v in (None, "") for v in raw):
             continue
         rec: dict = {}
+        # Which column gave each field — a value fixed on Exceptions is
+        # written back to that column too, so a copied column shows it.
+        came: dict = {}
+        heading = dict(named)
         for idx, field in cols:
-            if idx < len(raw) and raw[idx] not in (None, ""):
-                rec.setdefault(field, raw[idx])
+            if idx < len(raw) and raw[idx] not in (None, "") and field not in rec:
+                rec[field] = raw[idx]
+                if idx in heading:
+                    came[field] = heading[idx]
         by_name = {name: raw[idx] for idx, name in named
                    if idx < len(raw) and raw[idx] not in (None, "")}
         if rec or by_name:
             rec["_col"] = by_name
+            rec["_from"] = came
             out.append(rec)
     return out
 

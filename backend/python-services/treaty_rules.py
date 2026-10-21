@@ -68,10 +68,47 @@ def _money(v: float) -> str:
     return f"{v:,.0f}"
 
 
+# ── from the limits agreed on the treaty ────────────────────────────────────
+def from_limits(limits: Optional[dict], currency: Optional[str] = None) -> list[dict]:
+    """The treaty's agreed limits (contract_types.TREATY_LIMITS) as rules on
+    its reinsurance bordereau, at the severity set on each limit."""
+    import contract_types as ct
+    out = []
+    for key, entry in ct.treaty_limits(limits).items():
+        rule = ct.TREATY_LIMITS[key].get("rule")
+        if not rule:
+            continue
+        kind, subject = rule
+        v, sev = entry["value"], _severity(entry.get("severity"), "warning")
+        q = ct.TREATY_LIMITS[key]["question"]
+        clause = f"Agreed limit — {q}: " + (f"{(currency + ' ') if currency else ''}{_money(ce.num(v))}"
+                                             if kind == "max" else str(v))
+        if kind == "max":
+            n = ce.num(v)
+            if n is None:
+                continue
+            what = ("referred to the lead reinsurer above" if key == "referral_threshold"
+                    else "at most")
+            out.append(_rule(f"limit_{key}",
+                             f"Sum insured {what} {(currency + ' ') if currency else ''}{_money(n)}",
+                             kind, subject, severity=sev, clause=clause, value=n))
+        else:
+            vals = [x.strip() for x in re.split(r";|,| and ", str(v)) if x.strip()]
+            if not vals:
+                continue
+            noun = SUBJECT_LABEL[subject]
+            label = (f"{noun[:1].upper()}{noun[1:]} is one of: {', '.join(vals)}" if kind == "allowed"
+                     else f"{noun[:1].upper()}{noun[1:]} is not {', '.join(vals)}")
+            out.append(_rule(f"limit_{key}", label, kind, subject, severity=sev,
+                             clause=clause, values=vals))
+    return out
+
+
 # ── from the treaty's terms ─────────────────────────────────────────────────
 def derive(st: dict, inception: Optional[dt.date],
-           expiry: Optional[dt.date]) -> list[dict]:
-    """The rules a treaty's structure implies. Same structure, same rules."""
+           expiry: Optional[dt.date], limits: Optional[dict] = None) -> list[dict]:
+    """The rules a treaty's structure implies — and its agreed limits, when
+    given. Same structure and limits, same rules."""
     ttype = st.get("treaty_type")
     terms = st.get("terms") or {}
     cur = (terms.get("currency") or "").strip().upper()
@@ -114,7 +151,7 @@ def derive(st: dict, inception: Optional[dt.date],
     if ttype in ("quota_share", "surplus"):
         out.append(_rule("duplicate", "Each policy appears once in the period",
                          "duplicate", "policy", severity="warning"))
-    return out
+    return out + from_limits(limits, cur or None)
 
 
 def merge(saved: Optional[list], derived: list[dict]) -> list[dict]:
@@ -241,10 +278,17 @@ def _hits(value: str, items: list[str]) -> bool:
     return any(v == _norm(x) or (len(_norm(x)) > 3 and _norm(x) in v) for x in items)
 
 
+# Every row a rule fails is kept, to be decided one by one — up to this many.
+MAX_ITEMS = 2000
+
+
 def check(rules: list[dict], rows: list[dict]) -> list[dict]:
     """Every enabled rule that some row breaks: [{id, label, severity, source,
-    clause, rows, examples: [{policy, value, why}]}]. A rule whose subject no
-    row carries is skipped — said as `untested`, not as a pass."""
+    clause, rows, examples: [{policy, value, why}], items: [{key, row, policy,
+    value, why}]}]. `row` is the row's place in `rows`; `key` names the
+    exception across rebuilds (rule, policy, value — and which repeat of them).
+    A rule whose subject no row carries is skipped — said as `untested`, not
+    as a pass."""
     out = []
     seen: dict[str, int] = {}
     for r in rules or []:
@@ -256,13 +300,13 @@ def check(rules: list[dict], rows: list[dict]) -> list[dict]:
         carried = False
         if r["kind"] == "duplicate":
             seen.clear()
-        for row in rows:
+        for i, row in enumerate(rows):
             v = ce.first(row, fields)
             pol = ce._s(ce.first(row, ce.POLICY))
             if r["kind"] == "required":
                 carried = True
                 if v is None or (ce.num(v) is None and r["subject"] != "policy"):
-                    bad.append({"policy": pol, "value": None,
+                    bad.append({"row": i, "policy": pol, "value": None,
                                 "why": f"no {SUBJECT_LABEL[r['subject']]}"})
                 continue
             if v is None:
@@ -293,11 +337,23 @@ def check(rules: list[dict], rows: list[dict]) -> list[dict]:
                 if seen[key] == 2:
                     why = "appears more than once"
             if why:
-                bad.append({"policy": pol, "value": ce._s(v), "why": why})
+                bad.append({"row": i, "policy": pol, "value": ce._s(v), "why": why})
         if bad:
+            n: dict[tuple, int] = {}
+            for b in bad:
+                k = (b["policy"] or "", b["value"] or "")
+                n[k] = n.get(k, 0) + 1
+                b["key"] = "|".join((r["id"], *k, str(n[k])))
+            reco, options = recommend(r)
             out.append({"id": r["id"], "label": r["label"], "severity": r["severity"],
                         "source": r.get("source"), "clause": r.get("clause"),
-                        "rows": len(bad), "examples": bad[:5]})
+                        "kind": r["kind"], "subject": r["subject"],
+                        "field": SUBJECT_LABEL.get(r["subject"]),
+                        "recommendation": reco, "options": options,
+                        "rows": len(bad),
+                        "examples": [{k: b[k] for k in ("policy", "value", "why")}
+                                     for b in bad[:5]],
+                        "items": bad[:MAX_ITEMS]})
         elif not carried and rows:
             out.append({"id": r["id"], "label": r["label"], "severity": "untested",
                         "source": r.get("source"), "clause": r.get("clause"),
@@ -306,9 +362,106 @@ def check(rules: list[dict], rows: list[dict]) -> list[dict]:
     return out
 
 
+# The broker's decisions: Approve (the recommended value), Fix (a value
+# entered), Dismiss (kept as it is). "accept" is Dismiss as first named;
+# "exclude" (left out of the statement) is still honoured where saved.
+DECISIONS = ("approve", "fix", "dismiss", "accept", "exclude")
+STATUS = {"approve": "approved", "fix": "fixed", "dismiss": "dismissed",
+          "accept": "dismissed", "exclude": "excluded"}
+NUMERIC = {"premium", "sum_insured", "claims"}
+
+
+def recommend(r: dict) -> tuple[Optional[str], list[str]]:
+    """The value a row breaking `r` should hold, when the rule names one —
+    (one value, or the choices). Approve writes it; without one, Fix."""
+    p = r.get("params") or {}
+    if r["kind"] == "max" and p.get("value") is not None:
+        return _plain(p["value"]), []
+    if r["kind"] == "currency" and p.get("value"):
+        return str(p["value"]).upper(), []
+    if r["kind"] == "allowed":
+        vals = [str(v) for v in p.get("values") or [] if str(v).strip()]
+        return (vals[0], []) if len(vals) == 1 else (None, vals)
+    return None, []
+
+
+def _plain(v: Any) -> str:
+    n = ce.num(v)
+    if n is None:
+        return str(v)
+    return str(int(n)) if float(n).is_integer() else str(n)
+
+
+def decide(checks: list[dict], decisions: dict[str, dict],
+           refail: Optional[set] = None) -> tuple[set[int], dict[int, dict]]:
+    """Mark every exception with what was decided on it, by its key, and
+    count each check's open / approved / fixed / dismissed / excluded rows.
+    `refail`: (rule id, row) pairs whose approved or fixed value was checked
+    again and still breaks the rule — open again, said so.
+    Returns the rows to leave out, and the values to write: {row: {subject: value}}."""
+    refail = refail or set()
+    out = {it["row"] for c in checks for it in c.get("items") or []
+           if (decisions.get(it.get("key")) or {}).get("kind") == "exclude"}
+    fixes: dict[int, dict] = {}
+    for c in checks:
+        tally = {"open": 0, "approved": 0, "fixed": 0, "dismissed": 0, "excluded": 0}
+        for it in c.get("items") or []:
+            for k in ("reason", "decided_by", "decided_at", "new_value", "still_fails"):
+                it.pop(k, None)
+            d = decisions.get(it.get("key"))
+            if d:
+                it["status"] = STATUS.get(d["kind"], "open")
+                it.update({"reason": d.get("reason"), "decided_by": d.get("by"),
+                           "decided_at": d.get("at")})
+                if d["kind"] in ("approve", "fix"):
+                    it["new_value"] = d.get("value")
+                    if d.get("value") not in (None, ""):
+                        fixes.setdefault(it["row"], {})[c.get("subject")] = d["value"]
+                    if (c["id"], it["row"]) in refail:
+                        it["status"] = "open"
+                        it["still_fails"] = True
+            elif it["row"] in out:
+                it["status"] = "excluded"
+                it["reason"] = "Left out under another rule"
+            else:
+                it["status"] = "open"
+            tally[it["status"]] += 1
+        if c.get("items") is not None:
+            # Rows past MAX_ITEMS are never shown, so they stay open.
+            tally["open"] += max(0, c.get("rows", 0) - len(c["items"]))
+            c.update(tally)
+    return out, fixes
+
+
+def apply_fixes(rows: list[dict], fixes: dict[int, dict]) -> list[dict]:
+    """The rows with each approved or fixed value written in — to the field
+    the rule reads and to the column it came from, so a column copied into
+    the reinsurer's file shows it too."""
+    out = list(rows)
+    for i, subj in fixes.items():
+        if i >= len(out):
+            continue
+        row = {**out[i], "_col": dict(out[i].get("_col") or {})}
+        for subject, value in subj.items():
+            fields = SUBJECT_FIELDS.get(subject) or ()
+            if not fields:
+                continue
+            key = next((k for k in fields if row.get(k) not in (None, "")), fields[0])
+            v = ce.num(value) if subject in NUMERIC and ce.num(value) is not None else value
+            row[key] = v
+            col = (row.get("_from") or {}).get(key)
+            if col:
+                row["_col"][col] = v
+        out[i] = row
+    return out
+
+
 def critical(checks: Optional[list]) -> list[dict]:
+    """The critical rules some row still breaks — undecided. A check from
+    before decisions (no `open` count) counts whole."""
     # "blocking" is the name it had before — statements checked then still count.
-    return [c for c in checks or [] if c.get("severity") in ("critical", "blocking")]
+    return [c for c in checks or [] if c.get("severity") in ("critical", "blocking")
+            and c.get("open", c.get("rows", 1)) > 0]
 
 
 def _severity(v: Any, default: str) -> str:

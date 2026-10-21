@@ -663,13 +663,82 @@ def test_a_signed_treaty_can_only_be_approved(w, sent):
                        json={"signer_name": "Mia"}).status_code == 200
 
 
-def test_a_treaty_never_opens_an_electronic_round(w):
+def test_a_treaty_signs_in_the_same_round_as_a_brokers_contract(w):
+    """The carrier signs the treaty on the document, then its lead reinsurer —
+    no seat here — is the counterparty signer, reached by email and code."""
+    from db import EsignEnvelope
+    cid = _create(w).json()["id"]                       # Swiss is the lead
+    _set_state(cid, "agreed")
+    with SessionLocal() as s:
+        c = s.get(Contract, cid)
+        c.wording_sections = {"sections": [{"key": "parties", "title": "P",
+                                            "body": "1.1  x"}]}
+        s.commit()
+    r = client.get(f"/esign/contracts/{cid}/round", headers=w["ch"]).json()
+    assert r["can_sign"] is True and "treaty" not in r
+    r = client.post(f"/esign/contracts/{cid}/signing-session", headers=w["ch"])
+    assert r.status_code == 200, r.text
+    with SessionLocal() as s:
+        env = s.get(EsignEnvelope, r.json()["envelope_id"])
+        other = next(x for x in env.recipients if x.side == "broker")
+        assert other.name == "Sam Swiss" and other.title == "Reinsurer"
+        assert other.email.endswith("@swiss.test") and other.org == "Swiss Re"
+        # The treaty's execution page carries a box the reinsurer signs.
+        from db import EsignField
+        boxes = s.query(EsignField).filter(EsignField.envelope_id == env.id,
+                                           EsignField.party_key == other.party_key).all()
+        assert any(b.type == "signature" for b in boxes)
+    view = client.get(f"/esign/sign/{r.json()['token']}",
+                      headers={"X-Esign-Session": r.json()["session"]})
+    assert view.status_code == 200, view.text
+    assert view.json()["envelope"]["counterparty"] == "reinsurer"
+
+
+def test_the_reinsurer_signs_the_treaty_on_the_document(w, monkeypatch):
+    """End to end, as a broker signs: the carrier signs on the document, the
+    lead reinsurer opens its emailed link with the code, signs its own box,
+    and the treaty is signed by both and in force."""
+    import esign_otp
+    from db import EsignEnvelope
+    codes: list[str] = []
+    real = esign_otp.generate_code
+    monkeypatch.setattr(esign_otp, "generate_code",
+                        lambda: codes.append(real()) or codes[-1])
+
+    def fill(view, name, title):
+        return [{"field_id": f["id"], "value": {
+            "signature": name, "initial": "".join(x[0] for x in name.split()),
+            "name": name, "title": title, "date": "07 Jan 2027"}.get(f["type"], "")}
+            for f in view["fields"] if f["mine"]]
+
     cid = _create(w).json()["id"]
     _set_state(cid, "agreed")
-    r = client.get(f"/esign/contracts/{cid}/round", headers=w["ch"]).json()
-    assert r["can_sign"] is False and r["treaty"] is True
-    r = client.post(f"/esign/contracts/{cid}/signing-session", headers=w["ch"])
-    assert r.status_code == 409 and "signature page" in r.json()["detail"]
+    with SessionLocal() as s:
+        c = s.get(Contract, cid)
+        c.wording_sections = {"sections": [{"key": "parties", "title": "P",
+                                            "body": "1.1  x"}]}
+        s.commit()
+    r = client.post(f"/esign/contracts/{cid}/signing-session", headers=w["ch"]).json()
+    h = {"X-Esign-Session": r["session"]}
+    v = client.get(f"/esign/sign/{r['token']}", headers=h).json()
+    assert client.post(f"/esign/sign/{r['token']}", headers=h, json={
+        "agreed": True, "signature_name": "Dana", "fields": fill(v, "Dana", "Director")
+    }).status_code == 200
+    with SessionLocal() as s:
+        env = s.get(EsignEnvelope, r["envelope_id"])
+        tok = next(x for x in env.recipients if x.side == "broker").token
+    hr = {"X-Esign-Session": client.post(f"/esign/sign/{tok}/verify",
+                                         json={"code": codes[-1]}).json()["session"]}
+    v = client.get(f"/esign/sign/{tok}", headers=hr).json()
+    assert v["me"]["org"] == "Swiss Re" and v["envelope"]["counterparty"] == "reinsurer"
+    r2 = client.post(f"/esign/sign/{tok}", headers=hr, json={
+        "agreed": True, "signature_name": "Sam Swiss",
+        "fields": fill(v, "Sam Swiss", "Reinsurer")})
+    assert r2.status_code == 200, r2.text
+    rec = client.get(f"/contracts/{cid}", headers=w["ch"]).json()
+    assert rec["unsigned_sides"] == []
+    assert {g["signer_name"] for g in rec["signatures"]} == {"Dana", "Sam Swiss"}
+    assert rec["lifecycle"] in ("signed", "active")
 
 
 # ── the lead reinsurer signs on its link ────────────────────────────────────

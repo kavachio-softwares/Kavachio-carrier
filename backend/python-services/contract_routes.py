@@ -1913,7 +1913,10 @@ def create_contract(body: ContractIn, p: Principal = Depends(current_principal))
         c.executed_date = _as_date(clean.get("executed_date"))
         c.notice_period_days = clean.get("notice_period_days")
         c.premium_cap_amount = clean.get("premium_cap_amount")
-        c.commercial_terms = ct.clean_agreed_limits(body.agreed_limits) or None
+        # A treaty keeps only the limits a treaty has (contract_types.TREATY_LIMITS).
+        c.commercial_terms = (ct.treaty_limits(body.agreed_limits)
+                              if (c.contract_type or "") == "insurer_reinsurer"
+                              else ct.clean_agreed_limits(body.agreed_limits)) or None
         if body.renews_contract_id is not None:
             # Must be a contract the caller can actually see, and one nobody has
             # renewed already — two renewals of the same contract would leave
@@ -2470,7 +2473,9 @@ def update_contract(contract_id: int, body: dict,
         # Both are absent-means-unchanged, so a screen saving one field does not
         # wipe the other.
         if "agreed_limits" in body:
-            c.commercial_terms = ct.clean_agreed_limits(body["agreed_limits"]) or None
+            c.commercial_terms = (ct.treaty_limits(body["agreed_limits"])
+                                  if (c.contract_type or "") == "insurer_reinsurer"
+                                  else ct.clean_agreed_limits(body["agreed_limits"])) or None
         retied: list[str] = []
         added: list[str] = []
         if "wording_sections" in body:
@@ -5626,6 +5631,10 @@ def _auto_bind(s, c: Contract, p: Principal) -> Optional[dict]:
     """
     if not (c.commercial_terms or {}):
         return None
+    # A treaty's limits are checked on its reinsurance bordereau
+    # (treaty_rules.from_limits) — never on the brokers' files.
+    if (c.contract_type or "") == "insurer_reinsurer":
+        return None
     try:
         tmpl, level = _resolve_template(s, c)
         if tmpl is None or tmpl.tenant_id != c.tenant_id:
@@ -5650,6 +5659,12 @@ def _bind_checks(s, c: Contract, tmpl: ExportTemplate, p: Principal) -> dict:
     for the automatic path, and only a person who pressed a button needs to be
     told there was nothing to press it for.
     """
+    if (c.contract_type or "") == "insurer_reinsurer":
+        raise HTTPException(409, {
+            "message": "A treaty's agreed limits are checked on its reinsurance "
+                       "bordereau, not on the brokers' files — see Treaty rules "
+                       "on its reinsurance bordereau setup.",
+            "errors": {"agreed_limits": "treaty"}})
     if not (c.commercial_terms or {}):
         raise HTTPException(409, {
             "message": "This contract has no agreed limits to build checks "

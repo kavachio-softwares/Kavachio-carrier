@@ -450,6 +450,9 @@ export type AgreedLimitSpec = {
    *  form used to hold its own list, so a limit added to the vocabulary existed
    *  everywhere except the screen somebody would have typed it on. */
   common: boolean;
+  /** How a treaty asks it — absent where a treaty has no such limit. A
+   *  treaty's limits are checked on its reinsurance bordereau. */
+  treaty?: { question: string; sub: string; checkable: boolean; common: boolean } | null;
 };
 
 /** What the carrier agreed, as the flow holds it. */
@@ -522,7 +525,11 @@ export type WordingInput = {
 
 /** The three headings the limits table is grouped under, served so neither the
  *  create screen nor the contract record restates them. */
-export type LimitGroup = { key: string; label: string; sub: string };
+export type LimitGroup = {
+  key: string; label: string; sub: string;
+  /** The same heading, for a treaty. */
+  treaty_label?: string; treaty_sub?: string;
+};
 
 /** One line a signature block can carry. `fixed` marks the one that cannot be
  *  turned off — a block with nowhere to sign is not a signature block. */

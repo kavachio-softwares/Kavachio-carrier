@@ -118,8 +118,8 @@ export default function ContractNew() {
   const [kind, setKind] = useState<string>("new");
 
   const [specs, setSpecs] = useState<ContractTypeSpec[] | null>(null);
-  const [limitSpec, setLimitSpec] = useState<AgreedLimitSpec[]>([]);
-  const [limitGroups, setLimitGroups] = useState<LimitGroup[]>([]);
+  const [allLimits, setLimitSpec] = useState<AgreedLimitSpec[]>([]);
+  const [allGroups, setLimitGroups] = useState<LimitGroup[]>([]);
   const [termSpec, setTermSpec] = useState<TermSpec | null>(null);
   // What a signature block may contain, and what this contract's will. Both
   // come from the SERVER — the vocabulary so the form cannot offer a line the
@@ -138,6 +138,18 @@ export default function ContractNew() {
   // ?type=insurer_reinsurer arrives from the Treaties list and a programme's
   // Reinsurance page, so "Raise a treaty" opens on the treaty already.
   const [typeKey, setTypeKey] = useState(params.get("type") ?? "");
+  // A treaty asks only the limits a treaty has, worded for a reinsurer — and
+  // checks them on its reinsurance bordereau, not on the brokers' files.
+  const treatyLimits = typeKey === "insurer_reinsurer";
+  const limitSpec = useMemo(() => !treatyLimits ? allLimits
+    : allLimits.filter(l => l.treaty).map(l => ({
+        ...l, question: l.treaty!.question, sub: l.treaty!.sub,
+        checkable: l.treaty!.checkable, common: l.treaty!.common,
+        default_severity: l.treaty!.checkable ? l.default_severity : null })),
+    [allLimits, treatyLimits]);
+  const limitGroups = useMemo(() => !treatyLimits ? allGroups
+    : allGroups.map(g => ({ ...g, label: g.treaty_label ?? g.label, sub: g.treaty_sub ?? g.sub })),
+    [allGroups, treatyLimits]);
 
   const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
   const [programId, setProgramId] = useState(params.get("program_id") ?? "");
@@ -1045,7 +1057,7 @@ export default function ContractNew() {
             <b>In the contract:</b> the clause quoting{" "}
             <span className="term">{preview?.tokens[l.name]}</span>
             <span className="arrow">→</span>
-            <b>On every row:</b>{" "}
+            <b>{treatyLimits ? "On every reinsurance bordereau row:" : "On every row:"}</b>{" "}
             <span className="mono">{becomes.expression}</span>
             <span className="arrow">→</span>
             <span className={`badge ${becomes.severity === "critical" ? "b-crit" : "b-warn"}`}>
@@ -1400,12 +1412,17 @@ export default function ContractNew() {
   const limitsHead = (
     <>
         <div className="fh">
-          {kind === "endorse" ? "The terms — change what moved" : "The limits you agreed"}
+          {kind === "endorse" ? "The terms — change what moved"
+            : treatyLimits ? "The limits of the treaty" : "The limits you agreed"}
           <InfoTip text={kind === "endorse"
             ? "These are its current terms — edit the ones the "
               + "endorsement changes and leave the rest alone."
-            : "Each line becomes a clause in the contract and a check "
-              + "that runs on every file the broker sends."} />
+            : treatyLimits
+              ? "Each line becomes a clause in the treaty. Cover and per-risk "
+                + "limits are also checked on every reinsurance bordereau — "
+                + "a row that breaks one shows on its Exceptions."
+              : "Each line becomes a clause in the contract and a check "
+                + "that runs on every file the broker sends."} />
         </div>
     </>
   );
@@ -1421,7 +1438,9 @@ export default function ContractNew() {
                 ? "Show fewer"
                 : `＋ ${hiddenCount} more you can set`}
             </button>
-            <InfoTip text="Brokerage, profit commission, settlement, tax — leave them out and the contract simply does not mention them." />
+            <InfoTip text={treatyLimits
+              ? "The referral limit, settlement and tax — leave them out and the treaty simply does not mention them."
+              : "Brokerage, profit commission, settlement, tax — leave them out and the contract simply does not mention them."} />
           </div>
         )}
     </>
@@ -1434,7 +1453,10 @@ export default function ContractNew() {
         <div style={{ display: "flex", alignItems: "center" }}>
           <span className="badge b-ok" style={{ flex: "0 0 auto" }}>
             <span className="d" />
-            {preview?.checks.length
+            {/* A treaty's limits are checked on its reinsurance bordereau, so
+                they are counted from the treaty's own list, not the broker
+                preview's checks. */}
+            {(treatyLimits ? undefined : preview?.checks.length)
               ?? (Object.entries(limits).filter(([k]) =>
                     limitSpec.find(l => l.name === k)?.checkable).length
                   + (values.inception_dt && values.expiry_dt ? 1 : 0))}{" "}
@@ -1634,7 +1656,7 @@ export default function ContractNew() {
       body: secBasics },
     ...limitGroups.map((g, i) => ({
       key: g.key, label: g.label,
-      cap: i === 0 ? "The limits you agreed" : undefined,
+      cap: i === 0 ? (isTreaty ? "The limits of the treaty" : "The limits you agreed") : undefined,
       meta: limitsSet(g.key) ? `${limitsSet(g.key)} set` : "None set",
       done: limitsSet(g.key) > 0, short: false,
       body: <>{limitsHead}{limitPanel(g)}{limitsFold}</>,
@@ -2411,7 +2433,9 @@ export default function ContractNew() {
                     </div>
                     <div className="kv">
                       <span className="k">Rules to be set up</span>
-                      <span className="v">{preview?.checks.length ?? 0}</span>
+                      <span className="v">{treatyLimits
+                        ? Object.keys(limits).filter(k => limitSpec.find(l => l.name === k)?.checkable).length
+                        : preview?.checks.length ?? 0}</span>
                     </div>
                   </div>
                   {/* Named, never "they": the other side is a specific
@@ -2424,11 +2448,11 @@ export default function ContractNew() {
                         <li><b>Save as a draft</b> — only you can see it. You can
                           still change the structure.</li>
                         <li><b>Create and sign it now</b> — the terms are settled
-                          and you sign for the carrier. {other} is not on Kavachio,
-                          so nobody on their side reviews it here.</li>
-                        <li>It becomes active once you record {other}&apos;s
-                          signature against the signed slip or wording they send
-                          back.</li>
+                          and you sign the treaty for the carrier, on the document.</li>
+                        <li>{other} is then emailed it with a one-time code and
+                          signs on the same document — no Kavachio account needed.
+                          Their signature puts it in force, and both get the
+                          signed copy.</li>
                       </ul>
                     );
                     return (

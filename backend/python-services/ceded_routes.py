@@ -38,7 +38,7 @@ import treaty_types as tt
 from app_routes import _iso_utc, resolve_tenant_id
 from auth_deps import Principal, current_principal
 from db import (
-    CededBordereau, CededInput, CededSetup, CededStatement, Contract, ExportTemplate,
+    AppUser, CededBordereau, CededDecision, CededInput, CededSetup, CededStatement, Contract, ExportTemplate,
     OutputExport,
     Party, PartyContact, Program, SessionLocal, Tenant,
 )
@@ -133,7 +133,7 @@ def rules_for(s, c: Contract, st: Optional[dict] = None) -> list[dict]:
     if not st:
         return []
     return trr.merge(su.rules if su is not None else None,
-                     trr.derive(st, c.inception_dt, c.expiry_dt))
+                     trr.derive(st, c.inception_dt, c.expiry_dt, c.commercial_terms))
 
 
 def own_layout(su: Optional[CededSetup]) -> Optional[dict]:
@@ -262,6 +262,66 @@ def _source_key(sources: list[tuple[OutputExport, dict]]) -> str:
 #  Building a version
 # =============================================================================
 
+def decisions_for(s, c: Contract, period: str) -> dict[str, dict]:
+    """What was decided on this treaty's exceptions for `period`, by key."""
+    rows = (s.query(CededDecision, AppUser.full_name)
+            .outerjoin(AppUser, AppUser.id == CededDecision.decided_by_user_id)
+            .filter(CededDecision.contract_id == c.id, CededDecision.period == period)
+            .all())
+    return {d.key: {"kind": d.kind, "value": d.new_value, "reason": d.reason,
+                    "by": who, "at": _iso(d.decided_at)} for d, who in rows}
+
+
+def _checked(s, c: Contract, period: str, st: dict,
+             rows: list[dict]) -> tuple[list[dict], list[dict], list[str]]:
+    """The treaty's rules run on every row, each exception marked with what
+    was decided on it — and the rows the statement is made from: approved
+    and fixed values written in, excluded rows out. The rows are checked
+    again with those values (the broker's Fix & Validate): a value that still
+    breaks its rule is open again."""
+    rules = rules_for(s, c, st)
+    decisions = decisions_for(s, c, period)
+    checks = trr.check(rules, rows)
+    out, fixes = trr.decide(checks, decisions)
+    fixed = trr.apply_fixes(rows, fixes)
+    if fixes:
+        again = {(x["id"], it["row"]) for x in trr.check(rules, fixed)
+                 for it in x.get("items") or []}
+        refail = {(x["id"], it["row"]) for x in checks for it in x.get("items") or []
+                  if it.get("status") in ("approved", "fixed")
+                  and (x["id"], it["row"]) in again}
+        if refail:
+            trr.decide(checks, decisions, refail)
+    notes = []
+    if fixes:
+        notes.append(f"{len(fixes)} row{'s' if len(fixes) != 1 else ''} corrected by "
+                     f"your decisions on the treaty's rules.")
+    if out:
+        notes.append(f"{len(out)} row{'s' if len(out) != 1 else ''} left out of the "
+                     f"statement by your decisions on the treaty's rules.")
+    return checks, [r for i, r in enumerate(fixed) if i not in out], notes
+
+
+def live_checks(s, c: Contract, cb: CededBordereau) -> tuple[list[dict], int]:
+    """The statement's exceptions with what is decided on them NOW — and how
+    many of those decisions are not in the statement yet (saved since it was
+    prepared: Fix & Validate takes them in)."""
+    import copy
+    built = cb.checks or []
+    checks = copy.deepcopy(built)
+    decisions = decisions_for(s, c, cb.period)
+    # A value checked again and still failing stays open while it is unchanged.
+    refail = {(x["id"], it["row"]) for x in built for it in x.get("items") or []
+              if it.get("still_fails")
+              and (decisions.get(it.get("key")) or {}).get("value") == it.get("new_value")}
+    trr.decide(checks, decisions, refail)
+    was = {it.get("key"): (it.get("status"), it.get("new_value"))
+           for x in built for it in x.get("items") or []}
+    unapplied = sum(1 for x in checks for it in x.get("items") or []
+                    if (it.get("status"), it.get("new_value")) != was.get(it.get("key")))
+    return checks, unapplied
+
+
 def gather(s, c: Contract, period: str, st: dict) -> dict:
     """Read the inward bordereaux for `period` and cede them under `st`.
     Writes nothing — build() saves it, the setup preview just shows it."""
@@ -299,8 +359,9 @@ def gather(s, c: Contract, period: str, st: dict) -> dict:
         for o, _v in ytd:
             ytd_rows.extend(_rows_of(s, o, names)[0])
 
+    checks, rows, left_out = _checked(s, c, period, st, rows)
+    notes.extend(left_out)
     result = ce.compute(st, rows, ytd_rows=ytd_rows)
-    checks = trr.check(rules_for(s, c, st), rows)
     # A line keeps only the inward fields the setup's layout passes through.
     su = setup_of(s, c)
     keep = cl.needed_fields(su.columns if su is not None else None)
@@ -347,13 +408,13 @@ def _gather_own(s, c: Contract, period: str, st: dict, layout: Optional[dict]) -
         ytd_rows = []
         for ci in _own_inputs(s, c, period, up_to=True):
             ytd_rows.extend(_own_rows(s, ci, ci.layout or layout or {}))
+    checks, rows, left_out = _checked(s, c, period, st, rows)
     result = ce.compute(st, rows, ytd_rows=ytd_rows)
-    checks = trr.check(rules_for(s, c, st), rows)
     su = setup_of(s, c)
     cl.prune(result["lines"], cl.needed_fields(su.columns if su is not None else None),
              cl.needed_cols(su.columns if su is not None else None))
     cl.prune(result["skipped"], set())
-    notes = list(result["notes"])
+    notes = left_out + list(result["notes"])
     if not files:
         notes.insert(0, f"No file of yours has been uploaded for {period} yet.")
     return {"sources": [], "result": result, "notes": notes,
@@ -709,6 +770,8 @@ def detail(cb_id: int, p: Principal = Depends(current_principal)):
                     .order_by(CededBordereau.version_no.desc())]
         st = _tr().load_structure(s, c.id, names=False) or {}
         su = setup_of(s, c)
+        checks, unapplied = live_checks(s, c, cb)
+        stop = [x["label"] for x in trr.critical(cb.checks)]
         # What Send would do, said before it is pressed: each reinsurer, who
         # it goes to, and the BDX file attached to the email.
         send_plan = [{"statement_id": x.id, "reinsurer": names.get(x.reinsurer_party_id),
@@ -736,12 +799,19 @@ def detail(cb_id: int, p: Principal = Depends(current_principal)):
             # A draft built before its setup last changed — rebuilt the next
             # time the statements list is opened, or by Prepare again.
             "setup_changed": cb.status in OPEN and current_key != cb.source_key,
-            # The treaty's rules the rows broke; a Critical one stops Send.
-            "checks": cb.checks or [],
-            "send_blocked_by": [x["label"] for x in trr.critical(cb.checks)],
-            "can_send": cb.status == "draft" and bool(stmts)
-                        and not trr.critical(cb.checks)
-                        and _cr()._speaks_for_carrier(p),
+            # The treaty's rules the rows broke, with what is decided on each
+            # row now; a Critical one stops Send while a row of it is open.
+            "checks": checks,
+            # Decisions saved since it was prepared — Fix & Validate takes them in.
+            "unapplied": unapplied,
+            # Every rule the rows were checked against — broken or not — for
+            # the exceptions' Check Summary.
+            "rules": [{k: r.get(k) for k in ("id", "label", "kind", "subject",
+                                             "severity", "source", "clause")}
+                      for r in (rules_for(s, c, st) if st else []) if r.get("enabled", True)],
+            "send_blocked_by": stop,
+            "can_send": cb.status == "draft" and bool(stmts) and not stop
+                        and not unapplied and _cr()._speaks_for_carrier(p),
             "columns": [{"key": k, "label": h, "kind": kind}
                         for k, h, kind in ce.LINE_COLUMNS],
         }
@@ -792,12 +862,16 @@ def deliver(cb_id: int, user_id: Optional[int], note: Optional[str],
             raise HTTPException(409, f"this statement is {cb.status}; prepare it "
                                      f"again to send a new version")
         stmts = s.query(CededStatement).filter(CededStatement.cb_id == cb.id).all()
+        if cb.status in OPEN and live_checks(s, c, cb)[1]:
+            raise HTTPException(409, "decisions on the treaty's exceptions are not in "
+                                     "this statement yet — run Fix & Validate first")
         stop = trr.critical(cb.checks)
         if stop:
             raise HTTPException(409, "the treaty's rules stop this being sent: "
                                      + "; ".join(x["label"] for x in stop)
-                                     + ". Correct the rows, or set the rule to "
-                                       "Warning on the setup, and prepare it again.")
+                                     + ". Decide each row on its Exceptions — "
+                                       "Approve, Fix or Dismiss it — then Fix & "
+                                       "Validate.")
         if not stmts:
             raise HTTPException(409, "there is nothing to send — no reinsurer "
                                      "holds a share of this treaty")
@@ -871,6 +945,98 @@ def send(cb_id: int, body: SendIn = SendIn(),
     out = detail(cb_id, p)
     out["sent"] = sent
     return out
+
+
+class DecisionIn(BaseModel):
+    key: str
+    kind: str                       # approve | fix | dismiss | reopen (exclude kept)
+    value: Optional[str] = None     # approve: one of the choices; fix: the value
+    reason: Optional[str] = None
+
+
+class DecideIn(BaseModel):
+    decisions: list[DecisionIn]
+
+
+@router.post("/reinsurance/bordereaux/{cb_id}/decide")
+def decide(cb_id: int, body: DecideIn, p: Principal = Depends(current_principal)):
+    """Decide the rows a treaty rule caught — the broker's exception
+    resolution, for a reinsurance bordereau: `approve` (the value the rule
+    recommends), `fix` (a value entered), `dismiss` (kept as it is), `reopen`
+    (undecided again). Recorded only: Fix & Validate prepares the statement
+    again with them, as the broker's does."""
+    cr = _cr()
+    cr._assert_speaks_for_carrier(p, "decide a reinsurance bordereau's exceptions")
+    done, skipped = 0, []
+    with SessionLocal() as s:
+        cb, c = _carrier_cb(s, p, cb_id)
+        if cb.status not in OPEN:
+            raise HTTPException(409, f"this statement is {cb.status} — what was "
+                                     f"sent stays as it was. Decide on the draft "
+                                     f"that replaces it.")
+        items = {it["key"]: (chk, it) for chk in cb.checks or []
+                 for it in chk.get("items") or [] if it.get("key")}
+        for d in body.decisions:
+            if d.kind not in (*trr.DECISIONS, "reopen"):
+                raise HTTPException(400, f"unknown decision {d.kind!r}")
+            hit = items.get(d.key)
+            if hit is None:
+                skipped.append(d.key)
+                continue
+            chk, it = hit
+            who = it.get("policy") or "this row"
+            value = (d.value or "").strip() or None
+            if d.kind == "approve":
+                value = value if value in (chk.get("options") or []) else chk.get("recommendation")
+                if value is None:
+                    raise HTTPException(400, f"“{chk.get('label')}” recommends no value "
+                                             f"for {who} — use Fix to enter one")
+            if d.kind == "fix":
+                if value is None:
+                    raise HTTPException(400, f"enter the corrected value for {who}")
+                if chk.get("subject") in trr.NUMERIC and ce.num(value) is None:
+                    raise HTTPException(400, f"{value!r} is not a number — the "
+                                             f"{chk.get('field') or 'value'} of {who}")
+            row = (s.query(CededDecision)
+                   .filter(CededDecision.contract_id == c.id,
+                           CededDecision.period == cb.period,
+                           CededDecision.key == d.key).first())
+            if d.kind == "reopen":
+                if row is not None:
+                    s.delete(row)
+            else:
+                if row is None:
+                    row = CededDecision(tenant_id=c.tenant_id, contract_id=c.id,
+                                        period=cb.period, key=d.key)
+                    s.add(row)
+                row.rule_id = chk["id"]
+                row.policy, row.value = it.get("policy"), it.get("value")
+                row.kind = d.kind
+                row.new_value = value if d.kind in ("approve", "fix") else None
+                row.reason = (d.reason or "").strip() or None
+                row.decided_by_user_id, row.decided_at = p.user_id, _now()
+            done += 1
+        s.commit()
+    out = detail(cb_id, p)
+    out.update({"updated": done, "skipped": skipped})
+    return out
+
+
+@router.post("/reinsurance/bordereaux/{cb_id}/validate")
+def fix_and_validate(cb_id: int, p: Principal = Depends(current_principal)):
+    """Fix & Validate: prepare the draft again with the decisions taken in —
+    approved and fixed values written into the rows, excluded rows out — and
+    check every row again."""
+    cr = _cr()
+    cr._assert_speaks_for_carrier(p, "validate a reinsurance bordereau")
+    with SessionLocal() as s:
+        cb, c = _carrier_cb(s, p, cb_id)
+        if cb.status not in OPEN:
+            raise HTTPException(409, f"this statement is {cb.status} — prepare the "
+                                     f"next version to change it")
+        build(s, c, cb.period, p.user_id)
+        s.commit()
+    return detail(cb_id, p)
 
 
 # =============================================================================
@@ -1069,7 +1235,7 @@ def _setup_json(s, c: Contract, su: Optional[CededSetup], p: Principal) -> dict:
                      "columns": ce.default_columns(st.get("treaty_type")),
                      "layout": {"source": "kavachio"},
                      "input_layout": {"source": "brokers"},
-                     "rules": trr.derive(st, c.inception_dt, c.expiry_dt) if st else [],
+                     "rules": trr.derive(st, c.inception_dt, c.expiry_dt, c.commercial_terms) if st else [],
                      "file_format": "xlsx", "recipients": {}, "cc": [],
                      "send_mode": "manual"},
         "options": {

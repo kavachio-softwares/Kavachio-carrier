@@ -206,12 +206,17 @@ export function TreatyRulesStep({ cid, rec, v, change, readOnly = false }: {
 }
 
 /** The treaty's rules a statement's rows broke — on Check and on the
- *  statement itself. */
-export function TreatyChecks({ checks }: { checks?: TreatyCheck[] }) {
+ *  statement itself. Each rule's rows are decided on Exceptions, as a
+ *  broker's are: `onResolve` opens them (`resolveLabel` names the button). */
+export function TreatyChecks({ checks, onResolve, resolveLabel = "Resolve exceptions →", busy = false }: {
+  checks?: TreatyCheck[]; onResolve?: () => void; resolveLabel?: string; busy?: boolean;
+}) {
   // Statements checked before the rename still say "blocking".
   const broken = (checks ?? []).filter(c => c.severity !== "untested")
     .map(c => (c.severity as string) === "blocking" ? { ...c, severity: "critical" as const } : c);
   const untested = (checks ?? []).filter(c => c.severity === "untested");
+  const decided = broken.some(c => c.open != null);
+  const open = broken.reduce((n, c) => n + (c.open ?? c.rows), 0);
   return (
     <div className="card" style={{ marginBottom: 18 }}>
       <div className="card-h">
@@ -221,13 +226,22 @@ export function TreatyChecks({ checks }: { checks?: TreatyCheck[] }) {
         <h3>Treaty checks</h3>
         <span className="sub">
           {broken.length === 0 ? "every row meets the treaty's rules"
-            : `${broken.length} rule${broken.length === 1 ? "" : "s"} broken`}
+            : `${broken.length} rule${broken.length === 1 ? "" : "s"} broken · `
+              + (open ? `${open} row${open === 1 ? "" : "s"} to resolve` : "all resolved")}
         </span>
+        {onResolve && broken.length > 0 && (
+          <span className="right">
+            <button className="btn sm pri" type="button" disabled={busy} onClick={onResolve}>
+              {resolveLabel}
+            </button>
+          </span>
+        )}
       </div>
       {broken.length > 0 && (
         <div className="tbl-wrap">
           <table className="panel-tbl">
-            <thead><tr><th style={{ width: 110 }}>Severity</th><th>Rule</th><th style={{ width: 80 }}>Rows</th><th>For example</th></tr></thead>
+            <thead><tr><th style={{ width: 110 }}>Severity</th><th>Rule</th><th style={{ width: 80 }}>Rows</th><th>For example</th>
+              {decided && <th style={{ width: 230 }}>Resolution</th>}</tr></thead>
             <tbody>
               {broken.map(c => (
                 <tr key={c.id}>
@@ -244,6 +258,16 @@ export function TreatyChecks({ checks }: { checks?: TreatyCheck[] }) {
                     ))}
                     {c.rows > 3 && <div>+{c.rows - 3} more</div>}
                   </td>
+                  {decided && (
+                    <td>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                        <span className="badge b-ok">Approved {c.approved ?? 0}</span>
+                        <span className="badge b-info">Fixed {c.fixed ?? 0}</span>
+                        <span className="badge b-warn">Dismissed {c.dismissed ?? 0}</span>
+                        <span className="badge b-mut">Pending {c.open ?? c.rows}</span>
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

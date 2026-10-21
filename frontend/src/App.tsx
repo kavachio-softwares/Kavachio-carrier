@@ -24,6 +24,7 @@ import PartyDetail from "./pages/PartyDetail";
 import ProgrammeReinsurance from "./pages/ProgrammeReinsurance";
 import ReinsuranceBordereaux from "./pages/ReinsuranceBordereaux";
 import CededBordereauDetail from "./pages/CededBordereauDetail";
+import CededExceptions from "./pages/CededExceptions";
 import ReinsuranceSetups from "./pages/ReinsuranceSetups";
 import ReinsuranceSetupEdit from "./pages/ReinsuranceSetupEdit";
 import ReinsuranceSetupView from "./pages/ReinsuranceSetupView";
@@ -206,6 +207,8 @@ export default function App() {
             each reinsurer, answered on its private link. */}
         <Route path="/reinsurance/bordereaux" element={<ReinsuranceBordereaux />} />
         <Route path="/reinsurance/bordereaux/:id" element={<CededBordereauDetail />} />
+        <Route path="/reinsurance/bordereaux/:id/exceptions" element={<CededExceptions />} />
+        <Route path="/reinsurance/bordereaux/:id/exceptions/:ruleId" element={<CededExceptions />} />
         {/* Each treaty's reinsurance bordereau setup — nothing is prepared for
             a treaty until it is active. */}
         <Route path="/reinsurance/setups" element={<ReinsuranceSetups />} />

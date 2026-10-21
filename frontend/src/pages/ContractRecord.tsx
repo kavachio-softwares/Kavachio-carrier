@@ -1705,16 +1705,16 @@ function ContractRecordView() {
                           : ""}.</>
                     )}{" "}
                     You can also settle the terms yourself. Either way you then
-                    sign for the carrier and record the reinsurers&apos;
-                    signature against the signed copy.</>
+                    sign the treaty for the carrier, and the lead reinsurer is
+                    emailed it to sign on the same document.</>
                 ) : rec.lifecycle === "agreed" ? (
                   <><b>Terms settled.</b>{" "}
                     {rec.unsigned_sides.includes("carrier")
-                      ? "Sign for the carrier first. "
+                      ? "Sign for the carrier first, on the document. "
                       : "The carrier has signed. "}
-                    The reinsurer signs outside Kavachio: attach the signed copy
-                    they return under Documents, then record their signature
-                    against it.</>
+                    The lead reinsurer is then emailed the treaty with a one-time
+                    code and signs it on the same document, as a broker signs a
+                    contract — both get the sealed signed copy.</>
                 ) : rec.lifecycle === "signed" ? (
                   <>Both sides have signed. It becomes active once nothing else
                     is in the way.</>

@@ -297,6 +297,8 @@ ACTION_WORDS = {
     "treaty_structure_saved":         "Saved a treaty's structure",
     "signed_treaty_uploaded":         "Uploaded a signed treaty",
     "reinsurance_bordereau_prepared": "Prepared a reinsurance bordereau",
+    "reinsurance_exception_decided": "Decided reinsurance bordereau exceptions",
+    "reinsurance_bordereau_validated": "Fixed & validated a reinsurance bordereau",
     "reinsurance_setup_saved":        "Saved a reinsurance bordereau setup",
     "reinsurance_setup_activated":    "Activated a reinsurance bordereau setup",
     "reinsurance_setup_submitted":    "Sent a reinsurance bordereau setup for approval",

@@ -96,14 +96,16 @@ export default function ReinsuranceBordereaux() {
     }
   }
 
-  /** Make the statements — from this period's file when the setup reads one. */
-  async function generate() {
+  /** Make the statements — from this period's file when the setup reads one.
+   *  `resolve`: then open its exceptions, to decide the rows the treaty's
+   *  rules caught — as a broker resolves a processed bordereau's. */
+  async function generate(resolve = false) {
     setBusy("run"); setErr("");
     try {
       const d = ownFile
         ? await uploadPeriodInput(Number(treaty), runPeriod, ownFile)
         : await prepareCeded(Number(treaty), runPeriod);
-      nav(`/reinsurance/bordereaux/${d.id}`);
+      nav(`/reinsurance/bordereaux/${d.id}${resolve ? "/exceptions" : ""}`);
     } catch (e) {
       setErr(fieldErrors(e).message);
     } finally {
@@ -263,7 +265,7 @@ export default function ReinsuranceBordereaux() {
               {busy === "check" ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
               Check
             </button>
-            <button className="btn pri" type="button" disabled={!canRun || !!busy} onClick={generate}>
+            <button className="btn pri" type="button" disabled={!canRun || !!busy} onClick={() => generate()}>
               {busy === "run" ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
               Generate reinsurance BDX
             </button>
@@ -277,7 +279,7 @@ export default function ReinsuranceBordereaux() {
               <b>Check · {picked?.name} · {checked.period}</b>
               <span className="badge b-info"><span className="d" />Nothing saved</span>
               <button className="btn sm pri" type="button" style={{ marginLeft: "auto" }}
-                      disabled={!!busy} onClick={generate}>
+                      disabled={!!busy} onClick={() => generate()}>
                 <Sparkles size={12} /> Generate it
               </button>
             </div>
@@ -311,7 +313,12 @@ export default function ReinsuranceBordereaux() {
                   ))}
               </div>
             </div>
-            {checked.checks && checked.checks.length > 0 && <TreatyChecks checks={checked.checks} />}
+            {checked.checks && checked.checks.length > 0 && (
+              // Resolved on the statement's Exceptions — Generate saves it first.
+              <TreatyChecks checks={checked.checks} busy={!!busy}
+                            resolveLabel="Generate & resolve exceptions →"
+                            onResolve={() => generate(true)} />
+            )}
             {[...checked.notes, ...(checked.missing.length
               ? [`No bordereau for ${checked.period} yet from ${checked.missing.map(m => m.name).join(", ")}.`] : [])]
               .map((n, i) => <div key={i} className="note" style={{ marginBottom: 6 }}>{n}</div>)}

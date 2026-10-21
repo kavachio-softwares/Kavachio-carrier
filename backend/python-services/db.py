@@ -1516,6 +1516,32 @@ class CededInput(Base):
                          default=datetime.utcnow, server_default=func.now())
 
 
+class CededDecision(Base):
+    """What the carrier decided on one row a treaty rule caught, for a treaty
+    and period — kept across rebuilds by the exception's key. As the broker
+    decides an exception: `approve` (the recommended value), `fix` (a value
+    entered — both in `new_value`), `dismiss` (kept as it is). `accept` is
+    the old name for dismiss; `exclude` leaves the row out of the statement."""
+    __tablename__ = "ceded_decision"
+    __table_args__ = (UniqueConstraint("cdd_contract_id", "cdd_period", "cdd_key",
+                                       name="uq_ceded_decision_key"),)
+    id = Column("cdd_id", Integer, primary_key=True)
+    tenant_id = Column("cdd_tenant_id", Integer, nullable=True, index=True)
+    contract_id = Column("cdd_contract_id", Integer,
+                         ForeignKey("contract.contract_id"), nullable=False, index=True)
+    period = Column("cdd_period", String, nullable=False)
+    key = Column("cdd_key", String, nullable=False)
+    rule_id = Column("cdd_rule_id", String, nullable=False)
+    policy = Column("cdd_policy", String, nullable=True)
+    value = Column("cdd_value", String, nullable=True)
+    kind = Column("cdd_kind", String, nullable=False)
+    new_value = Column("cdd_new_value", String, nullable=True)
+    reason = Column("cdd_reason", Text, nullable=True)
+    decided_by_user_id = Column("cdd_decided_by", Integer, nullable=True)
+    decided_at = Column("cdd_decided_at", DateTime(timezone=True),
+                        default=datetime.utcnow, server_default=func.now())
+
+
 class CededStatement(Base):
     """One reinsurer's part of a ceded bordereau: its share of every line, its
     totals, its own workbook, and its answer (agreed, or a query)."""
