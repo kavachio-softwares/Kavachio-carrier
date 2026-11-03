@@ -64,6 +64,22 @@ export type BordereauReadiness = {
 export const getBordereauReadiness = (p: ContractPath) =>
   api.get<BordereauReadiness>(`${base(p)}/bordereau`).then(r => r.data);
 
+/** One reporting period this contract's calendar actually expects — the same
+ *  rows the carrier's Bordereau Calendar and the broker's own Send Bordereau
+ *  screen read. Picking one of these (never typing a month by hand) is what
+ *  keeps all three screens pointed at exactly the same record. */
+export type BordereauPeriod = {
+  expected_id: number;
+  period: string;               // '2026-08' | '2026-Q3' | …, the programme's own label
+  due_date: string | null;
+  status: string;
+  processed: boolean;           // already has a BDX generated for it
+};
+
+export const getContractPeriods = (p: ContractPath) =>
+  api.get<{ periods: BordereauPeriod[] }>(`${base(p)}/periods`)
+    .then(r => r.data.periods);
+
 /** The run payload is IDENTICAL to the carrier's — same handler, same fields —
  *  so it is described once, next to the component that renders it. */
 export type { RunResp as BrokerRunResult } from "../components/RunResult";
@@ -76,13 +92,23 @@ export type { RunResp as BrokerRunResult } from "../components/RunResult";
  */
 export const runBrokerBordereau = (
   p: ContractPath, file: File,
-  opts: { checkOnly?: boolean; skipRows?: number } = {},
+  opts: { checkOnly?: boolean; skipRows?: number; confirmDuplicate?: boolean;
+          confirmLayout?: boolean; period?: string } = {},
 ) => {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("filename", file.name);
   fd.append("check_only", String(!!opts.checkOnly));
+  // Only after the broker has been asked "this exact file was sent before —
+  // send it anyway?" and said yes. Without it that case is a 409 question.
+  if (opts.confirmDuplicate) fd.append("confirm_duplicate", "true");
+  // Likewise after "most of the setup's columns are missing — run it anyway?".
+  if (opts.confirmLayout) fd.append("confirm_layout", "true");
   fd.append("skip_rows", String(opts.skipRows ?? 0));
+  // Required by the server on a real submission (not a self-check) — see
+  // carrier_routes.contract_bordereau_run. Sent as the row's own period
+  // label, picked from getContractPeriods, never typed free-hand.
+  if (opts.period) fd.append("period", opts.period);
   return api.post<RunResp>(`${base(p)}/runs`, fd).then(r => r.data);
 };
 
@@ -101,6 +127,14 @@ export type BrokerRun = {
 export const getBrokerRuns = (p: ContractPath, limit = 20) =>
   api.get<BrokerRun[]>(`${base(p)}/runs`, { params: { limit } }).then(r => r.data);
 
+/** One page of them, counted by the server.
+ *
+ *  The unpaged call above stops at the twentieth most recent file with no way
+ *  to reach the twenty-first; this is the same history, pageable. */
+export const getBrokerRunsPaged = (p: ContractPath, page: number, pageSize: number) =>
+  api.get<{ items: BrokerRun[]; total: number }>(`${base(p)}/runs`,
+    { params: { page, page_size: pageSize } }).then(r => r.data);
+
 /**
  * Where the shared RunResult component reads this run's file and preview rows.
  *
@@ -113,3 +147,8 @@ export const brokerRunUrls = (p: ContractPath): RunUrls => ({
   file: id => `${base(p)}/runs/${id}/file`,
   data: (id, q) => `${base(p)}/runs/${id}/data?${q}`,
 });
+
+/** The blank bordereau for this contract — the layout its live setup reads,
+ *  which is what a run finds the columns of an uploaded file by. */
+export const bordereauTemplatePath = (p: ContractPath) =>
+  `${base(p)}/bordereau-template`;

@@ -75,3 +75,12 @@ export function localDayEnd(dateOnly?: string | null): Date | null {
   if (!start) return null;
   return new Date(start.getFullYear(), start.getMonth(), start.getDate(), 23, 59, 59, 999);
 }
+
+/** A reporting period: '2026-07' → "Jul 2026". Anything else (a quarter, a
+ *  week) is shown as is. */
+export function periodLabel(p: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(p);
+  if (!m) return p;
+  return new Date(Number(m[1]), Number(m[2]) - 1, 1)
+    .toLocaleDateString("en-GB", { month: "short", year: "numeric" });
+}

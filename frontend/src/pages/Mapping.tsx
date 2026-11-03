@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
+import { InfoTip } from "../components/InfoTip";
 
 // Strip optional role suffix so spec entries with the base form still match
 // against candidates that include the role-prefixed variant (and vice versa).
@@ -214,8 +215,8 @@ export default function Mapping() {
           <div className="t">
             <h2>
               Map Input Format <span className="tag-pill">{fmtName}</span>
+              <InfoTip text="Match each input column to a field in the Kavachio data model, then approve to save and backfill." />
             </h2>
-            <p>Match each input column to a field in the Kavachio data model, then approve to save and backfill.</p>
           </div>
           <div className="actions">
             <button className="btn" onClick={() => nav(returnTo || "/admin/mapping-tasks")}>← Queue</button>

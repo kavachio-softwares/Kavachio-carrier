@@ -12,15 +12,21 @@
  *   Check My Bordereau   every validation runs, nothing is submitted, nothing
  *                        is recorded, and the carrier is never shown it. A
  *                        broker finds out what is wrong BEFORE the carrier does.
- *   Generate BDX         the real run: ingested, recorded, and visible to the
- *                        carrier with whatever exceptions it carries.
+ *   Generate BDX         the real run: ingested, recorded against the
+ *                        reporting period picked below, AND sent — emailed to
+ *                        the carrier (cc your own admin) the moment it
+ *                        processes, whatever exceptions it carries. There is
+ *                        no separate Send step or screen any more; this IS
+ *                        the send (see RunResult's "Sent to the carrier"
+ *                        note, and submission_calendar_service.send_bordereau
+ *                        on the server).
  *
  * WHAT DIFFERS FROM THE CARRIER'S SCREEN is only the scope, and only because
  * the two genuinely differ:
  *
- *   - The carrier picks carrier → programme → broker → contract. A broker has
- *     exactly one thing to pick: which of ITS OWN contracts this file is for.
- *     Carrier, programme and broker all follow from it.
+ *   - The carrier picks carrier → programme → broker → contract. A broker
+ *     picks only programme → contract, each shown flat when there is just
+ *     one; carrier and broker follow from the contract.
  *   - A broker seat carries no tenant, so every /direct/* and /export/* route
  *     refuses it. The run, the download and the preview all go through the
  *     carrier-centric chain instead, which authorizes the broker one path
@@ -28,24 +34,36 @@
  *
  * The contract is the scope because a bordereau is checked against a CONTRACT's
  * rules — a broker holding two contracts on one programme is answering to two
- * different sets of rules. Only live contracts can be run; one the carrier has
- * not approved governs nothing, and is named with the reason rather than hidden.
+ * different sets of rules. Live contracts can be run, and so can one whose term
+ * has ENDED, for the months inside its term (a late bordereau is still owed);
+ * one not yet in force governs nothing, and is named with the reason.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { History } from "lucide-react";
+import { History, Download, AlertTriangle } from "lucide-react";
+import { Modal } from "../components/ui/Modal";
 import { getBrokerContracts, type BrokerContract } from "../api/broker";
+import { useBrokerCarrierId } from "../brokerCarrier";
 import {
-  getBrokerMe, getBordereauReadiness, runBrokerBordereau, getBrokerRuns,
-  brokerRunUrls,
-  type ContractPath, type BordereauReadiness, type BrokerRun,
+  getBrokerMe, getBordereauReadiness, runBrokerBordereau, getBrokerRunsPaged,
+  brokerRunUrls, bordereauTemplatePath, getContractPeriods,
+  type ContractPath, type BordereauReadiness, type BrokerRun, type BordereauPeriod,
 } from "../api/brokerBordereau";
 import { Dropzone } from "../components/Dropzone";
-import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
+import { PeriodPicker } from "../components/PeriodPicker";
+import { ContractPicker, ProgrammePicker, defaultContractId, isRunnable, type BrokerProgramme } from "../components/ContractPicker";
+import { RunResult, ColumnToggles, fetchPreview, type RunResp, type LayoutChanges } from "../components/RunResult";
 import { type Sheet } from "../components/OutputRows";
 import { LoadingOverlay } from "../components/Busy";
-import { downloadFile } from "../api/client";
+import { downloadFile, downloadErrorText } from "../api/client";
 import { fmtDate } from "../utils/date";
+import { Pagination } from "../components/Pagination";
+import { InfoTip } from "../components/InfoTip";
+import { olderItdMessage } from "../api/itd";
+
+/** Runs per page of the history. Server-side: the endpoint used to stop at the
+ *  twentieth most recent file with no way to reach the twenty-first. */
+const RUNS_PAGE_SIZE = 10;
 
 /** Server messages are for the log; this is what the broker can act on. */
 function errorText(e: any): string {
@@ -55,13 +73,11 @@ function errorText(e: any): string {
   return "The run could not be completed. Try again, and tell your carrier if it keeps happening.";
 }
 
-const label = (c: BrokerContract) =>
-  `${c.filename ?? `Contract ${c.id}`} — ${c.programme.name} (${c.carrier.name})`;
-
 export default function BrokerBordereau() {
   const nav = useNavigate();
   const [brokerId, setBrokerId] = useState<number | null>(null);
   const [contracts, setContracts] = useState<BrokerContract[] | null>(null);
+  const [programmeId, setProgrammeId] = useState<number | "">("");
   const [contractId, setContractId] = useState<number | "">("");
   const [ready, setReady] = useState<BordereauReadiness | null>(null);
   const [readyLoading, setReadyLoading] = useState(false);
@@ -70,32 +86,88 @@ export default function BrokerBordereau() {
   // Which action is running, so the overlay says the right thing.
   const [mode, setMode] = useState<"check" | "run">("run");
   const [err, setErr] = useState<string | null>(null);
+  // "This exact file was sent before" — asked on the spot, not refused.
+  const [duplicateMsg, setDuplicateMsg] = useState<string | null>(null);
+  // "Fewer than 90% of the setup's columns are in this file" — asked in a
+  // popup before the run: Cancel, or Process Bordereau Anyway
+  // (direct_routes._layout_gate).
+  const [layoutBlock, setLayoutBlock] = useState<(LayoutChanges & { message: string; min_match_pct?: number }) | null>(null);
+  // The broker chose Continue Anyway for this file, so a duplicate question
+  // that follows must not ask about the columns again.
+  const [layoutOk, setLayoutOk] = useState(false);
   const [result, setResult] = useState<RunResp | null>(null);
   const [preview, setPreview] = useState<Sheet | null>(null);
+  const [periods, setPeriods] = useState<BordereauPeriod[] | null>(null);
+  const [period, setPeriod] = useState<string>("");
   const [runs, setRuns] = useState<BrokerRun[] | null>(null);
+  const [runsPage, setRunsPage] = useState(1);
+  const [runsTotal, setRunsTotal] = useState(0);
   const [showHistory, setShowHistory] = useState(false);
+
+  // THE SCOPE THAT MATTERS MOST. A bordereau is checked against one contract's
+  // rules, and two carriers' contracts sitting in one dropdown are separated
+  // only by a name in brackets — which is how a file gets run against the
+  // wrong carrier and comes back with exceptions that mean nothing. Narrowing
+  // the list to the carrier being worked on removes the mistake rather than
+  // labelling it.
+  const carrierId = useBrokerCarrierId();
 
   useEffect(() => {
     getBrokerMe().then(m => setBrokerId(m.id)).catch(() => setBrokerId(null));
-    getBrokerContracts()
-      .then(rows => {
-        setContracts(rows);
-        const live = rows.filter(c => c.approval_status === "approved");
-        // One live contract is not a choice. Select it and let the broker get
-        // on with the actual task.
-        if (live.length === 1) setContractId(live[0].id);
-      })
-      .catch(() => setContracts([]));
   }, []);
 
+  useEffect(() => {
+    // Switching carrier drops the current pick: keeping it would leave the
+    // screen addressed at a contract no longer in the list it is showing.
+    setContractId(""); setProgrammeId("");
+    getBrokerContracts({ carrierId: carrierId ?? undefined })
+      .then(rows => {
+        setContracts(rows);
+        const live = rows.filter(isRunnable);
+        // One programme, or one contract, is not a choice. Select it and let
+        // the broker get on with the actual task.
+        const progs = new Set(live.map(c => c.programme.id).filter(id => id != null));
+        if (progs.size === 1) setProgrammeId([...progs][0] as number);
+        // The renewal, not its previous term, when both are on the list.
+        if (progs.size === 1) setContractId(defaultContractId(live));
+      })
+      .catch(() => setContracts([]));
+  }, [carrierId]);
+
+  // In force, which is what decides whether a file can be produced against it.
+  // This used to read the carrier's approval instead — a weaker question, and
+  // one that no longer exists now the gate has gone.
   const live = useMemo(
-    () => (contracts ?? []).filter(c => c.approval_status === "approved"),
+    () => (contracts ?? []).filter(isRunnable),
     [contracts]);
   const waiting = useMemo(
-    () => (contracts ?? []).filter(c => c.approval_status === "pending_approval"),
+    () => (contracts ?? []).filter(c => !isRunnable(c)),
     [contracts]);
+  // The broker's programmes, from the contracts it can run — a programme is
+  // what the broker thinks in ("the Demonity file"), the contract follows.
+  const programmes: BrokerProgramme[] = useMemo(() => {
+    const m = new Map<number, BrokerProgramme>();
+    for (const c of live) {
+      if (c.programme.id == null) continue;
+      const p = m.get(c.programme.id) ?? { id: c.programme.id, name: c.programme.name,
+                                           code: c.programme.code,
+                                           carrier: c.carrier.name, contracts: [] };
+      p.contracts.push(c);
+      m.set(c.programme.id, p);
+    }
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [live]);
+  const onProgramme = useMemo(
+    () => programmes.find(p => p.id === programmeId)?.contracts ?? [],
+    [programmes, programmeId]);
   const contract = useMemo(
     () => live.find(c => c.id === contractId) ?? null, [live, contractId]);
+
+  function pickProgramme(id: number) {
+    setProgrammeId(id);
+    const on = programmes.find(p => p.id === id)?.contracts ?? [];
+    setContractId(defaultContractId(on));
+  }
 
   /** The full chain this run is addressed at. Null until everything resolves. */
   const path: ContractPath | null = useMemo(() => {
@@ -115,12 +187,38 @@ export default function BrokerBordereau() {
   // changes, so a stale exception list can never be read as this one's.
   useEffect(() => {
     setResult(null); setPreview(null); setErr(null); setFile(null);
+    setLayoutBlock(null); setLayoutOk(false);
+    setPeriod("");
+    // A different contract is a different history, so it is read from its start.
+    setRunsPage(1);
   }, [contractId]);
 
-  const loadRuns = useCallback(() => {
-    if (!path) { setRuns(null); return; }
-    getBrokerRuns(path).then(setRuns).catch(() => setRuns([]));
+  // The real reporting periods this contract's calendar expects — never a
+  // free-text month/year, so what gets sent always matches an actual row (see
+  // GET .../periods). Re-fetched whenever the contract changes.
+  useEffect(() => {
+    if (!path) { setPeriods(null); return; }
+    getContractPeriods(path)
+      .then(rows => {
+        // An ended contract's calendar already stops at its term (the server
+        // builds no month that starts after the expiry).
+        setPeriods(rows);
+        // The most recent NOT-YET-PROCESSED period is almost always what
+        // somebody dropping a file today means — pre-select it, but only if
+        // there is exactly one live contract's worth of ambiguity to resolve
+        // FOR them, not silently override a choice they are mid-way through.
+        const open = rows.find(r => !r.processed);
+        if (open) setPeriod(p => p || open.period);
+      })
+      .catch(() => setPeriods([]));
   }, [path]);
+
+  const loadRuns = useCallback(() => {
+    if (!path) { setRuns(null); setRunsTotal(0); return; }
+    getBrokerRunsPaged(path, runsPage, RUNS_PAGE_SIZE)
+      .then(r => { setRuns(r.items); setRunsTotal(r.total); })
+      .catch(() => { setRuns([]); setRunsTotal(0); });
+  }, [path, runsPage]);
 
   useEffect(() => {
     if (!path) { setReady(null); return; }
@@ -130,44 +228,117 @@ export default function BrokerBordereau() {
       .then(r => { if (!stale) setReady(r); })
       .catch(() => { if (!stale) setReady(null); })
       .finally(() => { if (!stale) setReadyLoading(false); });
-    loadRuns();
     return () => { stale = true; };
-  }, [path, loadRuns]);
+  }, [path]);
 
-  async function submit(checkOnly: boolean) {
+  // The history fetches on its own, so turning its page does not also re-ask
+  // whether this contract is ready to be run.
+  useEffect(() => { loadRuns(); }, [loadRuns]);
+
+  async function submit(checkOnly: boolean, confirmDuplicate = false, confirmLayout = layoutOk) {
     if (!file || !path || !urls) return;
     setMode(checkOnly ? "check" : "run");
-    setBusy(true); setErr(null); setResult(null); setPreview(null);
+    setBusy(true); setErr(null); setResult(null); setPreview(null); setLayoutBlock(null);
     try {
-      const r = await runBrokerBordereau(path, file, { checkOnly });
+      const r = await runBrokerBordereau(path, file,
+        { checkOnly, confirmDuplicate, confirmLayout, period });
       setResult(r);
       // Best-effort preview, exactly as the carrier's screen does it — a
       // missing preview must never make a good run look like a failure.
       fetchPreview(urls, r.export_id).then(setPreview);
       // A self-check records nothing, so only a real submission changes history.
-      if (!checkOnly) loadRuns();
+      // Back to the first page with it: a submitted run is the newest row, and
+      // it belongs at the top of the history rather than wherever the reader
+      // happened to have paged to.
+      if (!checkOnly) { setRunsPage(1); loadRuns(); }
     } catch (e) {
-      setErr(errorText(e));
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      if (detail && typeof detail === "object"
+          && (detail as { code?: string }).code === "duplicate_file") {
+        setDuplicateMsg((detail as { message?: string }).message
+          ?? "This exact file has already been sent.");
+      } else if (detail && typeof detail === "object"
+          && (detail as { code?: string }).code === "layout_mismatch") {
+        setLayoutBlock(detail as LayoutChanges & { message: string; min_match_pct?: number });
+      } else {
+        // An ITD file older than one already sent is refused outright — no
+        // "send anyway", it would wind the running total back.
+        setErr(olderItdMessage(detail) ?? errorText(e));
+      }
     } finally { setBusy(false); }
   }
 
   function clearForm() {
-    setFile(null); setResult(null); setPreview(null); setErr(null);
+    pickFile(null); setResult(null); setPreview(null); setErr(null);
   }
 
-  const canSubmit = !!file && !!ready?.ready && !busy;
+  // A new file is a new answer to "run it anyway?".
+  function pickFile(f: File | null) {
+    setFile(f); setLayoutBlock(null); setLayoutOk(false);
+  }
+
+  function downloadTemplate() {
+    if (!path) return;
+    downloadFile(bordereauTemplatePath(path))
+      .catch(async e => setErr(await downloadErrorText(e,
+        "We couldn't download the bordereau template — please try again.")));
+  }
+
+  // Required on a real submission — see contract_bordereau_run. Not required
+  // to Check (there is no submit(true) button today, but the rule stays
+  // correct if it is ever restored).
+  const canSubmit = !!file && !!ready?.ready && !!period && !busy;
 
   return (
     <div className="proto">
+      <Modal open={duplicateMsg != null}
+        title={<span className="flex items-center gap-2">
+          <AlertTriangle size={17} className="text-amber-500" /> Same File Already Sent
+        </span>}
+        onClose={() => setDuplicateMsg(null)}
+        footer={<>
+          <button className="btn" onClick={() => setDuplicateMsg(null)}>Don’t send it</button>
+          <button className="btn pri" onClick={() => { setDuplicateMsg(null); submit(false, true, layoutOk); }}>
+            Send it anyway</button>
+        </>}>
+        <p className="text-sm">{duplicateMsg}</p>
+      </Modal>
+      <Modal open={layoutBlock != null}
+        title={<span className="flex items-center gap-2">
+          <AlertTriangle size={17} className="text-amber-500" /> Your columns don’t match the carrier’s template
+        </span>}
+        onClose={() => setLayoutBlock(null)}
+        footer={<>
+          <button className="btn" onClick={() => setLayoutBlock(null)}>Cancel</button>
+          <button className="btn pri" disabled={!canSubmit}
+            onClick={() => { setLayoutBlock(null); setLayoutOk(true); submit(false, false, true); }}>
+            Process Bordereau Anyway</button>
+        </>}>
+        <div>
+          {layoutBlock && (
+            <ul className="text-sm" style={{ margin: 0, paddingLeft: 20, listStyle: "disc",
+                                             display: "grid", gap: 4 }}>
+              <li><b>{layoutBlock.missing_columns.length} of {layoutBlock.expected_count} columns</b> are
+                missing or renamed ({Math.round(layoutBlock.changed_pct)}%).</li>
+              <li>At least <b>{layoutBlock.min_match_pct ?? 90}%</b> must match.</li>
+              <li>Missing columns will be <b>blank</b> in the output.</li>
+            </ul>
+          )}
+          <ColumnToggles changes={layoutBlock} />
+        </div>
+      </Modal>
       {busy && <LoadingOverlay label={mode === "check"
         ? "Checking your bordereau — running every validation. Nothing is sent…"
         : "Processing bordereau — validating and generating output. This can take a few minutes…"} />}
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Process Bordereau</h2>
-            <p>Pick the contract the bordereau is for, drop the file, check it,
-              then send it.</p>
+            <h2>
+              Process Bordereau
+              <InfoTip text={"Pick the contract and reporting period, drop the "
+                + "file, and Generate BDX — it's sent to the carrier the "
+                + "moment it's processed, no second step needed."} />
+            </h2>
           </div>
         </div>
 
@@ -176,58 +347,81 @@ export default function BrokerBordereau() {
         )}
 
         {contracts !== null && contracts.length === 0 && (
-          <div className="note warn" style={{ marginBottom: 18, maxWidth: 640 }}>
-            <b>You have no contracts yet.</b> A bordereau is checked against a
-            contract's rules, so there is nothing to submit until a carrier puts
-            you on a programme and a contract is in place. Ask your carrier
-            contact — none of it is something you can do from this side.
+          <div className="note warn" style={{ marginBottom: 18 }}>
+            <b>No contracts yet.</b> You can process a bordereau once your
+            carrier adds you to a programme and your contract is active. Please
+            contact your carrier to get started.
           </div>
         )}
 
         {contracts !== null && contracts.length > 0 && live.length === 0 && (
           <div className="note warn" style={{ marginBottom: 18, maxWidth: 640 }}>
-            <b>None of your contracts is live yet.</b> A contract governs nothing
-            until the carrier approves it, and it is that approval which creates
-            the rules your file is checked against. See{" "}
-            <Link to="/broker/contracts">My Contracts</Link> for where each one
-            has got to.
+            <b>No active contracts yet.</b> You can process a bordereau once one
+            of your contracts is active. Track their progress in{" "}
+            <Link to="/broker/contracts">My Contracts</Link>.
           </div>
         )}
 
         <div className="card pad">
           <div className="field">
-            <label>Contract</label>
-            {live.length === 1 ? (
-              // Nothing to choose between: this is what the bordereau is for.
-              <input value={label(live[0])} readOnly disabled />
-            ) : (
-              <select
-                value={contractId}
-                disabled={live.length === 0}
-                onChange={e => setContractId(e.target.value ? Number(e.target.value) : "")}
-              >
-                <option value="">
-                  {live.length === 0 ? "No live contract yet" : "Select Contract…"}
-                </option>
-                {live.map(c => <option key={c.id} value={c.id}>{label(c)}</option>)}
-              </select>
-            )}
-            <div className="hint">
-              Each contract has its own rules, so the same spreadsheet can pass
-              under one and fail under another. Carrier and programme come with
-              it — there is nothing else to pick.
-            </div>
+            <label>
+              Programme
+              <InfoTip text={"Which of your programmes this bordereau is for. "
+                + "The carrier comes with it."} />
+            </label>
+            <ProgrammePicker value={programmeId} onChange={pickProgramme}
+              programmes={programmes} />
           </div>
+
+          {programmeId !== "" && (
+            <div className="field">
+              <label>
+                Contract
+                <InfoTip text={"Each contract has its own rules, so the same "
+                  + "spreadsheet can pass under one and fail under another."} />
+              </label>
+              <ContractPicker value={contractId}
+                onChange={id => setContractId(id)} contracts={onProgramme} />
+            </div>
+          )}
+
+          {/* An ended contract is still owed the bordereaux of its term — say
+              so, rather than leaving the broker to wonder why it is offered. */}
+          {contract?.lifecycle === "expired" && (
+            <div className="note" style={{ marginBottom: 16 }}>
+              This contract’s term ended{contract.expiry_dt ? <> on <b>{fmtDate(contract.expiry_dt)}</b></> : null}.
+              You can still send bordereaux for the months up to then.
+            </div>
+          )}
+
+          {/* Which month (or quarter, on a quarterly programme) this file is
+              FOR — the reporting period. A REAL row from this contract's own
+              calendar, never a free-text month/year, so it can only ever match
+              a period the carrier is actually expecting — see GET .../periods.
+              This is what both Generate BDX's automatic send and the
+              carrier's own Bordereau Calendar then read back. */}
+          {contract && (
+            <div className="field">
+              <label>
+                Reporting Period
+                <InfoTip text={"Which month this bordereau reports on — not "
+                  + "today's date. A July file sent in September is still "
+                  + "July's."} />
+              </label>
+              <PeriodPicker value={period} onChange={setPeriod} periods={periods} />
+            </div>
+          )}
 
           {/* Named rather than hidden: a broker looking for a contract they know
               they sent should find out WHY it is not selectable. */}
           {waiting.length > 0 && (
             <div className="note" style={{ marginBottom: 16 }}>
               {waiting.length === 1
-                ? <><b>{waiting[0].filename ?? `Contract ${waiting[0].id}`}</b> is
-                    not listed — it is still waiting on the carrier's approval.</>
+                ? <><b>{waiting[0].name ?? waiting[0].filename
+                        ?? `Contract ${waiting[0].id}`}</b> is not listed — it is
+                    not active yet.</>
                 : <><b>{waiting.length} of your contracts</b> are not listed —
-                    they are still waiting on the carrier's approval.</>}
+                    they are not active yet.</>}
             </div>
           )}
 
@@ -257,18 +451,28 @@ export default function BrokerBordereau() {
                   — the programme's shared setup, not one built for you.
                 </span>
               )}
+              {/* The blank layout this setup reads — the file to fill in before
+                  dropping it below. Only for a real setup: the legacy fallback
+                  has no id and no sample of its own to rebuild. */}
+              {ready.setup?.id != null && path && (
+                <button className="btn" style={{ marginLeft: "auto" }} onClick={downloadTemplate}>
+                  <Download size={14} /> Bordereau Input Template
+                </button>
+              )}
             </div>
           )}
 
-          <Dropzone file={file} onPick={setFile} disabled={!ready?.ready} />
+          <Dropzone file={file} onPick={pickFile} disabled={!ready?.ready} />
 
           <div style={{ marginTop: 18, display: "flex", gap: 10, alignItems: "center" }}>
-            {/* The self-check is the reason a broker has this screen, so unlike
-                the carrier's it is offered first and prominently. */}
-            <button className="btn" onClick={() => submit(true)} disabled={!canSubmit}
+            {/* Hidden for now, the same as on the carrier's screen — Generate
+                BDX is the only action offered. Everything behind it still
+                works (submit(true) → check_only, which validates without
+                submitting), so restoring it is uncommenting these lines. */}
+            {/* <button className="btn" onClick={() => submit(true)} disabled={!canSubmit}
               title="Run every validation without sending — see what to fix first">
               Check My Bordereau
-            </button>
+            </button> */}
             <button className="btn pri" onClick={() => submit(false)} disabled={!canSubmit}>
               Generate BDX
             </button>
@@ -289,12 +493,13 @@ export default function BrokerBordereau() {
             preview={preview}
             urls={urls}
             onError={setErr}
-            // A broker has no Exception Triage screen to be sent to — that
-            // route is carrier_admin-only, and deciding exceptions is the
-            // carrier's call, not theirs. So the findings are listed HERE, on
-            // a real submission as much as on a check: being told "14
-            // exceptions" with nothing to act on is not a result.
-            findings="always"
+            // TEMPORARILY HIDDEN on a real submission (was findings="always").
+            // Restore that value to bring the "What Failed Validation" list
+            // back. The reason it was there: a broker has no Exception Triage
+            // screen to be sent to — that route is carrier_admin-only, and
+            // deciding exceptions is the carrier's call, not theirs — so being
+            // told "268 exceptions" with nothing to act on is not a result.
+            findings="check-only"
             // The SAME Exception Triage screen the carrier uses. The export id
             // in the path is what scopes it, and the server only hands back an
             // export stamped with this broker — so this opens their own run and
@@ -307,7 +512,8 @@ export default function BrokerBordereau() {
                 Review Exceptions
               </button>
             ) : null}
-            footNote={<b>Ask your carrier to review the setup.</b>}
+            // Unmapped columns and mapping tasks are the carrier's to fix.
+            carrierNotes={false}
           />
         )}
 
@@ -382,15 +588,20 @@ export default function BrokerBordereau() {
                 </div>
               )}
             </div>
+            <Pagination
+              page={runsPage}
+              pageCount={Math.max(1, Math.ceil(runsTotal / RUNS_PAGE_SIZE))}
+              pageSize={RUNS_PAGE_SIZE} totalItems={runsTotal}
+              onPageChange={setRunsPage} noun="files" />
           </div>
         )}
 
-        <div className="note" style={{ marginTop: 14 }}>
+        {/* <div className="note" style={{ marginTop: 14 }}>
           Your carrier builds the setup that decides what a valid file looks
           like, and the contract decides the rules it is checked against. If
           either is wrong for your book, that is a conversation with them — see{" "}
           <Link to="/broker/contracts">My Contracts</Link>.
-        </div>
+        </div> */}
       </div>
     </div>
   );

@@ -53,6 +53,11 @@ from openpyxl.styles.numbers import is_date_format
 
 from data_model import DATA_MODEL
 from contract_upload_services.gemini_service import invoke_with_retry as _gateway_invoke
+from contract_upload_services.gemini_service import DETERMINISTIC_SEED, model_for
+
+# Today's model for the template-mapping and sheet-role calls; each can be moved
+# by config (KAVACHIO_MODEL_TEMPLATE_MAPPING / KAVACHIO_MODEL_SHEET_ROLES).
+_DEFAULT_MAPPING_MODEL = "gemini-2.5-flash"
 
 log = logging.getLogger("bdx.exporter")
 
@@ -1170,10 +1175,14 @@ def _call_gemini_for_chunk(
     # the global concurrency + rate limiter live in ONE place. We keep exporter's
     # own client (600 s timeout) and its lenient JSON recovery below.
     kwargs = {
-        "model": "gemini-2.5-flash",
+        "model": model_for("template_mapping", _DEFAULT_MAPPING_MODEL),
         "contents": prompt,
         "config": {
             "response_mime_type": "application/json",
+            # Same columns, same answer: two templates built from one standard
+            # should not map it differently by chance.
+            "temperature": 0,
+            "seed": DETERMINISTIC_SEED,
             "max_output_tokens": _LLM_MAX_OUTPUT_TOKENS,
             # KEY FIX: disable extended thinking so all output tokens go to the
             # JSON response instead of internal reasoning. Without this, ~15k
@@ -1181,6 +1190,21 @@ def _call_gemini_for_chunk(
             "thinking_config": {"thinking_budget": 0},
         },
     }
+    # Same prompt, same answer: temperature 0 + seed still moved a few columns'
+    # canonical field between two builds of one standard (3 of 147 measured), which
+    # flips a column between "from the bordereau" and "from the contract". Only a
+    # complete answer (finished, parsed) is stored; the key covers the whole
+    # prompt, the generation config and the model.
+    import ai_cache
+    import hashlib
+    cache_key = ai_cache.make_key(*ai_cache.model_scoped(
+        ("template_canonical_v1", hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+         {k: v for k, v in kwargs["config"].items()}), kwargs["model"]))
+    cached = ai_cache.get("template_canonical", cache_key)
+    if isinstance(cached, dict):
+        log.info("    Gemini ← '%s' chunk %d served from cache", sheet_name, chunk_index)
+        return cached
+
     try:
         resp = _gateway_invoke(kwargs, label=label, gen_client=client)
     except Exception as e:
@@ -1208,6 +1232,8 @@ def _call_gemini_for_chunk(
     if parsed is None:
         log.error("Could not recover JSON for '%s' chunk %d (finish=%s)",
                   sheet_name, chunk_index, finish_reason)
+    elif isinstance(parsed, dict) and str(finish_reason).endswith("STOP"):
+        ai_cache.put("template_canonical", cache_key, parsed)
     return parsed
 
 
@@ -1344,10 +1370,12 @@ def classify_sheet_roles(client, structure: dict) -> dict:
     for attempt in range(1, 3):
         try:
             resp = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model_for("sheet_roles", _DEFAULT_MAPPING_MODEL),
                 contents=prompt,
                 config={
                     "response_mime_type": "application/json",
+                    "temperature": 0,
+                    "seed": DETERMINISTIC_SEED,
                     "response_schema": _SHEET_ROLE_SCHEMA,
                     "thinking_config": {"thinking_budget": 0},
                 },
@@ -1537,6 +1565,24 @@ def _keeps_own_date_format(dst_cell, src_cell) -> bool:
         return False
 
 
+def _heading_date_on_non_date(dst_cell, src_cell) -> bool:
+    """True when the donor is a HEADING whose number format is a date and dst
+    does not hold a date — _keeps_own_date_format the other way round.
+
+    A heading row is often formatted as dates without anyone noticing (text
+    looks the same either way — the Risksmith workbook has 88 of its 93
+    headings so). Copied onto a number, that format shows 2,000 as 22/06/1905
+    and 0 as 00/01/1900; and a number past Excel's last date (10,000,000) is
+    turned into #VALUE! the next time the file is opened to paint exceptions.
+    So a heading's date format only goes onto a real date."""
+    try:
+        if isinstance(dst_cell.value, (_date_cls, datetime, _time_cls)):
+            return False
+        return is_date_format(src_cell.number_format)
+    except Exception:  # noqa: BLE001 — style decisions never break a delivery
+        return False
+
+
 def _copy_cell_style(src_cell, dst_cell, strip_bold: bool = False) -> None:
     """Copy src's style onto dst, unchanged — except `strip_bold`, passed when
     the donor is the HEADER cell (the fallback for a template whose sample data
@@ -1548,7 +1594,8 @@ def _copy_cell_style(src_cell, dst_cell, strip_bold: bool = False) -> None:
     cell's original look.
 
     The one style a date cell does NOT take from the donor is its number format
-    (see _keeps_own_date_format)."""
+    (see _keeps_own_date_format); nor does any other cell take a HEADING's date
+    format (see _heading_date_on_non_date)."""
     if src_cell is None or src_cell is dst_cell:
         return
     try:
@@ -1559,7 +1606,8 @@ def _copy_cell_style(src_cell, dst_cell, strip_bold: bool = False) -> None:
         dst_cell.fill = copy(src_cell.fill)
         dst_cell.border = copy(src_cell.border)
         dst_cell.alignment = copy(src_cell.alignment)
-        if not _keeps_own_date_format(dst_cell, src_cell):
+        if not (_keeps_own_date_format(dst_cell, src_cell)
+                or (strip_bold and _heading_date_on_non_date(dst_cell, src_cell))):
             dst_cell.number_format = src_cell.number_format
         dst_cell.protection = copy(src_cell.protection)
     except Exception as e:
@@ -1577,17 +1625,29 @@ def _cell_has_visible_style(cell) -> bool:
     return bool(getattr(cell, "has_style", False))
 
 
-def _is_non_data_row_values(vals: list) -> bool:
+def _is_non_data_row_values(vals: list, names: list | None = None,
+                            measure_cols=None) -> bool:
     """True when a row's VALUES mark it as a summary/totals or blank spacer
     row — not a transaction row (mirrors row_classifier's categories): blank,
     carries summary/total wording, or is sparse with nothing but bare numbers
-    (an unlabelled totals row)."""
-    filled = [v for v in vals if v is not None and str(v).strip()]
+    (an unlabelled totals row).
+
+    `names` (the column of each value) and `measure_cols` (the columns the setup
+    fills) together narrow the blank and numeric-only tests to the filled
+    columns, as row_classifier does — otherwise a wide template's unmapped
+    columns make every row look sparse. Summary wording is looked for in every
+    value. Without both, or when no name is measured, all values count."""
+    measured = vals
+    if names is not None and measure_cols:
+        keep = set(measure_cols)
+        measured = [v for n, v in zip(names, vals) if n in keep] or vals
+    everything = [v for v in vals if v is not None and str(v).strip()]
+    filled = [v for v in measured if v is not None and str(v).strip()]
     if not filled:
         return True
     try:
         from row_classifier import _SUMMARY_KEYWORDS
-        if any(_SUMMARY_KEYWORDS.match(str(v).strip()) for v in filled):
+        if any(_SUMMARY_KEYWORDS.match(str(v).strip()) for v in everything):
             return True
     except Exception:  # noqa: BLE001 — keyword check is best-effort
         pass
@@ -1604,7 +1664,7 @@ def _is_non_data_row_values(vals: list) -> bool:
         except ValueError:
             return False
 
-    n_cols = len(vals) or 1
+    n_cols = len(measured) or 1
     return len(filled) < n_cols * 0.5 and all(_numeric(v) for v in filled)
 
 
@@ -1906,12 +1966,29 @@ def highlight_exceptions(
     painted light red with a comment explaining why, so the problems are visible
     in the downloaded file.
 
-    Cell positions mirror `_generate_with_template`'s row math exactly: per sheet,
-    the i-th output record (1-based — which is what the validator stores in each
-    exception's `row`/`__rowid`) is written at Excel row `data_start_row + 1 +
-    (i - 1)`, and each output column lives at `column_index + 1`. Exceptions that
-    don't resolve to a real cell (unknown sheet/column, missing row, merged-cell
-    anchor) are skipped rather than guessed.
+    Row math mirrors the renderers exactly: per sheet, the i-th output record
+    (1-based — which is what the validator stores in each exception's
+    `row`/`__rowid`) is written at Excel row `data_start_row + 1 + (i - 1)`.
+
+    COLUMNS ARE FOUND BY NAME IN THE FILE WE ARE PAINTING, not by the template's
+    `column_index`. There are two renderers: `_render_with_template` keeps the
+    sample's physical positions (`column_index + 1`), while `render_output`'s
+    plain writer — used whenever the template has diverged from its sample, i.e.
+    a field was switched off or the order changed — lays the ACTIVE columns out
+    contiguously at 1..N. Painting at `column_index + 1` was therefore right for
+    one renderer and wrong for the other: on export 35 all 14 fills landed on the
+    wrong column (Risk Expiry Date's ten on "Gross premium paid this time") and
+    one landed at column 144 of a 64-column sheet, leaving 80 empty columns
+    behind. Reading the header row of the workbook in hand is correct for both,
+    and for any renderer added later.
+
+    `column_index + 1` remains the fallback for a column whose name is not in the
+    header row, but only while it lands inside the columns that were actually
+    written — past that it would paint an empty cell into open space and widen
+    the sheet, which is what created those trailing columns.
+
+    Exceptions that don't resolve to a real cell (unknown sheet/column, missing
+    row, merged-cell anchor) are skipped rather than guessed.
 
     Pure, defensive post-processing: it NEVER raises. On any failure it returns
     the input bytes unchanged so adding highlights can never break the download.
@@ -1921,6 +1998,7 @@ def highlight_exceptions(
     try:
         from openpyxl.styles import PatternFill
         from openpyxl.comments import Comment
+        import output_template_fields as otf
 
         # Match sheet/column names tolerantly: collapse internal whitespace, trim,
         # lowercase. The validator's `sheet`/`field` are SQL string literals the
@@ -1933,16 +2011,56 @@ def highlight_exceptions(
         # normalized worksheet title -> real title (so wb[...] uses the real one)
         ws_by_norm = {_norm(t): t for t in wb.sheetnames}
 
+        def _headers_at(ws, row_1b: int) -> dict[str, int]:
+            """{normalized header text: 1-based column} for one row of the file.
+
+            First occurrence wins: a workbook that repeats a header keeps the
+            leftmost column, the same one a reader would look at first."""
+            found: dict[str, int] = {}
+            if ws is None or (ws.max_row or 0) < row_1b:
+                return found
+            for cell in ws[row_1b]:
+                v = cell.value
+                if v is None or not str(v).strip():
+                    continue
+                found.setdefault(_norm(v), cell.column)
+            return found
+
         # normalized sheet_name -> (data_start_1based, {normalized_col: col_idx})
         sheet_meta: dict[str, tuple[int, dict[str, int]]] = {}
         for sh in structure.get("sheets") or []:
             name = sh.get("sheet_name") or ""
             data_start = (sh.get("data_start_row") or 1) + 1
+            ws = wb[ws_by_norm[_norm(name)]] if _norm(name) in ws_by_norm else None
+            # The template's own header row; the plain writer always uses row 1,
+            # so fall back to it when that row carries nothing.
+            written = (_headers_at(ws, (sh.get("header_row") or 0) + 1)
+                       or _headers_at(ws, 1))
+            last_written = max(written.values(), default=0)
+
             colmap: dict[str, int] = {}
             for c in sh.get("columns") or []:
                 cn = c.get("column_name")
-                if cn:
-                    colmap[_norm(cn)] = c["column_index"] + 1
+                if not cn:
+                    continue
+                # A renamed column carries the user's word in the file while
+                # the exception still names the internal one, so try both.
+                pos = None
+                for nm in (otf.header_of(c), cn):
+                    if nm and _norm(nm) in written:
+                        pos = written[_norm(nm)]
+                        break
+                if pos is None:
+                    fallback = (c.get("column_index") or 0) + 1
+                    # Only inside what was written — see the docstring.
+                    pos = fallback if fallback <= (last_written or fallback) else None
+                if pos is not None:
+                    colmap[_norm(cn)] = pos
+            # An exception may name a column the structure does not carry (a
+            # template edited since the run); the file's own header still
+            # places it.
+            for nm, idx in written.items():
+                colmap.setdefault(nm, idx)
             sheet_meta[_norm(name)] = (data_start, colmap)
 
         fills = {

@@ -156,35 +156,61 @@ def retarget_ir_rule(rule_spec: Any, canonical_target: Any, error_message: Any,
     return new_spec, new_target, new_error_message, target_old, resolved_new
 
 
-def patch_tolerance(rule_spec: Any, output_schema, updates: dict) -> tuple[dict, dict]:
+# The templates a tolerance can be set on (19.3): formula rules take the two-band
+# tolerance/reject pair; NUMBER LIMITS take a single margin (`tolerance_pct`) that
+# widens the bound (see rule_compiler._limit_tol) — they have no reject band.
+_LIMIT_TOLERANCE_TEMPLATES = ("max_limit", "min_limit", "range_check")
+TOLERANCE_TEMPLATES = ("cross_field_math",) + _LIMIT_TOLERANCE_TEMPLATES
+
+
+def patch_tolerance(rule_spec: Any, output_schema, updates: dict,
+                    follow_contract: bool = False) -> tuple[dict, dict]:
     """Return (new_rule_spec, applied) with the tolerance-band params on a
-    cross_field_math IR rule updated and the compiled SQL regenerated
-    deterministically (validate_ir → compile_ir → rebuild spec — the same path as
-    retarget_ir_rule, so the runtime never runs a stale query).
+    formula (cross_field_math) or number-limit (max_limit / min_limit /
+    range_check) rule updated and the compiled SQL regenerated deterministically
+    (validate_ir → compile_ir → rebuild spec — the same path as retarget_ir_rule,
+    so the runtime never runs a stale query). Rule Library / AI rules (kind
+    ir_v1) and typed contract-term rules (source contract_terms) alike.
 
     `updates` maps a key in `_TOLERANCE_PARAMS` to a percent (float ≥ 0), or to
-    None to REMOVE that param (reverting to the single-threshold default).
+    None to REMOVE that param (reverting to the single-threshold default). A limit
+    rule takes `tolerance_pct` only. The rule is marked `tolerance_source="rule"`:
+    its own value, which the contract margin no longer overrides (see
+    contract_margin.py). `follow_contract=True` instead drops the rule's own
+    tolerance_pct/reject_pct and marks it `tolerance_source="contract"` so it
+    follows the contract margin again — explicitly, so an older audit event
+    saying somebody once edited it cannot make it "own" again.
     Deterministic; raises RuleEditError on any invalid input — safe for HTTP 400.
     """
     spec = _as_dict(rule_spec)
-    if spec.get("kind") != "ir_v1" or not isinstance(spec.get("ir"), dict):
+    is_term = spec.get("source") == "contract_terms"
+    if (spec.get("kind") != "ir_v1" and not is_term) or not isinstance(spec.get("ir"), dict):
         raise RuleEditError(
             "Only AI rule-engine (IR) rules can be edited. Re-upload the contract "
             "to regenerate this rule.")
 
     ir = spec["ir"]
-    if ir.get("template") != "cross_field_math":
+    template = ir.get("template")
+    if template not in TOLERANCE_TEMPLATES:
         raise RuleEditError(
             "Tolerance bands apply only to cross-field math (formula) rules such "
-            "as premium = base × rate.")
+            "as premium = base × rate, and to number limits (a minimum, a "
+            "maximum or a range).")
+    is_limit = template in _LIMIT_TOLERANCE_TEMPLATES
 
     clean: dict[str, float | None] = {}
-    for key, val in (updates or {}).items():
+    if follow_contract:
+        clean = {"tolerance_pct": None, "reject_pct": None}
+    for key, val in ({} if follow_contract else (updates or {})).items():
         if key not in _TOLERANCE_PARAMS:
             raise RuleEditError(f"Unknown tolerance parameter: {key!r}")
         if val is None:
             clean[key] = None
             continue
+        if is_limit and key == "reject_pct":
+            raise RuleEditError(
+                "A number limit takes a single margin (tolerance_pct); it has no "
+                "reject band.")
         try:
             num = float(val)
         except (TypeError, ValueError):
@@ -229,8 +255,14 @@ def patch_tolerance(rule_spec: Any, output_schema, updates: dict) -> tuple[dict,
     new_spec = dict(spec)
     new_spec["ir"] = new_ir
     new_spec["compiled_sql"] = new_sql
-    new_spec["executable"] = True
-    new_spec.pop("unmapped_reason", None)
+    if is_term:
+        # A contract-term rule mirrors its IR's params at the top level
+        # (contract_rules.write_rules); keep the copy honest.
+        new_spec["params"] = new_params
+    else:
+        new_spec["executable"] = True
+        new_spec.pop("unmapped_reason", None)
+    new_spec["tolerance_source"] = "contract" if follow_contract else "rule"
     return new_spec, clean
 
 

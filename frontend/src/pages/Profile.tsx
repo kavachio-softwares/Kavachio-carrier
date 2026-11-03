@@ -2,7 +2,9 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { getUser, normalizeRole, ROLE_LABEL, setUser } from "../auth";
+import { useCarrierSeat } from "../hooks/useCarrierSeat";
 import { PasswordInput } from "../components/ui/PasswordInput";
+import { InfoTip } from "../components/InfoTip";
 
 // Password policy — kept in sync with the backend (POST /auth/change-password).
 const RULES: { label: string; test: (p: string) => boolean }[] = [
@@ -30,6 +32,8 @@ export default function Profile() {
   const [savingPwd, setSavingPwd] = useState(false);
   const [pwdMsg, setPwdMsg] = useState<string | null>(null);
   const [pwdErr, setPwdErr] = useState<string | null>(null);
+  // Same role, two seats at a carrier: only the owner is the Carrier Admin.
+  const seat = useCarrierSeat();
 
   if (!user) {
     // RequireAuth guards this route, but stay defensive.
@@ -37,7 +41,7 @@ export default function Profile() {
     return null;
   }
 
-  const roleLabel = ROLE_LABEL[normalizeRole(user.role)];
+  const roleLabel = seat === "user" ? "Carrier User" : ROLE_LABEL[normalizeRole(user.role)];
   const nameChanged = fullName.trim() !== (user.full_name ?? "").trim();
 
   const met = RULES.map(r => r.test(pwd));
@@ -82,8 +86,9 @@ export default function Profile() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>My Account</h2>
-            <p>Your personal details and sign-in security.</p>
+            <h2>My Account
+              <InfoTip text="Your personal details and sign-in security." />
+            </h2>
           </div>
           <div className="actions">
             <button className="btn" onClick={() => nav(-1)}>← Back</button>

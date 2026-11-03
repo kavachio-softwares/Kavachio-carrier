@@ -21,7 +21,7 @@ const LOOK: Record<OnboardingStatus, { label: string; cls: string; title: string
   invited: {
     label: "Invited",
     cls: "bg-warn/10 text-warn",
-    title: "Their admin was invited and hasn't used the link yet — worth chasing.",
+    title: "They were invited and haven't used the link yet — worth chasing.",
   },
   active: {
     label: "Active",

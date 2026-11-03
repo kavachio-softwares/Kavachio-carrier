@@ -32,8 +32,8 @@ export default function AddTenant() {
   // Naming the gap beats a button that is dead for reasons the user cannot see.
   const missing = [
     !f.name.trim() && "Legal name",
-    !f.admin_name.trim() && "Admin full name",
-    !EMAIL_RE.test(f.admin_email.trim()) && "a valid admin email",
+    !f.admin_name.trim() && "the owner's full name",
+    !EMAIL_RE.test(f.admin_email.trim()) && "a valid owner email",
   ].filter(Boolean) as string[];
   const canCreate = missing.length === 0;
 
@@ -54,7 +54,7 @@ export default function AddTenant() {
   if (!isAdmin) {
     return (
       <div className="proto"><div className="view full">
-        <div className="page-head"><div className="t"><h2>Create Carrier</h2></div></div>
+        <div className="page-head"><div className="t"><h2>Onboard Carrier</h2></div></div>
         <div className="note warn" style={{ maxWidth: 560 }}>
           This screen is restricted to Kavachio platform admins.
         </div>
@@ -67,12 +67,11 @@ export default function AddTenant() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Create Carrier</h2>
-            <p>
-              Add the insurance company and email an invitation to their first
-              admin. From there, they set up their own programmes, brokers and
-              contracts.
-            </p>
+            <h2>
+              Onboard Carrier
+              <InfoTip text={"Add the insurance company and invite its owner, who sets up "
+                + "their own programmes, brokers and contracts from there."} />
+            </h2>
           </div>
           <div className="actions">
             <button className="btn" onClick={() => nav("/tenants")}>← Carriers</button>
@@ -89,38 +88,33 @@ export default function AddTenant() {
           <div className="card pad">
             <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>
               Carrier organisation
-              <InfoTip text="A brand new carrier is empty until its own admin signs in. They add the programmes and the brokers, not us." />
+              <InfoTip text="A brand new carrier is empty until the carrier signs in. They add the programmes and the brokers, not us." />
             </h3>
             <div className="field">
-              <label>Legal name <span style={{ color: "var(--p-crit)" }}>*</span></label>
+              <label>Name <span style={{ color: "var(--p-crit)" }}>*</span></label>
               <input value={f.name} autoFocus
                 placeholder="e.g. Northgate Mutual Insurance Co"
                 onChange={e => set("name", e.target.value)} />
             </div>
-            <div className="field">
+            <div className="field" style={{ marginBottom: 0 }}>
               <label>Base currency</label>
               <select value={f.currency} onChange={e => set("currency", e.target.value)}>
                 {CURRENCIES.map(([v, l]) => <option key={v} value={v}>{v} — {l}</option>)}
               </select>
               <div className="hint">The currency this carrier reports in.</div>
             </div>
-            <div className="field" style={{ marginBottom: 0 }}>
-              <label>Organisation type</label>
-              <input className="ro" value="Carrier" readOnly />
-              <div className="hint">
-                Fixed. Brokers are not set up here — a carrier adds its own
-                brokers on its own programmes.
-              </div>
-            </div>
           </div>
 
-          {/* Its first admin */}
+          {/* Its owner. The same person as the first admin — naming them here
+              is what makes the organisation accountable to somebody from the
+              moment it exists, rather than to whoever happens to log in. */}
           <div className="card pad">
-            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>First admin</h3>
-            <p style={{ margin: "0 0 14px", fontSize: 12, color: "var(--p-muted)" }}>
-              They get an email inviting them to set a password. After that they
-              set the company up and add their own colleagues.
-            </p>
+            <h3 style={{ margin: "0 0 16px", fontSize: 14 }}>
+              Owner
+              <InfoTip text={"The one person accountable for this organisation. They get an "
+                + "email inviting them to set a password, then set the company up and add "
+                + "their own colleagues as admins."} />
+            </h3>
             <div className="field">
               <label>Full name <span style={{ color: "var(--p-crit)" }}>*</span></label>
               <input value={f.admin_name} placeholder="Full name"
@@ -128,21 +122,22 @@ export default function AddTenant() {
             </div>
             <div className="field">
               <label>Email <span style={{ color: "var(--p-crit)" }}>*</span></label>
-              <input type="email" value={f.admin_email} placeholder="admin@carrier.com"
+              <input type="email" value={f.admin_email} placeholder="name@carrier.com"
                 onChange={e => set("admin_email", e.target.value)} />
             </div>
-            <div className="note" style={{ marginTop: 4 }}>
+            {/* <div className="note" style={{ marginTop: 4 }}>
               When they accept, they arrive at an empty account and we guide them
-              through adding their first programme.
-            </div>
+              through adding their first programme. They can hand ownership to
+              one of their own admins later — you do not have to do it for them.
+            </div> */}
           </div>
         </div>
 
-        {missing.length > 0 && (
+        {/* {missing.length > 0 && (
           <div style={{ marginTop: 16, fontSize: 13, color: "var(--p-muted)" }}>
             Still needed: {missing.join(", ")}
           </div>
-        )}
+        )} */}
       </div>
 
       {busy && <LoadingOverlay label="Creating the carrier and sending the invite…" />}

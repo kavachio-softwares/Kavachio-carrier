@@ -104,13 +104,27 @@ def mail_account(account: str = "") -> MailAccount:
 
 
 def send_email(to: str, subject: str, html: str, text: str | None = None,
-               account: str = "") -> None:
+               account: str = "", cc: "str | list[str] | None" = None,
+               attachments: "list[tuple[str, bytes, str]] | None" = None,
+               reply_to: "str | None" = None) -> None:
     """Send an HTML email as `account` (default sender when omitted).
     Raises on failure — the caller decides how to handle it.
 
+    `cc` is one address or a list — e.g. the carrier user who asked for a
+    reminder to go out, so they hold a copy of exactly what the broker was
+    told. Left off the message entirely when empty, rather than an empty
+    header.
+
+    `attachments` is a list of (filename, data, mime_type) — e.g. the completed
+    contract sent to both parties when the last signature lands. A signed
+    contract has to ARRIVE, not sit behind a login: the people who need it next
+    are lawyers, auditors and reinsurers with no account on this platform.
+
     Honours the MAIL_ALLOWED_RECIPIENTS test guard: when that is set, a
     recipient not on the list is skipped (logged, not raised) so callers that
-    fan out to several addresses still deliver to the allowed ones."""
+    fan out to several addresses still deliver to the allowed ones. Cc
+    addresses go through the same guard, individually — one disallowed cc
+    does not stop the message reaching an allowed `to`."""
     allowed = _allowed_recipients()
     if allowed and (to or "").strip().lower() not in allowed:
         # WARNING, not INFO: mail that a caller believes it sent is silently not
@@ -122,6 +136,10 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
     if allowed:
         log.warning("[Email] test mode: MAIL_ALLOWED_RECIPIENTS restricts delivery "
                     "to %d address(es); %s is allowed", len(allowed), to)
+    cc_in = [cc] if isinstance(cc, str) else list(cc or [])
+    cc_list = [c.strip() for c in cc_in if (c or "").strip()]
+    if allowed:
+        cc_list = [c for c in cc_list if c.strip().lower() in allowed]
     acct = mail_account(account)
     if not acct.user or not acct.password:
         prefix = (account or "").strip().upper()
@@ -134,14 +152,30 @@ def send_email(to: str, subject: str, html: str, text: str | None = None,
     msg["Subject"] = subject
     msg["From"] = formataddr((acct.sender_name, acct.sender))
     msg["To"] = to
+    if cc_list:
+        msg["Cc"] = ", ".join(cc_list)
+    if (reply_to or "").strip():
+        # e.g. a broker's intake address, so a reply carrying a corrected file
+        # lands where files are collected rather than in the sender's inbox.
+        msg["Reply-To"] = reply_to.strip()
     msg.set_content(text or "Open this message in an HTML-capable email client.")
     msg.add_alternative(html, subtype="html")
+    for name, data, mime in (attachments or []):
+        # A bad mime string would raise inside the email package and lose the
+        # whole message, so anything unexpected falls back to opaque bytes —
+        # every client can still save the file.
+        maintype, _, subtype = (mime or "application/octet-stream").partition("/")
+        msg.add_attachment(data, maintype=maintype or "application",
+                           subtype=subtype or "octet-stream", filename=name)
 
-    log.info("[Email] sending '%s' to %s as %s via %s:%s",
-             subject, to, acct.sender, acct.host, acct.port)
+    log.info("[Email] sending '%s' to %s%s as %s via %s:%s",
+             subject, to, f" (cc {', '.join(cc_list)})" if cc_list else "",
+             acct.sender, acct.host, acct.port)
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(acct.host, acct.port, context=ctx, timeout=20) as server:
         server.login(acct.user, acct.password)
+        # No explicit to_addrs: smtplib pulls recipients from the To/Cc headers
+        # already on the message, so leaving `cc` off never sends bcc-style.
         server.send_message(msg)
     log.info("[Email] sent to %s as %s", to, acct.sender)
 
@@ -157,7 +191,7 @@ def reset_email_html(link: str, name: str | None = None) -> str:
                 box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
       <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
                   color:#0E1320;margin-bottom:6px">Kavachio</div>
-      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
       <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">Reset your password</h1>
       <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
       <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 22px">
@@ -192,7 +226,7 @@ def invite_email_html(link: str, name: str | None = None, org: str | None = None
                 box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
       <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
                   color:#0E1320;margin-bottom:6px">Kavachio</div>
-      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau validation &amp; reporting</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
       <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">You're invited</h1>
       <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
       <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 22px">
@@ -211,3 +245,295 @@ def invite_email_html(link: str, name: str | None = None, org: str | None = None
     </div>
   </div>
 </body></html>"""
+
+
+def carrier_invite_email_html(link: str, name: str | None = None,
+                              carrier: str | None = None) -> str:
+    """A carrier inviting a broker who ALREADY has a Kavachio login.
+
+    Different from invite_email_html on purpose. That one hands somebody their
+    account — set a password, complete onboarding. This one goes to a person
+    who already has an account and is being asked a question: another carrier
+    would like to work with you. So there is no password, no expiry, and the
+    button says JOIN rather than "complete onboarding" — it drops them on the
+    invitation screen inside the app, signed in as themselves.
+    """
+    greeting = f"Hi {name}," if (name or "").strip() else "Hi,"
+    who = f"<b>{carrier}</b>" if (carrier or "").strip() else "A carrier"
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">{carrier or "A carrier"} wants to work with you</h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 22px">
+        {who} has invited you to work with them on Kavachio. You already have an
+        account &mdash; nothing to set up. Join and they can put you on their
+        programmes; your other carriers are not affected and are never shown to
+        them.
+      </p>
+      <a href="{link}" style="display:inline-block;background:#3149C6;color:#fff;text-decoration:none;
+                font-size:14px;font-weight:600;padding:12px 22px;border-radius:8px">Join now</a>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        If the button doesn't work, copy and paste this link into your browser:<br>
+        <a href="{link}" style="color:#3149C6;word-break:break-all">{link}</a>
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:18px 0 0">
+        You can decline, and nothing happens. If you weren't expecting this, you
+        can safely ignore this email.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
+def overdue_reminder_email_html(name: str | None, program_name: str, period: str,
+                                due_date: str | None, days_over: int,
+                                note: str | None = None) -> str:
+    """A carrier chasing a broker for a bordereau that is now late.
+
+    Plain and short on purpose — this is a nudge about one file, not a
+    marketing email. `note` is whatever the carrier user typed in "Anything to
+    add?"; shown only when they wrote one.
+    """
+    greeting = f"Hi {name}," if (name or "").strip() else "Hi,"
+    due_txt = f" It was due on <b>{due_date}</b>." if due_date else ""
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
+        {program_name} — {period} bordereau is {plural(days_over, 'day')} overdue
+      </h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        The <b>{period}</b> bordereau for <b>{program_name}</b> hasn't arrived yet.{due_txt}
+        Could you send it across when you get a chance?
+      </p>
+      {f'<p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 22px;'
+       f'padding:12px 14px;background:#F8F9FC;border-radius:8px">{escape_html(note)}</p>' if (note or "").strip() else ""}
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a reminder from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
+def broker_removed_email_html(name: str | None, carrier: str, program_name: str) -> str:
+    """A carrier telling a broker it has been taken off a programme.
+
+    Says plainly what stops and what stays, because the first thing a broker
+    asks on reading "you've been removed" is whether their files are lost.
+    """
+    greeting = f"Hi {escape_html(name)}," if (name or "").strip() else "Hi,"
+    c, p = escape_html(carrier), escape_html(program_name)
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
+        {c} has removed you from {p}
+      </h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        <b>{c}</b> has taken you off the programme <b>{p}</b>. What this means:
+      </p>
+      <ul style="font-size:14px;color:#566071;line-height:1.7;margin:0 0 14px;padding-left:20px">
+        <li>You can no longer send bordereaux for it, by upload, email, SFTP or API.</li>
+        <li>You can no longer fix or approve exceptions on its files.</li>
+        <li>Files you already sent, and your contracts, stay on record with {c}.</li>
+      </ul>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        If you think this is a mistake, please contact {c}.
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a notice from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
+def broker_added_back_email_html(name: str | None, carrier: str, program_name: str) -> str:
+    """A carrier putting a broker it had removed back on a programme — the
+    counterpart of broker_removed_email_html. Only ever sent to a broker who
+    was taken off before; a first-time add sends nothing."""
+    greeting = f"Hi {escape_html(name)}," if (name or "").strip() else "Hi,"
+    c, p = escape_html(carrier), escape_html(program_name)
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
+        {c} has added you back to {p}
+      </h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        <b>{c}</b> has put you back on the programme <b>{p}</b>. What this means:
+      </p>
+      <ul style="font-size:14px;color:#566071;line-height:1.7;margin:0 0 14px;padding-left:20px">
+        <li>You can send bordereaux for it again, by upload, email, SFTP or API.</li>
+        <li>You can fix and approve exceptions on its files again.</li>
+        <li>If you send by SFTP, API or email, your existing login, key or address
+            works as before &mdash; there is nothing new to set up.</li>
+        <li>Files you sent earlier, and your contracts, are still on record with {c}.</li>
+      </ul>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        If you have any questions, please contact {c}.
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a notice from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
+def renewal_live_email_html(name: str | None, carrier: str, program_name: str,
+                            contract_name: str, code: str, start: str, end: str,
+                            old_code: str | None) -> str:
+    """A carrier's renewed contract has gone in force: the broker's new code and
+    dates, and what happens to files sent under the old code."""
+    greeting = f"Hi {escape_html(name)}," if (name or "").strip() else "Hi,"
+    c, p = escape_html(carrier), escape_html(program_name)
+    k, n = escape_html(code), escape_html(contract_name)
+    s_, e_ = escape_html(start), escape_html(end)
+    old = (f"<li>Files sent under the old code {escape_html(old_code)} for a month in "
+           f"this new period are filed under the renewal automatically; anything "
+           f"unclear is held for {c} to check.</li>") if old_code else ""
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
+        Your contract on {p} has been renewed
+      </h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        <b>{c}</b> has put the renewal of your contract on <b>{p}</b> in force.
+      </p>
+      <ul style="font-size:14px;color:#566071;line-height:1.7;margin:0 0 14px;padding-left:20px">
+        <li>Contract: <b>{n}</b></li>
+        <li>New contract code: <b>{k}</b> &mdash; use it in email subjects and file names.</li>
+        <li>Period: <b>{s_}</b> to <b>{e_}</b></li>
+        {old}
+        <li>Late files for the previous period still go under the previous contract.</li>
+      </ul>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        If you have any questions, please contact {c}.
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a notice from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
+def period_change_email_html(name: str | None, carrier: str, program_name: str,
+                             contract_name: str, code: str, period_old: str,
+                             period_new: str, reason: str, undone: bool = False) -> str:
+    """A carrier corrected the dates of a broker's contract (Change period), or
+    undid a correction: the old and new period and the carrier's REASON. Takes
+    nothing else on purpose — the carrier's internal note and its evidence are
+    never passed to this function, so they cannot reach the broker."""
+    greeting = f"Hi {escape_html(name)}," if (name or "").strip() else "Hi,"
+    c, p = escape_html(carrier), escape_html(program_name)
+    k, n = escape_html(code), escape_html(contract_name)
+    o, w, r = escape_html(period_old), escape_html(period_new), escape_html(reason)
+    what = ("undone an earlier correction to the dates of" if undone
+            else "corrected the dates of")
+    title = ("A date correction on your contract was undone" if undone
+             else "The dates of your contract were corrected")
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">{title}</h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        <b>{c}</b> has {what} your contract on <b>{p}</b>.
+      </p>
+      <ul style="font-size:14px;color:#566071;line-height:1.7;margin:0 0 14px;padding-left:20px">
+        <li>Contract: <b>{n}</b> ({k})</li>
+        <li>Was: <b>{o}</b></li>
+        <li>Now: <b>{w}</b></li>
+        <li>Reason: {r}</li>
+      </ul>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        Files you have already sent are not changed. If you have any questions,
+        please contact {c}.
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a notice from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
+def bordereau_sent_email_html(program_name: str, period: str, due_date: str | None,
+                              sent_date: str) -> str:
+    """A broker sending a processed bordereau on to the carrier. The file
+    itself is the attachment; this is just the covering note.
+
+    Deliberately says nothing about on-time/late — that judgement belongs on
+    the carrier's own calendar and to the recipient reading the due date
+    themselves, not to a tone in the covering email.
+    """
+    due_txt = f" It was due on <b>{due_date}</b>." if due_date else ""
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">
+        {program_name} — {period} bordereau
+      </h1>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">
+        The <b>{period}</b> bordereau for <b>{program_name}</b> is attached, sent on
+        <b>{sent_date}</b>.{due_txt}
+      </p>
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        Sent from your broker on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def escape_html(text: str) -> str:
+    from html import escape
+    return escape(text)

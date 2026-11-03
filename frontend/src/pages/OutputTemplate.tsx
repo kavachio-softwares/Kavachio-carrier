@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, ChevronDown, ChevronRight, Wand2,
-  Search, RefreshCw, FileText, Quote, ShieldAlert, Layers,
+  Search, RefreshCw, FileText, Quote, ShieldAlert, Layers, Download,
 } from "lucide-react";
-import { api } from "../api/client";
-import { currentMga } from "../auth";
+import { api, downloadFile, downloadErrorText } from "../api/client";
+import { currentMga, isKavachioAdmin } from "../auth";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import { Select, TextInput } from "../components/ui/Field";
-import { PageBody, PageHeader } from "../components/Layout";
+import { PageHeader } from "../components/Layout";
 import OutputTemplateFields from "../components/OutputTemplateFields";
 import TemplateSheetPreview from "../components/TemplateSheetPreview";
 import { LoadingOverlay } from "../components/Busy";
@@ -99,8 +99,39 @@ type ContractMapping = {
   field_rules: Record<string, ContractRule[]>;
 };
 
+/** The route at /outputs/templates/:id — the template on a page of its own. */
 export default function OutputTemplate() {
   const { id } = useParams();
+  return <OutputTemplateEditor templateId={Number(id)} />;
+}
+
+/**
+ * The template review itself, so it can be read either on its own route or
+ * inside a tab. `embedded` is the only difference: on a route the screen owns
+ * the page chrome (PageHeader + PageBody + a Cancel that leaves), while in a
+ * tab the host already provides all three — so it draws its own toolbar and
+ * lets the host decide what leaving means.
+ */
+export function OutputTemplateEditor({ templateId, embedded, onVersioned }: {
+  templateId: number;
+  /** Rendered inside a host screen's tab rather than on its own route. */
+  embedded?: boolean;
+  /** A used template is versioned rather than edited, so an edit can land on a
+   *  NEW id. On the route that means navigating; a host passes this to follow
+   *  the new id in whatever way its own state requires. */
+  onVersioned?: (nextId: number) => void;
+}) {
+  const id = String(templateId);
+  const nav = useNavigate();
+  // WHO IS LOOKING decides how much of the blueprint this page shows.
+  //
+  // The carrier reviews the column mapping (the sheet blocks below) and sees
+  // the file as it will be delivered (the sheet preview). The field builder —
+  // internal keys, source types, per-field defaults and transforms — is the
+  // platform admin's: it is the mechanism behind the template, not the
+  // template, and on the carrier's screen it read as a second copy of the same
+  // columns with more knobs than anyone there could use.
+  const platformAdmin = isKavachioAdmin();
   const [t, setT] = useState<Template | null>(null);
   const [model, setModel] = useState<Record<string, any>>({});
   const [extras, setExtras] = useState<Record<string, ExtraDef>>({});
@@ -108,16 +139,33 @@ export default function OutputTemplate() {
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [downloadErr, setDownloadErr] = useState<string | null>(null);
   // Bumped when the grid above changes a column, so the field builder below
   // re-reads rather than showing the list as it was a moment ago.
   const [fieldsKey, setFieldsKey] = useState(0);
+  // UNSAVED COLUMN MAPPING, held here and nowhere else until Save.
+  //
+  // This page has two editors of the same value. The mapping rows below write
+  // `canonical_field` into this component's copy of the template and persist it
+  // with Save Draft; the field builder writes the same value as `source_field`
+  // through an endpoint of its own, from a copy IT loaded when it mounted.
+  // Neither knew about the other, so the second save to run wrote its own stale
+  // copy over the first — and `reloadTemplate` then replaced this state with
+  // the server's, wiping the edit off the screen as well. Both said "Saved."
+  //
+  // One flag fixes both halves: while there are unsaved mapping edits, nothing
+  // else may save over them and no reload may quietly discard them.
+  const [dirty, setDirty] = useState(false);
 
   // Re-read after the field builder saves, so the sheet preview above it shows
   // the rename / reorder / removal that was just made rather than the layout as
   // it was when the page opened.
   const reloadTemplate = useCallback(() => {
+    // Refusing the refresh is the lesser harm. A stale row above is visible and
+    // one reload away; an edit silently reverted is neither.
+    if (dirty) return;
     api.get<Template>(`/export/template/${id}`).then(r => setT(r.data));
-  }, [id]);
+  }, [id, dirty]);
 
   useEffect(() => {
     api.get<Template>(`/export/template/${id}`).then(r => setT(r.data));
@@ -129,6 +177,15 @@ export default function OutputTemplate() {
       .then(r => setContractMapping(r.data))
       .catch(() => setContractMapping({ contract: null, field_rules: {} }));
   }, [id]);
+
+  // The browser's own guard. Everything above stops another CONTROL discarding
+  // an unsaved mapping; this stops the tab doing it.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   // Canonical fields plus user-defined extras (all searchable, grouped).
   const allFields: ModelField[] = useMemo(() => {
@@ -145,7 +202,12 @@ export default function OutputTemplate() {
     return [...base, ...xs];
   }, [model, extras]);
 
+  // Both patches spread the existing structure rather than rebuilding it as
+  // `{ sheets }`. The structure carries more than its sheets — `source_check`
+  // among them — and rebuilding dropped every other key on the first column a
+  // user touched, so an edit to one mapping quietly deleted unrelated state.
   function patchColumn(sheetIdx: number, colIdx: number, patch: Partial<TplColumn>) {
+    setDirty(true);
     setT(prev => {
       if (!prev) return prev;
       const s = prev.structure.sheets.map((sh, i) => {
@@ -153,15 +215,16 @@ export default function OutputTemplate() {
         return { ...sh, columns: sh.columns.map((c, j) =>
           j === colIdx ? { ...c, ...patch } : c) };
       });
-      return { ...prev, structure: { sheets: s } };
+      return { ...prev, structure: { ...prev.structure, sheets: s } };
     });
   }
   function patchSheet(sheetIdx: number, patch: Partial<TplSheet>) {
+    setDirty(true);
     setT(prev => {
       if (!prev) return prev;
       const s = prev.structure.sheets.map((sh, i) =>
         i === sheetIdx ? { ...sh, ...patch } : sh);
-      return { ...prev, structure: { sheets: s } };
+      return { ...prev, structure: { ...prev.structure, sheets: s } };
     });
   }
   function setSheetRole(sheetIdx: number, role: "data" | "reference" | "summary") {
@@ -176,7 +239,11 @@ export default function OutputTemplate() {
         approved: approve || t.approved,
         output_format: t.output_format ?? "xlsx",
       });
-      setT(data); setMsg(approve ? "Approved & activated." : "Saved.");
+      setT(data); setDirty(false);
+      setMsg(approve ? "Approved & activated." : "Saved.");
+      // The field builder holds its own copy of what was just written. Re-read
+      // it, or its next save would put the pre-save mapping back.
+      setFieldsKey(k => k + 1);
     } catch (e: any) { setMsg(e?.message ?? "Save failed."); }
     finally { setBusy(false); }
   }
@@ -203,59 +270,121 @@ export default function OutputTemplate() {
     sh.columns.some(c => (c.candidates?.length ?? 0) > 0)
   );
 
+  // The file this template produces with no rows in it — written by the same
+  // writer a run uses, so what downloads is what Generate BDX would deliver.
+  function downloadTemplate() {
+    setDownloadErr(null);
+    downloadFile(`/output-template/${id}/download`)
+      .catch(async e => setDownloadErr(await downloadErrorText(e,
+        "We couldn't download this template — please try again.")));
+  }
+
   if (!t) return null;
+
+  // The same controls either way. Cancel is the one that cannot travel: on the
+  // route it leaves the screen, and in a tab there is no screen to leave.
+  const actions = (
+    <div className="flex items-center gap-2 flex-wrap">
+      <label className="flex items-center gap-1.5 text-sm text-ink-muted">
+        Output format
+        <Select
+          className="!py-1 !w-auto"
+          value={t.output_format ?? "xlsx"}
+          onChange={e => {
+            // A format change is a change like any other — it has to be saved.
+            setDirty(true);
+            setT(prev => prev ? { ...prev, output_format: e.target.value } : prev);
+          }}
+        >
+          {OUTPUT_FORMATS.map(f => (
+            <option key={f.value} value={f.value}>{f.label}</option>
+          ))}
+        </Select>
+      </label>
+      <Button variant="secondary" onClick={downloadTemplate}
+        title="The file this template produces, with no rows in it">
+        <Download size={14} /> Download Template
+      </Button>
+      {!embedded && (
+        <Link to={platformAdmin ? `/tenants/${t.mga}` : "/direct/setups"}>
+          <Button variant="ghost">Cancel</Button>
+        </Link>
+      )}
+      {!hasAnyCandidates && (
+        <Button variant="secondary" onClick={refreshCandidates} disabled={busy || refreshing}>
+          <RefreshCw size={14} /> Re-Run AI Mapping
+        </Button>
+      )}
+      {dirty && (
+        <span className="pill pill-amber whitespace-nowrap">
+          <AlertTriangle size={11} /> Unsaved changes
+        </span>
+      )}
+      {/* Each button only when it would do something. Save Draft needs an
+          unsaved change. Save & Activate needs a change OR a template that is
+          not active yet — an active template with nothing changed has nothing
+          left to save or to activate. */}
+      <Button onClick={() => save(false)} variant="secondary" disabled={busy || !dirty}
+        title={!dirty ? "No changes to save" : undefined}>
+        Save Draft
+      </Button>
+      <Button onClick={() => save(true)} disabled={busy || (t.approved && !dirty)}
+        title={t.approved && !dirty ? "Already active — nothing has changed" : undefined}>
+        Save & Activate
+      </Button>
+    </div>
+  );
 
   return (
     <>
       {refreshing && (
         <LoadingOverlay label="Re-running the AI mapping against the original sample — this can take a minute…" />
       )}
-      <PageHeader
-        title={`Template: ${t.name}`}
-        subtitle={`${t.carrier ?? "—"} · review AI-proposed column mapping`}
-        action={
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1.5 text-sm text-ink-muted">
-              Output format
-              <Select
-                className="!py-1 !w-auto"
-                value={t.output_format ?? "xlsx"}
-                onChange={e => setT(prev => prev ? { ...prev, output_format: e.target.value } : prev)}
-              >
-                {OUTPUT_FORMATS.map(f => (
-                  <option key={f.value} value={f.value}>{f.label}</option>
-                ))}
-              </Select>
-            </label>
-            <Link to="/outputs"><Button variant="ghost">Cancel</Button></Link>
-            {!hasAnyCandidates && (
-              <Button variant="secondary" onClick={refreshCandidates} disabled={busy || refreshing}>
-                <RefreshCw size={14} /> Re-Run AI Mapping
-              </Button>
-            )}
-            <Button onClick={() => save(false)} variant="secondary" disabled={busy}>
-              Save Draft
-            </Button>
-            <Button onClick={() => save(true)} disabled={busy}>
-              Save & Activate
-            </Button>
+      {embedded ? (
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-3
+          border-b border-border pb-3">
+          <div className="min-w-0">
+            <h3 className="text-[15px] font-semibold truncate">Template: {t.name}</h3>
+            <p className="text-xs text-ink-muted mt-0.5">
+              {t.carrier ?? "—"} · review AI-proposed column mapping
+            </p>
           </div>
-        }
-      />
-      <PageBody>
+          {actions}
+        </div>
+      ) : (
+        <PageHeader
+          title={`Template: ${t.name}`}
+          subtitle={`${t.carrier ?? "—"} · review AI-proposed column mapping`}
+          action={actions}
+        />
+      )}
+      {/* PageBody's own markup, with its page padding dropped when a host has
+          already applied it. A component picked at render time would be a new
+          type on every render, and React would remount everything below.
+
+          Every section below is a Card, which is right on a page of its own and
+          wrong inside one: a host's card would draw a second border and a second
+          five of padding around each. Embedded, the direct-child cards are
+          flattened to plain stacked sections — the spacing is space-y-5's
+          either way, so nothing shifts but the chrome. */}
+      <div className={embedded
+        ? "space-y-5 [&>.card]:!p-0 [&>.card]:border-0 [&>.card]:bg-transparent"
+          + " [&>.card]:shadow-none"
+        : "px-8 py-6 space-y-5"}>
         <Card>
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-3">
               <span className={`pill ${t.approved ? "pill-green" : "pill-amber"}`}>
                 {t.approved ? "Approved" : "Draft"}
               </span>
-              <span className="text-sm text-ink-muted">
+              {/* <span className="text-sm text-ink-muted">
                 Map every output column to a canonical or extra field. The
                 sample workbook's fonts, fills, merges &amp; widths are
                 preserved on generation.
-              </span>
+              </span> */}
             </div>
             {msg && <span className="text-sm text-emerald-700">{msg}</span>}
+            {downloadErr && <span className="text-sm text-red-700">{downloadErr}</span>}
           </div>
           {!hasAnyCandidates && (
             <div className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200
@@ -283,20 +412,38 @@ export default function OutputTemplate() {
             </div>
             <span className="text-xs text-ink-muted">
               Active columns only, in delivery order, under the names the file
-              will carry — edit them below.
+              will carry{platformAdmin ? " — edit them below." : "."}
             </span>
           </div>
           <TemplateSheetPreview sheets={t.structure?.sheets ?? []}
             templateId={Number(id)}
-            onChanged={() => { reloadTemplate(); setFieldsKey(k => k + 1); }} />
+            onChanged={(nextId) => {
+              // A used template is versioned, not edited: the column landed on a
+              // new id, so follow it — re-reading this one would show the layout
+              // without the change and look like nothing happened.
+              if (nextId != null) {
+                if (onVersioned) onVersioned(nextId);
+                else nav(`/outputs/templates/${nextId}`);
+                return;
+              }
+              reloadTemplate(); setFieldsKey(k => k + 1);
+            }} />
         </Card>
 
         {/* The blueprint itself: which columns the delivered file carries, what
             feeds each one, and in what order. The mapping review below is the
             other half of the same template — this decides WHAT the fields are,
-            that decides where their values come from. */}
-        <OutputTemplateFields templateId={Number(id)} refreshKey={fieldsKey}
-          onSaved={reloadTemplate} />
+            that decides where their values come from. Platform admin only —
+            see `platformAdmin`. */}
+        {platformAdmin && (
+          <OutputTemplateFields templateId={Number(id)} refreshKey={fieldsKey}
+            blockedReason={dirty
+              ? "There are unsaved column-mapping changes above. Save Draft at the "
+                + `top of the ${embedded ? "tab" : "page"} first — this list holds its own `
+                + "copy of the mapping, so saving it now would write the old values back."
+              : null}
+            onSaved={reloadTemplate} />
+        )}
 
         {contractMapping?.contract && (
           <Card>
@@ -324,13 +471,11 @@ export default function OutputTemplate() {
               {t.structure.sheets.filter(isSummarySheet).length} summary
             </span>
           </div>
-          <p className="mt-1 text-xs text-ink-muted">
-            The AI classified each tab from its column headers.{" "}
-            <strong>Data</strong> tabs are validated (rules are generated &amp; run on them);{" "}
-            <strong>Reference</strong> tabs are lookup / mapping tables, and{" "}
-            <strong>Summary</strong> tabs roll up totals from the data tabs — both are{" "}
-            <strong>excluded from rule generation</strong>. Change any that are wrong before proceeding.
-          </p>
+          <ul className="mt-1 list-disc pl-5 text-xs text-ink-muted space-y-0.5">
+            <li><strong>Data:</strong> the actual records.</li>
+            <li><strong>Reference:</strong> lookup lists, like codes.</li>
+            <li><strong>Summary:</strong> totals from the data tabs.</li>
+          </ul>
           <div className="mt-3 space-y-1.5">
             {t.structure.sheets.map((sh, si) => {
               const bucket = sheetBucket(sh);
@@ -372,6 +517,13 @@ export default function OutputTemplate() {
           </div>
         </Card>
 
+ {/* HIDDEN, not deleted. The per-sheet column list sat under the two
+            cards above and repeated what they already answer — Sheet
+            Classification names every tab and says which are validated, and
+            the sample grid at the top shows the columns themselves. SheetBlock
+            and the patch handlers are left intact below: put this block back
+            and the section returns exactly as it was.
+
         {t.structure.sheets.map((sh, si) => (
           <SheetBlock
             key={sh.sheet_name}
@@ -382,7 +534,8 @@ export default function OutputTemplate() {
             onPatchColumn={(ci, p) => patchColumn(si, ci, p)}
           />
         ))}
-      </PageBody>
+        */}
+      </div>
     </>
   );
 }
@@ -395,7 +548,10 @@ function SheetBlock({ sheet: sh, allFields, fieldRules,
   onPatchSheet: (p: Partial<TplSheet>) => void;
   onPatchColumn: (colIdx: number, p: Partial<TplColumn>) => void;
 }) {
-  const [open, setOpen] = useState(true);
+  // Collapsed by default: the header already says how many columns are mapped
+  // and how many need review, which is the answer most visits are after. The
+  // rows are one click away when they are not.
+  const [open, setOpen] = useState(false);
   const mappedCount = sh.columns.filter(c => c.canonical_field).length;
   const unmappedCount = sh.columns.length - mappedCount;
 

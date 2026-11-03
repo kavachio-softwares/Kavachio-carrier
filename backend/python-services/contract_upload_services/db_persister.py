@@ -172,6 +172,9 @@ def persist_resolved_rules(
     validation_rules,
     actor="user",
     created_by=None,
+    tag_template_id=None,
+    conn=None,
+    leave_review_queue=False,
 ):
     """Persist rules built by a human review-queue resolution for ONE existing
     clause (see manual_rule_resolution.generate_rules_for_clause_field).
@@ -187,24 +190,36 @@ def persist_resolved_rules(
     that only arrived later) passes its own, so a bulk regeneration is not
     recorded as somebody's hand-made fix.
 
+    The last three are for a rule set ADDED for a second output template (see
+    rule_scope.py); every other caller leaves them out and gets exactly what
+    this always did:
+      `tag_template_id`    stamps validation_rule.output_template_id — the
+                           template the added set belongs to. Left out, the
+                           column is not even named, so a database the
+                           migration has not reached yet still accepts it.
+      `conn`               writes inside the caller's transaction, so a set
+                           made of many clauses lands whole or not at all.
+      `leave_review_queue` leaves the clause's status and review routing as
+                           they are: those describe the contract against the
+                           template it is bound to, and the setups already on
+                           that template read them.
+
     Returns: list of {rule_id, rule_name, output_field} for the inserted rows.
     """
+    from contextlib import nullcontext
+
     created_by = created_by or f"manual_resolution:{actor}"
     created = []
-    with canonical_engine.begin() as conn:
-        for r in validation_rules:
-            if not isinstance(r, dict):
-                continue
-            ct = r.get("canonical_target") or {}
-            new_rule_id = conn.execute(
-                text("""
+    tag_col = ", output_template_id" if tag_template_id is not None else ""
+    tag_val = ", :output_template_id" if tag_template_id is not None else ""
+    insert_sql = text(f"""
                     INSERT INTO validation_rule
                         (tenant_id, contract_id, program_id, rule_engine,
                          rule_class_id, rule_name, rule_description,
                          validation_stage, severity, canonical_target, rule_spec,
                          error_message, source_clause_id, source_verbatim_text,
                          source_page_number, generation_confidence, rule_status,
-                         created_by)
+                         created_by{tag_col})
                     VALUES
                         (:tenant_id, :contract_id, :program_id, :rule_engine,
                          :rule_class_id, :rule_name, :rule_description,
@@ -212,9 +227,17 @@ def persist_resolved_rules(
                          CAST(:canonical_target AS JSONB), CAST(:rule_spec AS JSONB),
                          :error_message, :source_clause_id, :source_verbatim_text,
                          :source_page_number, :generation_confidence, :rule_status,
-                         :created_by)
+                         :created_by{tag_val})
                     RETURNING rule_id
-                """),
+                """)
+    tx = nullcontext(conn) if conn is not None else canonical_engine.begin()
+    with tx as conn:
+        for r in validation_rules:
+            if not isinstance(r, dict):
+                continue
+            ct = r.get("canonical_target") or {}
+            new_rule_id = conn.execute(
+                insert_sql,
                 {
                     "tenant_id":        tenant_id,
                     "contract_id":      contract_id,
@@ -236,6 +259,7 @@ def persist_resolved_rules(
                     # go live immediately (consistent with the IR generator default).
                     "rule_status":      r.get("rule_status") or "active",
                     "created_by":       created_by,
+                    "output_template_id": tag_template_id,
                 },
             ).scalar()
 
@@ -246,13 +270,19 @@ def persist_resolved_rules(
                 "rule_id":      new_rule_id,
                 "rule_name":    r.get("rule_name"),
                 "output_field": ct.get("output_field"),
+                # How many of the template's sample rows this rule would flag, when
+                # the verifier was able to measure it. A reviewer who has just bound
+                # a clause to a column of their own choosing needs this: a rule that
+                # flags most of the sample data is the signal that the column was
+                # the wrong one, and nothing else on the screen would say so.
+                "sample_impact": r.get("sample_impact"),
             })
 
         # `db_clause_id` is None for a rule that came from no clause of this
         # contract — a generic library rule, which the whole-contract path sends
         # through here with a NULL source. There is no clause to take out of the
         # review queue, and both statements below would match nothing anyway.
-        if created and db_clause_id is not None:
+        if created and db_clause_id is not None and not leave_review_queue:
             # The clause now has runnable rules → leave the review queue.
             conn.execute(
                 text("""
@@ -277,6 +307,77 @@ def persist_resolved_rules(
             )
 
     return created
+
+
+def refresh_review_reasons(contract_id, program_id, tenant_id, review_queue):
+    """Re-state WHY each still-unmapped clause is unmapped, for THIS run.
+
+    `persist_resolved_rules` deletes a clause's review row the moment it gets a
+    rule. What it cannot do is correct the rows that remain: those were written
+    by the UPLOAD, and a contract added before any Bordereau Setup existed was
+    told, accurately at the time, "no output template yet — a rule can only be
+    written against an output template's columns".
+
+    Once a setup binds a template and generates rules, that sentence is false,
+    and it is the sentence the setup screen prints under every leftover clause
+    (missing_columns._unmapped_clauses reads contract_clause_routing.reason).
+    A user looking at a screen that HAS a template is told the template is
+    missing, and the true reason — the mapper found no column that could hold
+    this clause's value — is nowhere on the page.
+
+    So the reasons this run produced replace the ones the upload left behind.
+    Rows are UPDATEd, never deleted and re-inserted, so a clause somebody has
+    already resolved by hand keeps its identity; a clause with no row yet gets
+    one, because a run can route a clause to review that the upload did not.
+    Best-effort by design: a failure here must not undo rules that were written.
+    """
+    if not review_queue:
+        return 0
+    touched = 0
+    try:
+        with canonical_engine.begin() as conn:
+            for it in review_queue:
+                if not isinstance(it, dict):
+                    continue
+                cid = it.get("clause_id")
+                reason = (it.get("reason") or "").strip()
+                if cid is None or not reason:
+                    continue
+                res = conn.execute(
+                    text("""
+                        UPDATE contract_clause_routing
+                           SET reason = :reason, created_at = now()
+                         WHERE contract_id = :contract_id
+                           AND clause_id = :clause_id
+                           AND bucket = 'review'
+                    """),
+                    {"reason": reason, "contract_id": contract_id,
+                     "clause_id": cid},
+                )
+                if not res.rowcount:
+                    conn.execute(
+                        text("""
+                            INSERT INTO contract_clause_routing
+                                (tenant_id, contract_id, program_id, clause_id,
+                                 bucket, rule_name, clause_text, source_page, reason)
+                            VALUES
+                                (:tenant_id, :contract_id, :program_id, :clause_id,
+                                 'review', :rule_name, :clause_text, :source_page,
+                                 :reason)
+                        """),
+                        {"tenant_id": tenant_id, "contract_id": contract_id,
+                         "program_id": program_id, "clause_id": cid,
+                         "rule_name": it.get("rule_name"),
+                         "clause_text": it.get("clause_text"),
+                         "source_page": it.get("source_page"),
+                         "reason": reason},
+                    )
+                touched += 1
+    except Exception as e:  # noqa: BLE001 — never cost a run its rules
+        log.warning("refresh_review_reasons failed for contract %s: %s",
+                    contract_id, e)
+        return 0
+    return touched
 
 
 def _parse_date(value, default):
@@ -345,9 +446,16 @@ def normalize_upload_token(token):
     return token
 
 
+def _coded_type(requested):
+    """A contract type contract_types.py knows, never free text: the one asked
+    for when it is valid, else DEFAULT_TYPE."""
+    import contract_types as ct
+    return requested if requested in ct.CONTRACT_TYPES else ct.DEFAULT_TYPE
+
+
 def build_extracted_payload(document_type, program_name, program_metadata,
                             upload_token=None, reference_documents=None,
-                            identity=None, regen_report=None):
+                            identity=None, regen_report=None, extraction=None):
     """The contract row's `extracted` JSON.
 
     `upload_token` is the caller's correlation id for THIS upload. It rides in
@@ -398,6 +506,11 @@ def build_extracted_payload(document_type, program_name, program_metadata,
         payload["identity"] = dict(identity)
     if regen_report:
         payload["regen_report"] = regen_report
+    # How the clauses were read — {model, prompt_sha256, cache: hit|miss, path:
+    # whole_document|sections|resume, stored}. Nested for the same scalar-filter
+    # reason; tells "the model answered differently" from "the input changed".
+    if isinstance(extraction, dict) and extraction:
+        payload["extraction"] = dict(extraction)
     return payload
 
 
@@ -427,6 +540,9 @@ def persist_pipeline_output(
     upload_token=None,
     identity=None,
     prior_contract=None,
+    existing_contract_id=None,
+    record_defaults=None,
+    prior_broker_party_id="__any_broker__",
 ):
     """
     Persist `final_output` into the canonical Postgres tables.
@@ -450,6 +566,30 @@ def persist_pipeline_output(
     hit triggers reconcile-and-carry-forward over `validation_rules` BEFORE
     anything is inserted — see regen_reconcile.reconcile. Fail-open: any error
     in that path falls back to persisting the generated set unchanged.
+
+    `prior_broker_party_id` narrows that L3 probe to the broker this contract
+    is for (regen_reconcile.ANY_BROKER, the default, keeps it tenant-wide).
+
+    `existing_contract_id` writes the extraction INTO a contract that already
+    exists instead of creating one. Two flows need it and neither can use the
+    insert path:
+
+      * a contract raised from its TERMS before anyone had the wording — the
+        record was created by a person, and the file arrives afterwards;
+      * a re-generation after an endorsement, where the contract keeps its
+        identity and only the rules it produces change.
+
+    Both would otherwise end up with two contract rows for one contract: the
+    one the user is looking at, and the one the rules were attached to. In this
+    mode the business fields a PERSON entered are never overwritten — extraction
+    only fills what is still empty (see the COALESCE below) — and the
+    programme-wide supersede is skipped, because regenerating one contract must
+    not retire the others.
+
+    `record_defaults` carries values decided by the route rather than by
+    extraction — currently the coded `contract_type` (see contract_types.py).
+    Without it the insert path falls back to the document type the model read
+    off the page, which is what the column held before contracts had a type.
     """
 
     program_metadata = final_output.get("program_metadata") or {}
@@ -509,7 +649,8 @@ def persist_pipeline_output(
                 prior = prior_contract
                 if not prior:
                     prior = _rr.find_prior_contract_l3(
-                        conn, tenant_id, program_metadata)
+                        conn, tenant_id, program_metadata,
+                        broker_party_id=prior_broker_party_id)
                 if prior and prior.get("contract_id"):
                     prior_cid = prior["contract_id"]
                     # Same template ⇔ the prior row's content_fingerprint (doc
@@ -601,68 +742,238 @@ def persist_pipeline_output(
         contract_name = source_file or f"contract_{program_id}"
         umr = f"UMR-{program_id}-{abs(hash(contract_name)) % 1_000_000:06d}"
 
-        # ── Type-2 SCD versioning ────────────────────────────────────────
-        # The contract table already carries the SCD columns. Close out the
-        # prior current version(s) for this program before inserting the new
-        # one, and stamp the new row as current with its content fingerprint.
-        # The fingerprint is what lets an identical re-upload be reused
-        # WITHOUT re-running the LLM (see contract_versioning.find_reusable_contract).
-        conn.execute(
-            text("""
-                UPDATE contract
-                SET    is_current_version = FALSE,
-                       valid_until = now()
-                WHERE  contract_program_id = :pid
-                  AND  is_current_version IS TRUE
-            """),
-            {"pid": program_id},
-        )
+        _defaults = record_defaults or {}
+        _extracted_payload = _jsonb(build_extracted_payload(
+            document_type,
+            _meta_scalar(program_metadata.get("program_name")),
+            program_metadata,
+            upload_token,
+            reference_documents,
+            identity=identity,
+            regen_report=regen_report,
+            extraction=meta.get("extraction"),
+        ))
 
-        # program/contract are now unified with the ops columns; the contract
-        # screen reads the ops `filename` / `status_ops` / `extracted` columns,
-        # so populate them too — not just the canonical contract_name.
-        contract_id = conn.execute(
-            text("""
-                INSERT INTO contract
-                    (tenant_id, contract_program_id, contract_primary_umr,
-                     contract_name, contract_type,
-                     contract_inception_date, contract_expiry_date,
-                     filename, status_ops, extracted,
-                     output_template_id, is_app_managed,
-                     row_hash, row_key,
-                     is_current_version, valid_from)
-                VALUES
-                    (:tenant_id, :program_id, :umr, :contract_name, :contract_type,
-                     :inception_dt, :expiry_dt, :filename, :status_ops,
-                     CAST(:extracted AS JSONB), :output_template_id, TRUE,
-                     :content_fingerprint, :entity_fingerprint,
-                     TRUE, now())
-                RETURNING contract_id
-            """),
-            {
-                "tenant_id":          tenant_id,
-                "program_id":         program_id,
-                "umr":                umr,
-                "contract_name":      contract_name,
-                "contract_type":      document_type,
-                "inception_dt":       inception,
-                "expiry_dt":          expiry,
-                "filename":           source_file or contract_name,
-                "status_ops":         "active",
-                "extracted":          _jsonb(build_extracted_payload(
-                    document_type,
-                    _meta_scalar(program_metadata.get("program_name")),
-                    program_metadata,
-                    upload_token,
-                    reference_documents,
-                    identity=identity,
-                    regen_report=regen_report,
-                )),
-                "output_template_id":  output_template_id,
-                "content_fingerprint": content_fingerprint,
-                "entity_fingerprint":  entity_fingerprint,
-            }
-        ).scalar_one()
+        if existing_contract_id:
+            # ── Write INTO a contract that already exists ────────────────
+            # The row was created by a person (from the terms, before the
+            # wording arrived) or is being re-generated after an endorsement.
+            # Either way its identity is settled, so no new row and no
+            # programme-wide supersede — the other contracts on this programme
+            # are not affected by one contract being re-read.
+            #
+            # COALESCE, not assignment, on the business fields: a date or a UMR
+            # a person typed is a FACT, and the extraction's reading of the same
+            # field is a guess. The guess only fills a blank.
+            #
+            # `extracted` is rewritten whole, but its "settings" key is the
+            # carrier's own (the contract margin set in Bordereau Setup — see
+            # contract_margin.py), not the extraction's: a re-read keeps it.
+            conn.execute(
+                text("""
+                    UPDATE contract
+                    SET    filename           = :filename,
+                           status_ops         = :status_ops,
+                           extracted          = CAST(:extracted AS JSONB)
+                               || CASE WHEN jsonb_typeof(extracted -> 'settings') = 'object'
+                                       THEN jsonb_build_object('settings', extracted -> 'settings')
+                                       ELSE '{}'::jsonb END,
+                           output_template_id = COALESCE(:output_template_id,
+                                                         output_template_id),
+                           row_hash           = :content_fingerprint,
+                           row_key            = :entity_fingerprint,
+                           is_current_version = TRUE,
+                           contract_inception_date =
+                               COALESCE(contract_inception_date, :inception_dt),
+                           contract_expiry_date =
+                               COALESCE(contract_expiry_date, :expiry_dt),
+                           contract_primary_umr =
+                               COALESCE(contract_primary_umr, :umr),
+                           contract_name      = COALESCE(contract_name, :contract_name),
+                           modified_at        = now()
+                    WHERE  contract_id = :cid
+                """),
+                {
+                    "cid":                 existing_contract_id,
+                    "filename":            source_file or contract_name,
+                    "status_ops":          "active",
+                    "extracted":           _extracted_payload,
+                    "output_template_id":  output_template_id,
+                    "content_fingerprint": content_fingerprint,
+                    "entity_fingerprint":  entity_fingerprint,
+                    "inception_dt":        inception,
+                    "expiry_dt":           expiry,
+                    "umr":                 umr,
+                    "contract_name":       contract_name,
+                },
+            )
+            contract_id = existing_contract_id
+
+            # The Re-read route refuses a contract carrying rule sets added for
+            # other output templates (rule_scope.py), but it checks before a
+            # minutes-long read. One added while that read ran would be deleted
+            # below, so ask again here — the UPDATE above holds this contract's
+            # row, and an added set is written holding it too. Never true of a
+            # contract that has not had a set added.
+            import rule_scope
+            if rule_scope.tag_column_present(conn) and conn.execute(text(
+                    "SELECT 1 FROM validation_rule WHERE contract_id = :cid "
+                    "AND output_template_id IS NOT NULL LIMIT 1"),
+                    {"cid": existing_contract_id}).first() is not None:
+                raise ValueError(
+                    "rules were set up for another output template while this "
+                    "contract was being re-read; re-reading would remove them, "
+                    "so nothing has been changed")
+
+            # Everything below re-inserts this contract's rules, clauses, terms
+            # and routings, so the previous generation has to go first — without
+            # this, re-reading a contract after an endorsement leaves BOTH
+            # generations attached and every check runs twice.
+            #
+            # Deleted child-first: rule_sql hangs off validation_rule and
+            # contract_clause_routing off clauses_extracted, so the dependents
+            # go before the rows they point at.
+            #
+            # This is why regeneration is an explicit action rather than
+            # something an upload does quietly: it discards the rules currently
+            # in force for this contract and replaces them with a fresh reading.
+            for _sql in (
+                "DELETE FROM rule_sql WHERE contract_id = :cid",
+                "DELETE FROM contract_clause_routing WHERE contract_id = :cid",
+                "DELETE FROM validation_rule WHERE contract_id = :cid",
+                "DELETE FROM clauses_extracted WHERE contract_id = :cid",
+                "DELETE FROM contract_term WHERE term_contract_id = :cid",
+            ):
+                conn.execute(text(_sql), {"cid": existing_contract_id})
+        else:
+            # ── Type-2 SCD versioning ────────────────────────────────────
+            # The contract table already carries the SCD columns. Close out the
+            # prior current version(s) for this program before inserting the new
+            # one, and stamp the new row as current with its content fingerprint.
+            # The fingerprint is what lets an identical re-upload be reused
+            # WITHOUT re-running the LLM (see
+            # contract_versioning.find_reusable_contract).
+            #
+            # valid_until still closes in SYSTEM time — that is the audit answer
+            # to "what did we believe, and when", and it stays.
+            #
+            # is_current_version is NOT cleared any more. It was a cached
+            # resolve_as_of(today) whose invalidation scope (programme only) did
+            # not match how contracts are actually scoped (programme + schedule
+            # + broker), so it drifted — programme 1 ended up with four rows all
+            # claiming to be current. Currency is now derived from
+            # contract_effective_from/to instead, which cannot drift because it
+            # is not a copy of anything.
+            conn.execute(
+                text("""
+                    UPDATE contract
+                    SET    valid_until = now()
+                    WHERE  contract_program_id = :pid
+                      AND  is_current_version IS TRUE
+                """),
+                {"pid": program_id},
+            )
+
+            # program/contract are now unified with the ops columns; the contract
+            # screen reads the ops `filename` / `status_ops` / `extracted` columns,
+            # so populate them too — not just the canonical contract_name.
+            contract_id = conn.execute(
+                text("""
+                    INSERT INTO contract
+                        (tenant_id, contract_program_id, contract_primary_umr,
+                         contract_name, contract_type,
+                         contract_inception_date, contract_expiry_date,
+                         filename, status_ops, extracted,
+                         output_template_id, is_app_managed,
+                         row_hash, row_key,
+                         is_current_version, valid_from)
+                    VALUES
+                        (:tenant_id, :program_id, :umr, :contract_name, :contract_type,
+                         :inception_dt, :expiry_dt, :filename, :status_ops,
+                         CAST(:extracted AS JSONB), :output_template_id, TRUE,
+                         :content_fingerprint, :entity_fingerprint,
+                         TRUE, now())
+                    RETURNING contract_id
+                """),
+                {
+                    "tenant_id":          tenant_id,
+                    "program_id":         program_id,
+                    "umr":                umr,
+                    "contract_name":      contract_name,
+                    # Always a CODED type (insurer_broker / insurer_reinsurer —
+                    # see contract_types.py): the route's when it names a valid
+                    # one, else the default. The document type the model read
+                    # off the page ("Program Schedule G") is a heading, not a
+                    # contract type — stored here it failed every later
+                    # validate(), so Renew and Edit were refused with a 400.
+                    # It is kept in `extracted.document_type`.
+                    "contract_type":      _coded_type(_defaults.get("contract_type")),
+                    "inception_dt":       inception,
+                    "expiry_dt":          expiry,
+                    "filename":           source_file or contract_name,
+                    "status_ops":         "active",
+                    "extracted":          _extracted_payload,
+                    "output_template_id":  output_template_id,
+                    "content_fingerprint": content_fingerprint,
+                    "entity_fingerprint":  entity_fingerprint,
+                }
+            ).scalar_one()
+
+        # ── 2b) Business-effective term (Feature 7 — Prior Period Files) ──
+        # The SCD UPDATE above closed the prior version with `valid_until =
+        # now()` — SYSTEM time, "we stopped believing this today". §7.1 asks a
+        # different question: which version APPLIED on a transaction's date. So
+        # this stamps the business-effective range and closes the predecessor at
+        # the new version's effective_from, which is what makes a backdated
+        # endorsement resolve correctly for dates already in the past.
+        #
+        # A separate UPDATE rather than extra columns on the INSERT above: the
+        # INSERT stays byte-identical, so a deployment that has not applied
+        # migration 20_1 keeps working exactly as before instead of failing on
+        # an unknown column.
+        #
+        # Fail-open, and deliberately broad: effective dating is additive and
+        # nothing reads it until CONTRACT_ASOF_ENABLED is on, so it must never
+        # be the reason a contract upload fails.
+        #
+        # Wrapped in a SAVEPOINT, and that is load-bearing rather than tidy: in
+        # PostgreSQL a failed statement aborts the whole transaction, so a
+        # try/except alone would swallow the Python exception while leaving the
+        # transaction dead — every statement after this point would then fail
+        # with InFailedSqlTransaction, and the contract upload would break on
+        # the one path this block was written to survive. The savepoint rolls
+        # back only what happened inside it and hands the caller a working
+        # transaction back.
+        _sp = None
+        try:
+            from contract_upload_services import contract_asof as _asof
+            _sp = conn.begin_nested()
+            _eff_from = _parse_date(
+                # Honoured if extraction ever surfaces an endorsement date; an
+                # amendment's effective date is NOT its contract's inception,
+                # and using inception for one would silently backdate the new
+                # version over the whole original term.
+                _meta_scalar(program_metadata.get("amendment_effective_date"))
+                or _meta_scalar(program_metadata.get("endorsement_effective_date")),
+                inception,
+            )
+            _lineage = _asof.lineage_of(conn, contract_id)
+            if _lineage is not None:
+                _asof.stamp_effective_dates(
+                    conn, contract_id, _lineage, _eff_from, expiry,
+                    version_label=_meta_scalar(
+                        program_metadata.get("amendment_number")) or "Original",
+                )
+            if _sp is not None:
+                _sp.commit()
+        except Exception as _asof_exc:  # noqa: BLE001 — fail-open by design
+            if _sp is not None:
+                try:
+                    _sp.rollback()
+                except Exception:
+                    pass
+            print(f"[AsOf] effective dating skipped ({_asof_exc}) — "
+                  f"contract {contract_id} persisted without a business term")
 
         # ── 3) UPDATE program metadata columns ───────────────────────────
         territory = _meta_scalar(program_metadata.get("territory"))

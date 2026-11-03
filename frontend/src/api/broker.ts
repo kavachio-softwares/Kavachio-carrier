@@ -7,6 +7,7 @@
  * back inside the data.
  */
 import { api } from "./client";
+import type { CalendarStatus } from "./calendar";
 
 export type BrokerCarrier = { id: number; name: string; programme_count: number };
 
@@ -15,37 +16,189 @@ export type BrokerProgramme = {
   carrier_id: number; carrier_name: string; assigned_at: string | null;
 };
 
-export type ApprovalStatus = "draft" | "pending_approval" | "approved" | "rejected";
-
 export type BrokerContract = {
   id: number;
   filename: string | null;
-  programme: { id: number | null; name: string };
+  /** Short code a broker can write in an email subject or file name instead
+   *  of the name, e.g. CTR-7824YC. */
+  code?: string;
+  /** What it is called. An AUTHORED contract has no file, so a list keyed on
+   *  filename shows it as "Contract 462". */
+  name: string;
+  contract_type: string | null;
+  /** Where it is in its life, and the question this list is really about: a
+   *  contract sitting in `in_review` is one the BROKER has to act on. */
+  lifecycle: Lifecycle;
+  /** Who it is waiting on — the question this list is actually scanned for. */
+  whose_turn: "carrier" | "broker" | null;
+  has_wording: boolean;
+  programme: { id: number | null; name: string; code?: string | null };
   carrier: { id: number | null; name: string };
   inception_dt: string | null;
   expiry_dt: string | null;
-  approval_status: ApprovalStatus;
-  /** Who put it there. A carrier upload is live on arrival; a broker upload waits. */
+  /** Who put it there. Only the carrier raises contracts now, so this is
+   *  "carrier" on anything new; older rows can still say "broker". */
   source: "carrier" | "broker";
   submitted_at: string | null;
   created_at: string | null;
+  /** Superseded by a renewal now in force: the PREVIOUS TERM. Still pickable
+   *  on Process Bordereau, for the late months of its own term only. */
+  previous_term?: boolean;
+  /** The renewal that replaced it. */
+  renewed_by?: { id: number; name: string | null } | null;
 };
+
+/** Mirrors the carrier-side type; `expired` is derived from the term. */
+export type Lifecycle =
+  | "draft" | "pending" | "in_review" | "changes_requested" | "agreed"
+  | "signed" | "active" | "expired" | "terminated" | "superseded";
 
 export type BrokerDashboard = {
   broker: { id: number; name: string };
   carriers: { id: number; name: string }[];
   counts: {
-    waiting_on_carrier: number; live_contracts: number;
+    /** The queue only this broker can move — terms to read, or a signature to
+     *  give. Its absence is why a carrier could send terms over and the broker
+     *  never be told. */
+    waiting_on_me: number;
+    /** In force, which since signing became mandatory is not the same as
+     *  approved. */
+    live_contracts: number;
     programmes: number; carriers: number;
+    /** This broker's own people — its admins and its users (operators),
+     *  invited ones included. One team, whichever carrier is selected. */
+    users: number;
+    users_invited: number;
+    /** OPEN exceptions on this broker's live files — the sum of the "Still
+     *  open" column on /broker/exceptions. */
+    agency_exceptions: number;
+    /** Files not yet processed, due in the next 30 days. */
+    files_upcoming: number;
+    /** Files not yet processed and already past their due date, any month. */
+    files_overdue: number;
+    /** Earliest due date still to come, and the oldest one missed (ISO). */
+    next_due: string | null;
+    first_overdue: string | null;
+    /** The reporting period of every overdue file, oldest first ("2026-05"). */
+    overdue_periods: string[];
+    /** In-force contracts whose term ends within 30 days, and the soonest end. */
+    contracts_expiring: number;
+    next_expiry: string | null;
+    /** Contracts waiting on this broker's signature. */
+    signatures_pending: number;
+    /** Contracts signed by everyone. */
+    signatures_completed: number;
+    /** Contracts whose terms this broker still has to agree (before signing). */
+    terms_to_agree: number;
+    terms_agreed: number;
   };
-  waiting: {
-    id: number; filename: string | null;
-    programme: string; carrier: string; submitted_at: string | null;
+  /** There is no "waiting on the carrier" queue any more: the carrier's
+   *  approval gate, and the broker-side upload that fed it, are both gone. A
+   *  broker no longer brings a contract for someone to answer. */
+  waiting_on_me: {
+    id: number; name: string; lifecycle: Lifecycle;
+    programme: string; carrier: string;
+    /** What the broker has to do, in words, not a state name. */
+    what: string;
   }[];
 };
 
-export const getBrokerDashboard = () =>
-  api.get<BrokerDashboard>("/broker/dashboard").then(r => r.data);
+/** `carrierId` NARROWS to one carrier; undefined means all of them. It can only
+ *  narrow — the server scopes every broker read to the programmes this broker
+ *  is actually on, and an id they are not linked to yields nothing rather than
+ *  more. */
+export const getBrokerDashboard = (carrierId?: number | null) =>
+  api.get<BrokerDashboard>("/broker/dashboard", {
+    params: carrierId ? { carrier_id: carrierId } : {},
+  }).then(r => r.data);
+
+/** One file this broker owes — a row of the carrier's own Bordereau Calendar,
+ *  narrowed to this broker (GET /broker/calendar). */
+export type BrokerCalendarRow = {
+  id: number;
+  program_id: number;
+  program_name: string;
+  carrier_name: string | null;
+  /** This broker's own name, as the carrier's calendar shows it. */
+  broker_name?: string | null;
+  period: string;
+  due_date: string | null;
+  /** When it was first processed — the date the carrier saw it arrive. */
+  received_at: string | null;
+  latest_received_at: string | null;
+  status: CalendarStatus;
+  days_over: number | null;
+  days_late: number | null;
+  version_count: number;
+  version_label: string;
+  /** The carrier's reminders about this file. */
+  chased_at: string | null;
+  chase_count: number;
+  /** The file behind the newest version, for its exceptions screen. */
+  export_id: number | null;
+  /** The contract this period answers to. */
+  contract_id?: number | null;
+  contract_name?: string | null;
+  /** That contract has since been replaced, or renewed. */
+  contract_replaced?: boolean;
+  contract_renewed?: boolean;
+  /** Files for this period under another (replaced) contract, kept in
+   *  View Versions for audit. */
+  other_contract_files?: number;
+  /** When the newest version was uploaded — exact time, UTC ISO. */
+  uploaded_at: string | null;
+};
+
+export type BrokerCalendar = {
+  month: string;
+  months: string[];
+  rows: BrokerCalendarRow[];
+  /** The carrier calendar's own headline counts, for this broker only. */
+  counts: { due: number; on_time: number; late: number; never: number };
+  schedules: {
+    program_id: number; program_name: string; carrier_name: string | null;
+    frequency: string | null; frequency_label: string; due_rule: string;
+    next_due: string | null; covers_until: string | null;
+    /** This broker's own entry only (the server drops everyone else's). */
+    brokers?: { broker_name?: string | null; contract_id: number | null; contract_name: string | null }[];
+  }[];
+};
+
+/** One live file with exceptions (GET /broker/exceptions). */
+export type BrokerExceptionFile = {
+  export_id: number;
+  filename: string | null;
+  programme: string | null;
+  carrier: string | null;
+  created_at: string | null;
+  rows: number;
+  exceptions: number;
+  open: number;
+  put_right: number;
+};
+
+export const getBrokerExceptions = (carrierId?: number | null) =>
+  api.get<{
+    items: BrokerExceptionFile[];
+    totals: { files: number; files_open: number; exceptions: number;
+              open: number; put_right: number };
+    /** Left out of the totals: files under a replaced contract whose month
+     *  the newer contract's file answers. Kept for audit. */
+    replaced?: { files: number; open: number };
+  }>("/broker/exceptions", {
+    params: carrierId ? { carrier_id: carrierId } : {},
+  }).then(r => r.data);
+
+/** Every file sent for one period of this broker's calendar. */
+export const getBrokerCalendarVersions = (expectedId: number) =>
+  api.get<{ expected_id: number; period: string;
+            versions: import("./calendar").SubmissionVersionRow[] }>(
+    `/broker/calendar/${expectedId}/versions`).then(r => r.data);
+
+export const getBrokerCalendar = (month?: string, carrierId?: number | null) =>
+  api.get<BrokerCalendar>("/broker/calendar", {
+    params: { ...(month ? { month } : {}), ...(carrierId ? { carrier_id: carrierId } : {}) },
+  }).then(r => r.data);
 
 export const getBrokerCarriers = () =>
   api.get<BrokerCarrier[]>("/broker/carriers").then(r => r.data);
@@ -60,6 +213,25 @@ export const getBrokerContracts = (opts: { carrierId?: number; programId?: numbe
     params: {
       carrier_id: opts.carrierId || undefined,
       program_id: opts.programId || undefined,
+    },
+  }).then(r => r.data);
+
+/** One page of them, filtered and counted by the server.
+ *
+ *  `status` is the screen's own vocabulary — "mine" for the ones waiting on
+ *  this broker, otherwise a lifecycle. It is sent rather than applied here so
+ *  the count under the table is the size of the filtered set, not of the page. */
+export const getBrokerContractsPaged = (opts: {
+  carrierId?: number; programId?: number; status?: string;
+  page: number; page_size: number;
+}) =>
+  api.get<{ items: BrokerContract[]; total: number; waiting_on_me: number }>(
+    "/broker/contracts", {
+    params: {
+      carrier_id: opts.carrierId || undefined,
+      program_id: opts.programId || undefined,
+      status: opts.status || undefined,
+      page: opts.page, page_size: opts.page_size,
     },
   }).then(r => r.data);
 
@@ -79,20 +251,20 @@ export type BrokerUser = {
 
 export type BrokerUsers = {
   broker: { id: number; name: string };
+  /** One page of the team when `page` was asked for; all of it otherwise. */
   items: BrokerUser[];
+  /** Team-wide, never the page's — what the pager counts against. */
   total: number;
   /** Team-wide, so "can't remove the last admin" uses the true count. */
   total_admins: number;
 };
 
-export const getBrokerUsers = () =>
-  api.get<BrokerUsers>("/broker/users").then(r => r.data);
-
-export const inviteBrokerOperator = (full_name: string, email: string) =>
-  api.post<BrokerUser>("/broker/users", { full_name, email }).then(r => r.data);
-
-export const resendBrokerInvite = (userId: number) =>
-  api.post(`/broker/users/${userId}/resend-invite`).then(r => r.data);
+/** The team. `page`/`page_size` are optional and the server ignores their
+ *  absence — `total` and `total_admins` stay the whole team's either way, so
+ *  "you cannot remove the last admin" is decided on the team and not on the
+ *  ten people who happen to be on screen. */
+export const getBrokerUsers = (params?: { page?: number; page_size?: number }) =>
+  api.get<BrokerUsers>("/broker/users", { params }).then(r => r.data);
 
 export const removeBrokerUser = (userId: number) =>
   api.delete(`/broker/users/${userId}`).then(r => r.data);
@@ -104,10 +276,253 @@ export const removeBrokerUser = (userId: number) =>
 export type OperatorHome = {
   broker: { id: number; name: string };
   carriers: { id: number; name: string }[];
-  counts: { programmes: number; setups: number; runs: number; exceptions: number };
+  counts: {
+    programmes: number;
+    setups: number; runs: number; exceptions: number;
+    /** Runs that have those exceptions. */
+    exception_runs: number;
+  };
+  /** Files THIS person sent through Process Bordereau in the last 7 days.
+   *  Counts from the day the uploader started being recorded. */
+  my_uploads_this_week: number;
+  /** File received → output ready, averaged over the broker's runs in the
+   *  last 30 days. Seconds; null when there is nothing to measure. */
+  avg_turnaround_sec: number | null;
+  /** Newest first: the broker's own runs AND the ones the carrier ran for it —
+   *  the same list for every one of the broker's users. */
+  recent_runs: OperatorRun[];
   /** Which step is missing, so the screen can say whose job the next one is. */
   blocked_on: "no-programme" | "no-setup" | null;
 };
 
+export type OperatorRun = {
+  export_id: number;
+  filename: string;
+  programme: string | null;
+  contract: string | null;
+  contract_id?: number | null;
+  rows: number | null;
+  exception_count: number;
+  status: string | null;
+  /** "broker" — sent through the broker's own lane; "carrier" — the carrier
+   *  ran it for this broker. */
+  sent_by: "broker" | "carrier";
+  /** The broker the file was processed for. */
+  broker_name?: string | null;
+  created_at: string | null;
+  /** Which version of its submission this file is — each submission is
+   *  listed once, as its newest version — and the month it is for. */
+  version_no?: number | null;
+  reporting_period?: string | null;
+  /** Still open / put right — the same count Exceptions to Review shows. */
+  open?: number;
+  put_right?: number;
+  /** The contract this file was checked against has since been replaced
+   *  (renewed, or a new contract for the same programme and broker). */
+  contract_replaced?: boolean;
+  /** The contract has been renewed: its files stay counted and editable. */
+  contract_renewed?: boolean;
+  /** False when the newer contract's file answers the same month of a
+   *  REPLACED contract: kept for audit, left out of Exceptions to Review. */
+  counted?: boolean;
+};
+
+/** "13 of 23 open" — what a file's badge says, the way Exceptions to Review
+ *  counts it. Undefined `open` (an older server) falls back to the total. */
+export function exceptionsLeft(r: OperatorRun): { open: number; total: number; title: string } {
+  const total = r.exception_count;
+  const open = r.open ?? total;
+  return { open, total,
+    title: `${open} of ${total} still open · ${r.put_right ?? total - open} put right` };
+}
+
 export const getOperatorHome = () =>
   api.get<OperatorHome>("/broker/operator-home").then(r => r.data);
+
+// --- the same activity, shaped for charts ------------------------------------
+// One endpoint behind both broker dashboards, so the admin's "this week" and
+// the user's "this week" can never quote different numbers.
+
+/** One day. Every day in the window is present, zeros included, so a quiet
+ *  day reads as quiet rather than closing the gap. */
+export type BrokerInsightDay = {
+  date: string;
+  clean: number; flagged: number;
+  /** A file nobody has checked yet — neither clean nor flagged. */
+  not_checked: number;
+  resolved: number;
+};
+
+/** The files one person sent, and the exceptions on them.
+ *
+ *  `open` + `put_right` = `exceptions`, counted per EXCEPTION — one cell each.
+ *  `rows` and `rows_flagged` are the size of what those exceptions came from,
+ *  for the sentence beside the bar ("14 across 10 rows"); a row is never drawn
+ *  as a share, because one bad cell does not make a bad row. */
+export type UploaderWork = {
+  rows: number;
+  /** Rows carrying at least one exception that is still open. */
+  rows_flagged: number;
+  exceptions: number;
+  /** Nobody has decided these yet. */
+  open: number;
+  /** Fixed, approved, dismissed or rejected — by anyone on the team. */
+  put_right: number;
+};
+
+/** A person on the broker's own team. `files` is what they sent through
+ *  Process Bordereau in the window and `uploads` the exceptions on those
+ *  files; `resolved` counts decisions they made themselves. `rank` is their
+ *  place in the whole team — files first, decisions as the tie-break (ties
+ *  share one rank). */
+export type BrokerInsightPerson = {
+  id: number; name: string;
+  role: "broker_admin" | "operator";
+  resolved: number;
+  rank: number;
+  files: number;
+  uploads: UploaderWork;
+};
+
+/** A carrier ranked by files run; `rank` is its place among ALL the broker's
+ *  carriers (ties share one), taken before any search. */
+export type BrokerInsightCarrier = { id: number; name: string; runs: number; rank: number };
+
+export type BrokerInsights = {
+  days: number;
+  runs_by_day: BrokerInsightDay[];
+  /** Top 5 only — `carriers_total` is the whole count; "View all" opens
+   *  /broker/files-by-carrier for the rest. */
+  by_carrier: BrokerInsightCarrier[];
+  carriers_total: number;
+  /** Top 5 only, broker admin only — null for an operator, whose colleagues'
+   *  tallies are not their business. "View all" opens /broker/team-activity. */
+  by_person: BrokerInsightPerson[] | null;
+  /** How many people the team has — `by_person` is only the top of it. */
+  people_total: number | null;
+  totals: {
+    runs_this_week: number;
+    runs_in_window: number;
+    resolved_in_window: number;
+  };
+};
+
+/** One file a person sent, with the same counts the dashboard bar is made of. */
+export type PersonFile = {
+  export_id: number;
+  source_upload_id: number | null;
+  filename: string | null;
+  programme_id: number | null;
+  programme: string | null;
+  carrier: string | null;
+  status: string | null;
+  created_at: string | null;
+  rows: number;
+  rows_flagged: number;
+  exceptions: number;
+  open: number;
+  put_right: number;
+};
+
+/** One programme's share of what a person sent — the cut a broker admin
+ *  reviews by, since the contract, the rules and the carrier all hang off the
+ *  programme. */
+export type PersonProgramme = {
+  id: number | null; name: string; carrier: string | null;
+  files: number; rows: number; exceptions: number; open: number; put_right: number;
+};
+
+export type PersonFiles = {
+  person: { id: number; name: string | null };
+  items: PersonFile[];
+  total: number;
+  by_programme: PersonProgramme[];
+  totals: { files: number; rows: number; exceptions: number; open: number; put_right: number };
+};
+
+export const getPersonFiles = (
+  userId: number,
+  { days = 30, page = 1, pageSize = 25 }: { days?: number; page?: number; pageSize?: number } = {},
+) =>
+  api.get<PersonFiles>(`/broker/insights/people/${userId}/files`,
+    { params: { days, page, page_size: pageSize } }).then(r => r.data);
+
+export const getBrokerInsights = (days = 30) =>
+  api.get<BrokerInsights>("/broker/insights", { params: { days } })
+     .then(r => r.data);
+
+/** The whole team, ranked, one page at a time, searchable by name or email. */
+export const getTeamRanking = (opts: { days: number; page: number; pageSize: number; q?: string }) =>
+  api.get<{ items: BrokerInsightPerson[]; total: number }>("/broker/insights/people", {
+    params: { days: opts.days, page: opts.page, page_size: opts.pageSize, q: opts.q || undefined },
+  }).then(r => r.data);
+
+/** Every carrier the broker works with, ranked, one page at a time, searchable by name. */
+export const getCarrierRanking = (opts: { days: number; page: number; pageSize: number; q?: string }) =>
+  api.get<{ items: BrokerInsightCarrier[]; total: number }>("/broker/insights/carriers", {
+    params: { days: opts.days, page: opts.page, page_size: opts.pageSize, q: opts.q || undefined },
+  }).then(r => r.data);
+
+/** One decision behind a Team Activity count — a single row someone fixed,
+ *  approved or dismissed. */
+export type PersonDecision = {
+  id: number;
+  kind: string;
+  policy_number: string | null;
+  sheet: string | null;
+  row: number | null;
+  field: string | null;
+  old_value: string | null;
+  new_value: string | null;
+  reason: string | null;
+  decided_at: string | null;
+  /** The file this exception belongs to; open it via the same exceptions
+   *  screen Process Bordereau uses (`/uploads/${export_id}/exceptions`). */
+  export_id: number | null;
+  filename: string | null;
+  programme: string | null;
+  /** WHO resolved it, in the words this viewer may see: their own colleagues
+   *  by name, the other side as its company (see backend decision_log). */
+  decided_by: string | null;
+  decided_by_user_id: number | null;
+};
+
+/** WHICH exceptions a person put right, newest first, a page at a time —
+ *  the detail behind their Team Activity count. */
+export const getPersonDecisions = (userId: number, opts: { days: number; page: number; pageSize: number }) =>
+  api.get<{ person: { id: number; name: string | null }; items: PersonDecision[]; total: number }>(
+    `/broker/insights/people/${userId}/decisions`,
+    { params: { days: opts.days, page: opts.page, page_size: opts.pageSize } },
+  ).then(r => r.data);
+
+/** Every run made for this broker, newest first, one page at a time. */
+export const getBrokerRunHistory = (page: number, pageSize: number) =>
+  api.get<{ items: OperatorRun[]; total: number }>("/broker/runs", {
+    params: { page, page_size: pageSize },
+  }).then(r => r.data);
+
+
+/** A carrier asking this broker to work with them.
+ *
+ *  `programme` is usually null: an invitation is to the CARRIER, and which
+ *  programmes follow is their decision afterwards. */
+export type BrokerInvitation = {
+  id: number;
+  carrier: string;
+  programme: string | null;
+  program_id: number | null;
+  invited_at: string | null;
+};
+
+export const getBrokerInvitations = () =>
+  api.get<BrokerInvitation[]>("/broker/invitations").then(r => r.data);
+
+/** Agree to work with them. THIS is what creates the relationship — a carrier
+ *  cannot add a broker to their book without it. */
+export const acceptBrokerInvitation = (id: number) =>
+  api.post<{ message?: string; carrier_id?: number; carrier?: string }>(
+    `/broker/invitations/${id}/accept`, {}).then(r => r.data);
+
+export const declineBrokerInvitation = (id: number) =>
+  api.post<{ message?: string }>(`/broker/invitations/${id}/decline`, {})
+     .then(r => r.data);

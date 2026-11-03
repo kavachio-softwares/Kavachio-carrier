@@ -1,5 +1,6 @@
 import re
 import os
+import math
 import json
 import time
 import random
@@ -55,6 +56,7 @@ _MODEL_CEILINGS = {
     "gemini-2.5-flash": {"input": 1_000_000, "output": 65536},
     "gemini-2.5-flash-lite": {"input": 1_000_000, "output": 65536},
     "gemini-3.5-flash": {"input": 1_000_000, "output": 65536},
+    "gemini-2.5-pro": {"input": 1_000_000, "output": 65536},
 }
 
 
@@ -253,9 +255,35 @@ def _is_transient(exc) -> bool:
 
 
 def _retry_after_seconds(exc):
-    """Extract a server-suggested Retry-After (seconds) if present, else None."""
-    m = re.search(r"retry[-\s]?after['\":\s]+(\d+)", f"{exc}".lower())
-    return int(m.group(1)) if m else None
+    """Extract a server-suggested wait (seconds) if present, else None.
+
+    THREE SHAPES, because Gemini does not send the HTTP header this originally
+    looked for. A 429 from generativelanguage carries the wait in its own body:
+
+        'details': [{'@type': '...RetryInfo', 'retryDelay': '17s'}]
+        'message': '... Please retry in 17.189112315s.'
+
+    Matching only ``retry-after`` therefore returned None for every real quota
+    error, and the caller fell back to ``1.5 ** attempt`` — 1.0s, 1.5s, 2.3s,
+    3.4s. Four attempts burn out in about eleven seconds against a quota window
+    of sixty, so the call fails, the batch raises, and stage_b routes its whole
+    intent set to review. That is silent RULE LOSS caused by nothing worse than
+    a rate limit, and it is invisible afterwards: the clauses simply sit unmapped
+    with no indication that a 429, rather than the contract, put them there.
+
+    The largest advertised wait wins — the shapes can disagree, and waiting too
+    long only costs time whereas waiting too little costs the rules.
+    """
+    blob = f"{exc}".lower()
+    waits = []
+    for pat in (r"retry[-\s]?after['\":\s]+(\d+(?:\.\d+)?)",
+                r"retrydelay['\":\s]+(\d+(?:\.\d+)?)s?",
+                r"retry in\s+(\d+(?:\.\d+)?)\s*s"):
+        waits += [float(m) for m in re.findall(pat, blob)]
+    if not waits:
+        return None
+    # Ceil, so a 17.19s instruction is honoured as 18 rather than 17.
+    return int(math.ceil(max(waits)))
 
 
 def invoke_with_retry(kwargs, label="LLM", est_tokens=None, gen_client=None):
@@ -302,11 +330,28 @@ def _generate_with_retry(kwargs, label, est_tokens, gen_client=None):
 #                      Deliberately the smallest model that can answer a closed
 #                      yes/no about two short strings; the deterministic gates
 #                      around it do the load-bearing work.
-# Determinism comes from the compiler + temp 0 / seed, not from the model.
+# temp 0 + a seed make answers MOSTLY repeatable, not always: the same Call 1
+# request was measured returning two different clause sets for one PDF (41 vs 59).
+# A repeatable answer for identical input comes from ai_cache, keyed on the input.
 EXTRACTION_MODEL = os.getenv("KAVACHIO_EXTRACTION_MODEL", "gemini-2.5-flash")
 STAGE_B_MODEL = os.getenv("KAVACHIO_STAGEB_MODEL", "gemini-3.5-flash")
 SMALL_MODEL = os.getenv("KAVACHIO_SMALL_MODEL", "gemini-2.5-flash-lite")
 DETERMINISTIC_SEED = int(os.getenv("KAVACHIO_LLM_SEED", "7"))
+
+# The model every ai_cache entry of the pre-existing kinds (rule_intents,
+# formula_infer, generic_bind, var_topup) was stored under: those calls ran on
+# EXTRACTION_MODEL's default and no deployment overrode it. Kept as the literal
+# rather than the env-resolved constant, because a switch made through
+# KAVACHIO_EXTRACTION_MODEL must invalidate those entries too.
+LEGACY_CACHE_MODEL = "gemini-2.5-flash"
+
+
+def model_for(purpose: str, default: str) -> str:
+    """The model for one PURPOSE (e.g. "clause_extraction", "column_mapping"):
+    ``KAVACHIO_MODEL_<PURPOSE>`` when set, else ``default`` (normally one of the
+    tier constants above). Lets one call site move to a bigger model by config
+    without dragging every other caller of that tier along."""
+    return (os.getenv(f"KAVACHIO_MODEL_{purpose.upper()}") or "").strip() or default
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXPLICIT CONTEXT CACHING
@@ -342,8 +387,42 @@ _CTX_CACHE_TTL = os.getenv("KAVACHIO_CONTEXT_CACHE_TTL", "600s")
 # pure overhead anyway. 4096 is the conservative figure across 2.5/3.x Flash.
 _CTX_CACHE_MIN_TOKENS = int(os.getenv("KAVACHIO_CONTEXT_CACHE_MIN", "4096"))
 
-_ctx_caches: dict = {}        # (model, sha256(prefix)) -> cache name
+# (model, sha256(prefix)) -> (cache name or None, expiry epoch seconds). The
+# expiry matters: the entry lives as long as this PROCESS, but the CachedContent
+# behind it dies on the server after _CTX_CACHE_TTL. A long-running API server
+# would otherwise keep quoting a name Gemini has already collected, and every call
+# that quoted it came back 403 "CachedContent not found" — surfacing to the user as
+# "Call 2 failed" on a screen that had worked minutes earlier.
+_ctx_caches: dict = {}
 _ctx_lock = threading.Lock()
+
+
+def _ctx_ttl_seconds() -> float:
+    """_CTX_CACHE_TTL as a number of seconds. Gemini's TTL is written "600s"."""
+    raw = str(_CTX_CACHE_TTL).strip()
+    try:
+        return float(raw[:-1]) if raw.endswith("s") else float(raw)
+    except ValueError:
+        return 600.0
+
+
+def forget_context_cache(name: str):
+    """Drop a cache name we can no longer use, so the next call creates a fresh one
+    instead of quoting a dead resource. Used when Gemini rejects the name."""
+    if not name:
+        return
+    with _ctx_lock:
+        for k, v in list(_ctx_caches.items()):
+            if isinstance(v, tuple) and v[0] == name:
+                _ctx_caches.pop(k, None)
+
+
+def _is_stale_cache_error(exc) -> bool:
+    """True when a request failed because its cached_content no longer exists.
+    Gemini answers a collected cache with 403 PERMISSION_DENIED, not 404."""
+    msg = str(exc).lower()
+    return "cachedcontent" in msg and (
+        "not found" in msg or "permission denied" in msg or "invalid" in msg)
 
 
 def context_cache_for(prefix: str, model: str):
@@ -357,11 +436,17 @@ def context_cache_for(prefix: str, model: str):
         return None
     if estimate_tokens(prefix, model) < _CTX_CACHE_MIN_TOKENS:
         return None
-    import hashlib
+    import hashlib, time
     key = (model, hashlib.sha256(prefix.encode("utf-8")).hexdigest())
     with _ctx_lock:
-        if key in _ctx_caches:
-            return _ctx_caches[key]
+        entry = _ctx_caches.get(key)
+        if entry is not None:
+            name, expires_at = entry
+            # Re-create a few seconds BEFORE the server-side TTL runs out, so a call
+            # that starts just under the wire cannot land just over it.
+            if time.time() < expires_at:
+                return name
+            _ctx_caches.pop(key, None)
     try:
         cache = client.caches.create(
             model=model,
@@ -375,8 +460,11 @@ def context_cache_for(prefix: str, model: str):
         print(f"[ctx-cache] not created ({type(exc).__name__}: {str(exc)[:120]}) "
               f"— sending full prompt")
         name = None
+    # A failure is remembered too (don't retry the create on every call) but only
+    # for the same window, so a transient quota error doesn't disable caching for
+    # the life of the process.
     with _ctx_lock:
-        _ctx_caches[key] = name       # cache the failure too; don't retry per call
+        _ctx_caches[key] = (name, time.time() + max(_ctx_ttl_seconds() - 30, 30))
     if name:
         print(f"[ctx-cache] created {name} "
               f"(~{estimate_tokens(prefix, model):,} tok, ttl {_CTX_CACHE_TTL})")
@@ -387,7 +475,7 @@ def release_context_caches():
     """Delete every cache this process created. Storage is billed per hour, so an
     upload should not leave one behind. Safe to call more than once."""
     with _ctx_lock:
-        names = [n for n in _ctx_caches.values() if n]
+        names = [v[0] for v in _ctx_caches.values() if v and v[0]]
         _ctx_caches.clear()
     for n in names:
         try:
@@ -502,10 +590,25 @@ def call_gemini(prompt, label="LLM", temperature=None, seed=None,
     except OversizeError:
         raise
     except Exception as exc:
+        # A cache that expired between the lookup and the send (or that some other
+        # process deleted) makes the request fail on the NAME, not on the prompt.
+        # Forget it and re-send the whole prompt: caching is a billing optimisation,
+        # so losing it must never cost the answer.
+        if _cache_name is not None and _is_stale_cache_error(exc):
+            print(f"[{label}] context cache {_cache_name} is gone ({exc}); "
+                  f"re-sending the full prompt.")
+            forget_context_cache(_cache_name)
+            _cache_name = None
+            config.pop("cached_content", None)
+            kwargs["contents"] = prompt
+            kwargs["config"] = config or None
+            if not config:
+                kwargs.pop("config", None)
+            response = _generate_with_retry(kwargs, label, est_input)
         # If the SDK/model rejects the structured-output config (older SDK or a
         # model without response_schema support), retry once without it so the
         # call degrades to prompt-enforced JSON instead of hard-failing.
-        if response_schema is not None:
+        elif response_schema is not None:
             print(f"[{label}] response_schema rejected ({exc}); "
                   f"retrying without structured output.")
             config.pop("response_mime_type", None)
@@ -535,6 +638,19 @@ def call_gemini(prompt, label="LLM", temperature=None, seed=None,
             f"output={output_tokens}  cached={cached_tokens}  "
             f"total={total_tokens}"
         )
+        # A reasoning trace cut off at its budget is the measured signature of a
+        # Call 1 answer that differed from a repeat of the same request, and it
+        # was only ever visible on the console.
+        if thinking_budget and thought_tokens and thought_tokens >= 0.98 * thinking_budget:
+            try:
+                import pipeline_log as plog
+                plog.log("LLM", "THINKING_CAPPED",
+                         f"{label}: {thought_tokens:,} of {thinking_budget:,} "
+                         f"thinking tokens ({_model})",
+                         "reasoning ran out of budget — answers like this were "
+                         "measured to vary between identical requests")
+            except Exception:
+                pass
 
     # ── Truncation detection ─────────────────────────────────────────────
     # A truncated answer sometimes still parses as valid JSON — the model closes

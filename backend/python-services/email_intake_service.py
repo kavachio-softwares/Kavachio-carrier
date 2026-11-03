@@ -10,13 +10,15 @@ only one broker holds. Email has a `From:` header, which is a CLAIM — anyone c
 write anything in it. That is why `file_arrival.claimed_sender` is named the way
 it is, and why this module is careful to say "claimed" everywhere it means it.
 
-Two ways a message is matched to a route, strongest first:
+How a message is matched to a route (5 Oct 2026). Brokers email Kavachio's
+own intake mailbox — a carrier is never asked to hand over theirs — and must
+copy (Cc) their carrier:
 
-  1. PLUS-ADDRESSING — the broker was given bordereaux+bridge-brokers@… and sent
-     to it. The address they were handed IS the identity, exactly like an SFTP
-     folder, and it cannot be arrived at by accident.
-  2. THE FROM: ADDRESS — matched against the route's stored address. Forgeable,
-     but it is what a broker who replies to an old thread will actually produce.
+  1. THE FROM: ADDRESS — matched against the route's stored sending address.
+  2. THE CARRIER IN CC — one of the carrier's own users must be on the To or
+     Cc line. It says which carrier the file is for (one broker can send to
+     several through the same mailbox), and it is the bar a file has to clear:
+     a sender who does not copy the carrier is turned away with the reason.
 
 Neither is authentication. A deployment that needs more should require SPF/DKIM
 to pass at the mail server, before the message ever reaches this code — that is
@@ -43,6 +45,7 @@ name, so a second mailbox usually needs two variables.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from email import message_from_bytes
@@ -83,9 +86,42 @@ class MailboxConfig:
         return self.port == 993
 
 
+def _intake_account(account: str) -> str:
+    """Which mailbox brokers send to. EMAIL_INTAKE_ACCOUNT=NOTIFY makes it the
+    Kavachio mailbox the platform already sends as (NOTIFY_SMTP_*)."""
+    return (account or os.getenv("EMAIL_INTAKE_ACCOUNT") or "").strip().upper()
+
+
+def _scoped(prefix: str, *names: str) -> str:
+    """The first of <PREFIX>_<name> that is set — never the unprefixed value,
+    which belongs to a different mailbox."""
+    for n in names:
+        v = (os.getenv(f"{prefix}_{n}") or "").strip()
+        if v:
+            return v
+    return ""
+
+
 def mailbox_config(account: str = "") -> MailboxConfig:
-    """Resolve the named IMAP mailbox ("" = the default one)."""
-    prefix = (account or "").strip().upper()
+    """Resolve the named IMAP mailbox ("" = the intake one).
+
+    A named account reads its OWN settings only, and its login falls back to
+    the same account's SMTP login — the Kavachio mailbox is one login for
+    sending and reading. Its server, when not set, is the SMTP server's IMAP
+    twin (smtp.gmail.com → imap.gmail.com)."""
+    prefix = _intake_account(account)
+    if prefix:
+        smtp_host = _scoped(prefix, "SMTP_HOST") or (os.getenv("SMTP_HOST") or "").strip()
+        twin = "imap." + smtp_host[5:] if smtp_host.startswith("smtp.") else ""
+        return MailboxConfig(
+            host=_scoped(prefix, "IMAP_HOST") or twin,
+            port=int(_scoped(prefix, "IMAP_PORT") or 993),
+            user=_scoped(prefix, "IMAP_USER", "SMTP_USER"),
+            password=_scoped(prefix, "IMAP_PASS", "SMTP_PASS").replace(" ", ""),
+            folder=_env(prefix, "IMAP_FOLDER", "INBOX"),
+            processed_folder=_env(prefix, "IMAP_PROCESSED_FOLDER", "Processed"),
+            search=_env(prefix, "IMAP_SEARCH", "UNSEEN"),
+        )
     return MailboxConfig(
         host=_env(prefix, "IMAP_HOST"),
         port=int(_env(prefix, "IMAP_PORT", "993") or 993),
@@ -123,21 +159,6 @@ def normalise_addr(value: Optional[str]) -> str:
     pairs = getaddresses([value])
     addr = pairs[0][1] if pairs else value
     return (addr or "").strip().strip("<>").lower()
-
-
-def plus_tag(address: str) -> Optional[str]:
-    """The tag out of user+tag@domain, or None.
-
-    This is how a broker proves which route they are using without us having to
-    trust the From: header — they were given the tagged address and nothing else
-    would produce it.
-    """
-    addr = normalise_addr(address)
-    if "+" not in addr or "@" not in addr:
-        return None
-    local = addr.split("@", 1)[0]
-    _, _, tag = local.partition("+")
-    return tag or None
 
 
 def _decode(value: Optional[str]) -> str:
@@ -226,9 +247,14 @@ def _wanted(filename: str, part: Message) -> bool:
         return False
     # An inline part is displayed within the message body — a logo, a pasted
     # screenshot. Nobody sends a bordereau inline.
-    if (part.get_content_disposition() or "").lower() == "inline":
+    disposition = (part.get_content_disposition() or "").lower()
+    if disposition == "inline":
         return False
-    if part.get("Content-ID"):
+    # A Content-ID usually means the HTML body points at the part. But Gmail
+    # gives EVERY attachment one (with X-Attachment-Id), so an explicit
+    # "attachment" disposition wins — otherwise every bordereau sent from Gmail
+    # was dropped as furniture and the message merely marked read (5 Oct 2026).
+    if part.get("Content-ID") and disposition != "attachment":
         return False                      # referenced by the HTML body
     return True
 
@@ -303,22 +329,26 @@ def parse_message(raw: bytes) -> ParsedMessage:
 
 # ── matching a message to a broker ──────────────────────────────────────────
 
-def route_label(route: IntakeRoute) -> str:
-    """The plus-tag that addresses this route: "bridge-brokers".
+def carrier_addresses(session, tenant_id: int) -> set[str]:
+    """The carrier's own users' addresses — any of them in To/Cc will do."""
+    from submission_calendar_service import carrier_contacts
+    return {normalise_addr(c.get("email")) for c in
+            carrier_contacts(session, [tenant_id]).get(tenant_id, []) if c.get("email")}
 
-    Derived from the same slugify the SFTP folders use, so the tag a broker is
-    given and the folder a broker is given read identically.
-    """
-    return svc.slugify(route.display_name or route.address)
+
+def carrier_cc(session, tenant_id: int) -> Optional[str]:
+    """The address a broker is told to copy: the carrier's best contact."""
+    from submission_service import _carrier_email
+    return _carrier_email(session, tenant_id)
 
 
 def resolve_route(session, tenant_id: Optional[int],
-                  parsed: ParsedMessage) -> tuple[Optional[IntakeRoute], str]:
+                  parsed: ParsedMessage) -> tuple[Optional[IntakeRoute], str, Optional[str]]:
     """Which broker's route does this message belong to?
 
-    Returns (route, how) so the poller can record HOW the sender was identified.
-    That matters when a file is queried later: "they used their own address" and
-    "the From: header said so" are very different levels of confidence.
+    Returns (route, how, refusal). `refusal` is set when the sender is known
+    but did not copy their carrier: the file is recorded on that route and
+    turned away with that reason.
 
     `tenant_id=None` searches every tenant's email routes. One mailbox can serve
     several carriers, and a message does not say which one it is for — the route
@@ -330,22 +360,28 @@ def resolve_route(session, tenant_id: Optional[int],
         q = q.filter(IntakeRoute.tenant_id == tenant_id)
     routes = q.order_by(IntakeRoute.id).all()
     if not routes:
-        return None, "no email routes configured"
+        return None, "no email routes configured", None
 
-    # 1. Plus-addressing — they used the address they were given.
-    tags = {t for t in (plus_tag(a) for a in parsed.to_addrs) if t}
-    if tags:
-        for route in routes:
-            if route_label(route) in tags:
-                return route, "addressed to their own intake address"
+    # 1. The From: header — whose sending address is it? One route per carrier.
+    mine = [r for r in routes
+            if parsed.from_addr and normalise_addr(r.address) == parsed.from_addr]
+    if not mine:
+        return None, "no route matches the sender", None
 
-    # 2. The From: header — a claim, but the usual one.
-    if parsed.from_addr:
-        for route in routes:
-            if normalise_addr(route.address) == parsed.from_addr:
-                return route, "matched on the From: address"
-
-    return None, "no route matches the sender"
+    # 2. Which of those carriers is copied on the email.
+    to = set(parsed.to_addrs)
+    copied = [r for r in mine if carrier_addresses(session, r.tenant_id) & to]
+    if len(copied) == 1:
+        return copied[0], "From: address, carrier copied", None
+    if len(copied) > 1:
+        return None, "more than one of the sender's carriers is copied", None
+    if len(mine) == 1:
+        r = mine[0]
+        cc = carrier_cc(session, r.tenant_id)
+        return r, "From: address, carrier not copied", (
+            "Not accepted — the email did not copy the carrier. Send it again with "
+            f"{cc or 'your carrier'} in Cc.")
+    return None, "the sender's carrier is not copied", None
 
 
 def build_email_address(broker_sending_address: str) -> str:

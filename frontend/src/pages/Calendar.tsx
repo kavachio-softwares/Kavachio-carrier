@@ -2,36 +2,40 @@
 //
 // The calendar itself now lives in components/ProgramCalendar, shared with the
 // Bordereau Setup screen. What is left HERE is the one thing that page cannot
-// have: a carrier -> program picker. Inside a setup the carrier and program are
-// already fixed by the pipeline, so no choice is offered there.
+// have: a program picker. Inside a setup the program is already fixed by the
+// pipeline, so no choice is offered there.
 //
-// The picker is two steps because a carrier holds many programs, and program
-// names are only meaningful under their carrier ("Program B" says nothing on
-// its own). Narrowing by carrier first also matches how Program Management
-// scopes its book, so the two screens are navigated the same way.
+// Program only. It used to ask for a carrier first, from when the page also
+// served people looking after several carriers; a carrier signed in only ever
+// sees its own programs, so that step was one option and one extra click.
 //
 // This page is kept (and still reached from the bell, the deadline card, the
 // dashboard link and the deadline email) so a program with no bordereau setup
 // yet still has somewhere to get its schedule set.
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { CalendarDays } from "lucide-react";
-import { listCarriers, listPrograms, type CarrierLite, type ProgramLite } from "../api/calendar";
+import { Link, useSearchParams } from "react-router-dom";
+import { CalendarDays, Layers } from "lucide-react";
+import { listPrograms, type ProgramLite } from "../api/calendar";
+import { api } from "../api/client";
 import ProgramCalendar from "../components/ProgramCalendar";
 import NotificationBell from "../components/NotificationBell";
 
 export default function Calendar() {
   const [programs, setPrograms] = useState<ProgramLite[]>([]);
-  const [carriers, setCarriers] = useState<CarrierLite[]>([]);
-  // ?carrier= / ?program= let other screens land here already narrowed — the
-  // dashboard's "N bordereaux overdue" link is the main one. Read once, as the
-  // initial value, so later picks are plain state and cannot fight the URL.
+  const [loaded, setLoaded] = useState(false);
+  // ?program= lets other screens land here already narrowed — the dashboard's
+  // "N bordereaux overdue" link is the main one. Read once, as the initial
+  // value, so later picks are plain state and cannot fight the URL. An old
+  // ?carrier= is simply ignored.
   const [sp, setSp] = useSearchParams();
-  const [selCarrier, setSelCarrier] = useState<number | "">(
-    () => (sp.get("carrier") ? Number(sp.get("carrier")) : ""));
   const [selProgram, setSelProgram] = useState<number | "">(
     () => (sp.get("program") ? Number(sp.get("program")) : ""));
   const [err, setErr] = useState<string | null>(null);
+  // Opened FOR one program (a link from the Bordereau Calendar or the
+  // dashboard): the page is about that program only, so it is shown as a
+  // fixed heading rather than a picker that could wander off to another.
+  // Opened bare (the bell), there is nothing to lock, so the picker stays.
+  const [locked] = useState(() => !!sp.get("program"));
 
   useEffect(() => {
     (async () => {
@@ -39,63 +43,32 @@ export default function Calendar() {
       catch (e: any) {
         setErr(e?.response?.data?.detail ?? e?.message ?? "Failed to load programs.");
       }
-      // Names only. A failure here costs labels, not function, so it must not
-      // surface an error banner over a calendar that still works.
-      try { setCarriers(await listCarriers()); } catch { setCarriers([]); }
+      setLoaded(true);
     })();
   }, []);
 
-  // The program id is authoritative: take the carrier FROM it rather than trusting
-  // both params to agree, so a stale or hand-edited ?carrier= can never leave the
-  // program hidden behind the wrong carrier. Runs once, when programs land.
+  // A linked program missing from the list is looked up on its own. The list
+  // holds only programmes created in the app, but the Bordereau Calendar shows
+  // every programme the carrier has, so its links can name one that is not in
+  // it. One that is not this tenant's (or was deleted) is refused by the server
+  // and dropped, rather than leaving a calendar up for something we cannot load.
   useEffect(() => {
-    if (programs.length === 0) return;
-    const pid = sp.get("program") ? Number(sp.get("program")) : null;
-    if (pid == null || Number.isNaN(pid)) return;
-    const p = programs.find(x => x.id === pid);
-    if (!p) { setSelProgram(""); return; }   // not this tenant's, or deleted
-    setSelCarrier(p.party_id ?? -1);
-    setSelProgram(pid);
+    if (!loaded || selProgram === "") return;
+    if (programs.some(p => p.id === selProgram)) return;
+    let live = true;
+    api.get<ProgramLite>(`/programs/${selProgram}`)
+      .then(r => { if (live && r.data?.id) setPrograms(prev => [...prev, r.data]); })
+      .catch(() => { if (live) setSelProgram(""); });
+    return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [programs]);
+  }, [loaded, programs, selProgram]);
 
-  const carrierName = useMemo(() => {
-    const byId = new Map(carriers.map(c => [c.id, c.legal_name]));
-    // Falls back to the program's own free-text lead_carrier when the party is
-    // missing from the directory (deactivated, or a different tenant scope).
-    return (p: ProgramLite) =>
-      (p.party_id != null ? byId.get(p.party_id) : null)
-      || p.lead_carrier || "Unassigned carrier";
-  }, [carriers]);
-
-  // Only carriers that actually hold a program — an empty carrier in this list
-  // would be a dead end, since there would be nothing to pick at step two.
-  // Programs with no party_id are grouped under a single synthetic id (-1) so
-  // they stay reachable instead of dropping out of the picker entirely.
-  const carrierOptions = useMemo(() => {
-    const seen = new Map<number, string>();
-    for (const p of programs) seen.set(p.party_id ?? -1, carrierName(p));
-    return [...seen].map(([id, name]) => ({ id, name }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [programs, carrierName]);
-
-  const carrierPrograms = useMemo(
-    () => selCarrier === "" ? []
-      : programs.filter(p => (p.party_id ?? -1) === selCarrier),
-    [programs, selCarrier]);
-
-  // Changing carrier must clear the program — otherwise the calendar below keeps
-  // rendering a program that is no longer in the visible list.
-  const pickCarrier = (v: string) => {
-    setSelCarrier(v === "" ? "" : Number(v));
-    setSelProgram("");
-    setSp(v === "" ? {} : { carrier: v }, { replace: true });
-  };
+  const sorted = useMemo(
+    () => [...programs].sort((a, b) => a.name.localeCompare(b.name)), [programs]);
 
   const pickProgram = (v: string) => {
     setSelProgram(v === "" ? "" : Number(v));
-    setSp(v === "" ? { carrier: String(selCarrier) }
-                   : { carrier: String(selCarrier), program: v }, { replace: true });
+    setSp(v === "" ? {} : { program: v }, { replace: true });
   };
 
   return (
@@ -118,38 +91,48 @@ export default function Calendar() {
           <div className="card-h">
             <CalendarDays className="ci" />
             <h3>Bordereau deadlines</h3>
-            <span className="sub">pick a program to see when its bordereaux are due</span>
+            <span className="sub">{locked
+              ? "when this program's bordereaux are due"
+              : "pick a program to see when its bordereaux are due"}</span>
           </div>
           <div style={{ padding: "16px 20px" }}>
+            {locked && selProgram !== "" ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+                            marginBottom: 16 }}>
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 10,
+                              padding: "10px 14px", borderRadius: 10,
+                              border: "1px solid var(--p-border)", background: "var(--p-surface-2)" }}>
+                  <span style={{ width: 32, height: 32, borderRadius: 8, display: "inline-flex",
+                                 alignItems: "center", justifyContent: "center",
+                                 background: "var(--p-surface)", color: "var(--p-primary)",
+                                 border: "1px solid var(--p-border)" }}>
+                    <Layers size={16} />
+                  </span>
+                  <span>
+                    <span style={{ display: "block", fontSize: 11, fontWeight: 600, letterSpacing: ".04em",
+                                   textTransform: "uppercase", color: "var(--p-muted)" }}>Program</span>
+                    <span style={{ display: "block", fontSize: 15, fontWeight: 600, color: "var(--p-ink)" }}>
+                      {programs.find(p => p.id === selProgram)?.name ?? "Loading…"}</span>
+                  </span>
+                </div>
+                <Link to="/bordereau-calendar" className="btn sm">← Bordereau Calendar</Link>
+              </div>
+            ) : (
             <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
               <div className="field" style={{ minWidth: 260, flex: "0 1 320px" }}>
-                <label>Carrier</label>
-                <select value={selCarrier} onChange={e => pickCarrier(e.target.value)}>
-                  <option value="">Select a carrier…</option>
-                  {carrierOptions.map(c =>
-                    <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </div>
-
-              <div className="field" style={{ minWidth: 260, flex: "0 1 320px" }}>
                 <label>Program</label>
-                <select value={selProgram} disabled={selCarrier === ""}
-                  onChange={e => pickProgram(e.target.value)}>
-                  <option value="">
-                    {selCarrier === "" ? "Select a carrier first…" : "Select a program…"}
-                  </option>
-                  {carrierPrograms.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                <select value={selProgram} onChange={e => pickProgram(e.target.value)}>
+                  <option value="">Select a program…</option>
+                  {sorted.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
               </div>
-            </div>
+            </div>)}
 
             {selProgram === "" ? (
               <span className="muted" style={{ fontSize: 13 }}>
-                {selCarrier === ""
-                  ? "Choose a carrier, then one of its programs, to see and change its deadlines."
-                  : carrierPrograms.length === 0
-                    ? "This carrier has no programs yet."
-                    : "Choose a program to see and change its deadlines."}
+                {loaded && programs.length === 0
+                  ? "You have no programs yet."
+                  : "Choose a program to see and change its deadlines."}
               </span>
             ) : (
               // Keyed on the program so switching resets the component's state
@@ -157,7 +140,7 @@ export default function Calendar() {
               <ProgramCalendar
                 key={selProgram}
                 programId={Number(selProgram)}
-                programName={carrierPrograms.find(p => p.id === selProgram)?.name} />
+                programName={programs.find(p => p.id === selProgram)?.name} />
             )}
           </div>
         </div>

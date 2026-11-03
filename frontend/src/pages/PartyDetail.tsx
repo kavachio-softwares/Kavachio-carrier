@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
+import { frequencyLabel, PROGRAMME_FREQUENCIES } from "../constants/frequency";
 import { useNavigate, useParams } from "react-router-dom";
 import { SlidersHorizontal } from "lucide-react";
 import { api } from "../api/client";
@@ -28,10 +29,10 @@ const TYPES: [string, string][] = [
   ["carrier", "Carrier"],
 ];
 const TYPE_LABEL: Record<string, string> = Object.fromEntries(TYPES);
-const BDX_FREQUENCIES: [string, string][] = [
-  ["monthly", "Monthly"], ["quarterly", "Quarterly"],
-  ["semi-annual", "Semi-Annual"], ["annual", "Annual"],
-];
+// One list for the whole app — see constants/frequency.ts. The values here used
+// to be "semi-annual" and "annual", which the calendar engine could not build a
+// schedule from: picking either produced a programme with no deadlines and no
+// explanation on screen.
 
 // Programs carry only two operational states in the directory: Active and
 // Inactive. Legacy/draft/empty values are treated as Active.
@@ -260,7 +261,7 @@ export default function PartyDetail() {
                     <Fragment key={prog.id}>
                       <tr>
                         <td><b>{prog.name}</b></td>
-                        <td>{toTitleCase(prog.bdx_frequency) || "—"}</td>
+                        <td>{frequencyLabel(prog.bdx_frequency)}</td>
                         <td>
                           <span className={`badge ${statusBadge(prog.status)}`}>
                             <span className="d" />{statusLabel(prog.status)}
@@ -309,8 +310,8 @@ export default function PartyDetail() {
                                 <select value={draft.bdx_frequency ?? ""}
                                   onChange={e => patchDraft("bdx_frequency", e.target.value)}>
                                   <option value="">—</option>
-                                  {BDX_FREQUENCIES.map(([v, l]) =>
-                                    <option key={v} value={v}>{l}</option>)}
+                                  {PROGRAMME_FREQUENCIES.map(f =>
+                                    <option key={f.value} value={f.value}>{f.label}</option>)}
                                 </select>
                               </div>
                               {/* <div className="field" style={{ marginBottom: 0 }}>

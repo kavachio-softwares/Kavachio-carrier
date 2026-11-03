@@ -1,0 +1,1044 @@
+// Requirement 17.2 — the carrier's Bordereau Calendar.
+//
+// Follows the carrier-centric design's `c-calendar` screen: five headline
+// counts, one row for every file somebody owes this month, and how often each
+// programme reports. The shape of the screen is the argument it makes — you
+// read what is owed, then what turned up, then what went onward, in that order,
+// because that is the order the questions get asked.
+//
+// KEYED ON THE DUE MONTH, not on the reporting period. Programmes on different
+// frequencies have to share one page: a monthly programme's July file and a
+// quarterly programme's Q2 file are both due in August, and August is the only
+// heading both of them belong under. The period each row is FOR is shown in the
+// row itself, so nothing is lost by grouping this way.
+//
+// Everything renders inside `.proto` — the badge / tile / card / note classes
+// are all defined as `.proto .x` in proto.css, and without the wrapper this
+// markup renders as unstyled text.
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { AlertTriangle, CalendarDays, Send, X } from "lucide-react";
+import {
+  chase, getBoard, getPlatformBoard, getVersions,
+  type BoardResponse, type BoardRow, type BoardSchedule, type BrokerContact,
+  type CalendarStatus, type ScheduleBroker, type SubmissionVersionRow,
+} from "../api/calendar";
+import { isKavachioAdmin } from "../auth";
+import { parseUtc } from "../utils/date";
+import NotificationBell from "../components/NotificationBell";
+import { InfoTip } from "../components/InfoTip";
+import { ExportFileViewer } from "../components/ExportFileViewer";
+import { Pagination } from "../components/Pagination";
+import { flowUrl } from "../components/ProgrammeStepper";
+import { ContractHeading, SupersededTag } from "../components/ContractTag";
+
+// Same vocabulary as ProgramCalendar's status badges, so a period reads the
+// same on the carrier's board as it does inside a bordereau setup.
+const STATUS_META: Record<CalendarStatus, { label: string; cls: string }> = {
+  scheduled:     { label: "Not due yet",  cls: "b-mut" },
+  due_soon:      { label: "Due soon",     cls: "b-info" },
+  due_today:     { label: "Due today",    cls: "b-warn" },
+  overdue:       { label: "Overdue",      cls: "b-crit" },
+  on_time:       { label: "On time",      cls: "b-ok" },
+  received_late: { label: "Arrived late", cls: "b-warn" },
+};
+
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+/** How a version came in — "v1 by hand, v2 by API" is one period's history. */
+const CAME_BY: Record<string, string> = {
+  upload: "Manual Upload", email: "Email", sftp: "SFTP", api: "API",
+  secure_link: "Secure Link",
+};
+
+/** ISO date → "15 Aug". The year is in the month heading above the table, so
+ *  repeating it on every row is noise. */
+function fmtDay(iso?: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
+/** "30 Sept 2026, 14:18" — the moment a file came in, in the viewer's own
+ *  time. A server timestamp (UTC), unlike the date-only strings above. */
+function fmtFullTime(iso?: string | null): string {
+  const d = parseUtc(iso);
+  if (!d) return "—";
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+    + ", " + d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtFull(iso?: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-GB",
+    { day: "numeric", month: "short", year: "numeric" });
+}
+
+/** "2026-08" → "August 2026". */
+function fmtMonth(key?: string | null): string {
+  if (!key) return "—";
+  const [y, m] = key.split("-").map(Number);
+  if (!y || !m) return key;
+  return new Date(y, m - 1, 1).toLocaleDateString("en-GB",
+    { month: "long", year: "numeric" });
+}
+
+// Rows per page in the programme list — the same size Users & Roles pages at.
+const PAGE_SIZE = 10;
+
+/* Tailwind's preflight strips the marker off every list, so bulleted notes
+   have to ask for the disc back by hand. */
+const LIST: React.CSSProperties = {
+  margin: 0, paddingLeft: 16, listStyle: "disc outside",
+};
+const LI: React.CSSProperties = { listStyle: "disc", marginBottom: 4 };
+
+export default function BordereauCalendar() {
+  // The Kavachio admin has no carrier of their own, so they get every
+  // carrier's board in one — the same numbers the platform dashboard's
+  // "Overdue Bordereaux" card already totals cross-tenant. It is read-only
+  // for them here too: only a broker amends a late file (canAmendExceptions),
+  // and nobody at Kavachio is the one who would send a reminder on a
+  // carrier's behalf, so chasing stays off this view entirely.
+  const platform = isKavachioAdmin();
+  // Only meaningful in platform mode — carried over from the dashboard's own
+  // carrier/broker filter (ArrivalsCard's `to`), so clicking through from a
+  // scoped "Overdue Bordereaux" card lands on that same scope here rather
+  // than snapping back to every carrier.
+  const [qs] = useSearchParams();
+  const scopeCarrier = platform ? Number(qs.get("carrier")) || undefined : undefined;
+  const scopeBroker = platform ? Number(qs.get("broker")) || undefined : undefined;
+  const [board, setBoard] = useState<BoardResponse | null>(null);
+  const [month, setMonth] = useState<string | undefined>(undefined);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  // No page-level busy flag: the page no longer performs the chase itself. The
+  // confirm dialog does, and owns the spinner on its own button.
+  // The period whose version history is open. One at a time: the panel answers
+  // "what did we actually send for this one", which is a question about a
+  // single row.
+  const [openRow, setOpenRow] = useState<BoardRow | null>(null);
+  // The rows a pending chase would cover. null = no dialog open. One row for
+  // "Chase them", every late row for "Chase what is late".
+  const [chasing, setChasing] = useState<BoardRow[] | null>(null);
+  const [schedPage, setSchedPage] = useState(1);
+  // The month's files and the deadlines behind them sit on two tabs — for
+  // everyone now, not only the platform view, so each table gets the page to
+  // itself. ?tab=deadlines opens the second one.
+  const [tab, setTab] = useState<"month" | "deadlines">(
+    () => (qs.get("tab") === "deadlines" ? "deadlines" : "month"));
+  const [monthPage, setMonthPage] = useState(1);
+  // Programmes whose full broker list is open — a long one shows the first few.
+  const [openBrokers, setOpenBrokers] = useState<Set<number>>(new Set());
+
+  const load = useCallback(async (m?: string) => {
+    setLoading(true); setErr(null); setMonthPage(1);
+    try {
+      const data = await (platform
+        ? getPlatformBoard(m, { carrier: scopeCarrier, broker: scopeBroker })
+        : getBoard(m));
+      setBoard(data);
+      setMonth(data.month);
+    } catch (e: any) {
+      setErr(e?.response?.data?.detail ?? e?.message ?? "Could not load the calendar.");
+    } finally {
+      setLoading(false);
+    }
+  }, [platform, scopeCarrier, scopeBroker]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const rows = board?.rows ?? [];
+  const counts = board?.counts;
+
+  // The programme list arrives whole (one row per programme), so it pages here
+  // rather than on the server. A reload can leave fewer programmes than the
+  // page we were on, hence the clamp.
+  const schedules = board?.schedules ?? [];
+  const schedPageCount = Math.max(1, Math.ceil(schedules.length / PAGE_SIZE));
+  const schedPageNow = Math.min(schedPage, schedPageCount);
+  const schedRows = schedules.slice((schedPageNow - 1) * PAGE_SIZE, schedPageNow * PAGE_SIZE);
+
+  // Who is actually late, for the header button. Unattributed rows are excluded
+  // for the same reason they are excluded from the counts: there is nobody to
+  // chase on a programme with no broker.
+  const overdue = useMemo(
+    () => rows.filter(r => !r.unassigned && r.status === "overdue"), [rows]);
+
+  // CHASING ASKS FIRST. A chase is a message about somebody being late, so the
+  // screen names who it is about and who would hear about it before anything is
+  // recorded — and gives you somewhere to say why. Firing straight off the click
+  // meant the only way to find out what a chase did was to do one.
+  async function confirmChase(rows: BoardRow[], note: string) {
+    if (rows.length === 0) return;      // never let an empty selection through
+    const res = await chase(rows.map(r => r.id), note);
+    setErr(null);
+    setMsg(res.chased === 0
+      ? "Nothing to follow up — those files are no longer late."
+      : res.mail_failed.length > 0
+      ? `Follow-up recorded for ${plural(res.chased, "late file")}, but `
+        + `${plural(res.mail_failed.length, "reminder")} could not be emailed — try again shortly.`
+      : res.emailed > 0
+      ? `Follow-up recorded and ${plural(res.emailed, "reminder")} emailed.`
+      : `Follow-up recorded for ${plural(res.chased, "late file")}.`);
+    await load(month);
+  }
+
+  const worstFirst = useMemo(() => {
+    // Most overdue first, then the rest by due date. The row that needs doing
+    // something about should not be somewhere in the middle of the table.
+    const rank: Record<string, number> = {
+      overdue: 0, due_today: 1, due_soon: 2, received_late: 3,
+      scheduled: 4, on_time: 5,
+    };
+    return [...rows].sort((a, b) => {
+      if (a.unassigned !== b.unassigned) return a.unassigned ? 1 : -1;
+      const ra = rank[a.status] ?? 9, rb = rank[b.status] ?? 9;
+      if (ra !== rb) return ra - rb;
+      return (a.due_date ?? "").localeCompare(b.due_date ?? "");
+    });
+  }, [rows]);
+
+  // Paged after the sort, so page 1 is always the worst of the whole month.
+  const monthPageCount = Math.max(1, Math.ceil(worstFirst.length / PAGE_SIZE));
+  const monthPageNow = Math.min(monthPage, monthPageCount);
+  const monthRows = platform
+    ? worstFirst.slice((monthPageNow - 1) * PAGE_SIZE, monthPageNow * PAGE_SIZE)
+    : worstFirst;
+
+  return (
+    <div className="proto">
+      <div className="view full">
+        <div className="page-head">
+          <div className="t">
+            <h2>
+              {platform ? "Bordereau Calendar — All Carriers" : "Bordereau Calendar"}
+              <InfoTip text={platform
+                ? "What every carrier is owed this month, across the whole "
+                  + "platform. Read-only here — chasing a late file is each "
+                  + "carrier's own call, made from their own calendar."
+                : "What each broker owes you and when, what has actually "
+                  + "arrived, and what you have sent on."} />
+            </h2>
+          </div>
+          <div className="actions">
+            <NotificationBell placement="inline" />
+            {!platform && (
+              <>
+                <Link className="btn" to="/files">Files Received →</Link>
+                <button className="btn pri" onClick={() => setChasing(overdue)}
+                  disabled={overdue.length === 0}
+                  title={overdue.length === 0 ? "Nothing is late" : ""}>
+                  {overdue.length === 0 ? "Nothing is late"
+                    : `Remind on late files (${overdue.length})`}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
+        {msg && <div className="note" style={{ marginBottom: 16 }}>{msg}</div>}
+
+        {/* ---- the four headline counts ---------------------------------- */}
+        <div className="tiles" style={{ marginBottom: 18 }}>
+          <div className="tile">
+            <div className="k">Due this month</div>
+            <div className="v">{counts?.due ?? "—"}</div>
+            {/* <div className="foot">
+              across {plural(board?.programme_count ?? 0, "programme")}
+            </div> */}
+          </div>
+          <div className="tile">
+            <div className="k">Arrived on time</div>
+            <div className="v" style={{ color: "var(--p-ok)" }}>{counts?.on_time ?? "—"}</div>
+            {/* <div className="foot">
+              {counts && counts.due > 0
+                ? `${Math.round((counts.on_time / counts.due) * 100)}% of what was due`
+                : "nothing due"}
+            </div> */}
+          </div>
+          <div className="tile">
+            <div className="k">Arrived late</div>
+            <div className="v" style={{ color: "var(--p-warn)" }}>{counts?.late ?? "—"}</div>
+            {/* <div className="foot">
+              {(() => {
+                const late = rows.filter(r => !r.unassigned && r.days_late != null);
+                if (late.length === 0) return "none";
+                const days = late.map(r => r.days_late!).sort((a, b) => a - b);
+                return days.length === 1 ? plural(days[0], "day") + " over"
+                  : `${days[0]} to ${days[days.length - 1]} days over`;
+              })()}
+            </div> */}
+          </div>
+          <div className={`tile${(counts?.never ?? 0) > 0 ? " alert" : ""}`}>
+            <div className="k">Never arrived</div>
+            <div className="v" style={{ color: "var(--p-crit)" }}>{counts?.never ?? "—"}</div>
+            {/* <div className="foot">
+              {overdue.length === 0 ? "nothing outstanding"
+                : (() => {
+                  const worst = [...overdue].sort(
+                    (a, b) => (b.days_over ?? 0) - (a.days_over ?? 0))[0];
+                  return `${worst.broker_name ?? "Unnamed broker"} · ${
+                    plural(worst.days_over ?? 0, "day")} over`;
+                })()}
+            </div> */}
+          </div>
+        </div>
+
+        <div className="tabs" style={{ alignItems: "center" }}>
+          <button className={tab === "month" ? "on" : ""} onClick={() => setTab("month")}>
+            Month-wise Calendar ({worstFirst.length})
+          </button>
+          <button className={tab === "deadlines" ? "on" : ""} onClick={() => setTab("deadlines")}>
+            All Programmes Calendar ({schedules.length})
+          </button>
+          <InfoTip text={tab === "month"
+            ? "One row for every file a broker owes in the month you pick: when it is "
+              + "due, whether it arrived, and what to do about it."
+            : "One row per programme: how often its bordereau is due, the next due date "
+              + "and when the deadlines stop. This is what fills the month-wise calendar."} />
+        </div>
+
+        {/* ---- one row per file somebody owes this month ------------------ */}
+        {tab === "month" && (
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="card-h">
+            <CalendarDays className="ci" />
+            <h3>{fmtMonth(month)}</h3>
+            <span className="sub">
+              one row for every file somebody owes you, by the date it is due
+            </span>
+            <div className="right">
+              <select className="fbar-select" value={month ?? ""}
+                onChange={e => load(e.target.value)}
+                disabled={loading || (board?.months?.length ?? 0) === 0}>
+                {(board?.months ?? []).map(m =>
+                  <option key={m} value={m}>{fmtMonth(m)}</option>)}
+                {(board?.months?.length ?? 0) === 0 && <option value="">No deadlines yet</option>}
+              </select>
+            </div>
+          </div>
+
+          <div className="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  {platform && <th>Carrier</th>}
+                  <th>Programme</th><th>Broker</th><th>Contract</th><th>Period</th><th>Due by</th>
+                  <th>Received On</th><th>Arrival Status</th>
+                  <th>Version</th><th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && (
+                  <tr><td colSpan={platform ? 10 : 9} style={{ padding: "18px 12px", textAlign: "center" }}
+                    className="muted">Loading…</td></tr>
+                )}
+                {!loading && worstFirst.length === 0 && (
+                  <tr><td colSpan={platform ? 10 : 9} style={{ padding: "18px 12px", textAlign: "center" }}
+                    className="muted">
+                    Nothing is due in this month.{" "}
+                    <Link className="linkish" to="/programs">Set a programme's frequency →</Link>
+                  </td></tr>
+                )}
+                {!loading && monthRows.map(r => {
+                  // A PROGRAMME WITH NO BROKER OWES NOTHING. It shows a blank
+                  // row rather than an overdue one, because there is nobody to
+                  // be late — and it stays in the list so the programme reads
+                  // as idle instead of being forgotten about.
+                  if (r.unassigned) {
+                    return (
+                      <tr key={r.id}>
+                        {platform && <td className="muted">{r.carrier_name ?? "—"}</td>}
+                        <td><b>{r.program_name}</b></td>
+                        <td className="muted">no broker on it yet</td>
+                        <td className="muted">—</td>
+                        <td className="mono">{r.period}</td>
+                        <td className="muted">—</td>
+                        <td className="muted">—</td>
+                        <td><span className="badge b-mut"><span className="d" />Nothing is owed</span></td>
+                        <td className="muted">—</td>
+                        <td>
+                          {!platform && (
+                            <Link className="linkish" to={flowUrl(r.program_id, "brokers")}
+                              title="This programme has no broker, so nobody owes a file yet">
+                              Add Broker →
+                            </Link>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  }
+                  const m = STATUS_META[r.status]
+                    ?? { label: String(r.status), cls: "b-mut" };
+                  // The badge says what happened; this says how far off it was,
+                  // which the badge cannot carry.
+                  const detail = r.status === "overdue"
+                    ? `${plural(r.days_over ?? 0, "day")} over, nothing yet`
+                    : r.days_late != null ? `${plural(r.days_late, "day")} late` : null;
+                  return (
+                    <tr key={r.id}>
+                      {platform && <td className="muted">{r.carrier_name ?? "—"}</td>}
+                      <td>{r.program_name}</td>
+                      <td><b>{r.broker_name ?? `Broker ${r.broker_party_id}`}</b></td>
+                      {/* The contract this period answers to: the one its file
+                          was checked against, or — still waiting — the
+                          programme x broker contract covering the period.
+                          Kavachio staff read it only; the contract page is the
+                          carrier's own. */}
+                      <td>
+                        {r.contract_id == null ? <span className="muted">—</span>
+                          : platform ? r.contract_name
+                          : <Link className="linkish" to={`/contracts/${r.contract_id}`}>{r.contract_name}</Link>}
+                        {(r.contract_replaced || r.contract_renewed) && <div><SupersededTag replaced={r.contract_replaced} renewed={r.contract_renewed} style={{ marginLeft: 0, marginTop: 4 }} /></div>}
+                      </td>
+                      <td className="mono">{r.period}</td>
+                      <td className="mono">{fmtDay(r.due_date)}</td>
+                      <td className="mono">
+                        {fmtDay(r.received_at)}
+                        {r.latest_received_at && r.latest_received_at !== r.received_at && (
+                          <div className="sub">latest {fmtDay(r.latest_received_at)}</div>
+                        )}
+                      </td>
+                      <td>
+                        <span className={`badge ${m.cls}`}><span className="d" />
+                          {detail ?? m.label}</span>
+                        {r.chase_count > 0 && (
+                          <div className="sub" style={{ marginTop: 3 }}>
+                            followed up {r.chase_count > 1 ? `${r.chase_count}×` : ""}{" "}
+                            {fmtDay(r.chased_at)}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        {r.version_count === 0
+                          ? <span className="muted">—</span>
+                          : (
+                            <>
+                            <span className={`badge ${r.version_count > 1 ? "b-warn" : "b-mut"}`}>
+                              <span className="d" />{r.version_label}
+                            </span>
+                            {(r.other_contract_files ?? 0) > 0 && (
+                              <div className="sub" style={{ marginTop: 3 }}>
+                                + {r.other_contract_files} under a replaced contract
+                              </div>
+                            )}
+                            </>
+                          )}
+                      </td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        {r.version_count > 0 && (
+                          <span className="linkish" onClick={() => setOpenRow(r)}
+                            title="Every file received for this period, and where it was sent">
+                            View Versions →
+                          </span>
+                        )}
+                        {!platform && r.status === "overdue" && (
+                          <span className="linkish" style={{ marginLeft: r.version_count > 0 ? 8 : 0 }}
+                            onClick={() => setChasing([r])}
+                            title="Email the broker a reminder that this file is late">
+                            Send Reminder →
+                          </span>
+                        )}
+                        {/* Nothing owed yet and nothing received: no action, and
+                            the dash says so rather than leaving a blank cell. */}
+                        {r.version_count === 0 && (platform || r.status !== "overdue") && (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {platform && (
+            <Pagination page={monthPageNow} pageCount={monthPageCount}
+              pageSize={PAGE_SIZE} totalItems={worstFirst.length}
+              onPageChange={setMonthPage} noun="files" />
+          )}
+
+          <div className="note" style={{ margin: 0, border: 0,
+            borderTop: "1px solid var(--p-border)", borderRadius: 0,
+            display: "flex", alignItems: "center", gap: 6 }}>
+            <b>A programme with no broker owes you nothing.</b>
+            <InfoTip text={"It shows a blank row rather than an overdue one, because "
+              + "there is nobody to be late. It stays in the list so you can see it "
+              + "is idle instead of forgetting it exists."} />
+          </div>
+        </div>
+        )}
+
+        {/* ---- what fills the calendar ---------------------------------- */}
+        {tab === "deadlines" && (
+        <div className="card">
+          <div className="card-h">
+            <CalendarDays className="ci" />
+            <h3>All Programmes</h3>
+            <span className="sub">how often each programme's bordereau is due</span>
+          </div>
+          <div className="tbl-wrap">
+            <table>
+              <thead>
+                <tr>{platform && <th>Carrier</th>}<th>Programme</th><th>Broker</th><th>Contract</th>
+                  <th>Reporting Frequency</th><th>Due</th>
+                  <th>Next Due Date</th>
+                  <th>Contract Ends On
+                    <InfoTip text={"The day this programme's contract ends. Deadlines are set up to "
+                    + "this date and stop after it."} />
+                  </th><th>Action</th></tr>
+              </thead>
+              <tbody>
+                {schedules.length === 0 && (
+                  <tr><td colSpan={platform ? 9 : 8} className="muted"
+                    style={{ padding: "14px 12px" }}>No programmes yet.</td></tr>
+                )}
+                {schedRows.map(sch => {
+                  const brokers = sch.brokers ?? [];
+                  const open = openBrokers.has(sch.program_id);
+                  const visible = open ? brokers : brokers.slice(0, BROKERS_SHOWN);
+                  const hidden = brokers.length - visible.length;
+                  const toggle = () => setOpenBrokers(prev => {
+                    const next = new Set(prev);
+                    if (next.has(sch.program_id)) next.delete(sch.program_id);
+                    else next.add(sch.program_id);
+                    return next;
+                  });
+                  // Programme-level cells: one per programme, spanning its brokers.
+                  const span = Math.max(1, visible.length);
+                  const head = (
+                    <>
+                      {platform && <td rowSpan={span} className="muted">{sch.carrier_name ?? "—"}</td>}
+                      <td rowSpan={span} style={{ verticalAlign: "top" }}>
+                        <b>{sch.program_name}</b>
+                        <div className="sub">
+                          {brokers.length === 0 ? "no brokers on it"
+                            : plural(brokers.length, "broker")}
+                        </div>
+                        {(hidden > 0 || (open && brokers.length > BROKERS_SHOWN)) && (
+                          <span className="linkish" style={{ fontSize: 12 }} onClick={toggle}>
+                            {open ? "Show fewer" : `+${plural(hidden, "more broker")}`}
+                          </span>
+                        )}
+                      </td>
+                    </>
+                  );
+                  const freq = (
+                    <>
+                      <td rowSpan={span} style={{ verticalAlign: "top" }}>
+                        {sch.frequency
+                          ? sch.frequency_label
+                          : <span className="badge b-warn"><span className="d" />Not set</span>}
+                      </td>
+                      <td rowSpan={span} style={{ verticalAlign: "top" }}>{sch.due_rule}</td>
+                    </>
+                  );
+                  if (brokers.length === 0) {
+                    return (
+                      <tr key={sch.program_id}>
+                        {head}
+                        <td className="muted">no broker yet</td>
+                        <td className="muted">—</td>
+                        {freq}
+                        <td className="mono">—</td>
+                        <td className="mono">
+                          {sch.covers_until ? fmtFull(sch.covers_until)
+                            : <span className="sub">no contract yet</span>}
+                        </td>
+                        <td>
+                          {platform ? <span className="muted">—</span> : (
+                            <Link className="linkish" to={flowUrl(sch.program_id, "brokers")}
+                              title="Deadlines need a broker, their contract and a bordereau setup. Start by adding a broker.">
+                              Add Broker →
+                            </Link>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return visible.map((b, i) => (
+                    <tr key={`${sch.program_id}-${b.broker_party_id}`}>
+                      {i === 0 && head}
+                      <td><b>{b.broker_name}</b></td>
+                      <td>
+                        {b.contract_id == null ? <span className="muted">No contract</span>
+                          : platform ? b.contract_name
+                          : <Link className="linkish" to={`/contracts/${b.contract_id}`}>{b.contract_name}</Link>}
+                        {b.contract_id != null && !b.contract_settled && (
+                          <div className="sub">not agreed and signed yet</div>
+                        )}
+                      </td>
+                      {i === 0 && freq}
+                      <td className="mono">{fmtFull(b.next_due)}</td>
+                      {/* Why the deadlines stop where they do: this broker's
+                          contract ends. */}
+                      <td className="mono">
+                        {b.contract_ends ? fmtFull(b.contract_ends)
+                          : <span className="sub">{b.contract_id == null
+                            ? "no contract yet" : "no end date on the contract"}</span>}
+                      </td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        {platform ? <span className="muted">—</span> : <NextStep sch={sch} b={b} />}
+                      </td>
+                    </tr>
+                  ));
+                })}
+              </tbody>
+            </table>
+          </div>
+          <Pagination page={schedPageNow} pageCount={schedPageCount}
+            pageSize={PAGE_SIZE} totalItems={schedules.length}
+            onPageChange={setSchedPage} noun="programmes" />
+        </div>
+        )}
+      </div>
+
+      {openRow && (
+        <VersionPanel row={openRow} onClose={() => setOpenRow(null)} />
+      )}
+
+      {chasing && (
+        <ChaseModal rows={chasing} onClose={() => setChasing(null)}
+          onConfirm={confirmChase} />
+      )}
+    </div>
+  );
+}
+
+/** How many brokers a programme shows before "+N more brokers". */
+const BROKERS_SHOWN = 3;
+
+/** The one thing to do next for a broker on a programme. A file is only owed
+ *  once there is a broker, their contract is agreed and signed, and a bordereau
+ *  setup is live — so the deadlines are offered last, not first. */
+function NextStep({ sch, b }: { sch: BoardSchedule; b: ScheduleBroker }) {
+  const q = `program_id=${sch.program_id}&broker_party_id=${b.broker_party_id}`;
+  if (b.contract_id == null) {
+    return <Link className="linkish" to={`/contracts/new?${q}`}
+      title="This broker has no contract on this programme yet">Add Contract →</Link>;
+  }
+  if (!b.contract_settled) {
+    return <Link className="linkish" to={`/contracts/${b.contract_id}`}
+      title="The contract has to be agreed and signed before a bordereau setup">Finish Contract →</Link>;
+  }
+  if (!b.setup_live) {
+    return <Link className="linkish" to={`/direct/setup?${q}`}
+      title="No live bordereau setup for this broker yet, so their files cannot be processed">
+      Set Up Bordereau →</Link>;
+  }
+  return <Link className="linkish" to={`/calendar?program=${sch.program_id}`}
+    title={sch.frequency
+      ? "Change how often it is due, the due day and reminders"
+      : "Everything is in place. Set how often this programme's bordereau is due."}>
+    {sch.frequency ? "Edit Deadlines →" : "Set Frequency →"}</Link>;
+}
+
+// ---------------------------------------------------------------------------
+// The version history for one period, and the place a release is recorded.
+//
+// Release lives HERE rather than on the table row because sending onward is a
+// statement about a specific version — "Munich Re got the corrected file on the
+// 3rd" — and the row cannot express which one without the chain beside it.
+// ---------------------------------------------------------------------------
+function VersionPanel({ row, onClose }: {
+  row: BoardRow; onClose: () => void;
+}) {
+  const [versions, setVersions] = useState<SubmissionVersionRow[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  // The ONE version whose file is open — the broker calendar's viewer, so the
+  // carrier reads every version the same way the broker who sent it does. It
+  // mounts only on click and streams just the rows on screen.
+  const [viewing, setViewing] = useState<SubmissionVersionRow | null>(null);
+
+  const reload = useCallback(async () => {
+    setErr(null);
+    try { setVersions((await getVersions(row.id)).versions); }
+    catch (e: any) {
+      setErr(e?.response?.data?.detail ?? "Could not load the versions.");
+    }
+  }, [row.id]);
+
+  useEffect(() => { reload(); }, [reload]);
+  useEffect(() => {
+    // While a file is open, Escape belongs to the viewer: it closes the file
+    // and leaves this list where it was, rather than closing both at once.
+    if (viewing) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, viewing]);
+
+  // Each contract keeps its own history: a file's number is its number
+  // within its contract — what Exception Triage calls it.
+  const label = (v: SubmissionVersionRow) =>
+    `Version ${v.file_version_no ?? v.version_no}`;
+  // The newest version is the file that counts; every earlier one was replaced.
+  const newest = versions?.length ? versions[versions.length - 1] : null;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(16,20,28,.45)",
+      display: "flex", justifyContent: "flex-end", zIndex: 60 }}
+      onClick={onClose}>
+      <div className="card" style={{ width: "min(560px, 100%)", height: "100%",
+        borderRadius: 0, overflowY: "auto", margin: 0 }}
+        onClick={e => e.stopPropagation()}>
+        <div className="card-h">
+          <h3>{row.program_name} · {row.period}</h3>
+          <span className="sub">{row.broker_name ?? "unattributed"}</span>
+          <div className="right">
+            <span className="linkish" onClick={onClose}
+              role="button" aria-label="Close"><X size={14} /></span>
+          </div>
+        </div>
+
+        <div style={{ padding: "16px 20px" }}>
+          {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
+
+          <h4 style={{ margin: "0 0 10px", fontSize: 13 }}>
+            Every file sent for this period
+          </h4>
+          <p className="muted" style={{ fontSize: 12.5, margin: "0 0 12px" }}>
+            The newest one is the file that counts — the earlier ones are kept
+            so a correction can be told apart from the original.
+          </p>
+          {versions === null && <p className="muted" style={{ fontSize: 13 }}>Loading…</p>}
+          {versions?.length === 0 && (
+            <div className="note">Nothing has been submitted for this period yet.</div>
+          )}
+          {versions?.map((v, i) => (
+            <div key={v.id}>
+            {/* A heading wherever the contract changes, so a replaced
+                contract's files read as their own, kept history. */}
+            {versions.some(x => x.contract_id !== versions[0].contract_id)
+              && (i === 0 || versions[i - 1].contract_id !== v.contract_id) && (
+              <ContractHeading name={v.contract_name} replaced={v.contract_replaced} renewed={v.contract_renewed} />
+            )}
+            <div className="card" style={{ marginBottom: 12, padding: "12px 14px",
+              boxShadow: "none" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8,
+                flexWrap: "wrap", marginBottom: 6 }}>
+                <span className={`badge ${v.kind === "original" ? "b-mut" : "b-warn"}`}>
+                  <span className="d" />
+                  {`Version ${v.version_no}`}
+                </span>
+                <span className="mono" style={{ fontSize: 12.5 }}>
+                  arrived {v.uploaded_at ? fmtFullTime(v.uploaded_at) : fmtFull(v.received_at)}
+                </span>
+                {/* "the file said July" and "we assumed July" are different
+                    levels of confidence, and an operator checking a wrong month
+                    needs to know which one this was. */}
+                {v.period_source === "oldest_open" && (
+                  <span className="sub" title="No period could be read from the file, so this was matched to the oldest period still open.">
+                    period assumed
+                  </span>
+                )}
+              </div>
+              {(v.source_filename || v.channel) && (
+                <div className="sub" style={{ marginBottom: 4 }}>
+                  {v.source_filename}
+                  {v.channel && CAME_BY[v.channel] ? `${v.source_filename ? " · " : ""}via ${CAME_BY[v.channel]}` : ""}
+                </div>
+              )}
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+                {newest && v.id !== newest.id ? (
+                  <span className="badge b-mut"><span className="d" />Replaced by {label(newest)}
+                    {newest.contract_id != null && v.contract_id !== newest.contract_id
+                      ? " of the current contract" : ""}</span>
+                ) : (
+                  <span className="badge b-ok"><span className="d" />The file that counts</span>
+                )}
+                {v.received_export_id != null && (
+                  <span className="linkish" style={{ marginLeft: "auto" }} role="button"
+                    onClick={() => setViewing(v)}>View file →</span>
+                )}
+              </div>
+            </div>
+            </div>
+          ))}
+
+          {/* Sending a bordereau onward is not built, so there is nothing
+              here to record against. The release fields stay on the version
+              row and the API still accepts them — when the send exists, this
+              panel gets the other half back. */}
+        </div>
+      </div>
+      {viewing?.received_export_id != null && (
+        // Outside the drawer's click-to-close area, so closing the file never
+        // closes the list behind it.
+        <div onClick={e => e.stopPropagation()}>
+          <ExportFileViewer exportId={viewing.received_export_id}
+            title={`${row.program_name} · ${row.period} · ${label(viewing)}`}
+            // A replaced version is history: its problems are worked on the
+            // newest file, so only that one offers the exceptions screen.
+            reviewTo={viewing.id === newest?.id
+              ? `/uploads/${viewing.received_export_id}/exceptions?download=${viewing.received_export_id}&from=calendar`
+              : undefined}
+            onClose={() => setViewing(null)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CHASING, WITH A CONFIRM STEP.
+//
+// Follows the prototype's chase dialog: it names what is late, who would hear
+// about it and how far over the deadline it is, and gives you a line of your own
+// to add before anything is written down.
+//
+// One component covers both entry points. "Chase them" passes a single row;
+// "Chase what is late" passes every overdue row on the board. The difference is
+// only how many rows arrive, so the dialog counts them rather than branching.
+//
+// Confirming records the chase against each period, keeps your note with it,
+// AND emails the broker's contact(s) — one reminder per late period, you cc'd
+// on each so you hold a copy of exactly what they were told.
+// ---------------------------------------------------------------------------
+function ChaseModal({ rows, onClose, onConfirm }: {
+  rows: BoardRow[];
+  onClose: () => void;
+  onConfirm: (rows: BoardRow[], note: string) => Promise<void>;
+}) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  // The bulk list shows a short preview and expands on request — a carrier
+  // with 100 late files should not open to a page-long dialog.
+  const [showAll, setShowAll] = useState(false);
+  const BULK_PREVIEW = 5;
+
+  const single = rows.length === 1;
+  // Everyone who would hear about it, deduplicated — one broker can be late on
+  // several programmes, and telling them three times is one conversation.
+  const recipients = useMemo(() => {
+    const byEmail = new Map<string, BrokerContact & { broker: string }>();
+    for (const r of rows) {
+      for (const c of r.contacts ?? []) {
+        if (!byEmail.has(c.email)) {
+          byEmail.set(c.email, { ...c, broker: r.broker_name ?? "this broker" });
+        }
+      }
+    }
+    return [...byEmail.values()];
+  }, [rows]);
+
+  // A broker with no user account has nobody to tell. Worth saying out loud —
+  // it is the one case where recording a chase achieves nothing at all.
+  const unreachable = useMemo(
+    () => [...new Set(rows.filter(r => (r.contacts ?? []).length === 0)
+      .map(r => r.broker_name ?? "an unnamed broker"))],
+    [rows]);
+
+  async function go() {
+    setBusy(true); setErr(null);
+    try {
+      await onConfirm(rows, note.trim());
+      onClose();
+    } catch (e: any) {
+      setErr(e?.response?.data?.detail ?? "Could not record the follow-up.");
+      setBusy(false);
+    }
+  }
+
+  const r0 = rows[0];
+  const initial = (n: string) => (n.trim()[0] ?? "?").toUpperCase();
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(16,20,28,.45)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      padding: 24, zIndex: 70 }}
+      onClick={onClose}>
+      <div className="card" style={{ width: single ? "min(540px, 100%)" : "min(820px, 100%)",
+        maxHeight: "88vh", margin: 0, display: "flex", flexDirection: "column",
+        overflow: "hidden", borderRadius: 14,
+        boxShadow: "0 24px 48px -12px rgb(16 20 28 / .28)" }}
+        role="dialog" aria-modal="true"
+        onClick={e => e.stopPropagation()}>
+
+        {/* ---- header -------------------------------------------------- */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12,
+          padding: "16px 20px", borderBottom: "1px solid var(--p-border)" }}>
+          <span style={{ width: 36, height: 36, borderRadius: 10, flex: "none",
+            background: "var(--p-primary-soft)", color: "var(--p-primary)",
+            display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Send size={16} />
+          </span>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--p-ink)" }}>
+              {single ? `Remind ${r0.broker_name ?? "this broker"}` : "Remind on all late files"}
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--p-muted)", marginTop: 2 }}>
+              {single
+                ? "An email asking for the missing file."
+                : "One reminder each, for the person who sends the file. Nothing goes to a broker who is up to date."}
+            </div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close"
+            style={{ width: 32, height: 32, borderRadius: 8, flex: "none",
+              border: "1px solid var(--p-border)", background: "var(--p-surface)",
+              color: "var(--p-muted)", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <X size={15} />
+          </button>
+        </div>
+
+        {/* ---- body (scrolls; header and footer stay put) --------------- */}
+        <div style={{ padding: "18px 20px", overflowY: "auto", flex: 1 }}>
+          {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
+
+          {single ? (
+            <>
+              {/* WHAT IS LATE — the file, its deadline and how far over, in one card. */}
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 12,
+                padding: "14px 16px", borderRadius: 10,
+                background: "var(--p-crit-soft)", border: "1px solid #F3C6CD" }}>
+                <AlertTriangle size={18} style={{ color: "var(--p-crit)", flex: "none", marginTop: 1 }} />
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "var(--p-ink)" }}>
+                    {r0.program_name} <span style={{ color: "var(--p-muted)", fontWeight: 500 }}>· {r0.period}</span>
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--p-muted)", marginTop: 4,
+                    display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <CalendarDays size={13} />
+                    Due <b style={{ color: "var(--p-ink)" }}>{fmtFull(r0.due_date)}</b> · still not arrived
+                  </div>
+                </div>
+                <span style={{ flex: "none", whiteSpace: "nowrap", fontSize: 12, fontWeight: 700,
+                  color: "var(--p-crit-ink)", background: "var(--p-surface)",
+                  border: "1px solid #F3C6CD", borderRadius: 999, padding: "4px 10px" }}>
+                  {plural(r0.days_over ?? 0, "day")} overdue
+                </span>
+              </div>
+
+              {r0.chase_count > 0 && (
+                <div style={{ fontSize: 12.5, color: "var(--p-muted)", marginTop: 10 }}>
+                  Already followed up{" "}
+                  <b style={{ color: "var(--p-ink)" }}>
+                    {r0.chase_count === 1 ? "once" : `${r0.chase_count} times`}
+                  </b>
+                  {r0.chased_at && <>, last on {fmtFull(r0.chased_at)}</>}.
+                </div>
+              )}
+
+              {/* WHO HEARS ABOUT IT */}
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--p-muted)",
+                margin: "18px 0 8px" }}>Goes to</div>
+              {recipients.length === 0 ? (
+                <div style={{ fontSize: 13, color: "var(--p-muted)", padding: "10px 12px",
+                  border: "1px dashed var(--p-border-2)", borderRadius: 10 }}>
+                  Nobody on record
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {recipients.map(c => (
+                    <div key={c.email} style={{ display: "flex", alignItems: "center", gap: 12,
+                      padding: "10px 12px", border: "1px solid var(--p-border)",
+                      borderRadius: 10, background: "var(--p-surface-2)" }}>
+                      <span style={{ width: 34, height: 34, borderRadius: "50%", flex: "none",
+                        background: "var(--p-primary)", color: "#fff", fontWeight: 700, fontSize: 14,
+                        display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        {initial(c.name || c.email)}
+                      </span>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--p-ink)" }}>{c.name}</div>
+                        <div style={{ fontSize: 12.5, color: "var(--p-muted)",
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {c.email}
+                        </div>
+                      </div>
+                      {/* An invited contact is the right address but an
+                          unconfirmed one — say so before it is relied on. */}
+                      {c.status === "invited" && (
+                        <span className="badge b-warn" style={{ flex: "none" }}>Invited, not signed in yet</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <div>
+              <div className="tbl-wrap" style={showAll
+                ? { maxHeight: 360, overflowY: "auto", border: "1px solid var(--p-border)", borderRadius: 8 }
+                : { border: "1px solid var(--p-border)", borderRadius: 8 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Broker</th><th>Email</th><th>Programme</th>
+                      <th>Due date</th><th style={{ textAlign: "right" }}>Overdue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(showAll ? rows : rows.slice(0, BULK_PREVIEW)).map(r => {
+                      const emails = (r.contacts ?? []).map(c => c.email);
+                      return (
+                        <tr key={r.id}>
+                          <td>{r.broker_name ?? "Unnamed broker"}</td>
+                          <td>{emails.length
+                            ? emails.join(", ")
+                            : <span className="muted">no contact on record</span>}</td>
+                          <td>{r.program_name} <span className="sub">· {r.period}</span></td>
+                          <td>{fmtFull(r.due_date)}</td>
+                          <td style={{ textAlign: "right" }}>
+                            <b>{plural(r.days_over ?? 0, "day")}</b>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {rows.length > BULK_PREVIEW && (
+                <button type="button" className="linkish" style={{ marginTop: 8 }}
+                  onClick={() => setShowAll(v => !v)}>
+                  {showAll ? "Show fewer" : `View all ${rows.length} →`}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Nobody to tell is a real outcome, not an edge case to hide. */}
+          {unreachable.length > 0 && (
+            <div className="note warn" style={{ marginTop: 14 }}>
+              <AlertTriangle size={13} style={{ verticalAlign: "-2px" }} />{" "}
+              {unreachable.length === 1
+                ? <><b>{unreachable[0]}</b> has nobody on record to contact.</>
+                : <><b>{unreachable.length} of these brokers</b> have nobody on
+                  record to contact: {unreachable.join(", ")}.</>}{" "}
+              The follow-up is still recorded against the period, but you will have to
+              reach them yourself.
+            </div>
+          )}
+
+          <div className="field" style={{ margin: "18px 0 0" }}>
+            <label>Anything to add? <span style={{ fontWeight: 400, color: "var(--p-faint)" }}>(optional)</span></label>
+            <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
+              style={{ resize: "vertical" }}
+              placeholder="e.g. we need this before month end" />
+            <div className="hint">Kept with the reminder, so what you asked for is
+              readable later.</div>
+          </div>
+        </div>
+
+        {/* ---- footer -------------------------------------------------- */}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10,
+          padding: "14px 20px", borderTop: "1px solid var(--p-border)",
+          background: "var(--p-surface-2)" }}>
+          <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn pri" onClick={go} disabled={busy}>
+            <Send size={13} />
+            {busy ? "Recording…"
+              : single ? "Send the reminder"
+              : `Send ${plural(rows.length, "reminder")}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

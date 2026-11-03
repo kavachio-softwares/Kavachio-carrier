@@ -7,8 +7,7 @@ from fastapi import UploadFile
 
 from contract_upload_services.constants import (
     MAX_CONTRACT_UPLOAD_BYTES,
-    MIN_CONTRACT_UPLOAD_BYTES,
-    MIN_READABLE_TEXT_CHARS,
+    MIN_CONTRACT_WORDS,
     CONTRACT_UPLOAD_ERROR_MESSAGES,
 )
 
@@ -28,12 +27,24 @@ class UploadContractValidationError(Exception):
         }
 
 
-def _code_msg(code: str) -> tuple[str, str]:
+def _code_msg(code: str, **fill) -> tuple[str, str]:
     msg = CONTRACT_UPLOAD_ERROR_MESSAGES.get(code)
     if not msg:
         # Fallback: should never happen
         return code, "Invalid contract upload."
-    return code, msg
+    return code, (msg.format(**fill) if fill else msg)
+
+
+def count_words(text: str) -> int:
+    """Words as a reader would count them.
+
+    A word is a whitespace-separated run with at least one letter or digit in
+    it. So "policy/inspection" is one word and "10,000" is one, while a bare
+    dash, bullet or "§" is none — punctuation on its own line would otherwise
+    let a page of rules and numbering pass for a contract. Unicode-aware, so a
+    wording in another script counts the same way.
+    """
+    return sum(1 for tok in (text or "").split() if any(ch.isalnum() for ch in tok))
 
 
 def _get_ext_lower(uploaded_filename: Optional[str]) -> str:
@@ -72,13 +83,15 @@ def validate_uploaded_contract(
             *_code_msg("CORRUPT_FILE")
         )
 
-    # 1) SIZE
+    # 1) SIZE — an upper bound only. How SHORT a contract may be is decided by
+    # its words, further down, once it has been read.
     size = len(file_bytes)
     if size > MAX_CONTRACT_UPLOAD_BYTES:
         raise UploadContractValidationError(*_code_msg("FILE_TOO_LARGE"))
 
-    if size < MIN_CONTRACT_UPLOAD_BYTES:
-        raise UploadContractValidationError(*_code_msg("FILE_TOO_SMALL"))
+    if size == 0:
+        # Nothing to read at all: that is a broken file, not a short contract.
+        raise UploadContractValidationError(*_code_msg("CORRUPT_FILE"))
 
     # 2) FORMAT
     ext = _get_ext_lower(file.filename)
@@ -153,10 +166,19 @@ def validate_uploaded_contract(
         readable_text = "\n".join(
             line.strip() for line in readable_text.splitlines() if line.strip()
         )
-        char_count = len(readable_text.strip())
+        words = count_words(readable_text)
 
-        if char_count < MIN_READABLE_TEXT_CHARS:
+        # NO WORDS AT ALL is a different problem from too few, and it gets the
+        # advice that fixes it. The extractor already OCRs image-only pages when
+        # Tesseract is installed, so a document that still yields nothing is a
+        # scan it could not read — telling someone with twenty scanned pages
+        # that their contract is "too short" would send them the wrong way.
+        if words == 0:
             raise UploadContractValidationError(*_code_msg("INSUFFICIENT_TEXT"))
+
+        if words < MIN_CONTRACT_WORDS:
+            raise UploadContractValidationError(*_code_msg(
+                "CONTRACT_TOO_SHORT", words=words, min_words=MIN_CONTRACT_WORDS))
 
     except UploadContractValidationError:
         raise

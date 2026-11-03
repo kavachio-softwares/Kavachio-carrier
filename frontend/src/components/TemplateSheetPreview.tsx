@@ -62,7 +62,12 @@ export default function TemplateSheetPreview({
   /** Given both of these, the grid becomes editable: insert and remove columns
    *  in place. Without them it stays a read-only picture of the template. */
   templateId?: number;
-  onChanged?: () => void;
+  /** Called after every successful edit. A template that has already produced a
+   *  file is NOT edited in place — the server copies it into the next version
+   *  and writes the change there — so the new id is handed back and the caller
+   *  has to follow it. Re-reading the id it started with is what made an added
+   *  column look like it had not been added at all. */
+  onChanged?: (nextTemplateId?: number) => void;
 }) {
   const names = sheets.map(s => s.sheet_name);
   const [active, setActive] = useState(names[0] ?? "");
@@ -73,6 +78,12 @@ export default function TemplateSheetPreview({
   // server refused. One at a time — a spreadsheet has one open menu.
   const [menu, setMenu] = useState<{ at: number; side: "left" | "right" } | null>(null);
   const [draft, setDraft] = useState("");
+  // The same insert, asked for the other way round: a plain button and one
+  // field, for the common case of "just put a column on the end". Pointing at
+  // a letter is precise but assumes you already know WHERE it goes; most new
+  // columns have no natural neighbour and simply belong at the end.
+  const [adding, setAdding] = useState(false);
+  const [addDraft, setAddDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const wrap = useRef<HTMLDivElement>(null);
@@ -105,16 +116,37 @@ export default function TemplateSheetPreview({
       }));
   }, [cols, maxRows]);
 
+  /** The id the edit actually landed on, when that is not the one we asked. */
+  function forkedTo(id: number | undefined): number | undefined {
+    return id != null && id !== templateId ? id : undefined;
+  }
+
   async function insert(at: number) {
     const name = draft.trim();
     if (!templateId || !name) return;
     setBusy(true); setErr(null);
     try {
-      await addTemplateField(templateId, {
+      const res = await addTemplateField(templateId, {
         sheet: sheet!.sheet_name, display_name: name, position: at,
       });
       setMenu(null); setDraft("");
-      onChanged?.();
+      onChanged?.(forkedTo(res.template?.id));
+    } catch (e: unknown) { setErr(errText(e)); }
+    finally { setBusy(false); }
+  }
+
+  /** Add a column at the END of the sheet. `position` is omitted, which is what
+   *  the API reads as "append". */
+  async function append() {
+    const name = addDraft.trim();
+    if (!templateId || !name) return;
+    setBusy(true); setErr(null);
+    try {
+      const res = await addTemplateField(templateId, {
+        sheet: sheet!.sheet_name, display_name: name,
+      });
+      setAdding(false); setAddDraft("");
+      onChanged?.(forkedTo(res.template?.id));
     } catch (e: unknown) { setErr(errText(e)); }
     finally { setBusy(false); }
   }
@@ -130,9 +162,9 @@ export default function TemplateSheetPreview({
       const next = doc.fields.map(f =>
         f.sheet === sheet!.sheet_name && f.column_name === col.column_name
           ? { ...f, active: false } : f);
-      await saveTemplateFields(templateId, next, false);
+      const res = await saveTemplateFields(templateId, next, false);
       setMenu(null);
-      onChanged?.();
+      onChanged?.(forkedTo(res.template?.id));
     } catch (e: unknown) { setErr(errText(e)); }
     finally { setBusy(false); }
   }
@@ -261,9 +293,18 @@ export default function TemplateSheetPreview({
           </button>
         ))}
         {editable && (
-          <span className="text-[11px] text-ink-soft">
-            Point at a column letter to insert or remove
-          </span>
+          <>
+            <button type="button" disabled={busy}
+              onClick={() => { setAddDraft(""); setErr(null); setAdding(true); }}
+              className="inline-flex items-center gap-1 rounded-md border border-border
+                bg-white px-2.5 py-1 text-[12px] font-medium hover:bg-surface-2
+                disabled:opacity-40">
+              <Plus size={12} /> Add column
+            </button>
+            <span className="text-[11px] text-ink-soft">
+              goes on the end — or point at a column letter to insert or remove
+            </span>
+          </>
         )}
         <span className="ml-auto text-[11.5px] text-ink-soft pr-1">
           {cols.length} column{cols.length === 1 ? "" : "s"} ·{" "}
@@ -271,6 +312,50 @@ export default function TemplateSheetPreview({
                        : "no records"}
         </span>
       </div>
+
+      {/* One field, because one is all this needs: the heading the file will
+          carry. Where it goes is already answered — the end — and everything
+          else about the column is set afterwards in the field builder. */}
+      {editable && adding && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6"
+          onClick={() => { if (!busy) setAdding(false); }}>
+          <div className="w-[min(420px,100%)] rounded-lg bg-white p-4 shadow-xl"
+            role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+            <div className="mb-3 flex items-center gap-2">
+              <h4 className="text-sm font-semibold">Add a column</h4>
+              <button type="button" className="ml-auto text-ink-soft"
+                onClick={() => setAdding(false)} aria-label="Close">
+                <X size={14} />
+              </button>
+            </div>
+            <label className="block text-[12px] text-ink-muted mb-1">Column name</label>
+            <input autoFocus value={addDraft} disabled={busy}
+              placeholder="e.g. Broker reference"
+              onChange={e => setAddDraft(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" && addDraft.trim()) append();
+                if (e.key === "Escape" && !busy) setAdding(false);
+              }}
+              className="w-full rounded-md border border-border px-2.5 py-1.5 text-[13px]" />
+            <p className="mt-1.5 text-[11.5px] text-ink-soft">
+              It is added at the end of <b>{sheet.sheet_name}</b>. Where its value
+              comes from is set in the field list below.
+            </p>
+            <div className="mt-3 flex justify-end gap-2">
+              <button type="button" disabled={busy} onClick={() => setAdding(false)}
+                className="rounded-md border border-border px-3 py-1.5 text-[12.5px]
+                  hover:bg-surface-2 disabled:opacity-40">
+                Cancel
+              </button>
+              <button type="button" disabled={busy || !addDraft.trim()} onClick={append}
+                className="inline-flex items-center gap-1 rounded-md bg-navy px-3 py-1.5
+                  text-[12.5px] font-semibold text-white disabled:opacity-40">
+                <Plus size={12} /> {busy ? "Adding…" : "Add column"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

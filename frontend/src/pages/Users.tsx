@@ -1,42 +1,39 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
-import { currentMga, getUser, normalizeRole } from "../auth";
+import { clearAuth, currentMga, getUser, normalizeRole } from "../auth";
 import { fmtDateTime } from "../utils/date";
 import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { InfoTip } from "../components/InfoTip";
 import { InviteSentModal } from "../components/InviteSentModal";
+import { addsCarrierUsers, invitesBrokers, useCarrierSeat } from "../hooks/useCarrierSeat";
 
 type U = {
   id: number; email: string; full_name: string;
   role: string; status: string; mga: string;
   last_login_at?: string | null;
-  /** Broker people appear here too now — this says which organisation. */
+  /** Broker ADMINS appear here too (never the brokers' own users) — this says
+   *  which organisation. */
   broker_party_id?: number | null;
   org_name?: string | null;
   org_kind?: "carrier" | "broker";
+  /** The one person accountable for this organisation. Exactly one row carries
+   *  it, and that row cannot be removed until ownership has moved. */
+  is_owner?: boolean;
 };
 
 // The API normalizes every stored/legacy role string down to the four-role
 // vocabulary (kavachio_admin rows are filtered out server-side, so a tenant
 // never sees the platform account in its own list).
 const ROLE_LABEL: Record<string, string> = {
-  carrier_admin: "Carrier Admin",
-  broker_admin: "Broker Admin",
-  operator: "Operator",
+  carrier_admin: "Carrier",
+  broker_admin: "Broker",
+  operator: "Broker User",
 };
 
-// What each seat can actually do — the reason anyone reads this table.
-const ROLE_CAN_DO: Record<string, string> = {
-  carrier_admin: "Everything you can, including approving contracts",
-  broker_admin: "Their contracts and file setups; adds their own staff",
-  operator: "Processing and exceptions only",
-};
-
-// Single source of truth for a user's displayed status bucket — used by both
-// the Status filter and the badge, so they can never drift out of sync.
 type StatusKey = "active" | "invited" | "inactive";
 const STATUS_LABEL: Record<StatusKey, string> = { active: "Active", invited: "Invited", inactive: "Inactive" };
 function statusKey(s: string): StatusKey {
@@ -77,10 +74,11 @@ export default function Users() {
   // last admin" needs the true total, not just however many are on this page.
   const filterKey = `${dq}|${roleFilter}|${statusFilter}`;
   const { page, setPage, items, total, extra, pageCount, reload } = useServerList<
-    U, { total_admins: number }
+    U, { total_admins: number; owner_user_id: number | null }
   >(
     (page, pageSize) =>
-      api.get<{ items: U[]; total: number; total_admins: number }>("/users", {
+      api.get<{ items: U[]; total: number; total_admins: number;
+                owner_user_id: number | null }>("/users", {
         params: {
           mga, page, page_size: pageSize,
           q: dq || undefined, role: roleFilter || undefined, status: statusFilter || undefined,
@@ -92,11 +90,39 @@ export default function Users() {
   const pageRows = items;
   const totalItems = total;
   const adminCount = extra?.total_admins ?? 0;
+  // What is yours to act on: carrier users are the carrier admin's alone; a
+  // broker admin is anyone's who has that broker on their list (the server
+  // sends a carrier user only the brokers they invited). Same rule on the server.
+  const seat = useCarrierSeat();
+
+  /** May act on this row — resend, reset, remove. Your own row always. */
+  function mayManage(u: U) {
+    if (u.id === me?.id) return true;
+    return u.org_kind === "broker" ? invitesBrokers(seat) : addsCarrierUsers(seat);
+  }
+
   function canRemove(u: U) {
-    if (u.id === me?.id) return false;          // can't remove yourself
-    if (normalizeRole(u.role) === "operator") return false;  // the broker's seat, not yours
+    // Leaving is allowed — you do not need somebody else's permission to close
+    // your own account. What is NOT allowed is walking out as the carrier
+    // admin, because that leaves the organisation accountable to nobody.
+    if (u.is_owner) return false;               // hand the role on first
+    if (!mayManage(u)) return false;            // the other seat's person
     if (normalizeRole(u.role) === "carrier_admin" && adminCount <= 1) return false; // can't remove last admin
     return true;
+  }
+
+  /** Why a Remove link is inert, in the words of the rule that stopped it. The
+   *  server enforces every one of these; this only explains it in place. */
+  function whyNotRemovable(u: U): string {
+    if (u.is_owner && u.id === me?.id)
+      return "You run this carrier on Kavachio, so your account cannot be removed.";
+    if (u.is_owner)
+      return "This person runs the carrier on Kavachio, so they cannot be removed.";
+    if (!mayManage(u))
+      return u.org_kind === "broker"
+        ? "Brokers are managed by the carrier people who invited them."
+        : "Only the carrier removes carrier users.";
+    return "This is the only account left — add another before removing this one.";
   }
 
   const filtersActive = q !== "" || roleFilter !== "" || statusFilter !== "";
@@ -105,12 +131,20 @@ export default function Users() {
   // Removal is confirmed in an in-app dialog (matching Reset Password below)
   // rather than a native confirm(), and the blocked case explains WHY instead
   // of firing an alert from a link that already looks disabled.
+  // The carrier admin, when somebody clicks Remove on their row. Not a
+  // confirmation — there is nothing to confirm until the role has moved.
+  const [blocked, setBlocked] = useState<U | null>(null);
   const [removeTarget, setRemoveTarget] = useState<U | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeErr, setRemoveErr] = useState<string | null>(null);
 
   function askRemove(u: U) {
-    if (!canRemove(u)) return;   // link is visibly muted; nothing to explain in a popup
+    // The carrier admin's row opens a dialog that EXPLAINS rather than
+    // confirms. A muted link with a tooltip is a dead end for the one person
+    // most likely to be clicking it — somebody who is leaving — and says
+    // nothing about the step that unblocks them.
+    if (u.is_owner) { setBlocked(u); return; }
+    if (!canRemove(u)) return;   // genuinely not yours to do; the title says why
     setRemoveErr(null);
     setRemoveTarget(u);
   }
@@ -123,6 +157,14 @@ export default function Users() {
         `/users/${removeTarget.id}`);
       // Someone other records name is suspended rather than deleted, so the
       // trail of who did what stays readable. Say which happened.
+      // Removing YOURSELF ends the session: reloading the list would fire a
+      // page of requests the server now refuses, and leave somebody staring at
+      // a screen they no longer have access to.
+      if (removeTarget.id === me?.id) {
+        clearAuth();
+        nav("/login", { replace: true });
+        return;
+      }
       setMsg({ kind: "ok", text: data?.message ?? `${removeTarget.email} was removed.` });
       setRemoveTarget(null);
       reload();
@@ -171,15 +213,23 @@ export default function Users() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Users &amp; Roles</h2>
-            <p>
-              Everyone who signs in on your side of the platform — your own team,
-              and the admins at the brokers who send you files. Operators are added
-              by their own broker, so they appear here but are not yours to change.
-            </p>
+            {/* Each carrier seat sees only the people it manages — the server
+                sends nothing else. */}
+            <h2>
+              Users &amp; Roles
+              <InfoTip text={
+                seat === "admin" ? "You, and the admins of the broker companies you work with."
+                : seat === "user" ? "The broker companies you invited, shown by the person who runs each one."
+                : "Everyone who signs in on your side — your own team, and the admins at the brokers who send you files."} />
+            </h2>
           </div>
+          {/* Carrier users were retired on 29 Sep 2026: the carrier admin
+              adds nobody at their own organisation, and brings brokers in. */}
           <div className="actions">
-            <button className="btn pri" onClick={() => nav("/users/new")}>＋ Invite User</button>
+            {invitesBrokers(seat) && (
+              <button className="btn pri"
+                      onClick={() => nav("/users/new?for=broker")}>＋ Invite a Broker</button>
+            )}
           </div>
         </div>
 
@@ -201,11 +251,15 @@ export default function Users() {
           <ListFilterBar
             search={{ value: q, onChange: setQ, placeholder: "Search name or email…" }}
             selects={[
-              {
+              // A carrier user's list holds one kind of person (broker admins),
+              // so a role filter would have nothing to choose between.
+              ...(seat === "user" ? [] : [{
                 key: "role", ariaLabel: "Filter by role", value: roleFilter, onChange: setRoleFilter,
+                // Operators never appear on this list, so they are not a filter.
                 options: [{ value: "", label: "All Roles" },
-                  ...Object.entries(ROLE_LABEL).map(([value, label]) => ({ value, label }))],
-              },
+                  ...Object.entries(ROLE_LABEL).filter(([value]) => value !== "operator")
+                    .map(([value, label]) => ({ value, label }))],
+              }]),
               {
                 key: "status", ariaLabel: "Filter by status", value: statusFilter, onChange: setStatusFilter,
                 options: [{ value: "", label: "All Statuses" },
@@ -219,14 +273,18 @@ export default function Users() {
           <div className="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Name</th><th>Organisation</th><th>Role</th><th>Can do</th>
-                  <th>Status</th><th>Last Sign-In</th><th></th></tr>
+                {/* Six headings for six cells. The trailing empty <th> was
+                    left behind when the "Can do" column went, and a header
+                    column with no body cells under it took real width — which
+                    is why the actions sat in a wide, half-empty column. */}
+                <tr><th>Name</th><th>Organisation</th><th>Role</th>
+                  <th>Status</th><th>Last Sign-In</th>
+                  <th style={{ textAlign: "right" }}>Actions</th></tr>
               </thead>
               <tbody>
                 {pageRows.map(u => {
                   const sb = statusBadge(u.status);
                   const role = normalizeRole(u.role);
-                  const isAdminRow = role === "carrier_admin";
                   const invited = u.status === "pending" || u.status === "invited";
                   return (
                     <tr key={u.id}>
@@ -238,56 +296,89 @@ export default function Users() {
                           it "Broker Admin" says the seat but not the company. */}
                       <td>
                         {u.org_name ?? "—"}
-                        <div className="sub">
+                        {/* <div className="sub">
                           {u.org_kind === "broker" ? "Broker" : "Your organisation"}
-                        </div>
+                        </div> */}
                       </td>
                       <td>
-                        <span className={`badge ${isAdminRow ? "b-info" : "b-mut"}`}>
-                          <span className="d" />{ROLE_LABEL[role] ?? role}
+                        {/* One organisation, one carrier admin — the person
+                            accountable for it and the only one who adds or
+                            removes people. Everyone else is a carrier: the
+                            same DB role, deliberately, because the column
+                            only accepts four values and the distinction that
+                            matters is who owns the place. */}
+                        <span className={`badge ${u.is_owner ? "b-info" : "b-mut"}`}>
+                          <span className="d" />
+                          {u.org_kind === "broker"
+                            ? (ROLE_LABEL[role] ?? role)
+                            : u.is_owner ? "Carrier" : "Carrier User"}
                         </span>
                       </td>
-                      <td className="l">{ROLE_CAN_DO[role] ?? "—"}</td>
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="muted">{fmtDateTime(u.last_login_at)}</td>
                       <td className="r">
-                        {invited ? (
-                          <span className="linkish" onClick={() => resend(u)}>
-                            Resend Invite
-                          </span>
-                        ) : (
-                          <span className="linkish" onClick={() => resetPassword(u)}>
-                            Reset Password
-                          </span>
-                        )}
-                        {" · "}
-                        {/* When removal isn't allowed the element carries NO click
-                            handler at all — it's inert, not a link that silently
-                            does nothing — and aria-disabled drives the styling
-                            (grey, not-allowed cursor, no hover underline). The
-                            title says which rule applies. */}
-                        {canRemove(u) ? (
-                          <span className="linkish" title="Remove this user"
-                            onClick={() => askRemove(u)}>
-                            Remove
-                          </span>
-                        ) : (
-                          <span className="linkish mut" aria-disabled="true"
-                            title={u.id === me?.id
-                              ? "You can't remove your own account."
-                              : normalizeRole(u.role) === "operator"
-                                ? "Operators belong to the broker. Their own admin adds and removes them."
-                                : "This is the only admin — add another before removing this one."}>
-                            Remove
-                          </span>
-                        )}
+                        {/* BUTTONS, not linked words. Three actions separated
+                            by middots read as one sentence — "Reset Password ·
+                            Make carrier admin · Remove" — so the row offered no
+                            hit target the eye could find and the destructive
+                            one sat in the same ink as the safe ones. `rowacts`
+                            is the house flex row, flushed RIGHT. Centring put
+                            every row's buttons in a different place, because
+                            the rows do not all carry the same three: a two
+                            button row and a three button row shared no edge and
+                            the column read as ragged. Aligned right, the last
+                            button — the destructive one — runs in a straight
+                            line down the page, and the heading follows it.
+                            Its top margin is dropped inside a cell. */}
+                        <div className="rowacts"
+                             style={{ marginTop: 0, justifyContent: "flex-end" }}>
+                          {/* Resend / reset only on rows that are yours to act
+                              on — the server answers 403 on the others. */}
+                          {mayManage(u) && (invited ? (
+                            <button type="button" className="btn sm"
+                                    onClick={() => resend(u)}>
+                              Resend Invite
+                            </button>
+                          ) : (
+                            <button type="button" className="btn sm"
+                                    onClick={() => resetPassword(u)}>
+                              Reset Password
+                            </button>
+                          ))}
+                          {/* Removing somebody is the one act here that cannot
+                              be undone, so it is the one button that is not
+                              the same colour as the others. */}
+                          {canRemove(u) || u.is_owner ? (
+                            <button
+                              type="button" className="btn sm danger"
+                              title={u.is_owner ? whyNotRemovable(u) : "Remove this user"}
+                              onClick={() => askRemove(u)}
+                            >
+                              {u.is_owner && u.id === me?.id ? "Leave" : "Remove"}
+                            </button>
+                          ) : (
+                            // Genuinely disabled rather than a look-alike: no
+                            // handler, not focusable, announced as disabled.
+                            // The title sits on the wrapper because a disabled
+                            // button swallows the hover that would show it.
+                            <span title={whyNotRemovable(u)}>
+                              <button type="button" className="btn sm danger" disabled>
+                                Remove
+                              </button>
+                            </span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-            {totalItems === 0 && !filtersActive && <div className="empty">No users yet.</div>}
+            {totalItems === 0 && !filtersActive && (
+              <div className="empty">
+                {seat === "user" ? "You have not invited any broker companies yet." : "No users yet."}
+              </div>
+            )}
             {totalItems === 0 && filtersActive && <div className="empty">No users match the filters.</div>}
           </div>
           {totalItems > 0 && (
@@ -296,10 +387,16 @@ export default function Users() {
           )}
         </div>
 
-        <div className="note" style={{ marginTop: 14, maxWidth: 560 }}>
-          Bringing a broker on board? Invite their admin above — the broker
-          organisation is created with the invitation. Put them on a programme
-          from Programmes; until then they cannot produce.
+        <div className="note" style={{ marginTop: 14 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Adding a broker company</div>
+          {/* Tailwind's preflight strips the marker off every list, so the disc
+              is asked for by hand — the same as ProgramCalendar's notes. */}
+          <ul style={{ margin: 0, padding: "0 0 0 16px", listStyle: "disc outside" }}>
+            <li style={{ listStyle: "disc", marginBottom: 4 }}>Invite the company above.</li>
+            <li style={{ listStyle: "disc" }}>
+              Add it to a programme — it can't send files until then.
+            </li>
+          </ul>
         </div>
       </div>
 
@@ -347,16 +444,59 @@ export default function Users() {
 
       {/* Remove user — same in-app dialog pattern as Reset Password above, so
           the two destructive actions on this screen look like one product. */}
+      {blocked && (
+        <div className="proto-modal-overlay" onClick={() => setBlocked(null)}>
+          <div className="proto-modal" onClick={e => e.stopPropagation()}>
+            <div className="m-h">
+              <h3>This account cannot be removed</h3>
+              <button className="x" onClick={() => setBlocked(null)}
+                      aria-label="Close">×</button>
+            </div>
+            <div className="m-b">
+              {blocked.id === me?.id ? (
+                <>
+                  You run this organisation on Kavachio, so you cannot
+                  remove yourself — it would leave the organisation
+                  accountable to nobody.
+                </>
+              ) : (
+                <>
+                  <b>{blocked.full_name || blocked.email}</b> is this
+                  organisation&rsquo;s main account, so they cannot be removed.
+                </>
+              )}
+            </div>
+            <div className="m-f">
+              <button className="btn pri" onClick={() => setBlocked(null)}>
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {removeTarget && (
         <div className="proto-modal-overlay" onClick={closeRemove}>
           <div className="proto-modal" onClick={e => e.stopPropagation()}>
             <div className="m-h">
-              <h3>Remove User</h3>
+              <h3>{removeTarget.id === me?.id ? "Leave this organisation" : "Remove User"}</h3>
               <button className="x" onClick={closeRemove} aria-label="Close">×</button>
             </div>
             <div className="m-b">
-              Remove <b>{removeTarget.full_name || removeTarget.email}</b> ({removeTarget.email})
-              from your organization? They will lose access immediately.
+              {removeTarget.id === me?.id ? (
+                <>
+                  Remove <b>your own account</b> ({removeTarget.email}) from
+                  this organisation? You will be signed out and will lose
+                  access immediately. This is not something you can undo
+                  yourself — somebody still here would have to invite you back.
+                </>
+              ) : (
+                <>
+                  Remove <b>{removeTarget.full_name || removeTarget.email}</b>{" "}
+                  ({removeTarget.email}) from your organization? They will lose
+                  access immediately.
+                </>
+              )}
               {removeErr && (
                 <div style={{ marginTop: 10, color: "var(--p-crit)" }}>{removeErr}</div>
               )}
@@ -364,7 +504,8 @@ export default function Users() {
             <div className="m-f">
               <button className="btn" onClick={closeRemove} disabled={removeBusy}>Cancel</button>
               <button className="btn pri" onClick={confirmRemove} disabled={removeBusy}>
-                {removeBusy ? "Removing…" : "Remove User"}
+                {removeBusy ? "Removing…"
+                 : removeTarget.id === me?.id ? "Remove my account" : "Remove User"}
               </button>
             </div>
           </div>

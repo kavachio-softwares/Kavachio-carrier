@@ -11,6 +11,7 @@ import { useState } from "react";
 import { api } from "../api/client";
 import { isKavachioAdmin } from "../auth";
 import { fmtDate, fmtDateTime } from "../utils/date";
+import { InfoTip } from "../components/InfoTip";
 import { ListFilterBar } from "../components/ListFilterBar";
 import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
@@ -23,16 +24,23 @@ type Row = {
   created_at?: string | null; last_login_at?: string | null;
 };
 type Counts = {
-  total: number; kavachio: number; carrier_users: number;
-  broker_users: number; operators: number; never_signed_in: number;
-  carriers: number; brokers: number;
+  total: number;
+  carrier_admins: number; carrier_users: number;
+  broker_admins: number; broker_users: number;
+  never_signed_in: number; carriers: number; brokers: number;
 };
 
+// One entry per SEAT this screen can show — Kavachio's own account is not one
+// of them (see the server's own comment on why: exactly one, and it is Us,
+// not a role a carrier or broker holds). Carrier admin and carrier user share
+// the one DB role; the server tells them apart by who owns the organisation
+// and sends back "carrier_user" for the rest, so this screen (and its filter)
+// can name both.
 const ROLE_LABEL: Record<string, string> = {
-  kavachio_admin: "Kavachio Admin",
-  carrier_admin: "Carrier Admin",
-  broker_admin: "Broker Admin",
-  operator: "Operator",
+  carrier_admin: "Carrier",
+  carrier_user: "Carrier User",
+  broker_admin: "Broker",
+  operator: "Broker User",
 };
 const STATUS_LABEL: Record<string, string> = {
   active: "Active", invited: "Invited", inactive: "Inactive",
@@ -85,11 +93,11 @@ export default function AdminUsers() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Users &amp; Roles</h2>
-            <p>
-              Everyone who can sign in to Kavachio, which company they work for,
-              and what they are allowed to do.
-            </p>
+            <h2>
+              Users &amp; Roles
+              <InfoTip text={"Everyone who can sign in to Kavachio, which company they work "
+                + "for, and what they are allowed to do."} />
+            </h2>
           </div>
           <div className="actions">
             <span className="badge b-mut"><span className="d" />View only</span>
@@ -99,18 +107,19 @@ export default function AdminUsers() {
     
 
         {c && (
-          <div className="tiles five" style={{ marginBottom: 18 }}>
+          <div className="tiles three" style={{ marginBottom: 18 }}>
             <Tile k="Users" v={c.total}
-              foot={c.never_signed_in > 0
-                ? `${c.never_signed_in} ${c.never_signed_in === 1 ? "has" : "have"} not signed in yet`
-                : "all have signed in"} />
-            <Tile k="Kavachio Admin" v={c.kavachio}
-              foot={c.kavachio === 1 ? "the only Kavachio account" : "Kavachio accounts"} />
-            <Tile k="Carrier users" v={c.carrier_users}
-              foot={`across ${c.carriers} ${c.carriers === 1 ? "carrier" : "carriers"}`} />
-            <Tile k="Broker users" v={c.broker_users}
-              foot={`across ${c.brokers} ${c.brokers === 1 ? "broker" : "brokers"}`} />
-            <Tile k="Operators" v={c.operators} foot="added by their brokers" />
+              info="Everyone with a login, across the two seats beside this one. Not Kavachio's own account — there is exactly one of those, and it is Us, not a seat to review." />
+            <Tile k="Carrier" v={c.carrier_admins}
+              info={`The one person accountable for each carrier — its recognised `
+                + `owner. Not every carrier has named one yet (${c.carriers} carriers `
+                + `have people at all; only ${c.carrier_admins} of them have an owner `
+                + `on record), which is why this can read lower than the number of `
+                + `carrier organisations beside it.`} />
+            <Tile k="Broker" v={c.broker_admins}
+              info={`The first person a carrier invited at a broker. Unlike carriers, `
+                + `every broker they work with currently has exactly one — which is `
+                + `why this matches the number of broker organisations beside it.`} />
           </div>
         )}
 
@@ -120,8 +129,12 @@ export default function AdminUsers() {
             selects={[
               {
                 key: "role", ariaLabel: "Filter by role", value: role, onChange: setRole,
+                // Carrier users and broker users were retired on 29 Sep 2026;
+                // their labels stay in ROLE_LABEL only to name a leftover row.
                 options: [{ value: "", label: "All roles" },
-                  ...Object.entries(ROLE_LABEL).map(([value, label]) => ({ value, label }))],
+                  ...Object.entries(ROLE_LABEL)
+                    .filter(([value]) => value !== "carrier_user" && value !== "operator")
+                    .map(([value, label]) => ({ value, label }))],
               },
               {
                 key: "status", ariaLabel: "Filter by status", value: status, onChange: setStatus,
@@ -137,7 +150,7 @@ export default function AdminUsers() {
             <table>
               <thead>
                 <tr>
-                  <th>Name</th><th>Organisation</th><th>Role</th>
+                  <th>Name</th><th>Email</th><th>Organisation</th><th>Role</th>
                   <th>Status</th><th>Created</th><th>Last sign-in</th>
                 </tr>
               </thead>
@@ -148,17 +161,21 @@ export default function AdminUsers() {
                     <tr key={u.id}>
                       <td>
                         <b>{u.full_name}</b>
-                        <div className="sub">{u.email}</div>
+                        {/* <div className="sub">{u.email}</div> */}
+                      </td>
+                      <td>
+                        {/* <b>{u.full_name}</b> */}
+                        <span >{u.email}</span>
                       </td>
                       <td>
                         {u.org_name}
                         {/* Which side of the platform they sit on. A broker
                             works for several carriers, so its name alone does
                             not say whose book this is. */}
-                        <div className="sub">
+                        {/* <div className="sub">
                           {u.org_kind === "kavachio" ? "the platform"
                             : u.org_kind === "broker" ? "broker" : "carrier"}
-                        </div>
+                        </div> */}
                       </td>
                       <td>{ROLE_LABEL[u.role] ?? u.role}</td>
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
@@ -187,12 +204,13 @@ export default function AdminUsers() {
   );
 }
 
-function Tile({ k, v, foot }: { k: string; v: number; foot: string }) {
+// Anything that EXPLAINS the tile goes in `info`, behind the icon, rather
+// than spelled out on the face of the tile.
+function Tile({ k, v, info }: { k: string; v: number; info?: string }) {
   return (
     <div className="tile">
-      <div className="k">{k}</div>
+      <div className="k">{k}{info && <InfoTip text={info} />}</div>
       <div className="v">{v}</div>
-      <div className="foot">{foot}</div>
     </div>
   );
 }

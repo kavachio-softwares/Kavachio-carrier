@@ -1,0 +1,328 @@
+/**
+ * Contracts — every contract this carrier holds, in one place.
+ *
+ * The view the app never had. Contracts could only be reached one broker or one
+ * programme at a time, which answers "what does CRC hold?" but not the
+ * questions people actually arrive with: what is expiring, what is waiting on
+ * me, where is that contract.
+ *
+ * Two ways a contract gets here and they are different jobs: uploading one that
+ * EXISTS reads its terms out of the wording; raising one states terms being
+ * agreed now, with the document to follow. Both end at the same record.
+ *
+ * Signature history hangs off this screen rather than off the sidebar: what is
+ * out for signature is a fact about the contracts listed here, and reading it
+ * anywhere else means first remembering which contract you meant.
+ */
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { FilePlus2, History, Upload } from "lucide-react";
+import { canAccessPath } from "../access";
+import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
+import {
+  listContractsPaged,
+  type ContractRecord, type Lifecycle,
+} from "../api/contractRecord";
+import { fmtDate } from "../utils/date";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { useServerList } from "../hooks/useServerList";
+import { ListFilterBar } from "../components/ListFilterBar";
+import { Pagination } from "../components/Pagination";
+import AddContractModal from "../components/AddContractModal";
+import { InfoTip } from "../components/InfoTip";
+
+/** Rows per page. The server cuts the page in SQL, so this is what gets
+ *  FETCHED — not what is shown out of a larger fetch. */
+const PAGE_SIZE = 10;
+
+/** Why a code sits beside a name: the broker can write it instead. */
+const CODE_TIP = "Short code — brokers can write this in an email subject or file name instead of the name";
+
+
+/** What the lifecycle means to someone scanning the list.
+ *
+ *  `expired` is derived by the server from the term rather than stored, so a
+ *  contract that lapsed overnight reads correctly here without anything having
+ *  run to update it. */
+const STATE: Record<Lifecycle, { label: string; cls: string; note: string }> = {
+  // Neutral on purpose: this list carries both a carrier's own drafts (nobody
+  // to submit to) and a broker's (waiting to be submitted).
+  draft: { label: "Draft", cls: "b-mut", note: "not live yet" },
+  // An UPLOADED contract, waiting on the carrier admin to accept it. It says
+  // "accept" rather than "review" because that is the whole of the act: the
+  // document was executed before it got here, so there is nothing to
+  // negotiate and nothing to sign, and the admin's word is what puts it in
+  // force. A contract WRITTEN here never passes through this state — it goes
+  // straight to the broker and meets the admin afterwards, at the signature.
+  pending: { label: "Awaiting acceptance", cls: "b-warn",
+             note: "with the carrier" },
+  in_review: { label: "Out for review", cls: "b-warn", note: "with the broker" },
+  changes_requested: { label: "Changes requested", cls: "b-warn",
+                       note: "the broker pushed back — your move" },
+  // The note is finished per row from whose_turn — see turnNote(). `agreed`
+  // covers the whole signing round, carrier first and broker after it, so the
+  // state on its own cannot say who is being waited on.
+  agreed: { label: "Terms agreed", cls: "b-ok", note: "terms settled" },
+  signed: { label: "Signed", cls: "b-ok",
+            note: "returned — yours to place and activate" },
+  // "In force", not "Live". Live is what a website is: it says the row is
+  // switched on and nothing about the contract. In force is the state an
+  // insurance contract is actually in — signed, running, and the only state a
+  // bordereau can be produced against — and it is the phrase the wording, the
+  // lifecycle and the rest of this app already use.
+  active: { label: "Active", cls: "b-ok",
+            note: "cover is running — bordereaux can be produced against it" },
+  expired: { label: "Expired", cls: "b-mut", note: "its term has run out" },
+  terminated: { label: "Terminated", cls: "b-crit", note: "ended early" },
+  superseded: { label: "Superseded", cls: "b-mut", note: "replaced by a renewal" },
+};
+
+const TYPE_LABEL: Record<string, string> = {
+  insurer_broker: "Insurer ↔ Broker",
+  insurer_reinsurer: "Insurer ↔ Reinsurer",
+};
+
+export default function Contracts() {
+  const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [err, setErr] = useState("");
+
+  // ?program_id= opens the list already filtered — the Programmes stepper
+  // links here for a programme whose contracts are all in place.
+  const [params] = useSearchParams();
+  const [programme, setProgramme] = useState(params.get("program_id") ?? "");
+  // ?waiting=mine opens the list already narrowed to what is this side's move
+  // — where both dashboard tiles land. Held as state, not read straight off
+  // the URL, so clearing it clears like every other filter on this screen.
+  const [waiting, setWaiting] = useState(params.get("waiting") === "mine");
+  const [lifecycle, setLifecycle] = useState("");
+  const [type, setType] = useState("");
+  const [q, setQ] = useState("");
+  // Debounced because this search runs on the SERVER — filtering happens in
+  // SQL, so an undebounced box is one request per keystroke.
+  const query = useDebouncedValue(q, 300);
+
+  useEffect(() => {
+    getHierarchy()
+      .then(h => setProgrammes(h.programmes))
+      .catch(() => setProgrammes([]));
+  }, []);
+
+  // TRUE server-side paging: every filter AND the page are applied in SQL, so a
+  // carrier holding thousands of contracts fetches ten rows rather than
+  // thousands to show ten. The filters are folded into one key, which the hook
+  // uses to snap back to page 1 — a filter that narrowed the list while you sat
+  // on page 4 would otherwise show an empty table.
+  const filterKey = [programme, lifecycle, type, query.trim(), waiting].join("|");
+  const {
+    items: rows, total, page, pageCount, loading, setPage, reload,
+  } = useServerList<ContractRecord>(
+    (pg, size) => listContractsPaged({
+      program_id: programme ? Number(programme) : undefined,
+      lifecycle: lifecycle || undefined,
+      contract_type: type || undefined,
+      waiting: waiting ? "mine" : undefined,
+      q: query.trim() || undefined,
+      page: pg, page_size: size,
+    }).catch(e => {
+      setErr(e?.response?.data?.detail || "Could not load contracts.");
+      throw e;
+    }),
+    filterKey, PAGE_SIZE,
+  );
+
+  const filtersActive = !!(programme || lifecycle || type || q || waiting);
+
+  // Surfaced above the table because it is the one thing on this screen that
+  // blocks work: a contract that names a document nobody supplied cannot be
+  // submitted, activated, or have its rules generated.
+  const blocked = useMemo(
+    () => (rows ?? []).filter(r => r.missing_references.length > 0).length,
+    [rows]);
+
+  return (
+    <div className="proto">
+      <div className="view full">
+        <div className="page-head">
+          <div className="t">
+            <h2>Contracts
+              <InfoTip text="Every contract you hold, across all your programmes and brokers." />
+            </h2>
+          </div>
+          <div className="actions">
+            {/* Where the Signatures sidebar tab went. Watching a signing round
+                is watching a contract, so the way in is from the contracts you
+                hold rather than a tab of its own — and the same link, carrying
+                a contract id, is what the record's Signatures card opens. */}
+            {canAccessPath("/contracts/signatures") && (
+              <Link to="/contracts/signatures" className="btn">
+                <History size={14} /> Signature history
+              </Link>
+            )}
+            <button type="button" className="btn" onClick={() => setUploading(true)}>
+              <Upload size={14} /> Upload existing
+            </button>
+            <Link to="/contracts/new" className="btn pri">
+              <FilePlus2 size={14} /> Configure Contract
+            </Link>
+          </div>
+        </div>
+
+        {err && (
+          <div className="note warn" style={{ marginBottom: 16, maxWidth: 620 }}>
+            {err}
+          </div>
+        )}
+
+        {blocked > 0 && (
+          <div className="note warn" style={{ marginBottom: 16 }}>
+            <b>
+              {blocked} contract{blocked === 1 ? "" : "s"} refer to a document
+              that has not been supplied.
+            </b>{" "}
+            Until it is, some of their clauses cannot be checked — so they
+            cannot be submitted or made active.
+          </div>
+        )}
+
+        <div className="card">
+          <ListFilterBar
+            search={{ value: q, onChange: setQ,
+                      placeholder: "Name, UMR or filename" }}
+            selects={[
+              {
+                key: "programme", ariaLabel: "Filter by programme",
+                value: programme, onChange: setProgramme,
+                options: [{ value: "", label: "All programmes" },
+                  ...programmes.map(p => ({ value: String(p.id), label: p.name }))],
+              },
+              {
+                key: "type", ariaLabel: "Filter by type",
+                value: type, onChange: setType,
+                options: [
+                  { value: "", label: "All types" },
+                  { value: "insurer_broker", label: "Insurer ↔ Broker" },
+                  { value: "insurer_reinsurer", label: "Insurer ↔ Reinsurer" },
+                ],
+              },
+              {
+                key: "state", ariaLabel: "Filter by state",
+                value: lifecycle, onChange: setLifecycle,
+                options: [{ value: "", label: "All states" },
+                  ...(Object.keys(STATE) as Lifecycle[]).map(k => ({
+                    value: k, label: STATE[k].label }))],
+              },
+              // Not a state, which is why it is its own filter: whose move it
+              // is is worked out per row from the lifecycle AND from who has
+              // already signed, so no entry in the list above can stand in
+              // for it. It is also the question this screen is most often
+              // opened with, and where both dashboard tiles land.
+              {
+                key: "waiting", ariaLabel: "Filter by whose move it is",
+                value: waiting ? "mine" : "",
+                onChange: v => setWaiting(v === "mine"),
+                options: [
+                  { value: "", label: "Anyone's move" },
+                  { value: "mine", label: "Waiting on me" },
+                ],
+              },
+            ]}
+            onClear={() => {
+              setProgramme(""); setLifecycle(""); setType(""); setQ("");
+              setWaiting(false);
+            }}
+            active={filtersActive}
+          />
+
+          <div className="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Contract</th><th>Broker</th><th>Programme</th>
+                  <th>Term</th><th>State</th>
+                  {/* Documents and Checks were taken off this list; both are
+                      still on the contract's own page. A missing document is
+                      still flagged in the warning above the table. */}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(c => {
+                  const st = STATE[c.lifecycle] ?? STATE.draft;
+                  // Who the signing round is on. The carrier signs first, so a
+                  // freshly agreed contract is waiting on the carrier, not the
+                  // broker.
+                  const note = c.lifecycle !== "agreed" ? st.note
+                    : c.whose_turn === "carrier" ? "the carrier signs next"
+                    : c.whose_turn === "broker" ? "the broker signs next"
+                    : st.note;
+                  return (
+                    <tr key={c.id}>
+                      <td>
+                        <Link to={`/contracts/${c.id}`}><b>{c.name}</b></Link>
+                        <div className="sub">
+                          {c.code && <><span className="mono" title={CODE_TIP}>{c.code}</span> · </>}
+                          {c.contract_type
+                            ? TYPE_LABEL[c.contract_type] ?? c.contract_type
+                            : "type not set"}
+                          {c.umr && <> · {c.umr}</>}
+                        </div>
+                      </td>
+                      <td>
+                        {c.counterparty?.name ?? "—"}
+                        {/* {c.counterparty && (
+                          <div className="sub">{c.counterparty.party_type}</div>
+                        )} */}
+                      </td>
+                      <td>
+                        {c.programme?.name ?? "—"}
+                        {c.programme?.code && (
+                          <div className="sub mono" title={CODE_TIP}>{c.programme.code}</div>)}
+                      </td>
+                      <td className="mono">
+                        {c.inception_dt && c.expiry_dt
+                          ? `${fmtDate(c.inception_dt)} → ${fmtDate(c.expiry_dt)}`
+                          : "—"}
+                      </td>
+                      <td>
+                        <span className={`badge ${st.cls}`}>
+                          <span className="d" />{st.label}
+                        </span>
+                        <div className="sub">{note}</div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {!loading && rows.length === 0 && (
+              <div className="empty">
+                {/* Arrived from a dashboard tile, which is clickable at zero on
+                    purpose. "No contracts match those filters" is true and
+                    answers a question nobody asked — the one being asked is
+                    "is anything waiting on me?". */}
+                {waiting && !programme && !lifecycle && !type && !q
+                  ? "Nothing is waiting on you. Every contract here is either "
+                    + "with the broker or already active."
+                  : filtersActive
+                  ? "No contracts match those filters."
+                  : "No contracts yet. Upload a wording you already have, or raise "
+                    + "one from its terms and let the wording follow."}
+              </div>
+            )}
+            {loading && !err && <div className="empty">Loading…</div>}
+          </div>
+          <Pagination
+            page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
+            totalItems={total} onPageChange={setPage} noun="contracts" />
+        </div>
+      </div>
+
+      <AddContractModal
+        open={uploading}
+        onClose={() => setUploading(false)}
+        programmes={programmes}
+        // The new contract belongs in the list — re-read it.
+        onAdded={() => reload()} />
+    </div>
+  );
+}

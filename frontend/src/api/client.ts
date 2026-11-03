@@ -182,14 +182,21 @@ export async function ensureAccessToken(): Promise<string | null> {
  *  design, and holding the app-wide overlay up for their whole duration would
  *  block the page. Callers show their own progress instead. Pass `signal` to
  *  abort (e.g. when the component unmounts mid-stream).
+ *
+ *  `quiet` skips the global error popup — for a background connection that
+ *  reconnects by itself, where a server restart is nothing to tell anyone about.
+ *
+ *  `headers` replaces the login: the broker's secure correction link has no
+ *  session token, it sends its own `X-Fix-Session` instead.
  */
 export async function streamNdjson(
   path: string,
   params: Record<string, string | number | boolean | undefined>,
   onMessage: (msg: any) => void,
   signal?: AbortSignal,
+  opts: { quiet?: boolean; headers?: Record<string, string> } = {},
 ): Promise<void> {
-  const token = await ensureAccessToken();
+  const token = opts.headers ? null : await ensureAccessToken();
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null) qs.set(k, String(v));
@@ -200,19 +207,19 @@ export async function streamNdjson(
   let res: Response;
   try {
     res = await fetch(`${baseURL}${path}?${qs.toString()}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: opts.headers ?? (token ? { Authorization: `Bearer ${token}` } : {}),
       signal,
     });
   } catch (e) {
     if ((e as DOMException)?.name === "AbortError") throw e; // deliberate cancel
-    publishApiError({ kind: "network", message: FRIENDLY_NETWORK_ERROR });
+    if (!opts.quiet) publishApiError({ kind: "network", message: FRIENDLY_NETWORK_ERROR });
     throw new Error(FRIENDLY_NETWORK_ERROR);
   }
   if (!res.ok) {
     let detail: unknown = `Request failed (${res.status})`;
     try { detail = (await res.json())?.detail ?? detail; } catch { /* non-JSON body */ }
     if (res.status >= 500 || typeof detail !== "string") {
-      publishApiError({ kind: "server", message: FRIENDLY_SERVER_ERROR });
+      if (!opts.quiet) publishApiError({ kind: "server", message: FRIENDLY_SERVER_ERROR });
       throw new Error(FRIENDLY_SERVER_ERROR);
     }
     throw new Error(detail);
@@ -242,7 +249,10 @@ export async function streamNdjson(
 // instead we fetch the bytes through the interceptor and hand the browser a
 // blob URL to save.
 export async function downloadFile(path: string, filename?: string): Promise<void> {
-  const res = await api.get(path, { responseType: "blob" });
+  // The header tells the Audit Logs this was a real download (a file saved),
+  // not a screen loading the same file to show it — see audit.DOWNLOAD_HEADER.
+  const res = await api.get(path, { responseType: "blob",
+                                    headers: { "X-Kavachio-Download": "1" } });
   // Prefer the server's filename (Content-Disposition) over the caller's hint.
   const cd = (res.headers?.["content-disposition"] as string | undefined) ?? "";
   const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
@@ -254,6 +264,20 @@ export async function downloadFile(path: string, filename?: string): Promise<voi
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
+// A refused download arrives as a Blob (the request asked for one), so the
+// server's `detail` is never parsed into JSON — read it here, or the user only
+// ever sees the fallback.
+export async function downloadErrorText(e: unknown, fallback: string): Promise<string> {
+  const data = (e as { response?: { data?: unknown } })?.response?.data;
+  if (data instanceof Blob) {
+    try {
+      const d = JSON.parse(await data.text())?.detail;
+      if (typeof d === "string" && d.trim()) return d;
+    } catch { /* not JSON — use the fallback */ }
+  }
+  return fallback;
+}
+
 // On 401, try a refresh ONCE and replay the request. If the refresh token is
 // expired/invalid, hard-logout and send the user to /login.
 api.interceptors.response.use(
@@ -262,8 +286,15 @@ api.interceptors.response.use(
     const cfg = err.config;
     const status = err.response?.status;
     const isAuthCall = typeof cfg?.url === "string" && cfg.url.includes("/auth/");
+    // The public signing routes answer 401 with "type the code from your
+    // email" — it is the one-time-code gate, not an expired app session. The
+    // person holding that link may have no account here at all, so refreshing
+    // a token they never had and then bouncing them to /login would throw a
+    // signer off a contract mid-signature. Their page handles the 401 itself.
+    const isPublicSigning = typeof cfg?.url === "string"
+      && cfg.url.includes("/esign/sign/");
 
-    if (status === 401 && cfg && !cfg._retry && !isAuthCall) {
+    if (status === 401 && cfg && !cfg._retry && !isAuthCall && !isPublicSigning) {
       cfg._retry = true;
       refreshing = refreshing ?? refreshAccessToken();
       const newToken = await refreshing;
@@ -282,6 +313,28 @@ api.interceptors.response.use(
   }
 );
 
+// A request that fails FastAPI's own schema check — a field missing, or the
+// wrong type — is answered 422 with `detail` as a LIST of {type, loc, msg,
+// input}, not the sentence every page renders `detail` as. React cannot render
+// that list: the page throws and goes blank, so the user never learns the
+// request was refused at all.
+function isValidationList(detail: unknown): detail is { loc?: unknown; msg?: unknown }[] {
+  return Array.isArray(detail) && detail.length > 0
+    && detail.every(d => d !== null && typeof d === "object" && "msg" in d);
+}
+
+/** That list as one sentence: which field, and what was wrong with it. */
+function validationText(detail: { loc?: unknown; msg?: unknown }[]): string {
+  const parts = detail.map(({ loc, msg }) => {
+    // loc opens with WHERE the value was looked for (body, query, path…); the
+    // field is what follows it.
+    const field = Array.isArray(loc) ? loc.slice(1).join(".") : "";
+    const what = typeof msg === "string" ? msg : "is not valid";
+    return field ? `${field}: ${what}` : what;
+  });
+  return `This request wasn't accepted — ${parts.join("; ")}.`;
+}
+
 // Last line of defence — registered AFTER the 401 handler so it only sees
 // errors that survive the refresh/replay flow. Unexpected failures (HTTP 5xx,
 // server unreachable) carry raw internals in `detail` (str(e), tracebacks,
@@ -289,7 +342,8 @@ api.interceptors.response.use(
 // existing `e?.response?.data?.detail` callsite renders friendly text, and
 // publish so <GlobalErrorPopup/> shows a popup. Meaningful 4xx messages
 // (validation, not-found, conflicts) pass through untouched — pages already
-// present those well.
+// present those well. The one 4xx that is rewritten is the schema-check list
+// above, and only into a sentence: no page can render it as it arrives.
 api.interceptors.response.use(
   (r) => r,
   (err) => {
@@ -316,6 +370,10 @@ api.interceptors.response.use(
       };
       err.message = FRIENDLY_SERVER_ERROR;
       publishApiError({ kind: "server", message: FRIENDLY_SERVER_ERROR });
+    } else if (isValidationList(err.response.data?.detail)) {
+      const text = validationText(err.response.data.detail);
+      err.response.data = { ...err.response.data, detail: text };
+      err.message = text;
     }
     return Promise.reject(err);
   }

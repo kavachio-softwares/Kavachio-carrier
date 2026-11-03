@@ -134,7 +134,8 @@ export type CreateScope = {
 };
 
 export const createFromStandard = (
-  scope: CreateScope, standard_id: string, jurisdiction: string,
+  scope: CreateScope & { contract_name?: string | null },
+  standard_id: string, jurisdiction: string,
   fields?: ProposedField[] | null,
 ) =>
   api.post<OutputTemplate & { structure: unknown }>(
@@ -218,6 +219,8 @@ export const analyzeSources = (opts: {
    *  layout and the standard is filling in what contracts never name. */
   standard_scope?: "full" | "essential";
   read_contract?: boolean;
+  /** Ask the AI again instead of reusing its stored answers for these inputs. */
+  refresh?: boolean;
   inputFile?: File | null;
   inputSheets?: string[];
   contractFile?: File | null;
@@ -233,6 +236,7 @@ export const analyzeSources = (opts: {
             String(opts.include_standard_library !== false));
   fd.append("standard_scope", opts.standard_scope ?? "full");
   fd.append("read_contract", String(opts.read_contract !== false));
+  if (opts.refresh) fd.append("refresh", "true");
   if (opts.inputFile) fd.append("input_file", opts.inputFile);
   for (const s of opts.inputSheets ?? []) fd.append("input_sheets", s);
   if (opts.contractFile) fd.append("contract_file", opts.contractFile);
@@ -415,29 +419,31 @@ export const compareWithSample = (id: number) =>
 export type ProgrammeBroker = {
   id: number; legal_name: string; status: string;
   contract_count: number;
-  /** Contracts the carrier has actually approved — the ones that can be worked
-   *  with. `contract_count` includes those still waiting. */
+  /** Kept as a separate field because callers read it, but it now equals
+   *  `contract_count` — there is no approval gate left to hold anything back. */
   approved_contract_count?: number;
-  pending_approvals: number;
 };
 
 export const getProgrammeBrokers = (programId: number) =>
   api.get<ProgrammeBroker[]>(`/programs/${programId}/brokers`).then(r => r.data);
 
 export type ScopedContract = {
-  id: number; filename: string | null; status: string;
+  // `name` is what the contract is called; `filename` is only set when it
+  // arrived as a document. Show them through contractLabel() — see
+  // utils/contractLabel.
+  id: number; name: string | null; filename: string | null; status: string;
   broker_party_id: number | null; broker_name: string | null;
-  approval_status: string;
   inception_dt: string | null; expiry_dt: string | null;
   output_template_id: number | null;
+  /** Where the contract is: draft / active / expired / superseded / … */
+  lifecycle?: string;
 };
 
+// No `approved_only` any more: the endpoint dropped that parameter when the
+// carrier-approval gate was removed, so it was being sent and ignored.
 export const getScopedContracts = (
-  programId: number, brokerPartyId?: number | null, approvedOnly = true,
+  programId: number, brokerPartyId?: number | null,
 ) =>
   api.get<ScopedContract[]>(`/programs/${programId}/contracts`, {
-    params: {
-      broker_party_id: brokerPartyId ?? undefined,
-      approved_only: approvedOnly || undefined,
-    },
+    params: { broker_party_id: brokerPartyId ?? undefined },
   }).then(r => r.data);

@@ -35,6 +35,7 @@ import {
   type OutputTemplate, type ProposedField, type ScopedContract,
   type SourceAnalysis, type Standard,
 } from "../api/outputTemplate";
+import { contractLabel } from "../utils/contractLabel";
 import { errText } from "../utils/directSetup";
 
 /** Which contract the field list is read from — saved, or staged in the form. */
@@ -97,7 +98,7 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
   const contractOptions = useMemo<ContractPick[]>(() => {
     const saved: ContractPick[] = (p.boundContracts ?? []).map(c => ({
       kind: "saved", id: c.id,
-      label: c.filename || `Contract ${c.id}`,
+      label: contractLabel(c),
     }));
     const staged: ContractPick[] = (p.contractFiles ?? []).map((f, i) => ({
       kind: "staged", index: i, label: f.name,
@@ -147,13 +148,25 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
   const stagedFile = contract?.kind === "staged"
     ? (p.contractFiles ?? [])[contract.index] ?? null : null;
   const savedId = contract?.kind === "saved" ? contract.id : null;
+  // The first staged contract that is not the saved one being sent, matched on
+  // either name a saved contract can carry. Only that one: a staged file named
+  // like ANOTHER saved contract is still the only way that contract is read.
+  const sentContractId = savedId ?? p.contractId;
+  const firstNewStagedFile = useMemo(() => {
+    const onFile = new Set((p.boundContracts ?? [])
+      .filter(c => c.id === sentContractId)
+      .flatMap(c => [c.name, c.filename]
+        .map(n => (n ?? "").trim().toLowerCase()).filter(Boolean)));
+    return (p.contractFiles ?? []).find(
+      f => !onFile.has(f.name.trim().toLowerCase())) ?? null;
+  }, [p.boundContracts, p.contractFiles, sentContractId]);
 
   const scope = {
     mga: p.mga,
     program_id: p.programId,
     carrier_party_id: p.carrierPartyId,
     broker_party_id: p.brokerPartyId,
-    contract_id: savedId ?? p.contractId,
+    contract_id: sentContractId,
     output_format: outputFormat,
     name: name.trim() || null,
   };
@@ -169,7 +182,7 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
         mga: p.mga,
         program_id: p.programId,
         broker_party_id: p.brokerPartyId,
-        contract_id: savedId ?? p.contractId,
+        contract_id: sentContractId,
         standard_id: forMode === "standard" || useLibrary ? standardId : null,
         jurisdiction: forMode === "standard" || useLibrary ? jurisdiction : null,
         include_standard_library: forMode === "standard" ? true : useLibrary,
@@ -186,9 +199,12 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
         // the published standard — so everything to hand is read: the contract
         // already on file AND one staged on the screen behind. They are
         // different documents, and a staged one is usually the newer of the
-        // two, so ignoring it would propose against last year's terms.
+        // two, so ignoring it would propose against last year's terms. A staged
+        // file with the name of the saved contract sent here is that same
+        // contract, and is not read again: its terms are already in, and reading both
+        // made the column list depend on what was still on the screen.
         contractFile: forMode === "standard"
-          ? ((p.contractFiles ?? [])[0] ?? stagedFile) : stagedFile,
+          ? (firstNewStagedFile ?? stagedFile) : stagedFile,
       });
       setAnalysis(a);
       setDropped(new Set(a.fields.filter(f => !f.recommended).map(f => f.field)));
@@ -237,7 +253,8 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
         // slices the published layout to what is ticked, then appends those
         // after it as optional columns.
         p.onCreated(await createFromStandard(
-          scope, standardId, jurisdiction, kept));
+          { ...scope, contract_name: stagedFile?.name ?? contract?.label ?? null },
+          standardId, jurisdiction, kept));
       } else {
         p.onCreated(await createFromContract(
           { ...scope, contract_name: stagedFile?.name ?? contract?.label ?? null },
@@ -285,25 +302,32 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
               How should the column list be decided?
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Named by what comes OUT, in the words the user already has:
+                  the format they were told to report in, or the contract in
+                  their hand. "Reporting standard" and "Contract-based /
+                  custom" described the mechanism and read as the same
+                  thing twice. */}
               <ChoiceCard
                 icon={<FileSpreadsheet size={17} />}
-                title="Reporting standard"
+                title={standards.length
+                  ? `${standards.map(s => s.label).join(" / ")} format`
+                  : "Reporting standard format"}
                 body={standards.length
-                  ? `The whole published column list — ${standards.map(s => s.label).join(", ")} — for the territory you report on, pruned to the part your binder actually uses. The layout is the standard's.`
+                  ? ["Based on the Lloyd's report format",
+                     "Your input bordereau template and contract are checked to keep only the columns you need"]
                   : "No reporting standard is bundled with this deployment."}
                 disabled={!standards.length}
                 onClick={() => setMode("standard")} />
               <ChoiceCard
                 icon={<FileText size={17} />}
-                title="Contract-based / custom"
+                title="Contract only"
                 body={contractOptions.length
-                  ? `Only what ${contractOptions.length === 1 ? "the contract" : "a contract"} itself requires, plus the columns every bordereau carries and contracts never name — the coverholder, the insured, the period, the currency. The layout is the contract's.`
-                  : "Upload a contract on the setup screen first — this option builds the field list from the contract's terms."}
+                  ? ["Based on your contract alone",
+                     "Only the columns it asks for are used, plus the essential columns common to every bordereau"]
+                  : "Upload a contract on the setup screen first."}
                 disabled={!contractOptions.length}
                 onClick={() => setMode("contract")} />
             </div>
-            <SourcesNote inputFile={p.inputFile ?? null}
-              contracts={contractOptions.length} />
           </div>
         )}
 
@@ -319,17 +343,18 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
               <label className="flex items-start gap-2 text-sm">
                 <input type="checkbox" className="mt-1" checked={useLibrary} disabled={busy}
                   onChange={e => setUseLibrary(e.target.checked)} />
-                <span>
-                  <b>Add the columns every bordereau needs.</b>
-                  <span className="block text-[11px] text-ink-soft">
-                    A contract rarely names the coverholder, the insured, the
-                    reporting period or the currency, and a bordereau always
-                    carries them. With this on, the {std?.label ?? "standard"}{" "}
-                    columns marked mandatory are added to the contract's own —
-                    those only, not the whole published list, which would bury
-                    the contract's terms. Anything both name appears once.
-                  </span>
-                </span>
+                <div>
+                  <b>Add the essential columns every bordereau needs</b>
+                  <ul className="list-disc pl-4 space-y-0.5 mt-0.5 text-[11px] text-ink-soft">
+                    <li>Contracts rarely name the basics: coverholder, insured,
+                      reporting period, currency, etc.</li>
+                    <li>Every bordereau still needs them.</li>
+                    <li>Tick this to add only the {std?.label ?? "standard"}{" "}
+                      mandatory columns, not the whole list.</li>
+                    <li>A column named by both the contract and{" "}
+                      {std?.label ?? "the standard"} appears once.</li>
+                  </ul>
+                </div>
               </label>
             )}
 
@@ -398,9 +423,6 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
                 onChange={e => setName(e.target.value)} />
             </Field>
 
-            <SourcesNote inputFile={p.inputFile ?? null}
-              contracts={contractOptions.length} />
-
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="secondary" disabled={busy}
                 onClick={() => setMode("choose")}>Back</Button>
@@ -417,43 +439,37 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
             <Summary a={analysis} shown={proposed} kept={kept}
               unfilled={unfilledRequired} extra={keptExtra} />
 
-            {!analysis.contract.model_used && analysis.contract.source !== "none" && (
-              <div className="rounded-md border border-amber-300 bg-amber-50 p-3
-                text-[12px] text-amber-800 flex items-start gap-2">
-                <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-                <div>
-                  The contract's wording could not be read just now, so only the
-                  fields its existing rules already name were added. You can add
-                  the rest in the editor.
-                </div>
-              </div>
-            )}
-
             {/* `proposal-grid` makes the header opaque and pins it. Without
                 it the app-wide `thead th` background is 60% transparent, so
                 rows scrolling underneath a sticky header show straight through
                 it and the two sets of words sit on top of each other. */}
             <div className="max-h-80 overflow-auto rounded-lg border border-border">
-              <table className="w-full text-[12.5px] proposal-grid">
+              {/* `table-fixed` so the widths below are the widths you get.
+                  On auto layout the browser re-shares the 40% the percentages
+                  leave over, and the tick column — the narrowest, so the
+                  cheapest to widen — soaked up most of it, leaving a hand's
+                  width of nothing between "Use" and "Column". One `<col>` per
+                  heading, and they add up to the whole table. */}
+              <table className="w-full table-fixed text-[12.5px] proposal-grid">
                 <colgroup>
-                  <col style={{ width: 40 }} />
-                  <col style={{ width: "27%" }} />
-                  <col style={{ width: "13%" }} />
-                  <col style={{ width: "20%" }} />
+                  <col style={{ width: 44 }} />
+                  <col style={{ width: "30%" }} />
+                  <col style={{ width: "16%" }} />
                   <col />
                 </colgroup>
                 <thead>
                   <tr>
-                    <th className="text-left px-3 py-2">Use</th>
+                    <th className="text-left pl-3 py-2">Use</th>
                     <th className="text-left px-3 py-2">Column</th>
-                    <th className="text-left px-3 py-2">Asked for by</th>
-                    <th className="text-left px-3 py-2">In your bordereau</th>
+                    <th className="text-left px-3 py-2">Required by</th>
                     <th className="text-left px-3 py-2">Why</th>
                   </tr>
                 </thead>
                 <tbody>
                   {proposed.map(f => (
                     <ProposalRow key={f.field} f={f}
+                      standardName={analysis?.standard ? stdLabel : "Reporting standard"}
+                      contractName={stagedFile?.name ?? contract?.label ?? null}
                       appended={isAppended(f, mode)}
                       kept={!dropped.has(f.field)}
                       onToggle={() => toggle(f.field)} />
@@ -465,27 +481,34 @@ export default function CreateOutputTemplate(p: CreateScopeProps) {
             {extra.length > 0 && (
               <div className="rounded-md border border-border bg-surface-2 p-3 text-[11.5px]">
                 <div className="font-medium text-ink">
-                  {keptExtra} extra column{keptExtra === 1 ? "" : "s"} the
-                  contract asks for that {stdLabel} does not publish
+                  {keptExtra} extra column{keptExtra === 1 ? "" : "s"} from the contract
                 </div>
                 <div className="text-ink-muted mt-1">
                   {extra.map(f => f.field).join(", ")}
                 </div>
-                <div className="text-ink-soft mt-1">
-                  These are added after the published columns and go in as
-                  optional, so the file still passes the standard's own check.
-                  They are ticked in the list above like any other column —
-                  untick one to leave it out.
-                </div>
+                <ul className="list-disc pl-4 space-y-0.5 text-ink-soft mt-1">
+                  <li>{analysis.standard ? stdLabel : "The standard"} doesn&apos;t
+                    include {extra.length === 1 ? "this one" : "these"}</li>
+                  <li>{extra.length === 1 ? "It goes" : "They go"} at the end as
+                    optional, so the file still passes the{" "}
+                    {analysis.standard?.label ?? "standard"} check</li>
+                  <li>{extra.length === 1
+                    ? "Untick it in the list above if you don't want it"
+                    : "Untick any you don't want in the list above"}</li>
+                </ul>
               </div>
             )}
 
-            <p className="text-[11px] text-ink-soft">
-              Nothing has been created yet. Ticked columns go in; unticked ones
-              stay out. A column the standard marks mandatory goes in whatever
-              you tick, and you can add or remove columns in the editor
-              afterwards too.
-            </p>
+            <ul className="list-disc pl-4 space-y-0.5 text-[11px] text-ink-soft">
+              <li>Nothing is saved yet</li>
+              <li>Ticked columns are added; unticked ones are left out</li>
+              {/* Only a column the standard marks mandatory is locked on (see
+                  ProposalRow), so the promise is made only when there is one. */}
+              {proposed.some(f => f.required && f.origin === "standard") && (
+                <li>Required columns are always added</li>
+              )}
+              <li>You can add or remove columns later in the editor</li>
+            </ul>
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="secondary" disabled={busy} onClick={back}>Back</Button>
               <Button onClick={create} disabled={busy || !kept.length}>
@@ -515,24 +538,28 @@ function ModeLede({ mode, standard, contract, useLibrary }: {
       ${std ? "border-border bg-surface-2" : "border-border bg-surface-2"}`}>
       <div className="flex items-center gap-1.5 font-medium text-ink">
         {std ? <FileSpreadsheet size={14} /> : <FileText size={14} />}
-        {std ? "Building from a reporting standard"
+        {std ? "How the columns are chosen"
              : "Building from the contract"}
       </div>
       <div className="text-ink-muted mt-1">
         {std ? (
-          <>The columns are {standard}&apos;s own published list for the
-            territory you pick below, in its published order. The contract and
-            your bordereau are read too, but only to decide which of those
-            columns this binder actually reports — and to add anything the
-            contract asks for that the list has no column for.</>
+          <>
+            <ul className="list-disc pl-4 space-y-0.5">
+              <li><b>{standard}</b> gives the full list of allowed columns.</li>
+              <li><b>Your bordereau</b> shows which ones you can actually fill.</li>
+              <li><b>Your contract</b> says which ones you must report — and adds
+                any the standard doesn&apos;t have.</li>
+            </ul>
+            <div className="mt-1">You&apos;ll review the result before anything is saved.</div>
+          </>
         ) : (
-          <>The columns come from {contract ? <b>{contract}</b> : "the contract"}
-            &apos;s own terms{useLibrary
-              ? <>, plus the handful of columns every bordereau carries and
-                  contracts never name — the coverholder, the insured, the
-                  period, the currency.</>
-              : <> and nothing else. Nothing is added for you.</>}
-            {" "}The published list is not the layout here.</>
+          <ul className="list-disc pl-4 space-y-0.5">
+            <li>Columns come only from what{" "}
+              {contract ? <b>{contract}</b> : "the"} contract asks for.</li>
+            {useLibrary
+              ? <li>Plus the essential columns every bordereau needs — ticked below.</li>
+              : <li>Nothing else is added unless you tick the box below.</li>}
+          </ul>
         )}
       </div>
     </div>
@@ -553,41 +580,22 @@ function isAppended(f: ProposedField, mode: Mode): boolean {
   return mode === "standard" && f.origin !== "standard";
 }
 
-/** What this proposal was read from — said before it is read, and after. */
-function SourcesNote({ inputFile, contracts }: {
-  inputFile: File | null; contracts: number;
-}) {
-  return (
-    <div className="rounded-md border border-sky-200 bg-sky-50 p-2.5
-      text-[11.5px] text-sky-800 leading-relaxed">
-      <div className="font-medium">Read from both sides</div>
-      <div className="mt-0.5">
-        {inputFile
-          ? <>Your bordereau <b>{inputFile.name}</b> decides which columns can
-              actually be filled, </>
-          : <>No input template is staged, so nothing can be checked against your
-              data and only the published requirements will decide, </>}
-        {contracts
-          ? <>and the contract decides what has to be reported.</>
-          : <>and no contract is available to say what has to be reported.</>}
-      </div>
-    </div>
-  );
-}
-
 function Summary({ a, shown, kept, unfilled, extra }: {
   a: SourceAnalysis; shown: ProposedField[]; kept: ProposedField[];
   unfilled: number; extra: number;
 }) {
-  const matched = kept.filter(f => f.in_input).length;
-  const likely = kept.filter(f => f.likely_in_input).length;
   const fromContract = kept.filter(f => f.origin !== "standard").length;
+  const leftOut = shown.length - kept.length;
+  const clauses = a.contract.clause_count;
+  const clauseWord = `${clauses} clause${clauses === 1 ? "" : "s"}`;
+  const essential = a.standard && a.standard.scope === "essential"
+    ? a.standard.field_count : 0;
   return (
     <div className="rounded-lg border border-border bg-surface-2 px-3 py-2.5
       text-[12px] leading-relaxed">
       <div className="flex items-center gap-1.5 font-medium text-ink">
         <CheckCircle2 size={14} className="text-emerald-600" />
-        {kept.length} of {shown.length} column{shown.length === 1 ? "" : "s"} kept
+        {kept.length} of {shown.length} column{shown.length === 1 ? "" : "s"} selected
         {/* Only say "from the standard" when the standard IS the layout.
             Built from a contract it supplies a handful of columns, and
             crediting the whole list to it would misread the file. */}
@@ -597,54 +605,58 @@ function Summary({ a, shown, kept, unfilled, extra }: {
         )}
         {a.standard && a.standard.scope === "essential" && <> from the contract</>}
       </div>
-      <div className="text-ink-muted mt-1">
-        {a.counts.checked_input
-          ? <>{matched} of them matched to a column of your bordereau
-              {likely > 0 && <>, {likely} probable</>}</>
-          : <>your bordereau was not checked</>}
-        {fromContract > 0 && <> · {fromContract} asked for by the contract</>}
-        {a.standard && a.standard.scope === "essential" && (
-          <> · {a.standard.field_count} added as the columns every bordereau
-            carries</>
+      <ul className="list-disc pl-4 space-y-0.5 text-ink-muted mt-1">
+        <li>{a.counts.checked_input
+          ? "Checked against your bordereau"
+          : "Your bordereau was not checked"}</li>
+        {fromContract > 0 && (
+          <li>{fromContract} column{fromContract === 1 ? " comes" : "s come"} from
+            the contract{clauses > 0 && ` (read from ${clauseWord})`}</li>
         )}
-        {a.contract.clause_count > 0 &&
-          <> · the contract was read from {a.contract.clause_count} clause
-            {a.contract.clause_count === 1 ? "" : "s"}</>}
-        {" · "}{shown.length - kept.length} left out as not applicable
-      </div>
-      {extra > 0 && (
-        <div className="text-ink-muted mt-1">
-          {extra} of them {extra === 1 ? "is" : "are"} not in the published
-          list — the contract asks for {extra === 1 ? "it" : "them"}, so{" "}
-          {extra === 1 ? "it is" : "they are"} added at the end as optional
-          column{extra === 1 ? "" : "s"}.
-        </div>
-      )}
-      {unfilled > 0 && (
-        // A pointer, not the report. The columns themselves, why each one
-        // stayed in and what to do about it need room and the field editor
-        // beside them, so they are on the template screen — naming the number
-        // here is what sends someone there.
-        <div className="text-ink-muted mt-1">
-          {unfilled} of them {unfilled === 1 ? "is" : "are"} required with
-          nothing in your bordereau to fill {unfilled === 1 ? "it" : "them"} —
-          the template screen lists {unfilled === 1 ? "it" : "them"} once this
-          is created.
-        </div>
-      )}
+        {fromContract === 0 && clauses > 0 && (
+          <li>The contract was read from {clauseWord}</li>
+        )}
+        {essential > 0 && (
+          <li>{essential} essential column{essential === 1 ? "" : "s"} every
+            bordereau needs {essential === 1 ? "is" : "are"} included</li>
+        )}
+        {/* `extra` counts ticked contract columns the published list lacks,
+            so it is always part of the "from the contract" line above. */}
+        {extra > 0 && (
+          <li>{extra} of these {extra === 1 ? "isn't" : "aren't"} in the{" "}
+            {a.standard ? `${a.standard.label} list` : "published list"}, so{" "}
+            {extra === 1 ? "it is" : "they are"} added at the end as optional</li>
+        )}
+        {unfilled > 0 && (
+          // A pointer, not the report. The columns themselves, why each one
+          // stayed in and what to do about it need room and the field editor
+          // beside them, so they are on the template screen — naming the number
+          // here is what sends someone there.
+          <li>{unfilled} required column{unfilled === 1 ? " has" : "s have"} no
+            data in your bordereau (the template screen lists{" "}
+            {unfilled === 1 ? "it" : "them"} after you create it)</li>
+        )}
+        {leftOut > 0 && (
+          <li>{leftOut} column{leftOut === 1 ? "" : "s"} left out as not needed</li>
+        )}
+      </ul>
     </div>
   );
 }
 
-function ProposalRow({ f, kept, appended, onToggle }: {
+function ProposalRow({ f, kept, appended, onToggle, standardName, contractName }: {
   f: ProposedField; kept: boolean; appended: boolean; onToggle: () => void;
+  /** The standard by name ("Lloyd's v5.2 (US)"), so the cell says WHICH one. */
+  standardName: string;
+  /** The contract by name; "The contract" when there is none to show. */
+  contractName: string | null;
 }) {
   // Locked means the server will keep it whatever the tick says: a column the
   // standard marks mandatory is never switched off (apply_selection).
   const locked = f.required && f.origin === "standard";
   return (
     <tr className={`border-t border-border ${kept ? "" : "opacity-50"}`}>
-      <td className="px-3 py-2 text-left align-top">
+      <td className="pl-3 py-2 text-left align-top">
         <input type="checkbox" checked={kept || locked} disabled={locked}
           title={locked ? "The standard makes this column mandatory" : undefined}
           onChange={onToggle} />
@@ -664,32 +676,25 @@ function ProposalRow({ f, kept, appended, onToggle }: {
         )}
       </td>
       <td className="px-3 py-2 text-ink-muted text-left align-top break-words">
+        {/* Named sources, not "The standard": the header already says which
+            standard this is, so the cell can too. */}
         {f.origin === "standard"
-          ? (f.also_in_contract ? "The standard and the contract" : "The standard")
+          ? (f.also_in_contract ? `${standardName} and the contract` : standardName)
           : f.origin === "contract_rule" ? "A rule on the contract"
-          : "The contract"}
+          : (contractName ?? "The contract")}
       </td>
-      <td className="px-3 py-2 text-left align-top">
-        {f.in_input ? (
-          <span className="text-emerald-700">
-            {f.input_column}
-            <span className="text-[10.5px] text-ink-soft ml-1">
-              {Math.round(f.confidence * 100)}%
-            </span>
-          </span>
-        ) : f.best_candidate ? (
-          <span className="text-amber-700">
-            {f.best_candidate.source}
-            <span className="text-[10.5px] text-ink-soft ml-1">
-              {Math.round(f.best_candidate.confidence * 100)}% — confirm
-            </span>
-          </span>
-        ) : <span className="text-ink-soft">—</span>}
-      </td>
+      {/* No "matched input column" cell. The match behind `in_input` is the
+          analysis's include check, not a mapping — the pipeline maps the data
+          later, at its own bar — and a column name with a percentage here read
+          as a mapping decision being made in the wrong place. */}
       <td className="px-3 py-2 text-ink-muted text-left align-top">
         {f.recommend_reason}
         {f.contract_reference && (
-          <div className="text-[11px] text-ink-soft italic mt-0.5">
+          // A clause quote runs to several lines and made one row as tall as
+          // the whole list. Two lines is enough to recognise it by; the full
+          // wording is on the contract.
+          <div className="text-[11px] text-ink-soft italic mt-0.5 line-clamp-2"
+            title={f.contract_reference}>
             “{f.contract_reference}”
           </div>
         )}
@@ -699,7 +704,9 @@ function ProposalRow({ f, kept, appended, onToggle }: {
 }
 
 function ChoiceCard({ icon, title, body, disabled, onClick }: {
-  icon: React.ReactNode; title: string; body: string;
+  icon: React.ReactNode; title: string;
+  /** A sentence, or a few short points shown as a list. */
+  body: string | string[];
   disabled?: boolean; onClick: () => void;
 }) {
   return (
@@ -711,7 +718,14 @@ function ChoiceCard({ icon, title, body, disabled, onClick }: {
       <div className="flex items-center gap-2 font-medium text-sm">
         {icon} {title}
       </div>
-      <p className="text-[12px] text-ink-muted mt-1.5 leading-relaxed">{body}</p>
+      {Array.isArray(body) ? (
+        <ul className="text-[12px] text-ink-muted mt-1.5 leading-relaxed
+          list-disc pl-4 space-y-0.5">
+          {body.map(line => <li key={line}>{line}</li>)}
+        </ul>
+      ) : (
+        <p className="text-[12px] text-ink-muted mt-1.5 leading-relaxed">{body}</p>
+      )}
     </button>
   );
 }

@@ -16,12 +16,16 @@
  * the parent reloads exceptions after each save and the cell tints update:
  * green = approved, blue = fixed, amber = dismissed, red = still pending.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import DecidedBy from "./DecidedBy";
 import { Check, Wrench, Hand, X } from "lucide-react";
 import { streamNdjson } from "../api/client";
 import { useRowWindow, WINDOW_MIN_ROWS } from "../hooks/useRowWindow";
 import { getUser } from "../auth";
-import { saveExportDecisions, type StoredException } from "../api/validation";
+import {
+  aggregateLabel, aggregateValue, saveExportDecisions,
+  type ExportDecideResponse, type ExportDecision, type StoredException,
+} from "../api/validation";
 import { decisionKindOf, type DecisionKind } from "./ExceptionCards";
 import RuleExplanationBlock, { hasExplanation } from "./RuleExplanation";
 import { writeValue, enumOptions, recoParts, RecommendationValue, type Decision } from "./ExceptionDecisionTable";
@@ -75,7 +79,7 @@ type SheetIndex = {
   /** `${gridRow}:${col}` → exceptions on that cell. */
   byCell: Map<string, StoredException[]>;
   /** col index → its flagged exceptions, split pending / decided. */
-  colFlags: Map<number, { pending: StoredException[]; decided: number }>;
+  colFlags: Map<number, { pending: StoredException[]; decided: StoredException[] }>;
   mapped: Set<StoredException>;
 };
 
@@ -201,7 +205,7 @@ function indexSheet(sheet: Sheet, sheetExceptions: StoredException[], totalRows?
   }
 
   const byCell = new Map<string, StoredException[]>();
-  const colFlags = new Map<number, { pending: StoredException[]; decided: number }>();
+  const colFlags = new Map<number, { pending: StoredException[]; decided: StoredException[] }>();
   const mapped = new Set<StoredException>();
   for (let i = 0; i < n; i++) {
     const e = own[i];
@@ -212,9 +216,9 @@ function indexSheet(sheet: Sheet, sheetExceptions: StoredException[], totalRows?
     if (!byCell.has(k)) byCell.set(k, []);
     byCell.get(k)!.push(e);
     mapped.add(e);
-    if (!colFlags.has(ci)) colFlags.set(ci, { pending: [], decided: 0 });
+    if (!colFlags.has(ci)) colFlags.set(ci, { pending: [], decided: [] });
     const cf = colFlags.get(ci)!;
-    if (decisionKindOf(e)) cf.decided += 1; else cf.pending.push(e);
+    (decisionKindOf(e) ? cf.decided : cf.pending).push(e);
   }
   return { byCell, colFlags, mapped };
 }
@@ -286,9 +290,11 @@ function place(r: DOMRect, w = 360, estH = 400): Pos {
 
 // ─── one exception's detail + actions inside the cell popover ────────────────
 
-function ExcDetail({ e, saving, onDecide }: {
+function ExcDetail({ e, saving, onDecide, readOnly = false }: {
   e: StoredException;
   saving: boolean;
+  /** Show the exception and its decision, but no Approve / Fix / Dismiss. */
+  readOnly?: boolean;
   onDecide: (e: StoredException, kind: "approve" | "fix" | "dismiss", value?: string | null) => void;
 }) {
   const [mode, setMode] = useState<null | "fix" | "approve-enum">(null);
@@ -297,6 +303,9 @@ function ExcDetail({ e, saving, onDecide }: {
   const approvable = writeValue(e, { kind: "approve" } as Decision) != null;
   const rp = recoParts(e);
   const saved = decisionKindOf(e) as DecisionKind | null;
+  // Set only when `actual_value` is a total rather than this cell's value.
+  const agg = aggregateLabel(e.aggregate, e.field_path);
+  const aggVal = aggregateValue(e.aggregate, e.actual_value);
   const clause = e.contract_clause_text
     ? (e.contract_clause_text.length > 200 ? e.contract_clause_text.slice(0, 200) + "…" : e.contract_clause_text)
     : null;
@@ -325,6 +334,7 @@ function ExcDetail({ e, saving, onDecide }: {
           </span>
         )}
       </div>
+      {saved && <DecidedBy by={e.decided_by} at={e.decided_at} />}
 
       {/* What the rule requires, in plain English. `compact` drops the
           collapsible and the how-to-fix — the popover is only 360px wide and
@@ -349,10 +359,26 @@ function ExcDetail({ e, saving, onDecide }: {
       )}
 
       <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 mt-2 text-xs">
-        <span className="text-ink-soft">Actual</span>
+        {/* An aggregate rule's actual is a TOTAL, not this cell's value — a
+            file whose ten premiums make 110,150 showed "Actual 110,150" beside
+            a cell reading 12,450 and read as a bug. Say which number it is. */}
+        <span className="text-ink-soft">{agg ? agg.label : "Actual"}</span>
         <span className="font-mono" style={{ color: HL_FG }}>
-          {e.actual_value?.trim() ? e.actual_value : <i>(empty)</i>}
+          {aggVal ? aggVal.value : e.actual_value?.trim() ? e.actual_value : <i>(empty)</i>}
+          {aggVal?.gap && <span className="font-sans text-[11px] text-ink-soft"> · {aggVal.gap}</span>}
         </span>
+        {agg && (
+          <span className="col-span-2 text-[11px] text-ink-soft leading-relaxed">
+            {agg.note}
+          </span>
+        )}
+        {/* No contract version covers this row's date, so it was checked
+            against the current contract — say which one, and its period. */}
+        {e.contract_period_note && (
+          <span className="col-span-2 text-[11px] text-ink-soft leading-relaxed">
+            {e.contract_period_note}
+          </span>
+        )}
         {/* A format rule has no recommended value — the row shows an EXAMPLE of
             the required shape, so it is labelled as one rather than as the value
             to accept. */}
@@ -369,7 +395,7 @@ function ExcDetail({ e, saving, onDecide }: {
       </div>
 
       {/* actions */}
-      {mode === null && (
+      {mode === null && !readOnly && (
         <div className="flex items-center gap-2 mt-3">
           <button
             onClick={startApprove}
@@ -557,12 +583,48 @@ function mergeSheetPages(prev: Map<string, SheetState>, activeSheet: string, raw
   return next;
 }
 
-export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose }: {
+/** Where the grid reads its rows and saves decisions, when that is not the
+ *  logged-in portal — the broker's secure correction link, which reaches the
+ *  same handlers for one export through its own session header. */
+export type ReviewSource = {
+  streamPath: string;
+  headers: Record<string, string>;
+  save: (decisions: ExportDecision[]) => Promise<ExportDecideResponse>;
+};
+
+export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose, readOnly = false,
+  readOnlyNote = "View only — the broker who sent this file makes these decisions.", source,
+  hint, footerNote, autoScroll = true, hideToolbar = false, focus = null, bulkFix = false }: {
   exportId: string;
+  /** Default: the portal's /export/downloads/{exportId} endpoints with the login. */
+  source?: ReviewSource;
+  /** The line beside the title. Default: the portal's. */
+  hint?: ReactNode;
+  /** The legend's right-hand note. Default: the portal's Fix & Validate note. */
+  footerNote?: ReactNode;
+  /** Scroll the grid into view when it opens (the portal opens it on demand). */
+  autoScroll?: boolean;
+  /** Hide the Exceptions / All rows toggle and the pending · resolved count. */
+  hideToolbar?: boolean;
+  /** Jump to the first of these exceptions' cells (pending first): switch to
+   *  its sheet, scroll it into view, outline it and open it. A new `nonce`
+   *  asks again for the same cells. */
+  focus?: { exceptionIds: number[]; nonce: number } | null;
+  /** The column chip's popover opens on Fix (one value for every flagged row
+   *  of the ticked rules) rather than Approve. All three actions are always
+   *  offered: Approve, Fix and Dismiss. */
+  bulkFix?: boolean;
+  /** Kavachio staff: the whole workbook and every flagged cell, no decisions. */
+  readOnly?: boolean;
+  /** What the cell popover says in read-only mode. The default is for a
+   *  carrier or Kavachio viewer; the broker's own "View file" window passes
+   *  its own, since there the viewer IS the broker. */
+  readOnlyNote?: string;
   exceptions: StoredException[];
   /** Called after a successful save so the parent can reload exceptions. */
   onSaved: (saved: number) => void;
-  onClose: () => void;
+  /** Shows the Hide button. Omit it where the grid is the page itself. */
+  onClose?: () => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -629,10 +691,19 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
   const [colPop, setColPop] = useState<{ ci: number; pos: Pos } | null>(null);
   // Which rules (clauses) are ticked in the column Approve-all popover.
   const [colSel, setColSel] = useState<Set<string>>(new Set());
+  // The one value "Fix all" writes.
+  const [colFixVal, setColFixVal] = useState("");
+  // What the column popover does to the ticked rules' rows.
+  const [colAction, setColAction] = useState<"approve" | "fix" | "dismiss">("approve");
+  // Whether the column popover also re-decides rows already resolved — a
+  // bulk value that failed Validate Again is changed the way it was made.
+  const [colRedo, setColRedo] = useState(false);
+  const colTargets = (cf: { pending: StoredException[]; decided: StoredException[] }) =>
+    colRedo ? [...cf.pending, ...cf.decided] : cf.pending;
 
   useEffect(() => {
-    rootRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, []);
+    if (autoScroll) rootRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [autoScroll]);
 
   // One request per WINDOW of rows, consumed as it arrives.
   //
@@ -661,7 +732,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
     try {
       const { chunk, delayMs } = streamOpts();
       await streamNdjson(
-        `/export/downloads/${exportId}/data/stream`,
+        source?.streamPath ?? `/export/downloads/${exportId}/data/stream`,
         {
           marks: needMeta ? 1 : 0,
           meta: needMeta ? 1 : 0,
@@ -734,6 +805,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
           }
         },
         ctl.signal,
+        source ? { headers: source.headers } : {},
       );
     } catch (e: any) {
       if (e?.name !== "AbortError") {
@@ -939,8 +1011,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
     if (items.length === 0) return;
     setSaving(true); setSaveErr(null);
     try {
-      const res = await saveExportDecisions(
-        exportId,
+      const decisions: ExportDecision[] =
         items.map(({ e, kind, value, reason }) => ({
           rule_id: e.rule_id ?? null,
           policy_number: e.policy_number ?? null,
@@ -951,9 +1022,10 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
           actual_value: e.actual_value ?? null,
           sheet: e.source_sheet ?? null,
           row: e.source_row ?? null,
-        })),
-        getUser()?.id,
-      );
+        }));
+      const res = source
+        ? await source.save(decisions)
+        : await saveExportDecisions(exportId, decisions, getUser()?.id);
       const skipped = res.skipped ?? [];
       if (skipped.length) {
         setSaveErr(`${skipped.length} of ${items.length} could not be applied — ` +
@@ -976,12 +1048,34 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
     const cf = idx?.colFlags.get(ci);
     if (!cf) return;
     // Only the rules (clauses) the user ticked in the popover.
-    const items = groupColPending(cf.pending)
+    const items = groupColPending(colTargets(cf))
       .filter(gr => colSel.has(gr.key))
       .flatMap(gr => gr.approvable)
       .map(e => ({
         e, kind: "approve" as const, value: writeValue(e, { kind: "approve" } as Decision),
       }));
+    void saveBatch(items);
+  }
+
+  function fixColumn(ci: number) {
+    const cf = idx?.colFlags.get(ci);
+    const value = colFixVal.trim();
+    if (!cf || !value) return;
+    const items = groupColPending(colTargets(cf))
+      .filter(gr => colSel.has(gr.key))
+      .flatMap(gr => gr.pending)
+      .map(e => ({ e, kind: "fix" as const, value }));
+    void saveBatch(items);
+  }
+
+  /** Keep the values as sent for every flagged row of the ticked rules. */
+  function dismissColumn(ci: number) {
+    const cf = idx?.colFlags.get(ci);
+    if (!cf) return;
+    const items = groupColPending(colTargets(cf))
+      .filter(gr => colSel.has(gr.key))
+      .flatMap(gr => gr.pending)
+      .map(e => ({ e, kind: "dismiss" as const }));
     void saveBatch(items);
   }
 
@@ -996,24 +1090,97 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
   const stickyCol: React.CSSProperties =
     { position: "sticky", left: 0, zIndex: 1, background: "var(--p-surface)", boxShadow: EDGE_R };
 
+  // ── jump to a cell (focus prop) ────────────────────────────────────────────
+  // 1. switch to the exception's sheet and wait for its marks (the index needs
+  //    them); 2. find its cell and scroll the grid so the row is in the
+  //    rendered window; 3. once that row's values are in the DOM, centre the
+  //    cell, outline it for a moment and open it.
+  const [focusReq, setFocusReq] = useState<{ ids: Set<number>; sheet: string } | null>(null);
+  const focusCellRef = useRef<{ key: string; until: number } | null>(null);
+  const [flashKey, setFlashKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focus || !focus.exceptionIds.length) return;
+    const ids = new Set(focus.exceptionIds);
+    const first = exceptions.find(e => ids.has(e.exception_id));
+    if (!first) return;
+    setFocusReq({ ids, sheet: String(first.source_sheet ?? "") });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.nonce]);
+
+  useEffect(() => {
+    if (!focusReq || !sheetOrder) return;
+    const ti = sheetOrder.findIndex(n => norm(n) === norm(focusReq.sheet));
+    if (ti >= 0 && ti !== tab) { setTab(ti); closePops(); return; }
+    if (!activeSheetName || !activeState || !metaRef.current.has(activeSheetName)) return;
+    let best: { gi: number; ci: number; pending: boolean } | null = null;
+    for (const [key, excs] of idx.byCell) {
+      if (!excs.some(e => focusReq.ids.has(e.exception_id))) continue;
+      const [gi, ci] = key.split(":").map(Number);
+      const pending = excs.some(e => focusReq.ids.has(e.exception_id) && !decisionKindOf(e));
+      if (!best || (pending && !best.pending) ||
+          (pending === best.pending && (gi < best.gi || (gi === best.gi && ci < best.ci)))) {
+        best = { gi, ci, pending };
+      }
+    }
+    setFocusReq(null);
+    if (!best) return;
+    // Its position in the list on screen; a row hidden by the Exceptions filter
+    // cannot be, so show all rows and use its sheet position.
+    let i = rowFilter === "exceptions" ? exceptionGis.indexOf(best.gi) : best.gi - 1;
+    if (i < 0) { setRowFilter("all"); i = best.gi - 1; }
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTop = Math.max(0, i * rowH - rowH * 2);
+      setViewport({ top: el.scrollTop, height: el.clientHeight });
+    }
+    setCellPop(null); setColPop(null);
+    focusCellRef.current = { key: `${best.gi}:${best.ci}`, until: Date.now() + 8000 };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusReq, sheetOrder, tab, activeSheetName, activeState, idx]);
+
+  // Runs after every render until the target row's values have arrived.
+  useEffect(() => {
+    const f = focusCellRef.current;
+    if (!f) return;
+    if (Date.now() > f.until) { focusCellRef.current = null; return; }
+    const td = scrollRef.current?.querySelector<HTMLElement>(`td[data-cell="${f.key}"]`);
+    if (!td) return;
+    focusCellRef.current = null;
+    td.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    setFlashKey(f.key);
+    window.setTimeout(() => {
+      if (!td.isConnected) return;
+      setCellPop({ key: f.key, pos: place(td.getBoundingClientRect()) });
+    }, 450);
+    window.setTimeout(() => setFlashKey(k => (k === f.key ? null : k)), 2400);
+  });
+
   const popExcs = cellPop ? (idx.byCell.get(cellPop.key) ?? []) : [];
   const popCol = colPop ? (idx.colFlags.get(colPop.ci) ?? null) : null;
   const popColGroups = useMemo(
-    () => (popCol ? groupColPending(popCol.pending) : []), [popCol]);
+    () => (popCol ? groupColPending(colRedo ? [...popCol.pending, ...popCol.decided] : popCol.pending) : []),
+    [popCol, colRedo]);
   const popColSelected = popColGroups.filter(gr => colSel.has(gr.key));
   const popColCount = popColSelected.reduce((a, gr) => a + gr.approvable.length, 0);
-  const popColSkipped = popColSelected.reduce((a, gr) => a + (gr.pending.length - gr.approvable.length), 0);
+  // Fix and Dismiss act on every pending row of the ticked rules.
+  const popColAll = popColSelected.reduce((a, gr) => a + gr.pending.length, 0);
+  const popColApprovable = popColGroups.some(gr => gr.approvable.length > 0);
+  const popColSkipped = popColSelected.filter(gr => gr.approvable.length > 0)
+    .reduce((a, gr) => a + (gr.pending.length - gr.approvable.length), 0);
 
   return (
     <div className="card" style={{ marginBottom: 18 }} ref={rootRef}>
       <div className="card-h">
         <h3>BDX Review</h3>
         <span className="sub">
-          {name ?? "Output"} — click a highlighted cell to see its error and fix it right here.
+          {/* View only: nothing can be fixed here, so the line must not say so. */}
+          {hint ?? (readOnly
+            ? <>{name ?? "Output"} — click a highlighted cell to see its error.</>
+            : <>{name ?? "Output"} — click a highlighted cell to see its error and fix it right here.</>)}
         </span>
         
         <div className="right" style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {!busy && activeSheetName && totalRows > 0 && (
+          {!hideToolbar && !busy && activeSheetName && totalRows > 0 && (
           <div style={{ display: "flex" }}>
             <div className="seg" role="tablist" style={{ display: "inline-flex", border: "1px solid var(--p-border)", borderRadius: 8, overflow: "hidden" }}>
               {([["exceptions", `Exceptions (${exceptionGis.length})`], ["all", `All rows (${totalRows})`]] as const).map(([val, label]) => (
@@ -1029,10 +1196,10 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
             </div>
           </div>
         )}
-          <span className="muted" style={{ fontSize: 12 }}>
+          {!hideToolbar && <span className="muted" style={{ fontSize: 12 }}>
             {pendingCells} pending · {decidedCells} resolved
-          </span>
-          <button className="btn sm" onClick={onClose}><X size={13} /> Hide</button>
+          </span>}
+          {onClose && <button className="btn sm" onClick={onClose}><X size={13} /> Hide</button>}
         </div>
       </div>
 
@@ -1089,6 +1256,7 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                   {header.map((h, ci) => {
                     const cf = idx.colFlags.get(ci);
                     const pend = cf?.pending.length ?? 0;
+                    const done = cf?.decided.length ?? 0;
                     return (
                       <th key={ci} style={{
                         ...stickyHead,
@@ -1097,25 +1265,43 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                       }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                           <span>{String(h ?? "").trim() || `Column ${ci + 1}`}</span>
-                          {pend > 0 && (
+                          {(pend > 0 || done > 0) && !readOnly && (
                             <button
                               onClick={ev => {
                                 ev.stopPropagation();
                                 setSaveErr(null); setCellPop(null);
-                                // Pre-tick every clause that has something approvable;
-                                // the popover lets the user untick clauses they don't want.
-                                const groups = groupColPending(cf?.pending ?? []);
-                                setColSel(new Set(groups.filter(gr => gr.approvable.length > 0).map(gr => gr.key)));
+                                // Nothing left open: the popover changes the
+                                // decisions already made instead.
+                                const redo = pend === 0;
+                                setColRedo(redo);
+                                // Pre-tick every clause; the popover lets the user untick
+                                // the ones they don't want (Approve skips clauses with
+                                // nothing to approve on its own).
+                                const groups = groupColPending(
+                                  redo ? (cf?.decided ?? []) : (cf?.pending ?? []));
+                                setColSel(new Set(groups.map(gr => gr.key)));
+                                setColAction(bulkFix || !groups.some(gr => gr.approvable.length > 0)
+                                  ? "fix" : "approve");
+                                // Fix all starts from the recommended value when
+                                // every ticked rule agrees on one.
+                                const vals = new Set(groups.map(gr => gr.value).filter(v => v != null));
+                                setColFixVal(vals.size === 1 ? String([...vals][0]) : "");
                                 setColPop({ ci, pos: place(ev.currentTarget.getBoundingClientRect(), 340, 300) });
                               }}
-                              title={`Approve all ${pend} flagged ${pend === 1 ? "row" : "rows"} in this column`}
+                              title={pend > 0
+                                ? `Approve, fix or dismiss all ${pend} flagged ${pend === 1 ? "row" : "rows"} in this column`
+                                : `Change the decision on all ${done} resolved ${done === 1 ? "row" : "rows"} in this column`}
                               style={{
                                 display: "inline-flex", alignItems: "center", gap: 3,
                                 fontSize: 10, fontWeight: 700, textTransform: "none", letterSpacing: 0,
-                                color: "#047857", background: "#ECFDF5", border: "1px solid #A7F3D0",
+                                ...(pend > 0
+                                  ? { color: "#047857", background: "#ECFDF5", border: "1px solid #A7F3D0" }
+                                  : { color: DONE_FG.fix, background: "#fff", border: `1px solid ${DONE_BD.fix}` }),
                                 borderRadius: 999, padding: "1px 7px", cursor: "pointer",
                               }}>
-                              <Check size={10} /> Approve all · {pend}
+                              {pend > 0
+                                ? <><Check size={10} /> Resolve all · {pend}</>
+                                : <><Wrench size={10} /> Change all · {done}</>}
                             </button>
                           )}
                         </div>
@@ -1195,7 +1381,11 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                               : doneKind ? DONE_BD[doneKind] : "transparent"}` } : {}),
                         };
                         return (
-                          <td key={ci} className={ci === 0 ? "mono" : ""} style={style}
+                          <td key={ci} className={ci === 0 ? "mono" : ""}
+                            data-cell={excs ? key : undefined}
+                            style={key === flashKey
+                              ? { ...style, boxShadow: "inset 0 0 0 2px var(--p-primary)", transition: "box-shadow .2s" }
+                              : style}
                             title={excs
                               ? (pending
                                   ? (excs[0].error_message ?? "Failed validation — click to review")
@@ -1272,8 +1462,11 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
             Dismissed
           </span>
           <span style={{ marginLeft: "auto" }}>
-            Approved &amp; fixed values are written into the output when you click <strong>Fix &amp; Validate</strong>.
-            {unmapped > 0 && <> · {unmapped} exception{unmapped === 1 ? "" : "s"} not tied to a cell — use the rule cards below.</>}
+            {footerNote ?? <>
+              {readOnly ? readOnlyNote : <>
+                Approved &amp; fixed values are written into the output when you click <strong>Fix &amp; Validate</strong>.</>}
+              {unmapped > 0 && <> · {unmapped} exception{unmapped === 1 ? "" : "s"} not tied to a cell — use the rule cards below.</>}
+            </>}
           </span>
         </div>
       )}
@@ -1287,12 +1480,13 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                    maxHeight: cellPop.pos.maxH }}>
           {popExcs.map((e, i) => (
             <div key={e.exception_id} className={i > 0 ? "mt-3 pt-3 border-t border-border" : ""}>
-              <ExcDetail e={e} saving={saving} onDecide={onDecide} />
+              <ExcDetail e={e} saving={saving} onDecide={onDecide} readOnly={readOnly} />
             </div>
           ))}
           {saveErr && <p className="text-[11px] text-danger mt-2">{saveErr}</p>}
           <p className="text-[10px] text-ink-soft mt-2">
-            Saved immediately — the corrected value reaches the output on Fix &amp; Validate.
+            {readOnly ? readOnlyNote
+                      : <>Saved immediately — the corrected value reaches the output on Fix &amp; Validate.</>}
           </p>
         </div>
       )}
@@ -1301,28 +1495,73 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
         <div className="fixed z-40 w-[340px] rounded-lg border border-border bg-white shadow-xl p-3 text-xs overflow-y-auto"
           style={{ left: colPop.pos.left, top: colPop.pos.top, bottom: colPop.pos.bottom,
                    maxHeight: colPop.pos.maxH }}>
-          <div className="font-semibold text-emerald-700 mb-1 flex items-center gap-1.5">
-            <Check size={13} /> Approve all — {String(header[colPop.ci] ?? "")}
+          <div className="font-semibold text-ink mb-2">
+            {popCol.pending.length > 0 ? "All flagged rows" : "Change all resolved rows"}
+            {" — "}{String(header[colPop.ci] ?? "")}
+          </div>
+          {/* Open rows and rows already decided in one column: the earlier
+              decisions are left alone unless asked for. */}
+          {popCol.pending.length > 0 && popCol.decided.length > 0 && (
+            <label className="flex items-center gap-2 mb-2.5 text-[11px] text-ink-muted cursor-pointer">
+              <input type="checkbox" className="h-3.5 w-3.5" checked={colRedo}
+                onChange={ev => {
+                  const on = ev.target.checked;
+                  setColRedo(on);
+                  setColSel(new Set(groupColPending(
+                    on ? [...popCol.pending, ...popCol.decided] : popCol.pending).map(gr => gr.key)));
+                }} />
+              Also change the {popCol.decided.length} already resolved
+            </label>
+          )}
+          {/* The same three decisions a single cell offers, for the whole column. */}
+          <div className="grid grid-cols-3 gap-1 mb-2.5" role="tablist">
+            {([["approve", "Approve", Check], ["fix", "Fix", Wrench], ["dismiss", "Dismiss", Hand]] as const)
+              .map(([k, label, Icon]) => {
+                const on = colAction === k;
+                return (
+                  <button key={k} type="button" role="tab" aria-selected={on}
+                    onClick={() => { setColAction(k); setSaveErr(null); }}
+                    className="flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-semibold"
+                    style={on ? { background: DONE_BG[k], color: DONE_FG[k], border: `1px solid ${DONE_BD[k]}` }
+                              : { background: "#fff", color: "#64748B", border: "1px solid #E2E8F0" }}>
+                    <Icon size={12} /> {label}
+                  </button>
+                );
+              })}
           </div>
 
-          {popColGroups.some(gr => gr.approvable.length > 0) ? (
+          {colAction === "approve" && !popColApprovable ? (
+            <p className="text-ink-muted">
+              None of the flagged rows in this column has a single recommended value to
+              approve — use <b>Fix</b> to enter one, or <b>Dismiss</b> to keep the values as sent.
+            </p>
+          ) : (
             <>
               <p className="text-ink-muted mb-1.5">
-                {popColGroups.length === 1
-                  ? "Approve the flagged rows with their recommended value:"
-                  : `This column is checked by ${popColGroups.length} clauses — tick which to approve:`}
+                {colAction === "approve"
+                  ? (popColGroups.length === 1
+                    ? "Approve the flagged rows with their recommended value:"
+                    : `This column is checked by ${popColGroups.length} clauses — tick which to approve:`)
+                  : colAction === "fix"
+                    ? (popColGroups.length === 1
+                      ? "Write one corrected value into every flagged row:"
+                      : `This column is checked by ${popColGroups.length} clauses — tick which to fix:`)
+                    : (popColGroups.length === 1
+                      ? "Keep the values as sent — the rows pass through unchanged:"
+                      : `This column is checked by ${popColGroups.length} clauses — tick which to dismiss:`)}
               </p>
-              {/* one row per rule/clause, so approving one clause never silently
-                  approves another clause's errors on the same column */}
+              {/* one row per rule/clause, so deciding one clause never silently
+                  decides another clause's errors on the same column */}
               <div className="max-h-52 overflow-y-auto space-y-1">
                 {popColGroups.map(gr => {
                   const canApprove = gr.approvable.length > 0;
+                  const canTick = colAction !== "approve" || canApprove;
                   return (
                     <label key={gr.key}
                       className={`flex items-start gap-2 px-1.5 py-1.5 rounded border border-border ${
-                        canApprove ? "hover:bg-surface-2 cursor-pointer" : "opacity-70 cursor-not-allowed"}`}>
-                      <input type="checkbox" className="h-3.5 w-3.5 mt-0.5" disabled={!canApprove}
-                        checked={canApprove && colSel.has(gr.key)}
+                        canTick ? "hover:bg-surface-2 cursor-pointer" : "opacity-70 cursor-not-allowed"}`}>
+                      <input type="checkbox" className="h-3.5 w-3.5 mt-0.5" disabled={!canTick}
+                        checked={canTick && colSel.has(gr.key)}
                         onChange={() => setColSel(prev => {
                           const n = new Set(prev);
                           n.has(gr.key) ? n.delete(gr.key) : n.add(gr.key);
@@ -1338,10 +1577,11 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                             <span className="text-[10px] font-mono text-ink-soft">RULE-{gr.ruleId}</span>
                           )}
                           <span className="ml-auto text-ink-soft shrink-0">
-                            {gr.approvable.length}/{gr.pending.length} row{gr.pending.length === 1 ? "" : "s"}
+                            {colAction === "approve" ? `${gr.approvable.length}/` : ""}
+                            {gr.pending.length} row{gr.pending.length === 1 ? "" : "s"}
                           </span>
                         </span>
-                        {canApprove ? (
+                        {colAction === "approve" && (canApprove ? (
                           <span className="block text-[11px] mt-0.5">
                             → <span className="font-mono text-emerald-700">
                               {gr.value ?? "each row's own recommended value"}
@@ -1349,9 +1589,9 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                           </span>
                         ) : (
                           <span className="block text-[11px] text-amber-600 mt-0.5">
-                            No single recommended value — Fix these cells individually.
+                            No single recommended value — use Fix or Dismiss.
                           </span>
-                        )}
+                        ))}
                         {(gr.requirement || gr.clause) && (
                           <span className="block text-[10px] text-ink-soft mt-0.5 truncate"
                             title={gr.clause ?? gr.requirement ?? undefined}>
@@ -1363,25 +1603,39 @@ export default function BdxInlineReview({ exportId, exceptions, onSaved, onClose
                   );
                 })}
               </div>
-              {popColSkipped > 0 && (
+              {colAction === "fix" && (
+                <div className="mt-2.5">
+                  <label className="block text-[11px] font-semibold text-ink-muted mb-1">
+                    New value for {popColAll} row(s)
+                  </label>
+                  <input value={colFixVal} onChange={ev => setColFixVal(ev.target.value)}
+                    placeholder="Enter the corrected value"
+                    className="w-full rounded-md border border-border px-2 py-1.5 text-xs" />
+                </div>
+              )}
+              {colAction === "approve" && popColSkipped > 0 && (
                 <p className="text-[11px] text-amber-600 mt-1.5">
                   {popColSkipped} of the ticked rows {popColSkipped === 1 ? "has" : "have"} no single
                   recommended value and will be skipped.
                 </p>
               )}
             </>
-          ) : (
-            <p className="text-ink-muted">
-              None of the flagged rows in this column has a single recommended value to
-              approve — click each cell and use <b>Fix</b> instead.
-            </p>
           )}
 
           {saveErr && <p className="text-[11px] text-danger mt-2">{saveErr}</p>}
           <div className="flex justify-end gap-2 mt-3">
             <button className="text-xs px-2 py-1 rounded-md hover:bg-surface-2 text-ink-muted"
               onClick={closePops}>Cancel</button>
-            {popColGroups.some(gr => gr.approvable.length > 0) && (
+            {colAction === "fix" ? (
+              <Button onClick={() => fixColumn(colPop.ci)}
+                disabled={saving || !colFixVal.trim() || popColAll === 0}>
+                Fix {popColAll}
+              </Button>
+            ) : colAction === "dismiss" ? (
+              <Button onClick={() => dismissColumn(colPop.ci)} disabled={saving || popColAll === 0}>
+                Dismiss {popColAll}
+              </Button>
+            ) : popColApprovable && (
               <Button onClick={() => approveColumn(colPop.ci)} disabled={saving || popColCount === 0}>
                 Approve {popColCount}
               </Button>

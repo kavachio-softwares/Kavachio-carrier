@@ -8,6 +8,7 @@ import { Pagination } from "../components/Pagination";
 import { useServerList } from "../hooks/useServerList";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { InviteSentModal } from "../components/InviteSentModal";
+import { InfoTip } from "../components/InfoTip";
 
 type Tenant = {
   mga: string; name: string; code: string;
@@ -119,14 +120,14 @@ export default function Tenants() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Carriers</h2>
-            <p>
-              All the insurance companies using Kavachio. When you add one, we
-              email its first admin an invitation to join.
-            </p>
+            <h2>
+              Carriers
+              <InfoTip text={"Every insurance company using Kavachio — adding one "
+                + "emails its owner an invitation to join."} />
+            </h2>
           </div>
           <div className="actions">
-            <button className="btn pri" onClick={() => nav("/tenants/new")}>＋ Create Carrier</button>
+            <button className="btn pri" onClick={() => nav("/tenants/new")}>＋ Onboard Carrier</button>
           </div>
         </div>
 
@@ -168,7 +169,7 @@ export default function Tenants() {
               <thead>
                 <tr>
                   <th>Carrier</th><th>Programmes</th><th>Brokers</th>
-                  <th>Users</th><th>Status</th><th></th>
+                  <th>Status</th><th style={{ textAlign: "right" }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -187,28 +188,41 @@ export default function Tenants() {
                           until its own admin signs in and builds it. */}
                       <td>{t.programmes ?? 0}</td>
                       <td>{t.brokers ?? 0}</td>
-                      <td>{t.users}</td>
                       <td><span className={`badge ${sb.cls}`}><span className="d" />{sb.label}</span></td>
                       <td className="r">
-                        <span className="linkish" onClick={() => nav(`/tenants/${encodeURIComponent(t.mga)}`)}>View</span>
-                        {/* Only offered while the org actually has an outstanding
-                            invite — nothing to resend once everyone has onboarded.
-                            While the request is in flight the element carries NO
-                            click handler, so it can't be fired twice. */}
-                        {(t.pending_invites ?? 0) > 0 && (
-                          <>
-                            {" · "}
-                            {resending === t.mga ? (
-                              <span className="linkish mut" aria-disabled="true">Sending…</span>
-                            ) : (
-                              <span className="linkish" onClick={() => resendInvite(t)}
-                                title={`Re-send the onboarding link to ${t.pending_invites} pending ${
-                                  t.pending_invites === 1 ? "user" : "users"} of ${t.name}`}>
-                                Resend invite
-                              </span>
-                            )}
-                          </>
-                        )}
+                        {/* BUTTONS, not linked words — matching Users & Roles
+                            (pages/Users.tsx): a plain-text "View · Resend
+                            invite" reads as one sentence, gives the eye no hit
+                            target, and a destructive action would sit in the
+                            same ink as a safe one. `rowacts` is the house flex
+                            row, flushed right, so a two-button row and a
+                            one-button row still share the same right edge down
+                            the column. */}
+                        <div className="rowacts" style={{ marginTop: 0, justifyContent: "flex-end" }}>
+                          {/* Resend invite BEFORE View, so View — the one
+                              action every row has — runs in a straight line
+                              down the right edge of the column. Left of it,
+                              Resend invite only appears on the rows that still
+                              have one outstanding, which is why it shifts
+                              rather than lining up itself. Disabled rather
+                              than removed while the request is in flight, so
+                              it cannot be fired twice and the row does not
+                              shift. */}
+                          {(t.pending_invites ?? 0) > 0 && (
+                            <button type="button" className="btn sm"
+                                    disabled={resending === t.mga}
+                                    onClick={() => resendInvite(t)}
+                                    title={resending === t.mga ? undefined
+                                      : `Re-send the onboarding link to ${t.pending_invites} pending ${
+                                          t.pending_invites === 1 ? "user" : "users"} of ${t.name}`}>
+                              {resending === t.mga ? "Sending…" : "Resend invite"}
+                            </button>
+                          )}
+                          <button type="button" className="btn sm"
+                                  onClick={() => nav(`/tenants/${encodeURIComponent(t.mga)}`)}>
+                            View
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

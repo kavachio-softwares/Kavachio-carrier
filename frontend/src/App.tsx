@@ -9,19 +9,34 @@ import Tenants from "./pages/Tenants";
 import AddTenant from "./pages/AddTenant";
 import AdminUsers from "./pages/AdminUsers";
 import BrokerDashboard from "./pages/BrokerDashboard";
-import OperatorHome from "./pages/OperatorHome";
+import BrokerRuns from "./pages/BrokerRuns";
+import BrokerCalendar from "./pages/BrokerCalendar";
+import BrokerExceptions from "./pages/BrokerExceptions";
+import TeamActivity from "./pages/TeamActivity";
+import PersonActivity from "./pages/PersonActivity";
+import FilesByCarrier from "./pages/FilesByCarrier";
 import BrokerContracts from "./pages/BrokerContracts";
+import BrokerInvitations from "./pages/BrokerInvitations";
 import BrokerBordereau from "./pages/BrokerBordereau";
-import BrokerUsers from "./pages/BrokerUsers";
 import TenantDetail from "./pages/TenantDetail";
 import Parties from "./pages/Parties";
-import AddParty from "./pages/AddParty";
 import PartyDetail from "./pages/PartyDetail";
 import Programs from "./pages/Programs";
 import ProgramManagement from "./pages/ProgramManagement";
 import AddProgram from "./pages/AddProgram";
-import ProgramBrokers from "./pages/ProgramBrokers";
 import ContractDetail from "./pages/ContractDetail";
+import ContractRecord from "./pages/ContractRecord";
+import ContractSignature from "./pages/ContractSignature";
+import Contracts from "./pages/Contracts";
+import ContractNew from "./pages/ContractNew";
+// Create-a-Contract, step 4 from the carrier's side: what is out for
+// signature and where each one got to. Steps 1-3 are the wizard at
+// /contracts/new.
+import ContractSignatures from "./pages/ContractSignatures";
+// The signing screen itself. PUBLIC — reached from an emailed link by
+// people who have no account here, so it sits outside RequireAuth.
+import SignContract from "./pages/SignContract";
+import FixLink from "./pages/FixLink";
 import Mapping from "./pages/Mapping";
 import DirectRun from "./pages/DirectRun";
 import DirectSetup from "./pages/DirectSetup";
@@ -30,7 +45,6 @@ import BordereauSetupDetail from "./pages/BordereauSetupDetail";
 import BordereauSetupEdit from "./pages/BordereauSetupEdit";
 import AdminMappingTasks from "./pages/AdminMappingTasks";
 import KavachioAdminDashboard from "./pages/KavachioAdminDashboard";
-import Outputs from "./pages/Outputs";
 import OutputTemplate from "./pages/OutputTemplate";
 import UploadExceptions from "./pages/UploadExceptions";
 import RuleReview from "./pages/RuleReview";
@@ -39,11 +53,12 @@ import RuleLibrary from "./pages/RuleLibrary";
 import RuleForm from "./pages/RuleForm";
 import RecentRuns from "./pages/RecentRuns";
 import Calendar from "./pages/Calendar";
+import BordereauCalendar from "./pages/BordereauCalendar";
 // Feature 10 — file intake channels.
-import FilesArrive from "./pages/FilesArrive";
-import FilesReceived from "./pages/FilesReceived";
+import Files from "./pages/Files";
 import AddUser from "./pages/AddUser";
 import Profile from "./pages/Profile";
+import AuditLogs from "./pages/AuditLogs";
 import Welcome from "./pages/Welcome";
 import { useEffect } from "react";
 import {
@@ -51,13 +66,23 @@ import {
 } from "./auth";
 import { canAccessPath, landingPath } from "./access";
 import BrokerDetail from "./pages/BrokerDetail";
+import BrokerFiles from "./pages/BrokerFiles";
 import Brokers from "./pages/Brokers";
+import BrokerOnboardingRequests from "./pages/BrokerOnboardingRequests";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   // A stored user with an expired refresh token is a dead session — treat it
   // as signed out immediately instead of waiting for the first 401.
+  const location = useLocation();
   if (isRefreshTokenExpired()) clearAuth();
-  if (!getUser()) return <Navigate to="/login" replace />;
+  if (!getUser()) {
+    // REMEMBER WHERE THEY WERE GOING. Somebody arriving from a link — a
+    // carrier's "Join now", a signature request — was being dropped on their
+    // dashboard after signing in, with no trace of what they had clicked. The
+    // link worked and the destination was lost, which reads as the link being
+    // broken.
+    return <Navigate to="/login" replace state={{ from: location }} />;
+  }
   return children;
 }
 
@@ -102,6 +127,21 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/reset" element={<ResetPassword />} />
+      {/* Where "Join now" lands. Signed in, but OUTSIDE the app shell: somebody
+          arriving from an email has one decision to make, and a sidebar of
+          screens about a carrier they have not joined yet is not it. Presented
+          like the sign-in page, which is the other door into this app. */}
+      <Route path="/invitations"
+             element={<RequireAuth><BrokerInvitations /></RequireAuth>} />
+      {/* Signing a contract from an emailed link. No Layout, no session,
+          no guard: the token in the URL is the whole credential and it
+          stands for exactly one signer on exactly one contract. The
+          insurer's signer and the broker's both land here. */}
+      <Route path="/sign" element={<SignContract />} />
+      {/* The broker's secure correction link from a result email. Same idea as
+          /sign: no Layout, no session — the token is the credential, for one
+          submission only. */}
+      <Route path="/fix/:token" element={<FixLink />} />
       {/* /welcome is the tenant-admin first-run wizard — it has no Layout shell,
           so it carries the guards itself. */}
       <Route path="/welcome" element={<RequireAuth><RequireAccess><Welcome /></RequireAccess></RequireAuth>} />
@@ -112,30 +152,57 @@ export default function App() {
         <Route path="/tenant" element={<Tenant />} />      {/* Organization (this tenant's own settings) */}
         {/* Broker seats. Everything here is READ of what a carrier gave them. */}
         <Route path="/broker" element={<BrokerDashboard />} />
-        <Route path="/operator" element={<OperatorHome />} />   {/* the broker's day-to-day seat */}
         <Route path="/broker/contracts" element={<BrokerContracts />} />
-        {/* The broker's monthly run. Both broker seats reach it: an admin
-            submits, and an operator is the seat added to do exactly this. */}
+        {/* The broker's monthly run — the broker admin's. */}
         <Route path="/broker/bordereau" element={<BrokerBordereau />} />
-        <Route path="/broker/users" element={<BrokerUsers />} />   {/* The broker staffs itself */}
+        <Route path="/broker/runs" element={<BrokerRuns />} />
+        <Route path="/broker/calendar" element={<BrokerCalendar />} />
+        <Route path="/broker/exceptions" element={<BrokerExceptions />} />
+        <Route path="/broker/team-activity" element={<TeamActivity />} />
+        <Route path="/broker/team-activity/:userId" element={<PersonActivity />} />
+        <Route path="/broker/files-by-carrier" element={<FilesByCarrier />} />
         <Route path="/admin/users" element={<AdminUsers />} />   {/* Everyone on the platform, read-only */}
         <Route path="/tenants" element={<Tenants />} />    {/* Tenants directory (Kavachio platform admin) */}
         <Route path="/tenants/new" element={<AddTenant />} />
         <Route path="/tenants/:mga" element={<TenantDetail />} />
         <Route path="/parties" element={<Parties />} />
-        <Route path="/parties/new" element={<AddParty />} />
+        {/* No /parties/new. Adding a carrier happens in Users & Roles and
+            nowhere else; a route nothing links to is still a way in for anyone
+            who kept the bookmark. The directory itself stays readable — a
+            counterparty on a contract is opened by id. */}
         <Route path="/parties/:id" element={<PartyDetail />} />
         <Route path="/programs" element={<Programs />} />
         {/* The carrier hierarchy: brokers are reached from the carrier, not
             from a tenant — the same broker produces for several carriers. */}
         <Route path="/brokers" element={<Brokers />} />
+        {/* Before /brokers/:brokerId so the static segment cannot be read as an
+            id. React Router ranks it ahead anyway; the order says why. */}
+        <Route path="/brokers/requests" element={<BrokerOnboardingRequests />} />
         <Route path="/brokers/:brokerId" element={<BrokerDetail />} />
+        {/* What that broker has SENT, split by programme — opened from the
+            Broker Performance card on Home. */}
+        <Route path="/brokers/:brokerId/files" element={<BrokerFiles />} />
         {/* Carrier-scoped oversight dashboard. Without ?carrier= it renders its
             own carrier picker, so the route needs no param of its own. */}
         <Route path="/program-management" element={<ProgramManagement />} />
         <Route path="/programs/new" element={<AddProgram />} />
-        <Route path="/programs/:programId/brokers" element={<ProgramBrokers />} />   {/* the mesh, managed */}
+        {/* The same flow, picked up for a programme that already exists. */}
+        <Route path="/programs/:programId/setup" element={<AddProgram />} />
+        {/* The contract as a RECORD — terms, documents, lifecycle. The
+            programme-scoped route below is what it PRODUCED: clauses and rules. */}
+        <Route path="/contracts" element={<Contracts />} />
+        <Route path="/contracts/new" element={<ContractNew />} />
+        {/* The other way in: a wording that already exists, read on upload. */}
+        {/* Uploading is a dialog now (AddContractModal); old links land on the list. */}
+        <Route path="/contracts/upload" element={<Navigate to="/contracts" replace />} />
+        <Route path="/contracts/:contractId" element={<ContractRecord />} />
+        {/* Screen only — no signing provider is connected. See the page. */}
+        <Route path="/contracts/:contractId/signature" element={<ContractSignature />} />
         <Route path="/programs/:programId/contracts/:contractId" element={<ContractDetail />} />
+        {/* Watching the signing rounds. A round is STARTED from the
+            contract itself, once both sides have agreed the terms — see
+            esign_routes' in-app door — not from a screen of its own. */}
+        <Route path="/contracts/signatures" element={<ContractSignatures />} />
         <Route path="/direct" element={<DirectRun />} />
         <Route path="/direct/setup" element={<DirectSetup />} />
         <Route path="/direct/setups" element={<BordereauSetups />} />
@@ -145,9 +212,6 @@ export default function App() {
         <Route path="/uploads/:uploadId/exceptions" element={<UploadExceptions />} />
         <Route path="/uploads/:uploadId/exceptions/rule/:ruleId" element={<RuleReview />} />
         <Route path="/uploads/mapper/:mapperId" element={<Mapping />} />
-        <Route path="/outputs" element={<Outputs />} />
-        <Route path="/outputs/new-template" element={<Outputs />} />
-        <Route path="/outputs/generate" element={<Outputs />} />
         <Route path="/outputs/templates/:id" element={<OutputTemplate />} />
         <Route path="/users" element={<Users />} />
         {/* Rule library — managed BDX rules. tenant_admin sees their own tenant's
@@ -158,11 +222,21 @@ export default function App() {
         <Route path="/rule-library/:id/edit" element={<RuleForm />} />
         <Route path="/runs" element={<RecentRuns />} />
         <Route path="/calendar" element={<Calendar />} />
-        {/* How a broker's file reaches you, and everything that has landed. */}
-        <Route path="/intake" element={<FilesArrive />} />
-        <Route path="/intake/arrivals" element={<FilesReceived />} />
+        {/* The carrier's view of the same data: every broker's obligation for a
+            due month, rather than one programme's deadlines. /calendar stays as
+            the place a single programme's schedule is SET. */}
+        <Route path="/bordereau-calendar" element={<BordereauCalendar />} />
+        {/* How a broker's file reaches you, and everything that has landed —
+            one screen with two tabs. The old paths are kept as redirects: they
+            are in emails to brokers and in bookmarks, and a link that 404s is a
+            support call. */}
+        <Route path="/files" element={<Files />} />
+        <Route path="/intake" element={<Navigate to="/files?panel=ways" replace />} />
+        <Route path="/intake/arrivals" element={<Navigate to="/files" replace />} />
         <Route path="/users/new" element={<AddUser />} />
         <Route path="/profile" element={<Profile />} />
+        {/* Audit Logs — one screen, five seats. The server scopes the rows. */}
+        <Route path="/audit" element={<AuditLogs />} />
       </Route>
       <Route path="*" element={<DefaultHome />} />
     </Routes>

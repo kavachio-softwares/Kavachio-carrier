@@ -78,6 +78,21 @@ for _t_name in EXTRA_FIELD_ENTITY_TABLES:
 
 
 # ---------------------------------------------------------------------------
+# Operational tenant settings column.
+#
+# The v4 model dropped `internal_codes` from the tenant entity (LEGACY_FIELD_MAP
+# maps it to None), but it stays on the physical table as an OPERATIONAL store:
+# db.Tenant declares it, /tenant reads and writes it, and extras.py keeps the
+# user-defined extra-field definitions under its `extras` sub-key. Without it
+# here, any canonical-side `t.c.internal_codes` raises AttributeError — which is
+# what 500'd GET /extra-fields. Appended the same way `extras` is above.
+# ---------------------------------------------------------------------------
+_TENANT = CANONICAL_TABLES.get("tenant")
+if _TENANT is not None and "internal_codes" not in _TENANT.c:
+    _TENANT.append_column(Column("internal_codes", JSON, nullable=True))
+
+
+# ---------------------------------------------------------------------------
 # Operational tenancy column.
 #
 # The v4 model scopes child tables through their parents (policy → contract →
@@ -100,6 +115,24 @@ for _t_name, _t in CANONICAL_TABLES.items():
         if "tenant_id" not in _t.c:
             _t.append_column(Column("tenant_id", Integer, nullable=True))
         _TENANT_COL[_t_name] = "tenant_id"
+
+
+# ---------------------------------------------------------------------------
+# Which broker SENT a policy.
+#
+# policy_contract_broker_party_id says whose contract a policy sits under, and
+# a contract the carrier holds for a whole programme has no broker — so on a
+# programme shared by several brokers it could not tell their policies apart,
+# and one broker could read another's. This records the broker whose
+# bordereau run loaded the policy. Lineage, an OPERATIONAL fact rather than
+# model content (like tenant_id above), so it is appended here and is never a
+# mapping target. db.init_db adds it to an existing table the way it adds
+# every canonical column the table lacks; migrations/24 does the same by hand.
+# ---------------------------------------------------------------------------
+POLICY_SUBMITTER_COL = "policy_submitting_broker_party_id"
+_POLICY = CANONICAL_TABLES.get("policy")
+if _POLICY is not None and POLICY_SUBMITTER_COL not in _POLICY.c:
+    _POLICY.append_column(Column(POLICY_SUBMITTER_COL, Integer, nullable=True))
 
 
 def tenant_col(table_name: str) -> str | None:

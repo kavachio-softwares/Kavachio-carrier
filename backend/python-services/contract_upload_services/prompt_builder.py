@@ -555,7 +555,72 @@ def _reference_documents_block(reference_documents):
     return "\n".join(parts)
 
 
-def build_extraction_prompt(section, reference_documents=None):
+def _endorsements_block(endorsements):
+    """Render active endorsements into a prompt block.
+
+    An endorsement is NOT a reference document, and rendering it as one would
+    produce the wrong rules. A reference document RESOLVES a clause that
+    deferred its content elsewhere — the wording said "per the Guidelines" and
+    the guidelines supply the missing values. An endorsement CHANGES a clause
+    that was already complete: the wording said $5m and the endorsement says
+    $7m, and only one of those may survive into a rule.
+
+    So both documents stay active and both are read, but the endorsement's
+    version of any term it touches is the one that becomes a rule. The clause it
+    replaced is not deleted from the extraction — it is marked superseded, so
+    "why is the limit 7 and not 5" stays answerable from the record.
+
+    `endorsements` is a list of {"name", "text", "effective_from"}. Returns ""
+    when there are none, which is the common case.
+    """
+    if not endorsements:
+        return ""
+
+    names = [(e.get("name") or "(unnamed endorsement)") for e in endorsements]
+
+    parts = [
+        "\n---BEGIN ENDORSEMENTS---",
+        "The document(s) below AMEND the contract section above. They are in",
+        "force together with it — this is not a replacement wording, and the",
+        "section above has NOT been superseded as a whole.",
+        "",
+        "Apply them as follows, clause by clause:",
+        "  1. Where an endorsement CHANGES a term that the contract already",
+        "     states (a limit, a rate, a date, a list, a deductible), extract",
+        "     the ENDORSED value as the live clause. Set that clause's",
+        "     \"amended_by_endorsement\" to the endorsement's document name and",
+        "     \"superseded_text\" to the original wording it replaced, VERBATIM.",
+        "  2. Where an endorsement ADDS a term the contract did not have,",
+        "     extract it as a new clause and set \"amended_by_endorsement\" to",
+        "     the endorsement's name.",
+        "  3. Where an endorsement REMOVES a term, extract the original clause",
+        "     with \"removed_by_endorsement\" set to the endorsement's name so it",
+        "     produces no rule but stays on the record.",
+        "  4. Every clause the endorsements do NOT touch is extracted from the",
+        "     contract exactly as it stands. Most clauses are in this case.",
+        "",
+        "NEVER emit both the original and the endorsed version of the same term",
+        "as two live clauses — that produces two contradictory rules and the",
+        "check fails whichever value the data holds.",
+        "",
+        "Where two endorsements touch the SAME term, the one with the later",
+        "effective date wins.",
+        "",
+        f"ACTIVE ENDORSEMENTS: {json.dumps(names)}",
+    ]
+    for e in endorsements:
+        name = e.get("name") or "(unnamed endorsement)"
+        eff = e.get("effective_from")
+        head = f'\n=== ENDORSEMENT: "{name}"'
+        if eff:
+            head += f' (effective {eff})'
+        parts.append(f'{head} ===\n{e.get("text") or ""}')
+    parts.append("---END ENDORSEMENTS---\n")
+
+    return "\n".join(parts)
+
+
+def build_extraction_prompt(section, reference_documents=None, endorsements=None):
     """
     Build the Pipeline 1.3 extraction prompt for one section.
     `section` is one element from split_into_sections().
@@ -563,6 +628,11 @@ def build_extraction_prompt(section, reference_documents=None):
     `reference_documents` (optional) is a list of {"name", "text"} for external
     documents the contract refers to; when present they are appended so the LLM
     can resolve deferred clauses against their real content.
+
+    `endorsements` (optional) is a list of {"name", "text", "effective_from"}
+    for documents that AMEND this contract. They are rendered separately from
+    reference documents because they do the opposite thing — see
+    _endorsements_block.
     """
 
     section_type = section.get("section_type", "body")
@@ -571,6 +641,7 @@ def build_extraction_prompt(section, reference_documents=None):
     text         = section.get("text", "")
 
     references_block = _reference_documents_block(reference_documents)
+    endorsements_block = _endorsements_block(endorsements)
 
     return f"""{_EXTRACTION_SYSTEM}
 
@@ -581,7 +652,7 @@ Pages: {page_start} to {page_end}
 ---BEGIN SECTION TEXT---
 {text}
 ---END SECTION TEXT---
-{references_block}
+{references_block}{endorsements_block}
 Extract per schema."""
 
 
@@ -693,7 +764,16 @@ def _coerce_number(value):
         return None
 
 
-def infer_value_kind(name: str, samples: list) -> str:
+# Declared template data types (lower-cased) the no-sample fallback trusts. A
+# "string" is absent on purpose: it is what an untyped column gets, amounts included.
+_DECLARED_DATE_TYPES = {"date", "datetime", "timestamp"}
+_DECLARED_PERCENT_TYPES = {"percent", "percentage"}
+_DECLARED_MONEY_TYPES = {"currency", "money", "amount"}
+_DECLARED_DECIMAL_TYPES = {"decimal", "number", "numeric", "float", "double"}
+_DECLARED_INTEGER_TYPES = {"int", "integer"}
+
+
+def infer_value_kind(name: str, samples: list, data_type=None) -> str:
     """Deterministically classify a column's VALUE KIND from its name + sample
     values, so the mapper can pick a field whose kind matches the intent's value
     (a money cap → money column, a percentage → percent column, etc.).
@@ -702,6 +782,11 @@ def infer_value_kind(name: str, samples: list) -> str:
     'date', 'text/code'. This is generic — it keys off symbols ($, %), numeric
     SCALE drawn from the samples, and the word 'date' in the name — never off any
     specific column name, so it stays correct for any template.
+
+    `data_type` (the template's declared type, when it has one) is read ONLY when
+    the column has no usable samples: a standard template built from a spec has
+    types but no data, and without it every such amount column fell to
+    'text/code', so limit clauses could not bind to their own limit columns.
     """
     nm = (name or "").lower()
     nums = [n for n in (_coerce_number(s) for s in (samples or [])) if n is not None]
@@ -712,6 +797,29 @@ def infer_value_kind(name: str, samples: list) -> str:
     # so sample values can't be trusted to look like dates.
     if any(w in nm for w in ("date", " dt", "inception", "expiry", "expiration")):
         return "date"
+
+    has_samples = any(str(s).strip() and str(s).strip().lower() not in ("nan", "none")
+                      for s in (samples or []) if s is not None)
+    if not has_samples:
+        declared = str(data_type or "").strip().lower()
+        if declared in _DECLARED_DATE_TYPES:
+            return "date"
+        if declared in _DECLARED_PERCENT_TYPES:
+            return "percentage (0–100)"
+        if declared in _DECLARED_MONEY_TYPES:
+            return "money"
+        if declared in _DECLARED_DECIMAL_TYPES:
+            # No scale to read: the name's % marks a rate, a rate-like word a plain
+            # number (exchange rate, multiplier), otherwise a declared decimal in
+            # a bordereau is an amount (premium, limit, fee, tax).
+            if has_pct:
+                return "percentage (0–100)"
+            if re.search(r"\b(rate|ratio|multiplier|factor|exchange|roe)\b",
+                         re.sub(r"[_\W]+|(?<=[a-z])(?=[A-Z])", " ", name or "").lower()):
+                return "number"
+            return "money"
+        if declared in _DECLARED_INTEGER_TYPES:
+            return "money" if has_money else "number"
 
     if nums:
         # Sample SCALE dominates the name: "100% policy Limit" holds millions, so
@@ -759,6 +867,10 @@ def dedup_template_fields(template_fields: list[dict]) -> list[dict]:
                 "required": f.get("required"),
             }
             merged[name] = cur
+        # Declared type rides along (only when some copy has one) so the deduped
+        # prompt block can still judge a sample-less column's kind.
+        if not cur.get("data_type") and f.get("data_type"):
+            cur["data_type"] = f.get("data_type")
         sh = f.get("sheet", "")
         if sh and sh not in cur["sheets"]:
             cur["sheets"].append(sh)
@@ -795,7 +907,7 @@ def _template_fields_block(template_fields: list[dict]) -> str:
         sheet = f.get("sheet", "")
         name  = f.get("name", "")
         samples = f.get("samples", [])
-        kind = infer_value_kind(name, samples)
+        kind = infer_value_kind(name, samples, f.get("data_type"))
         sample_str = f", samples: {samples[:3]}" if samples else ""
         # The column's internal data-model tag (canonical_field) is deliberately
         # NOT shown. Rule mapping keys off the RENDERED OUTPUT template — name,

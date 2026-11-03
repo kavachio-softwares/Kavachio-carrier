@@ -131,24 +131,29 @@ SECTION_HEADER_PATTERNS = [
 
 
 # =========================================================
-# Contract upload validation (FILE_TOO_LARGE / encrypted / OCR gate, etc.)
+# Contract upload validation (FILE_TOO_LARGE / encrypted / length gate, etc.)
 # =========================================================
 
 MAX_CONTRACT_UPLOAD_MB = 50
-MIN_CONTRACT_UPLOAD_KB = 10
-
 MAX_CONTRACT_UPLOAD_BYTES = MAX_CONTRACT_UPLOAD_MB * 1024 * 1024
-MIN_CONTRACT_UPLOAD_BYTES = MIN_CONTRACT_UPLOAD_KB * 1024
 
-# Minimum characters after extracting readable text.
-# If the document is scanned (no text), extraction will yield very little.
-MIN_READABLE_TEXT_CHARS = 700
+# THE LENGTH FLOOR IS COUNTED IN WORDS, not bytes.
+#
+# It used to be a 10 KB minimum file size, which judged the FILE rather than the
+# contract: a PDF writer that compresses well produces a real three-page program
+# schedule in under 9 KB, and that was refused as "too small to be a binding
+# authority contract" before a word of it was read. Words are what makes a
+# contract long enough to have terms in it, so words are what is counted — read
+# from the same extracted text the rest of the pipeline reads.
+MIN_CONTRACT_WORDS = 100
 
 CONTRACT_UPLOAD_ERROR_MESSAGES = {
     "FILE_TOO_LARGE":
         "This file exceeds the 50 MB limit. Please split or compress the document and try again.",
-    "FILE_TOO_SMALL":
-        "This file is too small to be a binding authority contract. Please check you've uploaded the right file.",
+    # Formatted with {words} and {min_words} — the count is part of the message
+    # so "too short" says HOW short, and the minimum is never restated here.
+    "CONTRACT_TOO_SHORT":
+        "Your contract is too short to process. A contract needs at least {min_words} words, and this one has {words}.",
     "INVALID_FORMAT":
         "We accept PDF and Word (.docx) documents. The file you uploaded appears to be a different format.",
     "ENCRYPTED_PDF":

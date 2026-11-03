@@ -12,6 +12,9 @@ json-repair==0.30.3
 psycopg2-binary==2.9.9
 PyMuPDF==1.24.10
 PyPDF2==3.0.1
+reportlab==5.0.1
+# Digitally seals the completed contract (PAdES). See esign_seal.py.
+pyHanko==0.37.0
 python-docx==1.1.2
 dotenv
 bcrypt>=4.0.0
@@ -23,3 +26,15 @@ azure-storage-blob==12.23.1
 
 # JWT auth (access + refresh tokens)
 python-jose[cryptography]==3.5.0
+defusedxml==0.7.1
+# SFTP intake: notices a file the moment it lands in a broker's folder
+# (FSEvents / inotify). See sftp_watch.py.
+watchdog==6.0.0
+# External SFTP pull: Kavachio logs in to a broker's own SFTP server as a
+# client (sftp_pull.py). Brings pynacl (Ed25519) and uses `cryptography`,
+# which also encrypts the saved logins (intake_secrets.py). Paramiko 5 has no
+# SHA-1 algorithms: a server offering only ssh-rsa / *-sha1 is refused.
+paramiko==5.0.0
+# Test-only. The contract as-of suites (test_contract_asof*.py) are
+# pytest-based and cannot run without it.
+pytest==9.1.1

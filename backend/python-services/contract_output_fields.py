@@ -12,7 +12,9 @@ Cost shape, copied deliberately from ``missing_columns``:
     which is plain SQL.
   * ONE call to the SMALL model: temperature 0, fixed seed, a response schema so
     the shape is enforced by the API, thinking disabled, every input list capped
-    so a 200-clause contract sends the same size prompt as a short one.
+    so a 200-clause contract sends the same size prompt as a short one. The
+    answer is kept in ai_cache (kind ``contract_fields``), keyed on the whole
+    prompt and the model, so the same evidence proposes the same fields.
 
 If the model is unavailable the caller still gets a usable answer: the fields the
 contract's OWN rules already name (``validation_rule.canonical_target``) are
@@ -27,6 +29,7 @@ from typing import Any, Iterable, Optional
 
 from sqlalchemy import bindparam, text
 
+import ai_cache  # imports db lazily, inside get/put
 from data_model import DATA_MODEL
 
 log = logging.getLogger("bdx.contract_output_fields")
@@ -38,8 +41,14 @@ _MAX_FIELDS = int(os.getenv("KAVACHIO_CONTRACT_FIELDS_MAX", "40"))
 # A paragraph shorter than this in a freshly-read document is a page number, a
 # heading or a stray caption, not a term.
 _MIN_PARA_CHARS = int(os.getenv("KAVACHIO_CONTRACT_FIELDS_MIN_PARA", "40"))
-_MAX_OUTPUT_TOKENS = int(os.getenv("KAVACHIO_CONTRACT_FIELDS_MAX_TOKENS", "6144"))
+# A reply of ~70 fields used 5.7k tokens; a limit that close drops EVERY AI
+# field the day one answer runs a little longer (call_gemini raises on MAX_TOKENS).
+_MAX_OUTPUT_TOKENS = int(os.getenv("KAVACHIO_CONTRACT_FIELDS_MAX_TOKENS", "16384"))
 _SEED = 20260101
+# Part of the cached answer's key: bump it whenever _build_prompt or the schema
+# changes, or an answer to the old question is served for the new one.
+PROMPT_VERSION = "contract_fields_v1"
+_CACHE_KIND = "contract_fields"
 
 # The clause types that actually say what has to be reported. Everything else
 # fills whatever prompt budget is left over.
@@ -48,23 +57,25 @@ _REPORTING_CLAUSE_TYPES = {
     "data_requirements", "mandatory_fields", "premium", "claims",
 }
 
+# No maxItems / maxLength: with them the API refused the schema on every call
+# ("too many states for serving") and the answer came back unstructured. The
+# count is capped in analyze() instead, in a fixed order.
 _RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
         "fields": {
             "type": "array",
-            "maxItems": _MAX_FIELDS,
             "items": {
                 "type": "object",
                 "properties": {
-                    "field": {"type": "string", "maxLength": 80},
-                    "category": {"type": "string", "maxLength": 40},
+                    "field": {"type": "string"},
+                    "category": {"type": "string"},
                     "data_type": {"type": "string",
                                   "enum": ["string", "int", "decimal", "date",
                                            "datetime", "bool"]},
                     "required": {"type": "boolean"},
-                    "reason": {"type": "string", "maxLength": 160},
-                    "contract_reference": {"type": "string", "maxLength": 200},
+                    "reason": {"type": "string"},
+                    "contract_reference": {"type": "string"},
                 },
                 "required": ["field", "required"],
             },
@@ -298,16 +309,32 @@ def _build_prompt(clauses: list[dict], rules: list[dict],
     return "\n".join(lines)
 
 
+def _model() -> Optional[str]:
+    """KAVACHIO_MODEL_CONTRACT_FIELDS, else the older KAVACHIO_CONTRACT_FIELDS_MODEL,
+    else the extraction model. None when the SDK is not configured at all.
+
+    Not the small model: measured on a Lloyd's-standard template with a real
+    contract, flash-lite (once its schema was actually accepted) proposed too few
+    contract columns — none for the per-auto / terminal / per-vehicle limits — so
+    those limits had nowhere to be checked; the extraction model proposed them and
+    the same run caught every limit breach."""
+    try:
+        from contract_upload_services.gemini_service import EXTRACTION_MODEL, model_for
+    except Exception as e:  # noqa: BLE001 — no key / no SDK configured
+        log.warning("contract field analysis unavailable: %s", e)
+        return None
+    return model_for("contract_fields",
+                     os.getenv("KAVACHIO_CONTRACT_FIELDS_MODEL") or EXTRACTION_MODEL)
+
+
 def _ask_model(prompt: str) -> Optional[list[dict]]:
     """Imported lazily: gemini_service builds its API client at import time, so a
     module-level import would make every route that merely reads a template need
     an API key at boot."""
-    try:
-        from contract_upload_services.gemini_service import call_gemini, SMALL_MODEL
-    except Exception as e:  # noqa: BLE001 — no key / no SDK configured
-        log.warning("contract field analysis unavailable: %s", e)
+    model = _model()
+    if model is None:
         return None
-    model = os.getenv("KAVACHIO_CONTRACT_FIELDS_MODEL") or SMALL_MODEL
+    from contract_upload_services.gemini_service import call_gemini
     try:
         raw = call_gemini(prompt, label="ContractOutputFields", temperature=0,
                           seed=_SEED, response_schema=_RESPONSE_SCHEMA, model=model,
@@ -332,9 +359,35 @@ def _ask_model(prompt: str) -> Optional[list[dict]]:
     return items if isinstance(items, list) else None
 
 
+def _proposals(prompt: str, tenant_id: Any = None,
+               refresh: bool = False) -> Optional[list[dict]]:
+    """The model's field list for this prompt — the stored answer when this exact
+    prompt was answered by this model before, else a fresh call that is stored.
+
+    The prompt IS the evidence (clause texts, rule targets, known fields), so
+    keying on it covers every input; a failed call (None) is never stored.
+    `refresh` asks afresh (and stores the new answer) for a deliberate re-read."""
+    model = _model()
+    key = ai_cache.make_key(*ai_cache.model_scoped(
+        (PROMPT_VERSION, tenant_id, prompt, {"seed": _SEED}), model,
+        legacy_model=None)) if model else None
+    hit = ai_cache.get(_CACHE_KIND, key, refresh=refresh) if key else None
+    if isinstance(hit, list):
+        return hit
+    proposed = _ask_model(prompt)
+    if key and isinstance(proposed, list):
+        ai_cache.put(_CACHE_KIND, key, proposed, tenant_id=tenant_id)
+    return proposed
+
+
+def _norm_name(name: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", name.lower()).split())
+
+
 def analyze(s, contract_ids: list[int],
             known_fields: Optional[list[str]] = None,
-            *, documents: Optional[list[dict]] = None) -> dict:
+            *, documents: Optional[list[dict]] = None,
+            tenant_id: Any = None, refresh: bool = False) -> dict:
     """The contract's output-field requirements.
 
     `known_fields` are the headings the template already has (the standard
@@ -343,7 +396,8 @@ def analyze(s, contract_ids: list[int],
     `documents` is clause-shaped prose read from a contract that has no row yet
     (see ``clauses_from_document``). It is used ON TOP OF whatever the stored
     contracts provide, so staging a file and naming a saved contract are not
-    mutually exclusive.
+    mutually exclusive. `tenant_id` scopes the cached model answer; `refresh`
+    bypasses it.
 
     Returns ``{"fields": [...], "model_used": bool, "clause_count": int}``. The
     caller VALIDATES and merges this — nothing here is written anywhere, and the
@@ -357,9 +411,17 @@ def analyze(s, contract_ids: list[int],
     known = {f["field"].strip().lower() for f in fields}
     known |= {str(k).strip().lower() for k in (known_fields or [])}
 
-    proposed = _ask_model(_build_prompt(clauses, rules, sorted(known)))
+    proposed = _proposals(_build_prompt(clauses, rules, sorted(known)), tenant_id,
+                          refresh)
     model_used = proposed is not None
-    for item in proposed or []:
+    # The cap below keeps the first _MAX_FIELDS, so which fields survive must not
+    # depend on the order the model happened to write them in: required first,
+    # then by name.
+    items = sorted((i for i in proposed or [] if isinstance(i, dict)),
+                   key=lambda i: (not i.get("required"),
+                                  _norm_name(str(i.get("field") or "")),
+                                  str(i.get("field") or "")))
+    for item in items:
         name = str(item.get("field") or "").strip()
         if not name or name.lower() in known:
             continue

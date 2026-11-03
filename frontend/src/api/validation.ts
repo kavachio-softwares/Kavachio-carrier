@@ -128,6 +128,10 @@ export type StoredException = {
   status: string | null;
   /** Reviewer's saved reason/note (set by /api/validate/exceptions/decide). */
   resolution_note?: string | null;
+  /** Who made the saved decision, in the words this viewer may see — a
+   *  broker user reads as their broker company to the carrier. */
+  decided_by?: string | null;
+  decided_at?: string | null;
   /** Backend-derived recommended value (expected_value → rule_spec → null). */
   recommendation?: string | null;
   /** Structured allowed values for an enum rule — each is one choice. Preferred
@@ -176,6 +180,12 @@ export type StoredException = {
   source_row?: number | null;
   /** Output sheet name (direct-lane output exceptions) — decision key. */
   source_sheet?: string | null;
+  /** Set when `actual_value` is a TOTAL rather than this cell's own value —
+   *  see AggregateMarker. */
+  aggregate?: AggregateMarker | null;
+  /** Set when this row's date is covered by no version of the contract, so it
+   *  was checked against the current one — names that contract and its period. */
+  contract_period_note?: string | null;
 };
 
 export type StoredRun = {
@@ -224,11 +234,93 @@ export async function getUploadExceptions(
 // ── Output-stage (per-download) exceptions ───────────────────────────────────
 
 /** A generate-time exception from /export/downloads/{id} (output stage). */
+/** What an aggregate rule's `actual_value` covers.
+ *
+ *  A rule like "the total premium must not exceed 100,000" adds a whole column
+ *  up and compares the TOTAL, but the exception still has to hang off a row, so
+ *  the compiler pins it to the first row that fed the sum. Without this marker
+ *  the screens showed that total beside one cell under the word "Actual" — a
+ *  file whose ten premiums make 110,150 read "Actual 110,150" next to a cell
+ *  showing 12,450, which looks like a bug and is not one.
+ *
+ *  `level` is what the number covers: "file" = the whole column, "group" = one
+ *  policy or key. Row-level rules carry no marker at all. */
+export type AggregateMarker = {
+  level: "file" | "group";
+  function: "sum" | "count" | "distinct_count" | string;
+  group_by: string[];
+  /** The rule's bound on the total (from its IR, attached at read time). */
+  max?: number | null;
+  min?: number | null;
+};
+
+/** The compiler's own sentences for an aggregate breach (rule_compiler
+ *  `_b_aggregate_cap` / `_b_aggregate_cap_dedup`). Read only as a FALLBACK, for
+ *  files validated before the marker was stamped on the exception — every new
+ *  run carries `aggregate` and never reaches this. */
+function aggregateFromReason(reason?: string | null,
+                             policyNumber?: string | null): AggregateMarker | null {
+  const r = (reason ?? "").trim();
+  const m = r.match(/^(sum|count|distinct_count)\((.+)\) breaches limit$/i);
+  if (m) {
+    return {
+      // The sentence does not name the key, so the presence of a policy is the
+      // only signal for whether this total is the file's or one policy's.
+      level: policyNumber ? "group" : "file",
+      function: m[1].toLowerCase(),
+      group_by: [],
+    };
+  }
+  if (/^cumulative .+ across schedules breaches limit$/i.test(r)) {
+    return { level: "group", function: "sum", group_by: [] };
+  }
+  return null;
+}
+
+/** How to label an aggregate's `actual_value` in place of "Actual", and the
+ *  one line that explains why the highlight is where it is. Null for a
+ *  row-level exception, whose actual IS the cell. */
+export function aggregateLabel(a: AggregateMarker | null | undefined, field?: string | null) {
+  if (!a) return null;
+  const where = a.level === "file" ? "the whole file"
+    : a.group_by.length ? `this ${a.group_by.join(", ")}` : "this policy";
+  const name =
+    a.function === "count" ? "Rows counted"
+    : a.function === "distinct_count" ? "Values found"
+    : a.level === "file" ? "File total" : "Total for this policy";
+  const what =
+    a.function === "count" ? `Rows counted across ${where}`
+    : a.function === "distinct_count" ? `The different values of ${field ?? "this column"} across ${where}`
+    : `${field ?? "This column"} added up across ${where}`;
+  return {
+    label: name,
+    note: `${what}. The highlight sits on the first row that feeds it — `
+      + "the breach belongs to the total, not to this one value.",
+  };
+}
+
+/** An aggregate's total as a reader writes it ("107,700", not "107700.0"),
+ *  and how far it sits past the rule's limit. Null for a row-level value. */
+export function aggregateValue(a: AggregateMarker | null | undefined, actual?: string | null) {
+  const raw = String(actual ?? "").replace(/,/g, "").trim();
+  const n = Number(raw);
+  if (!a || !raw || !Number.isFinite(n)) return null;
+  const fmt = (x: number) => x.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const gap = a.max != null && n > a.max ? `${fmt(n - a.max)} over the ${fmt(a.max)} limit`
+    : a.min != null && n < a.min ? `${fmt(a.min - n)} under the ${fmt(a.min)} minimum`
+    : null;
+  return { value: fmt(n), gap };
+}
+
 export type OutputException = {
   severity: string; code?: string; sheet?: string; row?: number;
   column?: string; field?: string; message?: string;
   rule_name?: string; rule_id?: number; contract_filename?: string;
   reason?: string; error_class?: string;
+  /** Present only on an aggregate rule — see AggregateMarker. */
+  aggregate?: AggregateMarker | null;
+  /** See StoredException.contract_period_note. */
+  contract_period_note?: string | null;
   contract_id?: number; contract_clause_text?: string | null;
   contract_clause_page?: number | null;
   policy_number?: string | null; actual_value?: string | null;
@@ -244,6 +336,8 @@ export type OutputException = {
   /** Present once a decision has been saved for this output exception. */
   exception_id?: number | null; status?: string | null;
   resolution_note?: string | null;
+  decided_by?: string | null;
+  decided_at?: string | null;
   /** Plain-English explanation of the rule (backend-derived, additive). */
   explanation?: RuleExplanation | null;
   /** See StoredException.check_kind / root_cause. */
@@ -277,6 +371,8 @@ export function outputExcToStored(x: OutputException, i: number): StoredExceptio
     actual_value: x.actual_value ?? null,
     status: x.status ?? "open",
     resolution_note: x.resolution_note ?? null,
+    decided_by: x.decided_by ?? null,
+    decided_at: x.decided_at ?? null,
     created_at: null,
     policy_number: x.policy_number ?? null,
     external_policy_number: null,
@@ -289,6 +385,8 @@ export function outputExcToStored(x: OutputException, i: number): StoredExceptio
     contract_filename: x.contract_filename ?? null,
     source_row: x.row ?? null,
     source_sheet: x.sheet ?? null,
+    aggregate: x.aggregate ?? aggregateFromReason(x.reason, x.policy_number),
+    contract_period_note: x.contract_period_note ?? null,
     // Hand-enumerated mapper: a field missing here is silently dropped for the
     // whole output lane (every ?download=<id> screen), so it must be listed.
     explanation: x.explanation ?? null,
@@ -330,7 +428,12 @@ export type ExportDecideResponse = {
 export async function rerenderExport(
   exportId: number | string,
   actor?: string
-): Promise<{ export_id: number; exception_count?: number; status?: string }> {
+): Promise<{
+  export_id: number; exception_count?: number; status?: string;
+  /** Set when Fix & Validate made the next version (the secure link's way):
+   *  the version corrected here is kept and marked replaced. */
+  version?: number | null; from_version?: number | null; status_text?: string | null;
+}> {
   const { data } = await api.post(`/export/downloads/${exportId}/rerender`,
     { actor: actor ?? null });
   return data;
@@ -353,14 +456,36 @@ export async function saveExportDecisions(
   return data;
 }
 
+/** What a generated download is FOR, in names — the strip above its exceptions. */
+export type DownloadAbout = {
+  programme: string | null; broker: string | null; contract: string | null;
+  reporting_period: string | null; version_no: number | null;
+  /** Set once this (current) version was delivered to the carrier. It stays
+   *  correctable while a critical or warning exception is open (`open`) or a
+   *  decision is waiting to be sent (`unsent`); `locked` once neither. */
+  delivery?: DeliveryState | null;
+};
+
+export type DeliveryState = {
+  delivered: boolean; delivered_at?: string | null; flagged?: boolean;
+  open: number; unsent: number; locked: boolean;
+};
+
+/** A generated download's output-stage exceptions, plus what the file is for. */
+export async function getDownloadReview(
+  downloadId: number | string
+): Promise<{ exceptions: StoredException[]; about: DownloadAbout | null }> {
+  const { data } = await api.get<{ exceptions: OutputException[]; about?: DownloadAbout }>(
+    `/export/downloads/${downloadId}`
+  );
+  return { exceptions: (data.exceptions ?? []).map(outputExcToStored), about: data.about ?? null };
+}
+
 /** Fetch a generated download's output-stage exceptions, mapped to StoredException[]. */
 export async function getDownloadExceptions(
   downloadId: number | string
 ): Promise<StoredException[]> {
-  const { data } = await api.get<{ exceptions: OutputException[] }>(
-    `/export/downloads/${downloadId}`
-  );
-  return (data.exceptions ?? []).map(outputExcToStored);
+  return (await getDownloadReview(downloadId)).exceptions;
 }
 
 /** Batch "Save": re-validate ALL edits together and write one new version per
@@ -452,4 +577,52 @@ export function toTitleCase(str?: string | null): string {
     .split(' ')
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
+}
+
+
+// ── Results tab (plan 21–22): every row's outcome, the counts, the versions ──
+
+export type RowOutcome = "passed" | "open" | "resolved" | "not_checked";
+
+export type ResultsSummary = {
+  total: number; passed: number; open: number; resolved: number; not_checked: number;
+  exceptions: number; exceptions_open: number; exceptions_resolved: number;
+};
+
+export type ResultRecord = {
+  sheet: string | null; sheet_name: string; row: number;
+  policy_number: string | null; outcome: RowOutcome;
+  exceptions: Array<{
+    rule: string; field: string | null; severity: string; message: string | null;
+    actual: unknown; status: string; decided_by?: string | null; decided_at?: string | null;
+  }>;
+};
+
+export type ResultVersion = {
+  version: number; export_id: number | null; current: boolean;
+  status: string | null; status_text: string | null; source: string | null;
+  created_at: string | null; filename: string | null;
+  exceptions: number | null; rows: number | null; output_format: string | null;
+  replaced_by: number | null;
+};
+
+export type ExportResults = {
+  export_id: number; status: string | null;
+  summary: ResultsSummary;
+  by_rule: Array<{ rule: string; severity: string; exceptions: number; open: number; resolved: number }>;
+  records: { items: ResultRecord[]; total: number; page: number; page_size: number; pages: number };
+  versions: ResultVersion[];
+};
+
+export async function getExportResults(
+  exportId: number | string,
+  opts: { outcome?: RowOutcome | ""; q?: string; page?: number; pageSize?: number } = {},
+): Promise<ExportResults> {
+  const { data } = await api.get(`/export/downloads/${exportId}/results`, {
+    params: {
+      outcome: opts.outcome || undefined, q: opts.q?.trim() || undefined,
+      page: opts.page ?? 1, page_size: opts.pageSize ?? 50,
+    },
+  });
+  return data;
 }

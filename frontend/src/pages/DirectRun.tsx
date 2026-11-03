@@ -1,15 +1,20 @@
 import { useEffect, useState, useRef } from "react";
-import { useNavigate } from "react-router-dom";
-import { History, AlertTriangle } from "lucide-react";
-import { api } from "../api/client";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { History, AlertTriangle, Download } from "lucide-react";
+import { api, downloadFile, downloadErrorText } from "../api/client";
 import { LoadingOverlay } from "../components/Busy";
 import { Dropzone } from "../components/Dropzone";
+import { PeriodPicker } from "../components/PeriodPicker";
 import { Modal } from "../components/ui/Modal";
 import { currentMga, isTenantAdmin } from "../auth";
 import { type Sheet } from "../components/OutputRows";
 import { RunResult, fetchPreview, type RunResp } from "../components/RunResult";
 import { useBrokerContractScope } from "../components/BrokerContractScope";
 import { resolveOutputTemplate, type ResolveResult } from "../api/outputTemplate";
+import { contractLabel } from "../utils/contractLabel";
+import { type BordereauPeriod } from "../api/brokerBordereau";
+import { InfoTip } from "../components/InfoTip";
+import { olderItdMessage } from "../api/itd";
 
 type Party = { id: number; legal_name: string; is_active?: boolean };
 type Program = { id: number; name: string; status?: string; party_id?: number | null };
@@ -20,6 +25,19 @@ export default function DirectRun() {
   const mga = currentMga();
   const nav = useNavigate();
   const admin = isTenantAdmin();
+
+  // Arriving from elsewhere with the scope already decided — today that is
+  // Activate Setup, which lands here on the setup it just switched on. Each
+  // level is applied only once its own list has loaded, because selecting a
+  // level clears the ones below it; and only once, so the user can change any
+  // of them afterwards without the URL putting them back.
+  const [params] = useSearchParams();
+  const wanted = useRef({
+    carrier: Number(params.get("carrier_party_id")) || null,
+    program: Number(params.get("program_id")) || null,
+    broker: Number(params.get("broker_party_id")) || null,
+    contract: Number(params.get("contract_id")) || null,
+  });
 
   const [carriers, setCarriers] = useState<Party[]>([]);
   // A tenant IS a carrier, and its own carrier party is not "app managed", so
@@ -43,6 +61,9 @@ export default function DirectRun() {
   const [result, setResult] = useState<RunResp | null>(null);
   // The multi-table refusal from /direct/run — shown as a modal, not the banner.
   const [multiTableModal, setMultiTableModal] = useState<string | null>(null);
+  // This exact file was loaded before. The person is right here, so they are
+  // asked — run it anyway, or stop — instead of the file being held for later.
+  const [duplicateMsg, setDuplicateMsg] = useState<string | null>(null);
   const [preview, setPreview] = useState<Sheet | null>(null);
   // Whether this tenant still needs first-time setup (carrier + Bordereau).
   const [needsSetup, setNeedsSetup] = useState(false);
@@ -56,6 +77,26 @@ export default function DirectRun() {
   const [tpl, setTpl] = useState<ResolveResult | null>(null);
   const [tplLoading, setTplLoading] = useState(false);
 
+  // The reporting period this run is FOR — the same real calendar rows the
+  // broker's own Process Bordereau picks from (GET /direct/periods mirrors
+  // carrier_routes.contract_bordereau_periods). Only meaningful once a broker
+  // is picked — a period is always somebody's — and then REQUIRED whenever the
+  // calendar lists one, as on every other way a file comes in. A run for no
+  // broker has no period to pick.
+  const [periods, setPeriods] = useState<BordereauPeriod[] | null>(null);
+  const [period, setPeriod] = useState<string>("");
+  useEffect(() => {
+    setPeriod("");
+    if (programId === "" || scope.brokerPartyId === "") { setPeriods(null); return; }
+    api.get<{ periods: BordereauPeriod[] }>("/direct/periods", { params: {
+      mga: currentMga(), program_id: programId, broker_party_id: scope.brokerPartyId,
+    } }).then(r => {
+      setPeriods(r.data.periods);
+      const open = r.data.periods.find(p => !p.processed);
+      if (open) setPeriod(p => p || open.period);
+    }).catch(() => setPeriods([]));
+  }, [programId, scope.brokerPartyId]);
+
   /** The Bordereau Setup screen, opened on the selection made here. */
   function setupHref(): string {
     const p = new URLSearchParams();
@@ -66,6 +107,12 @@ export default function DirectRun() {
     return q ? `/direct/setup?${q}` : "/direct/setup";
   }
 
+  function downloadOutputTemplate(templateId: number) {
+    downloadFile(`/output-template/${templateId}/download`)
+      .catch(async e => setErr(await downloadErrorText(e,
+        "We couldn't download the output template — please try again.")));
+  }
+
   const carrierName = carriers.find(c => c.id === carrierId)?.legal_name
     ?? (ownCarrier?.id === carrierId ? ownCarrier.legal_name : "") ?? "";
   const programName = programs.find(p => p.id === programId)?.name ?? "";
@@ -74,13 +121,21 @@ export default function DirectRun() {
   // dropdown that leaves the user stuck with nothing to select.
   const noPrograms = carrierId !== "" && !programsLoading && programs.length === 0;
 
-  // A generated output (and the uploaded file) belongs to the scope it was run
-  // for — clear stale state when the carrier or program changes, so re-locking
-  // the Dropzone on a cleared selection never leaves a stale file behind.
+  // A generated output belongs to the scope it was run for, so any change to
+  // that scope makes it stale.
   useEffect(() => {
     setResult(null); setPreview(null); setErr(null);
-    setFile(null);
   }, [carrierId, programId, scope.brokerPartyId, scope.contractId]);
+
+  // The FILE is dropped only when WHO the run is for changes — clearing it then
+  // is what stops re-locking the Dropzone on a cleared selection from leaving a
+  // stale file behind. Naming a different contract is not that: the file is the
+  // bordereau, and the contract is whose terms it is checked against. Since
+  // picking the contract is now something you do deliberately, wiping an
+  // already-dropped file for it would be a surprise with no reason behind it.
+  useEffect(() => {
+    setFile(null);
+  }, [carrierId, programId, scope.brokerPartyId]);
 
   // Resolve the output template for whatever is selected right now.
   useEffect(() => {
@@ -152,6 +207,31 @@ export default function DirectRun() {
       .catch(() => { setHasSetup(false); setSetup(null); });
   }, [programId]);
 
+  // The carrier is known before anything is fetched, so it can be applied on
+  // the first render; the /my-carrier-party default below only fills a blank.
+  useEffect(() => {
+    const c = wanted.current.carrier;
+    if (c != null) { wanted.current.carrier = null; setCarrierId(c); }
+  }, []);
+  useEffect(() => {
+    const p = wanted.current.program;
+    if (p == null || !programs.some(x => x.id === p)) return;
+    wanted.current.program = null;
+    setProgramId(p);
+  }, [programs]);
+  useEffect(() => {
+    const b = wanted.current.broker;
+    if (b == null || !scope.brokers.some(x => x.id === b)) return;
+    wanted.current.broker = null;
+    scope.setBrokerPartyId(b);
+  }, [scope.brokers]);
+  useEffect(() => {
+    const c = wanted.current.contract;
+    if (c == null || !scope.contracts.some(x => x.id === c)) return;
+    wanted.current.contract = null;
+    scope.setContractId(c);
+  }, [scope.contracts]);
+
   function clearForm() {
     setFile(null); setResult(null); setPreview(null); setErr(null);
   }
@@ -159,9 +239,20 @@ export default function DirectRun() {
   // Shared submit for both actions. checkOnly=true is the pre-submission
   // self-check: the backend runs every validation but does NOT ingest or record
   // a run; checkOnly=false is the real, committing Generate BDX.
-  async function submit(checkOnly: boolean) {
+  async function submit(checkOnly: boolean, confirmDuplicate = false) {
     if (!file || carrierId === "" || programId === "") {
       setErr("Pick carrier, program and an input file."); return;
+    }
+    // Every file says which reporting period it is for — wherever the calendar
+    // has one to pick. The server refuses it too.
+    if (!checkOnly && !period && periods && periods.length > 0) {
+      setErr("Pick the reporting period this bordereau is for."); return;
+    }
+    // The server refuses this too. Said here as well, because a disabled button
+    // with no sentence beside it is a screen that will not say what is wrong.
+    if (scope.needsContractChoice) {
+      setErr("Pick which contract this bordereau was written under — its terms "
+             + "are what every row is checked against."); return;
     }
     setMode(checkOnly ? "check" : "run");
     setBusy(true); setErr(null); setResult(null); setPreview(null);
@@ -176,7 +267,9 @@ export default function DirectRun() {
       // way it always has — from the programme's active setup.
       if (scope.brokerPartyId !== "") fd.append("broker_party_id", String(scope.brokerPartyId));
       if (scope.contractId !== "") fd.append("contract_id", String(scope.contractId));
+      if (period) fd.append("period", period);
       if (checkOnly) fd.append("check_only", "true");
+      if (confirmDuplicate) fd.append("confirm_duplicate", "true");
       const { data } = await api.post<RunResp>(`/direct/run`, fd);
       setResult(data);
       // Best-effort output preview for the result card. marks=1 so the flagged
@@ -186,9 +279,26 @@ export default function DirectRun() {
                      data: (id, q) => `/export/downloads/${id}/data?${q}` },
                    data.export_id).then(setPreview);
     } catch (e: unknown) {
-      const a = e as { response?: { data?: { detail?: string } }; message?: string };
-      const msg = a?.response?.data?.detail ?? a?.message ?? "Run failed.";
-      if (/multiple tables|more than one table/i.test(String(msg))) setMultiTableModal(String(msg));
+      const a = e as { response?: { data?: { detail?: unknown } }; message?: string };
+      // Only ever a sentence on screen. A detail that is not one would be handed
+      // to React as a child, which throws and blanks the page instead of saying
+      // the run was refused.
+      const detail = a?.response?.data?.detail;
+      // The one refusal that is a question, not an error.
+      if (detail && typeof detail === "object"
+          && (detail as { code?: string }).code === "duplicate_file") {
+        setDuplicateMsg((detail as { message?: string }).message
+          ?? "This exact file has already been loaded.");
+        return;
+      }
+      // An ITD file older than one already loaded. A refusal, not a question:
+      // running it anyway would wind the running total back, so there is no
+      // "run anyway" — only the sentence saying why.
+      const older = olderItdMessage(detail);
+      if (older) { setErr(older); return; }
+      const msg = typeof detail === "string" && detail.trim()
+        ? detail : a?.message ?? "Run failed.";
+      if (/multiple tables|more than one table/i.test(msg)) setMultiTableModal(msg);
       else setErr(msg);
     } finally { setBusy(false); }
   }
@@ -204,8 +314,19 @@ export default function DirectRun() {
   // template. Running anyway would deliver a file with the right headings and
   // no data, so it is blocked here as well as on the server.
   const templateMismatch = !!tpl?.found && !!tpl.setup && !tpl.setup.matches;
+  // Several contracts and none picked is not a runnable state: the run would
+  // fall back on whatever the setup was built against, which is the silent
+  // wrong answer this picker exists to stop.
   const canSubmit = carrierId !== "" && programId !== "" && hasSetup === true
-    && !!file && !templateMissing && !templateMismatch;
+    && !!file && !templateMissing && !templateMismatch
+    && !scope.needsContractChoice;
+  // THE SETUP FOR THIS SELECTION — the one the server says a run would use, not
+  // the programme's newest. A broker with two contracts on two BDX templates
+  // has two live setups, so the name shown and the layout downloaded must
+  // follow the contract picked. Until that answer arrives, the programme's.
+  const runSetup: { id: number; name: string | null } | null = tpl?.setup
+    ? { id: tpl.setup.pipeline_id, name: tpl.setup.name }
+    : setup ? { id: setup.id, name: setup.name } : null;
 
 
   return (
@@ -216,9 +337,11 @@ export default function DirectRun() {
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Process Bordereau</h2>
-            <p>Pick who the bordereau is for, drop the file, generate the
-              validated output.</p>
+            <h2>
+              Process Bordereau
+              <InfoTip text={"Pick who the bordereau is for, drop the file, generate "
+                + "the validated output."} />
+            </h2>
           </div>
         </div>
 
@@ -247,6 +370,21 @@ export default function DirectRun() {
             Got It
           </button>}>
           <p className="text-sm">{multiTableModal}</p>
+        </Modal>
+
+        <Modal open={duplicateMsg != null}
+          title={<span className="flex items-center gap-2">
+            <AlertTriangle size={17} className="text-amber-500" /> Same File Already Loaded
+          </span>}
+          onClose={() => setDuplicateMsg(null)}
+          footer={<>
+            <button className="btn" onClick={() => setDuplicateMsg(null)}>Don’t run it</button>
+            <button className="btn pri" onClick={() => { setDuplicateMsg(null); submit(false, true); }}>
+              Run it anyway</button>
+          </>}>
+          <p className="text-sm">{duplicateMsg}</p>
+          <p className="text-sm" style={{ marginTop: 8, color: "var(--p-muted)" }}>
+            Running it anyway is recorded on the Files screen, with your name.</p>
         </Modal>
 
 
@@ -285,7 +423,7 @@ export default function DirectRun() {
                   <label>Program</label>
                   <select value={programId} disabled={carrierId === "" || noPrograms}
                     onChange={e => setProgramId(e.target.value ? Number(e.target.value) : "")}>
-                    <option value="">
+                    <option value="" disabled>
                       {carrierId === "" ? "Select Program…"
                         : programsLoading ? "Loading programs…"
                         : noPrograms ? "No program for this carrier"
@@ -309,7 +447,7 @@ export default function DirectRun() {
                     disabled={programId === "" || scope.brokers.length === 0}
                     onChange={e => scope.setBrokerPartyId(
                       e.target.value ? Number(e.target.value) : "")}>
-                    <option value="">
+                    <option value="" disabled>
                       {programId === "" ? "Select a program first"
                         : scope.brokers.length === 0 ? "No brokers on this program"
                         : "All brokers"}
@@ -321,17 +459,75 @@ export default function DirectRun() {
                 </div>
                 <div className="field">
                   <label>Contract</label>
-                  <input readOnly disabled value={
-                    programId === "" ? "Select a program first"
-                      : scope.contractsLoading ? "Finding the live contracts…"
-                      : scope.contracts.length === 0
-                        ? "No approved contract for this selection"
-                        : scope.contracts.length === 1
-                          ? (scope.contracts[0].filename
-                             || `Contract ${scope.contracts[0].id}`)
-                          : `${scope.contracts.length} contracts on this broker`} />
+                  {/* A CHOICE ONLY WHEN THERE IS ONE.
+                      With one contract on file there is nothing to ask — it is
+                      the only answer and it is simply reported, exactly as this
+                      field has always done.
+                      With SEVERAL there is a real question, and it used to be
+                      answered silently: the run measured the file against
+                      whichever contract the setup was built on, whatever the
+                      bordereau was actually written under. A broker's two live
+                      contracts are two different sets of terms. */}
+                  {scope.contracts.length > 1 ? (
+                    <select value={scope.contractId}
+                      onChange={e => scope.setContractId(
+                        e.target.value ? Number(e.target.value) : "")}>
+                      <option value="" disabled>
+                        Select Contract
+                      </option>
+                      {scope.contracts.map(c => (
+                        <option key={c.id} value={c.id}>
+                          {contractLabel(c)}
+                          {c.broker_name ? "" : " — carrier held"}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input readOnly disabled value={
+                      programId === "" ? "Select a program first"
+                        : scope.contractsLoading ? "Finding the live contracts…"
+                        : scope.contracts.length === 0
+                          ? "No contract for this selection"
+                          : contractLabel(scope.contracts[0])} />
+                  )}
                 </div>
               </div>
+
+              {/* Which real calendar period this run is FOR, once a broker is
+                  picked — same idea as the contract picker above it: a real
+                  row from the calendar, never a typed month, so this run and
+                  the broker's own Bordereau Calendar can never disagree on
+                  which period it satisfied. */}
+              {scope.brokerPartyId !== "" && (
+                <div className="field">
+                  <label>Reporting Period</label>
+                  <PeriodPicker value={period} onChange={setPeriod} periods={periods}
+                    emptyLabel="No periods set up for this broker yet" />
+                </div>
+              )}
+
+              {/* What the pick decides, said once and only where it is a
+                  question. The terms are what the file is checked against, so
+                  naming the wrong contract is not a labelling mistake — it is a
+                  bordereau measured against somebody else's binder. */}
+              {scope.contracts.length > 1 && (
+                <div className={`note${scope.contractId === "" ? " warn" : ""}`}
+                     style={{ marginBottom: 16 }}>
+                  {scope.contractId === "" ? (
+                    <>
+                      <b>This broker has {scope.contracts.length} live
+                      contracts.</b> Pick the one this bordereau was written
+                      under — its terms are what every row is checked against.
+                    </>
+                  ) : (
+                    <>
+                      Checked against the terms of{" "}
+                      <b>{scope.contractName}</b>. Its clauses are the rules
+                      this run applies.
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* Which output template this run would write into — answered
                   before the file is uploaded, not after. */}
@@ -409,15 +605,18 @@ export default function DirectRun() {
                     <>There is no program for this carrier yet.{" "}
                       <span className="linkish" onClick={() => nav(`/programs/new?party=${carrierId}`)}>Create a Program →</span></>
                   ) : (
-                    <>There is no program for this carrier. <b>Ask your admin to add one.</b></>
+                    <>There is no program for this carrier. <b>Ask the carrier to add one.</b></>
                   )}
                 </div>
               )}
 
               {/* active-setup confirmation / no-setup guidance */}
-              {hasSetup === true && (
+              {/* Not while the selection has no template of its own: naming a
+                  setup built for another contract there reads as "this is what
+                  will run", and it will not — the run is refused. */}
+              {hasSetup === true && !templateMissing && (
                 <div className="note" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
-                  Using setup <b>{setup?.name || `${carrierName} · ${programName}`}</b>
+                  Using setup <b>{runSetup?.name || `${carrierName} · ${programName}`}</b>
                   <span className="tag-pill">Active</span>
                 </div>
               )}
@@ -427,8 +626,24 @@ export default function DirectRun() {
                     <>No active setup for this carrier + program.{" "}
                       <span className="linkish" onClick={() => nav(setupHref())}>Configure It →</span></>
                   ) : (
-                    <>No setup for this carrier. <b>Ask your admin to configure it.</b></>
+                    <>No setup for this carrier. <b>Ask the carrier to set it up.</b></>
                   )}
+                </div>
+              )}
+
+              {/* The output template is the file Generate BDX WRITES — offered
+                  for reference only, once a contract is picked. */}
+              {hasSetup === true && runSetup && !templateMissing && !templateMismatch
+                && scope.contractId !== "" && tpl?.template && (
+                <div className="note" style={{ marginBottom: 16, display: "flex",
+                  alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <span style={{ flex: 1, minWidth: 260 }}>
+                    The output template is the file Generate BDX gives back.
+                  </span>
+                  <button className="btn"
+                    onClick={() => downloadOutputTemplate(tpl.template!.id)}>
+                    <Download size={14} /> Output Template
+                  </button>
                 </div>
               )}
 
@@ -489,7 +704,7 @@ export default function DirectRun() {
                   // that bounces them back to the dashboard.
                   admin
                     ? <span className="linkish" onClick={() => nav(setupHref())}>Review the Setup →</span>
-                    : <b>Ask your admin to review the setup.</b>
+                    : <b>Ask the carrier to review the setup.</b>
                 }
               />
             )}
@@ -497,7 +712,7 @@ export default function DirectRun() {
             {admin ? (
               <div className="note" style={{ marginTop: 14 }}>Missing a setup? <span className="linkish" onClick={() => nav(setupHref())}>Configure It →</span></div>
             ) : (
-              <div className="note" style={{ marginTop: 14 }}>No setup for a carrier? <b>Ask your admin to configure it.</b></div>
+              <div className="note" style={{ marginTop: 14 }}>No setup for a carrier? <b>Ask the carrier to set it up.</b></div>
             )}
           </div>
         </div>

@@ -5,9 +5,9 @@ actually implements:
 
     1. the carrier owns the lifecycle — programmes, brokers, contracts, setup
     2. the broker signs in and sees only what the carrier assigned it
-    3. the broker uploads a contract
-    4. the carrier reviews the extraction and approves or rejects it
-    5. once approved, the broker completes bordereau setup and supplies files
+    3. the carrier raises the contract and sends its terms to the broker
+    4. the broker reads the terms and either agrees them or asks for changes
+    5. both sides sign, and the contract goes in force
     6. the broker submits bordereaux and reads its own validation results
     7. the broker fixes what validation flagged
 
@@ -34,7 +34,7 @@ import app_routes as _app
 import hierarchy_routes as _hier
 from auth_deps import Principal, current_principal, require_role
 from carrier_scope import (
-    CarrierScope, broker_party_id_of, carrier_ids_for_broker, carrier_scope,
+    CarrierScope, broker_party_id_of, broker_programme_ids, carrier_ids_for_broker, carrier_scope,
     contract_scope, program_scope, broker_scope, policy_scope,
 )
 from db import SessionLocal, Tenant
@@ -85,12 +85,25 @@ def carrier_get(scope: CarrierScope = Depends(carrier_scope)):
 
 @router.get(_C + "/programs")
 def programs_list(scope: CarrierScope = Depends(carrier_scope)):
-    return _app.programs_list(mga=scope.mga, principal=scope.acting)
+    rows = _app.programs_list(mga=scope.mga, principal=scope.acting)
+    # A broker seat sees only the programmes that carry ITS program_broker row
+    # (the rule at the top of carrier_scope). The carrier's other programmes —
+    # including ones only another broker is on — are none of its business.
+    if scope.principal.is_broker:
+        with SessionLocal() as s:
+            mine = broker_programme_ids(s, scope.principal, scope.carrier_id)
+        rows = [r for r in rows if r.get("id") in mine]
+    return rows
 
 
+# Programme WRITES are the carrier's. The delegated handlers are called
+# directly, so their own Depends never run; without this guard a broker seat,
+# holding the carrier-pinned `acting` principal, could create programmes or
+# rewrite one it shares with other brokers (and with it their calendar).
 @router.post(_C + "/programs")
 def programs_create(body: _app.ProgramBody,
-                    scope: CarrierScope = Depends(carrier_scope)):
+                    scope: CarrierScope = Depends(carrier_scope),
+                    _guard: Principal = Depends(require_role("carrier_admin"))):
     return _app.programs_create(mga=scope.mga, body=body, principal=scope.acting)
 
 
@@ -101,7 +114,8 @@ def program_get(scope: CarrierScope = Depends(program_scope)):
 
 @router.put(_P)
 def program_update(body: _app.ProgramBody,
-                   scope: CarrierScope = Depends(program_scope)):
+                   scope: CarrierScope = Depends(program_scope),
+                   _guard: Principal = Depends(require_role("carrier_admin"))):
     return _app.programs_update(program_id=scope.program_id, body=body,
                                 principal=scope.acting)
 
@@ -114,7 +128,8 @@ def program_schedule_get(scope: CarrierScope = Depends(program_scope)):
 
 @router.put(_P + "/schedule")
 def program_schedule_put(body: _app.ScheduleBody,
-                         scope: CarrierScope = Depends(program_scope)):
+                         scope: CarrierScope = Depends(program_scope),
+                         _guard: Principal = Depends(require_role("carrier_admin"))):
     return _app.program_schedule_put(program_id=scope.program_id, body=body,
                                      principal=scope.acting)
 
@@ -126,8 +141,15 @@ def program_schedule_put(body: _app.ScheduleBody,
 
 @router.get(_P + "/brokers")
 def programme_brokers(scope: CarrierScope = Depends(program_scope)):
-    return _hier.programme_brokers(program_id=scope.program_id,
+    rows = _hier.programme_brokers(program_id=scope.program_id,
                                    principal=scope.acting)
+    # A broker seat sees its OWN row only — not which other brokers share the
+    # programme, nor what they hold on it.
+    if scope.principal.is_broker:
+        with SessionLocal() as s:
+            own = broker_party_id_of(s, scope.principal)
+        rows = [r for r in rows if own is not None and r.get("id") == own]
+    return rows
 
 
 @router.post(_P + "/brokers")
@@ -149,7 +171,7 @@ def programme_broker_remove(scope: CarrierScope = Depends(broker_scope),
 # ── 3. contracts (a contract is programme × broker) ─────────────────────────
 
 @router.get(_B + "/contracts")
-def broker_contracts_list(approved_only: bool = Query(default=False),
+def broker_contracts_list(
                           scope: CarrierScope = Depends(broker_scope)):
     """Contracts this broker holds on this programme.
 
@@ -162,13 +184,12 @@ def broker_contracts_list(approved_only: bool = Query(default=False),
     empty. The filtering is left to program_contracts_list rather than repeated
     here, so the two can never disagree about that rule.
 
-    `approved_only` drops anything still waiting on the carrier — only a live
-    contract can have an output template built on it.
+    It once took an `approved_only` flag, back when a contract could be waiting
+    on the carrier's approval. Nothing waits any more — that gate is gone.
     """
     return _app.program_contracts_list(
         program_id=scope.program_id,
         broker_party_id=scope.broker_party_id,
-        approved_only=approved_only,
         principal=scope.acting,
     )
 
@@ -184,12 +205,15 @@ async def broker_contract_upload(
     enable_reference_halt: bool = Form(default=False),
     upload_token: Optional[str] = Form(default=None),
     scope: CarrierScope = Depends(broker_scope),
+    _guard: Principal = Depends(require_role("carrier_admin")),
 ):
-    """Step 3 of the flow — the broker uploads a contract for this programme.
+    """Upload a contract for this programme, filed under this broker. The
+    carrier's act — a broker seat is refused by the guard.
 
-    A contract a BROKER uploads waits for its carrier; one the CARRIER uploads
-    is live immediately. That decision is made from who submitted it (the DB
-    trigger trg_set_contract_approval), never from anything the client says.
+    This was "the broker uploads a contract and waits for the carrier to
+    approve it". There is no approval gate any more, and no broker-side upload
+    screen: a contract is the carrier's, and the broker in the address says who
+    it is WITH, not who brought it.
     """
     return await _app.program_contract_upload(
         program_id=scope.program_id, file=file,
@@ -210,36 +234,14 @@ def contract_detail(scope: CarrierScope = Depends(contract_scope)):
                                         principal=scope.acting)
 
 
-# ── 4. carrier review: approve / reject ─────────────────────────────────────
-
-@router.post(_T + "/approve")
-def contract_approve(body: _hier.ApprovalDecision = _hier.ApprovalDecision(),
-                     scope: CarrierScope = Depends(contract_scope),
-                     _guard: Principal = Depends(require_role("carrier_admin"))):
-    return _hier.contract_approve(contract_id=scope.contract_id, body=body,
-                                  principal=scope.acting)
-
-
-@router.post(_T + "/reject")
-def contract_reject(body: _hier.ApprovalDecision = _hier.ApprovalDecision(),
-                    scope: CarrierScope = Depends(contract_scope),
-                    _guard: Principal = Depends(require_role("carrier_admin"))):
-    return _hier.contract_reject(contract_id=scope.contract_id, body=body,
-                                 principal=scope.acting)
-
+# ── 4. the contract's thread ───────────────────────────────────────────────
 
 @router.get(_T + "/approvals")
 def contract_approval_history(scope: CarrierScope = Depends(contract_scope)):
-    """Every decision ever made on this contract — the contract row holds the
-    CURRENT state, this holds how it got there."""
+    """How this contract got to where it is — the negotiation thread: terms sent
+    out, changes asked for, terms agreed."""
     return _hier.contract_approval_history(contract_id=scope.contract_id,
                                            principal=scope.acting)
-
-
-@router.get(_C + "/approvals")
-def carrier_approvals_queue(scope: CarrierScope = Depends(carrier_scope)):
-    """What is waiting on THIS carrier — step 4's inbox."""
-    return _hier.approvals_queue(principal=scope.acting)
 
 
 # ── 5-7. bordereau: setup, submission, validation ───────────────────────────
@@ -255,8 +257,11 @@ async def broker_bordereau_setup(
     resume_token: Optional[str] = Form(default=None),
     reference_files: Optional[list[UploadFile]] = File(default=None),
     scope: CarrierScope = Depends(broker_scope),
+    _guard: Principal = Depends(require_role("carrier_admin")),
 ):
-    """Step 5 — bordereau setup for this broker on this programme.
+    """Step 5 — bordereau setup for this broker on this programme. The
+    carrier's to build (setup stays with the carrier); a broker seat is
+    refused by the guard.
 
     Combined output-template + contract upload: the Output Template is resolved
     first (it is the semantic bridge), then the contract is processed with that
@@ -279,16 +284,22 @@ def contract_policies(limit: int = Query(default=50, le=500),
     """The policies written under this contract — the last link of the chain.
 
     Reads the canonical warehouse directly (policy is not an ops ORM entity)
-    and returns only the CURRENT SCD-2 version of each row.
+    and returns only the CURRENT SCD-2 version of each row — and only the ones
+    this scope may read: a broker sees the policies it sent, never another
+    broker's under a shared contract (carrier_scope.policy_sender_filter).
     """
     from sqlalchemy import select, func as _f
     from canonical import CANONICAL_TABLES
+    from carrier_scope import policy_sender_filter
     from db import CanonicalSession
     t = CANONICAL_TABLES["policy"]
+    sender = policy_sender_filter(t, scope)
 
     def _current(stmt):
         if "is_current_version" in t.c:
             stmt = stmt.where(t.c.is_current_version.isnot(False))
+        if sender is not None:
+            stmt = stmt.where(sender)
         return stmt
 
     with CanonicalSession() as cs:
@@ -355,33 +366,38 @@ def _carrier_party_id(s, carrier_id: int) -> int:
     return pid
 
 
+def _scope_pipeline(s, scope: CarrierScope, cpid: int,
+                    broker: Optional[int], active_only: bool):
+    """The newest setup for this carrier + programme, held by `broker` (None =
+    the programme's shared one). What the readiness check falls back on to say
+    a setup exists but is still a draft; live setups go through setup_scope."""
+    from db import Pipeline
+    q = (s.query(Pipeline)
+         .filter(Pipeline.tenant_id == scope.carrier_id,
+                 Pipeline.carrier_party_id == cpid,
+                 Pipeline.program_id == scope.program_id))
+    if active_only:
+        q = q.filter(Pipeline.status == "active")
+    q = q.filter(Pipeline.broker_party_id == broker if broker is not None
+                 else Pipeline.broker_party_id.is_(None))
+    return q.order_by(Pipeline.id.desc()).first()
+
+
 @router.get(_T + "/bordereau")
 def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
     """Can a bordereau be run against this contract yet, and against what.
 
-    Two things have to be true, and they fail for completely different reasons,
-    so they are reported separately rather than as one "not ready":
+    What has to be true is that a SETUP exists — the (programme × broker) setup
+    the carrier builds, which says how to read the spreadsheet. That is not
+    something the broker can fix themselves, which is exactly why the answer is
+    a reason and not an upload box that fails on submit.
 
-      the contract is live      a contract the carrier has not approved governs
-                                nothing, so there are no rules to validate on
-      a setup exists            the carrier has built the (programme × broker)
-                                setup that says how to read the spreadsheet
-
-    Neither is something the broker can fix themselves, which is exactly why
-    the answer is a reason and not an upload box that fails on submit.
+    It also used to require the contract to have cleared the carrier's approval
+    gate. There is no gate any more, so the only remaining question is the
+    setup.
     """
-    from db import Contract, DirectFormat, ExportTemplate, Pipeline
+    from db import DirectFormat, ExportTemplate, Pipeline
     with SessionLocal() as s:
-        c = s.get(Contract, scope.contract_id)
-        if c is not None and (c.approval_status or "approved") != "approved":
-            return {
-                "ready": False,
-                "reason": ("This contract is not live yet — the carrier has "
-                           "still to approve it. Until they do, there are no "
-                           "rules to check your file against."),
-                "setup": None,
-            }
-
         cpid = _carrier_party_id(s, scope.carrier_id)
 
         # Mirrors direct_run's resolution order exactly, so what this endpoint
@@ -389,15 +405,7 @@ def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
         # (carrier, programme, broker) — the CONTRACT supplies the rules, not
         # the layout, which is why one setup can serve several contracts.
         def _pipe(broker: Optional[int], active_only: bool):
-            q = (s.query(Pipeline)
-                 .filter(Pipeline.tenant_id == scope.carrier_id,
-                         Pipeline.carrier_party_id == cpid,
-                         Pipeline.program_id == scope.program_id))
-            if active_only:
-                q = q.filter(Pipeline.status == "active")
-            q = q.filter(Pipeline.broker_party_id == broker if broker is not None
-                         else Pipeline.broker_party_id.is_(None))
-            return q.order_by(Pipeline.id.desc()).first()
+            return _scope_pipeline(s, scope, cpid, broker, active_only)
 
         def _payload(pipe: Pipeline, held_by: str):
             tpl = (s.get(ExportTemplate, pipe.output_template_id)
@@ -413,10 +421,14 @@ def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
                 "output_template": ({"id": tpl.id, "name": tpl.name} if tpl else None),
             }
 
-        pipe, held_by = _pipe(scope.broker_party_id, True), "broker"
-        if pipe is None:
-            pipe, held_by = _pipe(None, True), "programme"
+        # The live setup for THIS contract. A broker with two contracts on two
+        # BDX templates has two live setups, and the one named here has to be
+        # the one a run uses — setup_scope is the single answer to both.
+        from setup_scope import live_setup_for
+        pipe = live_setup_for(s, scope.carrier_id, cpid, scope.program_id,
+                              scope.broker_party_id, scope.contract_id)
         if pipe is not None:
+            held_by = "broker" if pipe.broker_party_id is not None else "programme"
             return {"ready": True, "reason": None, "setup": _payload(pipe, held_by)}
 
         # The pre-pipeline fallback direct_run still honours: an approved
@@ -461,6 +473,94 @@ def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
         }
 
 
+@router.get(_T + "/bordereau-template")
+def contract_bordereau_template(scope: CarrierScope = Depends(contract_scope)):
+    """The blank bordereau to fill in for this contract: the layout the setup
+    that would run it reads. The setup is resolved as /bordereau and the run
+    resolve it — the live setup for this contract (setup_scope)."""
+    from fastapi import Response
+    import bordereau_template as bt
+    with SessionLocal() as s:
+        cpid = _carrier_party_id(s, scope.carrier_id)
+        from setup_scope import live_setup_for
+        pipe = live_setup_for(s, scope.carrier_id, cpid, scope.program_id,
+                              scope.broker_party_id, scope.contract_id)
+        if pipe is None:
+            raise HTTPException(404, "There is no live bordereau setup for this "
+                                     "contract yet, so there is no layout to download.")
+        try:
+            data, name = bt.setup_input_template(s, pipe)
+        except bt.TemplateUnavailable as e:
+            raise HTTPException(404, str(e))
+    return Response(content=data, media_type=bt.XLSX, headers=bt.attachment(name))
+
+
+@router.get(_T + "/periods")
+def contract_bordereau_periods(scope: CarrierScope = Depends(contract_scope)):
+    """The REAL reporting periods a broker can pick from when running a
+    bordereau against this contract — the Bordereau Calendar's own rows for
+    this (programme, broker), not a free-text month/year.
+
+    Picking one of these and sending it as `period` on /runs is what lets
+    Process Bordereau, Send Bordereau and the Bordereau Calendar all point at
+    exactly the same ExpectedSubmission row — see submission_calendar_service.
+    resolve_period_label (explicit is always trusted, never guessed).
+
+    Ordered most-recently-due first, with the currently open ones (nothing
+    processed yet) marked, since that is almost always what somebody running a
+    bordereau today wants — but a period already processed is still listed
+    (and still pickable), for a correction/resubmission.
+
+    FUTURE PERIODS ARE NOT LISTED — a period whose own reporting window has not
+    ended yet (`period_end` still ahead of today) is not something there can be
+    a real file for: the month it reports on has not finished. Filtered on
+    `period_end`, not `due_date`, on purpose — the due date is typically ~10
+    days AFTER the period ends, and a broker filing July's bordereau in early
+    August (before July's due date) is the NORMAL case, not an early one.
+    """
+    from datetime import datetime
+    from db import ExpectedSubmission
+    import renewal_chain as rc
+    today = datetime.utcnow().date()
+    def _rows(s):
+        q = (s.query(ExpectedSubmission)
+             .filter(ExpectedSubmission.tenant_id == scope.carrier_id,
+                     ExpectedSubmission.program_id == scope.program_id,
+                     ExpectedSubmission.broker_party_id == scope.broker_party_id,
+                     ExpectedSubmission.period_end <= today))
+        # A contract in a renewal chain answers for its OWN term only: the
+        # previous term lists its (late) months, the renewal its new ones —
+        # filtered before the cut, so old months are never pushed off the list.
+        own = rc.own_term(s, scope.contract_id)
+        if own is not None and own.inception_dt is not None:
+            q = q.filter(ExpectedSubmission.period_start >= own.inception_dt)
+            if own.expiry_dt is not None:
+                q = q.filter(ExpectedSubmission.period_start < own.expiry_dt)
+        return q.order_by(ExpectedSubmission.due_date.desc()).limit(24).all()
+    with SessionLocal() as s:
+        rows = _rows(s)
+        if not rows:
+            # No calendar for this broker yet: build it from the contract, as
+            # the carrier's calendar screen would on first view (a schedule
+            # made before this broker joined is rebuilt to include them).
+            from submission_calendar_service import ensure_auto_schedule, materialize_schedule
+            from db import SubmissionSchedule
+            had = (s.query(SubmissionSchedule.id)
+                   .filter(SubmissionSchedule.program_id == scope.program_id).first())
+            sched = ensure_auto_schedule(s, scope.program_id, scope.carrier_id)
+            if sched is not None and had is not None:
+                materialize_schedule(s, sched)
+                s.commit()
+            if sched is not None:
+                rows = _rows(s)
+        return {"periods": [
+            {"expected_id": e.id, "period": e.period,
+             "due_date": e.due_date.isoformat() if e.due_date else None,
+             "status": e.status, "processed": e.received_at is not None}
+            for e in rows
+        ]}
+
+
 @router.post(_T + "/runs")
 async def contract_bordereau_run(
     file: UploadFile = File(...),
@@ -471,12 +571,42 @@ async def contract_bordereau_run(
     # whole point of giving the broker the lane — they find out what is wrong
     # before the carrier does, not after.
     check_only: bool = Form(default=False),
+    # The broker was told this exact file was loaded before and chose to send
+    # it anyway. Without it a duplicate comes back as a 409 question.
+    confirm_duplicate: bool = Form(default=False),
+    # The broker was told most of the setup's columns are missing from this
+    # file and chose to run it anyway. Without it that case is a 409 question.
+    confirm_layout: bool = Form(default=False),
+    # The reporting period this run is FOR — one of the labels /periods just
+    # listed, e.g. "2026-08". Required on a real submission (not on a
+    # self-check, which touches no calendar) so the file lands on the period
+    # it was actually filed for, never a guess. See resolve_period_label.
+    period: Optional[str] = Form(default=None),
     scope: CarrierScope = Depends(contract_scope),
 ):
     """Step 6 — submit a bordereau against this contract."""
     import direct_routes as _direct
+    if not check_only and not period:
+        raise HTTPException(
+            400, "Pick the reporting period this bordereau is for before "
+                 "submitting — see the periods this contract's calendar "
+                 "expects at GET .../periods.")
     with SessionLocal() as s:
         cpid = _carrier_party_id(s, scope.carrier_id)
+        # A renewal-chain contract takes files for its own term only — a 2025
+        # month goes to the renewal, a missing 2024 month to the previous term.
+        if period:
+            import renewal_chain as rc
+            own = rc.own_term(s, scope.contract_id)
+            day = rc.period_start(period)
+            if own is not None and day is not None and not rc.covers(own, day):
+                raise HTTPException(
+                    400, f"{day:%B %Y} is outside this contract's term "
+                         f"({own.inception_dt:%d %b %Y} to {own.expiry_dt:%d %b %Y}). "
+                         "Pick the contract whose term covers that month."
+                    if own.inception_dt and own.expiry_dt else
+                    f"{day:%B %Y} is outside this contract's term. Pick the "
+                    "contract whose term covers that month.")
     return await _direct.direct_run(
         mga=scope.mga,
         carrier_party_id=cpid,
@@ -487,17 +617,29 @@ async def contract_bordereau_run(
         # than to a tenant code that means nothing on their side.
         actor=f"broker:{scope.broker_party_id}",
         skip_rows=skip_rows,
+        period=period,
         check_only=check_only,
         broker_party_id=scope.broker_party_id,
         contract_id=scope.contract_id,
+        # Passed explicitly: called as a function, direct_run's own default is
+        # the Form() marker, which is truthy.
+        confirm_duplicate=confirm_duplicate,
+        check_layout=not confirm_layout,
         principal=scope.acting,
     )
 
 
 @router.get(_T + "/runs")
 def contract_bordereau_runs(limit: int = Query(default=20, le=100),
+                            page: Optional[int] = Query(default=None, ge=1),
+                            page_size: Optional[int] = Query(default=None, ge=1, le=200),
                             scope: CarrierScope = Depends(contract_scope)):
-    """What has been submitted against this contract, newest first."""
+    """What has been submitted against this contract, newest first.
+
+    Pagination is OPT-IN and handed straight to /direct/runs, which already
+    does the work: without `page` this stays the capped plain list it was, and
+    with it the broker's own history becomes pageable instead of stopping at
+    the twentieth most recent file with no way to reach the twenty-first."""
     import direct_routes as _direct
     with SessionLocal() as s:
         cpid = _carrier_party_id(s, scope.carrier_id)
@@ -516,8 +658,8 @@ def contract_bordereau_runs(limit: int = Query(default=20, le=100),
         program_id=scope.program_id,
         broker_party_id=scope.broker_party_id,
         contract_id=scope.contract_id,
-        page=None,
-        page_size=None,
+        page=page,
+        page_size=page_size,
         limit=limit,
         principal=scope.acting,
     )

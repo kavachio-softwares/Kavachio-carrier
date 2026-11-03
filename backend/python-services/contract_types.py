@@ -1,0 +1,797 @@
+"""
+contract_types.py
+─────────────────
+WHAT a contract is, and therefore which fields it cannot be saved without.
+
+There are two, and they differ by who the carrier is facing:
+
+  insurer_broker      the insurer delegates to a BROKER. A binder / delegated
+                      authority: the broker writes business in the insurer's
+                      name, under a stated class of business.
+
+  insurer_reinsurer   the insurer cedes to a REINSURER. A treaty: nobody writes
+                      on anyone's behalf. What identifies it is the year of
+                      account it attaches to and the notice needed to get out
+                      of it.
+
+Both lists live HERE and nowhere else. The create/edit endpoints validate
+against this module, and the frontend form is BUILT from it (served by
+GET /contract-types), so a field cannot be mandatory on the server and optional
+in the form — the two cannot drift because there is only one list.
+
+Changing what a type requires is a one-line edit to `required` below. Nothing
+else in the app hardcodes a field list.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+# ── the field vocabulary ────────────────────────────────────────────────────
+# `attr` is the Contract ORM attribute the value lands on, so the routes can
+# apply an edit generically instead of naming all eighteen columns twice.
+# `kind` is what the form should render, not a storage type.
+# `example` is the reference text that belongs INSIDE the box — the form and
+# the record page both use it as the input's placeholder. It lives here rather
+# than in the frontend because it is part of the vocabulary: a hardcoded copy
+# in one screen drifted from the spec (it still offered an example for a field
+# that had been removed), and the record page had no examples at all.
+#
+# `hint` is the sentence UNDER the box, and says what the field means. Where an
+# example used to be buried in that sentence it has moved here, so the two are
+# not two half-copies of the same thing.
+FIELDS: dict[str, dict[str, Any]] = {
+    "name": {
+        "attr": "name", "label": "Contract name", "kind": "text",
+        "example": "Schedule A — 2027",
+        "hint": "How people will refer to it.",
+    },
+    "counterparty_party_id": {
+        "attr": "broker_party_id", "label": "Counterparty", "kind": "party",
+        "hint": "The organisation on the other side of this contract.",
+    },
+    "schedule_key": {
+        "attr": "schedule_key", "label": "Schedule key", "kind": "text",
+        "example": "SCH-A",
+        # The design's own hint, verbatim.
+        "hint": "Lets one programme hold many contracts.",
+    },
+    "inception_dt": {
+        "attr": "inception_dt", "label": "Inception", "kind": "date",
+        "hint": "The day cover under this contract begins.",
+    },
+    "expiry_dt": {
+        "attr": "expiry_dt", "label": "Expiry", "kind": "date",
+        "hint": "The day it ends. A renewal starts a NEW contract rather than "
+                "extending this one, so the history stays readable.",
+    },
+    "class_of_business": {
+        "attr": "class_of_business", "label": "Class of business", "kind": "text",
+        "example": "Commercial Property",
+        "hint": "What may be written under it.",
+    },
+    "year_of_account": {
+        "attr": "year_of_account", "label": "Year of account", "kind": "text",
+        "example": "2027",
+        "hint": "The account year the cession attaches to — not the same as "
+                "the inception year for a treaty written mid-year.",
+    },
+    "notice_period_days": {
+        "attr": "notice_period_days", "label": "Notice period (days)", "kind": "int",
+        "example": "60",
+        "hint": "Days of notice needed to cancel. Termination is checked "
+                "against this.",
+    },
+    "premium_cap_amount": {
+        "attr": "premium_cap_amount", "label": "Premium cap", "kind": "decimal",
+        "example": "5,000,000",
+        # Says so on the field, because the two are easy to set by accident and
+        # only one of them is enforced.
+        "hint": "Recorded on the contract only. To have it CHECKED on every "
+                "file, set “Most premium they may write” in the limits below "
+                "instead — that one produces a clause and a check.",
+    },
+    "premium_cap_currency": {
+        "attr": "premium_cap_currency", "label": "Cap currency", "kind": "currency",
+        "hint": "Currency the cap is expressed in.",
+    },
+    "executed_date": {
+        "attr": "executed_date", "label": "Executed", "kind": "date",
+        "hint": "When it was signed. Normally filled in when the broker signs "
+                "and returns it — set it here only for a contract that was "
+                "already executed before it reached Kavachio.",
+    },
+    "earnings_pattern": {
+        "attr": "earnings_pattern", "label": "Earnings pattern", "kind": "text",
+        "example": "Straight line, 12 months",
+        "hint": "How premium earns across the term, where it is stated.",
+    },
+}
+
+# ── the two types ───────────────────────────────────────────────────────────
+# `counterparty_party_type` is enforced, not decorative: an insurer_broker
+# contract filed against a reinsurer would sit under a party whose page cannot
+# show it, and every downstream screen joins through that column.
+CONTRACT_TYPES: dict[str, dict[str, Any]] = {
+    "insurer_broker": {
+        "key": "insurer_broker",
+        "label": "Insurer ↔ Broker",
+        "blurb": "A binder / delegated authority: the broker writes business "
+                 "in your name under agreed terms.",
+        "counterparty_party_type": "broker",
+        "counterparty_label": "Broker",
+        # A broker must be ON the programme before it can hold a contract there
+        # — program_broker is the gate. A reinsurer has no such gate, because it
+        # does not produce business into the programme.
+        "counterparty_must_be_on_programme": True,
+        "required": [
+            "name", "counterparty_party_id", "inception_dt", "expiry_dt",
+            "class_of_business",
+        ],
+        # No year_of_account. It is a TREATY idea — which underwriting year a
+        # cession attaches to — and on a binder with a broker it was an
+        # optional box nobody filled in. It stays REQUIRED on the reinsurer
+        # type below, where it means something.
+        "optional": [
+            "schedule_key", "notice_period_days",
+            "premium_cap_amount", "premium_cap_currency", "executed_date",
+            "earnings_pattern",
+        ],
+    },
+    "insurer_reinsurer": {
+        "key": "insurer_reinsurer",
+        "label": "Insurer ↔ Reinsurer",
+        "blurb": "A treaty: you cede risk to a reinsurer. Nobody writes on "
+                 "anyone's behalf, so nothing is delegated.",
+        "counterparty_party_type": "reinsurer",
+        "counterparty_label": "Reinsurer",
+        "counterparty_must_be_on_programme": False,
+        "required": [
+            "name", "counterparty_party_id", "inception_dt", "expiry_dt",
+            "year_of_account", "notice_period_days",
+        ],
+        "optional": [
+            "schedule_key", "class_of_business", "premium_cap_amount",
+            "premium_cap_currency", "executed_date", "earnings_pattern",
+        ],
+    },
+}
+
+# The optional lists are long, and that is fine: the form shows the required
+# fields and folds the rest behind a disclosure, so a contract that needs none
+# of them is six inputs and one closed section. Two carry a caveat the form
+# states on the field itself rather than here:
+#
+#   · PREMIUM CAP also exists as the agreed limit "Most premium they may write",
+#     which unlike this field produces a clause and a check. Setting both is two
+#     places to state one number.
+#   · EXECUTED DATE is normally written by signing (submit_signed), not typed —
+#     it is here for a contract already executed before it reached Kavachio.
+#
+# UMR, RISK CODE and SECTION are NOT in either list. The columns stay, the
+# record still shows them, a renewal still carries them forward and the schedule
+# still prints them where they are set — extraction reads them off an uploaded
+# wording — but none of the three is ASKED FOR when a contract is raised.
+#
+# All three are market references somebody else issues, not decisions the two
+# parties are making in this form. A UMR is allocated when the risk is placed; a
+# Lloyd's risk code is the market's classification, not the carrier's; a section
+# number only means anything for a contract already written in sections, which
+# an authored one is not. Asking produced blanks on nearly every contract, and
+# the few people who did fill them in were typing a placeholder — which is worse
+# than an empty field, because a placeholder looks like an answer.
+#
+# They stay on ContractIn so an older client sending one is not rejected; it is
+# dropped by validate(), which keeps to the lists above.
+DEFAULT_TYPE = "insurer_broker"
+
+
+# ── how long a term runs ────────────────────────────────────────────────────
+# Inception and expiry are the FACTS, and the only two things stored. A duration
+# is a quicker way of saying the second one: the form offers these lengths and
+# writes the expiry date each works out to. A term matching none of them — 54
+# days, or a treaty that ends when a scheme year does — is typed straight into
+# the expiry field and is no less valid, which is why nothing here is ever
+# required and no duration is kept on the contract. Storing one would be a
+# second answer to a question the two dates already answer, and the two would
+# eventually disagree.
+#
+# Served rather than listed in the form so that the lengths on offer and the
+# convention below have one home.
+#
+# THE CONVENTION — both days count. The wording says so in as many words ("from
+# {{inception}} to {{expiry}}, both days inclusive"), so a 12-month term
+# incepting 1 Jan 2027 expires 31 Dec 2027, not 1 Jan 2028. Where adding the
+# months lands on a day the month does not have — 31 January plus one month —
+# the end of that month is the answer and nothing is taken off it, or a term
+# would come out a day short of the month it was meant to be.
+TERM_DURATION_MONTHS = (*range(1, 13), 18, 24, 36, 48, 60)
+
+
+def _duration_label(months: int) -> str:
+    """Said the way somebody would say it, worked out rather than written down
+    twice — a list of labels beside a list of numbers is a list that drifts."""
+    if months % 12 == 0:
+        years = months // 12
+        return "1 year" if years == 1 else f"{years} years"
+    return "1 month" if months == 1 else f"{months} months"
+
+
+def term_spec() -> dict[str, Any]:
+    """The term lengths the form offers, and how a term is counted."""
+    return {
+        "durations": [{"months": m, "label": _duration_label(m)}
+                      for m in TERM_DURATION_MONTHS],
+        "inclusive": True,
+        "note": "Both the first and the last day are inside the term.",
+    }
+
+
+# ── lifecycle ───────────────────────────────────────────────────────────────
+# The BUSINESS state of a contract, kept apart from `status_ops` (what the
+# extraction pipeline did with the file). Two axes, because they answer two
+# different questions and a single column carrying both would lose one.
+#
+#   draft              being prepared. Not visible to the counterparty.
+#   pending            the BROKER submitted it; waiting on the carrier.
+#   in_review          the CARRIER sent its terms out; waiting on the broker.
+#   changes_requested  the broker pushed back; the ball is with the carrier.
+#   agreed             both sides settled the terms. Next stop is signature.
+#   signed             the broker signed and returned it. It is back with the
+#                      carrier, whose next act is PLACEMENT — which Kavachio
+#                      does not do yet. Until it does, the carrier goes straight
+#                      from here to putting the contract in force, and this
+#                      state is where a placement step would slot in without
+#                      moving anything either side of it.
+#   active             in force. The only state a bordereau can be produced
+#                      against.
+#   expired            term ran out. Reached by the date, not by a decision.
+#   terminated         ended early and deliberately, with a reason on the record.
+#   superseded         replaced by a renewal, which points back at it.
+#
+# Two directions of travel meet here, which is why there are two "waiting"
+# states rather than one:
+#
+#   BROKER-ORIGINATED   draft → pending → (carrier approves) → active
+#                       The broker brings a contract; the carrier decides.
+#
+#   CARRIER-ORIGINATED  draft → in_review ⇄ changes_requested
+#                             → agreed → signed → active
+#                       The carrier proposes terms; the broker reviews, and may
+#                       push back as many times as it takes. Nobody "approves"
+#                       here — the carrier already owns the book, so what is
+#                       being sought is the broker's AGREEMENT, which is a
+#                       different thing and needs its own word. The broker then
+#                       signs and returns it, and the carrier places it and puts
+#                       it in force.
+#
+# A carrier can still raise a contract straight into `active` when there is
+# nothing to negotiate, which is what it did before any of this existed.
+LIFECYCLE = (
+    "draft", "pending", "in_review", "changes_requested", "agreed", "signed",
+    "active", "expired", "terminated", "superseded",
+)
+
+# Which moves are legal. A contract cannot go back to draft once submitted to
+# the carrier — a rejected contract is corrected and re-submitted, which is an
+# edit plus a fresh decision, not a rewind.
+LIFECYCLE_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    # `signed` from a draft is how a contract with no broker seat gets there:
+    # an insurer ↔ reinsurer counterparty never logs in, so its signature is
+    # recorded rather than typed, and there is no review round in between.
+    # `agreed` from a draft is the carrier waiving the review it is not obliged
+    # to hold — a renewal on last year's wording, or a treaty whose counterparty
+    # has no seat here to read it. It is a deliberate act with its own endpoint
+    # and its own row in the history (see contract_routes.skip_review), never a
+    # side effect: what it skips is the OTHER side's chance to object, so it has
+    # to be visible afterwards that nobody took it.
+    # `active` is NOT reachable from here any more — a contract goes in force
+    # because both sides signed it, which means passing through `signed`.
+    "draft":             ("pending", "in_review", "agreed", "signed", "terminated"),
+    # `pending` is now the CARRIER'S OWN review step: a contract one of its
+    # users raised, waiting on the carrier admin. From there the admin does
+    # whichever thing the author was asking for — send the terms to the broker,
+    # settle them without asking (skip-review), or sign a contract with no
+    # broker seat to ask — or sends it back to `draft` for the author to fix.
+    # It is deliberately the same set of onward moves a `draft` has, because
+    # the admin is deciding the same question the author would have.
+    "pending":           ("in_review", "agreed", "signed", "draft", "terminated"),
+    # The negotiation loop. in_review ⇄ changes_requested can run as many times
+    # as the two sides need; neither side can end it alone.
+    "in_review":         ("changes_requested", "agreed", "draft", "terminated"),
+    "changes_requested": ("in_review", "draft", "terminated"),
+    # Agreed is not final: either side can reopen before signature, and pretending
+    # otherwise would mean re-raising the whole contract to change one number.
+    # It leads to `signed`, never straight to `active` — signing is the step.
+    "agreed":            ("signed", "changes_requested", "terminated"),
+    # Signed by both sides. `active` is the only way on for now because
+    # placement is not built — when it is, it goes here. Withdrawing a
+    # signature before the contract is in force sends it back the way it came,
+    # which is done by setting the state directly rather than as a transition:
+    # it is an erasure, not a step forward.
+    "signed":            ("active", "changes_requested", "terminated"),
+    "active":            ("expired", "terminated", "superseded"),
+    "expired":           ("superseded",),
+    "terminated":        (),
+    "superseded":        (),
+}
+
+# The states in which the contract is out with the broker rather than with the
+# carrier. Used to decide who may edit and whose queue it belongs in.
+WITH_BROKER = ("in_review", "agreed")
+# `pending` belongs here: the contract is inside the carrier, on the carrier
+# admin's desk. Adding it is what puts it in their queue — _whose_turn already
+# answered "carrier" for it, and now the edit rules agree.
+WITH_CARRIER = ("draft", "pending", "changes_requested", "signed")
+
+
+class ContractTypeError(ValueError):
+    """A contract that cannot be saved as the type it claims to be.
+
+    Carries `errors` as {field: message} so the form can mark the offending
+    inputs rather than showing one sentence above the whole thing.
+    """
+
+    def __init__(self, message: str, errors: dict[str, str] | None = None):
+        super().__init__(message)
+        self.message = message
+        self.errors = errors or {}
+
+    def to_detail(self) -> dict[str, Any]:
+        return {"message": self.message, "errors": self.errors}
+
+
+def spec(contract_type: str) -> dict[str, Any]:
+    """The type's definition, or a 400-worthy error naming the valid ones."""
+    t = CONTRACT_TYPES.get((contract_type or "").strip())
+    if t is None:
+        raise ContractTypeError(
+            f"“{contract_type}” is not a contract type. "
+            f"Use one of: {', '.join(CONTRACT_TYPES)}.",
+            {"contract_type": "unknown contract type"},
+        )
+    return t
+
+
+def field_names(contract_type: str) -> list[str]:
+    """Every field this type accepts, required first — the form's field order."""
+    t = spec(contract_type)
+    return [*t["required"], *t["optional"]]
+
+
+def public_spec() -> list[dict[str, Any]]:
+    """The whole vocabulary, shaped for the form that renders it.
+
+    Sent to the browser so the create/edit screen knows which inputs to show
+    and which to mark mandatory WITHOUT restating any of it in TypeScript.
+    """
+    out = []
+    for t in CONTRACT_TYPES.values():
+        fields = []
+        for name in field_names(t["key"]):
+            f = FIELDS[name]
+            fields.append({
+                "name": name,
+                "label": (t["counterparty_label"]
+                          if name == "counterparty_party_id" else f["label"]),
+                "kind": f["kind"],
+                "hint": f["hint"],
+                # The placeholder. Absent for a date or a picker, where the
+                # control already says what shape the answer takes.
+                "example": f.get("example"),
+                "required": name in t["required"],
+            })
+        out.append({
+            "key": t["key"],
+            "label": t["label"],
+            "blurb": t["blurb"],
+            "counterparty_party_type": t["counterparty_party_type"],
+            "counterparty_label": t["counterparty_label"],
+            "counterparty_must_be_on_programme": t["counterparty_must_be_on_programme"],
+            "fields": fields,
+        })
+    return out
+
+
+def _is_blank(v: Any) -> bool:
+    return v is None or (isinstance(v, str) and not v.strip())
+
+
+def validate(contract_type: str, values: dict[str, Any],
+             *, partial: bool = False) -> dict[str, Any]:
+    """Check `values` against the type and return only the fields it allows.
+
+    `partial=True` (an edit) skips the mandatory check for fields the caller did
+    not send, so a screen can save one field without resending the whole record
+    — but a field that IS sent may not be blanked if the type requires it.
+
+    Unknown fields are DROPPED rather than rejected: a field that is optional on
+    one type and absent on the other would otherwise make switching type fail
+    with an error about a field the user cannot see.
+    """
+    t = spec(contract_type)
+    allowed = set(field_names(t["key"]))
+    clean = {k: v for k, v in values.items() if k in allowed}
+
+    errors: dict[str, str] = {}
+    for name in t["required"]:
+        if partial and name not in values:
+            continue
+        if _is_blank(clean.get(name)):
+            errors[name] = f"{FIELDS[name]['label']} is required for a "\
+                           f"{t['label']} contract."
+
+    # A term that runs backwards is not a term. Checked here rather than in the
+    # route so the manual-entry and the extracted-metadata paths agree.
+    inc, exp = clean.get("inception_dt"), clean.get("expiry_dt")
+    if inc and exp and str(inc) > str(exp):
+        errors["expiry_dt"] = "Expiry falls before inception."
+
+    days = clean.get("notice_period_days")
+    if days not in (None, "") and int(days) < 0:
+        errors["notice_period_days"] = "A notice period cannot be negative."
+
+    if errors:
+        # Name them. "Missing something" is true and useless — the caller may
+        # be three steps away from the field, and a message that does not say
+        # which one leaves them hunting.
+        named = ", ".join(FIELDS[k]["label"] for k in errors if k in FIELDS)
+        raise ContractTypeError(
+            f"A {t['label']} contract cannot be saved without: {named}."
+            if named else
+            f"This {t['label']} contract is missing something it cannot be "
+            f"saved without.", errors)
+    return clean
+
+
+# ── the limits you agreed ───────────────────────────────────────────────────
+# The heart of writing a contract. Each entry is ONE row of the design's step-1
+# table, and it carries three things at once:
+#
+#     the question   in the words somebody says out loud ("Most commission you
+#                    will pay"), not the column name (commission_pct)
+#     the answer     what was agreed
+#     the teeth      how hard it bites when a file breaks it — Critical, which
+#                    stops the row, or Warning, which only flags it. See
+#                    SEVERITY_VOCAB for the words.
+#
+# That third column is the point of the whole flow. Uploading a PDF gets you
+# clauses a model had to interpret and a severity somebody guessed at later;
+# typing the number here means the carrier decides enforcement AT THE MOMENT OF
+# AGREEING IT, in plain words. It maps straight onto validation_rule.severity,
+# which the pipeline already understands.
+#
+# `token` is what the wording quotes. Sections store {{key}}, never the baked
+# value — see contract_wording. Change the cap in step 1 and every sentence
+# carrying its chip changes with it, and so does the check. A hand-typed "15%"
+# does not, which is exactly how a contract ends up saying one thing while the
+# system checks another.
+#
+# `check` is the expression the limit becomes. None means the term is real and
+# worth recording but has nothing in a spreadsheet to measure it against —
+# governing law, tax treatment — so it stays wording and produces no check.
+AGREED_LIMITS: dict[str, dict[str, Any]] = {
+    # ══ COVER — what may be written at all ══
+    "coverage": {
+        "question": "What is covered",
+        "sub": "Coverage — e.g. Property Damage, Business Interruption.",
+        "kind": "text", "default_severity": "warning",
+        "check": "coverage in ({v})", "token": "{v}", "group": "cover",
+    },
+    "territory": {
+        "question": "Where business may be written",
+        "sub": "Territory — the places the broker is allowed to sell in.",
+        "kind": "text", "default_severity": "warning",
+        "check": "risk_territory in ({v})", "token": "{v}", "group": "cover",
+    },
+    # The other way of saying it, and NOT the same thing said backwards. A
+    # permitted list is closed — anywhere unnamed is out — which is unusable for
+    # a contract written across a continent with two states carved out of it.
+    # Naming the carve-outs leaves everywhere else open, and a carrier who tried
+    # to express that as a permitted list had to enumerate the world.
+    #
+    # Both may be set: territory says where the authority runs, this says where
+    # it stops even so. Critical by default where its opposite is only a
+    # warning, because an exclusion is the answer to "we will not touch this"
+    # — the same reason excluded_risks is critical and permitted_risks is not.
+    "excluded_territory": {
+        "question": "Where business may not be written",
+        "sub": "Excluded territory — places that are out of scope even when "
+               "the risk itself would be acceptable.",
+        "kind": "text", "default_severity": "critical",
+        "check": "risk_territory not in ({v})", "token": "{v}", "group": "cover",
+    },
+    "permitted_risks": {
+        "question": "What may be written",
+        "sub": "Permitted risks — e.g. commercial buildings. Anything else "
+               "needs referring.",
+        "kind": "text", "default_severity": "critical",
+        "check": "risk_type in ({v})", "token": "{v}", "group": "cover",
+    },
+    "excluded_risks": {
+        "question": "What may never be written",
+        "sub": "Excluded risks — e.g. nuclear, war. No referral makes these "
+               "acceptable.",
+        "kind": "text", "default_severity": "critical",
+        "check": "risk_type not in ({v})", "token": "{v}", "group": "cover",
+    },
+    "policy_period_months": {
+        "question": "Longest policy you will write",
+        "sub": "Policy period, in months. A longer one is outside this "
+               "contract.",
+        "kind": "int", "unit": "months", "default_severity": "warning",
+        "check": "policy_term_months <= {v}", "token": "{v} months",
+        "group": "cover",
+    },
+    "transaction_types": {
+        "question": "Kinds of transaction you will accept",
+        "sub": "Anything else in a file is not covered by this contract.",
+        "kind": "choice", "default_severity": "critical",
+        "choices": ["new, renewal, endorsement and cancellation",
+                    "new and renewal only"],
+        "check": "transaction_type in ({v})", "token": "{v}", "group": "cover",
+    },
+
+    # ══ AUTHORITY / LIMITS — how much they may commit you to ══
+    "max_sum_insured": {
+        "question": "Biggest risk you will cover",
+        "sub": "Per risk limit — sum insured on any one policy.",
+        "kind": "money", "default_severity": "critical",
+        "check": "sum_insured <= {v}", "token": "{c} {v}", "group": "authority",
+    },
+    "aggregate_limit": {
+        "question": "Most you will be on risk for at once",
+        "sub": "Aggregate limit — total exposure across everything written "
+               "under this contract.",
+        "kind": "money", "default_severity": "critical",
+        "check": "aggregate_exposure <= {v}", "token": "{c} {v}",
+        "group": "authority",
+    },
+    "max_tiv": {
+        "question": "Most total insured value on one policy",
+        "sub": "Maximum TIV — the sum of all values on a single risk, which "
+               "can exceed the limit you pay out.",
+        "kind": "money", "default_severity": "critical",
+        "check": "total_insured_value <= {v}", "token": "{c} {v}",
+        "group": "authority",
+    },
+    "premium_cap_total": {
+        "question": "Most premium they may write",
+        "sub": "Maximum premium — across the whole term on this contract. At "
+               "85% you get an email, before the line rather than after.",
+        "kind": "money", "default_severity": "critical",
+        "check": "premium_written_total <= {v}", "token": "{c} {v}",
+        "group": "authority",
+    },
+    "min_premium": {
+        "question": "Smallest premium you will take",
+        "sub": "Minimum premium, per policy. Anything cheaper is not worth "
+               "writing.",
+        "kind": "money", "default_severity": "warning",
+        "check": "gross_written_premium >= {v}", "token": "{c} {v}",
+        "group": "authority",
+    },
+    "deductible": {
+        "question": "Least the insured must bear",
+        "sub": "Deductible — the minimum each claim carries before you pay.",
+        "kind": "money", "default_severity": "warning",
+        "check": "deductible >= {v}", "token": "{c} {v}", "group": "authority",
+    },
+    "referral_threshold": {
+        "question": "Above which they must ask you first",
+        "sub": "Referral threshold — a risk over this may not be bound on "
+               "their own authority.",
+        "kind": "money", "default_severity": "warning",
+        "check": "sum_insured <= {v} unless referred", "token": "{c} {v}",
+        "group": "authority",
+    },
+    "underwriting_authority": {
+        "question": "How much they may decide themselves",
+        "sub": "Underwriting authority — delegated means they bind within "
+               "these limits without asking.",
+        "kind": "choice", "default_severity": None,
+        "choices": ["delegated within these limits",
+                    "referral on every risk",
+                    "delegated, with referral above the threshold"],
+        "check": None, "token": "{v}", "group": "authority",
+    },
+
+    # ══ FINANCIAL TERMS — what the two of you pay each other ══
+    "commission_max_pct": {
+        "question": "Most commission you will pay",
+        "sub": "Out of the premium on each risk.",
+        "kind": "percent", "unit": "%", "default_severity": "critical",
+        "check": "commission_pct <= {v}", "token": "{v}%", "group": "financial",
+    },
+    "commission_pct": {
+        "question": "Commission",
+        "sub": "The agreed rate, where it is fixed rather than capped.",
+        "kind": "percent", "unit": "%", "default_severity": "critical",
+        "check": "commission_pct == {v}", "token": "{v}%", "group": "financial",
+    },
+    "brokerage_pct": {
+        "question": "Brokerage",
+        "sub": "On placement, where it is separate from commission.",
+        "kind": "percent", "unit": "%", "default_severity": "warning",
+        "check": "brokerage_pct == {v}", "token": "{v}%", "group": "financial",
+    },
+    "carrier_share_pct": {
+        "question": "Your share of each risk",
+        "sub": "Where the contract is not 100% yours.",
+        "kind": "percent", "unit": "%", "default_severity": "critical",
+        "check": "carrier_share_pct == {v}", "token": "{v}%",
+        "group": "financial",
+    },
+    "override_commission_pct": {
+        "question": "Override commission",
+        "sub": "Additional commission over the base rate.",
+        "kind": "percent", "unit": "%", "default_severity": "warning",
+        "check": None, "token": "{v}%", "group": "financial",
+    },
+    "profit_commission_pct": {
+        "question": "Profit commission",
+        "sub": "The broker's share of underwriting profit, settled at the end "
+               "of the term.",
+        "kind": "percent", "unit": "%", "default_severity": None,
+        "check": None, "token": "{v}%", "group": "financial",
+    },
+    "broker_fee": {
+        "question": "Broker fee",
+        "sub": "A flat fee, where one is charged as well as or instead of "
+               "brokerage.",
+        "kind": "money", "default_severity": None,
+        "check": None, "token": "{c} {v}", "group": "financial",
+    },
+    "premium_basis": {
+        "question": "What the percentages are calculated on",
+        "sub": "Premium basis — gross is before deductions, net is after.",
+        "kind": "choice", "default_severity": None,
+        "choices": ["gross written premium", "net written premium"],
+        "check": None, "token": "{v}", "group": "financial",
+    },
+    "currency": {
+        "question": "Contract currency",
+        "sub": "Every monetary amount reported under this contract.",
+        "kind": "text", "default_severity": "critical",
+        "check": "currency == {v}", "token": "{v}", "group": "financial",
+    },
+    "payment_terms_days": {
+        "question": "Days to settle",
+        "sub": "Payment terms — after the end of the period the premium was "
+               "written in.",
+        "kind": "int", "unit": "days", "default_severity": "warning",
+        "check": "settled_within_days <= {v}", "token": "{v} days",
+        "group": "financial",
+    },
+    "settlement_frequency": {
+        "question": "How often accounts are settled",
+        "sub": "Settlement frequency — usually the same rhythm as the "
+               "bordereau.",
+        "kind": "choice", "default_severity": "warning",
+        "choices": ["monthly", "quarterly"],
+        "check": "bordereau period complete", "token": "{v}",
+        "group": "financial",
+    },
+    "tax_treatment": {
+        "question": "Tax treatment",
+        "sub": "Taxes — whether reported premium includes taxes and levies.",
+        "kind": "choice", "default_severity": None,
+        "choices": ["exclusive of taxes", "inclusive of taxes",
+                    "with taxes applicable and shown separately"],
+        "check": None, "token": "{v}", "group": "financial",
+    },
+}
+
+# The terms nearly every contract states, offered before the rest.
+#
+# The form asks these up front and folds the remaining twenty behind "show every
+# term" — thirty rows presented flat is a form nobody finishes. It lives HERE
+# and is served with the vocabulary because the frontend held its own copy, and
+# a limit added to this module then existed everywhere except the screen where
+# somebody would have typed it. Being on this list decides visibility and
+# nothing else: every limit is offered, and any limit already carrying a value
+# is shown whether it is here or not.
+COMMON_LIMITS = (
+    "coverage", "territory", "excluded_territory", "excluded_risks",
+    "max_sum_insured", "premium_cap_total", "underwriting_authority",
+    "commission_pct", "brokerage_pct", "currency",
+)
+
+# The three headings the table is grouped under, in the order they are asked.
+# Cover first because it decides whether a risk belongs here at all; then how
+# much authority the broker has over it; then what the two of you are paid.
+LIMIT_GROUPS = [
+    ("cover", "Cover",
+     "what may be written under this contract at all"),
+    ("authority", "Authority and limits",
+     "how much the broker may commit you to without asking"),
+    ("financial", "Financial terms",
+     "what the two of you are paying each other"),
+]
+
+# ── how hard a check bites ──────────────────────────────────────────────────
+# The vocabulary, once. `key` is what is stored on the row and on
+# validation_rule.severity; `label` is what a person sees; `action` says what
+# actually happens to a bordereau row that breaks it.
+#
+# The labels used to be typed into the form, the summary badge and the sample
+# contract separately — three copies of the same two words, free to drift, and
+# renaming one meant finding the other six by hand. They are served from here
+# now (see /contract-types), so a rename is this tuple and nothing else.
+SEVERITY_VOCAB: tuple[dict[str, str], ...] = (
+    {"key": "critical", "label": "Critical", "action": "Stops the row",
+     "hint": "a must-fix breach — the row is not acceptable as submitted"},
+    {"key": "warning", "label": "Warning", "action": "Flags the row",
+     "hint": "worth knowing about, but it does not block the file"},
+)
+
+SEVERITIES = tuple(s["key"] for s in SEVERITY_VOCAB)
+
+SEVERITY_LABEL = {s["key"]: s["label"] for s in SEVERITY_VOCAB}
+SEVERITY_ACTION = {s["key"]: s["action"] for s in SEVERITY_VOCAB}
+
+
+def clean_agreed_limits(raw: dict | None) -> dict:
+    """Keep known limits, coerce their values, and settle each one's severity.
+
+    Shape in and out is {key: {"value": ..., "severity": "critical"|"warning"}}.
+    A limit with no value is dropped entirely — a row with teeth but no number
+    would generate a check against nothing. Severity falls back to the limit's
+    own default, and is forced to None where the limit produces no check, so a
+    term that cannot be checked can never claim to stop a row.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, spec in AGREED_LIMITS.items():
+        entry = raw.get(key)
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            entry = {"value": entry}
+        v = entry.get("value")
+        if v in (None, ""):
+            continue
+        kind = spec["kind"]
+        if kind in ("percent", "money"):
+            try:
+                v = float(str(v).replace(",", "").strip())
+            except (TypeError, ValueError):
+                continue
+        elif kind == "int":
+            try:
+                v = int(str(v).replace(",", "").strip())
+            except (TypeError, ValueError):
+                continue
+        else:
+            v = str(v).strip()
+
+        sev = entry.get("severity") or spec.get("default_severity")
+        if not spec.get("check"):
+            sev = None
+        elif sev not in SEVERITIES:
+            sev = spec.get("default_severity")
+        out[key] = {"value": v, "severity": sev}
+    return out
+
+
+def limit_groups_spec() -> list[dict[str, str]]:
+    """The table's headings, served so the form does not restate them."""
+    return [{"key": k, "label": lbl, "sub": sub} for k, lbl, sub in LIMIT_GROUPS]
+
+
+def agreed_limits_spec() -> list[dict[str, Any]]:
+    """The vocabulary, shaped for the step-1 table."""
+    return [{
+        "name": k,
+        "question": s["question"],
+        "sub": s["sub"],
+        "kind": s["kind"],
+        "unit": s.get("unit"),
+        "choices": s.get("choices"),
+        "group": s["group"],
+        # Whether this row gets the "if a file breaks it" control at all.
+        "checkable": bool(s.get("check")),
+        "default_severity": s.get("default_severity"),
+        # Shown before "show every term". See COMMON_LIMITS.
+        "common": k in COMMON_LIMITS,
+    } for k, s in AGREED_LIMITS.items()]

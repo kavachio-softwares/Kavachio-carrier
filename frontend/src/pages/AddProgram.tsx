@@ -1,21 +1,64 @@
 /**
- * Create Programme — and pick its brokers in the same step.
+ * Configure Program — the whole setup as one flow on one screen:
+ *   1. the programme, 2. its brokers, 3. their contracts, 4. each broker's
+ *   Bordereau Setup (built on its own screen, reached from step 4 here).
  *
- * Deliberately one screen, not two. A programme with no broker cannot hold a
- * contract, so creating one and "adding brokers later" just leaves you with
- * something nobody can use. Ticking them here means the thing you end up with
- * actually works.
+ * The same screen picks up an existing programme at /programs/:id/setup?stage=N
+ * — the Programmes list sends every row and every pill there, so the stepper
+ * is on screen whichever step you arrive at.
+ *
+ * A stepper across the top shows the four steps and where you are. One
+ * section is on screen at a time; saving a section moves on to the next, and
+ * any step already reached can be clicked to go back to it. A step that cannot
+ * be reached yet is shown disabled, its tooltip saying what unlocks it.
+ *
+ * Step 1 saves the programme on its own ("Configure Program", under the
+ * Programme card). Step 2, the broker list, unlocks only once that exists —
+ * a broker is put ON a programme, and until it is saved there is nothing to
+ * put them on. The list is shown dimmed beforehand so it reads as the next
+ * step rather than appearing from nowhere.
+ *
+ * Still one screen, not two. A programme with no broker cannot hold a
+ * contract, so "create it now, add brokers some other day" tends to leave
+ * something nobody can use. Doing both here, back to back, means the thing you
+ * end up with actually works.
+ *
+ * "Add New Broker" invites one who is not on the list yet in a dialog, on this
+ * screen — the flow never leaves. When the invite goes through, the list is
+ * reloaded and whoever newly appears on it is ticked, so the next click is
+ * Assign.
+ *
+ * Step 3 appears once anyone is assigned, because a contract is (programme ×
+ * broker) and until then there is no pair to write one for. Each broker gets
+ * the same two ways in as the programme's own broker screen: Upload (a dialog,
+ * here) for a wording that already exists, and Raise (the full contract form)
+ * for terms being agreed now. Raise leaves the screen — it is a long form of
+ * its own and is the last thing in the flow.
  *
  * The carrier is not asked for. You are signed in as it.
  */
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Copy, FileText, Plus, Upload, UserPlus } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
 import { PageBody, PageHeader } from "../components/Layout";
+import { FlowStepper, type FlowStep } from "../components/FlowStepper";
 import { Card } from "../components/ui/Card";
-import { addProgrammeBroker, getBrokers, type BrokerSummary } from "../api/hierarchy";
+import {
+  addProgrammeBroker, getBrokers, getHierarchy,
+  type BrokerSummary, type HierarchyBroker, type HierarchyProgramme,
+  onProgramme,
+  setupFinished,
+} from "../api/hierarchy";
 import { OnboardingBadge } from "../components/OnboardingBadge";
+import { InviteBrokerModal } from "../components/InviteBrokerModal";
+import { InviteSentModal } from "../components/InviteSentModal";
+import AddContractModal from "../components/AddContractModal";
+import { fetchContractOriginal, fetchDocument, getContract } from "../api/contractRecord";
+import { Pagination } from "../components/Pagination";
+import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { getSegments, addSegment, type Segment } from "../api/segments";
 
 // Segments are the CARRIER's own list now (api/segments), not a fixed five —
@@ -25,11 +68,43 @@ import { getSegments, addSegment, type Segment } from "../api/segments";
 // Sentinel for the dropdown's "add" option. Not a segment name, and no
 // real name can collide with it.
 const ADD_SEGMENT = "__add_segment__";
-const FREQUENCIES = ["Monthly", "Quarterly"];
+// Five, not the app-wide ten: this list shares the row with the Programme
+// card, and ten tall broker rows ran far below it. Five keeps both cards
+// roughly level so the page reads as one step beside another.
+const BROKER_PAGE_SIZE = 5;
+// One list for the whole app — see constants/frequency.ts for why.
+
+// The step number on each card's title. The three cards ARE a sequence — each
+// unlocks the next — so the numbers say something true about them.
+function Step({ n, children }: { n: number; children: ReactNode }) {
+  return (
+    <span className="flex items-center gap-2">
+      <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-navy text-[11px] font-semibold text-white">
+        {n}
+      </span>
+      {children}
+    </span>
+  );
+}
+
+// Contracts that have ended no longer count as the broker's contract. Null
+// lifecycle is a contract raised before the lifecycle existed — in force.
+const ENDED = new Set(["expired", "terminated", "superseded"]);
+const openContracts = (b?: HierarchyBroker) =>
+  (b?.contracts ?? []).filter(c => !ENDED.has(c.lifecycle ?? ""));
 
 export default function AddProgram() {
   const mga = currentMga();
   const nav = useNavigate();
+  // Only the carrier ADMIN reviews and signs a contract; a carrier user's
+  // "Open the contract" stays a plain look, not an action item.
+  const isAdmin = addsCarrierUsers(useCarrierSeat());
+  // /programs/:programId/setup?stage=N picks the flow up for a programme that
+  // already exists — the Programmes list sends each row here, at the step it
+  // is stuck on. /programs/new starts a new one.
+  const params = useParams();
+  const [search] = useSearchParams();
+  const resumeId = params.programId ? Number(params.programId) : null;
 
   const [name, setName] = useState("");
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -39,7 +114,7 @@ export default function AddProgram() {
   const [creatingSegment, setCreatingSegment] = useState(false);
   const [segErr, setSegErr] = useState("");
   const [productLine, setProductLine] = useState("");
-  const [frequency, setFrequency] = useState(FREQUENCIES[0]);
+  const [frequency, setFrequency] = useState<string>(PROGRAMME_FREQUENCIES[0].value);
   const [status, setStatus] = useState("active");
 
   // The carrier's segments. Selecting the first keeps the form immediately
@@ -67,14 +142,106 @@ export default function AddProgram() {
 
   const [brokers, setBrokers] = useState<BrokerSummary[] | null>(null);
   const [picked, setPicked] = useState<Set<number>>(new Set());
-  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Paged on screen, not by the server: the whole list is already needed here —
+  // to spot who is new after an invite, and to list the assigned in step 3 —
+  // so there is nothing to save by fetching it a page at a time. Ticks live in
+  // `picked`, not on the page, so they survive paging.
+  const [brokerPage, setBrokerPage] = useState(1);
+
+  // Set once step 1 succeeds, and its presence IS the step: null while the
+  // programme is still being filled in, an id once it is saved and the broker
+  // list is open.
+  const [programId, setProgramId] = useState<number | null>(null);
+  const [configuring, setConfiguring] = useState(false);
+  const [assigning, setAssigning] = useState(false);
+  // Brokers an earlier attempt already put on the programme. The server
+  // refuses a second add ("already on this programme", 409), so a retry after
+  // a partial failure has to skip these rather than trip over them.
+  const [assigned, setAssigned] = useState<Set<number>>(new Set());
+  // Brokers whose assignment became a REQUEST for the carrier admin rather
+  // than a link. Kept apart from `assigned` on purpose: step 3 adds a contract
+  // to a broker ON this programme, and one who is still waiting to be approved
+  // is not on it. Folding these into `assigned` would offer a contract step
+  // that the server refuses every time.
+  const [requested, setRequested] = useState<Set<number>>(new Set());
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteNote, setInviteNote] = useState<string | null>(null);
+  // Brokers that went up for the carrier admin's approval instead of onto the
+  // programme. Its own line rather than inviteNote's, because that one ends
+  // "Assign to put them on this programme" — advice that does not apply to
+  // something already sent and waiting.
+  const [approvalNote, setApprovalNote] = useState<string | null>(null);
+  // The same "Invite sent" confirmation the Party invite page shows — the
+  // dialog closing on its own was too quiet to be sure anything happened.
+  // `pending` when a carrier user's invite only ASKED their carrier admin.
+  // Nothing was sent to the broker, so the dialog must not say it was — not in
+  // its words and not in its icon, which is the part people read first.
+  const [sent, setSent] = useState<
+    { message: React.ReactNode; email: string; pending?: boolean } | null>(null);
+
+  // Step 3. Who the upload dialog is open for, and how many contracts each
+  // broker has had uploaded here — so a row can say it is done.
+  const [uploadFor, setUploadFor] = useState<BrokerSummary | null>(null);
+  // "Use the same contract as <sibling broker>" on an UPLOADED contract: the
+  // sibling's files, handed to the upload dialog opened for this broker. Null
+  // for a plain upload.
+  const [copyFiles, setCopyFiles] = useState<
+    { from: string; file: File | null; refs: File[]; filename: string | null } | null>(null);
+  // The broker row whose copy is being fetched, and why it failed if it did.
+  const [copyBusy, setCopyBusy] = useState<number | null>(null);
+  const [copyErr, setCopyErr] = useState<{ broker: number; msg: string } | null>(null);
+  const [uploaded, setUploaded] = useState<Record<number, number>>({});
+  // Set when the open upload dialog has actually saved a contract. Its Done
+  // button then carries on to Bordereau Setup instead of just closing.
+  const [contractSaved, setContractSaved] = useState(false);
+  // Which section is on screen. The stepper at the top moves between them; each
+  // section also moves on to the next by itself once it is saved.
+  const [stage, setStage] = useState<1 | 2 | 3 | 4>(1);
+  // The programme as saved: its brokers, their contracts and setups. Read once
+  // it exists, and again after each thing done here, so steps 3 and 4 show
+  // what is really on it — including contracts raised on other screens.
+  const [prog, setProg] = useState<HierarchyProgramme | null>(null);
 
   useEffect(() => {
     getBrokers().then(setBrokers).catch(() => setBrokers([]));
   }, []);
 
+  const reload = useCallback(async (id: number) => {
+    try {
+      const h = await getHierarchy();
+      const p = h.programmes.find(x => x.id === id) ?? null;
+      setProg(p);
+      return p;
+    } catch { return null; }
+  }, []);
+
+  // Picking up an existing programme: fill step 1 from it (locked, as after a
+  // save), mark its brokers assigned, and open the step asked for.
+  useEffect(() => {
+    if (resumeId == null) return;
+    reload(resumeId).then(p => {
+      if (!p) { setErr("Could not find that programme."); return; }
+      setName(p.name);
+      setSegment(p.business_segment ?? "");
+      setProductLine(p.product_line ?? "");
+      if (p.bdx_frequency) setFrequency(p.bdx_frequency);
+      setStatus(p.status ?? "active");
+      setProgramId(p.id);
+      setAssigned(new Set(p.brokers.filter(b => onProgramme(b.link_status)).map(b => b.id)));
+      // Seeded from the SERVER, not only from what happened in this tab: a
+      // request survives a reload, and without this the broker was offered
+      // again and the second ask was refused as a duplicate.
+      setRequested(new Set((p.brokers_awaiting ?? [])
+        .map(b => b.broker_party_id).filter((id): id is number => id != null)));
+      const want = Number(search.get("stage"));
+      setStage(want >= 1 && want <= 4 ? (want as 1 | 2 | 3 | 4) : 2);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeId]);
+
   function toggle(id: number) {
+    if (assigned.has(id)) return;
     setPicked(prev => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
@@ -82,9 +249,10 @@ export default function AddProgram() {
     });
   }
 
-  async function create() {
+  // Step 1 — the programme alone.
+  async function configure() {
     if (!name.trim()) { setErr("Give the programme a name."); return; }
-    setBusy(true); setErr(null);
+    setConfiguring(true); setErr(null);
     try {
       const { data } = await api.post<{ id: number }>("/programs", {
         name: name.trim(),
@@ -93,46 +261,294 @@ export default function AddProgram() {
         bdx_frequency: frequency,
         status,
       }, { params: { mga } });
-
-      // Creating the programme is only half of it. The brokers are what make it
-      // usable, so they are linked here rather than left as a second job — one
-      // at a time, so a single failure names the broker it failed on.
-      const failed: string[] = [];
-      for (const id of picked) {
-        try {
-          await addProgrammeBroker(data.id, id);
-        } catch {
-          failed.push(brokers?.find(b => b.id === id)?.legal_name ?? `#${id}`);
-        }
-      }
-      if (failed.length) {
-        setErr(`Programme created, but these brokers could not be added: ${failed.join(", ")}. Add them from the programme's Brokers screen.`);
-        setBusy(false);
-        return;
-      }
-      nav(`/programs/${data.id}/brokers`);
+      setProgramId(data.id);
+      setStage(2);
     } catch (e: any) {
-      setErr(e?.response?.data?.detail ?? "Could not create the programme.");
-      setBusy(false);
+      setErr(e?.response?.data?.detail ?? "Could not configure the programme.");
+    } finally { setConfiguring(false); }
+  }
+
+  // Step 2 — put every ticked broker on it. One at a time, so a failure names
+  // the broker it failed on. True when nothing is left outstanding.
+  async function assignPicked(): Promise<{ ok: boolean; linked: number }> {
+    if (programId == null) return { ok: false, linked: 0 };
+    const todo = [...picked].filter(
+      id => !assigned.has(id) && !requested.has(id));
+    if (todo.length === 0) return { ok: true, linked: assigned.size };
+    setAssigning(true); setErr(null);
+    const ok: number[] = [];
+    const asked: number[] = [];
+    const failed: { id: number; why?: string }[] = [];
+    for (const id of todo) {
+      try {
+        const r = await addProgrammeBroker(programId, id);
+        (r.pending ? asked : ok).push(id);
+      }
+      catch (e: any) {
+        // `detail` is a string for the simple refusals and an object for the
+        // ones carrying a remedy — unpacked, not rendered raw.
+        const d = e?.response?.data?.detail;
+        failed.push({ id, why: typeof d === "string" ? d : d?.message });
+      }
+    }
+    setAssigned(prev => new Set([...prev, ...ok]));
+    setRequested(prev => new Set([...prev, ...asked]));
+    setAssigning(false);
+    const name = (id: number) =>
+      brokers?.find(b => b.id === id)?.legal_name ?? `#${id}`;
+    // Whatever was asked for is now waiting, so it must not stay ticked —
+    // otherwise Finish tries it again and is refused for being a duplicate.
+    if (asked.length) setPicked(prev => {
+      const next = new Set(prev);
+      asked.forEach(id => next.delete(id));
+      return next;
+    });
+    if (failed.length) {
+      // THE SERVER'S OWN WORDS, when it gave any. It knows which of half a
+      // dozen reasons applies — already on the programme, already asked and
+      // waiting, not reachable by this carrier — and the fixed sentence that
+      // used to be here claimed the one about accepting an invitation
+      // regardless, which was usually wrong and never actionable.
+      const said = [...new Set(failed.map(f => f.why).filter(Boolean))];
+      setErr(said.length === 1 ? said[0]!
+        : said.length > 1 ? said.join(" ")
+        : `These brokers could not be added: `
+          + `${failed.map(f => name(f.id)).join(", ")}. Try again.`);
+      return { ok: false, linked: assigned.size + ok.length };
+    }
+    if (asked.length) {
+      // Not an error — it is the flow working. But it IS the end of the road
+      // for those brokers on this screen, so say so rather than letting step 3
+      // present a contract step for somebody who is not on the programme yet.
+      setApprovalNote(
+        `${asked.map(name).join(", ")} ${asked.length === 1 ? "has" : "have"} `
+        + `gone to the carrier to approve. Nothing is sent to `
+        + `${asked.length === 1 ? "them" : "any of them"} until then, and you can `
+        + `add ${asked.length === 1 ? "their" : "the"} contract once it is through.`);
+    }
+    return { ok: true, linked: assigned.size + ok.length };
+  }
+
+  // Step 2's button. With nobody picked there is no contract to add — a
+  // contract needs a broker — so the programme's own screen is next. Otherwise
+  // assign, and carry on to step 3 on this same screen.
+  async function finish() {
+    if (pending === 0 && assigned.size === 0) {
+      nav(`/programs`);
+      return;
+    }
+    const r = await assignPicked();
+    if (programId != null) reload(programId);   // re-reads what is now waiting
+    if (r.ok) {
+      // Step 3 needs at least one broker actually ON the programme. When every
+      // one of them went up for approval instead, there is nothing to add a
+      // contract to — so stay put and let the note explain, rather than
+      // advancing to a step that cannot be completed. Read off the return
+      // value, not `assigned`: that setState has not re-rendered yet.
+      if (r.linked > 0) {
+        setStage(3);
+        if (programId != null) reload(programId);
+      }
     }
   }
+
+  // After an invite: reload the list and tick whoever is new on it. The
+  // invite does not return an id (it must not reveal whether that address
+  // belonged to an existing broker), so "new" is read off the list itself —
+  // which shows nothing the Party screen would not show anyway.
+  async function onInvited(message: string, email: string, pending?: boolean,
+                           org?: string) {
+    setSent({
+      email, pending,
+      message: pending
+        ? <>Nothing is sent to <b>{org || "this broker"}</b> until the
+            carrier approves.</>
+        : message,
+    });
+    if (pending) {
+      // Nothing was created, so there is nobody new on the list to tick and
+      // nothing to assign. inviteNote's "Anyone new is ticked below" would be
+      // false on both counts.
+      setApprovalNote(message + " Nothing has been sent to them.");
+      // It names this programme, so it is now in brokers_awaiting — refetch so
+      // the step shows it waiting rather than reading as untouched.
+      if (programId != null) reload(programId);
+      return;
+    }
+    setInviteNote(message);
+    const before = new Set((brokers ?? []).map(b => b.id));
+    try {
+      const fresh = await getBrokers();
+      setBrokers(fresh);
+      const added = fresh.filter(b => !before.has(b.id)).map(b => b.id);
+      if (added.length) {
+        setPicked(prev => new Set([...prev, ...added]));
+        setBrokerPage(1);   // newest first, so whoever was just ticked is here
+      }
+    } catch { /* the list keeps what it had; the note still confirms the invite */ }
+  }
+
+  const locked = programId != null;
+  const pending = [...picked].filter(id => !assigned.has(id)).length;
+  const finishLabel = pending > 0
+    ? `Assign ${pending} broker${pending === 1 ? "" : "s"}`
+    : "Finish without brokers";
+  const brokerCount = brokers?.length ?? 0;
+  const brokerPageCount = Math.max(1, Math.ceil(brokerCount / BROKER_PAGE_SIZE));
+  // Clamped so a list that shrinks under you never strands you on a blank page.
+  const pageNow = Math.min(brokerPage, brokerPageCount);
+  const brokersOnPage = (brokers ?? []).slice(
+    (pageNow - 1) * BROKER_PAGE_SIZE, pageNow * BROKER_PAGE_SIZE);
+
+  // Brokers now on the programme, in list order, for step 3.
+  const assignedBrokers = (brokers ?? []).filter(b => assigned.has(b.id));
+
+  // ── the stepper ────────────────────────────────────────────────────────────
+  // Per broker: the contracts on this programme (the saved ones, or what was
+  // uploaded here before the reload came back) and the setup built from them.
+  const onProg = (id: number) => prog?.brokers.find(b => b.id === id);
+  const contractsOf = (id: number) =>
+    Math.max(openContracts(onProg(id)).length, uploaded[id] ?? 0);
+
+  // "Use the same contract as <sibling broker>". A contract is (programme x
+  // broker) — one row per broker, agreed and signed by that broker — so this
+  // is a COPY, never a contract two brokers share: the other broker could not
+  // open a shared one, and one broker agreeing would read as both agreeing.
+  // The siblings offered: other brokers on this programme holding an open
+  // contract, the settled one first, as each row shows it.
+  const siblingContracts = (id: number) => assignedBrokers.flatMap(s => {
+    if (s.id === id) return [];
+    const mine = openContracts(onProg(s.id));
+    const c = mine.find(x => x.settled) ?? mine[0];
+    return c ? [{ broker: s, contractId: c.id }] : [];
+  });
+
+  // A raised contract is copied by opening the Raise form filled in from it.
+  // An uploaded one by uploading the same document for this broker — attached
+  // for them when the server still has the file, asked for by name when not.
+  async function copySiblingContract(
+    b: BrokerSummary, sib: { broker: BrokerSummary; contractId: number },
+  ) {
+    if (programId == null) return;
+    setCopyErr(null);
+    setCopyBusy(b.id);
+    try {
+      const rec = await getContract(sib.contractId);
+      if (!rec.is_uploaded) {
+        nav(`/contracts/new?program_id=${programId}&broker_party_id=${b.id}`
+            + `&flow=1&copy_from=${rec.id}`);
+        return;
+      }
+      const toFile = (blob: Blob, name: string | null | undefined) =>
+        new File([blob], name || "contract.pdf", { type: blob.type });
+      const docs = (rec.documents ?? []).filter(d => d.is_active && d.has_file);
+      const main = docs.find(d => d.kind === "contract");
+      let file: File | null = null;
+      if (main) {
+        file = toFile(await fetchDocument(rec.id, main.id), main.filename);
+      } else {
+        const orig = await fetchContractOriginal(rec.id);
+        if (orig) file = toFile(orig.blob, orig.filename ?? rec.filename);
+      }
+      const refs = await Promise.all(docs.filter(d => d.kind === "reference")
+        .map(async d => toFile(await fetchDocument(rec.id, d.id), d.filename)));
+      setCopyFiles({ from: sib.broker.legal_name, file, refs,
+                     filename: rec.filename });
+      setContractSaved(false);
+      setUploadFor(b);
+    } catch (e: any) {
+      setCopyErr({ broker: b.id,
+                   msg: e?.response?.data?.detail ?? "Could not load that contract." });
+    } finally {
+      setCopyBusy(null);
+    }
+  }
+  // HAS A CONTRACT vs HAS ONE READY TO BUILD ON — two different questions.
+  // `contractsOf` (above) answers the first and stays as it was, for the plain
+  // count in the per-broker line. `withContract` used to be built from it,
+  // which meant a contract sitting at `draft` or `agreed` — created, but
+  // signed by nobody — counted the same as one in force: "Next: Bordereau
+  // setup" lit up, and Bordereau Setup then had nothing to check the file
+  // against and would refuse to activate anyway.
+  //
+  // `settled` is read off the server (hierarchy_routes._contract_settled), the
+  // SAME rule the setup activation gate itself enforces — not "lifecycle is
+  // active": a contract the carrier has signed answers true while it still
+  // reads `agreed`, because the broker's countersignature is not waited for
+  // (see [[carrier-admin-one-gate]]). Re-deriving that here would drift the
+  // moment the real rule changes; reading the server's own answer cannot.
+  const hasSettledContract = (id: number) =>
+    (onProg(id)?.contracts ?? []).some(c => c.settled);
+  const withContract = assignedBrokers.filter(b => hasSettledContract(b.id));
+  const withSetup = withContract.filter(b => onProg(b.id)?.setup_status === "active");
+  const contractsDone = assignedBrokers.length > 0 && withContract.length === assignedBrokers.length;
+  const setupDone = contractsDone && withSetup.length === withContract.length;
+  // Where "Bordereau setup" leads from the step-3 button: the first broker with
+  // a contract but no setup in use.
+  const setupBroker = withContract.find(b => !setupFinished(onProg(b.id)?.setup_status)) ?? withContract[0];
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const setupUrl = (brokerId: number) =>
+    `/direct/setup?program_id=${programId}&broker_party_id=${brokerId}&flow=1`;
+  const steps: FlowStep[] = [
+    {
+      key: "programme", label: "Configure program",
+      sub: locked ? name.trim() : "Name and how often it reports",
+      state: locked ? "done" : "current", enabled: true,
+      onClick: () => setStage(1),
+    },
+    {
+      key: "brokers", label: "Assign brokers",
+      sub: assigned.size > 0 ? plural(assigned.size, "broker") + " assigned"
+        : locked ? "Who sends you files" : "After the programme is saved",
+      state: assigned.size > 0 ? "done" : "todo",
+      enabled: locked,
+      title: locked ? undefined : "Configure the programme first",
+      onClick: () => setStage(2),
+    },
+    {
+      key: "contracts", label: "Contracts",
+      sub: contractsDone ? "Every broker has a contract"
+        : assigned.size > 0 ? `${withContract.length} of ${assigned.size} brokers have a contract`
+        : "After brokers are assigned",
+      state: contractsDone ? "done" : "todo",
+      enabled: locked && assigned.size > 0,
+      title: assigned.size > 0 ? undefined : "Assign at least one broker first",
+      onClick: () => setStage(3),
+    },
+    {
+      key: "setup", label: "Bordereau setup",
+      sub: setupDone ? "Every broker's setup is in use"
+        : withContract.length > 0 ? `${withSetup.length} of ${withContract.length} setups ready`
+        : contractsDone === false && assignedBrokers.some(b => contractsOf(b.id) > 0)
+          ? "Waiting on a signature"
+        : "After a contract is added",
+      state: setupDone ? "done" : "todo",
+      enabled: locked && withContract.length > 0,
+      title: withContract.length > 0 ? undefined
+        : assignedBrokers.some(b => contractsOf(b.id) > 0)
+          ? "A setup is built from a SIGNED contract — sign one first"
+          : "Add a contract first — a setup is built from it",
+      onClick: () => setStage(4),
+    },
+  ];
+  // Whichever section is open is the current step, unless it is already done.
+  steps.forEach((st, i) => {
+    st.open = i + 1 === stage;
+    if (st.open && st.state !== "done") st.state = "current";
+  });
 
   return (
     <>
       <PageHeader
-        title="Create Programme"
-        subtitle="Set up a new type of business, and choose which brokers will send you business for it."
+        title="Configure Program"
+        subtitle={resumeId != null
+          ? `${name || "This programme"} — carry on from where it got to.`
+          : "Set up a new type of business, choose which brokers send you business for it, and add their contracts."}
         action={
-          <div className="flex items-center gap-2">
-            <button className="rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
-              onClick={() => nav("/programs")}>← Programmes</button>
-            <button
-              className="rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:opacity-50"
-              onClick={create} disabled={busy || !name.trim()}
-              title={name.trim() ? undefined : "Give the programme a name first"}>
-              {busy ? "Creating…" : "Create programme"}
-            </button>
-          </div>
+          /* The save lives under each step now, where the step is — a single
+             top-right button used to do both at once and is no longer needed. */
+          <button className="rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
+            onClick={() => nav("/programs")}>← Programmes</button>
         }
       />
       <PageBody>
@@ -142,138 +558,529 @@ export default function AddProgram() {
           </div>
         )}
 
-        <div className="grid gap-5 md:grid-cols-2">
-          <Card title="Programme">
-            <div className="space-y-4">
-              <div>
-                <label className="mb-1 block text-xs font-medium text-ink-muted">Programme name</label>
-                <input className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
-                  autoFocus value={name} placeholder="e.g. Spectrum Transportation"
-                  onChange={e => setName(e.target.value)} />
-              </div>
-              <div className="grid gap-4 sm:grid-cols-2">
+        <FlowStepper steps={steps} label="Configure program steps" />
+
+        {stage === 1 && (
+          <Card title={<Step n={1}>Programme</Step>}>
+            {/* Locked once saved: this form only ever CREATES, so editing a
+                field after step 1 would change nothing — and look as if it had. */}
+            <fieldset disabled={locked} className="m-0 min-w-0 border-0 p-0">
+              <div className="space-y-4">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-ink-muted">Business segment</label>
-                  {/* Adding a segment is an option IN the dropdown, not a second
-                      control beside it: naming a new segment and picking an
-                      existing one are the same decision, so they share one
-                      control. Choosing "+ Add a segment…" swaps this select for
-                      the text field in place, and picking/cancelling swaps back. */}
-                  {!creatingSegment ? (
-                    <select className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
-                      value={segment}
-                      onChange={e => {
-                        if (e.target.value === ADD_SEGMENT) { setCreatingSegment(true); setSegErr(""); }
-                        else setSegment(e.target.value);
-                      }}>
-                      {segments.length === 0 && <option value="">Loading…</option>}
-                      {segments.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
-                      <option value={ADD_SEGMENT}>+ Add a segment…</option>
-                    </select>
-                  ) : (
-                    <div className="flex gap-1.5">
-                      <input
-                        className="min-w-0 flex-1 rounded border border-border px-2.5 py-1.5 text-sm"
-                        autoFocus placeholder="e.g. Cyber"
-                        value={newSegment}
-                        onChange={e => setNewSegment(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === "Enter") { e.preventDefault(); createSegment(); }
-                          if (e.key === "Escape") { setCreatingSegment(false); setNewSegment(""); setSegErr(""); }
-                        }}
-                      />
-                      <button type="button"
-                        className="shrink-0 rounded bg-navy px-2.5 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:opacity-50"
-                        onClick={createSegment}
-                        disabled={!newSegment.trim() || addingSegment}>
-                        {addingSegment ? "Adding…" : "Add"}
-                      </button>
-                      <button type="button"
-                        className="shrink-0 rounded border border-border px-2 py-1.5 text-sm hover:border-navy"
-                        onClick={() => { setCreatingSegment(false); setNewSegment(""); setSegErr(""); }}>
-                        Cancel
-                      </button>
-                    </div>
-                  )}
-                  {segErr && <div className="mt-1 text-xs text-warn">{segErr}</div>}
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-ink-muted">Product line</label>
+                  <label className="mb-1 block text-xs font-medium text-ink-muted">Programme name</label>
                   <input className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
-                    value={productLine} placeholder="e.g. Commercial Auto"
-                    onChange={e => setProductLine(e.target.value)} />
+                    autoFocus value={name} placeholder="e.g. Spectrum Transportation"
+                    onChange={e => setName(e.target.value)} />
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-ink-muted">Business segment</label>
+                    {/* Adding a segment is an option IN the dropdown, not a second
+                        control beside it: naming a new segment and picking an
+                        existing one are the same decision, so they share one
+                        control. Choosing "+ Add a segment…" swaps this select for
+                        the text field in place, and picking/cancelling swaps back. */}
+                    {!creatingSegment ? (
+                      <select className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
+                        value={segment}
+                        onChange={e => {
+                          if (e.target.value === ADD_SEGMENT) { setCreatingSegment(true); setSegErr(""); }
+                          else setSegment(e.target.value);
+                        }}>
+                        {segments.length === 0 && <option value="">Loading…</option>}
+                        {segments.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                        {segment && !segments.some(s => s.name === segment) &&
+                          <option value={segment}>{segment}</option>}
+                        <option value={ADD_SEGMENT}>+ Add a segment…</option>
+                      </select>
+                    ) : (
+                      <div className="flex gap-1.5">
+                        <input
+                          className="min-w-0 flex-1 rounded border border-border px-2.5 py-1.5 text-sm"
+                          autoFocus placeholder="e.g. Cyber"
+                          value={newSegment}
+                          onChange={e => setNewSegment(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === "Enter") { e.preventDefault(); createSegment(); }
+                            if (e.key === "Escape") { setCreatingSegment(false); setNewSegment(""); setSegErr(""); }
+                          }}
+                        />
+                        <button type="button"
+                          className="shrink-0 rounded bg-navy px-2.5 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:opacity-50"
+                          onClick={createSegment}
+                          disabled={!newSegment.trim() || addingSegment}>
+                          {addingSegment ? "Adding…" : "Add"}
+                        </button>
+                        <button type="button"
+                          className="shrink-0 rounded border border-border px-2 py-1.5 text-sm hover:border-navy"
+                          onClick={() => { setCreatingSegment(false); setNewSegment(""); setSegErr(""); }}>
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                    {segErr && <div className="mt-1 text-xs text-warn">{segErr}</div>}
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-ink-muted">Product line</label>
+                    <input className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
+                      value={productLine} placeholder="e.g. Commercial Auto"
+                      onChange={e => setProductLine(e.target.value)} />
+                  </div>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-ink-muted">BDX frequency</label>
+                    <select className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
+                      value={frequency} onChange={e => setFrequency(e.target.value)}>
+                      {PROGRAMME_FREQUENCIES.map(f =>
+                        <option key={f.value} value={f.value}>{f.label}</option>)}
+                    </select>
+                    <p className="mt-1 text-xs text-ink-muted">How often you expect a file.</p>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-ink-muted">Status</label>
+                    <select className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
+                      value={status} onChange={e => setStatus(e.target.value)}>
+                      <option value="active">Active</option>
+                      <option value="draft">Draft</option>
+                    </select>
+                  </div>
                 </div>
               </div>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-ink-muted">BDX frequency</label>
-                  <select className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
-                    value={frequency} onChange={e => setFrequency(e.target.value)}>
-                    {FREQUENCIES.map(f => <option key={f} value={f}>{f}</option>)}
-                  </select>
-                  <p className="mt-1 text-xs text-ink-muted">How often you expect a file.</p>
+            </fieldset>
+
+            <div className="mt-5 flex items-center justify-end border-t border-border pt-4">
+              {!locked ? (
+                <button
+                  className="rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:opacity-50"
+                  onClick={configure} disabled={configuring || !name.trim()}
+                  title={name.trim() ? undefined : "Give the programme a name first"}>
+                  {configuring ? "Configuring…" : "Configure Program"}
+                </button>
+              ) : (
+                <div className="flex w-full items-center justify-between gap-3">
+                  <p className="text-sm font-medium text-ok">
+                    {resumeId != null ? "Programme configured." : "Programme configured — now assign its brokers."}
+                  </p>
+                  <button
+                    className="shrink-0 rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark"
+                    onClick={() => setStage(2)}>
+                    Next: Assign brokers →
+                  </button>
                 </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-ink-muted">Status</label>
-                  <select className="w-full rounded border border-border px-2.5 py-1.5 text-sm"
-                    value={status} onChange={e => setStatus(e.target.value)}>
-                    <option value="active">Active</option>
-                    <option value="draft">Draft</option>
-                  </select>
-                </div>
-              </div>
+              )}
             </div>
           </Card>
+        )}
 
-          <Card title="Assign brokers">
-            <p className="mb-3 text-xs leading-relaxed text-ink-muted">
-              Tick every broker that will send you business on this programme — a
-              programme is normally fed by several. Only brokers you already hold
-              appear here; create a new one on the{" "}
-              <a href="/users/new" className="text-navy hover:underline">Users &amp; Roles</a>{" "}
-              first and it will show up in this list.
-            </p>
-
-            {brokers === null && <p className="text-sm text-ink-muted">Loading…</p>}
-
-            {brokers?.length === 0 && (
-              <p className="text-sm text-ink-muted">
-                You have no brokers yet. You can create the programme now and add
-                them later, but it cannot hold a contract until it has one.
+        {stage === 2 && (
+          <Card title={<Step n={2}>Assign brokers</Step>}
+            action={
+              <button type="button"
+                className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium hover:border-navy disabled:opacity-50"
+                onClick={() => setInviteOpen(true)} disabled={!locked || assigning}
+                title={locked ? "Invite a broker who is not on this list yet"
+                  : "Configure the programme first"}>
+                <UserPlus size={13} /> Add New Broker
+              </button>
+            }>
+            {!locked && (
+              <p className="mb-3 rounded border border-border bg-surface-2 px-3 py-2 text-xs text-ink-muted">
+                Configure the programme first — its brokers can be assigned once it is saved.
               </p>
             )}
 
-            {brokers && brokers.length > 0 && (
-              <>
-                <div className="space-y-1.5">
-                  {brokers.map(b => (
-                    <label key={b.id}
-                      className={`flex cursor-pointer items-center gap-2.5 rounded border px-2.5 py-2 text-sm ${
-                        picked.has(b.id) ? "border-navy bg-navy/5" : "border-border hover:bg-surface-2"}`}>
-                      <input type="checkbox" checked={picked.has(b.id)}
-                        onChange={() => toggle(b.id)} />
-                      <span className="min-w-0 flex-1">
-                        <span className="block font-medium">{b.legal_name}</span>
-                        <span className="block text-xs text-ink-muted">
-                          {b.programmes.length === 0
-                            ? "On no programme yet"
-                            : `Already on ${b.programmes.map(p => p.name).join(", ")}`}
-                          {" · "}{b.contract_count} contract{b.contract_count === 1 ? "" : "s"}
-                        </span>
-                      </span>
-                      <OnboardingBadge status={b.onboarding_status} />
-                    </label>
-                  ))}
-                </div>
-                <p className="mt-3 text-xs text-ink-muted">
-                  {picked.size === 0
-                    ? "No brokers picked — the programme will start empty."
-                    : `${picked.size} broker${picked.size === 1 ? "" : "s"} will be put on this programme.`}
+            <p className="mb-3 text-xs leading-relaxed text-ink-muted">
+              Select brokers who will send business for this programme, or
+              click <b className="font-medium text-ink">Add New Broker</b> if
+              they are not listed.
+            </p>
+
+            {approvalNote && (
+              /* Info, not amber: nothing has gone wrong and nothing is late —
+                 it is with somebody else, which is what the flow asks for. */
+              <p className="mb-3 rounded border border-border bg-surface-2 px-3 py-2 text-xs text-ink-muted">
+                {approvalNote}
+              </p>
+            )}
+
+            {inviteNote && (
+              /* Amber, not green: the invitation is out but nothing is settled —
+                 they still have to accept, and nobody is on the programme until
+                 Assign is pressed. Green read as "done". */
+              <p className="mb-3 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
+                {inviteNote} Anyone new is ticked below — Assign to put them on this programme.
+              </p>
+            )}
+
+            {/* Shown but inert until step 1 is done, so the next step is
+                visible rather than appearing from nowhere. */}
+            <fieldset disabled={!locked || assigning}
+              className={`m-0 min-w-0 border-0 p-0 ${locked ? "" : "opacity-50"}`}>
+              {brokers === null && <p className="text-sm text-ink-muted">Loading…</p>}
+
+              {brokers?.length === 0 && (
+                <p className="text-sm text-ink-muted">
+                  You have no brokers yet. Use Add New Broker to invite one, or finish
+                  without — but the programme cannot hold a contract until it has one.
                 </p>
-              </>
+              )}
+
+              {brokers && brokers.length > 0 && (
+                <div className="space-y-1.5">
+                  {brokersOnPage.map(b => {
+                    const done = assigned.has(b.id);
+                    // Asked for and not yet answered. Locked like `done`: there
+                    // is nothing to do but wait, and ticking it again only
+                    // earns a duplicate refusal.
+                    const waiting = requested.has(b.id);
+                    const on = picked.has(b.id) || done;
+                    return (
+                      <label key={b.id}
+                        className={`flex items-center gap-2.5 rounded border px-2.5 py-2 text-sm ${
+                          locked && !done && !waiting ? "cursor-pointer" : ""} ${
+                          waiting ? "border-warn/40 bg-warn/5"
+                          : on ? "border-navy bg-navy/5"
+                          : "border-border hover:bg-surface-2"}`}>
+                        <input type="checkbox" checked={on} disabled={done || waiting}
+                          onChange={() => toggle(b.id)} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block font-medium">{b.legal_name}</span>
+                          <span className="block text-xs text-ink-muted">
+                            {waiting
+                              ? "Waiting for the carrier to approve"
+                              : b.programmes.length === 0
+                              ? "On no programme yet"
+                              : `Already on ${b.programmes.map(p => p.name).join(", ")}`}
+                            {!waiting && <>
+                              {" · "}{b.contract_count} contract{b.contract_count === 1 ? "" : "s"}
+                            </>}
+                          </span>
+                        </span>
+                        {waiting
+                          ? <span className="text-xs font-medium text-warn">Awaiting approval</span>
+                          : done
+                          ? <span className="text-xs font-medium text-ok">Assigned</span>
+                          : <OnboardingBadge status={b.onboarding_status} />}
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* The shared pager is styled by the .proto tokens; proto-embed
+                  brings them in without .proto's page background. Only shown
+                  once there is more than one page. */}
+              {brokerPageCount > 1 && (
+                <div className="proto proto-embed -mx-5 mt-3">
+                  <Pagination page={pageNow} pageCount={brokerPageCount}
+                    pageSize={BROKER_PAGE_SIZE} totalItems={brokerCount}
+                    onPageChange={setBrokerPage} noun="brokers" />
+                </div>
+              )}
+            </fieldset>
+
+            {locked && (
+              <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-4">
+                <p className="text-xs text-ink-muted">
+                  {pending > 0
+                    ? `${pending} broker${pending === 1 ? "" : "s"} will be put on this programme.`
+                    : requested.size > 0 && assigned.size === 0
+                    ? `${requested.size} broker${requested.size === 1 ? "" : "s"} waiting for the `
+                      + `carrier. Nothing is sent to them until it is approved.`
+                    : assigned.size > 0
+                    ? `${assigned.size} broker${assigned.size === 1 ? "" : "s"} assigned — add their contracts next.`
+                    : "No brokers picked — the programme will start empty."}
+                </p>
+                {/* Once everything ticked is on the programme, step 3 below is
+                    where the flow continues, so there is nothing to press here. */}
+                {(pending > 0 || assigned.size === 0) && (
+                  <button
+                    className="shrink-0 rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:opacity-50"
+                    onClick={finish} disabled={assigning}>
+                    {assigning ? "Assigning…" : finishLabel}
+                  </button>
+                )}
+                {pending === 0 && assigned.size > 0 && (
+                  <button
+                    className="shrink-0 rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark"
+                    onClick={() => setStage(3)}>
+                    Next: Add contracts →
+                  </button>
+                )}
+              </div>
             )}
           </Card>
-        </div>
+        )}
+
+        {stage === 3 && assigned.size > 0 && programId != null && (
+          <div>
+            <Card title={<Step n={3}>Add contracts</Step>}>
+              <p className="mb-3 text-xs leading-relaxed text-ink-muted">
+                A contract is what each broker's bordereaux are checked against.{" "}
+                <b className="font-medium text-ink">Raise a contract</b> to set the terms now, or{" "}
+                <b className="font-medium text-ink">Upload contract</b> for a wording that already exists.
+              </p>
+
+              <div className="space-y-1.5">
+                {assignedBrokers.map(b => {
+                  const n = contractsOf(b.id);
+                  // The one to open: a SETTLED one if there is one, else in
+                  // progress. Preferring `settled` over `isLive` here too —
+                  // otherwise a contract the carrier has signed (settled, but
+                  // still reading `agreed`) showed the same amber "not signed
+                  // yet" as one nobody has signed, directly contradicting a
+                  // "Next: Bordereau setup" that is, correctly, now enabled.
+                  const mine = openContracts(onProg(b.id));
+                  const shown = mine.find(c => c.settled) ?? mine[0];
+                  const ready = !!shown?.settled;
+                  const live = ready && (shown!.lifecycle == null || shown!.lifecycle === "active");
+                  return (
+                    <div key={b.id}
+                      className="flex flex-wrap items-center gap-3 rounded border border-border px-3 py-2.5">
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-medium">{b.legal_name}</span>
+                        <span className={`block text-xs ${!n ? "text-ink-muted" : ready || !shown ? "text-ok" : "text-warn"}`}>
+                          {!n ? "No contract on this programme yet"
+                            : !shown ? `${plural(n, "contract")} uploaded`
+                            : live ? `${plural(n, "contract")} · active`
+                            // Settled but not yet fully executed — the carrier
+                            // has signed, the broker has not, and a bordereau
+                            // setup can be built on it regardless.
+                            : ready ? `${plural(n, "contract")} · you have signed`
+                            // The admin's own move, named plainly rather than
+                            // via the raw lifecycle word — the same case the
+                            // "Review contract" button above answers.
+                            : isAdmin && shown.awaiting_carrier_admin
+                              ? `${plural(n, "contract")} · waiting on your signature`
+                            : `${plural(n, "contract")} · not signed yet (${(shown.lifecycle ?? "").replace(/_/g, " ")})`}
+                        </span>
+                        {copyErr?.broker === b.id && (
+                          <span className="block text-xs text-danger">{copyErr.msg}</span>
+                        )}
+                      </span>
+                      <OnboardingBadge status={b.onboarding_status} />
+                      <div className="flex shrink-0 items-center gap-2">
+                        {shown && (
+                          // "Review contract" when there is genuinely
+                          // something for THIS admin to decide on it right
+                          // now — the same signal the contract record's own
+                          // banner and the dashboard's "Waiting on You" tile
+                          // read (contract_routes._carrier_admin_turn).
+                          // Otherwise the plain "Open the contract" look, for
+                          // a carrier user or a contract that is not on
+                          // anybody's desk. Same destination either way — one
+                          // button, not two that could disagree.
+                          <Link to={`/contracts/${shown.id}`}
+                            className={isAdmin && shown.awaiting_carrier_admin
+                              ? "inline-flex items-center gap-1.5 rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark hover:no-underline"
+                              : "inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium text-ink hover:bg-surface-2 hover:no-underline"}>
+                            <FileText size={13} />
+                            {isAdmin && shown.awaiting_carrier_admin
+                              ? "Review contract" : "Open the contract"}
+                          </Link>
+                        )}
+                        {/* Only while this broker has no contract of its own:
+                            a copy is how a row gets its FIRST contract. One
+                            sibling is a button; several are a pick-list. */}
+                        {!shown && (() => {
+                          const sibs = siblingContracts(b.id);
+                          if (sibs.length === 0) return null;
+                          const cls = "inline-flex items-center gap-1.5 rounded border border-navy/40 px-3 py-1.5 text-xs font-medium text-navy hover:bg-navy/5 disabled:opacity-60";
+                          const busy = copyBusy === b.id;
+                          return sibs.length === 1 ? (
+                            <button type="button" className={cls} disabled={busy}
+                              title={`Start ${b.legal_name}'s contract from the one ${sibs[0].broker.legal_name} has — same terms, their own copy to agree and sign`}
+                              onClick={() => copySiblingContract(b, sibs[0])}>
+                              <Copy size={13} />
+                              {busy ? "Loading…" : `Use ${sibs[0].broker.legal_name}'s contract`}
+                            </button>
+                          ) : (
+                            <select className={`${cls} bg-white`} disabled={busy} value=""
+                              aria-label="Use another broker's contract"
+                              onChange={e => {
+                                const sib = sibs.find(x => String(x.broker.id) === e.target.value);
+                                if (sib) copySiblingContract(b, sib);
+                              }}>
+                              <option value="">{busy ? "Loading…" : "Use another broker's contract…"}</option>
+                              {sibs.map(x => (
+                                <option key={x.broker.id} value={x.broker.id}>
+                                  {x.broker.legal_name}'s contract
+                                </option>
+                              ))}
+                            </select>
+                          );
+                        })()}
+                        <button type="button" onClick={() => { setContractSaved(false); setCopyFiles(null); setUploadFor(b); }}
+                          className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-2">
+                          <Upload size={13} /> Upload contract
+                        </button>
+                        <Link to={`/contracts/new?program_id=${programId}&broker_party_id=${b.id}&flow=1`}
+                          className="inline-flex items-center gap-1.5 rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark hover:no-underline">
+                          <Plus size={13} /> Raise a contract
+                        </Link>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-4">
+                <p className="text-xs text-ink-muted">
+                  You can add more brokers and contracts later from the programme's own page.
+                </p>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button type="button"
+                    className="rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
+                    onClick={() => nav(`/programs`)}>
+                    Go to programme →
+                  </button>
+                  {/* Always shown, disabled rather than hidden — a button
+                      that vanishes reads as "not available yet", not as "do
+                      something first", and offers no way to find out what.
+                      Disabled until at least one broker has a SETTLED
+                      contract: Bordereau Setup is built against a contract's
+                      terms, and one nobody has signed has none yet to check a
+                      file against — proceeding just meant discovering the
+                      refusal one screen later, on activation. */}
+                  <button type="button"
+                    className="rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-navy"
+                    disabled={!setupBroker}
+                    title={setupBroker ? undefined
+                      : "A bordereau setup is built from a contract's terms — "
+                        + "sign at least one contract on this programme first."}
+                    onClick={() => setupBroker && setStage(4)}>
+                    Next: Bordereau setup →
+                  </button>
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {stage === 4 && programId != null && (
+          <Card title={<Step n={4}>Bordereau setup</Step>}>
+            <p className="mb-3 text-xs leading-relaxed text-ink-muted">
+              A setup says what each broker's file must look like, built from their
+              contract. A broker's file can be checked once their setup is in use.
+            </p>
+            <div className="space-y-1.5">
+              {assignedBrokers.map(b => {
+                // SETTLED, not merely present — the same distinction as step
+                // 3. Offering "Bordereau Setup" for a contract nobody has
+                // signed just moved the refusal one screen later, onto the
+                // setup builder's own activation.
+                const hasContract = contractsOf(b.id) > 0;
+                const settled = hasSettledContract(b.id);
+                const setup = onProg(b.id)?.setup_status ?? null;
+                return (
+                  <div key={b.id}
+                    className="flex flex-wrap items-center gap-3 rounded border border-border px-3 py-2.5">
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium">{b.legal_name}</span>
+                      <span className={`block text-xs ${setup === "active" ? "text-ok"
+                        : settled ? "text-warn" : "text-ink-muted"}`}>
+                        {setup === "active" ? "Setup in use — their files can be checked"
+                          : setup === "pending_approval"
+                            ? "Setup sent to the carrier — their files can be checked once it is approved"
+                          : setup === "draft" ? "Setup started, not finished yet"
+                          : settled ? "No setup yet, so their file can't be checked"
+                          : hasContract ? "Their contract is not signed yet"
+                          : "Needs a contract first"}
+                      </span>
+                    </span>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {setup === "active" ? (
+                        <Link to={`/direct/setups?program_id=${programId}`}
+                          className="inline-flex items-center rounded border border-border px-3 py-1.5 text-xs font-medium text-ink hover:bg-surface-2 hover:no-underline">
+                          View setup
+                        </Link>
+                      ) : settled ? (
+                        <button type="button" onClick={() => nav(setupUrl(b.id))}
+                          className="inline-flex items-center rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark">
+                          {setup === "draft" ? "Finish the setup" : "Bordereau Setup"}
+                        </button>
+                      ) : (
+                        <button type="button" onClick={() => setStage(3)}
+                          className="inline-flex items-center rounded border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-2">
+                          {hasContract ? "Go to contracts" : "Add a contract"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-4">
+              <p className={`text-xs ${setupDone ? "text-ok" : "text-ink-muted"}`}>
+                {setupDone ? "Everything is in place — files for this programme can be checked."
+                  : "You can come back to this from the Programmes list at any time."}
+              </p>
+              <button type="button"
+                className="shrink-0 rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
+                onClick={() => nav("/programs")}>
+                Back to Programmes
+              </button>
+            </div>
+          </Card>
+        )}
+
+        {/* Step 4, reached from here. Once a contract is saved this broker has
+            everything Bordereau Setup asks for — programme, broker, contract —
+            so Done goes straight on to it, with the programme and broker
+            filled in; Setup binds the contract from those two by itself.
+            Closed without saving (Cancel, ×), the dialog just closes. */}
+        {uploadFor && programId != null && (
+          <AddContractModal
+            open
+            onClose={() => {
+              // Saved: carry on to step 4 once every broker has a contract;
+              // otherwise stay on step 3 for the next one.
+              if (contractSaved) {
+                // The same rule as the Next button below: a contract that
+                // exists but is not settled must not auto-advance either — NOT
+                // even the one just uploaded. The old check exempted it on the
+                // assumption that "just added" meant "done", which is exactly
+                // the assumption that let an unsigned contract through.
+                const allHave = assignedBrokers.every(b => hasSettledContract(b.id));
+                if (allHave) setStage(4);
+              }
+              setUploadFor(null);
+              setCopyFiles(null);
+            }}
+            broker={uploadFor}
+            initialFile={copyFiles?.file}
+            initialRefFiles={copyFiles?.refs}
+            copiedFrom={copyFiles?.from}
+            copiedFilename={copyFiles?.filename}
+            programmes={[{ id: programId, name: name.trim(), status }]}
+            onAdded={() => {
+              setUploaded(u => ({ ...u, [uploadFor.id]: (u[uploadFor.id] ?? 0) + 1 }));
+              setContractSaved(true);
+              reload(programId);
+            }} />
+        )}
+
+        {/* Only once step 1 has saved and there IS a programme — before that
+            there is nothing to attach the invite to. */}
+        <InviteBrokerModal open={inviteOpen} onClose={() => setInviteOpen(false)}
+          programId={programId ?? undefined} onInvited={onInvited} />
+
+        {sent && (
+          <InviteSentModal
+            kind={sent.pending ? "pending" : "sent"}
+            title={sent.pending ? "Waiting for approval" : "Broker invited"}
+            message={sent.message}
+            /* The envelope row is the dialog SAYING an email went out. On a
+               request none has, so the row is dropped rather than relabelled. */
+            email={sent.pending ? undefined : sent.email}
+            note={sent.pending
+              ? "Nothing to assign yet — carry on setting up the programme."
+              : "They are ticked in the broker list — press Assign to put them on this programme."}
+            doneLabel="Continue"
+            onDone={() => setSent(null)}
+          />
+        )}
       </PageBody>
     </>
   );

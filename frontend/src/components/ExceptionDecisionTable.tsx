@@ -12,7 +12,8 @@
  * FRONTEND-ONLY for now: recommendation = the rule's expected_value, decisions
  * live in local state, and "Save decisions" is a stub (logs the payload).
  */
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import DecidedBy from "./DecidedBy";
 import { Link } from "react-router-dom";
 import { Check, Wrench, Hand, Ban, ChevronDown, ChevronRight, ArrowLeft, Table2 } from "lucide-react";
 import { api } from "../api/client";
@@ -32,6 +33,11 @@ const STATUS_KIND: Record<string, Exclude<DecisionKind, "none">> = {
 
 /** The SCD-2 write-back overrides status to the generic 'resolved'; recover the
  *  original decision kind from the resolution_note in that case. */
+/** True while the table is shown to someone who may read but not decide
+ *  (Kavachio staff). Every decision control below checks it, so none can be
+ *  missed by a prop that was not threaded through. */
+const ReadOnlyCtx = createContext(false);
+
 function kindFromNote(note: string): Exclude<DecisionKind, "none"> | null {
   if (/^\s*fixed/i.test(note)) return "fix";
   if (/^\s*approved/i.test(note)) return "approve";
@@ -499,6 +505,7 @@ function DecisionCell({
    *  clickable anchor. Defaults to the "Select decision ▾" pill. */
   trigger?: (props: { onClick: () => void; open: boolean }) => ReactNode;
 }) {
+  const readOnly = useContext(ReadOnlyCtx);
   const [menuOpen, setMenuOpen] = useState(false);
   const [prompt, setPrompt] = useState<Exclude<DecisionKind, "none"> | null>(null);
   const [draftValue, setDraftValue] = useState("");
@@ -578,6 +585,12 @@ function DecisionCell({
     else if (prompt === "dismiss") onChange({ kind: "dismiss" });
     else if (prompt === "reject")  onChange({ kind: "reject", reason: draftReason });
     setPrompt(null);
+  }
+
+  if (readOnly) {
+    // "Select decision" is an invitation; a reader who cannot decide sees "Pending".
+    return <span className={DECISION_PILL[decision.kind]}>
+      {decision.kind === "none" ? "Pending" : DECISION_LABEL[decision.kind]}</span>;
   }
 
   return (
@@ -751,7 +764,7 @@ function DecisionCell({
 // ─── Table ───────────────────────────────────────────────────────────────────
 
 export default function ExceptionDecisionTable({
-  group, uploadId, templateId, contractId, exportId, onSaved, backLink, backState,
+  group, uploadId, templateId, contractId, exportId, onSaved, backLink, backState, readOnly = false,
 }: {
   group: RuleGroup;
   uploadId?: number | string;
@@ -767,6 +780,8 @@ export default function ExceptionDecisionTable({
   /** Router state carried to the Exceptions screen so it can prompt the
    *  reviewer to apply the decisions they just recorded (Fix & Validate). */
   backState?: unknown;
+  /** Show every exception and its decision, but offer no way to change one. */
+  readOnly?: boolean;
 }) {
   // "View in Bordereau" — expands the exception inline to show its FULL
   // bordereau row (every column + header, offending cells highlighted) plus the
@@ -1043,6 +1058,7 @@ export default function ExceptionDecisionTable({
   }
 
   return (
+    <ReadOnlyCtx.Provider value={readOnly}>
     <div className="bg-white">
       {/* success banner — fixed, auto-dismisses (matches the app toast style) */}
       {toast && (
@@ -1058,7 +1074,11 @@ export default function ExceptionDecisionTable({
           (z-20) while its dropdown/prompt is open, so a short table (e.g. a single
           exception) doesn't render the bulk menu behind the bottom bar. */}
       <div className={`sticky top-0 ${bulkMenuOpen || bulkPrompt ? "z-30" : "z-20"} flex items-center gap-2 px-3 py-2 flex-wrap rounded-lg bg-emerald-50 border border-emerald-200`}>
-        {selected.size > 0 ? (
+        {readOnly ? (
+          <span className="text-sm text-ink-muted">
+            {decided}/{group.items.length} Decided · view only — the broker who sent this file makes these decisions
+          </span>
+        ) : selected.size > 0 ? (
           <>
             <span className="text-sm font-medium">{selected.size} selected</span>
             <span className="text-sm text-ink-soft">Bulk Decision:</span>
@@ -1189,10 +1209,10 @@ export default function ExceptionDecisionTable({
           <thead>
             <tr className="bg-surface-2 text-ink-muted text-[11px] uppercase tracking-wide">
               <th className="px-3 py-2 w-8">
-                <input type="checkbox" className="h-3.5 w-3.5 align-middle"
+                {!readOnly && <input type="checkbox" className="h-3.5 w-3.5 align-middle"
                   checked={allChecked}
                   ref={el => { if (el) el.indeterminate = someChecked; }}
-                  onChange={toggleAll} />
+                  onChange={toggleAll} />}
               </th>
               <th className="font-medium px-3 py-2">Policy</th>
               <th className="font-medium px-3 py-2">Actual</th>
@@ -1212,9 +1232,9 @@ export default function ExceptionDecisionTable({
                 <Fragment key={e.exception_id}>
                 <tr className={`border-t border-border align-top ${selected.has(e.exception_id) ? "bg-blue-50/50" : ""}`}>
                   <td className="px-3 py-2">
-                    <input type="checkbox" className="h-3.5 w-3.5 align-middle"
+                    {!readOnly && <input type="checkbox" className="h-3.5 w-3.5 align-middle"
                       checked={selected.has(e.exception_id)}
-                      onChange={() => toggleOne(e.exception_id)} />
+                      onChange={() => toggleOne(e.exception_id)} />}
                   </td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     <div className="font-mono font-medium">{policyLabel(e)}</div>
@@ -1261,9 +1281,17 @@ export default function ExceptionDecisionTable({
                       );
                     })()}
                   </td>
-                  <td className="px-3 py-2 text-ink-muted max-w-[260px]">{e.error_message ?? "—"}</td>
+                  <td className="px-3 py-2 text-ink-muted max-w-[260px]">
+                    {e.error_message ?? "—"}
+                    {/* Row dated outside every contract version: checked
+                        against the current contract — name it and its period. */}
+                    {e.contract_period_note && (
+                      <div className="text-[10px] text-ink-soft break-words mt-1">{e.contract_period_note}</div>
+                    )}
+                  </td>
                   <td className="px-3 py-2">
                     <DecisionCell e={e} decision={d} onChange={nd => setDecision(e.exception_id, nd)} />
+                    <DecidedBy by={e.decided_by} at={e.decided_at} />
                   </td>
                   <td className="px-3 py-2"><span className={`font-mono ${out.tone}`}>{out.text}</span></td>
                 </tr>
@@ -1303,10 +1331,12 @@ export default function ExceptionDecisionTable({
               <Button variant="ghost"><ArrowLeft size={14} /> Back</Button>
             </Link>
           )}
-          <Button onClick={() => { setSaveErr(null); setConfirmOpen(true); }}
-                  disabled={decided === 0 || saving}>
-            Save decisions
-          </Button>
+          {!readOnly && (
+            <Button onClick={() => { setSaveErr(null); setConfirmOpen(true); }}
+                    disabled={decided === 0 || saving}>
+              Save decisions
+            </Button>
+          )}
         </div>
       </div>
 
@@ -1341,6 +1371,7 @@ export default function ExceptionDecisionTable({
         </div>
       )}
     </div>
+    </ReadOnlyCtx.Provider>
   );
 }
 
@@ -1364,6 +1395,7 @@ function BordereauRowDetail({ sheets, e, decision, onDecision }: {
   decision: Decision;
   onDecision: (d: Decision) => void;
 }) {
+  const readOnly = useContext(ReadOnlyCtx);
   const scrollRef = useRef<HTMLDivElement>(null);
   const cellRef = useRef<HTMLTableCellElement>(null);
   const norm = (s: string) => s.trim().toLowerCase();
@@ -1413,7 +1445,7 @@ function BordereauRowDetail({ sheets, e, decision, onDecision }: {
     <div style={{ width: 0, minWidth: "100%" }}>
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[11px] font-semibold text-ink-muted">Bordereau row · {sheet!.sheet}</span>
-        {targetCol >= 0 && (
+        {targetCol >= 0 && !readOnly && (
           <span className="text-[11px] text-ink-soft">Click the highlighted cell to Approve or Fix</span>
         )}
       </div>
@@ -1440,6 +1472,16 @@ function BordereauRowDetail({ sheets, e, decision, onDecision }: {
             <tr>
               {row.map((c, i) => {
                 const text = String(c ?? "");
+                if (i === targetCol && readOnly) {
+                  return (
+                    <td key={i} ref={cellRef} title={noteAt.get(i) || undefined}
+                      className={decision.kind !== "none" ? DECISION_CELL_BG[decision.kind]
+                        : warnTarget ? "bg-[#FFE0B2] text-[#8F580D] font-semibold"
+                                     : "bg-[#FFC7CE] text-[#9B1C2E] font-semibold"}>
+                      {text}
+                    </td>
+                  );
+                }
                 if (i === targetCol) {
                   // The actionable cell — its own Approve/Fix/Dismiss popover.
                   return (

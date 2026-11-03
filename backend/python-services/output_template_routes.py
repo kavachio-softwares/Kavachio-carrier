@@ -162,6 +162,25 @@ def _resolve(s, tid: int, carrier_party_id: Optional[int], program_id: Optional[
             hit = s.get(ExportTemplate, c.output_template_id)
             if hit and hit.tenant_id == tid:
                 return hit, EXACT
+        # The same agreement in another term: a renewal and its previous term
+        # are one contract over time, so a late file sent under the previous
+        # term uses the layout agreed for the chain (newest term first). Not
+        # sideways — only the contract's own renewal chain is asked.
+        try:
+            import renewal_chain as rc
+            others = (sorted(rc.chain_ids(s, contract_id) - {contract_id}, reverse=True)
+                      if rc.routing_enabled() else [])
+        except Exception:  # noqa: BLE001 — no chain answer, the ladder goes on
+            others = []
+        for other in others:
+            hit = _base().filter(ExportTemplate.contract_id == other).first()
+            if hit:
+                return hit, EXACT
+            oc = s.get(Contract, other)
+            if oc and oc.output_template_id:
+                hit = s.get(ExportTemplate, oc.output_template_id)
+                if hit and hit.tenant_id == tid:
+                    return hit, EXACT
 
     if program_id and broker_party_id:
         hit = (_base()
@@ -184,17 +203,36 @@ def _resolve(s, tid: int, carrier_party_id: Optional[int], program_id: Optional[
     # Last rung: the setup's own template. This is what keeps every template
     # made before the scope columns existed reachable — they carry no
     # program_id, so only the pipeline knows which programme they serve.
+    #
+    # Never ANOTHER contract's or another broker's template, though. A setup
+    # built for contract A writes into A's template, and handing that to
+    # contract B is exactly the sideways fall this ladder refuses — B would be
+    # shown, and run into, a layout agreed for somebody else's terms. The one
+    # exception is a setup that LISTS the contract: the carrier deliberately
+    # built it to cover B too. Setups listing the contract are asked first.
     if program_id and carrier_party_id is not None:
-        pipe = (s.query(Pipeline)
-                .filter(Pipeline.tenant_id == tid,
-                        Pipeline.carrier_party_id == carrier_party_id,
-                        Pipeline.program_id == program_id,
-                        Pipeline.status == "active")
-                .order_by(Pipeline.id.desc()).first())
-        if pipe and pipe.output_template_id:
-            hit = s.get(ExportTemplate, pipe.output_template_id)
-            if hit and hit.tenant_id == tid:
-                return hit, PROGRAMME_LEVEL
+        pipes = (s.query(Pipeline)
+                 .filter(Pipeline.tenant_id == tid,
+                         Pipeline.carrier_party_id == carrier_party_id,
+                         Pipeline.program_id == program_id,
+                         Pipeline.status == "active")
+                 .order_by(Pipeline.id.desc()).all())
+        listed: set[int] = set()
+        if contract_id:
+            from setup_scope import contract_ids_of
+            listed = {p.id for p in pipes if contract_id in contract_ids_of(s, p.id)}
+            pipes.sort(key=lambda p: p.id not in listed)      # stable: newest first within
+        for pipe in pipes:
+            hit = s.get(ExportTemplate, pipe.output_template_id) if pipe.output_template_id else None
+            if not hit or hit.tenant_id != tid:
+                continue
+            if pipe.id not in listed:
+                if contract_id and hit.contract_id and hit.contract_id != contract_id:
+                    continue
+                if (broker_party_id and hit.broker_party_id
+                        and hit.broker_party_id != broker_party_id):
+                    continue
+            return hit, PROGRAMME_LEVEL
     return None, None
 
 
@@ -242,12 +280,13 @@ def resolve_template(
                       "broker_party_id": broker_party_id, "contract_id": contract_id},
             "scope_names": scope_names,
             "setup": _setup_for_scope(s, tid, carrier_party_id, program_id,
-                                      broker_party_id, t),
+                                      broker_party_id, contract_id, t),
         }
 
 
 def _setup_for_scope(s, tid: int, carrier_party_id: Optional[int],
                      program_id: int, broker_party_id: Optional[int],
+                     contract_id: Optional[int],
                      agreed: Optional[ExportTemplate]) -> Optional[dict]:
     """Which Bordereau Setup would actually run here, and does it write into the
     template this scope agreed on?
@@ -257,18 +296,13 @@ def _setup_for_scope(s, tid: int, carrier_party_id: Optional[int],
     different template: it would produce the right headings with nothing under
     them. `matches` is what lets the screen say that before a file is uploaded
     rather than after one is delivered.
-    """
-    def _active(broker):
-        q = (s.query(Pipeline)
-             .filter(Pipeline.tenant_id == tid,
-                     Pipeline.carrier_party_id == carrier_party_id,
-                     Pipeline.program_id == program_id,
-                     Pipeline.status == "active"))
-        q = q.filter(Pipeline.broker_party_id == broker if broker is not None
-                     else Pipeline.broker_party_id.is_(None))
-        return q.order_by(Pipeline.id.desc()).first()
 
-    pipe = (_active(broker_party_id) if broker_party_id else None) or _active(None)
+    The setup is the one for THIS contract (setup_scope) — a broker with two
+    contracts on two templates has two live setups.
+    """
+    from setup_scope import live_setup_for
+    pipe = live_setup_for(s, tid, carrier_party_id, program_id, broker_party_id,
+                          contract_id, agreed=agreed)
     if pipe is None:
         return None
     running = s.get(ExportTemplate, pipe.output_template_id) if pipe.output_template_id else None
@@ -442,11 +476,27 @@ class FromStandardBody(BaseModel):
     output_format: str = "xlsx"
     name: Optional[str] = None
     mga: Optional[str] = None
+    # A contract still staged on the form has no id yet — its file name is what
+    # the sheet is titled after instead.
+    contract_name: Optional[str] = None
     # The reviewed field list from /analyze-sources: which of the territory's
     # published columns this binder actually reports, each optionally carrying
     # the input column it was matched to. Omitted, the whole territory is taken
     # — which is what every caller did before this existed.
     fields: Optional[list[dict]] = None
+
+
+def _standard_sheet_title(standard: str, jurisdiction: Optional[str],
+                          contract: str) -> str:
+    """"Lloyds v5.2 US - DEMO_sign_v6" — the standard AND the contract, since
+    the sheet carries the contract's columns too. Excel caps titles at 31
+    characters and forbids a few, so the contract name is what gets cut."""
+    head = f"{standard} {jurisdiction or ''}".strip()[:31]
+    contract = "".join(ch for ch in contract if ch not in '[]:*?/\\').strip()
+    room = 31 - len(head) - 3
+    if not contract or room < 1:
+        return head
+    return f"{head} - {contract[:room].rstrip()}"
 
 
 @router.post("/output-template/from-standard")
@@ -474,8 +524,11 @@ async def create_from_standard(body: FromStandardBody,
             carrier_name = p.legal_name if p else None
         name = body.name or _scope_name(s, body.program_id, body.broker_party_id,
                                         body.contract_id, carrier_name)
+        c = s.get(Contract, body.contract_id) if body.contract_id else None
+        contract_label = _drop_ext((c.filename if c else None)
+                                   or body.contract_name or "")
 
-    label = f"{std['label']} - {body.jurisdiction or ''}".strip(" -")[:31]
+    label = _standard_sheet_title(std["label"], body.jurisdiction, contract_label)
     try:
         blob, jurisdiction = await run_in_threadpool(
             standards.sheet_bytes, std["id"], body.jurisdiction, label)
@@ -566,7 +619,8 @@ async def analyze_contract(body: AnalyzeBody,
         assert_tenant_owns(principal, c.tenant_id)
         library = standards.fields(body.standard_id, body.jurisdiction)
         known = [f["field"] for f in library]
-        result = await run_in_threadpool(cof.analyze, s, [c.id], known)
+        result = await run_in_threadpool(cof.analyze, s, [c.id], known,
+                                         tenant_id=tid)
     result["standard_field_count"] = len(known)
     return result
 
@@ -622,6 +676,9 @@ async def analyze_sources(
     # filling in what a contract never names. See _library.
     standard_scope: str = Form(standards.SCOPE_FULL),
     read_contract: bool = Form(True),
+    # A deliberate re-analysis: ask the model again rather than reuse the
+    # answers stored for these exact inputs (which is what keeps a repeat the same).
+    refresh: bool = Form(False),
     input_sheets: Optional[list[str]] = Form(None),
     input_file: Optional[UploadFile] = File(None),
     contract_file: Optional[UploadFile] = File(None),
@@ -674,15 +731,17 @@ async def analyze_sources(
         known = [f["field"] for f in library]
         with SessionLocal() as s:
             result = await run_in_threadpool(
-                cof.analyze, s, [cid] if cid else [], known, documents=documents)
+                cof.analyze, s, [cid] if cid else [], known, documents=documents,
+                tenant_id=tid, refresh=refresh)
         if cid:
             contract_source = "saved and uploaded" if documents else "saved"
 
     # Fold first: a contract field the published list already has a column for
     # belongs ON that column, not beside it.
     extras, folded = await run_in_threadpool(
-        osa.fold_contract_fields, library, result.get("fields") or [])
-    merged = _merge_fields(library, extras, folded)
+        osa.fold_contract_fields, library, result.get("fields") or [],
+        tenant_id=tid, refresh=refresh)
+    merged = osa.merge_fields(library, extras, folded)
     if not merged:
         raise HTTPException(
             400, "nothing to propose — include a reporting standard, or pick a "
@@ -707,7 +766,8 @@ async def analyze_sources(
     # Threadpool: the ladder's last rung asks the model about whatever the
     # deterministic rungs could not place.
     fields = await run_in_threadpool(
-        osa.cross_reference, merged, layout["columns"], layout["samples"])
+        osa.cross_reference, merged, layout["columns"], layout["samples"],
+        tenant_id=tid, refresh=refresh)
     osa.recommend(fields, checked_input=checked)
 
     std = standards.get(standard_id) if library else None
@@ -794,7 +854,7 @@ async def create_from_contract(body: FromContractBody,
         if contract_fields is None:
             known = [f["field"] for f in library]
             contract_fields = (await run_in_threadpool(
-                cof.analyze, s, [c.id], known))["fields"]
+                cof.analyze, s, [c.id], known, tenant_id=tid))["fields"]
         carrier_name = None
         if body.carrier_party_id:
             p = s.get(Party, body.carrier_party_id)
@@ -812,8 +872,8 @@ async def create_from_contract(body: FromContractBody,
         merged = list(contract_fields)
     else:
         extras, folded = await run_in_threadpool(
-            osa.fold_contract_fields, library, contract_fields)
-        merged = _merge_fields(library, extras, folded)
+            osa.fold_contract_fields, library, contract_fields, tenant_id=tid)
+        merged = osa.merge_fields(library, extras, folded)
     if not merged:
         raise HTTPException(
             400, "nothing to build a template from — the contract produced no "
@@ -863,54 +923,6 @@ async def create_from_contract(body: FromContractBody,
         _audit(principal, t, "contract",
                {"contract_id": body.contract_id, "fields": len(merged)})
         return _tpl_dict(s, t, with_structure=True)
-
-
-def _merge_fields(library: list[dict], contract_fields: list[dict],
-                  folded: Optional[dict[str, dict]] = None) -> list[dict]:
-    """Standard library + contract-specific, standard first, no duplicates.
-
-    `folded` comes from ``osa.fold_contract_fields``: a contract requirement
-    that turned out to BE one of the published columns, keyed by that column's
-    name. It is stamped onto the standard's own row rather than added beside
-    it, so a field the contract merely worded differently ends up as one column
-    that the contract is on record as asking for.
-    """
-    folded = folded or {}
-    out: list[dict] = []
-    seen: set[str] = set()
-    for f in library or []:
-        key = str(f.get("field", "")).strip().lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        row = {"field": f["field"], "required": bool(f.get("required")),
-               "source_field": None, "data_type": "string",
-               "origin": "standard",
-               "requirement": f.get("requirement"),
-               "reason": f.get("comments") or None}
-        c = folded.get(key)
-        if c:
-            row["also_in_contract"] = True
-            row["contract_reference"] = c.get("contract_reference")
-            if c.get("required"):
-                row["contract_required"] = True
-        out.append(row)
-    for f in contract_fields or []:
-        name = str(f.get("field") or f.get("display_name") or "").strip()
-        key = name.lower()
-        if not name or key in seen:
-            continue
-        seen.add(key)
-        out.append({"field": name, "required": bool(f.get("required")),
-                    "source_field": f.get("source_field"),
-                    "data_type": f.get("data_type") or "string",
-                    "origin": f.get("origin") or "contract",
-                    "category": f.get("category"),
-                    # Kept so the review table can say WHY a field is there —
-                    # dropped before, which left the user with a bare list.
-                    "reason": f.get("reason"),
-                    "contract_reference": f.get("contract_reference")})
-    return out
 
 
 def _structure_from_fields(sheet_name: str, fields: list[dict]) -> dict:
@@ -1188,7 +1200,8 @@ def validate(template_id: int, principal: Principal = Depends(current_principal)
         contract_fields = None
         if t.source_kind == "contract" and t.contract_id:
             import contract_output_fields as cof
-            contract_fields = cof.analyze(s, [t.contract_id])["fields"]
+            contract_fields = cof.analyze(s, [t.contract_id],
+                                          tenant_id=t.tenant_id)["fields"]
         return otv.validate_template(
             structure, standard_fields=_standard_fields_for(t),
             contract_fields=contract_fields,
@@ -1314,3 +1327,21 @@ def compare_sample(template_id: int,
         return {"configured": True,
                 "comparison": otv.compare_with_sample(
                     generated, {"sheets": (r.extracted or {}).get("sheets") or []})}
+
+
+@router.get("/output-template/{template_id}/download")
+def download_template(template_id: int,
+                      principal: Principal = Depends(current_principal)):
+    """The file this template produces, with no rows in it — for seeing the
+    layout Generate BDX delivers. It is not the file to fill in for Process
+    Bordereau; that is the setup's input layout (see bordereau_template)."""
+    from fastapi import Response
+    import bordereau_template as bt
+    with SessionLocal() as s:
+        t = _load(s, template_id, principal)
+        structure = t.structure
+        blob = storage.resolve_bytes(t.template_blob_ref, t.template_blob)
+        name = t.name
+    data = bt.output_workbook(structure, blob)
+    return Response(content=data, media_type=bt.XLSX,
+                    headers=bt.attachment(bt.download_name(name, "Output Template")))

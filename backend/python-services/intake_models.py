@@ -22,7 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text,
+    BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -64,6 +64,9 @@ class IntakeRoute(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     disabled_at = Column(DateTime(timezone=True), nullable=True)
     disabled_by_user_id = Column(BigInteger, ForeignKey("app_user.user_id"), nullable=True)
+    # Extra addresses told about every file on this channel (the broker
+    # exception loop): ["ops@broker.com", …]. Migration 32.
+    notify_emails = Column(JSONB, nullable=True)
 
 
 class FileArrival(Base):
@@ -94,7 +97,7 @@ class FileArrival(Base):
     row_count = Column(Integer, nullable=True)
     file_hash_sha256 = Column(Text, nullable=True, index=True)
     received_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    outcome = Column(Text, nullable=False)          # accepted | turned_away
+    outcome = Column(Text, nullable=False)   # accepted | held | turned_away
     turned_away_reason = Column(Text, nullable=True)
     sender_notified_at = Column(DateTime(timezone=True), nullable=True)
     sender_notified_via = Column(Text, nullable=True)
@@ -102,10 +105,65 @@ class FileArrival(Base):
     # Feature 10.2 — the reference a partner quotes back at us. Never hand out
     # arrival_id: a sequential integer lets anyone count other people's traffic.
     public_ref = Column(Text, nullable=True)
-    # Set by an API caller; unique per tenant, so a retrying cron job gets the
-    # original receipt back instead of loading the same month twice.
+    # Set by an API caller; unique per way in (tenant + route, migration 23),
+    # so a retrying cron job gets the original receipt back instead of loading
+    # the same month twice, and two brokers' keys never collide.
     idempotency_key = Column(Text, nullable=True)
     blob_ref = Column(Text, nullable=True)
+    # ── Feature 12.3 — what a PERSON decided ────────────────────────────────
+    # Everything above this line is what arrived and what the machine made of
+    # it. These four are the other half: a held file is one the checks could not
+    # settle, and until somebody could record a decision there was no way for it
+    # ever to stop being held. NULL resolution means nobody has looked yet,
+    # which is exactly what every pre-12.3 row means.
+    resolution = Column(Text, nullable=True)              # released | discarded
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id = Column(BigInteger, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    # Stamped when the stored bytes are deleted by retention. The row outlives
+    # the file: "it arrived on the 5th and was refused because X" stays
+    # answerable long after the file itself is gone.
+    bytes_purged_at = Column(DateTime(timezone=True), nullable=True)
+    # ── Migration 29 — the run this arrival became ──────────────────────────
+    # NULL run_state on an accepted row is "not picked up yet": intake_autorun
+    # takes it. See migrations/29_arrival_run_link.sql for every value.
+    run_state = Column(Text, nullable=True)
+    run_landing_id = Column(BigInteger, nullable=True)
+    run_export_id = Column(BigInteger, nullable=True)
+    run_error = Column(Text, nullable=True)
+    run_at = Column(DateTime(timezone=True), nullable=True)
+    # A manual upload has no route, so it carries what a route would have said.
+    channel = Column(Text, nullable=True)
+    program_id = Column(BigInteger, nullable=True)
+    submitted_by_user_id = Column(BigInteger, nullable=True)
+    # ── Migration 32 — the broker exception loop ────────────────────────────
+    # Every file from a broker is a version of a SUBMISSION. The reference the
+    # broker quotes is the public_ref of the thread's first file; a correction
+    # (a file quoting it, or the next file for the same programme + period)
+    # is the next version. Corrections made on the secure link are versions
+    # too, but they are exports (output_exports.version_no), not files.
+    reporting_period = Column(Text, nullable=True)   # the period it landed against
+    submission_ref = Column(Text, nullable=True, index=True)
+    version_no = Column(Integer, nullable=True)
+    matched_by = Column(Text, nullable=True)         # new | reference | period | duplicate
+    version_status = Column(Text, nullable=True)     # see submission_service.STATUS_WORDS
+    version_note = Column(Text, nullable=True)
+    # Thread-level, kept on the FIRST file only (public_ref == submission_ref).
+    deadline_at = Column(DateTime(timezone=True), nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    # Migration 34 — the contract the file is written under: picked on Process
+    # Bordereau, sent as contract_ref on the API, named in an email subject or
+    # file name, or the only one there is (intake_service.identify). The run
+    # checks the file against it, and it is part of what makes a later file
+    # the next version of the same submission.
+    contract_id = Column(BigInteger, nullable=True)
+    # Migration 38 — ITD handling (itd.py). Set by the run, from the rows, on
+    # a setup whose ITD settings are switched on; NULL everywhere else.
+    load_type = Column(Text, nullable=True)          # itd | regular
+    load_type_reason = Column(Text, nullable=True)   # why, in words
+    period_start = Column(Date, nullable=True)       # earliest period in the rows
+    period_end = Column(Date, nullable=True)         # latest — what an ITD is "as at"
+    itd_summary = Column(JSONB, nullable=True)       # counts per row result
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
 
@@ -122,6 +180,10 @@ class IntakeCredential(Base):
     the pepper held outside the database, so a dump alone yields no working
     keys; `key_prefix` is the indexed handle parsed out of the request header.
     Revoked, never deleted — arrivals point at the credential that carried them.
+
+    Since 6 Oct 2026 an SFTP channel on Kavachio's own server keeps its
+    broker's login here too (sftp_accounts): `key_prefix` is the user name and
+    `key_hash` the password's keyed fingerprint. Same columns, no migration.
     """
     __tablename__ = "intake_credential"
 

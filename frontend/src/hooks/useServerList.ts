@@ -52,5 +52,14 @@ export function useServerList<T, X = unknown>(
   }, [page, pageSize, filterKey, reloadTick]);
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+  // The list shrank under us — the last row of the last page was deleted, or
+  // dropped out of a filter (disabled while "Active" is picked). That page no
+  // longer exists, so step back to the new last one rather than show an empty
+  // page reading "Page 6 of 5".
+  useEffect(() => {
+    if (!loading && page > pageCount) setPage(pageCount);
+  }, [loading, page, pageCount]);
+
   return { page, setPage, items, total, extra, loading, pageCount, pageSize, reload };
 }

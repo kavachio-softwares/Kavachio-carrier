@@ -113,6 +113,12 @@ export function setAuth(data: AuthResponse) {
 /** Clear everything — user profile and both tokens. Use on logout / 401. */
 export function clearAuth() {
   store.dispatch(authCleared());
+  // The broker's carrier selection is a per-seat view preference held outside
+  // the auth slice, so it survives a logout unless it is cleared here — and
+  // the next person in this browser would start on the last one's carrier.
+  try {
+    localStorage.removeItem("kav.broker.carrier");
+  } catch { /* storage blocked; nothing persisted to clear */ }
   emitAuthEvent();
 }
 
@@ -155,6 +161,24 @@ export function isBrokerSeat(): boolean {
   const r = userRole();
   return r === "broker_admin" || r === "operator";
 }
+/**
+ * May DECIDE a file's exceptions — Approve / Fix / Dismiss / Reject, correct a
+ * value, or run Fix & Validate.
+ *
+ * The broker seats, and only them. A bordereau is the broker's submission, so
+ * putting it right is the broker's work: the carrier reads what was flagged and
+ * the broker answers for it. Kavachio staff were already refused (they read
+ * every file and amend none); both CARRIER seats now sit on the same side of
+ * that line.
+ *
+ * Viewing is untouched — every seat still opens the file, the rules and the
+ * BDX. This gates the write half only, and the API enforces the same rule
+ * independently (carrier_scope.assert_can_amend), so hiding the buttons is a
+ * courtesy rather than the guard.
+ */
+export function canAmendExceptions(): boolean {
+  return isBrokerSeat();
+}
 /** Can perform tenant-admin actions. kavachio_admin is a superset. */
 export function isTenantAdmin(): boolean {
   const r = userRole();
@@ -165,9 +189,9 @@ export function isTenantAdmin(): boolean {
 // organisation on every screen it appeared on.
 export const ROLE_LABEL: Record<Role, string> = {
   kavachio_admin: "Kavachio Admin",
-  carrier_admin:  "Carrier Admin",
-  broker_admin:   "Broker Admin",
-  operator:       "Operator",
+  carrier_admin:  "Carrier",
+  broker_admin:   "Broker",
+  operator:       "Broker User",
 };
 
 // --- refresh-token expiry → automatic logout ---------------------------------

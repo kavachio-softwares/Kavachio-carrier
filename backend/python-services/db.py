@@ -22,7 +22,9 @@ from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, Float, Index, Integer, String, JSON, DateTime, Date,
     ForeignKey, Text, LargeBinary, Boolean, Numeric, inspect, UniqueConstraint,
+    func, text,
 )
+from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.orm import declarative_base, deferred, sessionmaker, relationship
 
 from canonical import canonical_metadata  # 53 canonical xlsx-derived tables
@@ -82,6 +84,12 @@ if RLS_ENABLED:
             connection.exec_driver_sql("SET LOCAL app.tenant_id = %s", (str(tid),))
         # tid is None -> leave app.tenant_id unset -> current_setting(...,true) is NULL
         #             -> policy matches only tenant_id IS NULL rows (fail-closed).
+
+PARTY_TYPE_E = PGEnum(
+    "agency", "broker", "mgu", "mga", "tpa", "carrier", "reinsurer", "insured",
+    "vendor", "individual", "other", "insurer",
+    name="party_type_e", create_type=False,
+)
 
 Base = declarative_base()
 
@@ -315,6 +323,11 @@ class OutputExport(Base):
     source_upload_id = Column(Integer, nullable=True)
     policy_ids = Column(JSON, nullable=True)          # canonical policy_ids exported
     generated_by = Column(String, nullable=True)      # actor email
+    # The login that ran the file. `generated_by` above names the broker
+    # COMPANY on a broker-lane run, which is what the carrier is shown; this is
+    # the person, for the broker's own "files I uploaded" count. Never serve it
+    # to a carrier seat. NULL on every run made before it existed.
+    generated_by_user_id = Column(Integer, nullable=True, index=True)
     policy_count = Column(Integer, default=0)
     exception_count = Column(Integer, default=0)
     exceptions = _payload(Column(JSON, nullable=True))          # [{severity, code, sheet, row, field, message}]
@@ -330,6 +343,16 @@ class OutputExport(Base):
     # storage and `blob` is NULL. Falls back to `blob` otherwise.
     blob_ref = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    # ── Broker exception loop (migration 32) ────────────────────────────────
+    # The submission this checked file belongs to (the reference the broker
+    # quotes — file_arrival.public_ref of its first file) and its version.
+    # A file's own export carries the file's version number; an export made
+    # from secure-link corrections IS a version, so its status lives here too
+    # (version_status is NULL on a file's export: that status is the file's).
+    submission_ref = Column(String, nullable=True, index=True)
+    version_no = Column(Integer, nullable=True)
+    version_status = Column(String, nullable=True)
+    version_note = Column(Text, nullable=True)
 
 
 class UploadPolicy(Base):
@@ -358,13 +381,20 @@ class Tenant(Base):
     # code); tenant_legal_name is the display/legal name.
     tenant_name = Column("tenant_code", String, unique=True, index=True, nullable=False)
     legal_name = Column("tenant_legal_name", String, nullable=True)
-    tenant_type = Column(String, nullable=True)
+    tenant_type = Column(PARTY_TYPE_E, nullable=True)
     # --- operational columns (outside the canonical model) -----------------
     address = Column(JSON, nullable=True)
     currency = Column(String, nullable=True)      # ISO 4217 (USD, EUR, GBP …)
     logo = Column(Text, nullable=True)            # org logo as a data URL (sidebar co-brand)
     internal_codes = Column(JSON, nullable=True)  # JSONB free-form
     is_active = Column("tenant_is_active", Boolean, default=True)
+    # The one person accountable for this organisation. A POINTER, not a fourth
+    # role: always one of this tenant's own carrier_admins, so ownership can
+    # move without anybody's role changing and there is only one place to look
+    # for the answer. Nullable because a legacy organisation may have no admin
+    # to have been the owner — the UI shows that as needing one, rather than
+    # guessing. See migration 18.
+    owner_user_id = Column("tenant_owner_user_id", Integer, nullable=True)
     # Set once the tenant admin explicitly dismisses the first-login onboarding
     # wizard ("Skip for now"). Without this, needs_onboarding (below) is purely
     # derived from setup state, so a tenant that skips before finishing Bordereau
@@ -410,7 +440,7 @@ class Party(Base):
     __tablename__ = "party"
     id = Column("party_id", Integer, primary_key=True)
     tenant_id = Column("party_tenant_id", Integer, nullable=True)
-    party_type = Column(String, nullable=False)
+    party_type = Column(PARTY_TYPE_E, nullable=False)
     legal_name = Column("party_legal_name", String, nullable=False, index=True)
     # Stable business identifier (v4). The ingester keys synthetic parties on it.
     reference = Column("party_reference", String, nullable=True, index=True)
@@ -487,6 +517,9 @@ class Program(Base):
     commercial_terms = Column(JSON, nullable=True)
     status = Column("status_ops", String, default="draft")
     source_contract_file = Column(String, nullable=True)
+    # What holds a broker's file back from the carrier, and what happens at
+    # the correction deadline (submission_service.rule_for). NULL = defaults.
+    delivery_rule = Column(JSON, nullable=True)
     # canonical_program_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -539,21 +572,345 @@ class Contract(Base):
     broker_party_id = Column("contract_broker_party_id", Integer,
                              ForeignKey("party.party_id"), nullable=True, index=True)
     # The ONE approval in the platform. A contract a BROKER uploads waits for
-    # its carrier; a contract the CARRIER uploads is live immediately. Set by
-    # the DB trigger trg_set_contract_approval from who submitted it — never
-    # trust a client to say "approved".
-    # approved | pending_approval | rejected
-    approval_status = Column("contract_approval_status", String, default="approved")
+    # THE APPROVAL GATE IS GONE, and so is the broker-side upload it policed.
+    # `contract_approval_status`, `contract_approved_by_id` and
+    # `contract_approved_at` are left in the database — the schema is shared, and
+    # dropping a column is not this application's to do — but nothing reads or
+    # writes them any more, so they are not mapped here. An unmapped column
+    # cannot be revived by accident; a mapped one can.
     submitted_by_user_id = Column("contract_submitted_by_id", Integer,
                                   ForeignKey("app_user.user_id"), nullable=True)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
-    approved_by_user_id = Column("contract_approved_by_id", Integer,
-                                 ForeignKey("app_user.user_id"), nullable=True)
-    approved_at = Column(DateTime(timezone=True), nullable=True)
     # The agreed most-premium-they-may-write for the term. A LIMIT from the
     # wording — deliberately not an estimate, which is a forecast.
     premium_cap_amount = Column("contract_premium_cap_amount", Numeric, nullable=True)
     premium_cap_currency = Column(String, nullable=True)
+
+    # --- the contract as a RECORD ------------------------------------------
+    # Every column below already exists in the canonical schema and was simply
+    # never mapped, so the app could only ever show a filename where it meant
+    # to show a contract. Mapping them is a read/write-side addition with NO
+    # migration. What they mean, and which are mandatory, is decided per
+    # contract type in contract_types.py — never here.
+    name = Column("contract_name", String, nullable=True)
+    # insurer_broker | insurer_reinsurer. Free text in the DB (there is no CHECK
+    # on the column) but constrained by contract_types.spec() on the way in, so
+    # the legacy free-text values already in the table still load.
+    contract_type = Column("contract_type", String, nullable=True)
+    # The market's identifier for a delegated authority. NOTE the bare `umr`
+    # column on this table is legacy and unused (all NULL) — the ingester and
+    # the persister both write contract_primary_umr, so that is the one mapped.
+    umr = Column("contract_primary_umr", String, nullable=True)
+    risk_code = Column("contract_risk_code", String, nullable=True)
+    section_number = Column("contract_section_number", String, nullable=True)
+    class_of_business = Column("contract_class_of_business", String, nullable=True)
+    year_of_account = Column("contract_year_of_account", String, nullable=True)
+    earnings_pattern = Column("contract_earnings_pattern", String, nullable=True)
+    executed_date = Column("contract_executed_date", Date, nullable=True)
+    notice_period_days = Column("contract_notice_period_days", Integer, nullable=True)
+
+    # --- lifecycle ---------------------------------------------------------
+    # TWO status axes, because they answer two different questions:
+    #   status_ops       what the extraction PIPELINE did with the file.
+    #   lifecycle        where the CONTRACT itself is — see contract_types.
+    # Collapsing them would lose one: a contract can be extracted and still not
+    # in force because its term has not started.
+    lifecycle = Column("contract_status", String, nullable=True)
+    lifecycle_effective_date = Column("contract_status_effective_date", Date, nullable=True)
+    terminated_date = Column("contract_terminated_date", Date, nullable=True)
+    termination_reason = Column("contract_termination_reason", Text, nullable=True)
+    # The contract this one renews. A renewal is a NEW row pointing back, not an
+    # edit to the old term — last year's contract has to keep meaning what it
+    # meant when it was produced against.
+    renews_contract_id = Column("contract_renews_contract_id", Integer,
+                                ForeignKey("contract.contract_id"), nullable=True)
+
+    # --- the authored contract -------------------------------------------
+    # What the two sides agreed to pay each other (commission, shares, fees,
+    # settlement) as one dict — see contract_types.COMMERCIAL_TERMS for the
+    # vocabulary and for why this is JSON and not eleven columns. Used twice:
+    # shown on the record, and quoted verbatim inside the generated wording.
+    commercial_terms = Column(JSON, nullable=True)
+    # The wording's sections as the carrier left them — generated ones edited
+    # or not, plus any written by hand — and the signature-page layout. The
+    # composed .docx is built FROM this, so the document can always be
+    # regenerated and the sections are never trapped inside a binary.
+    wording_sections = Column(JSON, nullable=True)
+
+
+class ContractDocument(Base):
+    """The documents a contract is made of — and which of them rules come from.
+
+    Until now a contract WAS its file: one blob on the contract row. That cannot
+    express the three things this flow needs.
+
+      contract     the wording itself. Optional, because a contract can now be
+                   raised from its terms before anyone has the executed PDF.
+      reference    a document the wording DEFERS to ("per the Purchasing
+                   Guidelines on file"). The clauses that point at it produce no
+                   usable rule until it is supplied, which is why it is
+                   mandatory once the extraction names one.
+      endorsement  a change agreed after the fact. It does NOT replace the
+                   wording — both stay active, and rule generation reads the
+                   pair, with the endorsement's clauses taking precedence over
+                   the ones they amend.
+
+    `is_active` is what rule generation filters on, so superseding an
+    endorsement is a flag flip rather than a delete: the rules it produced stay
+    explainable afterwards.
+
+    This maps the EXISTING canonical `contract_document` table rather than a new
+    one of its own. The table was already in the v4 schema — defined, empty, and
+    reached by nothing in the app — and it is the right shape for this: a
+    document, its type, its version, who uploaded it, and whether it is the
+    executed copy. Five columns it lacks (the ones this flow turns on) are added
+    by migration 14; everything else was already there and is used as it stands.
+    """
+    __tablename__ = "contract_document"
+    id = Column("contract_document_id", Integer, primary_key=True)
+    tenant_id = Column(Integer, nullable=True, index=True)
+    contract_id = Column("contract_document_contract_id", Integer,
+                         ForeignKey("contract.contract_id"),
+                         nullable=False, index=True)
+    # contract | reference | endorsement. The canonical column is named for the
+    # document's TYPE, which is exactly what this is.
+    kind = Column("contract_document_type", String, nullable=False,
+                  default="contract")
+    filename = Column("contract_document_filename", String, nullable=True)
+    version = Column("contract_document_version", String, nullable=True)
+    # Whether this is the signed copy rather than a draft. Kavachio does not run
+    # the signing, so this records a fact from elsewhere.
+    is_executed_copy = Column("contract_document_is_executed_copy", Boolean,
+                              nullable=True)
+    blob_ref = Column("contract_document_blob_reference", String, nullable=True)
+    fingerprint = Column("contract_document_file_hash", String, nullable=True)
+    uploaded_by_user_id = Column("contract_document_uploaded_by_id", Integer,
+                                 nullable=True)
+    amendment_id = Column("contract_document_amendment_id", Integer, nullable=True)
+    upload_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    modified_at = Column(DateTime, default=datetime.utcnow,
+                         onupdate=datetime.utcnow)
+
+    # --- added by migration 14 ---------------------------------------------
+    # The document the wording asked for BY NAME, when this row answers such a
+    # request. Lets the "still missing" list be computed by matching what the
+    # extraction named against what has actually been supplied.
+    satisfies_reference = Column("contract_document_satisfies_reference",
+                                 String, nullable=True)
+    # Endorsements carry a date they take effect from; the wording does not.
+    effective_from = Column("contract_document_effective_from", Date, nullable=True)
+    # What rule generation filters on. Superseding is a flag flip, never a
+    # delete — see the class docstring.
+    is_active = Column("contract_document_is_active", Boolean, default=True)
+    # Parsed text + whatever the extractor made of it, cached so re-running rule
+    # generation does not re-parse every attachment.
+    extracted = Column("contract_document_extracted", JSON, nullable=True)
+    # The DB-blob fallback for when blob storage is off, matching the
+    # (blob_ref, blob) pair every other file-bearing table here uses. The
+    # canonical table only ever had the Azure pointer.
+    blob = _payload(Column("contract_document_blob", LargeBinary, nullable=True))
+
+
+class ContractSignature(Base):
+    """That a contract was signed, by which side, when, and on what authority.
+
+    A CONTRACT GOES LIVE BECAUSE IT WAS SIGNED. Both sides sign — one row each,
+    at least — and the second signature is what puts it in force. That is why
+    this is a table and not a key in the wording blob: it is dated, attributed,
+    and it is the thing the contract's being in force now rests on. A key in a
+    JSON bag can be overwritten by an unrelated save; a row cannot.
+
+    KAVACHIO DOES NOT WITNESS A SIGNING. It records that one happened, and
+    `method` is what keeps the two claims apart:
+
+      typed     the signatory was in Kavachio, was the right party, and typed
+                their name against this contract. `by_user_id` IS the signatory.
+      recorded  somebody signed on paper or through a provider elsewhere and
+                the carrier recorded the fact here. `by_user_id` is whoever
+                recorded it — never the signatory, who was never in this
+                system. It is the only honest way to hold a reinsurance
+                contract, whose counterparty has no seat here at all.
+
+    A SIGNATURE IS ON A VERSION. Editing a draft's terms or its wording deletes
+    the signatures on it. A signature that outlived the words it was under
+    would be worse than no signature at all.
+    """
+    __tablename__ = "contract_signature"
+    id = Column("contract_signature_id", Integer, primary_key=True)
+    tenant_id = Column("contract_signature_tenant_id", Integer, nullable=True)
+    contract_id = Column("contract_signature_contract_id", Integer,
+                         ForeignKey("contract.contract_id"),
+                         nullable=False, index=True)
+    # Which ORGANISATION this signature is for, not who typed it.
+    side = Column("contract_signature_side", String, nullable=False)
+    signer_name = Column("contract_signature_signer_name", String, nullable=False)
+    signer_title = Column("contract_signature_signer_title", String, nullable=True)
+    signer_email = Column("contract_signature_signer_email", String, nullable=True)
+    method = Column("contract_signature_method", String, default="typed")
+    by_user_id = Column("contract_signature_by_user_id", Integer, nullable=True)
+    signed_at = Column("contract_signature_signed_at", DateTime, nullable=True)
+    # The executed copy this was read off, where there is one.
+    document_id = Column("contract_signature_document_id", Integer, nullable=True)
+    note = Column("contract_signature_note", String, nullable=True)
+    created_at = Column("contract_signature_created_at", DateTime,
+                        default=datetime.utcnow)
+
+
+class CarrierBroker(Base):
+    """Which carriers a broker works with. THE relationship, not a derivation.
+
+    `party.tenant_id` says who ONBOARDED a broker — one carrier, one column.
+    Whether a carrier WORKS WITH one is many-to-many, because a broker produces
+    for several, and using the ownership column for it made a shared broker
+    invisible to every carrier but the first. That bug had to be found and
+    fixed separately in the broker directory, in Users & Roles and in the
+    contract counterparty picker; this is the row that stops there being a
+    fourth place.
+
+    Distinct from `program_broker`, which says WHICH PROGRAMMES they may
+    produce on. This says the two organisations work together at all — true
+    from the moment an invitation is accepted, and before any programme exists.
+    """
+    __tablename__ = "carrier_broker"
+    id = Column("carrier_broker_id", Integer, primary_key=True)
+    tenant_id = Column("carrier_broker_tenant_id", Integer, nullable=False)
+    party_id = Column("carrier_broker_party_id", Integer, nullable=False)
+    # active | ended. Ended rather than deleted: the contracts underneath stay
+    # readable, and "we used to" is a different answer from "we never did".
+    status = Column("carrier_broker_status", String, default="active")
+    origin = Column("carrier_broker_origin", String, nullable=True)
+    since = Column("carrier_broker_since", DateTime, default=datetime.utcnow)
+    ended_at = Column("carrier_broker_ended_at", DateTime, nullable=True)
+    by_user_id = Column("carrier_broker_by_user_id", Integer, nullable=True)
+
+
+def carrier_broker_ids(session, tenant_id: int) -> set[int]:
+    """Party ids of every broker this carrier works with. One place, so a new
+    screen cannot invent a fourth definition of the same question."""
+    if not tenant_id:
+        return set()
+    return {r[0] for r in session.query(CarrierBroker.party_id)
+            .filter(CarrierBroker.tenant_id == tenant_id,
+                    CarrierBroker.status == "active").all()}
+
+
+def link_carrier_broker(session, tenant_id: int, party_id: int,
+                        origin: str = "invitation",
+                        by_user_id: int | None = None) -> None:
+    """Record that this carrier works with this broker. Idempotent, and it
+    revives an ended relationship rather than inserting a second row."""
+    if not tenant_id or not party_id:
+        return
+    row = (session.query(CarrierBroker)
+           .filter(CarrierBroker.tenant_id == tenant_id,
+                   CarrierBroker.party_id == party_id).first())
+    if row:
+        if row.status != "active":
+            row.status, row.ended_at = "active", None
+        return
+    session.add(CarrierBroker(tenant_id=tenant_id, party_id=party_id,
+                              status="active", origin=origin,
+                              by_user_id=by_user_id))
+
+
+class BrokerInvitation(Base):
+    """A carrier asking a broker to produce on a programme, and the answer.
+
+    THE CARRIER NEVER LEARNS WHETHER THE BROKER ALREADY EXISTS. That is the
+    whole design. A broker works with several carriers, and which ones is that
+    broker's business and those carriers' — not something the next carrier can
+    discover by typing an address into an invite form. So inviting looks the
+    same either way, and what happens next depends on facts the carrier is not
+    shown: an existing broker sees the invitation on their own screen and
+    accepts it; a new one is onboarded, and completing onboarding accepts it
+    for them.
+
+    It also fixes something the old direct-assign path skipped: the programme
+    link now appears only once the broker has AGREED. A carrier could
+    previously put a broker on a programme by unilateral act, which is not what
+    "invitation" means anywhere else.
+
+    `party_id` is NULL until known — an invitation to an address nobody has
+    claimed yet has no organisation to point at.
+    """
+    __tablename__ = "broker_invitation"
+    id = Column("broker_invitation_id", Integer, primary_key=True)
+    tenant_id = Column("broker_invitation_tenant_id", Integer, nullable=False)
+    program_id = Column("broker_invitation_program_id", Integer, nullable=True)
+    email = Column("broker_invitation_email", String, nullable=False)
+    party_id = Column("broker_invitation_party_id", Integer, nullable=True)
+    # What the carrier typed. Only used if the broker turns out to be new.
+    org_name = Column("broker_invitation_org_name", String, nullable=True)
+    status = Column("broker_invitation_status", String, default="pending")
+    # 'auto' where onboarding accepted it, 'broker' where a person clicked.
+    accepted_by = Column("broker_invitation_accepted_by", String, nullable=True)
+    by_user_id = Column("broker_invitation_by_user_id", Integer, nullable=True)
+    created_at = Column("broker_invitation_created_at", DateTime,
+                        default=datetime.utcnow)
+    answered_at = Column("broker_invitation_answered_at", DateTime, nullable=True)
+    note = Column("broker_invitation_note", String, nullable=True)
+
+
+class BrokerOnboardingRequest(Base):
+    """A carrier USER asking to put a broker on a programme, and the carrier
+    admin's answer. The step BEFORE the invitation above.
+
+    IT HOLDS AN INTENTION, NOT A THING. Nothing exists yet when this row is
+    written — no organisation, no broker login, no relationship, no programme
+    link, and above all no email. That is the whole point: a request that is
+    rejected must leave nothing behind, and the only way to be sure of that is
+    to have created nothing in the first place. Approving it runs the ordinary
+    onboarding the carrier admin has always run (hierarchy_routes), unchanged.
+
+    TWO SHAPES IN ONE TABLE, told apart by `broker_party_id`:
+
+      set    an existing broker out of this carrier's own directory. Only a
+             programme link is wanted, and no email is ever sent for one.
+      NULL   a broker to invite. `email`, `org_name`, `party_type` and
+             `admin_name` are what the carrier user typed, and they are all
+             that is kept — whether that address already belongs to a broker
+             is decided at approval, by the same code that decides it today,
+             so this row cannot leak the answer either.
+
+    ONE ROW PER DECISION. Re-asking after a rejection writes a new row rather
+    than reopening this one, so "why was this turned down in June?" stays
+    answerable — which is why there is no separate decision log beside it, as
+    there is for setups (SetupApproval). A setup already existed before it was
+    submitted; a request like this one IS the submission.
+
+    A carrier ADMIN never appears here. Their own act is the approval — there
+    is nobody left to ask — so their broker goes on the programme directly,
+    exactly as it did before this table existed.
+    """
+    __tablename__ = "broker_onboarding_request"
+    id = Column("request_id", Integer, primary_key=True)
+    tenant_id = Column(Integer, nullable=False, index=True)  # ops tenancy column
+    # NULL where no programme was named. A carrier user bringing a broker into
+    # the DIRECTORY (the Party screen's invite) is onboarding them just as
+    # surely as one adding them to a programme — the same email goes to the
+    # same person — so it needs the same approval, and it has no programme to
+    # record. The queue shows those as "no programme yet".
+    program_id = Column(Integer, nullable=True, index=True)
+    # Set for a broker already in the directory; NULL for one to be invited.
+    broker_party_id = Column(Integer, nullable=True, index=True)
+    # What was typed, for the invite shape. Unused where broker_party_id is set.
+    email = Column(String, nullable=True)
+    org_name = Column(String, nullable=True)
+    party_type = Column(String, nullable=True)
+    admin_name = Column(String, nullable=True)
+    # pending | approved | rejected | withdrawn
+    status = Column(String, nullable=False, default="pending")
+    requested_by_user_id = Column(Integer, nullable=False)
+    requested_at = Column(DateTime, default=datetime.utcnow)
+    decided_by_user_id = Column(Integer, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    # Why it was turned down. Required on a rejection by the route rather than
+    # by the column: a request returned with nothing said about it is one the
+    # carrier user cannot act on, and they would have to go and ask.
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ProgramBroker(Base):
@@ -593,7 +950,13 @@ class ContractApproval(Base):
     tenant_id = Column(Integer, nullable=False, index=True)  # ops tenancy column
     contract_id = Column("approval_contract_id", Integer,
                          ForeignKey("contract.contract_id"), nullable=False, index=True)
-    # submitted | approved | rejected | withdrawn
+    # The decision vocabulary:
+    #   submitted | approved | rejected | withdrawn   the broker→carrier gate
+    #   sent_for_review | changes_requested | terms_agreed
+    #                                               the carrier→broker negotiation
+    # One table for both because they are the same kind of fact — somebody did
+    # something to this contract, and "how did it get here?" has to stay
+    # answerable across both directions of travel.
     action = Column("approval_action", String, nullable=False)
     acted_by_user_id = Column("approval_acted_by_id", Integer, nullable=False)
     acted_at = Column("approval_acted_at", DateTime(timezone=True), default=datetime.utcnow)
@@ -601,7 +964,241 @@ class ContractApproval(Base):
     # What the carrier was looking at when it decided. A contract file can be
     # replaced; the decision stays attached to the version it judged.
     contract_file_hash = Column("approval_file_hash", String, nullable=True)
+    # A counter-proposal, when this row is one:
+    #   [{field, current, proposed, comment}, …]
+    # A note alone says "the premium cap is too low" and leaves the carrier to
+    # work out which field, what number, and to type it. This says it in terms
+    # the other side can see beside the current value and apply in one move —
+    # and keeps "what did they actually ask for?" answerable later.
+    # Added by migration 15; NULL on every row that proposed nothing.
+    proposed_changes = Column("approval_proposed_changes", JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+# ============================================================================
+# Create-a-Contract, step 4 — Signatures.
+#
+# Four tables, one signing round. See migrations/13_contract_esign.sql for the
+# reasoning; the short version is the rule that makes the whole thing work:
+#
+#   a box on the page belongs to ONE signer and says so itself, in
+#   `party_key` — 'tenant:<tenant_id>' for the insurer, 'broker:<broker_party_id>'
+#   for the broker. The recipient behind the emailed link carries the same
+#   string. Field ownership is that equality, checked on the server, never
+#   inferred from what the browser posts.
+# ============================================================================
+
+def party_key_for_tenant(tenant_id) -> str:
+    """The insurer's identity as the fields spell it."""
+    return f"tenant:{int(tenant_id)}"
+
+
+def party_key_for_broker(broker_party_id) -> str:
+    """The broker's identity as the fields spell it."""
+    return f"broker:{int(broker_party_id)}"
+
+
+class EsignEnvelope(Base):
+    """One document, out for signature once.
+
+    Two PDFs are kept on purpose. `source_pdf` is the wording as it was written
+    and is never overwritten; `current_pdf` is that same document with every
+    signature applied so far, and it is what the NEXT signer opens — which is
+    how the broker sees the insurer's signature already on the page rather than
+    a blank block and a promise.
+    """
+    __tablename__ = "contract_esign_envelope"
+    # Indexes are declared here with the SAME NAMES the migration uses, not via
+    # `index=True`. init_db() still runs create_all() when RLS is off, so on any
+    # given database either this or migrations/13_contract_esign.sql made the
+    # table — and an auto-named `ix_contract_esign_envelope_envelope_tenant_id`
+    # is not the migration's `ix_esign_envelope_tenant`, so both would be created
+    # and every write would maintain two identical indexes. Matching the names
+    # makes CREATE INDEX IF NOT EXISTS see what is already there.
+    __table_args__ = (
+        Index("ix_esign_envelope_tenant", "envelope_tenant_id"),
+        Index("ix_esign_envelope_contract", "envelope_contract_id"),
+    )
+    id = Column("envelope_id", Integer, primary_key=True)
+    tenant_id = Column("envelope_tenant_id", Integer, nullable=False)
+    # NULL while the contract row does not exist yet: the wizard can send a
+    # generated draft before it is filed.
+    contract_id = Column("envelope_contract_id", Integer, nullable=True)
+    program_id = Column("envelope_program_id", Integer, nullable=True)
+    broker_party_id = Column("envelope_broker_party_id", Integer, nullable=True)
+    title = Column("envelope_title", String, nullable=False)
+    # draft | sent | in_progress | completed | declined | voided
+    status = Column("envelope_status", String, nullable=False, default="draft",
+                    server_default="draft")
+    source_pdf = _payload(Column("envelope_source_pdf", LargeBinary, nullable=True))
+    source_pdf_ref = Column("envelope_source_pdf_ref", String, nullable=True)
+    current_pdf = _payload(Column("envelope_current_pdf", LargeBinary, nullable=True))
+    current_pdf_ref = Column("envelope_current_pdf_ref", String, nullable=True)
+    page_count = Column("envelope_page_count", Integer, nullable=False, default=0,
+                        server_default=text("0"))
+    # Bumped on every stamp so a page image can never be served stale.
+    pdf_version = Column("envelope_pdf_version", Integer, nullable=False, default=1,
+                         server_default=text("1"))
+    created_by_user_id = Column("envelope_created_by_id", Integer, nullable=True)
+    created_at = Column("envelope_created_at", DateTime(timezone=True), nullable=False,
+                        default=datetime.utcnow, server_default=func.now())
+    sent_at = Column("envelope_sent_at", DateTime(timezone=True), nullable=True)
+    completed_at = Column("envelope_completed_at", DateTime(timezone=True), nullable=True)
+
+    recipients = relationship(
+        "EsignRecipient", back_populates="envelope", cascade="all, delete-orphan",
+        order_by="EsignRecipient.order_no")
+    fields = relationship(
+        "EsignField", back_populates="envelope", cascade="all, delete-orphan")
+
+
+class EsignRecipient(Base):
+    """One organisation's signer on one envelope, and the link that reaches them.
+
+    `party_key` is the identity the boxes are matched against. `tenant_id` and
+    `broker_party_id` mirror it in FK-able form, and exactly one is set — the
+    same rule chk_app_user_scope enforces on app_user, for the same reason: an
+    organisation is a carrier or a broker, never both at once.
+    """
+    __tablename__ = "contract_esign_recipient"
+    __table_args__ = (
+        # One organisation signs once per envelope: a duplicated signer row would
+        # silently give one side two sets of boxes.
+        Index("uq_esign_recipient_party", "recipient_envelope_id",
+              "recipient_party_key", unique=True),
+        Index("ix_esign_recipient_envelope", "recipient_envelope_id",
+              "recipient_order"),
+    )
+    id = Column("recipient_id", Integer, primary_key=True)
+    envelope_id = Column("recipient_envelope_id", Integer,
+                         ForeignKey("contract_esign_envelope.envelope_id"),
+                         nullable=False)
+    side = Column("recipient_side", String, nullable=False)          # insurer | broker
+    party_key = Column("recipient_party_key", String, nullable=False)
+    tenant_id = Column("recipient_tenant_id", Integer, nullable=True)
+    broker_party_id = Column("recipient_broker_party_id", Integer, nullable=True)
+    user_id = Column("recipient_user_id", Integer, nullable=True)
+    name = Column("recipient_name", String, nullable=False)
+    email = Column("recipient_email", String, nullable=False)
+    title = Column("recipient_title", String, nullable=True)
+    org = Column("recipient_org", String, nullable=True)
+    # 1 signs first. The next person is emailed only once this one is done.
+    order_no = Column("recipient_order", Integer, nullable=False, default=1,
+                      server_default=text("1"))
+    # pending | sent | viewed | signed | declined
+    status = Column("recipient_status", String, nullable=False, default="pending",
+                    server_default="pending")
+    # unique WITHOUT index=True: that pair makes SQLAlchemy build a unique INDEX
+    # named ix_…, where the migration declares `recipient_token TEXT UNIQUE` and
+    # gets the constraint …_recipient_token_key. Same guarantee, different
+    # object — and two of them on one column if both sides ran.
+    token = Column("recipient_token", String, unique=True, nullable=True)
+    token_expires = Column("recipient_token_expires", DateTime(timezone=True), nullable=True)
+    sent_at = Column("recipient_sent_at", DateTime(timezone=True), nullable=True)
+    viewed_at = Column("recipient_viewed_at", DateTime(timezone=True), nullable=True)
+    signed_at = Column("recipient_signed_at", DateTime(timezone=True), nullable=True)
+    decline_reason = Column("recipient_decline_reason", Text, nullable=True)
+    signature_name = Column("recipient_signature_name", String, nullable=True)
+    # The drawn signature as a data URL. Big, and only needed while stamping,
+    # so it never rides along on a list query.
+    signature_image = _payload(Column("recipient_signature_image", Text, nullable=True))
+    signed_ip = Column("recipient_signed_ip", String, nullable=True)
+    signed_agent = Column("recipient_signed_agent", String, nullable=True)
+    # --- the one-time code that unlocks the link (migration 17) ------------
+    # Holding the URL is not enough on its own: a URL leaks through history,
+    # chat, screen shares and forwarded mail in ways a mailbox does not. Stored
+    # as a bcrypt hash, never in plain text — a readable signing code is a
+    # readable signing code to anyone with a database backup.
+    otp_hash = Column("recipient_otp_hash", String, nullable=True)
+    otp_expires = Column("recipient_otp_expires", DateTime(timezone=True), nullable=True)
+    # Six digits is a small space, so these two are the real protection, not the
+    # hash: five wrong guesses locks the link for fifteen minutes.
+    otp_attempts = Column("recipient_otp_attempts", Integer, nullable=False,
+                          default=0, server_default=text("0"))
+    otp_locked_until = Column("recipient_otp_locked_until", DateTime(timezone=True),
+                              nullable=True)
+    otp_verified_at = Column("recipient_otp_verified_at", DateTime(timezone=True),
+                             nullable=True)
+    # So a resend button cannot be turned into a way to mail somebody hundreds
+    # of messages.
+    otp_sent_count = Column("recipient_otp_sent_count", Integer, nullable=False,
+                            default=0, server_default=text("0"))
+    otp_last_sent_at = Column("recipient_otp_last_sent_at", DateTime(timezone=True),
+                              nullable=True)
+    created_at = Column("recipient_created_at", DateTime(timezone=True), nullable=False,
+                        default=datetime.utcnow, server_default=func.now())
+
+    envelope = relationship("EsignEnvelope", back_populates="recipients")
+
+
+class EsignField(Base):
+    """A box on the page, owned by exactly one signer.
+
+    Position is a FRACTION of the page (0..1, origin top-left), not points: the
+    signing screen renders each page at whatever width the browser gives it, and
+    fractions land the box in the same place at every zoom and every DPI.
+    """
+    __tablename__ = "contract_esign_field"
+    __table_args__ = (
+        Index("ix_esign_field_envelope", "field_envelope_id", "field_page"),
+        Index("ix_esign_field_party", "field_envelope_id", "field_party_key"),
+    )
+    id = Column("field_id", Integer, primary_key=True)
+    envelope_id = Column("field_envelope_id", Integer,
+                         ForeignKey("contract_esign_envelope.envelope_id"),
+                         nullable=False)
+    # WHO OWNS THIS BOX — the entire access rule, in one column.
+    party_key = Column("field_party_key", String, nullable=False)
+    recipient_id = Column("field_recipient_id", Integer,
+                          ForeignKey("contract_esign_recipient.recipient_id"),
+                          nullable=True)
+    # signature | initial | name | title | date | text
+    type = Column("field_type", String, nullable=False)
+    page = Column("field_page", Integer, nullable=False)
+    x = Column("field_x", Float, nullable=False)
+    y = Column("field_y", Float, nullable=False)
+    w = Column("field_w", Float, nullable=False)
+    h = Column("field_h", Float, nullable=False)
+    required = Column("field_required", Boolean, nullable=False, default=True,
+                      server_default=text("TRUE"))
+    label = Column("field_label", String, nullable=True)
+    # The token in the document that put the box here, e.g.
+    # '{{signature:tenant:12}}'. Kept so a re-generated document can be re-tagged
+    # and the placement reproduced instead of re-drawn by hand.
+    anchor = Column("field_anchor", String, nullable=True)
+    value = Column("field_value", Text, nullable=True)
+    filled_at = Column("field_filled_at", DateTime(timezone=True), nullable=True)
+    created_at = Column("field_created_at", DateTime(timezone=True), nullable=False,
+                        default=datetime.utcnow, server_default=func.now())
+
+    envelope = relationship("EsignEnvelope", back_populates="fields")
+
+
+class EsignEvent(Base):
+    """What happened, in order.
+
+    The envelope row holds where it got to; this holds how it got there. It is
+    printed as the certificate page on the completed PDF, so nothing that
+    matters may be left out of it.
+    """
+    __tablename__ = "contract_esign_event"
+    __table_args__ = (
+        Index("ix_esign_event_envelope", "event_envelope_id", "event_at"),
+    )
+    id = Column("event_id", Integer, primary_key=True)
+    envelope_id = Column("event_envelope_id", Integer,
+                         ForeignKey("contract_esign_envelope.envelope_id"),
+                         nullable=False)
+    recipient_id = Column("event_recipient_id", Integer, nullable=True)
+    # created | sent | delivered | viewed | signed | declined | completed
+    # | reminded | voided
+    type = Column("event_type", String, nullable=False)
+    actor = Column("event_actor", String, nullable=True)
+    ip = Column("event_ip", String, nullable=True)
+    agent = Column("event_agent", String, nullable=True)
+    detail = Column("event_detail", JSON, nullable=True)
+    at = Column("event_at", DateTime(timezone=True), nullable=False,
+                default=datetime.utcnow, server_default=func.now())
 
 
 class SheetBinding(Base):
@@ -767,7 +1364,22 @@ class ColumnMappingCache(Base):
 
 
 class ActivityEvent(Base):
-    """Lightweight audit feed for S-12 'Recent activity'."""
+    """Lightweight audit feed for S-12 'Recent activity' and the Audit Logs screen.
+
+    `actor` is a DISPLAY string (an email, or `broker:<party id>` when the row
+    was written for the carrier to read — see audit.actor_for). It was the only
+    record of who acted, and that is not enough to scope the feed by role: a
+    broker row carrying `broker:12` has lost which of that broker's people did
+    it, so a broker admin could not see their own team's trail, and a row
+    written by a broker seat carries tenant_id NULL (a broker token has no
+    carrier), so the carrier could not find it either.
+
+    The three `actor_*` columns below record the acting SEAT alongside the
+    display string, so the audit feed can be scoped exactly and each viewer can
+    be shown the words they are allowed to see (audit_feed.py). Nullable with no
+    backfill: historical rows are still resolved at read time from `actor`, they
+    just cannot name the individual behind a `broker:<id>`.
+    """
     __tablename__ = "activity_events"
     id = Column(Integer, primary_key=True)
     tenant_id = Column(Integer, index=True, nullable=True)  # FK -> tenant.tenant_id (enforced in DB)
@@ -776,6 +1388,10 @@ class ActivityEvent(Base):
     target = Column(String, nullable=True)
     details = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    # --- the acting seat (see the note above) ------------------------------
+    actor_user_id = Column(Integer, index=True, nullable=True)
+    actor_role = Column(String, nullable=True)          # normalized, one of VALID_ROLES
+    actor_broker_party_id = Column(Integer, index=True, nullable=True)
 
 
 class AuthAudit(Base):
@@ -891,6 +1507,10 @@ class DirectFormat(Base):
     datamodel_mapper_id = Column(Integer, nullable=True)
     approved = Column(Integer, default=0)
     hit_count = Column(Integer, default=1)
+    # Feature 7 (§7.1): which column's date decides which contract version governs,
+    # plus per-setup tuning in JSONB. Requires migration 20_3_contract_asof_config.sql.
+    governing_date_field = Column(String, nullable=True)
+    asof_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -963,6 +1583,44 @@ class LandingCorrection(Base):
     )
 
 
+class ExceptionDecisionLog(Base):
+    """Every decision anyone made on an exception, in order — APPEND-ONLY.
+
+    landing_correction keeps only the LATEST decision per cell (it is the
+    override the renderer applies), and validation_exception only the latest
+    resolution. Neither can answer "who decided this, and who decided before
+    them". This can: one row per decision as it was saved, never updated or
+    deleted by the app.
+
+    The decider is taken from the LOGIN (the request's principal), never from
+    anything the browser sends. `decided_by_broker_party_id` is the decider's
+    own broker when a broker seat decided — which broker user fixed a row on a
+    run the carrier made for their broker is exactly what this records.
+    """
+    __tablename__ = "exception_decision_log"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, index=True, nullable=True)      # the run's carrier
+    export_id = Column(Integer, index=True, nullable=True)      # output_exports.id
+    landing_id = Column(Integer, index=True, nullable=True)     # direct lane
+    exception_id = Column(Integer, nullable=True)               # canonical lane
+    program_id = Column(Integer, nullable=True)                 # the run's scope
+    broker_party_id = Column(Integer, index=True, nullable=True)
+    lane = Column(String, nullable=False)                       # direct | canonical | upload
+    decided_by_user_id = Column(Integer, index=True, nullable=True)
+    decided_by_role = Column(String, nullable=True)
+    decided_by_broker_party_id = Column(Integer, nullable=True)
+    kind = Column(String, nullable=False)                       # approve | fix | dismiss | reject
+    rule_id = Column(Integer, nullable=True)
+    policy_number = Column(String, nullable=True)
+    sheet = Column(String, nullable=True)
+    row = Column(Integer, nullable=True)
+    field = Column(String, nullable=True)
+    old_value = Column(Text, nullable=True)
+    new_value = Column(Text, nullable=True)
+    reason = Column(Text, nullable=True)
+    decided_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class AdminMappingTask(Base):
     """A queued, one-time request for an admin to map a brand-new input format
     to the 850-field data model. Raised off the delivery critical path; the
@@ -1005,9 +1663,31 @@ class Pipeline(Base):
     # broker level existed — those stay (carrier, program) setups and keep
     # running exactly as they did, so this is purely additive.
     broker_party_id = Column(Integer, index=True, nullable=True)     # FK -> party.party_id
-    # draft (never activated) | active (the one runs use) | superseded (replaced
-    # by a newer active pipeline for the same carrier+program).
+    # draft (never sent up) | pending_approval (a carrier USER built it and the
+    # carrier admin has not decided yet) | active (the one runs use) |
+    # superseded (replaced by a newer active pipeline for the same
+    # carrier+program+broker).
+    #
+    # `pending_approval` sits between draft and active and is invisible to
+    # everything that asks for `active` — which is nearly every reader, and in
+    # particular setup_scope._live, the one gate behind Process Bordereau, the
+    # broker's readiness check and the template lookup and download. That is
+    # what "nothing reaches the broker before the carrier admin approves"
+    # rests on. See migration 27.
     status = Column(String, default="draft")
+    # Who sent this setup up for approval, and when. NULL on a setup built
+    # before approvals existed, and on one a carrier ADMIN built — their own
+    # act is the approval, so it never goes up.
+    submitted_by_user_id = Column(Integer, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    # pipeline.rule_scope — which of its contracts' rule sets this setup runs —
+    # is deliberately NOT mapped here: a mapped column is selected by every
+    # Pipeline query, and a database without migration 21 would fail them all.
+    # Read and written through rule_scope.pipeline_scope / write_pipeline_scope.
+    # Feature 7 (§7.1): pipeline overrides its direct_format when set.
+    # Requires migration 20_3_contract_asof_config.sql.
+    governing_date_field = Column(String, nullable=True)
+    asof_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -1026,6 +1706,37 @@ class PipelineContract(Base):
     contract_id = Column(Integer, nullable=False)           # FK -> contract.contract_id
     sheet_key = Column(String, nullable=True)               # output sheet; NULL = fallback
     position = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SetupApproval(Base):
+    """Every decision ever made on a Bordereau Setup.
+
+    The pipeline row holds the CURRENT state; this holds how it got there. A
+    setup can be submitted, rejected, fixed and re-submitted, and "why was this
+    sent back in June?" has to stay answerable after the fact.
+
+    Its own table rather than a widening of ContractApproval, which is the same
+    kind of fact about a different thing: that table's `approval_contract_id`
+    is NOT NULL, and making it nullable to fit setups in would weaken the one
+    record that is certain what it is about.
+
+    Only a carrier USER's setup is ever recorded here. A setup the carrier
+    admin builds goes live directly — there is nobody left to ask — so it has
+    no submission and no decision, and its trail is the activation itself.
+    """
+    __tablename__ = "setup_approval"
+    id = Column("approval_id", Integer, primary_key=True)
+    tenant_id = Column(Integer, nullable=False, index=True)  # ops tenancy column
+    pipeline_id = Column(Integer, nullable=False, index=True)
+    # submitted | approved | rejected
+    action = Column(String, nullable=False)
+    acted_by_user_id = Column(Integer, nullable=False)
+    acted_at = Column(DateTime, default=datetime.utcnow)
+    # Why it was sent back. Required on a rejection by the route, not by the
+    # column: a setup returned with no reason is a setup the carrier user
+    # cannot act on.
+    note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -1089,9 +1800,19 @@ class MissingBdxColumn(Base):
 class AiResponseCache(Base):
     """Memo of a model answer, keyed by a hash of the EXACT input that produced it.
 
-    Several calls in the upload pipeline ask a question whose answer does not
-    depend on the file being uploaded at all:
+    Several calls in the upload pipeline ask a question whose answer is fully
+    determined by inputs the key covers, so re-asking can only reproduce it:
 
+      rule_intents   — which clauses carry a rule, and what each one says
+                       (Call 2). Field-agnostic by construction, so the answer
+                       cannot change when an output template turns up later.
+                       Keyed on the clause texts. This is the one kind whose
+                       input IS the uploaded file, and it earns its place
+                       because the pass runs twice for the ordinary contract:
+                       once on upload, where it stops for want of a template,
+                       and again when a Bordereau Setup picks the contract up.
+                       The verdict survives on the clause row; the intents,
+                       which are the expensive half, were memory-only.
       generic_bind   — binding Kavachio's generic rule library to an output
                        template's columns. Depends only on (library rows,
                        template fields), so every contract uploaded against the
@@ -1215,6 +1936,14 @@ class ExpectedSubmission(Base):
     id = Column(Integer, primary_key=True)
     tenant_id = Column(Integer, index=True, nullable=True)
     program_id = Column(Integer, index=True, nullable=False)
+    # WHICH BROKER owes this one. A programme is reported by several brokers and
+    # each owes its own file, so "Corvin Risk is nine days late" is a statement
+    # about one row, not about the programme. NULL means the obligation is not
+    # attributed to a broker — either the programme has no broker on it yet, or
+    # the row predates this column. A NULL row is adopted by the first broker
+    # put on the programme rather than left orphaned, so its arrival history
+    # survives (see materialize_schedule).
+    broker_party_id = Column(Integer, index=True, nullable=True)
     schedule_id = Column(Integer, index=True, nullable=True)   # FK -> submission_schedule.id
     period = Column(String, nullable=False)                    # '2026-01' | '2026-Q1' | '2026-W03'
     period_start = Column(Date, nullable=False)
@@ -1224,8 +1953,31 @@ class ExpectedSubmission(Base):
     # ('late' is retired — it only ever meant "overdue past the grace period",
     #  and there is no grace period any more. Stored rows are migrated below.)
     status = Column(String, default="scheduled", index=True)
+    # The FIRST arrival for this period, and the only one that decides on_time
+    # vs received_late. A correction sent three weeks later must not repaint a
+    # missed deadline green, so these two stay pinned to version 1 and the later
+    # versions are counted separately below.
     received_at = Column(Date, nullable=True)
     received_export_id = Column(Integer, nullable=True)        # FK -> output_exports.id
+    # --- versions and release (see SubmissionVersion) -----------------------
+    # How many files have been submitted for this period. 1 = the original only;
+    # 2+ means it was corrected and resent. Denormalised from submission_version
+    # so the calendar can render a version badge without a per-row query.
+    version_count = Column(Integer, default=0)
+    # The most recent arrival, whichever version it was. `received_at` answers
+    # "did they meet the deadline"; this answers "what are we looking at now".
+    latest_received_at = Column(Date, nullable=True)
+    # SENT ONWARD. Producing a file and releasing it to its recipient are two
+    # different acts — a bordereau can be generated on the 3rd and only sent to
+    # the reinsurer on the 6th — so the calendar records them separately and can
+    # answer "did Munich Re actually get July, and when?".
+    released_at = Column(Date, nullable=True)
+    released_count = Column(Integer, default=0)
+    # CHASING. Recorded so the screen can say "chased 2 days ago" instead of
+    # offering a button whose effect nobody can see, and so a second chase is a
+    # deliberate act rather than an accident.
+    chased_at = Column(Date, nullable=True)
+    chase_count = Column(Integer, default=0)
     # The overdue bell fired for this row. Separate from `status` (which is
     # recomputed on read) so the reminder fires exactly once and survives a
     # re-materialize — status is a bad idempotency guard.
@@ -1248,7 +2000,68 @@ class ExpectedSubmission(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     __table_args__ = (
-        UniqueConstraint("program_id", "period", name="uq_expected_submission_program_period"),
+        # One obligation per (programme, broker, period). The broker is part of
+        # the key because three brokers on one programme each owe July, and
+        # NULL is the fourth, unattributed case.
+        UniqueConstraint("program_id", "broker_party_id", "period",
+                         name="uq_expected_submission_period"),
+    )
+
+
+class SubmissionVersion(Base):
+    """One file submitted for one expected period — and, if it went on, the
+    record of it being sent.
+
+    THE POINT OF THIS TABLE. A period can be filed more than once: the original
+    goes in on the due date, then something is found wrong and the period is
+    sent again. Overwriting the first submission would quietly rewrite history —
+    anyone looking back would see numbers that never actually went out — so each
+    submission is kept as its own immutable row and the period carries a chain
+    of them.
+
+    `version_no` counts from 1 within a period. Version 1 is the `original`;
+    every later one is a `corrected`. That distinction is the whole reason the
+    kind is stored rather than derived at read time: a period that was filed
+    once and a period that was filed three times are different facts about a
+    broker, and the second must stay visible after the fact.
+
+    A LATE file still belongs to its own period, not to the period it arrived
+    in — which is what `expected_id` fixes. The arrival date lives here; the
+    period it satisfies is decided by the calendar, not by the calendar month
+    the file happened to turn up in.
+    """
+    __tablename__ = "submission_version"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, index=True, nullable=True)
+    expected_id = Column(Integer, index=True, nullable=False)  # FK -> expected_submission.id
+    program_id = Column(Integer, index=True, nullable=True)
+    broker_party_id = Column(Integer, index=True, nullable=True)
+    period = Column(String, nullable=True)          # denormalised for readable history
+    version_no = Column(Integer, nullable=False, default=1)
+    # original | corrected. Derived from version_no when the row is written, and
+    # then kept — see the class docstring.
+    kind = Column(String, default="original")
+    # --- the file arriving --------------------------------------------------
+    received_at = Column(Date, nullable=True)
+    received_export_id = Column(Integer, nullable=True)   # FK -> output_exports.id
+    source_filename = Column(String, nullable=True)
+    # Where the period came from: 'explicit' (the caller said so), 'filename'
+    # (read off the file name), or 'oldest_open' (the fallback guess). Recorded
+    # because "we assumed this was July" and "the file said July" are different
+    # levels of confidence and an operator checking a wrong month needs to know
+    # which one this was.
+    period_source = Column(String, nullable=True)
+    # --- the file going onward ---------------------------------------------
+    released_at = Column(Date, nullable=True)
+    released_to = Column(String, nullable=True)     # reinsurer / syndicate / regulator / finance
+    released_by = Column(String, nullable=True)     # actor email
+    release_ref = Column(String, nullable=True)     # their reference, if they give one
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    modified_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("expected_id", "version_no",
+                         name="uq_submission_version_no"),
     )
 
 
@@ -1265,6 +2078,60 @@ def _ensure_column(conn, inspector, table: str, column: str, ddl_type: str) -> N
     conn.exec_driver_sql(f'ALTER TABLE {table} ADD COLUMN {column} {ddl_type}')
 
 
+def _sqlite_relax_expected_submission_key(conn) -> bool:
+    """Drop a legacy UNIQUE(program_id, period) on expected_submission, SQLite-style.
+
+    The obligation key gained the broker, so that old uniqueness now BLOCKS the
+    fan-out: two brokers cannot both owe 2026-07 under it. Postgres can simply
+    drop the constraint; SQLite cannot drop one declared inside CREATE TABLE, so
+    the only way out is the standard rebuild — make the new table, copy the rows
+    across, swap the names.
+
+    Detection looks at unique CONSTRAINTS as well as indexes: SQLAlchemy's SQLite
+    dialect reports a table-level UNIQUE as a constraint and hides its
+    `sqlite_autoindex_*` from get_indexes() entirely, so checking indexes alone
+    finds nothing and the rebuild silently never runs.
+
+    Returns True when the table was rebuilt, so the caller knows to reflect it
+    again — every cached column list for this table is stale afterwards.
+    """
+    try:
+        insp = inspect(conn)
+        if not insp.has_table("expected_submission"):
+            return False
+        target = {"program_id", "period"}
+        legacy = [uc for uc in insp.get_unique_constraints("expected_submission")
+                  if set(uc.get("column_names") or []) == target]
+        legacy += [ix for ix in insp.get_indexes("expected_submission")
+                   if ix.get("unique") and set(ix.get("column_names") or []) == target]
+        if not legacy:
+            return False
+        cols = [c["name"] for c in insp.get_columns("expected_submission")]
+        col_list = ", ".join(cols)
+        conn.exec_driver_sql("ALTER TABLE expected_submission "
+                             "RENAME TO expected_submission__old")
+        ExpectedSubmission.__table__.create(bind=conn)
+        # Only the columns the OLD table had — the new ones are left at their
+        # defaults and filled in by the backfill that runs after this.
+        conn.exec_driver_sql(
+            f"INSERT INTO expected_submission ({col_list}) "
+            f"SELECT {col_list} FROM expected_submission__old")
+        conn.exec_driver_sql("DROP TABLE expected_submission__old")
+        return True
+    except Exception:
+        # A failed rebuild must not take the whole boot down. Put the original
+        # table back and carry on: the calendar is then limited to one broker
+        # per period on this database, which is exactly how it behaved before —
+        # degraded, not broken.
+        try:
+            conn.exec_driver_sql("DROP TABLE IF EXISTS expected_submission")
+            conn.exec_driver_sql("ALTER TABLE expected_submission__old "
+                                 "RENAME TO expected_submission")
+        except Exception:
+            pass
+        return False
+
+
 def init_db():
     # Under RLS mode the app connects as the DML-only `kavachio_app` role, which
     # cannot run DDL — and auto-create_all() at import is exactly what resurrects
@@ -1274,6 +2141,18 @@ def init_db():
         return
     # Ops/mapper tables on the local (ops) database.
     Base.metadata.create_all(engine)
+    # The ITD tables' clearer names (itd_store.rename_old_tables) — moved
+    # across BEFORE create_all, which would otherwise build empty tables under
+    # the new names beside the old ones and their rows.
+    try:
+        import logging
+        import itd_store
+        with engine.begin() as conn:
+            for line in itd_store.rename_old_tables(conn):
+                logging.getLogger("bdx.db").info("renamed %s", line)
+    except Exception as e:  # noqa: BLE001 — never what stops the app starting
+        import logging
+        logging.getLogger("bdx.db").warning("ITD tables not renamed: %s", e)
     # Canonical 53-table xlsx-derived schema on the canonical Postgres DB.
     canonical_metadata.create_all(canonical_engine)
 
@@ -1284,6 +2163,39 @@ def init_db():
     json_type = "JSONB" if dialect == "postgresql" else "JSON"
     with engine.begin() as conn:
         inspector = inspect(conn)
+        # FIRST, before any column is added: the calendar's obligation key gained
+        # the broker, and the old UNIQUE(program_id, period) would block the
+        # fan-out. On SQLite that means rebuilding the table, so it has to happen
+        # while the column list is still the one on disk.
+        try:
+            if dialect == "postgresql":
+                conn.exec_driver_sql(
+                    "ALTER TABLE expected_submission "
+                    "DROP CONSTRAINT IF EXISTS uq_expected_submission_program_period")
+            else:
+                conn.exec_driver_sql(
+                    "DROP INDEX IF EXISTS uq_expected_submission_program_period")
+        except Exception:
+            pass
+        if dialect == "sqlite" and _sqlite_relax_expected_submission_key(conn):
+            inspector = inspect(conn)     # rebuilt — every cached shape is stale
+        # broker_onboarding_request.program_id must be NULLABLE. A request can
+        # name no programme at all — bringing a broker into the DIRECTORY sends
+        # the same email to the same person, so it needs the same approval and
+        # has no programme to record.
+        #
+        # Needed as an ALTER rather than left to create_all because create_all
+        # only ever CREATES: a database that met this table while the column was
+        # still NOT NULL keeps that shape for ever, and every directory invite
+        # there dies on a constraint. Idempotent, and a no-op on the tables that
+        # were created right.
+        if dialect == "postgresql":
+            try:
+                conn.exec_driver_sql(
+                    "ALTER TABLE broker_onboarding_request "
+                    "ALTER COLUMN program_id DROP NOT NULL")
+            except Exception:
+                pass
         _ensure_column(conn, inspector, "mappers", "spec_by_sheet", json_type)
         _ensure_column(conn, inspector, "mappers", "candidates", json_type)
         _ensure_column(conn, inspector, "mappers", "samples", json_type)
@@ -1310,6 +2222,17 @@ def init_db():
         _ensure_column(conn, inspector, "export_templates", "standard_meta", json_type)
         # The Bordereau Setup's broker level (NULL = a pre-broker setup).
         _ensure_column(conn, inspector, "pipeline", "broker_party_id", "INTEGER")
+        # Template-aware contract rules (see rule_scope.py). Both nullable with
+        # no backfill: a rule with no template belongs to its contract's
+        # original template, and a setup with no scope runs its own template's
+        # rules — so every existing rule and setup reads exactly as before.
+        _ensure_column(conn, inspector, "pipeline", "rule_scope", json_type)
+        # Bordereau Setup approval (migration 27): who sent a setup up for the
+        # carrier admin's decision, and when. NULL on every setup built before
+        # this, which is exactly right — they were never sent up.
+        _ensure_column(conn, inspector, "pipeline", "submitted_by_user_id", "INTEGER")
+        _ensure_column(conn, inspector, "pipeline", "submitted_at", "TIMESTAMP")
+        _ensure_column(conn, inspector, "validation_rule", "output_template_id", "INTEGER")
         # Generated-output metadata (plan section 22). template_version is the
         # one that matters: it keeps a historical download pinned to the layout
         # it was actually written with.
@@ -1319,9 +2242,11 @@ def init_db():
         _ensure_column(conn, inspector, "output_exports", "program_id", "INTEGER")
         _ensure_column(conn, inspector, "output_exports", "broker_party_id", "INTEGER")
         _ensure_column(conn, inspector, "output_exports", "contract_id", "INTEGER")
+        _ensure_column(conn, inspector, "output_exports", "generated_by_user_id", "INTEGER")
         _ensure_column(conn, inspector, "output_exports", "output_format", "VARCHAR")
         _ensure_column(conn, inspector, "output_exports", "sample_comparison", json_type)
         _ensure_column(conn, inspector, "tenant", "onboarding_skipped", "BOOLEAN DEFAULT FALSE")
+        _ensure_column(conn, inspector, "tenant", "tenant_owner_user_id", "BIGINT")
         # _ensure_column(conn, inspector, "program", "canonical_program_id", "INTEGER")
         # tenant_configs folded into `tenant` and dropped (see db_repair_notes.md)
         _ensure_column(conn, inspector, "dwh_bdx", "sheet_name", "VARCHAR")
@@ -1337,11 +2262,39 @@ def init_db():
         _ensure_column(conn, inspector, "reference_document", "blob_ref", "VARCHAR")
         _ensure_column(conn, inspector, "export_templates", "template_blob_ref", "VARCHAR")
         _ensure_column(conn, inspector, "program", "party_id", "INTEGER")
+        # Broker exception loop (migration 32): the programme's delivery rule
+        # and a version's place in its submission. All nullable.
+        _ensure_column(conn, inspector, "program", "delivery_rule", json_type)
+        for _c, _ddl in (("submission_ref", "VARCHAR"), ("version_no", "INTEGER"),
+                         ("version_status", "VARCHAR"), ("version_note", "TEXT")):
+            _ensure_column(conn, inspector, "output_exports", _c, _ddl)
         _ensure_column(conn, inspector, "mappers", "party_id", "INTEGER")
         _ensure_column(conn, inspector, "upload", "party_id", "INTEGER")
         # Contract → Output Template hierarchy
         _ensure_column(conn, inspector, "contract", "output_template_id", "INTEGER")
         _ensure_column(conn, inspector, "contract", "template_field_mappings", json_type)
+        # The documents a contract is made of. `contract_document` already
+        # existed in the canonical schema, so create_all() will NOT touch it —
+        # the five columns the contract flow needs have to be ALTERed in. See
+        # migrations/14_contract_documents.sql for what each one is for.
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_satisfies_reference", "VARCHAR")
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_effective_from", "DATE")
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_is_active", "BOOLEAN DEFAULT TRUE")
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_extracted", json_type)
+        _ensure_column(conn, inspector, "contract_document",
+                       "contract_document_blob", blob_type)
+        # The broker's counter-proposal on a contract under negotiation. See
+        # migrations/15_contract_negotiation.sql for why a note is not enough.
+        _ensure_column(conn, inspector, "contract_approval",
+                       "approval_proposed_changes", json_type)
+        # The authored contract: its commercial terms and its wording sections.
+        # See migrations/16_contract_authoring.sql.
+        _ensure_column(conn, inspector, "contract", "commercial_terms", json_type)
+        _ensure_column(conn, inspector, "contract", "wording_sections", json_type)
         # Direct-lane setup scoping (carrier + program)
         _ensure_column(conn, inspector, "direct_format", "carrier_party_id", "INTEGER")
         _ensure_column(conn, inspector, "direct_format", "program_id", "INTEGER")
@@ -1368,6 +2321,59 @@ def init_db():
                        "BOOLEAN DEFAULT FALSE")
         _ensure_column(conn, inspector, "expected_submission", "due_today_emailed",
                        "BOOLEAN DEFAULT FALSE")
+        # Requirement 17.2 — "due, released and corrected versions".
+        #
+        # broker_party_id turns one obligation per programme into one per
+        # (programme x broker), which is what the calendar screen actually
+        # shows. NULL on every pre-existing row; materialize_schedule adopts
+        # those into the programme's first broker rather than orphaning them,
+        # so no arrival history is lost.
+        _ensure_column(conn, inspector, "expected_submission", "broker_party_id",
+                       "INTEGER")
+        # Roll-ups denormalised from submission_version so the calendar renders
+        # a version badge and a "sent onward" date without a query per row.
+        _ensure_column(conn, inspector, "expected_submission", "version_count",
+                       "INTEGER DEFAULT 0")
+        _ensure_column(conn, inspector, "expected_submission", "latest_received_at",
+                       "DATE")
+        _ensure_column(conn, inspector, "expected_submission", "released_at", "DATE")
+        _ensure_column(conn, inspector, "expected_submission", "released_count",
+                       "INTEGER DEFAULT 0")
+        _ensure_column(conn, inspector, "expected_submission", "chased_at", "DATE")
+        _ensure_column(conn, inspector, "expected_submission", "chase_count",
+                       "INTEGER DEFAULT 0")
+        # Backfill the roll-ups for rows that arrived before versions existed:
+        # a period already marked received has exactly one submission behind it.
+        try:
+            conn.exec_driver_sql(
+                "UPDATE expected_submission "
+                "SET version_count = 1, latest_received_at = received_at "
+                "WHERE received_at IS NOT NULL "
+                "AND (version_count IS NULL OR version_count = 0)")
+            conn.exec_driver_sql(
+                "UPDATE expected_submission SET version_count = 0 "
+                "WHERE received_at IS NULL AND version_count IS NULL")
+            conn.exec_driver_sql(
+                "UPDATE expected_submission SET released_count = 0 "
+                "WHERE released_count IS NULL")
+        except Exception:
+            pass    # table not there yet; create_all built it with no rows
+        # The version rows those backfilled counts describe. Written here rather
+        # than left implied, so "show me every file sent for July" returns the
+        # original too and not just the corrections that came after it.
+        try:
+            conn.exec_driver_sql(
+                "INSERT INTO submission_version "
+                "(tenant_id, expected_id, program_id, broker_party_id, period, "
+                " version_no, kind, received_at, received_export_id, period_source) "
+                "SELECT e.tenant_id, e.id, e.program_id, e.broker_party_id, e.period, "
+                "       1, 'original', e.received_at, e.received_export_id, 'backfill' "
+                "FROM expected_submission e "
+                "WHERE e.received_at IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM submission_version v "
+                "                WHERE v.expected_id = e.id)")
+        except Exception:
+            pass    # submission_version not created yet, or already backfilled
         # 'late' is retired: with no grace period it and 'overdue' mean the same
         # thing. Fold the stored rows over, so the dashboard counts (which read
         # the column rather than recomputing) do not lose them. Idempotent — the
@@ -1408,6 +2414,56 @@ def init_db():
         # Which clause a missing-column finding was quoted from (added after the
         # table shipped; create_all only CREATEs, it never ALTERs).
         _ensure_column(conn, inspector, "missing_bdx_columns", "clause_label", "VARCHAR")
+        # Audit Logs: the acting SEAT behind each activity row (db.ActivityEvent).
+        # Without these the feed cannot be scoped by role — a broker row's
+        # `actor` is the broker COMPANY and its tenant_id is NULL, so neither
+        # the broker admin nor the carrier could find it. Nullable, no backfill.
+        _ensure_column(conn, inspector, "activity_events", "actor_user_id", "INTEGER")
+        _ensure_column(conn, inspector, "activity_events", "actor_role", "VARCHAR")
+        _ensure_column(conn, inspector, "activity_events", "actor_broker_party_id", "INTEGER")
+
+        # Migration 29 — the run an arrival became, and the manual-upload
+        # columns. Same columns as migrations/29_arrival_run_link.sql, which
+        # owns them under RLS. The backlog stamp runs only on the boot that
+        # adds run_state, so old accepted files are never auto-run.
+        if inspector.has_table("file_arrival"):
+            _had_run_state = "run_state" in {
+                c["name"] for c in inspector.get_columns("file_arrival")}
+            for _c, _ddl in (("run_state", "VARCHAR"), ("run_landing_id", "BIGINT"),
+                             ("run_export_id", "BIGINT"), ("run_error", "TEXT"),
+                             ("run_at", "TIMESTAMP"), ("channel", "VARCHAR"),
+                             ("program_id", "BIGINT"),
+                             ("submitted_by_user_id", "BIGINT")):
+                _ensure_column(conn, inspector, "file_arrival", _c, _ddl)
+            # Migration 32 — the broker exception loop: which submission a
+            # file is, its version, and the thread's deadline / delivery.
+            for _c, _ddl in (("reporting_period", "VARCHAR"),
+                             ("submission_ref", "VARCHAR"), ("version_no", "INTEGER"),
+                             ("matched_by", "VARCHAR"), ("version_status", "VARCHAR"),
+                             ("version_note", "TEXT"),
+                             ("deadline_at", "TIMESTAMP WITH TIME ZONE"
+                              if dialect == "postgresql" else "TIMESTAMP"),
+                             ("delivered_at", "TIMESTAMP WITH TIME ZONE"
+                              if dialect == "postgresql" else "TIMESTAMP")):
+                _ensure_column(conn, inspector, "file_arrival", _c, _ddl)
+            # Migration 34 — the contract a received file is written under.
+            _ensure_column(conn, inspector, "file_arrival", "contract_id", "BIGINT")
+            # Migration 38 — ITD handling: how the run read the file. All
+            # nullable, no backfill: NULL is "not an ITD-enabled setup".
+            for _c, _ddl in (("load_type", "VARCHAR"), ("load_type_reason", "TEXT"),
+                             ("period_start", "DATE"), ("period_end", "DATE"),
+                             ("itd_summary", json_type)):
+                _ensure_column(conn, inspector, "file_arrival", _c, _ddl)
+        # Migration 38 — a setup's ITD settings (itd.py). Not mapped on the
+        # Pipeline model, for the reason rule_scope is not: read and written
+        # through itd_store so a database without it keeps working.
+        _ensure_column(conn, inspector, "pipeline", "itd_config", json_type)
+        if inspector.has_table("intake_route"):
+            _ensure_column(conn, inspector, "intake_route", "notify_emails", json_type)
+            if not _had_run_state:
+                conn.exec_driver_sql(
+                    "UPDATE file_arrival SET run_state = 'pre_autorun' "
+                    "WHERE run_state IS NULL AND outcome = 'accepted'")
 
         # v4 model: tables shared between the ops ORM and the canonical schema
         # (tenant, party, program, contract, app_user, upload, …) are created
@@ -1425,6 +2481,26 @@ def init_db():
                 except Exception:  # noqa: BLE001 — fall back to a safe type
                     _ddl = "VARCHAR"
                 _ensure_column(conn, inspector, _t_name, _col.name, _ddl)
+        # Migrations 38/39 — one live row per transaction sent, per feed
+        # (itd_store.py), and the lookups every ITD comparison makes. Same
+        # indexes as the migration files; create_all makes none.
+        if dialect == "postgresql" and inspector.has_table("bdx_sent_transaction"):
+            for _ddl in (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_bdx_sent_transaction_feed_key "
+                "ON bdx_sent_transaction (tenant_id, sent_program_id, "
+                "sent_broker_party_id, sent_stream, sent_row_key) "
+                "WHERE COALESCE(sent_status, 'active') <> 'void'",
+                "CREATE INDEX IF NOT EXISTS ix_bdx_row_comparison_landing "
+                "ON bdx_row_comparison (comparison_landing_id, comparison_status)",
+                "CREATE INDEX IF NOT EXISTS ix_bdx_row_comparison_feed "
+                "ON bdx_row_comparison (tenant_id, comparison_program_id, "
+                "comparison_broker_party_id, comparison_load_type, comparison_status)",
+            ):
+                try:
+                    with conn.begin_nested():
+                        conn.exec_driver_sql(_ddl)
+                except Exception:  # noqa: BLE001 — an index never blocks boot
+                    pass
 
     # Canonical: add `extras` JSONB column to each row-strategy entity table
     # so user-defined fields (the `_xf:*` mapping prefix) have a home.

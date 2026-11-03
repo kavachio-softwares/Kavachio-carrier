@@ -48,7 +48,10 @@ export function DropBadge({ required }: { required?: boolean }) {
 
 /** The box itself: border state, drag handling and the click target. Shared by
  *  the single- and multi-file variants so the two can never drift apart. */
-function Zone({ tone, filled, disabled, onFiles, multiple, accept, inputRef, children }: {
+function Zone({ tone, filled, disabled, onFiles, multiple, accept, inputRef, children, box }: {
+  /** Extra classes for the box, e.g. a fixed height so boxes side by side
+   *  match. */
+  box?: string;
   tone: DropTone;
   filled: boolean;
   disabled?: boolean;
@@ -71,7 +74,7 @@ function Zone({ tone, filled, disabled, onFiles, multiple, accept, inputRef, chi
         const fs = Array.from(e.dataTransfer.files || []);
         if (fs.length) onFiles(multiple ? fs : fs.slice(0, 1));
       }}
-      className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
+      className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none ${box ?? ""}
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
           : `cursor-pointer ${drag ? "border-navy bg-navy/5"
               : filled ? "border-emerald-300 bg-emerald-50/40" : t.idle}`}`}>
@@ -119,7 +122,7 @@ function Prompt({ tone, hint }: { tone: DropTone; hint?: string }) {
 
 /** ONE file. */
 export function FileDrop({
-  label, icon, file, onPick, accept, hint, tone, required, disabled, disabledNote,
+  box, label, icon, file, onPick, accept, hint, tone, required, disabled, disabledNote,
 }: {
   label: string;
   icon: ReactNode;
@@ -133,6 +136,8 @@ export function FileDrop({
   /** What to say INSTEAD of the upload prompt while the box is shut — the
    *  reason is always local to the screen, so the screen supplies it. */
   disabledNote?: string;
+  /** Extra classes for the box (see Zone). */
+  box?: string;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   // The native input keeps its own value, so when the file is cleared from the
@@ -141,7 +146,7 @@ export function FileDrop({
   useEffect(() => { if (!file && ref.current) ref.current.value = ""; }, [file]);
 
   return (
-    <Zone tone={tone} filled={!!file} disabled={disabled} accept={accept} inputRef={ref}
+    <Zone box={box} tone={tone} filled={!!file} disabled={disabled} accept={accept} inputRef={ref}
       onFiles={fs => onPick(fs[0] ?? null)}>
       <Head icon={icon} label={label} tone={tone} filled={!!file} required={required} />
       {file ? (
@@ -166,7 +171,7 @@ export function FileDrop({
 /** MANY files, added over rounds and de-duplicated by name + size, so
  *  re-picking one does not stack a second copy of it. */
 export function MultiFileDrop({
-  label, icon, files, onChange, accept, hint, tone, required, disabled, disabledNote,
+  box, label, icon, files, onChange, accept, hint, tone, required, disabled, disabledNote,
 }: {
   label: string;
   icon: ReactNode;
@@ -178,10 +183,12 @@ export function MultiFileDrop({
   required?: boolean;
   disabled?: boolean;
   disabledNote?: string;
+  /** Extra classes for the box (see Zone). */
+  box?: string;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   return (
-    <Zone tone={tone} filled={files.length > 0} disabled={disabled} accept={accept}
+    <Zone box={box} tone={tone} filled={files.length > 0} disabled={disabled} accept={accept}
       multiple inputRef={ref}
       onFiles={fs => {
         const seen = new Set(files.map(f => `${f.name}|${f.size}`));

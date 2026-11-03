@@ -180,9 +180,14 @@ matched = analysed("Singapore Risk",
 row = by_name(matched, OPTIONAL)
 check("AA. the same optional field is kept once the bordereau carries it",
       row["recommended"] and row["in_input"], row["recommend_reason"])
-check("AA2. and the reason names the column it came from",
+# The reason says the bordereau carries it and stops there. Which column, and
+# how sure, is recorded on the field — not in the sentence: the dialog is where
+# the template is created, and a named column with a percentage there read as
+# a mapping decision, which happens later and at a much higher bar.
+check("AA2. the reason credits the bordereau without naming the column",
       "bordereau" in row["recommend_reason"]
-      and INPUT_COLUMNS[0] in row["recommend_reason"])
+      and INPUT_COLUMNS[0] not in row["recommend_reason"]
+      and row["input_column"] == INPUT_COLUMNS[0])
 
 # --- AB. what the contract asks for is kept whatever the data holds ---------
 CONTRACT_ONLY = {"field": "Retro Cession Reference", "required": True,

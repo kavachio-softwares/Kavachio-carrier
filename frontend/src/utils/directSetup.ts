@@ -84,11 +84,19 @@ export type ContractRule = {
   severity?: string | null; rule_status?: string | null;
   output_field?: string | null; output_fields?: string[]; rule_kind?: string | null;
   source_clause?: { text?: string | null; page_number?: number | null } | null;
-  // cross_field_math (formula) rules only — the ±% tolerance band. `reject_pct`,
-  // when set above `tolerance_pct`, splits flag (warning) from auto-reject.
+  // The ±% margin, on formula (cross_field_math) and limit (max_limit /
+  // min_limit / range_check) rules only. `tolerance_pct` is the margin the run
+  // APPLIES — the rule's own value, or else the contract margin — and
+  // `tolerance_source` says which. `reject_pct` is the formula rule's second
+  // step: when set above `tolerance_pct`, it splits flag (warning) from
+  // auto-reject. Limit rules have no reject step.
   rule_template?: string | null;
   tolerance_pct?: number | null;
   reject_pct?: number | null;
+  tolerance_source?: "rule" | "contract" | null;
+  // The rule as stored. Read only for a range check's low/high, to tell a
+  // range from one required value (low == high).
+  rule_spec?: { ir?: { params?: Record<string, unknown> | null } | null } | null;
   // Value-matching rules (value_in_set / value_not_in_set / conditional_*) only.
   // `enum_values` are the values the CONTRACT names; `variation_values` are the
   // surface spellings of those values the rule accepts — the list a tenant_admin
@@ -214,23 +222,63 @@ export type MissingColumnsResp = {
   skipped_reason?: string | null;
 };
 
-export type TemplateField = { name: string; sheet?: string | null };
+export type TemplateField = { name: string; sheet?: string | null;
+  /** False once the column was removed from the template. Kept in the list so
+   *  a rule already on it can still be labelled, but never offered again. */
+  active?: boolean };
 export type FieldMapping = { contract_field: string; output_field: string; rule_names: (string | null)[] };
 export type ClauseRouting = {
   clause_id: number | null; bucket: string; rule_name?: string | null;
   clause_text?: string | null; source_page?: number | null; reason?: string | null;
+  /** The clause's own title ("Fees"), from the extraction. Null on standard
+   *  (library) rules and on servers that do not send it. */
+  clause_title?: string | null;
 };
+
+/** What to call a clause that has no rule yet: its rule name if one was
+ *  proposed, else its own title, else the opening words of its text. Never a
+ *  bare "Unmapped Clause" when there is anything better to say. */
+export function clauseHeading(item: {
+  rule_name?: string | null; clause_title?: string | null; clause_text?: string | null;
+}): string {
+  if (item.rule_name) return item.rule_name;
+  if (item.clause_title) return item.clause_title;
+  const text = (item.clause_text ?? "").replace(/^\[Generic rule\]\s*/, "").trim();
+  if (!text) return "Clause";
+  const head = text.split(/\s+—\s+|\.\s/)[0];
+  return head.length > 90 ? `${head.slice(0, 87)}…` : head;
+}
 export type ContractDetailT = {
   contract: { id: number; filename: string | null; status: string; created_at: string | null };
   output_template: { name: string; version: number; fields?: TemplateField[] } | null;
   terms: ContractTerm[]; rules: ContractRule[]; field_mappings: FieldMapping[];
   clause_routing?: ClauseRouting[];
+  /** The margin (%) every rule with one follows until it is given its own.
+   *  0 when none was set; older servers omit it. */
+  contract_margin_pct?: number;
 };
 
+/** The reason the server gave, when it gave one a person can read.
+ *
+ *  Most errors carry `detail` as a sentence. An upload the server REFUSES —
+ *  too short, the wrong format, password-protected — carries it as
+ *  `{success: false, error: {code, message}}`, where `message` is written for
+ *  the person uploading. Every screen used to handle that shape badly: one
+ *  printed the JSON around the sentence, another replaced it with "could not be
+ *  read, please try again", which sends someone to retry a file that can never
+ *  pass. Null when there is no such sentence, so each caller keeps its own
+ *  fallback. */
+export function refusalMessage(e: unknown): string | null {
+  const d = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof d === "string") return d;
+  const m = (d as { error?: { message?: unknown } } | null | undefined)?.error?.message;
+  return typeof m === "string" && m.trim() ? m : null;
+}
+
 export function errText(e: unknown): string {
-  const a = e as { response?: { data?: { detail?: string } }; message?: string };
+  const a = e as { response?: { data?: { detail?: unknown } }; message?: string };
   const d = a?.response?.data?.detail;
-  return (typeof d === "string" ? d : d ? JSON.stringify(d) : null) ?? a?.message ?? "Something went wrong";
+  return refusalMessage(e) ?? (d ? JSON.stringify(d) : null) ?? a?.message ?? "Something went wrong";
 }
 
 // ---- contract-upload recovery ------------------------------------------------
@@ -306,4 +354,18 @@ export function pickRecoveredContract(
     && c.filename === opts.filename
     && (c.output_template_id == null || c.output_template_id === opts.templateId));
   return fresh.length ? Math.max(...fresh.map(c => c.id)) : null;
+}
+
+/** Output field → the broker (input) column(s) mapped into it, for the
+ *  Contracts & rules tab. A field filled by a constant or the tab name says so. */
+export function feedIndex(sel: Record<string, string>, extra: Record<string, MappingRule>) {
+  const by: Record<string, string[]> = {};
+  const add = (f: string, v: string) => { (by[f] ??= []).includes(v) || by[f].push(v); };
+  for (const [k, field] of Object.entries(sel)) add(field, k.slice(k.indexOf("||") + 2));
+  for (const [k, rule] of Object.entries(extra)) {
+    const field = k.slice(k.indexOf("||") + 2);
+    if (rule.kind === "const") add(field, `constant "${rule.value ?? ""}"`);
+    else if (rule.kind === "source_sheet") add(field, "the source tab name");
+  }
+  return (field: string) => by[field] ?? [];
 }

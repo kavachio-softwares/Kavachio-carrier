@@ -168,7 +168,10 @@ def current_intake_principal(
             raise _invalid()
 
         route = s.get(IntakeRoute, cred.route_id)
-        if route is None:
+        # The same table holds SFTP logins (sftp_accounts). Their fingerprint
+        # can never match a key — the user name is inside it — but a credential
+        # only ever opens the door it was made for.
+        if route is None or route.channel != "api":
             raise _invalid()
 
         # A switched-off route turns files away WITH a note rather than
@@ -176,7 +179,7 @@ def current_intake_principal(
         if not route.is_enabled:
             raise HTTPException(403, {
                 "error": "route_disabled",
-                "message": "This way in has been switched off by the carrier. "
+                "message": "This channel has been switched off by the carrier. "
                            "Contact them before sending again."})
 
         # Throttled to once a minute: otherwise every request writes a row and

@@ -19,13 +19,14 @@ exists, letting a caller enumerate other carriers' ids.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Path
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
-from auth_deps import Principal, current_principal
+from auth_deps import Principal, current_principal, require_role
 from db import (
     AppUser, Contract, Program, ProgramBroker, SessionLocal, Tenant,
 )
@@ -45,6 +46,12 @@ def broker_party_id_of(s, p: Principal) -> Optional[int]:
     """
     if not p.is_broker:
         return None
+    # Same rule as auth_deps.resolve_broker_party_id: login tokens never carry
+    # it, so it is set only on a Principal the server built itself — the
+    # broker's secure correction link (fix_link_routes._as_broker), which acts
+    # for the broker company with no user behind it.
+    if p.broker_party_id:
+        return int(p.broker_party_id)
     u = s.query(AppUser).filter(AppUser.id == p.user_id).first()
     return int(u.broker_party_id) if u and u.broker_party_id else None
 
@@ -56,6 +63,25 @@ def carrier_ids_for_broker(s, broker_party_id: int) -> set[int]:
                       func.coalesce(ProgramBroker.status, "active") == "active")
               .distinct().all())
     return {r[0] for r in rows if r[0] is not None}
+
+
+def broker_programme_ids(s, p: Principal, carrier_id: int) -> set[int]:
+    """The programmes of `carrier_id` that carry this broker seat's ACTIVE
+    program_broker row — the only ones a broker may see there. Empty for a
+    seat with no broker."""
+    bid = broker_party_id_of(s, p)
+    if bid is None:
+        return set()
+    # Joined through the programme (whose carrier is always set), not
+    # program_broker.tenant_id, which legacy rows may lack — resolve_broker
+    # accepts those too.
+    rows = (s.query(ProgramBroker.program_id)
+              .join(Program, Program.id == ProgramBroker.program_id)
+              .filter(ProgramBroker.broker_party_id == bid,
+                      Program.tenant_id == carrier_id,
+                      func.coalesce(ProgramBroker.status, "active") == "active")
+              .all())
+    return {r[0] for r in rows}
 
 
 def resolve_carrier(s, p: Principal, carrier_id: int) -> int:
@@ -73,6 +99,178 @@ def resolve_carrier(s, p: Principal, carrier_id: int) -> int:
     if p.tenant_id is None or int(p.tenant_id) != int(carrier_id):
         raise HTTPException(404, _NOT_FOUND)
     return int(carrier_id)
+
+
+# --- the two carrier seats --------------------------------------------------
+#
+# Everyone at a carrier holds the same `carrier_admin` DB role — the column
+# takes four values, and a fifth would ripple through every check in the
+# system. What separates the carrier ADMIN from a carrier USER is the
+# organisation's owner pointer, and nothing else.
+#
+# The consequence is easy to miss: `require_role("carrier_admin")` admits BOTH
+# seats. That is right for almost every route, and wrong for the few acts that
+# are the admin's alone — signing a contract, and approving a setup a carrier
+# user built. Those compose `require_carrier_admin` on top.
+#
+# app_routes._carrier_seat and _assert_is_carrier_admin are the same rule,
+# kept where their callers are; both delegate here so that who the carrier
+# admin is has ONE definition rather than three that can drift.
+
+def carrier_seat(s, p: Principal) -> str:
+    """Which carrier seat this is: "admin" (the organisation's owner), "user"
+    (everyone else there), or "both".
+
+    "both" covers Kavachio staff and an organisation with NO owner recorded —
+    a legacy tenant migration 18 could not name one for. Treating that as
+    "user" would lock every person in it out of their own company, so it opens
+    rather than closes.
+    """
+    if p.is_platform_admin:
+        return "both"
+    t = (s.query(Tenant).filter(Tenant.id == p.tenant_id).first()
+         if p.tenant_id else None)
+    if t is None or t.owner_user_id is None:
+        return "both"
+    return "admin" if t.owner_user_id == p.user_id else "user"
+
+
+def is_carrier_admin_seat(s, p: Principal) -> bool:
+    """True for the carrier admin, and for a seat the rule cannot pin down."""
+    return carrier_seat(s, p) in ("admin", "both")
+
+
+def is_carrier_admin_user(s, tenant_id, user_id) -> bool:
+    """The same question as is_carrier_admin_seat, asked about a USER ID rather
+    than about whoever is signed in.
+
+    Needed where the act is happening later than the decision to do it: an
+    invitation is accepted days after it was sent, and what the carrier's own
+    rule says about the link it writes depends on who sent it, not on the
+    broker clicking Accept. There is no Principal to hand it by then — only
+    `broker_invitation.by_user_id`.
+
+    Fails OPEN on an unknown tenant or a tenant with no owner recorded, exactly
+    as carrier_seat does: those organisations answer "both", every seat in them
+    is treated as the admin, and this has to agree with that or the two rules
+    would disagree about the same person.
+    """
+    if user_id is None:
+        return True
+    t = s.query(Tenant).filter(Tenant.id == tenant_id).first() if tenant_id else None
+    if t is None or t.owner_user_id is None:
+        return True
+    return t.owner_user_id == user_id
+
+
+def require_carrier_admin(what: str = "do this"):
+    """Dependency factory for the acts that are the carrier ADMIN's alone.
+
+    Composed with require_role rather than replacing it: the role check is what
+    refuses a broker token, a platform-only seat and a signed-out caller, and
+    this adds the seat on top of it.
+
+    403, not 404. A carrier user is entitled to know the contract exists and is
+    simply not theirs to sign — "no such contract" would send them looking for
+    a bug. That is the opposite of the scope misses above, where a 404 is what
+    stops a caller enumerating another carrier's ids.
+    """
+    def _dep(p: Principal = Depends(require_role("carrier_admin"))) -> Principal:
+        with SessionLocal() as s:
+            if not is_carrier_admin_seat(s, p):
+                raise HTTPException(
+                    403, f"Only the carrier can {what}.")
+        return p
+    return _dep
+
+
+# --- three seats, and the approval flow behind a flag -------------------------
+#
+# 29 Sep 2026: the platform has three seats — Kavachio admin, carrier admin,
+# broker admin. Carrier users and broker users (operators) are retired: nobody
+# creates them any more, and one still in the table cannot sign in.
+#
+# The carrier admin's approval flow (broker onboarding requests, Bordereau
+# Setup approval, accepting a carrier user's uploaded contract) existed only
+# for a carrier user's work. It is switched OFF by CARRIER_APPROVALS_ENABLED
+# rather than deleted: with it off every gate takes the admin's own road — the
+# carrier admin's act is the decision — and the approval screens stay hidden.
+
+def carrier_approvals_enabled() -> bool:
+    """CARRIER_APPROVALS_ENABLED (1/true/on/yes). Default OFF."""
+    return os.getenv("CARRIER_APPROVALS_ENABLED", "").strip().lower() in (
+        "1", "true", "on", "yes")
+
+
+def needs_carrier_approval(s, p: Principal) -> bool:
+    """Does this carrier seat's work wait for the carrier admin? Never while
+    the approval flow is off; otherwise only a carrier user's."""
+    return carrier_approvals_enabled() and not is_carrier_admin_seat(s, p)
+
+
+def retired_seat(s, u: AppUser) -> Optional[str]:
+    """Why this login may no longer be used, or None when it may.
+
+    A broker user (operator), or a carrier person who is not their
+    organisation's carrier admin. An organisation with no owner recorded keeps
+    every seat in it, as carrier_seat does — refusing them would lock the
+    company out of itself.
+    """
+    from auth_deps import normalize_role
+    role = normalize_role(u.role)
+    if role == "operator":
+        return ("Broker user accounts have been retired. Your broker "
+                "now does this work.")
+    if role == "carrier_admin" and not is_carrier_admin_user(s, u.tenant_id, u.id):
+        return ("Carrier user accounts have been retired. Your carrier "
+                "now does this work.")
+    return None
+
+
+
+# --- a programme link that is still waiting -----------------------------------
+#
+# A carrier USER's programme→broker link is created `pending_approval` and is
+# released when the Bordereau Setup built on it is approved (migration 27).
+# While it waits it is REAL for the carrier — they are building the contract
+# and the setup on top of it — and does not exist for the broker, which is the
+# whole point of the gate.
+#
+# So the status check cannot be one condition for everybody. Every broker-side
+# reader keeps asking for `active` alone; the carrier's own scope chain asks
+# through here.
+
+LINK_LIVE = "active"
+LINK_PENDING = "pending_approval"
+
+
+def link_live(p: Principal | None = None):
+    """SQL condition for the programme links this caller may act through.
+
+    The carrier sees its own pending links; a broker seat, and any caller we
+    cannot identify, sees only live ones. Fails closed: an unknown caller gets
+    the narrower answer.
+    """
+    live = func.coalesce(ProgramBroker.status, LINK_LIVE) == LINK_LIVE
+    if p is not None and not p.is_broker:
+        return or_(live, ProgramBroker.status == LINK_PENDING)
+    return live
+
+
+def link_is_live(link, p: Principal | None = None) -> bool:
+    """The same rule as link_live(), for code holding the ROW rather than
+    building a query.
+
+    Both exist because both shapes are in use, and the rule has to be one
+    thing. A carrier raising a contract under a broker whose link is still
+    waiting for the carrier admin is doing exactly what the flow asks of them —
+    refusing it there stops the chain in the middle, one step after it was
+    started. A NULL status is a legacy row and has always meant live.
+    """
+    status = (getattr(link, "status", None) or LINK_LIVE)
+    if status == LINK_LIVE:
+        return True
+    return status == LINK_PENDING and p is not None and not p.is_broker
 
 
 # --- the resolved chain -----------------------------------------------------
@@ -146,7 +344,7 @@ def resolve_broker(s, p: Principal, carrier_id: int, program_id: int,
     link = (s.query(ProgramBroker)
               .filter(ProgramBroker.program_id == program_id,
                       ProgramBroker.broker_party_id == broker_party_id,
-                      func.coalesce(ProgramBroker.status, "active") == "active")
+                      link_live(p))
               .first())
     if link is None or (link.tenant_id is not None and link.tenant_id != carrier_id):
         raise HTTPException(404, _NOT_FOUND)
@@ -170,8 +368,34 @@ def resolve_contract(s, p: Principal, carrier_id: int, program_id: int,
     return c
 
 
-def resolve_policy(cs, contract_id: int, policy_id: int) -> dict:
-    """A policy row, checked to hang off this contract. Reads the canonical
+def policy_sender_filter(t, scope: "CarrierScope"):
+    """Which of a contract's policies this scope may read, by who SENT them.
+
+    A contract does not say whose a policy is: one the carrier holds for the
+    whole programme collects every broker's policies. The sender the loader
+    records (canonical.POLICY_SUBMITTER_COL) does:
+      broker seat   only the policies its own runs loaded. A policy with no
+                    sender recorded is nobody's to show a broker.
+      carrier seat  the policies of the broker the path names, plus those with
+                    no sender recorded — the carrier owns them all anyway.
+    Returns a where-clause, or None for "no narrowing".
+    """
+    from sqlalchemy import false, or_
+    from canonical import POLICY_SUBMITTER_COL
+    col = t.c.get(POLICY_SUBMITTER_COL)
+    if scope.principal.is_broker:
+        if col is None or scope.broker_party_id is None:
+            return false()
+        return col == scope.broker_party_id
+    if col is None or scope.broker_party_id is None:
+        return None
+    return or_(col == scope.broker_party_id, col.is_(None))
+
+
+def resolve_policy(cs, contract_id: int, policy_id: int,
+                   scope: Optional["CarrierScope"] = None) -> dict:
+    """A policy row, checked to hang off this contract — and, given the scope,
+    to be one this scope may read (policy_sender_filter). Reads the canonical
     warehouse (policy is not an ops ORM entity)."""
     from sqlalchemy import select
     from canonical import CANONICAL_TABLES
@@ -179,6 +403,10 @@ def resolve_policy(cs, contract_id: int, policy_id: int) -> dict:
     stmt = select(t).where(t.c.policy_id == policy_id)
     if "is_current_version" in t.c:
         stmt = stmt.where(t.c.is_current_version.isnot(False))
+    if scope is not None:
+        sender = policy_sender_filter(t, scope)
+        if sender is not None:
+            stmt = stmt.where(sender)
     row = cs.execute(stmt).mappings().first()
     if row is None or row.get("policy_contract_id") != contract_id:
         raise HTTPException(404, _NOT_FOUND)
@@ -237,11 +465,149 @@ def policy_scope(policy_id: int = Path(..., ge=1),
                  scope: CarrierScope = Depends(contract_scope)) -> CarrierScope:
     from db import CanonicalSession
     with CanonicalSession() as cs:
-        resolve_policy(cs, scope.contract_id, policy_id)
+        resolve_policy(cs, scope.contract_id, policy_id, scope)
     return CarrierScope(**{**scope.__dict__, "policy_id": policy_id})
 
 
+# --- what the PLATFORM seat is not a party to --------------------------------
+#
+# require_role() lets a platform admin through every carrier gate — it is a
+# superset of the carrier roles by design. That is right for oversight, and
+# wrong for the two things below, which are not oversight: they are acts in a
+# relationship between a carrier and a broker that Kavachio is not part of.
+#
+# Both were "closed" only by accident before: each endpoint ends up calling
+# resolve_tenant_id(), which 400s a platform admin for not naming a tenant. A
+# 400 about a missing parameter is not a rule — it reads as something the
+# caller forgot rather than something they may not do, and it opens the moment
+# anyone adds a tenant picker to the screen. These say it outright instead.
+
+def assert_can_invite_brokers(principal: Principal) -> None:
+    """Bringing a broker on board, and chasing or withdrawing that invitation,
+    belongs to the CARRIER alone.
+
+    An invitation says "come and work with us", and Kavachio is not the "us".
+    The accepted invitation IS the carrier-broker relationship, so a platform
+    admin creating one would be making a relationship on a carrier's behalf
+    that the carrier never agreed to — and the broker would be told a carrier
+    invited them when nobody there did.
+
+    Kavachio's oversight of the same ground is unchanged: the carrier's page
+    still lists its brokers, and the audit trail still names every invitation.
+    Reading who works with whom is oversight; deciding it is not."""
+    if principal.is_platform_admin:
+        raise HTTPException(
+            403, "Kavachio can see a carrier's brokers but cannot invite one. "
+                 "An invitation comes from the carrier — only they can send, "
+                 "chase or withdraw it.")
+
+
+def assert_can_open_contract(principal: Principal) -> None:
+    """Opening a CONTRACT RECORD — its terms, its documents, its signature
+    page — is for the two organisations that hold it.
+
+    A contract is an agreement between a carrier and a broker, and its terms
+    are the commercial substance of that agreement. Kavachio runs the platform
+    the agreement is administered on; it is not a party to it, and being able
+    to read every carrier's rates and limits is not something running the
+    platform requires.
+
+    What oversight DOES need is left open on purpose: which contracts hang off
+    which programme, how many there are and what state they are in, all of
+    which the carrier's page still shows from the programme's contract list.
+    That answers "is this carrier set up" without opening the agreement."""
+    if principal.is_platform_admin:
+        raise HTTPException(
+            403, "Kavachio can see which contracts a programme has but cannot "
+                 "open one. A contract is between the carrier and the broker.")
+
+
 # --- reading one generated export, from either side --------------------------
+
+def assert_can_amend(principal: Principal) -> None:
+    """Changing a file's exceptions — deciding them (Approve / Fix / Dismiss),
+    correcting a value, or running Fix & Validate — is the BROKER's work, and
+    only the broker's.
+
+    A bordereau is the broker's submission. What is flagged on it is a question
+    put to the broker, and answering it is answering for their own file, so the
+    two broker seats are the only ones that may write here. Everyone else reads:
+    Kavachio staff open every file and amend none (a change made from the
+    platform is an edit neither side made), and a carrier reads what was flagged
+    on a file it received without correcting the submission on the sender's
+    behalf. Reading is untouched for all of them — assert_can_read_export still
+    lets each side see every file it is entitled to.
+
+    Call it BEFORE any read-scope check, so the answer is the same 403 whatever
+    the file — it is about who is asking, not which file."""
+    if principal.is_broker:
+        return
+    if principal.is_platform_admin:
+        raise HTTPException(
+            403, "Kavachio can view exceptions but not change them. Only the "
+                 "broker that sent a file can review, fix or re-validate it.")
+    raise HTTPException(
+        403, "You can view every exception on this file but not change them. "
+             "Only the broker that sent it can approve, fix, dismiss or "
+             "re-validate it.")
+
+
+def require_contract_broker(broker_party_id) -> None:
+    """A contract is always WITH one broker (9 Oct 2026). Saved with none, it
+    belonged to nobody: every broker on the programme could see it and be
+    checked against it. Said before anything is read or paid for."""
+    if broker_party_id is None:
+        raise HTTPException(
+            400, "Pick the broker this contract is with. A contract always "
+                 "belongs to one broker on the programme, so it cannot be "
+                 "saved without one.")
+
+
+def assert_broker_on_programme(s, broker_party_id, program_id,
+                               file_owner_party_id=None) -> None:
+    """Refuse a change to a file from a broker the carrier has taken OFF the
+    programme it was sent to.
+
+    assert_can_amend answers "is this the broker's kind of work"; this answers
+    "does this broker still hold the programme". Both have to be true. The
+    second was only ever implied: assert_can_read_export hides a removed
+    programme's files from the broker (a bare 404), and the other write routes
+    did not ask at all — a page left open, an upload-keyed route or an old
+    correction email still got through. This says why, in words, and covers
+    the routes the read check does not.
+
+    Pass the file's own programme. Nothing to check for a file with none
+    recorded, or for a caller that is not a broker (platform and carrier seats
+    never reach the write routes — assert_can_amend refuses them first).
+
+    Pass `file_owner_party_id` when the file is looked up by id: the message
+    names the carrier and programme, so it is only said about the broker's OWN
+    file. Anyone else's falls through to the usual "not found".
+
+    403 with the reason, not 404: the broker has worked on this programme, so
+    naming it discloses nothing, and "not found" would read as a fault.
+    """
+    if not broker_party_id or not program_id:
+        return
+    if file_owner_party_id is not None and int(file_owner_party_id) != int(broker_party_id):
+        return
+    live = (s.query(ProgramBroker.id)
+              .filter(ProgramBroker.program_id == program_id,
+                      ProgramBroker.broker_party_id == broker_party_id,
+                      func.coalesce(ProgramBroker.status, "active") == "active")
+              .first())
+    if live is not None:
+        return
+    prog = s.query(Program).filter(Program.id == program_id).first()
+    carrier = (s.query(Tenant).filter(Tenant.id == prog.tenant_id).first()
+               if prog is not None else None)
+    who = ((carrier.legal_name or carrier.tenant_name) if carrier else None) or "The carrier"
+    where = prog.name if prog is not None and prog.name else "this programme"
+    raise HTTPException(
+        403, f"{who} has taken you off {where}, so you can no longer send "
+             f"bordereaux for it or fix, approve or re-check its exceptions. "
+             f"Please contact {who} if this is a mistake.")
+
 
 def assert_can_read_export(s, p: Principal, export_row) -> None:
     """May this principal see this generated output?

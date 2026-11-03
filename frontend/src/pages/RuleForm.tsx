@@ -86,7 +86,7 @@ export default function RuleForm() {
             <button className="btn" onClick={() => nav("/rule-library")}>← Rules</button>
             <button className="btn pri" onClick={save} disabled={!canSave}
               title={canSave ? undefined : "Enter a rule name and pick a type first"}>
-              {busy ? "Saving…" : editing ? "Save changes" : "Create rule"}
+              {busy ? "Saving…" : editing ? "Save Changes" : "Create Rule"}
             </button>
           </div>
         </div>
@@ -154,7 +154,7 @@ export default function RuleForm() {
                   <input type="checkbox" checked={isActive}
                     onChange={e => setIsActive(e.target.checked)}
                     style={{ width: 16, height: 16, margin: 0, flex: "none" }} />
-                  <span>Active — run this rule on new uploads</span>
+                  <span>Active — include this rule when Bordereau Setup is run</span>
                 </label>
               </div>
             </div>

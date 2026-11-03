@@ -38,33 +38,103 @@ def actor_from_token(authorization: str | None) -> tuple[int | None, int | None]
         return None, None
 
 
-_email_cache: dict[int, str | None] = {}
+# user_id -> (email, normalized role, broker_party_id). One lookup per user per
+# process: the middleware needs all three on EVERY mutating request, and they
+# change about as often as a person changes job.
+_actor_cache: dict[int, tuple[str | None, str | None, int | None]] = {}
+
+
+def actor_identity(user_id: int | None) -> tuple[str | None, str | None, int | None]:
+    """(email, role, broker_party_id) for a user id. Best-effort, cached.
+
+    This is what lets an audit row name the SEAT that acted, not only a display
+    string — see the note on db.ActivityEvent. Never raises.
+    """
+    if user_id is None:
+        return None, None, None
+    hit = _actor_cache.get(user_id)
+    if hit is not None:
+        return hit
+    ident: tuple[str | None, str | None, int | None] = (None, None, None)
+    try:
+        from auth_deps import normalize_role
+        with SessionLocal() as s:
+            u = s.get(AppUser, user_id)
+            if u is not None:
+                ident = (u.email, normalize_role(u.role), u.broker_party_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("audit: actor lookup failed for %s: %s", user_id, e)
+    _actor_cache[user_id] = ident
+    return ident
+
+
+def forget_actor(user_id: int | None) -> None:
+    """Drop a cached identity — call after a role / broker change so the next
+    audit row records the new seat instead of the one held at first sight."""
+    _actor_cache.pop(user_id, None)
+
 
 def actor_email(user_id: int | None) -> str | None:
     """Resolve a user_id to its email (cached). Best-effort."""
-    if user_id is None:
+    return actor_identity(user_id)[0]
+
+def actor_columns(principal=None, user_id: int | None = None) -> dict:
+    """The three ``actor_*`` values for an ActivityEvent built by hand.
+
+    ``s.add(ActivityEvent(..., **actor_columns(principal)))`` records the acting
+    seat on a row that does not go through log_activity(). Never raises.
+    """
+    uid = user_id if user_id is not None else getattr(principal, "user_id", None)
+    _email, role, broker_id = actor_identity(uid)
+    return {"actor_user_id": uid, "actor_role": role,
+            "actor_broker_party_id": broker_id}
+
+
+def actor_for(principal) -> str | None:
+    """The actor to record for ``principal`` on rows the CARRIER reads.
+
+    A broker seat is recorded as its broker company, ``broker:<party id>`` —
+    the same label a run submitted through the broker's lane carries. The
+    carrier deals with the broker company and never sees the broker's own
+    users, so their emails do not belong in the carrier's activity. Everyone
+    else is recorded by email, as before. Best-effort, like actor_email.
+    """
+    if principal is None:
         return None
-    if user_id in _email_cache:
-        return _email_cache[user_id]
-    email = None
-    try:
-        with SessionLocal() as s:
-            u = s.get(AppUser, user_id)
-            email = u.email if u else None
-    except Exception as e:  # noqa: BLE001
-        log.warning("audit: actor_email lookup failed for %s: %s", user_id, e)
-    _email_cache[user_id] = email
-    return email
+    if getattr(principal, "is_broker", False):
+        try:
+            from auth_deps import resolve_broker_party_id
+            with SessionLocal() as s:
+                bid = resolve_broker_party_id(s, principal)
+            if bid is not None:
+                return f"broker:{bid}"
+        except Exception as e:  # noqa: BLE001
+            log.warning("audit: broker actor lookup failed for %s: %s",
+                        principal.user_id, e)
+    return actor_email(principal.user_id)
 
 # ---------------------------------------------------------------------------
 # writers
 # ---------------------------------------------------------------------------
 
-def log_activity(tenant_id, actor, action, target=None, details=None) -> None:
+def log_activity(tenant_id, actor, action, target=None, details=None, *,
+                 actor_user_id=None, principal=None) -> None:
+    """Append one activity row.
+
+    `actor` stays the display string every existing caller already passes. Give
+    EITHER `principal` (preferred — the request's Principal) or `actor_user_id`
+    and the acting seat is recorded alongside it, which is what makes the row
+    reachable by the Audit Logs screen's role scoping. Omit both and the row is
+    written exactly as before, and is resolved from `actor` at read time.
+    """
+    uid = actor_user_id if actor_user_id is not None else getattr(principal, "user_id", None)
+    _email, role, broker_id = actor_identity(uid)
     try:
         with SessionLocal() as s:
             s.add(ActivityEvent(tenant_id=tenant_id, actor=actor, action=action,
-                                target=target, details=details or {}))
+                                target=target, details=details or {},
+                                actor_user_id=uid, actor_role=role,
+                                actor_broker_party_id=broker_id))
             s.commit()
     except Exception as e:  # noqa: BLE001
         log.warning("audit: log_activity failed (%s): %s", action, e)
@@ -97,9 +167,43 @@ def log_access(actor, resource, action, ip=None, user_id=None, tenant_id=None) -
 
 _NUM = re.compile(r"/\d+")
 
+# Path segments that are SECRETS, not ids. A signing link is a bearer
+# credential: anyone holding it can sign that contract. It was being written
+# into the audit row twice — as the action name and as the target — which put a
+# live signing link in a log that carriers, brokers and Kavachio staff all read.
+# Redacted here, at the only place a request path becomes an audit row.
+_SECRET_SEGMENTS = [
+    (re.compile(r"(/esign/sign/)[^/]+"), r"\1{token}"),
+    # The broker's secure correction link is the same kind of credential.
+    (re.compile(r"(/fix-link/)[^/]+"), r"\1{token}"),
+]
+
+# Id segments that are not NUMBERS. A tenant is addressed by its code, so
+# /tenants/acme/transfer-ownership and /tenants/globex/transfer-ownership were
+# two different "actions" — 28 one-off rows for what is one event, and a filter
+# entry per carrier. Collapsed like any other id.
+_NAMED_IDS = [
+    (re.compile(r"(/tenants/)(?!new$|new/)[^/]+"), r"\1{code}"),
+]
+
+
+def redact_path(path: str) -> str:
+    """Blank out secret-bearing segments, leaving ids alone.
+
+    Kept apart from normalize_path because the two are wanted separately: a
+    reader naming "/export/downloads/37/file" needs the 37, and must never need
+    the signing token."""
+    for rx, repl in _SECRET_SEGMENTS:
+        path = rx.sub(repl, path)
+    return path
+
+
 def normalize_path(path: str) -> str:
-    """Collapse numeric id segments so actions group: /direct/format/211 ->
-    /direct/format/{id}."""
+    """Collapse id segments so actions group: /direct/format/211 ->
+    /direct/format/{id}. Secrets are redacted first, never collapsed."""
+    path = redact_path(path)
+    for rx, repl in _NAMED_IDS:
+        path = rx.sub(repl, path)
     return _NUM.sub("/{id}", path)
 
 
@@ -115,7 +219,13 @@ _FRIENDLY = {
     ("DELETE", "/parties/{id}/contacts/{id}"):       "party_contact_removed",
     ("POST",   "/programs/{id}/contracts"):          "contract_uploaded",
     ("POST",   "/programs/{id}/setup"):              "bordereau_setup_completed",
+    # One endpoint, two outcomes: the carrier ADMIN activates, a carrier USER
+    # sends it up for approval. The middleware keys on the path alone and
+    # cannot tell them apart, so the route logs itself (_SELF_LOGGED) and
+    # these names are kept only to resolve rows written before it did.
     ("POST",   "/pipelines/{id}/activate"):          "bordereau_setup_activated",
+    ("POST",   "/pipelines/{id}/approve"):           "bordereau_setup_approved",
+    ("POST",   "/pipelines/{id}/reject"):            "bordereau_setup_rejected",
     ("PUT",    "/mappers/{id}/sheet-bindings"):      "sheet_bindings_saved",
     ("PUT",    "/users/{id}"):                       "user_updated",
     ("DELETE", "/users/{id}"):                       "user_deleted",
@@ -134,6 +244,106 @@ _FRIENDLY = {
     ("POST",   "/export/template/{id}/activate"):    "output_template_activated",
     ("POST",   "/export/template/{id}/refresh"):     "output_template_refreshed",
     ("POST",   "/api/canonical/fields/save"):        "canonical_fields_saved",
+    # --- the contract's life, start to finish. These were the single biggest
+    # gap in the trail: every one of them WAS recorded, but as "POST
+    # /contracts/{id}/accept-terms", which reads as a server log rather than as
+    # the business event it is.
+    ("POST",   "/contracts"):                        "contract_raised",
+    ("PATCH",  "/contracts/{id}"):                   "contract_edited",
+    ("POST",   "/contracts/{id}/submit"):            "contract_submitted",
+    ("POST",   "/contracts/{id}/send-for-review"):   "contract_sent_for_review",
+    # The carrier admin's answer when a colleague's contract is not right.
+    ("POST",   "/contracts/{id}/send-back"):        "contract_sent_back",
+    ("POST",   "/contracts/{id}/accept-terms"):      "contract_terms_accepted",
+    # The uploaded road: a contract that was executed before it got here is
+    # accepted rather than signed. See contract_routes._accept_uploaded.
+    ("POST",   "/contracts/{id}/submit-for-approval"): "contract_awaiting_review",
+    ("POST",   "/contracts/{id}/accept"):            "contract_accepted",
+    ("POST",   "/contracts/{id}/request-changes"):   "contract_changes_requested",
+    ("POST",   "/contracts/{id}/approve"):           "contract_approved",
+    ("POST",   "/contracts/{id}/reject"):            "contract_rejected",
+    ("POST",   "/contracts/{id}/activate"):          "contract_activated",
+    ("POST",   "/contracts/{id}/terminate"):         "contract_terminated",
+    ("POST",   "/contracts/{id}/renew"):             "contract_renewed",
+    ("POST",   "/contracts/{id}/sign"):              "contract_signed",
+    ("POST",   "/contracts/{id}/submit-signed"):     "contract_signed_copy_submitted",
+    ("POST",   "/contracts/{id}/documents"):         "contract_document_attached",
+    ("POST",   "/contract-wording/pages"):           "contract_wording_saved",
+    ("POST",   "/contract-wording/pages/{id}"):      "contract_wording_saved",
+    ("POST",   "/contract-wording/draft"):           "contract_wording_drafted",
+    # --- signing
+    ("POST",   "/esign/contracts/{id}/signing-session"): "signature_round_started",
+    ("POST",   "/esign/sign/{token}"):               "contract_signed_from_email",
+    ("POST",   "/esign/sign/{token}/verify"):        "signing_code_verified",
+    # --- the broker mesh. A few keys below name routes that no longer exist
+    # (/contracts/{id}/approve, /submit, /reject, /brokers/link): they are what
+    # the ROWS ALREADY IN THE TABLE say, and this map is read on the way out as
+    # well as on the way in, so keeping them is what makes that history legible.
+    # One endpoint, two outcomes, as with /pipelines/{id}/activate above: the
+    # carrier ADMIN onboards the broker, a carrier USER raises a request for
+    # their carrier admin. Both routes log themselves (_SELF_LOGGED) and these
+    # names are kept only to resolve rows written before they did.
+    ("POST",   "/brokers"):                          "broker_added",
+    ("POST",   "/broker/users"):                     "broker_user_created",
+    ("POST",   "/broker/invitations/{id}/accept"):   "broker_invitation_accepted",
+    ("POST",   "/programs/{id}/brokers"):            "broker_put_on_programme",
+    # --- broker onboarding approval (the carrier admin's decision)
+    ("POST",   "/broker-onboarding-requests/{id}/approve"): "broker_request_approved",
+    ("POST",   "/broker-onboarding-requests/{id}/reject"):  "broker_request_rejected",
+    ("DELETE", "/broker-onboarding-requests/{id}"):         "broker_request_withdrawn",
+    # --- the run itself, through the canonical carrier-scoped path. This is
+    # the broker's whole reason for having a login, and it had no name.
+    ("POST",   "/carriers/{id}/programs/{id}/brokers/{id}/contracts/{id}/runs"):
+        "bordereau_run",
+    ("POST",   "/pipelines"):                        "bordereau_setup_created",
+    ("POST",   "/pipelines/{id}/missing-columns/analyze"): "missing_columns_analyzed",
+    ("PUT",    "/pipelines/{id}"):                   "bdx_setup_updated",
+    # --- invitations
+    ("POST",   "/broker/invitations/{id}/decline"):  "broker_invitation_declined",
+    ("POST",   "/broker-invitations/{id}/resend"):   "invite_resent",
+    ("DELETE", "/broker-invitations/{id}"):          "broker_invitation_withdrawn",
+    ("POST",   "/brokers/link"):                     "broker_linked",
+    ("DELETE", "/programs/{id}/brokers/{id}"):       "broker_removed_from_programme",
+    # --- contracts, the remaining verbs
+    ("POST",   "/programs/{id}/contracts/{id}/generate-rules"): "contract.rules_generated",
+    ("POST",   "/contracts/{id}/endorsement"):       "contract_endorsed",
+    ("POST",   "/contracts/{id}/bind-checks"):       "contract_checks_bound",
+    ("POST",   "/contracts/{id}/map-to-template"):   "contract_mapped_to_template",
+    ("POST",   "/contracts/{id}/skip-review"):       "contract_review_skipped",
+    # --- signing, the remaining verbs
+    ("POST",   "/esign/envelopes"):                  "signature_envelope_created",
+    ("POST",   "/esign/envelopes/{id}/send"):        "signature_envelope_sent",
+    ("POST",   "/esign/sign/{token}/resend-code"):   "signing_code_resent",
+    ("POST",   "/esign/envelopes/{id}/remind"):       "signature_reminder_sent",
+    ("POST",   "/esign/envelopes/{id}/void"):         "signature_round_voided",
+    ("POST",   "/esign/sign/{token}/decline"):       "contract_signature_declined",
+    # --- output templates
+    ("POST",   "/output-template/{id}/fields"):      "output_template_fields_saved",
+    ("PUT",    "/output-template/{id}/fields"):      "output_template_fields_saved",
+    ("POST",   "/output-template/from-standard"):    "output_template_from_standard",
+    ("POST",   "/output-template/analyze-sources"):  "output_sources_analyzed",
+    # --- how files reach the carrier
+    ("POST",   "/intake/routes"):                    "intake_route_created",
+    ("POST",   "/intake/routes/{id}/keys"):          "intake_key_created",
+    ("POST",   "/intake/routes/{id}/poll"):          "mailbox_polled",
+    ("POST",   "/intake/sftp/test"):                 "intake_sftp_tested",
+    ("POST",   "/intake/routes/{id}/guide"):         "intake_guide_sent",
+    ("POST",   "/intake/routes/{id}/sftp-login"):    "intake_sftp_login_issued",
+    ("POST",   "/intake/arrivals/{id}/release"):     "file_arrival_released",
+    # Rows written before these routes logged only themselves (_SELF_LOGGED).
+    ("POST",   "/intake/arrivals/{id}/discard"):     "intake.arrival.discarded",
+    ("DELETE", "/intake/keys/{id}"):                 "intake_key_revoked",
+    ("POST",   "/v1/bordereaux"):                    "bdx_uploaded",
+    # A route that no longer exists; its rows still say it.
+    ("POST",   "/broker/bordereau/{id}/send"):       "bordereau_sent",
+    # The Rule Library switch. The path cannot say which way it went — the
+    # route's own row (rule_enabled / rule_disabled) does.
+    ("PATCH",  "/rule-library/{id}"):                "rule_toggled",
+    # --- the rest
+    ("POST",   "/calendar/chase"):                   "submission_chased",
+    ("PUT",    "/programs/{id}/schedule"):           "submission_schedule_updated",
+    ("POST",   "/tenants/{code}/transfer-ownership"): "ownership_transferred",
+    ("POST",   "/onboarding/skip"):                  "onboarding_skipped",
 }
 
 def friendly_action(method: str, path: str) -> str:
@@ -147,6 +357,14 @@ def friendly_action(method: str, path: str) -> str:
 # captured generically by the middleware. (/auth/* is skipped separately and
 # handled by auth_audit.)
 _SELF_LOGGED = [
+    # Change period (Phase B) writes its own audit row, in the same transaction
+    # as the correction or undo it records; its previews write nothing at all.
+    ("POST",   re.compile(r"^/contracts/\d+/period(/undo)?(/preview)?$")),
+    # The secure correction link writes its own audit rows (who, by email).
+    ("POST",   re.compile(r"^/fix-link/[^/]+(/.*)?$")),
+    # The carrier's delivery rule and channel notify list log themselves.
+    ("PUT",    re.compile(r"^/programs/\d+/delivery-rule$")),
+    ("PUT",    re.compile(r"^/intake/routes/\d+/contacts$")),
     ("POST",   re.compile(r"^/extra-fields$")),
     ("POST",   re.compile(r"^/extra-fields/[^/]+/adopt$")),
     ("POST",   re.compile(r"^/tenants$")),
@@ -183,6 +401,14 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/bdx/preview$")),
     ("POST",   re.compile(r"^/export/validate$")),
     ("POST",   re.compile(r"^/api/canonical/field/preview$")),
+    # Two more of the same kind, found when the Audit Logs screen made the feed
+    # readable: they were 1,946 of 14,186 rows — 14% of the entire trail — and
+    # neither persists anything. A contract wording preview is a POST only
+    # because it posts the draft it is rendering.
+    ("POST",   re.compile(r"^/contract-wording/preview$")),
+    ("POST",   re.compile(r"^/contracts/\d+/endorsement/preview$")),
+    # Marking your own notifications as read is bookkeeping on your own inbox.
+    ("POST",   re.compile(r"^/admin/notifications/read$")),
     # Write endpoints that emit an explicit RICH event in their handler
     # (meaningful target + business details) — skip the generic middleware row so
     # there's exactly one meaningful audit row.
@@ -210,7 +436,94 @@ _SELF_LOGGED = [
     ("POST",   re.compile(r"^/export/template/\d+/activate$")),
     ("POST",   re.compile(r"^/export/template/\d+/refresh$")),
     ("PUT",    re.compile(r"^/mappers/\d+/sheet-bindings$")),
+    # Bordereau Setup approval. All three log themselves because the event
+    # depends on WHO asked and on what the setup was in, neither of which a
+    # path can say: the same POST /pipelines/{id}/activate is an activation
+    # from the carrier admin and a submission from a carrier user, and
+    # recording both as "activated" would put a decision in the trail that
+    # nobody made.
+    ("POST",   re.compile(r"^/pipelines/\d+/activate$")),
+    ("POST",   re.compile(r"^/pipelines/\d+/approve$")),
+    ("POST",   re.compile(r"^/pipelines/\d+/reject$")),
+    # Broker onboarding approval. The first two fork on WHO asked — the same
+    # POST /brokers is an onboarding from the carrier admin and a request from
+    # a carrier user — and the rest carry the broker, the programme and the
+    # reason in details, which the notification bell cannot render from a path.
+    ("POST",   re.compile(r"^/brokers$")),
+    ("POST",   re.compile(r"^/programs/\d+/brokers$")),
+    # Taking a broker off logs itself too: the path alone is two ids, and the
+    # trail should say WHICH broker came off WHICH programme, and whether they
+    # were told.
+    ("DELETE", re.compile(r"^/programs/\d+/brokers/\d+$")),
+    ("POST",   re.compile(r"^/broker-onboarding-requests/\d+/approve$")),
+    ("POST",   re.compile(r"^/broker-onboarding-requests/\d+/reject$")),
+    ("DELETE", re.compile(r"^/broker-onboarding-requests/\d+$")),
+    # Writes its own row, with the contract's name, programme and broker in
+    # details — the notification bell cannot render or group a row that only
+    # carries the path.
+    ("POST",   re.compile(r"^/contracts/\d+/send-back$")),
+    ("POST",   re.compile(r"^/contracts/\d+/accept$")),
+    ("POST",   re.compile(r"^/contracts/\d+/submit-for-approval$")),
+    # Each writes its own row with the file's / rule's name and the reason, so
+    # the middleware's copy only made every one of them appear twice — once as
+    # "Intake · arrivals #46 · release" (6 Oct 2026: every old copy had its
+    # named twin; audit_feed.SUPPRESSED_ACTIONS hides those).
+    ("POST",   re.compile(r"^/intake/arrivals/\d+/release$")),
+    ("POST",   re.compile(r"^/intake/arrivals/\d+/discard$")),
+    ("DELETE", re.compile(r"^/intake/keys/\d+$")),
+    # A broker's SFTP login writes intake_sftp_login_issued, with the user name.
+    ("POST",   re.compile(r"^/intake/routes/\d+/sftp-login$")),
+    ("PATCH",  re.compile(r"^/rule-library/\d+$")),
+    # Switching a channel on/off writes intake_route_updated ("switched off").
+    ("PATCH",  re.compile(r"^/intake/routes/\d+$")),
+    # Saving a submission schedule writes submission_schedule_updated itself.
+    ("PUT",    re.compile(r"^/programs/\d+/schedule$")),
+    # 6 Oct 2026 (user: "such duplicate entry should not happen in the logs
+    # table"): each of these handlers writes its own NAMED row for the click —
+    # with the contract, the template, the channel, the file and the counts —
+    # so the middleware's copy was the same action a second time. Checked
+    # first that every one of them always writes its row, and that nothing
+    # reads the copies.
+    ("POST",   re.compile(r"^/contracts/\d+/request-changes$")),   # contract_pushed_back
+    ("POST",   re.compile(r"^/contracts/\d+/accept-terms$")),      # contract_awaiting_signature
+    ("POST",   re.compile(r"^/output-template/from-standard$")),   # output_template_generated
+    ("POST",   re.compile(r"^/intake/routes$")),                   # intake_route_created
+    ("POST",   re.compile(r"^/intake/routes/\d+/keys$")),          # intake_key_created
+    ("POST",   re.compile(r"^/programs/\d+/contracts/\d+/generate-rules$")),  # contract.rules_generated
+    ("POST",   re.compile(r"^/calendar/chase$")),                  # submission_chased, per bordereau
+    # A portal upload: its result row (direct_output_generated / _checked)
+    # names the person, the file and the counts.
+    ("POST",   re.compile(r"^/carriers/\d+/programs/\d+/brokers/\d+/contracts/\d+/runs$")),
+    # Opening a contract to sign it is a page, not an act; the handler writes
+    # signature_round_started itself when it really starts a round.
+    ("POST",   re.compile(r"^/esign/contracts/\d+/signing-session$")),
 ]
+
+_ESIGN_SIGN = re.compile(r"^/esign/sign/([^/]+)(?:/|$)")
+
+
+def esign_context(path: str) -> dict | None:
+    """{contract_id, tenant_id, email} for a signing-link request — read BEFORE
+    the request runs, because signing clears the token. Without it every
+    signature row named nothing ("—"): the token was the only thing in its
+    path, and it is blanked before the row is stored. Never raises."""
+    m = _ESIGN_SIGN.match(path or "")
+    if not m:
+        return None
+    try:
+        from db import EsignEnvelope, EsignRecipient
+        with SessionLocal() as s:
+            rec = s.query(EsignRecipient).filter(EsignRecipient.token == m.group(1)).first()
+            env = s.get(EsignEnvelope, rec.envelope_id) if rec is not None else None
+            if env is None:
+                return None
+            return {"contract_id": getattr(env, "contract_id", None),
+                    "tenant_id": getattr(env, "tenant_id", None),
+                    "email": getattr(rec, "email", None)}
+    except Exception as e:  # noqa: BLE001
+        log.warning("audit: esign context lookup failed: %s", e)
+        return None
+
 
 def is_self_logged(method: str, path: str) -> bool:
     return any(m == method and rx.match(path) for m, rx in _SELF_LOGGED)
@@ -219,8 +532,19 @@ def is_self_logged(method: str, path: str) -> bool:
 # GET endpoints that return sensitive output / source data → access_log.
 # Curated on purpose: only data-bearing detail/download reads, NOT every list GET
 # (which would flood the log with page-load noise).
+#
+# A read is recorded as a "download" only when the browser's Download button
+# asked for it (api/client.ts downloadFile sends DOWNLOAD_HEADER). Everything
+# else on these paths — a screen loading a file to SHOW it, the preview after a
+# run — is a "view": kept in the table, never called a download (6 Oct 2026: a
+# broker who downloaded nothing read as "Downloaded a file" five times).
+DOWNLOAD_HEADER = "x-kavachio-download"
+
 _ACCESS_PATHS = [
     re.compile(r"^/export/downloads/\d+/file$"),
+    # The broker's own Download button (carrier_routes, the nested run path) —
+    # never logged before, so a broker's real downloads left no trace at all.
+    re.compile(r"^/carriers/\d+/programs/\d+/brokers/\d+/contracts/\d+/runs/\d+/file$"),
     re.compile(r"^/export/downloads/\d+/data$"),
     re.compile(r"^/export/downloads/\d+$"),
     re.compile(r"^/uploads/\d+/file$"),
@@ -228,6 +552,10 @@ _ACCESS_PATHS = [
     re.compile(r"^/uploads/\d+$"),
     re.compile(r"^/mapper/\d+/file$"),
     re.compile(r"^/dwh$"),
+    # Kavachio opening the evidence behind a large contract date correction.
+    re.compile(r"^/admin/contract-period-evidence/\d+/file$"),
+    # Taking the audit trail out of the building is itself worth a line in it.
+    re.compile(r"^/audit/export$"),
 ]
 
 def is_access_path(path: str) -> bool:

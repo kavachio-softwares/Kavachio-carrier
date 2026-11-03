@@ -16,35 +16,124 @@
  * broker is inert, and saying so on the row is the difference between a list
  * you read and a list you act on.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { frequencyLabel } from "../constants/frequency";
 import { Link, useNavigate } from "react-router-dom";
-import { Layers, ChevronRight, FileText, Users2, Plus } from "lucide-react";
+import { Layers, ChevronRight, Plus, Search, Copy, Check } from "lucide-react";
+import { InfoTip } from "../components/ui/InfoTip";
 import { PageBody, PageHeader } from "../components/Layout";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Sk } from "../components/ui/Skeleton";
-import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
+import { getHierarchy, onProgramme, type HierarchyProgramme } from "../api/hierarchy";
+import { Pagination } from "../components/Pagination";
+import { ProgrammeStepper, flowUrl, nextStep, programmeSteps } from "../components/ProgrammeStepper";
+import { fmtDate, localDayStart, localDayEnd } from "../utils/date";
+
+/** Rows per page — the same ten the other lists show. Paged client-side: the
+ *  programmes arrive in one payload with the hierarchy, so no request is saved
+ *  by asking the server for a page. */
+const PAGE_SIZE = 10;
+
+/** The programme's short code, labelled so a first-time reader knows what it
+ *  is: a "Code" tag, the code itself, a copy button and an ⓘ with the why.
+ *  Clicks stay here so they do not open the row. */
+function ProgrammeCode({ code }: { code: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <span className="mr-2 inline-flex items-center gap-1 align-middle" onClick={e => e.stopPropagation()}>
+      <span className="inline-flex items-center overflow-hidden rounded-md border border-border bg-surface-2 text-[11px] leading-none">
+        <span className="bg-border px-1.5 py-1 font-semibold uppercase tracking-wide text-ink-muted">Code</span>
+        <span className="px-1.5 py-1 font-mono text-ink">{code}</span>
+        <button type="button" aria-label="Copy code"
+          title={done ? "Copied" : "Copy code"}
+          className="border-l border-border px-1.5 py-1 text-ink-soft transition hover:text-navy"
+          onClick={() => {
+            navigator.clipboard?.writeText(code);
+            setDone(true); window.setTimeout(() => setDone(false), 1500);
+          }}>
+          {done ? <Check size={11} className="text-success" /> : <Copy size={11} />}
+        </button>
+      </span>
+      <InfoTip text={<>
+        This programme's short code. Brokers can put it in an email subject or
+        a file name (e.g. <span className="font-mono">{code}_Oct2026.xlsx</span>)
+        instead of typing the full programme name, so their file reaches the
+        right programme. It never changes.
+      </>} />
+    </span>
+  );
+}
+
+/** Filter by the step a programme is stuck on — the same step its row shows
+ *  in red. "ready" is every step done. */
+const STEP_FILTERS = [
+  { v: "", label: "All Steps" },
+  { v: "brokers", label: "Needs Broker" },
+  { v: "contract", label: "Needs Contract" },
+  { v: "setup", label: "Needs Setup" },
+  { v: "ready", label: "Ready" },
+] as const;
+type StepFilter = typeof STEP_FILTERS[number]["v"];
+
+const stuckOn = (p: HierarchyProgramme): StepFilter =>
+  (programmeSteps(p).find(s => s.state === "current")?.key as StepFilter | undefined) ?? "ready";
 
 export default function Programs() {
   const nav = useNavigate();
   const [rows, setRows] = useState<HierarchyProgramme[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+
+  // Filters — all client-side, over the one hierarchy payload.
+  const [q, setQ] = useState("");
+  const [step, setStep] = useState<StepFilter>("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const filtersActive = q.trim() !== "" || step !== "" || dateFrom !== "" || dateTo !== "";
+  const clearFilters = () => { setQ(""); setStep(""); setDateFrom(""); setDateTo(""); };
+  // A new filter starts from its first page.
+  useEffect(() => { setPage(1); }, [q, step, dateFrom, dateTo]);
 
   useEffect(() => {
     getHierarchy().then(h => setRows(h.programmes))
       .catch(() => setErr("Could not load your programmes."));
   }, []);
 
-  const needBrokers = (rows ?? []).filter(p => p.broker_count === 0).length;
+  // Filtered BEFORE the page slice, so the pager counts what you can see.
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const from = localDayStart(dateFrom);
+    const to = localDayEnd(dateTo);
+    return (rows ?? []).filter(p => {
+      const on = p.brokers.filter(b => onProgramme(b.link_status));
+      if (needle && ![p.name, p.business_segment, p.product_line, ...on.map(b => b.legal_name)]
+            .some(t => t?.toLowerCase().includes(needle))) return false;
+      if (step && stuckOn(p) !== step) return false;
+      if (from || to) {
+        const created = p.created_at ? new Date(p.created_at) : null;
+        if (!created) return false;
+        if (from && created < from) return false;
+        if (to && created > to) return false;
+      }
+      return true;
+    });
+  }, [rows, q, step, dateFrom, dateTo]);
+
+  const total = filtered.length;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // Clamped, so a list that shrinks never strands you on an empty page.
+  const pageNow = Math.min(page, pageCount);
+  const pageRows = filtered.slice((pageNow - 1) * PAGE_SIZE, pageNow * PAGE_SIZE);
 
   return (
     <>
       <PageHeader
         title="Programmes"
-        subtitle="One type of business you write — commercial motor, say, reported every month. Put brokers on a programme; your contracts sit underneath it."
+        info="One type of business you write — commercial motor, say — with your brokers and contracts underneath it."
         action={
           <Button onClick={() => nav("/programs/new")}>
-            <Plus size={15} /> Create Programme
+            <Plus size={15} /> Configure Program
           </Button>
         }
       />
@@ -66,123 +155,153 @@ export default function Programs() {
                 <Layers size={20} className="text-ink-soft" />
               </div>
               <p className="text-sm font-medium">No programmes yet</p>
+              {/* No second button here — Configure Program at the top right
+                  is the one way to start. */}
               <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">
-                Create one, then put at least one broker on it — a programme with
-                no broker cannot hold a contract.
+                Use <b className="font-medium text-ink">Configure Program</b> at the
+                top right to create one, then put at least one broker on it — a
+                programme with no broker cannot hold a contract.
               </p>
-              <div className="mt-4">
-                <Button onClick={() => nav("/programs/new")}>
-                  <Plus size={15} /> Create Programme
-                </Button>
-              </div>
             </div>
           </Card>
         )}
 
         {rows && rows.length > 0 && (
-          <Card>
-            {/* The one thing worth saying about the whole list, said once above
-                it rather than repeated as a footnote nobody connects to a row. */}
-            {needBrokers > 0 && (
-              <div className="mb-3 flex items-center gap-2 rounded-md bg-warn/10 px-3 py-2 text-[12.5px] text-warn">
-                <Users2 size={14} className="shrink-0" />
-                {needBrokers === 1
-                  ? "One programme has no broker on it yet, so it cannot hold a contract."
-                  : `${needBrokers} programmes have no broker on them yet, so they cannot hold a contract.`}
+          // Same toolbar as File Submissions; its styles live under .proto.
+          // Its own card with overflow visible, so nothing that opens from the
+          // toolbar is clipped by the table card's rounded corners.
+          <div className="proto proto-embed">
+            <div className="card" style={{ overflow: "visible", marginBottom: 14, padding: "14px 20px" }}>
+              {/* One row, every control the same height (fbar-even in
+                  proto.css). The search takes whatever width is left. */}
+              <div className="fbar-even">
+                <div className="search">
+                  <Search className="ic" />
+                  <input placeholder="Search by programme or broker…" value={q}
+                    onChange={e => setQ(e.target.value)} />
+                </div>
+                <div className="seg" role="group" aria-label="Filter by step">
+                  {STEP_FILTERS.map(f => (
+                    <button key={f.v} className={step === f.v ? "on" : ""}
+                      aria-pressed={step === f.v}
+                      onClick={() => setStep(f.v)}>{f.label}</button>
+                  ))}
+                </div>
+                <div className="fbar-daterange">
+                  <input type="date" className="fbar-date" aria-label="Created from date"
+                    value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+                  <span className="sub">–</span>
+                  <input type="date" className="fbar-date" aria-label="Created to date"
+                    value={dateTo} onChange={e => setDateTo(e.target.value)} />
+                </div>
+                {/* Always in the row, only hidden, so the controls beside it do
+                    not jump when a filter is first set. */}
+                <button type="button" className="fbar-clear" onClick={clearFilters}
+                  style={{ visibility: filtersActive ? "visible" : "hidden" }}
+                  aria-hidden={!filtersActive} tabIndex={filtersActive ? 0 : -1}>
+                  Clear Filters
+                </button>
               </div>
-            )}
+            </div>
+          </div>
+        )}
 
+        {rows && rows.length > 0 && total === 0 && (
+          <Card>
+            <p className="py-8 text-center text-sm text-ink-muted">
+              No programmes match your search — try different filters.
+            </p>
+          </Card>
+        )}
+
+        {rows && total > 0 && (
+          <Card>
             <div className="overflow-x-auto">
               <table>
                 <thead>
                   <tr>
                     <th>Programme</th>
-                    <th>Segment</th>
-                    <th>Reporting</th>
-                    <th>Brokers</th>
-                    <th>Contracts</th>
-                    <th />
+                    <th>How far it's got</th>
+                    {/* Named for what the button is: the one thing that moves
+                        this programme along the steps beside it. */}
+                    <th className="text-right">Next step</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map(p => (
+                  {pageRows.map(p => {
+                    // Clicking the row opens the Configure Program flow at the
+                    // step this programme is up to; a finished one at its last.
+                    const next = nextStep(p);
+                    // Segment and product line are long free text; they live in
+                    // the name's tooltip rather than a column that wraps the row.
+                    const about = [p.business_segment, p.product_line].filter(Boolean).join(" · ");
+                    return (
                     <tr
                       key={p.id}
                       className="group cursor-pointer"
-                      onClick={() => nav(`/programs/${p.id}/brokers`)}
+                      title={next ? next.hint : "Everything is in place — files can be checked."}
+                      onClick={() => nav(next ? next.to : flowUrl(p.id, "setup"))}
                     >
-                      <td>
-                        {/* A link, not just a clickable row. The row handler alone
-                            gave no affordance — nothing looked clickable, so the
-                            programme read as a dead label — and it could not be
-                            opened in a new tab or reached by keyboard. */}
-                        <div className="flex items-center gap-2.5">
-                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-navy/10">
-                            <Layers size={15} className="text-navy" />
-                          </span>
-                          <div className="min-w-0">
-                            <Link
-                              to={`/programs/${p.id}/brokers`}
-                              onClick={e => e.stopPropagation()}
-                              className="block truncate font-medium text-navy hover:underline"
-                            >
-                              {p.name}
-                            </Link>
-                            {p.product_line && (
-                              <div className="truncate text-xs text-ink-muted">{p.product_line}</div>
-                            )}
-                          </div>
+                      <td className="align-middle">
+                        {/* A link, not just a clickable row — it can be opened in a
+                            new tab and reached by keyboard. */}
+                        {/* <Link
+                          to={`/programs/${p.id}/brokers`}
+                          onClick={e => e.stopPropagation()}
+                          title={about || undefined}
+                          className="block font-semibold text-ink hover:text-navy hover:underline"
+                        > */}
+                          {p.name}
+                        {/* </Link> */}
+                        <div className="mt-0.5 text-xs text-ink-muted">
+                          {p.code && <ProgrammeCode code={p.code} />}
+                          {[p.created_at ? `Created ${fmtDate(p.created_at)}` : "",
+                            p.bdx_frequency ? frequencyLabel(p.bdx_frequency).toLowerCase() : ""]
+                            .filter(Boolean).join(" · ")}
                         </div>
                       </td>
-                      <td>
-                        {p.business_segment
-                          ? <span className="pill pill-grey">{p.business_segment}</span>
-                          : <span className="text-ink-soft">—</span>}
+                      <td className="align-middle">
+                        {/* Each pill opens its own step for this programme. */}
+                        <ProgrammeStepper programme={p} />
                       </td>
-                      <td className="capitalize text-ink-muted">{p.bdx_frequency || "—"}</td>
-                      {/* Zero brokers is the state worth calling out, not hiding:
-                          nothing can be done with the programme until it has one,
-                          so the cell says what to DO rather than showing a 0 the
-                          reader has to interpret. */}
-                      <td>
-                        {p.broker_count === 0 ? (
-                          <span className="pill pill-amber whitespace-nowrap"
-                            title="A programme with no broker cannot hold a contract.">
-                            Needs a broker
-                          </span>
+                      <td className="whitespace-nowrap text-right align-middle">
+                        {next ? (
+                          <Button className="!px-3 !py-1.5 !text-[12.5px] !font-semibold" title={next.hint}
+                            onClick={e => { e.stopPropagation(); nav(next.to); }}>
+                            {next.label}
+                          </Button>
                         ) : (
-                          <span className="inline-flex items-center gap-1.5 text-ink">
-                            <Users2 size={13} className="text-ink-soft" />
-                            <span className="font-medium tabular-nums">{p.broker_count}</span>
+                          <span className="inline-flex items-center gap-1 text-[12.5px] font-semibold text-success">
+                            Ready
+                            <ChevronRight size={16}
+                              className="text-ink-soft transition group-hover:translate-x-0.5 group-hover:text-navy" />
                           </span>
                         )}
                       </td>
-                      <td>
-                        <span className={`inline-flex items-center gap-1.5 ${
-                          p.contract_count === 0 ? "text-ink-soft" : "text-ink"}`}>
-                          <FileText size={13} className="text-ink-soft" />
-                          <span className="font-medium tabular-nums">{p.contract_count}</span>
-                        </span>
-                      </td>
-                      <td className="w-10">
-                        <ChevronRight
-                          size={16}
-                          className="text-ink-soft transition group-hover:translate-x-0.5 group-hover:text-navy"
-                        />
-                      </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
 
+            {/* The shared pager is styled by the .proto tokens; proto-embed
+                brings them in without .proto's page background. */}
+            {pageCount > 1 && (
+              <div className="proto proto-embed -mx-5">
+                <Pagination page={pageNow} pageCount={pageCount} pageSize={PAGE_SIZE}
+                  totalItems={total} onPageChange={setPage} noun="programmes" />
+              </div>
+            )}
+
             <p className="mt-3 border-t border-border pt-3 text-xs text-ink-muted">
-              Open a programme to manage the brokers on it. Contracts belong to a
-              programme <b className="font-medium">and</b> a broker together, so
-              they are listed under the broker that produced them.
+              Each programme goes Programme → Brokers → Contract → Setup. Green is
+              done, red is what's stopping files. Click a row to go straight to
+              where that programme is up to, or click any step to open it.
             </p>
           </Card>
         )}
+
       </PageBody>
     </>
   );

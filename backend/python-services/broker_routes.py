@@ -12,15 +12,23 @@ read off the link rows, which only exist where a carrier created one.
 """
 from __future__ import annotations
 
+import datetime as dt
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import String, and_, func, or_
 
+import contract_routes
+import contract_types as ct
+from exception_tally import current_export_ids, export_tally as _export_tally
 from auth_deps import Principal, current_principal
 from db import (
-    SessionLocal, AppUser, Contract, Party, Program, ProgramBroker, Tenant,
+    CarrierBroker, link_carrier_broker,
+    BrokerInvitation,
+    Pipeline, PipelineContract,
+    SessionLocal, AppUser, Contract, Party, Program,
+    ProgramBroker, Tenant,
 )
 
 router = APIRouter(tags=["broker"])
@@ -92,18 +100,242 @@ def broker_me(p: Principal = Depends(current_principal)):
         return {"id": bid, "name": (me.legal_name if me else "—"), "role": p.role}
 
 
-@router.get("/broker/carriers")
-def broker_carriers(p: Principal = Depends(current_principal)):
-    """The carriers that have put this broker on at least one programme.
+# =============================================================================
+#  Invitations — the broker's side of being asked
+# =============================================================================
+#
+# A carrier invites; the broker answers. The link that lets them produce is
+# written HERE, on accept, and nowhere else — so a carrier cannot put a broker
+# on a programme by unilateral act. That is what "invitation" means, and the
+# old direct-assign path quietly skipped it.
 
-    This is the first dropdown on BDX Setup. It is a list, not a choice the
-    broker makes freely — a carrier missing here means it never linked them.
+
+def _accept_invitation(s, inv, party_id: int, how: str) -> None:
+    """Record that this broker agreed to work with that carrier.
+
+    THE ACCEPTED INVITATION IS THE RELATIONSHIP. An invitation names a carrier,
+    not a programme — which programmes a broker produces on is a decision the
+    carrier goes on making for years, and it is made afterwards from the
+    programme's own screen. So the usual case writes no programme link at all;
+    the `program_id` branch below exists only for an invitation that named one.
+
+    Shared by the broker clicking Accept and by onboarding accepting on their
+    behalf, so the two cannot drift into writing different rows.
+    """
+    inv.status = "accepted"
+    inv.accepted_by = how
+    inv.answered_at = dt.datetime.now(dt.timezone.utc)
+    inv.party_id = party_id
+    # THE RELATIONSHIP ITSELF, written where it begins. The invitation records
+    # that they were asked and said yes; this records that they work together,
+    # which is what every screen reads.
+    link_carrier_broker(s, inv.tenant_id, party_id,
+                        origin="invitation", by_user_id=inv.by_user_id)
+    if not inv.program_id:
+        return
+    # WHOSE INVITATION THIS WAS decides what the link is worth, because the
+    # carrier's own rule for programme links does not stop applying just
+    # because the broker is the one clicking. A link the carrier ADMIN asked
+    # for goes live; one a carrier USER asked for waits at `pending_approval`
+    # and is released by the Bordereau Setup approval built on top of it
+    # (carrier_scope.LINK_PENDING, direct_routes._activate_links_for), exactly
+    # as it does when the same user adds the same broker from the programme
+    # screen.
+    #
+    # It used to be flat "active" here, which meant an invitation that named a
+    # programme handed the broker a live one the moment they accepted —
+    # straight past the setup gate. Nothing in the UI sent `program_id`, so it
+    # never fired; it was a hole waiting for the first caller that did.
+    # With the approval flow off (the default since 29 Sep 2026) nothing
+    # waits, whoever sent it.
+    from carrier_scope import (LINK_PENDING, carrier_approvals_enabled,
+                               is_carrier_admin_user)
+    status = ("active" if (not carrier_approvals_enabled()
+                           or is_carrier_admin_user(s, inv.tenant_id, inv.by_user_id))
+              else LINK_PENDING)
+    link = (s.query(ProgramBroker)
+            .filter(ProgramBroker.program_id == inv.program_id,
+                    ProgramBroker.broker_party_id == party_id)
+            .first())
+    if link:
+        # Re-accepting after having been taken off reactivates the row rather
+        # than inserting a second one; when it was first assigned is worth
+        # keeping. An already-live link is never pushed back down: it is live
+        # because something released it, and that has not been undone.
+        if link.status != "active":
+            link.status = status
+        link.tenant_id = inv.tenant_id
+    else:
+        s.add(ProgramBroker(tenant_id=inv.tenant_id, program_id=inv.program_id,
+                            broker_party_id=party_id, status=status,
+                            assigned_by_user_id=inv.by_user_id))
+
+
+def accept_pending_for_email(s, email: str, party_id: int) -> int:
+    """Accept every invitation waiting on this address. Returns how many.
+
+    Called when somebody finishes onboarding. A brand-new broker has nothing to
+    weigh up — the invitation is why their login exists — so making them click
+    Accept afterwards is a second click that can only ever be yes. Invitations
+    that arrived while they were still setting up are swept in the same pass.
+    """
+    pending = (s.query(BrokerInvitation)
+               .filter(func.lower(BrokerInvitation.email) == (email or "").lower(),
+                       BrokerInvitation.status == "pending")
+               .all())
+    for inv in pending:
+        _accept_invitation(s, inv, party_id, "auto")
+    return len(pending)
+
+
+@router.get("/broker/invitations")
+def broker_invitations(p: Principal = Depends(current_principal)):
+    """Carriers asking this broker to produce on a programme.
+
+    Only what is still open and only what is addressed to this broker. A
+    carrier's name appears here because they chose to introduce themselves by
+    inviting — nothing is disclosed in the other direction.
     """
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
-        links = _links(s, bid)
-        by_carrier: dict[int, int] = {}
-        for l in links:
+        # Only the broker admin answers them (_open_invitation), so only the
+        # broker admin is shown them — a list with buttons that always fail
+        # would be worse than none.
+        if p.role != "broker_admin":
+            return []
+        me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
+        emails = {(me.email or "").lower()} if me else set()
+        rows = (s.query(BrokerInvitation)
+                .filter(BrokerInvitation.status == "pending",
+                        or_(BrokerInvitation.party_id == bid,
+                            func.lower(BrokerInvitation.email).in_(emails or {""})))
+                .order_by(BrokerInvitation.created_at.desc())
+                .all())
+        if not rows:
+            return []
+        progs = {pr.id: pr.name for pr in s.query(Program).filter(
+            Program.id.in_([r.program_id for r in rows if r.program_id])).all()}
+        tens = {t.id: (t.legal_name or t.tenant_name) for t in s.query(Tenant).filter(
+            Tenant.id.in_([r.tenant_id for r in rows])).all()}
+        return [{
+            "id": r.id,
+            "carrier": tens.get(r.tenant_id, "—"),
+            # Usually none: a carrier invites you to work with THEM, and picks
+            # programmes afterwards. Shown only when one was named.
+            "programme": progs.get(r.program_id) if r.program_id else None,
+            "program_id": r.program_id,
+            "invited_at": r.created_at.isoformat() if r.created_at else None,
+        } for r in rows]
+
+
+class InvitationAnswer(BaseModel):
+    note: Optional[str] = None
+
+
+def _open_invitation(s, p: Principal, invitation_id: int):
+    """The pending invitation this broker may answer, and its broker id.
+
+    Answering one decides who the whole COMPANY works with, so it is the broker
+    admin's act — an operator works inside the relationships the admin agreed.
+
+    Open to them means exactly what GET /broker/invitations lists: addressed to
+    their broker, or to their own email. An invitation with no broker recorded
+    (party_id NULL) is theirs only by email — before, it was open to ANY broker
+    seat that guessed its id, which let one broker accept (or kill) an
+    invitation meant for somebody else and land on that carrier's programme.
+
+    404 rather than 403: an invitation addressed to somebody else is not this
+    broker's to know about.
+    """
+    if p.role != "broker_admin":
+        raise HTTPException(403, "only your broker can answer a carrier's invitation")
+    bid = _broker_party_id(s, p)
+    me = s.query(AppUser).filter(AppUser.id == p.user_id).first()
+    inv = s.get(BrokerInvitation, invitation_id)
+    mine_by_email = bool(me and me.email and inv and inv.email
+                         and inv.email.lower() == me.email.lower())
+    if (not inv or inv.status != "pending"
+            or not (inv.party_id == bid or mine_by_email)):
+        raise HTTPException(404, "that invitation is not open to you")
+    return inv, bid
+
+
+@router.post("/broker/invitations/{invitation_id}/accept")
+def broker_invitation_accept(invitation_id: int,
+                             body: InvitationAnswer = InvitationAnswer(),
+                             p: Principal = Depends(current_principal)):
+    """Agree to produce on that carrier's programme. This writes the link."""
+    with SessionLocal() as s:
+        inv, bid = _open_invitation(s, p, invitation_id)
+        _accept_invitation(s, inv, bid, "broker")
+        inv.note = (body.note or "").strip() or None
+        tenant = s.query(Tenant).filter(Tenant.id == inv.tenant_id).first()
+        carrier_name = (tenant.legal_name or tenant.tenant_name) if tenant else None
+        s.commit()
+        # The carrier comes back so the screen can SWITCH TO IT. Somebody who
+        # just deliberately joined one carrier should not be dropped on a
+        # merged view of all of them — that answers a question they did not ask
+        # and hides the thing they came for.
+        return {"ok": True, "program_id": inv.program_id,
+                "carrier_id": inv.tenant_id, "carrier": carrier_name,
+                "message": (f"You are now working with {carrier_name}."
+                            if carrier_name else "Accepted.")
+                           + (" They can put you on their programmes from here."
+                              if not inv.program_id else "")}
+
+
+@router.post("/broker/invitations/{invitation_id}/decline")
+def broker_invitation_decline(invitation_id: int,
+                              body: InvitationAnswer = InvitationAnswer(),
+                              p: Principal = Depends(current_principal)):
+    """Say no. Nothing is linked, and the carrier sees it was declined —
+    which is a fact about the invitation THEY sent, not about this broker's
+    other business."""
+    with SessionLocal() as s:
+        inv, bid = _open_invitation(s, p, invitation_id)
+        inv.status = "declined"
+        inv.answered_at = dt.datetime.now(dt.timezone.utc)
+        inv.party_id = bid
+        inv.note = (body.note or "").strip() or None
+        s.commit()
+        return {"ok": True, "message": "Declined."}
+
+
+def _carrier_ids(s, broker_id: int) -> set[int]:
+    """Every carrier this broker WORKS WITH.
+
+    Two sources, and both are needed. A programme link proves a working
+    relationship, but it is not the only one: a broker who has accepted a
+    carrier's invitation works with them from that moment, whether or not a
+    programme has been assigned yet — and assigning one may be days later.
+
+    Reading only the links is why a broker could accept two carriers and see
+    neither: they had agreed to work with both and been put on nothing, so the
+    dashboard showed an empty list and the carrier switcher had nothing to
+    switch between. The relationship is the invitation; the programme is what
+    they do inside it.
+    """
+    from_links = {l.tenant_id for l in _links(s, broker_id) if l.tenant_id}
+    from_rel = {r[0] for r in s.query(CarrierBroker.tenant_id)
+                .filter(CarrierBroker.party_id == broker_id,
+                        CarrierBroker.status == "active").all() if r[0]}
+    return from_links | from_rel
+
+
+@router.get("/broker/carriers")
+def broker_carriers(p: Principal = Depends(current_principal)):
+    """The carriers this broker works with.
+
+    The first dropdown on BDX Setup, and the carrier switcher in the sidebar.
+    It is a list, not a choice the broker makes freely — a carrier appears
+    because the broker accepted their invitation, and `programme_count` says
+    how much of that relationship has actually been set up yet. Zero is a real
+    and common answer: accepted this morning, programmes tomorrow.
+    """
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        by_carrier: dict[int, int] = {t: 0 for t in _carrier_ids(s, bid)}
+        for l in _links(s, bid):
             if l.tenant_id:
                 by_carrier[l.tenant_id] = by_carrier.get(l.tenant_id, 0) + 1
         if not by_carrier:
@@ -151,18 +383,53 @@ def broker_programmes(carrier_id: Optional[int] = Query(None),
 @router.get("/broker/contracts")
 def broker_contracts(carrier_id: Optional[int] = Query(None),
                      program_id: Optional[int] = Query(None),
+                     status: Optional[str] = Query(None),
+                     page: Optional[int] = Query(None, ge=1),
+                     page_size: Optional[int] = Query(None, ge=1, le=200),
                      p: Principal = Depends(current_principal)):
     """Every contract this broker holds, across every programme it is on.
 
     Two kinds live in one list: contracts the CARRIER added, which work
-    straight away, and contracts the BROKER added, which wait for approval.
-    Only a live one can be set up, so the UI needs both facts per row.
+    straight away. Only a live one can be set up, so the UI needs that per row.
+
+    IT ALSO CARRIES THE LIFECYCLE, and that is not a detail. Whether a contract
+    may be set up says nothing about whether the carrier has sent terms over for
+    the broker to read, argued back at, or is waiting on their signature.
+    Without the lifecycle a contract sitting in
+    `in_review` — the whole point of which is that the BROKER has to act —
+    renders as an ordinary approved row, and the negotiation is invisible to
+    the one person it is waiting on. `whose_turn` is included for the same
+    reason: it is the question the list is actually being scanned for.
+
+    Pagination is OPT-IN — without `page` the plain list comes back exactly as
+    before. `status` takes the screen's own vocabulary: "mine" means whose_turn
+    is the broker, anything else is matched against the lifecycle. Both facts
+    are derived per row rather than stored, so the filter runs HERE — and it
+    runs BEFORE the page is cut, so the total counts what the filter kept
+    rather than what the page happened to hold.
     """
+    def _page(out: list):
+        # Counted over EVERYTHING this broker holds — before the status filter,
+        # and before the page is cut. The screen states it above the table as
+        # the reason to open the page at all, so a number that shrank as you
+        # paged would be answering a different question.
+        waiting = sum(1 for r in out if r["whose_turn"] == "broker")
+        if status:
+            out = [r for r in out
+                   if (r["whose_turn"] == "broker" if status == "mine"
+                       else r["lifecycle"] == status)]
+        if page is None:
+            return out
+        size = page_size or 10
+        start = (page - 1) * size
+        return {"items": out[start:start + size], "total": len(out),
+                "page": page, "page_size": size, "waiting_on_me": waiting}
+
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
         links = _links(s, bid, carrier_id=carrier_id, program_id=program_id)
         if not links:
-            return []
+            return _page([])
         prog_ids = [l.program_id for l in links]
         carrier_of = {l.program_id: l.tenant_id for l in links}
         progs = {pr.id: pr for pr in s.query(Program).filter(Program.id.in_(prog_ids)).all()}
@@ -175,70 +442,268 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
                   .filter(Contract.program_id.in_(prog_ids),
                           Contract.broker_party_id == bid)
                   .order_by(Contract.id.desc()).all())
+
+        # Contracts belonging to a setup the carrier admin has not approved yet
+        # are not this broker's to see. `_links` above already hides a whole new
+        # chain, because the programme link waits with it — this covers the case
+        # it cannot: a broker ALREADY on the programme, for whom a colleague at
+        # the carrier has raised something new.
+        #
+        # Held back only while NOTHING live covers the contract. A contract that
+        # is also on an approved setup is one this broker is already working to,
+        # and a second setup being drafted over it — a new BDX template, say —
+        # must not take the first one off their list.
+        held = _contracts_awaiting_approval(s, prog_ids)
+
+        from intake_service import contract_code, programme_code
+        # A superseded contract that a renewal replaced is the PREVIOUS TERM:
+        # still pickable on Process Bordereau for its own late months.
+        renewal_of = {c.renews_contract_id: c for c in rows if c.renews_contract_id}
         out = []
         for c in rows:
+            if c.id in held:
+                continue
             cid = carrier_of.get(c.program_id)
+            state = contract_routes._effective_lifecycle(c)
             out.append({
                 "id": c.id,
                 "filename": c.filename,
+                # An AUTHORED contract has no file, so a list keyed on filename
+                # shows it as "Contract 462". The name is what it is called.
+                "name": c.name or c.filename or f"Contract {c.id}",
+                # What the broker writes in a subject or file name instead.
+                "code": contract_code(c),
+                "contract_type": c.contract_type,
+                "lifecycle": state,
+                "previous_term": state == "superseded" and c.id in renewal_of,
+                "renewed_by": ({"id": renewal_of[c.id].id,
+                                "name": renewal_of[c.id].name or renewal_of[c.id].filename}
+                               if c.id in renewal_of else None),
+                # Who the contract is waiting on. The SAME function the
+                # carrier's record uses, not a second copy of the rule — the
+                # two sides disagreeing about whose move it is would be worse
+                # than neither of them saying.
+                "whose_turn": contract_routes._whose_turn(
+                    c, contract_routes._unsigned_sides(
+                        contract_routes._signatures(s, c.id))),
+                "has_wording": bool((c.wording_sections or {}).get("sections"))
+                               or bool(c.blob_ref or c.blob),
                 "programme": {"id": c.program_id,
-                              "name": progs[c.program_id].name if c.program_id in progs else "—"},
+                              "name": progs[c.program_id].name if c.program_id in progs else "—",
+                              "code": programme_code(c.program_id) if c.program_id else None},
                 "carrier": {"id": cid, "name": carriers.get(cid, "—")},
                 "inception_dt": c.inception_dt.isoformat() if c.inception_dt else None,
                 "expiry_dt": c.expiry_dt.isoformat() if c.expiry_dt else None,
-                "approval_status": c.approval_status,
                 "source": _contract_source(s, c, bid),
                 "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
                 "created_at": c.created_at.isoformat() if getattr(c, "created_at", None) else None,
             })
-        return out
+        return _page(out)
+
+
+
+def _contracts_awaiting_approval(s, prog_ids) -> set:
+    """Contract ids on a `pending_approval` setup and on no live one.
+
+    The carrier admin approves the chain as a whole — programme, broker,
+    contract, BDX template — so until they do, none of it is the broker's to
+    see. See direct_routes and migration 27.
+    """
+    if not prog_ids:
+        return set()
+
+    def _ids(status):
+        return {cid for (cid,) in
+                s.query(PipelineContract.contract_id)
+                 .join(Pipeline, Pipeline.id == PipelineContract.pipeline_id)
+                 .filter(Pipeline.program_id.in_(prog_ids),
+                         Pipeline.status == status).all()}
+
+    return _ids("pending_approval") - _ids("active")
 
 
 @router.get("/broker/dashboard")
-def broker_dashboard(p: Principal = Depends(current_principal)):
+def broker_dashboard(carrier_id: Optional[int] = Query(None),
+                     p: Principal = Depends(current_principal)):
     """The broker's landing screen: what they hold, and what is holding them up.
 
-    "Waiting on the carrier" is the only queue a broker has — it is the one
-    thing they cannot move themselves.
+    TWO QUEUES, not one, and they point in opposite directions. "Waiting on the
+    carrier" is what the broker cannot move; "waiting on you" is what nobody
+    else can. The second one was missing entirely, so a carrier sending terms
+    over for review reached a broker who was never told — the negotiation sat
+    in a state whose whole purpose is that the broker acts on it, on a
+    dashboard that only counted the other side's queue.
+
+    SCOPED TO ONE CARRIER when `carrier_id` is given. A broker on several
+    carriers was shown one merged pile: five contracts waiting, across three
+    companies, with no way to answer "what does Northgate need from me". The
+    counts are the reason to open this screen, and a count that spans carriers
+    answers a question nobody asked. `carriers` always lists them all, so the
+    screen can offer the switch regardless of what is selected.
+
+    An unknown or unlinked carrier_id narrows to nothing rather than falling
+    back to everything: silently widening a scope the caller asked to narrow is
+    how a broker ends up acting on the wrong carrier's contract.
     """
     with SessionLocal() as s:
         bid = _broker_party_id(s, p)
         me = s.query(Party).filter(Party.id == bid).first()
-        links = _links(s, bid)
+        # Every carrier, for the switcher — computed before the narrowing, so
+        # selecting one never hides the others.
+        all_links = _links(s, bid)
+        links = ([l for l in all_links if l.tenant_id == carrier_id]
+                 if carrier_id is not None else all_links)
         prog_ids = [l.program_id for l in links]
-        carrier_ids = sorted({l.tenant_id for l in links if l.tenant_id})
+        carrier_ids = sorted(_carrier_ids(s, bid))
         carriers = {t.id: (t.legal_name or t.tenant_name) for t in s.query(Tenant).filter(
             Tenant.id.in_(carrier_ids)).all()} if carrier_ids else {}
         progs = ({pr.id: pr.name for pr in s.query(Program).filter(Program.id.in_(prog_ids)).all()}
                  if prog_ids else {})
 
-        pending, live = [], 0
+        # `pending` — contracts a broker had brought and the carrier had still
+        # to approve — is gone with the upload flow that created them.
+        on_me, live, terms_agreed = [], 0, 0
+        # In-force contracts whose term ends within 30 days — the Active
+        # Contracts tile warns about them. Read off expiry_dt, the same column
+        # _effective_lifecycle uses to call a contract expired, so a contract
+        # counted here is exactly one that tile will stop counting.
+        expiring, next_expiry = 0, None
+        soon_edge = contract_routes._today() + dt.timedelta(days=30)
         if prog_ids:
             rows = (s.query(Contract)
                       .filter(Contract.program_id.in_(prog_ids),
                               Contract.broker_party_id == bid).all())
             for c in rows:
-                if c.approval_status == "pending_approval":
-                    pending.append({
-                        "id": c.id, "filename": c.filename,
+                carrier_name = carriers.get(
+                    next((l.tenant_id for l in links
+                          if l.program_id == c.program_id), None), "—")
+                state = contract_routes._effective_lifecycle(c)
+
+                # The broker's OWN queue. `agreed` is in it too: terms both
+                # sides settled are waiting on the broker's signature, and a
+                # contract nobody signs never goes live.
+                turn = contract_routes._whose_turn(
+                    c, contract_routes._unsigned_sides(
+                        contract_routes._signatures(s, c.id)))
+                if turn == "broker":
+                    on_me.append({
+                        "id": c.id,
+                        "name": c.name or c.filename or f"Contract {c.id}",
+                        "lifecycle": state,
                         "programme": progs.get(c.program_id, "—"),
-                        "carrier": carriers.get(
-                            next((l.tenant_id for l in links if l.program_id == c.program_id), None), "—"),
-                        "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
+                        "carrier": carrier_name,
+                        "what": ("read the terms and agree them or ask for "
+                                 "changes" if state == "in_review"
+                                 else "sign it"),
                     })
-                elif c.approval_status == "approved":
+
+                # LIVE means in force, not merely approved. Since a contract
+                # goes in force only when both sides have signed it, an
+                # approved-but-unsigned one is not something to produce
+                # against, and counting it as live would say it is.
+                if state == "active":
                     live += 1
+                    if c.expiry_dt and c.expiry_dt <= soon_edge:
+                        expiring += 1
+                        if next_expiry is None or c.expiry_dt < next_expiry:
+                            next_expiry = c.expiry_dt
+
+                # The counterpart to terms_to_agree, for the tile that shows
+                # the two side by side: contracts whose terms are SETTLED,
+                # whatever is left to do about signing them. `expired` and
+                # `terminated` are left out on purpose — their terms were
+                # agreed once, but counting them beside a queue of live work
+                # would overstate the book.
+                if state in ("agreed", "signed", "active"):
+                    terms_agreed += 1
+
+        # Signatures on this broker's own contracts: signed by everyone
+        # (completed), and waiting on this broker's signature. Terms still to
+        # agree come before signing, so they are counted apart.
+        signatures_completed = 0
+        if prog_ids and rows:
+            from db import EsignEnvelope
+            signatures_completed = (s.query(func.count(EsignEnvelope.id))
+                .filter(EsignEnvelope.contract_id.in_([c.id for c in rows]),
+                        EsignEnvelope.status == "completed").scalar() or 0)
+        terms_to_agree = sum(1 for w in on_me if w["lifecycle"] == "in_review")
+
+        # OPEN exceptions on the files that are still live — the same list the
+        # tile opens (/broker/exceptions), so the number and the page behind it
+        # are one sum. It used to add up exception_count on every run, so a
+        # file that was fixed and re-run was counted twice and a put-right
+        # exception never left the number.
+        agency_exceptions = sum(f["open"] for f in _exception_files(s, bid, prog_ids))
+
+        # The files still to process, from the same rows the Bordereau Calendar
+        # reads. "Upcoming" is the next 30 days, not "this month": on the 29th
+        # of the month the file due on the 10th is the one that matters, and a
+        # month boundary would hide it.
+        from db import ExpectedSubmission
+        today = dt.datetime.utcnow().date()
+        files_upcoming = files_overdue = 0
+        next_due = first_overdue = None
+        overdue_periods: list[str] = []
+        if prog_ids:
+            owed = (s.query(ExpectedSubmission)
+                     .filter(ExpectedSubmission.broker_party_id == bid,
+                             ExpectedSubmission.program_id.in_(prog_ids),
+                             ExpectedSubmission.received_at.is_(None),
+                             ExpectedSubmission.due_date.isnot(None)))
+            files_overdue = owed.filter(ExpectedSubmission.due_date < today).count()
+            files_upcoming = owed.filter(
+                ExpectedSubmission.due_date >= today,
+                ExpectedSubmission.due_date <= today + dt.timedelta(days=30)).count()
+            nxt = (owed.filter(ExpectedSubmission.due_date >= today)
+                       .order_by(ExpectedSubmission.due_date.asc()).first())
+            next_due = nxt.due_date.isoformat() if nxt else None
+            # The oldest missed file, so the tile can open the calendar on its
+            # month — the calendar opens on the current month, and a file
+            # missed in June would otherwise never be on screen.
+            old = (owed.filter(ExpectedSubmission.due_date < today)
+                       .order_by(ExpectedSubmission.due_date.asc()).first())
+            first_overdue = old.due_date.isoformat() if old else None
+            # WHICH bordereaux are missing, oldest first — "3 overdue" does not
+            # say whether that is three programmes one month or one programme
+            # three months running, and those are different conversations.
+            overdue_periods = [e.period for e in owed.filter(
+                ExpectedSubmission.due_date < today)
+                .order_by(ExpectedSubmission.due_date.asc()).all()]
+
+        # "Users" tile — this broker's OWN people: its admins and its users
+        # (operators), invited ones included. Not narrowed by carrier: a broker
+        # has one team whichever carrier it is producing for. Removed people
+        # are deleted outright here, so every row still counts.
+        user_rows = (s.query(AppUser.status, func.count(AppUser.id))
+                       .filter(AppUser.broker_party_id == bid)
+                       .group_by(AppUser.status).all())
 
         return {
             "broker": {"id": bid, "name": me.legal_name if me else "—"},
             "carriers": [{"id": i, "name": carriers.get(i, "—")} for i in carrier_ids],
             "counts": {
-                "waiting_on_carrier": len(pending),
+                "waiting_on_me": len(on_me),
                 "live_contracts": live,
                 "programmes": len(links),
                 "carriers": len(carrier_ids),
+                "users": sum(n for _st, n in user_rows),
+                "users_invited": sum(n for st, n in user_rows
+                                     if st in ("invited", "pending")),
+                "agency_exceptions": int(agency_exceptions),
+                "files_upcoming": files_upcoming,
+                "files_overdue": files_overdue,
+                "next_due": next_due,
+                "first_overdue": first_overdue,
+                "overdue_periods": overdue_periods,
+                "contracts_expiring": expiring,
+                "next_expiry": next_expiry.isoformat() if next_expiry else None,
+                "signatures_pending": len(on_me) - terms_to_agree,
+                "signatures_completed": int(signatures_completed),
+                "terms_to_agree": terms_to_agree,
+                "terms_agreed": terms_agreed,
             },
-            "waiting": sorted(pending, key=lambda r: r["submitted_at"] or ""),
+            # The queue only this broker can move.
+            "waiting_on_me": on_me,
         }
 
 
@@ -267,7 +732,7 @@ def _broker_admin(s, p: Principal) -> int:
     them anyway. Failing here says why, instead of surfacing a database error.
     """
     if p.role != "broker_admin":
-        raise HTTPException(403, "only a broker admin can manage your team")
+        raise HTTPException(403, "only the broker can manage your team")
     return _broker_party_id(s, p)
 
 
@@ -284,7 +749,9 @@ def _broker_user_dict(u: AppUser) -> dict:
 
 
 @router.get("/broker/users")
-def broker_users(p: Principal = Depends(current_principal)):
+def broker_users(page: Optional[int] = Query(None, ge=1),
+                 page_size: Optional[int] = Query(None, ge=1, le=200),
+                 p: Principal = Depends(current_principal)):
     """Everyone at this broker organisation.
 
     Scoped by broker_party_id, never by tenant: a broker producing for three
@@ -293,75 +760,49 @@ def broker_users(p: Principal = Depends(current_principal)):
     Admin-only, reads included — an operator has no sidebar entry for this
     screen, and an endpoint that answers a request the UI never makes is just a
     way for the two layers to disagree later.
+
+    Pagination is OPT-IN: without `page` the whole team comes back exactly as
+    it always did. `total` and `total_admins` are the TEAM'S, never the page's
+    — the screen states the first above its table, and the second is what the
+    "you cannot remove the last admin" rule is decided on. Counting either off
+    one page of ten would make both of them quietly wrong the moment an
+    eleventh person joined.
     """
     with SessionLocal() as s:
         bid = _broker_admin(s, p)
         me = s.query(Party).filter(Party.id == bid).first()
-        rows = (s.query(AppUser)
-                  .filter(AppUser.broker_party_id == bid)
-                  .order_by(AppUser.email).all())
-        admins = sum(1 for u in rows if u.role == "broker_admin")
+        base = s.query(AppUser).filter(AppUser.broker_party_id == bid)
+        total = base.order_by(None).count()
+        admins = base.filter(AppUser.role == "broker_admin").count()
+        ordered = base.order_by(AppUser.email)
+        if page is not None:
+            size = page_size or 10
+            ordered = ordered.offset((page - 1) * size).limit(size)
+        rows = ordered.all()
         return {
             "broker": {"id": bid, "name": (me.legal_name if me else "—")},
             "items": [_broker_user_dict(u) for u in rows],
-            "total": len(rows),
+            "total": total,
             "total_admins": admins,
         }
 
 
+_BROKER_USERS_RETIRED = (
+    "Broker users are no longer part of Kavachio: the broker itself "
+    "agrees contracts and sends the bordereaux.")
+
+
 @router.post("/broker/users")
 def broker_user_invite(body: BrokerUserBody, p: Principal = Depends(current_principal)):
-    """Invite an OPERATOR into this broker organisation.
-
-    The role is not an input. A broker admin may create exactly one kind of
-    seat, so letting the client name it would only create a way to be refused
-    by the trigger. `invited_by_user_id` is the signed-in admin, which is what
-    makes "who let this person in?" a stored fact rather than a guess.
-    """
-    from app_routes import _make_invite_link, _send_invite_email
-
-    email = (body.email or "").strip().lower()
-    name = (body.full_name or "").strip()
-    if not email or not name:
-        raise HTTPException(400, "Name and email are required")
-
-    with SessionLocal() as s:
-        bid = _broker_admin(s, p)
-        if s.query(AppUser).filter(AppUser.email == email).first():
-            raise HTTPException(409, "Email already exists")
-        me = s.query(Party).filter(Party.id == bid).first()
-        u = AppUser(
-            email=email, full_name=name, role="operator",
-            # An operator belongs to the broker, to no carrier. Setting
-            # tenant_id here would break chk_app_user_scope.
-            tenant_id=None, broker_party_id=bid,
-            invited_by_user_id=p.user_id, status="invited",
-        )
-        s.add(u)
-        link = _make_invite_link(u)
-        s.commit(); s.refresh(u)
-        _send_invite_email(u.email, link, u.full_name, me.legal_name if me else None)
-        return _broker_user_dict(u)
+    """Retired 29 Sep 2026: a broker admin no longer adds broker users
+    (operators). 410 rather than 405 so a stale screen still gets a sentence."""
+    raise HTTPException(410, _BROKER_USERS_RETIRED)
 
 
 @router.post("/broker/users/{user_id}/resend-invite")
 def broker_user_resend(user_id: int, p: Principal = Depends(current_principal)):
-    """Re-issue the set-password link. The old one stops working."""
-    from app_routes import _make_invite_link, _send_invite_email
-    with SessionLocal() as s:
-        bid = _broker_admin(s, p)
-        u = s.get(AppUser, user_id)
-        # 404 rather than 403 on someone else's user: a wrong id must not tell
-        # a broker whether that id exists somewhere else on the platform.
-        if not u or u.broker_party_id != bid:
-            raise HTTPException(404, "user not found")
-        if u.status not in ("invited", "pending"):
-            raise HTTPException(409, "this user has already accepted their invite")
-        me = s.query(Party).filter(Party.id == bid).first()
-        link = _make_invite_link(u)
-        s.commit()
-        _send_invite_email(u.email, link, u.full_name, me.legal_name if me else None)
-        return {"ok": True}
+    """Retired with the invite above — there is no broker user to chase."""
+    raise HTTPException(410, _BROKER_USERS_RETIRED)
 
 
 @router.delete("/broker/users/{user_id}")
@@ -424,12 +865,53 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
                 "WHERE program_id = ANY(:pids) AND COALESCE(approved,0) = 1"),
                 {"pids": prog_ids}).scalar() or 0
 
-        # Runs and their exceptions, from the same programmes.
-        runs, exceptions = 0, 0
+        # Runs made FOR THIS BROKER — every one its team sent, whichever of
+        # them sent it, and every one the CARRIER ran for it (a carrier's
+        # Process Bordereau with this broker picked stamps the same column).
+        # All of the broker's users see the same runs and the same exceptions.
+        # Not every upload on the programme: programmes are shared, and
+        # counting by programme alone showed other brokers' files.
+        runs, exceptions, exception_runs = 0, 0, 0
+        my_uploads_week, turnaround_sec = 0, None
+        recent: list[dict] = []
         if prog_ids:
-            runs = s.execute(_text(
-                "SELECT count(*) FROM upload u "
-                "WHERE u.program_id = ANY(:pids)"), {"pids": prog_ids}).scalar() or 0
+            from db import LandingRecord, OutputExport
+            import validation_outcome as vo
+            mine = s.query(OutputExport).filter(
+                OutputExport.broker_party_id == bid,
+                OutputExport.program_id.in_(prog_ids))
+            runs = mine.count()
+
+            # Files THIS person sent through Process Bordereau. Runs made
+            # before the uploader was recorded have no user and are not
+            # guessed at, so this counts from the day recording began.
+            week_ago = dt.datetime.utcnow() - dt.timedelta(days=7)
+            my_uploads_week = mine.filter(
+                OutputExport.generated_by_user_id == p.user_id,
+                OutputExport.created_at >= week_ago).count()
+
+            # File received (landing written) to output ready (export written)
+            # — the same measure the carrier's own turnaround tile uses, over
+            # the broker's runs in the last 30 days.
+            month_ago = dt.datetime.utcnow() - dt.timedelta(days=30)
+            turnaround_sec = (s.query(func.avg(
+                    func.extract("epoch", OutputExport.created_at)
+                    - func.extract("epoch", LandingRecord.created_at)))
+                .join(LandingRecord, LandingRecord.output_export_id == OutputExport.id)
+                .filter(OutputExport.broker_party_id == bid,
+                        OutputExport.program_id.in_(prog_ids),
+                        OutputExport.created_at >= month_ago,
+                        OutputExport.created_at >= LandingRecord.created_at)
+                .scalar())
+            # Counted the way the carrier's own "Exceptions to review" tile
+            # counts them, so both sides read the same number for a run.
+            exceptions, exception_runs = s.query(
+                func.coalesce(func.sum(OutputExport.exception_count), 0),
+                func.count(OutputExport.id),
+            ).filter(OutputExport.broker_party_id == bid,
+                     OutputExport.program_id.in_(prog_ids),
+                     OutputExport.status == vo.HAS_EXCEPTIONS).one()
+            recent = _run_rows(s, mine.order_by(OutputExport.id.desc()).limit(10).all())
 
         return {
             "broker": {"id": bid, "name": me.legal_name if me else "—"},
@@ -439,7 +921,15 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
                 "setups": int(setups),
                 "runs": int(runs),
                 "exceptions": int(exceptions),
+                "exception_runs": int(exception_runs),
             },
+            "my_uploads_this_week": int(my_uploads_week),
+            # Seconds; None when there is no run to measure in the last 30 days.
+            "avg_turnaround_sec": (round(float(turnaround_sec), 1)
+                                   if turnaround_sec is not None else None),
+            # Newest first — the broker's own runs and the ones the carrier
+            # ran for it, the same list for every one of the broker's users.
+            "recent_runs": recent,
             # Why the screen is empty, said in the API rather than guessed at
             # in the UI: the operator cannot run anything until a setup exists,
             # and only their broker admin can build one.
@@ -449,3 +939,868 @@ def broker_operator_home(p: Principal = Depends(current_principal)):
                 else None
             ),
         }
+
+
+# --- the same activity, shaped for charts -----------------------------------
+
+
+@router.get("/broker/insights")
+def broker_insights(days: int = Query(30, ge=7, le=90),
+                    p: Principal = Depends(current_principal)):
+    """This broker's activity over a window, for the two dashboard charts.
+
+    Both broker screens read this one endpoint. The admin asks "who is doing
+    the work and which carrier is it for"; the user asks "how did our runs go".
+    Same rows, different cuts — one query set, so the two screens cannot drift
+    into quoting different numbers for the same week.
+
+    EVERY COUNT IS BROKER-WIDE, NEVER PER PERSON. `output_exports` records the
+    broker a run was made FOR (`broker_party_id`) and never the person who sent
+    it: a broker-lane run stamps `generated_by = "broker:<id>"`, the company.
+    So there is no honest per-user file count to return, and the screens say
+    "your team" rather than implying a personal total. This is deliberate, not
+    a gap to fill later — the carrier must not be able to see which of a
+    broker's people did what.
+
+    Two things ARE attributable to a person, and `by_person` carries both.
+    A decision on an exception: `exception_decision_log` takes the decider from
+    the login, and `decided_by_broker_party_id` is that person's own broker.
+    And a file sent through Process Bordereau: `output_exports
+    .generated_by_user_id` is stamped from the principal that ran it — never
+    served to a carrier seat, which still sees only "broker:<id>". So each
+    person's row carries the files they sent and the exceptions on them,
+    still open or put right. It goes to the broker
+    ADMIN only — the team roster is already admin-only, and a per-colleague
+    league table is not an operator's business.
+
+    Days with nothing in them are returned as zeros rather than skipped, so a
+    quiet day reads as a quiet day instead of collapsing the axis.
+    """
+    from db import ExceptionDecisionLog, OutputExport
+    import validation_outcome as vo
+
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        links = _links(s, bid)
+        prog_ids = [l.program_id for l in links]
+
+        # utcnow, because that is what every writer here stores. The column is
+        # timestamptz on a server in Asia/Kolkata, so comparing against a local
+        # "now" would silently drop the last 5.5 hours of rows.
+        today = dt.datetime.utcnow().date()
+        day_list = [today - dt.timedelta(days=i) for i in range(days - 1, -1, -1)]
+        since = dt.datetime.combine(day_list[0], dt.time.min)
+        week_since = dt.datetime.utcnow() - dt.timedelta(days=7)
+
+        runs: dict[str, dict] = {}
+        resolved: dict[str, int] = {}
+        by_carrier: list[dict] = []
+        carriers_total = 0
+        by_person: Optional[list[dict]] = None
+        runs_week = 0
+
+        if prog_ids:
+            scope = and_(OutputExport.broker_party_id == bid,
+                         OutputExport.program_id.in_(prog_ids))
+
+            for d, status, n in (
+                s.query(func.date(OutputExport.created_at),
+                        OutputExport.status, func.count(OutputExport.id))
+                 .filter(scope, OutputExport.created_at >= since)
+                 .group_by(func.date(OutputExport.created_at),
+                           OutputExport.status).all()
+            ):
+                cell = runs.setdefault(
+                    str(d), {"clean": 0, "flagged": 0, "not_checked": 0})
+                # Three outcomes, kept apart. A file nobody checked is not a
+                # clean one — folding it into either colour would report work
+                # that never happened.
+                if status == vo.HAS_EXCEPTIONS:
+                    cell["flagged"] += n
+                elif status == vo.CLEAN:
+                    cell["clean"] += n
+                else:
+                    cell["not_checked"] += n
+
+            runs_week = (s.query(func.count(OutputExport.id))
+                          .filter(scope, OutputExport.created_at >= week_since)
+                          .scalar() or 0)
+
+            # Which carrier the work was for — computed by _carrier_ranking below.
+            by_carrier, carriers_total = _carrier_ranking(s, bid, prog_ids, links, since, limit=5)
+
+        # Resolved-over-time is NOT gated on prog_ids: a decision is logged
+        # against the broker who made it, and it stays true even after the
+        # carrier takes that broker off the programme.
+        for d, n in (
+            s.query(func.date(ExceptionDecisionLog.decided_at),
+                    func.count(ExceptionDecisionLog.id))
+             .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
+                     ExceptionDecisionLog.decided_at >= since,
+                     # "reject" settles an exception too — see _team_ranking.
+                     ExceptionDecisionLog.kind.in_(
+                         ("fix", "approve", "dismiss", "reject")))
+             .group_by(func.date(ExceptionDecisionLog.decided_at)).all()
+        ):
+            resolved[str(d)] = resolved.get(str(d), 0) + n
+
+        people_total = None
+        if p.role == "broker_admin":
+            # The top of the team only. A broker can have hundreds of people;
+            # the dashboard draws a handful, and "View all" pages through the
+            # rest from /broker/insights/people rather than shipping every
+            # row on every load.
+            # The admin's own row is IN it: they run bordereaux too now, so
+            # leaving themselves out hid real work from the one card that
+            # reports it (see _team_ranking).
+            by_person, people_total = _team_ranking(s, bid, since, limit=5)
+
+        return {
+            "days": days,
+            # Oldest → newest, every day present, each one labelled with its
+            # own date so the screen never has to infer which day a bar is.
+            "runs_by_day": [
+                {"date": str(d),
+                 **runs.get(str(d), {"clean": 0, "flagged": 0, "not_checked": 0}),
+                 "resolved": resolved.get(str(d), 0)}
+                for d in day_list
+            ],
+            "by_carrier": by_carrier,
+            "carriers_total": carriers_total,
+            "by_person": by_person,
+            "people_total": people_total,
+            "totals": {
+                "runs_this_week": int(runs_week),
+                "runs_in_window": sum(
+                    c["clean"] + c["flagged"] + c["not_checked"]
+                    for c in runs.values()),
+                "resolved_in_window": sum(resolved.values()),
+            },
+        }
+
+
+def _run_rows(s, exports) -> list[dict]:
+    """The run rows both the dashboard and the run history show."""
+    from app_routes import _iso_utc
+    from exception_tally import contract_flags, export_versions
+    vers = export_versions(s, [e.id for e in exports]) if exports else {}
+    flags = contract_flags(s, [e.id for e in exports]) if exports else {}
+    tallies = {e.id: _export_tally(e) for e in exports}
+    prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
+                   .filter(Program.id.in_({e.program_id for e in exports})).all()}
+                  if exports else {})
+    cids = {e.contract_id for e in exports if e.contract_id}
+    contract_names = ({cid: (name or fname) for cid, name, fname in
+                       s.query(Contract.id, Contract.name, Contract.filename)
+                       .filter(Contract.id.in_(cids)).all()} if cids else {})
+    bids = {e.broker_party_id for e in exports if e.broker_party_id}
+    broker_names = ({bid: name for bid, name in s.query(Party.id, Party.legal_name)
+                     .filter(Party.id.in_(bids)).all()} if bids else {})
+    return [{
+        "export_id": e.id,
+        "filename": e.filename,
+        "programme": prog_names.get(e.program_id),
+        "contract": contract_names.get(e.contract_id),
+        "contract_id": e.contract_id if e.contract_id in contract_names else None,
+        "broker_name": broker_names.get(e.broker_party_id),
+        "rows": e.policy_count,
+        "status": e.status,
+        # A run through the broker's own lane is recorded as the broker
+        # company; anything else the carrier ran for them.
+        "sent_by": ("broker" if (e.generated_by or "").startswith("broker:")
+                    else "carrier"),
+        "created_at": _iso_utc(e.created_at),
+        # Which version of its submission this file is, and the month it is
+        # for — the list shows each submission once, as its newest version.
+        "version_no": (vers.get(e.id) or {}).get("version_no"),
+        "reporting_period": (vers.get(e.id) or {}).get("reporting_period"),
+        # What is still open on it, counted exactly as Exceptions to Review
+        # and the dashboard's own tile count — so the file list never quotes
+        # 23 for a file whose review screen says 13 are left.
+        **{k: tallies[e.id][k] for k in ("open", "put_right")},
+        "exception_count": tallies[e.id]["exceptions"],
+        # Checked against a contract that has since been replaced, and — when
+        # `counted` is False — answered by the newer contract's file for the
+        # same month: kept for audit, left out of Exceptions to Review.
+        **(flags.get(e.id) or {"contract_replaced": False, "contract_renewed": False,
+                               "counted": True}),
+    } for e in exports]
+
+
+def _uploader_work(s, bid: int, user_ids: list[int], since) -> dict[int, dict]:
+    """Per person: the exceptions on the files THEY sent, open and put right.
+
+    The only per-user file fact a broker has is `generated_by_user_id`, stamped
+    on a run made through Process Bordereau (see the dashboard's own note on
+    per-user attribution). Files run before that column existed, and files the
+    CARRIER ran for the broker, carry no user — they are left out rather than
+    attributed to a guess.
+
+    COUNTED IN EXCEPTIONS, NOT ROWS OR CELLS. An exception sits on one CELL:
+    a row of forty values with one bad date is one exception, not a bad row.
+    Counting it as a row said "10 of 10 rows need review" about a file where
+    thirty-nine values in forty were fine — true by its own definition and
+    wrong to every reader. Counting the other way, against every cell checked,
+    buries the same 14 exceptions in ~500 cells and draws a sliver nobody can
+    see. So the bar is the WORK — how much of it is still open — and the size
+    of what it came from is written beside it as files and rows.
+
+    `rows_flagged` is kept for that sentence only ("14 exceptions across 10
+    rows"), never as a bar: it is context for the count, not a share of the
+    file.
+
+    Decisions are matched to the file's exceptions AS THEY ARE NOW, notices
+    left out, exactly as Exception Triage matches them, so a bar here always
+    equals the screen it opens. Counting `exception_decision_log` rows instead
+    would call a file fixed on the strength of decisions about a rule that is
+    no longer an exception on it.
+    """
+    from db import OutputExport
+
+    out = {uid: {"files": 0, "rows": 0, "rows_flagged": 0,
+                 "exceptions": 0, "open": 0, "put_right": 0}
+           for uid in user_ids}
+    if not user_ids:
+        return out
+    live = current_export_ids(s, broker_party_id=bid)
+    if not live:
+        return out
+    rows = (s.query(OutputExport.id, OutputExport.generated_by_user_id)
+             .filter(OutputExport.broker_party_id == bid,
+                     OutputExport.generated_by_user_id.in_(user_ids),
+                     OutputExport.created_at >= since,
+                     OutputExport.id.in_(live)).all())
+    for eid, uid in rows:
+        # One export at a time, then let it go: the exceptions column runs to
+        # megabytes on a big bordereau and a busy person has many of them.
+        r = s.get(OutputExport, eid)
+        if r is None:
+            continue
+        tally = out[uid]
+        t = _export_tally(r)
+        tally["files"] += 1
+        tally["rows"] += t["rows"]
+        tally["rows_flagged"] += t["rows_flagged"]
+        tally["exceptions"] += t["exceptions"]
+        tally["open"] += t["open"]
+        tally["put_right"] += t["put_right"]
+        s.expunge(r)
+    return out
+
+
+def _team_ranking(s, bid: int, since, q: Optional[str] = None,
+                  offset: int = 0, limit: int = 10,
+                  exclude_user_id: Optional[int] = None):
+    """The broker's whole team ranked by how much work they have brought in
+    since `since` — files sent, then exceptions put right.
+
+    RANKED ON FILES, NOT ON DECISIONS. A person who uploads a bordereau with
+    fourteen exceptions on it and has fixed none of them is the most active
+    person on the team and the one an admin most needs to see; ranking on
+    decisions alone put them LAST and pushed them off a five-row card. So the
+    order is files sent first, decisions as the tie-break, and the row itself
+    says which of its rows still need review.
+
+    Counted and ranked in the database, so the rank costs the same for five
+    people as for five thousand. The rank is the TEAM rank, taken before any
+    search, so someone found by name keeps their real place rather than
+    becoming #1 of the results. Ties share a rank; everyone who has done
+    nothing in the window shares the last one.
+
+    `uploads` is attached only to the page being returned (see
+    `_uploader_work`, which has to open each file's exception blob) — ranking
+    stays in SQL, the detail is bought for the handful of people actually
+    being drawn.
+
+    `exclude_user_id` drops a user from the list. It is applied before ranking,
+    so a colleague's rank is never shifted by the dropped row.
+
+    IT IS NO LONGER USED TO DROP THE VIEWER. It was, on the reasoning that an
+    admin is not someone they keep tabs on. That held while the admin could not
+    send a file: their row was an empty one and hiding it lost nothing. Now that
+    both broker seats run Process Bordereau, an admin who sends the month's
+    bordereaux themselves is the person doing the work this screen exists to
+    show — and excluding them answered "who on my team sent what" with a table
+    that left out the largest sender, or with nothing at all at a broker where
+    the admin is the only person. The parameter is kept because the exclusion is
+    still the right call for any OTHER row a caller wants left out.
+    """
+    from auth_deps import normalize_role
+    from db import ExceptionDecisionLog, OutputExport
+    counts = (s.query(ExceptionDecisionLog.decided_by_user_id.label("uid"),
+                      func.count(ExceptionDecisionLog.id).label("n"))
+               .filter(ExceptionDecisionLog.decided_by_broker_party_id == bid,
+                       ExceptionDecisionLog.decided_at >= since,
+                       ExceptionDecisionLog.decided_by_user_id.isnot(None),
+                       # Every kind that settles an exception, "reject" too —
+                       # a file's own tally counts a rejected one as resolved,
+                       # so leaving it out here made the two disagree.
+                       ExceptionDecisionLog.kind.in_(
+                           ("fix", "approve", "dismiss", "reject")))
+               .group_by(ExceptionDecisionLog.decided_by_user_id)
+               .subquery())
+    # Files each person SENT in the window. Only runs made through Process
+    # Bordereau carry a user; a run the carrier made for this broker does not,
+    # and is not attributed to anyone.
+    sent = (s.query(OutputExport.generated_by_user_id.label("uid"),
+                    func.count(OutputExport.id).label("n"))
+             .filter(OutputExport.broker_party_id == bid,
+                     OutputExport.created_at >= since,
+                     OutputExport.generated_by_user_id.isnot(None))
+             .group_by(OutputExport.generated_by_user_id)
+             .subquery())
+    n = func.coalesce(counts.c.n, 0)
+    f = func.coalesce(sent.c.n, 0)
+    base = s.query(AppUser.id.label("id"),
+                   AppUser.full_name.label("full_name"),
+                   AppUser.email.label("email"),
+                   AppUser.role.label("role"),
+                   n.label("resolved"),
+                   f.label("files"),
+                   func.rank().over(order_by=(f.desc(), n.desc())).label("rank")) \
+             .outerjoin(counts, counts.c.uid == AppUser.id) \
+             .outerjoin(sent, sent.c.uid == AppUser.id) \
+             .filter(AppUser.broker_party_id == bid)
+    if exclude_user_id is not None:
+        base = base.filter(AppUser.id != exclude_user_id)
+    ranked = base.subquery()
+    rows = s.query(ranked)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        rows = rows.filter(or_(ranked.c.full_name.ilike(like),
+                               ranked.c.email.ilike(like)))
+    total = rows.count()
+    page = (rows.order_by(ranked.c.rank,
+                          func.lower(func.coalesce(ranked.c.full_name, ranked.c.email)),
+                          ranked.c.id)
+                .offset(offset).limit(limit).all())
+    work = _uploader_work(s, bid, [r.id for r in page], since)
+    items = []
+    for r in page:
+        w = work.get(r.id, {})
+        items.append({
+            "id": r.id,
+            "name": r.full_name or r.email or f"User {r.id}",
+            "role": normalize_role(r.role),
+            "resolved": int(r.resolved),
+            "rank": int(r.rank),
+            # The files this person sent, and the exceptions on them. `files`
+            # comes from the same query the rank does, so the number and the
+            # order can never disagree.
+            "files": int(r.files),
+            "uploads": {
+                "rows": w.get("rows", 0),
+                # Rows carrying at least one open exception — context for the
+                # count ("14 across 10 rows"), never drawn as a share.
+                "rows_flagged": w.get("rows_flagged", 0),
+                "exceptions": w.get("exceptions", 0),
+                "open": w.get("open", 0),
+                "put_right": w.get("put_right", 0),
+            },
+        })
+    return items, total
+
+
+def _carrier_ranking(s, bid: int, prog_ids: list[int], links, since,
+                     q: Optional[str] = None, offset: int = 0, limit: int = 10):
+    """Every carrier this broker is linked to, ranked by files run since
+    `since`. A carrier with no runs this window still appears at the bottom,
+    the same way a quiet team member still appears in `_team_ranking` — a
+    broker's carrier count is small enough that this is one pass in Python,
+    not a query worth pushing into SQL.
+    """
+    from db import OutputExport
+    carrier_ids = sorted({l.tenant_id for l in links if l.tenant_id})
+    tally: dict[int, int] = {cid: 0 for cid in carrier_ids}
+    if prog_ids:
+        carrier_of = {l.program_id: l.tenant_id for l in links}
+        scope = and_(OutputExport.broker_party_id == bid,
+                     OutputExport.program_id.in_(prog_ids))
+        for pid, n in (s.query(OutputExport.program_id, func.count(OutputExport.id))
+                        .filter(scope, OutputExport.created_at >= since)
+                        .group_by(OutputExport.program_id).all()):
+            cid = carrier_of.get(pid)
+            if cid in tally:
+                tally[cid] += n
+    names = {t.id: (t.legal_name or t.tenant_name)
+             for t in s.query(Tenant).filter(Tenant.id.in_(carrier_ids or [0])).all()}
+    ranked = sorted(
+        ({"id": cid, "name": names.get(cid, "—"), "runs": n} for cid, n in tally.items()),
+        key=lambda r: (-r["runs"], r["name"].lower()))
+    rank, last = 0, None
+    for i, r in enumerate(ranked):
+        if r["runs"] != last:
+            rank, last = i + 1, r["runs"]
+        r["rank"] = rank
+    if q and q.strip():
+        needle = q.strip().lower()
+        ranked = [r for r in ranked if needle in r["name"].lower()]
+    total = len(ranked)
+    return ranked[offset:offset + limit], total
+
+
+@router.get("/broker/insights/carriers")
+def broker_insights_carriers(days: int = Query(30, ge=7, le=90),
+                             page: int = Query(1, ge=1),
+                             page_size: int = Query(25, ge=1, le=100),
+                             q: Optional[str] = Query(None, max_length=100),
+                             p: Principal = Depends(current_principal)):
+    """Every carrier this broker works with, ranked by files run, a page at a
+    time, with a name search. Broker admin only, like the dashboard card it
+    opens from.
+    """
+    with SessionLocal() as s:
+        bid = _broker_admin(s, p)
+        links = _links(s, bid)
+        prog_ids = [l.program_id for l in links]
+        today = dt.datetime.utcnow().date()
+        since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+        items, total = _carrier_ranking(s, bid, prog_ids, links, since, q=q,
+                                        offset=(page - 1) * page_size, limit=page_size)
+        return {"items": items, "total": total}
+
+
+@router.get("/broker/insights/people/{user_id}/decisions")
+def broker_person_decisions(user_id: int, days: int = Query(30, ge=7, le=90),
+                            page: int = Query(1, ge=1),
+                            page_size: int = Query(25, ge=1, le=100),
+                            p: Principal = Depends(current_principal)):
+    """WHO resolved what on the files this person SENT — the receipt behind the
+    "Put right" column above it.
+
+    It used to list the decisions this person made themselves, anywhere. That
+    answered a question nobody was asking and read as broken: Cleap's page said
+    "nothing put right" beside a file showing 65 put right, because the 65 were
+    the ADMIN's. What a broker admin wants from a person's page is the other
+    cut — this is the work on THEIR files, whoever did it, with the decider
+    named on every row.
+
+    Scoped to THIS broker by the FILES, not by the decider: only exports
+    stamped with this broker and sent by this user are looked at, so a user id
+    from another broker matches no export and returns nothing. That also lets a
+    decision made by a CARRIER person on one of these files appear — it is work
+    on this file, and the name is written the way a broker seat may see it
+    (their own people by name, the other side as its company: see
+    `decision_log.Labeller`).
+
+    A re-run moves the landing pointer to a new export, so decisions saved
+    against the older one are matched by landing too — otherwise "Fix & Validate"
+    would empty this list.
+    """
+    from db import ExceptionDecisionLog, LandingRecord, OutputExport
+    with SessionLocal() as s:
+        bid = _broker_admin(s, p)
+        today = dt.datetime.utcnow().date()
+        since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+
+        live = current_export_ids(s, broker_party_id=bid)
+        mine = [i for (i,) in s.query(OutputExport.id)
+                .filter(OutputExport.broker_party_id == bid,
+                        OutputExport.generated_by_user_id == user_id,
+                        OutputExport.created_at >= since,
+                        OutputExport.id.in_(live or {-1})).all()]
+        landings = [i for (i,) in s.query(LandingRecord.id)
+                    .filter(LandingRecord.output_export_id.in_(mine or [0])).all()]
+        q = (s.query(ExceptionDecisionLog)
+              .filter(or_(ExceptionDecisionLog.export_id.in_(mine or [0]),
+                          ExceptionDecisionLog.landing_id.in_(landings or [0])),
+                      # Every kind that settles an exception, "reject" included:
+                      # the file's own tally counts a rejected one as put right,
+                      # so leaving it out here made the two disagree.
+                      ExceptionDecisionLog.kind.in_(
+                          ("fix", "approve", "dismiss", "reject"))))
+        total = q.count()
+        rows = (q.order_by(ExceptionDecisionLog.decided_at.desc())
+                 .offset((page - 1) * page_size).limit(page_size).all())
+
+        eids = {r.export_id for r in rows if r.export_id}
+        exports = ({e.id: e for e in s.query(OutputExport)
+                    .filter(OutputExport.id.in_(eids)).all()} if eids else {})
+        pids = {e.program_id for e in exports.values() if e.program_id}
+        prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
+                       .filter(Program.id.in_(pids)).all()} if pids else {})
+
+        from app_routes import _iso_utc
+        from decision_log import Labeller
+        who = Labeller(s, p)
+
+        def _row(r):
+            exp = exports.get(r.export_id)
+            return {
+                "id": r.id,
+                "kind": r.kind,
+                "policy_number": r.policy_number,
+                "sheet": r.sheet,
+                "row": r.row,
+                "field": r.field,
+                "old_value": r.old_value,
+                "new_value": r.new_value,
+                "reason": r.reason,
+                "decided_at": _iso_utc(r.decided_at),
+                "export_id": r.export_id,
+                "filename": exp.filename if exp else None,
+                "programme": prog_names.get(exp.program_id) if exp else None,
+                # WHO resolved it, in the words this viewer may see.
+                "decided_by": who.label(r.decided_by_user_id),
+                "decided_by_user_id": r.decided_by_user_id,
+            }
+
+        # Same bid filter as the decisions query, for the same reason: a
+        # user id from another broker gets no name here either.
+        person = (s.query(AppUser)
+                   .filter(AppUser.id == user_id, AppUser.broker_party_id == bid)
+                   .first())
+        return {
+            "person": {"id": user_id,
+                       "name": (person.full_name or person.email) if person else None},
+            "items": [_row(r) for r in rows],
+            "total": total,
+        }
+
+
+@router.get("/broker/insights/people/{user_id}/files")
+def broker_person_files(user_id: int, days: int = Query(30, ge=7, le=90),
+                        page: int = Query(1, ge=1),
+                        page_size: int = Query(25, ge=1, le=100),
+                        p: Principal = Depends(current_principal)):
+    """WHICH files this person sent, and what is still open on each one.
+
+    The Team Activity bar is one number for a person — "564 of 564 open" — and
+    a broker admin cannot act on that. Those 564 came from four files on two
+    different programmes, and a programme is the unit a broker admin actually
+    reviews: the contract, the rules and the carrier all hang off it. So this
+    returns the files themselves, each with its own counts and its own way in,
+    plus the same totals grouped by programme. Sending an admin straight to the
+    newest flagged file (what the card's link used to do) answered a question
+    nobody asked.
+
+    Counted by `_export_tally`, the same function behind the dashboard bar, so
+    the file rows add up to the bar and each row equals the triage screen it
+    opens.
+
+    Broker admin only, and scoped to THIS broker: every export is filtered on
+    `broker_party_id == bid`, so a user id belonging to another broker returns
+    an empty list rather than that broker's files.
+    """
+    from db import OutputExport
+    from app_routes import _iso_utc
+    with SessionLocal() as s:
+        bid = _broker_admin(s, p)
+        today = dt.datetime.utcnow().date()
+        since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+
+        person = (s.query(AppUser)
+                   .filter(AppUser.id == user_id, AppUser.broker_party_id == bid)
+                   .first())
+        live = current_export_ids(s, broker_party_id=bid)
+        q = (s.query(OutputExport.id)
+              .filter(OutputExport.broker_party_id == bid,
+                      OutputExport.generated_by_user_id == user_id,
+                      OutputExport.created_at >= since,
+                      OutputExport.id.in_(live or {-1}))
+              .order_by(OutputExport.created_at.desc(), OutputExport.id.desc()))
+        eids = [i for (i,) in q.all()]
+        total = len(eids)
+
+        # Which carrier each programme belongs to — the broker's own links, so
+        # a programme it was taken off simply has no carrier name rather than
+        # reaching into a carrier it can no longer see.
+        links = _links(s, bid)
+        carrier_of_prog = {l.program_id: l.tenant_id for l in links}
+        cids = {c for c in carrier_of_prog.values() if c}
+        carrier_names = ({t.id: (t.legal_name or t.tenant_name) for t in
+                          s.query(Tenant).filter(Tenant.id.in_(cids)).all()}
+                         if cids else {})
+        pids = {pid for (pid,) in s.query(OutputExport.program_id)
+                .filter(OutputExport.id.in_(eids or [0])).distinct().all() if pid}
+        prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
+                       .filter(Program.id.in_(pids)).all()} if pids else {})
+
+        # Every file is tallied (the programme summary has to cover all of
+        # them), but only the page asked for is returned. A broker's files in a
+        # 30-day window are tens, not thousands — the cost is one exception blob
+        # per file, the same pass the dashboard already makes for its top five.
+        items, by_prog = [], {}
+        lo, hi = (page - 1) * page_size, (page - 1) * page_size + page_size
+        for n, eid in enumerate(eids):
+            r = s.get(OutputExport, eid)
+            if r is None:
+                continue
+            t = _export_tally(r)
+            cid = carrier_of_prog.get(r.program_id)
+            g = by_prog.setdefault(r.program_id, {
+                "id": r.program_id,
+                "name": prog_names.get(r.program_id) or "No programme",
+                "carrier": carrier_names.get(cid),
+                "files": 0, "rows": 0, "exceptions": 0, "open": 0, "put_right": 0,
+            })
+            g["files"] += 1
+            for k in ("rows", "exceptions", "open", "put_right"):
+                g[k] += t[k]
+            if lo <= n < hi:
+                items.append({
+                    "export_id": r.id,
+                    "source_upload_id": r.source_upload_id,
+                    "filename": r.filename,
+                    "programme_id": r.program_id,
+                    "programme": prog_names.get(r.program_id),
+                    "carrier": carrier_names.get(cid),
+                    "status": r.status,
+                    "created_at": _iso_utc(r.created_at),
+                    **t,
+                })
+            s.expunge(r)
+
+        programmes = sorted(by_prog.values(),
+                            key=lambda g: (-g["open"], -g["files"], g["name"].lower()))
+        return {
+            "person": {"id": user_id,
+                       "name": (person.full_name or person.email) if person else None},
+            "items": items,
+            "total": total,
+            "by_programme": programmes,
+            "totals": {
+                "files": total,
+                **{k: sum(g[k] for g in programmes)
+                   for k in ("rows", "exceptions", "open", "put_right")},
+            },
+        }
+
+
+@router.get("/broker/insights/people")
+def broker_insights_people(days: int = Query(30, ge=7, le=90),
+                           page: int = Query(1, ge=1),
+                           page_size: int = Query(25, ge=1, le=100),
+                           q: Optional[str] = Query(None, max_length=100),
+                           p: Principal = Depends(current_principal)):
+    """Every person on the team, ranked, a page at a time, with a name search.
+
+    Broker admin only, like the dashboard card it opens from.
+    """
+    with SessionLocal() as s:
+        bid = _broker_admin(s, p)
+        today = dt.datetime.utcnow().date()
+        since = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time.min)
+        items, total = _team_ranking(s, bid, since, q=q,
+                                     offset=(page - 1) * page_size, limit=page_size)
+        return {"items": items, "total": total}
+
+
+def _exception_files(s, bid: int, prog_ids: list[int]) -> list[dict]:
+    """Every LIVE file of this broker that has exceptions, each one tallied.
+
+    Live = current_export_ids: a file that was fixed and re-run is counted
+    once, as it is now. Tallied by `_export_tally`, the function behind the
+    triage screen each row opens, so a row's "open" is the number that screen
+    shows. Behind both the dashboard's Exceptions to Review tile and the
+    /broker/exceptions list.
+    """
+    from db import OutputExport
+    from app_routes import _iso_utc
+    if not prog_ids:
+        return []
+    live = current_export_ids(s, broker_party_id=bid)
+    if not live:
+        return []
+    exports = (s.query(OutputExport)
+                .filter(OutputExport.broker_party_id == bid,
+                        OutputExport.program_id.in_(prog_ids),
+                        OutputExport.id.in_(live),
+                        OutputExport.exception_count > 0)
+                .order_by(OutputExport.created_at.desc(), OutputExport.id.desc())
+                .all())
+    carrier_of_prog = {l.program_id: l.tenant_id for l in _links(s, bid)}
+    cids = {c for c in carrier_of_prog.values() if c}
+    carrier_names = ({t.id: (t.legal_name or t.tenant_name) for t in
+                      s.query(Tenant).filter(Tenant.id.in_(cids)).all()}
+                     if cids else {})
+    pids = {e.program_id for e in exports if e.program_id}
+    prog_names = ({pid: name for pid, name in s.query(Program.id, Program.name)
+                   .filter(Program.id.in_(pids)).all()} if pids else {})
+    out = []
+    for e in exports:
+        t = _export_tally(e)
+        if t["exceptions"] == 0:
+            continue
+        out.append({
+            "export_id": e.id,
+            "filename": e.filename,
+            "programme": prog_names.get(e.program_id),
+            "carrier": carrier_names.get(carrier_of_prog.get(e.program_id)),
+            "created_at": _iso_utc(e.created_at),
+            **t,
+        })
+    return out
+
+
+@router.get("/broker/exceptions")
+def broker_exceptions(carrier_id: Optional[int] = Query(None),
+                      p: Principal = Depends(current_principal)):
+    """What the Exceptions to Review tile counts, file by file: every live file
+    with exceptions, most still-open first, each one opening its own triage.
+
+    Both broker seats — anyone who runs the bordereau works these. `carrier_id`
+    only narrows, like every other broker read.
+    """
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        prog_ids = [l.program_id for l in _links(s, bid, carrier_id=carrier_id)]
+        items = _exception_files(s, bid, prog_ids)
+        # Most still-open first; ties keep the query's newest-first order.
+        items.sort(key=lambda f: -f["open"])
+        return {
+            "items": items,
+            "totals": {
+                "files": len(items),
+                "files_open": sum(1 for f in items if f["open"] > 0),
+                **{k: sum(f[k] for f in items)
+                   for k in ("exceptions", "open", "put_right")},
+            },
+            # Not counted above: files under a replaced contract whose month
+            # the newer contract has answered. Kept for audit; said here so the
+            # number never drops without a reason on the page.
+            "replaced": _replaced_contract_files(s, bid, prog_ids),
+        }
+
+
+def _replaced_contract_files(s, bid: int, prog_ids: list[int]) -> dict:
+    """How much is kept for audit under replaced contracts, not counted."""
+    from db import OutputExport
+    from exception_tally import replaced_contract_runs
+    if not prog_ids:
+        return {"files": 0, "open": 0}
+    ids = replaced_contract_runs(
+        s, current_export_ids(s, broker_party_id=bid, include_replaced=True))
+    if not ids:
+        return {"files": 0, "open": 0}
+    rows = (s.query(OutputExport)
+             .filter(OutputExport.id.in_(ids),
+                     OutputExport.program_id.in_(prog_ids)).all())
+    return {"files": len(rows), "open": sum(_export_tally(r)["open"] for r in rows)}
+
+
+@router.get("/broker/calendar/{expected_id}/versions")
+def broker_calendar_versions(expected_id: int,
+                             p: Principal = Depends(current_principal)):
+    """Every file sent for one period this broker owes — the carrier calendar's
+    version history, for the broker's own calendar.
+
+    404 unless the period is THIS broker's, on a programme it is still on:
+    the carrier's /calendar/{id}/versions is tenant-scoped and refuses a
+    broker token, and must stay that way.
+    """
+    from db import ExpectedSubmission
+    from submission_calendar_service import submission_versions
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        e = s.get(ExpectedSubmission, expected_id)
+        prog_ids = {l.program_id for l in _links(s, bid)}
+        if e is None or e.broker_party_id != bid or e.program_id not in prog_ids:
+            raise HTTPException(404, "period not found")
+        return {"expected_id": expected_id, "period": e.period,
+                "versions": submission_versions(s, expected_id)}
+
+
+@router.get("/broker/runs-on-day")
+def broker_runs_on_day(day: dt.date = Query(..., description="YYYY-MM-DD"),
+                       p: Principal = Depends(current_principal)):
+    """The files behind one bar of the broker dashboard's Bordereau Status
+    chart — the carrier dashboard's day drawer, in this broker's scope.
+
+    Same scope and same day as /broker/insights' runs_by_day (this broker, the
+    programmes it is still on, the DB's own date of the run) and the same
+    three-way split, so the list always adds up to the bar clicked.
+    """
+    from db import OutputExport
+    import validation_outcome as vo
+    from app_routes import _day_runs_query, _day_runs_payload
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        prog_ids = [l.program_id for l in _links(s, bid)]
+        q = (_day_runs_query(s)
+             .filter(OutputExport.broker_party_id == bid,
+                     OutputExport.program_id.in_(prog_ids or [-1]),
+                     func.date(OutputExport.created_at) == day))
+        return _day_runs_payload(
+            s, q.order_by(OutputExport.created_at, OutputExport.id).all(), day, None,
+            lambda st: ("flagged" if st == vo.HAS_EXCEPTIONS
+                        else "clean" if st == vo.CLEAN else "not_checked"))
+
+
+@router.get("/broker/calendar")
+def broker_calendar(month: Optional[str] = Query(None),
+                    carrier_id: Optional[int] = Query(None),
+                    p: Principal = Depends(current_principal)):
+    """The broker's own Bordereau Calendar: every file it owes in one due-month,
+    and whether each one is done, late, or still to come.
+
+    The SAME board the carrier reads (calendar_board), narrowed to this broker
+    and to the programmes it is still on, so "arrived on time" on the carrier's
+    screen and "done on time" here are one fact read twice. `carrier_id` only
+    narrows, like every other broker read.
+
+    Read-only: no heal/sweep here. The carrier's own board and the daily
+    scheduler do those writes; a broker opening its calendar should not.
+    """
+    from submission_calendar_service import calendar_board, submission_versions
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        prog_ids = sorted({l.program_id for l in _links(s, bid, carrier_id=carrier_id)})
+        board = calendar_board(s, None, month=month, broker_id=bid,
+                               program_ids=prog_ids)
+        for r in board["rows"]:
+            # Who at the broker the carrier would email is the carrier's
+            # concern, not something the broker needs read back to it.
+            r.pop("contacts", None)
+            # When the newest version was actually uploaded — date AND time,
+            # which `latest_received_at` (a date) cannot say. The same value
+            # the Versions panel shows on its newest entry. A month holds a
+            # handful of rows per broker, so one lookup each is cheap.
+            vs = submission_versions(s, r["id"]) if r.get("version_count") else []
+            r["uploaded_at"] = vs[-1].get("uploaded_at") if vs else None
+            # The file behind the period's newest version, so a done row can
+            # open its exceptions — the same export the Process Bordereau
+            # result opens. Read from the Versions panel's own list, so a file
+            # sent by email, SFTP or API (whose output is found through its
+            # arrival) opens too.
+            r["export_id"] = next((v["received_export_id"] for v in reversed(vs)
+                                   if v.get("received_export_id")), None)
+        for sch in board["schedules"]:
+            # How many OTHER brokers share a programme is the carrier's to know.
+            sch.pop("broker_count", None)
+            # Likewise who they are and what contract each holds: keep only
+            # this broker's own entry (its contract, its next file).
+            if "brokers" in sch:
+                sch["brokers"] = [b for b in (sch["brokers"] or [])
+                                  if b.get("broker_party_id") == bid]
+        return board
+
+
+@router.get("/broker/runs")
+def broker_runs(page: int = Query(1, ge=1),
+                page_size: int = Query(20, ge=1, le=100),
+                p: Principal = Depends(current_principal)):
+    """Every file processed for this broker, newest first, a page at a time.
+
+    Same scope as the dashboard's recent runs: this broker's runs on the
+    programmes it is still on, whether its own team or the carrier sent them.
+    One row per SUBMISSION: a file sent again for the same programme, contract
+    and month is its next version, so only the newest version is listed (the
+    older ones stay in the database, in the submission's history).
+    """
+    from db import OutputExport
+    with SessionLocal() as s:
+        bid = _broker_party_id(s, p)
+        prog_ids = [l.program_id for l in _links(s, bid)]
+        if not prog_ids:
+            return {"items": [], "total": 0}
+        # Files under a replaced contract stay on the list, labelled — the
+        # history is kept for audit; only the counts leave them out.
+        live = current_export_ids(s, broker_party_id=bid, include_replaced=True)
+        q = s.query(OutputExport).filter(OutputExport.broker_party_id == bid,
+                                         OutputExport.program_id.in_(prog_ids),
+                                         OutputExport.id.in_(live or {-1}))
+        total = q.count()
+        rows = (q.order_by(OutputExport.id.desc())
+                 .offset((page - 1) * page_size).limit(page_size).all())
+        return {"items": _run_rows(s, rows), "total": total}

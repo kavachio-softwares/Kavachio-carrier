@@ -163,8 +163,12 @@ def main(do_reset: bool = False) -> None:
                 s.commit()
             print(f"on       : {bname} -> {pname}")
 
-        # --- two contracts, one of each approval path ------------------------
-        def contract(prog, brk, filename, submitter, approval, cap):
+        # --- two contracts on two brokers ------------------------------------
+        # There used to be one of each APPROVAL path here: a carrier upload that
+        # was live on arrival and a broker upload that waited for the carrier to
+        # let it in. The gate and the broker-side upload were removed together,
+        # so both contracts are now simply the carrier's.
+        def contract(prog, brk, filename, cap):
             c = (s.query(Contract)
                    .filter(Contract.program_id == prog.id,
                            Contract.filename == filename).first())
@@ -176,27 +180,21 @@ def main(do_reset: bool = False) -> None:
                 filename=filename, status="extracted",
                 inception_dt=date(2026, 1, 1), expiry_dt=date(2026, 12, 31),
                 premium_cap_amount=cap, premium_cap_currency="USD",
-                submitted_by_user_id=submitter.id, submitted_at=now,
-                approval_status=approval,
+                submitted_by_user_id=admin.id, submitted_at=now,
             )
-            if approval == "approved":
-                c.approved_by_user_id = admin.id
-                c.approved_at = now
             s.add(c); s.commit()
             s.add(ContractApproval(tenant_id=tid, contract_id=c.id, action="submitted",
-                                   acted_by_user_id=submitter.id, acted_at=now))
+                                   acted_by_user_id=admin.id, acted_at=now))
             s.commit()
             return c
 
-        # The carrier uploaded this one, so it is live on arrival.
         c1 = contract(progs["Programme A"], brokers["Bridge Brokers"],
-                      "ProgrammeA_Bridge_2026.pdf", admin, "approved", 12000000)
-        print(f"contract : {c1.filename}  approval={c1.approval_status}  (carrier upload)")
+                      "ProgrammeA_Bridge_2026.pdf", 12000000)
+        print(f"contract : {c1.filename}  (Bridge Brokers)")
 
-        # The broker uploaded this one, so it waits.
         c2 = contract(progs["Programme A"], brokers["Coastal Brokers"],
-                      "ProgrammeA_Coastal_2026.pdf", bu, "pending_approval", 5000000)
-        print(f"contract : {c2.filename}  approval={c2.approval_status}  (broker upload)")
+                      "ProgrammeA_Coastal_2026.pdf", 5000000)
+        print(f"contract : {c2.filename}  (Coastal Brokers)")
 
         print("\nseed complete — sign in as carrier.admin@northwind.test / Passw0rd!")
 

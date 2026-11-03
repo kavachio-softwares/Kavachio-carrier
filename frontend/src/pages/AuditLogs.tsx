@@ -1,0 +1,420 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { Download, Paperclip, Search } from "lucide-react";
+import {
+  downloadAuditLogs, downloadCorrectionEvidence, getAuditGroup, getAuditLogs, getAuditOptions,
+  type AuditOptions, type AuditQuery, type AuditRow,
+} from "../api/audit";
+import { downloadErrorText } from "../api/client";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { useServerList } from "../hooks/useServerList";
+import { Pagination } from "../components/Pagination";
+import { fmtDateTime } from "../utils/date";
+import { InfoTip } from "../components/InfoTip";
+
+// 200 a page, read by scrolling the table itself (its header stays put); the
+// page controls under it move between pages of 200.
+const PAGE_SIZE = 200;
+
+/** What this seat's trail actually covers — said once, at the top, because the
+ *  answer is different for every role and a table of rows cannot say it. */
+const SUBTITLE: Record<string, string> = {
+  platform:
+    "Everything that happens on Kavachio — every carrier, every broker and every person.",
+  carrier_admin:
+    "Everyone at your company, and every broker you work with — each person by name, with their broker company. Steps Kavachio takes on its own (status emails, reminders) show as Kavachio · Automatic.",
+  carrier_user:
+    "Your own trail, and everything the brokers you work with have done — each person by name. Steps Kavachio takes on its own show as Kavachio · Automatic.",
+  broker_admin:
+    "Your whole team — who sent which file, and who cleared which exception.",
+  broker_user:
+    "Your own trail: what you sent, what you opened and what you put right.",
+};
+
+const TONE_CLASS: Record<string, string> = {
+  ok: "b-ok", warn: "b-warn", bad: "b-crit", info: "b-info", muted: "b-mut",
+};
+
+/** A local calendar day as "YYYY-MM-DD" — never toISOString(), which is UTC and
+ *  would name yesterday for anyone east of Greenwich after midnight. */
+function localDay(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function daysAgo(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return localDay(d);
+}
+
+const RANGES = [
+  { key: "7", label: "Last 7 days" },
+  { key: "30", label: "Last 30 days" },
+  { key: "90", label: "Last 90 days" },
+  { key: "all", label: "All time" },
+  { key: "custom", label: "Custom range…" },
+];
+
+function rangeDates(key: string, from: string, to: string): { from?: string; to?: string } {
+  if (key === "custom") return { from: from || undefined, to: to || undefined };
+  if (key === "all") return {};
+  return { from: daysAgo(Number(key)), to: localDay(new Date()) };
+}
+
+/**
+ * Audit Logs — who did what, when, and how it ended.
+ *
+ * One screen for all five seats. The filters and the columns are the same
+ * everywhere; what changes is WHOSE rows the server sends back and what it is
+ * willing to call them (audit_feed.py). So there is no role branching here
+ * beyond the sentence at the top — if this screen ever needed to hide a row,
+ * that would mean the server had already sent one it should not have.
+ */
+export default function AuditLogs() {
+  const [range, setRange] = useState("30");
+  const [from, setFrom] = useState(daysAgo(30));
+  const [to, setTo] = useState(localDay(new Date()));
+  const [actor, setActor] = useState("");
+  // A notice can open this page on one Action type ("?action=contracts").
+  const [search] = useSearchParams();
+  const [action, setAction] = useState(search.get("action") || "all");
+  const [evidenceError, setEvidenceError] = useState("");
+  const [typed, setTyped] = useState("");
+  const q = useDebouncedValue(typed, 300);
+  const [opts, setOpts] = useState<AuditOptions | null>(null);
+  const [busy, setBusy] = useState<"" | "csv" | "xlsx">("");
+  const [failed, setFailed] = useState(false);
+  const [openGroup, setOpenGroup] = useState<AuditRow | null>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { getAuditOptions().then(setOpts).catch(() => setOpts(null)); }, []);
+
+  const query: AuditQuery = useMemo(
+    () => ({ ...rangeDates(range, from, to), actor, action, q }),
+    [range, from, to, actor, action, q],
+  );
+
+  const list = useServerList<AuditRow, { seat?: string }>(
+    (page, size) => getAuditLogs(query, page, size)
+      .then(r => { setFailed(false); return r; })
+      .catch(e => { setFailed(true); throw e; }),
+    JSON.stringify(query),
+    PAGE_SIZE,
+  );
+
+  // A new page starts at its top row, not wherever the last one was scrolled to.
+  useEffect(() => { scroller.current?.scrollTo({ top: 0 }); }, [list.page, JSON.stringify(query)]);
+
+  const seat = list.extra?.seat ?? "";
+  const showCarrier = seat === "platform";
+  const filtered = Boolean(actor || (action && action !== "all") || q || range !== "30");
+
+  const save = async (format: "csv" | "xlsx") => {
+    setBusy(format);
+    try { await downloadAuditLogs(query, format); } finally { setBusy(""); }
+  };
+
+  return (
+    <div className="proto">
+      <div className="view full">
+        <div className="page-head">
+          <div className="t">
+            <h2>Audit Logs <InfoTip text={SUBTITLE[seat] ?? "Who did what, when, and how it ended."} /></h2>
+          </div>
+          <div className="actions" style={{ display: "flex", gap: 8 }}>
+            {/* Two formats because they are read two different ways: CSV feeds
+                a system, Excel is what a person opens to filter and keep. */}
+            <button className="btn sm" disabled={!!busy || list.total === 0}
+              onClick={() => save("csv")}>
+              <Download size={13} /> {busy === "csv" ? "Preparing…" : "Download CSV"}
+            </button>
+            <button className="btn pri sm" disabled={!!busy || list.total === 0}
+              onClick={() => save("xlsx")}>
+              <Download size={13} /> {busy === "xlsx" ? "Preparing…" : "Download Excel"}
+            </button>
+          </div>
+        </div>
+
+        <div className="card" style={{ marginBottom: 14 }}>
+          {/* flex-end: every control is labelled, so they share one bottom line
+              — and "Clear filters" sits on it rather than floating mid-label. */}
+          <div className="card-h" style={{ gap: 14, flexWrap: "wrap", borderBottom: "none",
+                                           alignItems: "flex-end" }}>
+            <label className="fbar-field">
+              <span className="sub">Date range</span>
+              <select className="fbar-select" aria-label="Date range" value={range}
+                onChange={e => setRange(e.target.value)}>
+                {RANGES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
+              </select>
+            </label>
+
+            {range === "custom" && (
+              <label className="fbar-field">
+                <span className="sub">From / to</span>
+                <span className="fbar-daterange">
+                  <input type="date" className="fbar-date" aria-label="From date"
+                    value={from} max={to} onChange={e => setFrom(e.target.value)} />
+                  <span className="sub">–</span>
+                  <input type="date" className="fbar-date" aria-label="To date"
+                    value={to} min={from} onChange={e => setTo(e.target.value)} />
+                </span>
+              </label>
+            )}
+
+            <label className="fbar-field">
+              <span className="sub">Role / actor</span>
+              <select className="fbar-select" aria-label="Role or actor" value={actor}
+                onChange={e => setActor(e.target.value)}>
+                <option value="">Everyone in your reach</option>
+                {opts?.actors.map(a => (
+                  <option key={a.key} value={a.key}>{a.label} — {a.role}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="fbar-field">
+              <span className="sub">Action type</span>
+              <select className="fbar-select" aria-label="Action type" value={action}
+                onChange={e => setAction(e.target.value)}>
+                {(opts?.action_groups ?? [{ key: "all", label: "All actions", actions: [] }])
+                  .map(g => <option key={g.key} value={g.key}>{g.label}</option>)}
+              </select>
+            </label>
+
+            {/* Labelled like the three dropdowns, or it sits a caption-height
+                higher than them. */}
+            <label className="fbar-field grow">
+              <span className="sub">Search</span>
+              <span className="search">
+                <Search className="ic" />
+                <input type="search" placeholder="Search a person, file or action"
+                  aria-label="Search the audit trail"
+                  value={typed} onChange={e => setTyped(e.target.value)} />
+              </span>
+            </label>
+
+            {filtered && (
+              <span className="linkish fbar-clear-link" onClick={() => {
+                setRange("30"); setFrom(daysAgo(30)); setTo(localDay(new Date()));
+                setActor(""); setAction("all"); setTyped("");
+              }}>Clear filters</span>
+            )}
+          </div>
+        </div>
+
+        {evidenceError && (
+          <div className="note crit" style={{ marginBottom: 14 }}>{evidenceError}</div>
+        )}
+
+        <div className="card">
+          {failed ? (
+            <div className="empty">Could not load the audit trail.</div>
+          ) : list.loading && list.items.length === 0 ? (
+            <div className="empty">Loading…</div>
+          ) : list.total === 0 ? (
+            <div className="empty">
+              {filtered
+                ? "Nothing matches these filters. Try a wider date range."
+                : "Nothing has been recorded yet."}
+            </div>
+          ) : (
+            <>
+              <div className="tbl-wrap audit-scroll" ref={scroller}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ whiteSpace: "nowrap" }}>Timestamp ↓</th>
+                      <th>Actor / role</th>
+                      <th style={{ minWidth: 320 }}>Action / what exactly</th>
+                      <th>Target / file</th>
+                      {showCarrier && <th>Carrier</th>}
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {list.items.map(r => (
+                      <tr key={r.id}>
+                        <td className="muted" style={{ whiteSpace: "nowrap" }}>
+                          {fmtDateTime(r.at)}
+                        </td>
+                        <td>
+                          <b>{r.actor}</b>
+                          <div className="sub">{r.actor_role}</div>
+                        </td>
+                        <td>
+                          {r.action_label}
+                          {/* Exactly what was done — the field, the policy, the
+                              old and new value. An audit line that says only
+                              "Corrected a value" has recorded that something
+                              happened, not what. */}
+                          {r.detail && (
+                            <div className="sub" style={{ marginTop: 2, whiteSpace: "normal" }}>
+                              {r.detail}
+                            </div>
+                          )}
+                          {/* A bulk save is one line here; every change in it
+                              is one click away, exactly as it was recorded. */}
+                          {r.group && (
+                            <button type="button" className="linkish audit-group-link"
+                              onClick={() => setOpenGroup(r)}>
+                              View all {r.group.count} {r.group.noun ?? "changes"} →
+                            </button>
+                          )}
+                          {/* The server sends this on Kavachio's rows only: the
+                              evidence behind a large contract date correction. */}
+                          {r.evidence && (
+                            <button type="button" className="linkish audit-group-link"
+                              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                              onClick={() => {
+                                setEvidenceError("");
+                                downloadCorrectionEvidence(r.evidence!.event_id, r.evidence!.filename)
+                                  .catch(async e => setEvidenceError(
+                                    await downloadErrorText(e, "Could not open the evidence.")));
+                              }}>
+                              <Paperclip size={12} /> Open evidence ({r.evidence.filename})
+                            </button>
+                          )}
+                        </td>
+                        <td style={{ whiteSpace: "normal" }}>
+                          {/* The kind first — a bare name ("prg test") does not
+                              say whether it is a programme, a file or a setup. */}
+                          {r.target_kind && <div className="sub">{r.target_kind}</div>}
+                          {r.target}
+                        </td>
+                        {showCarrier && <td className="muted">{r.carrier ?? "—"}</td>}
+                        <td>
+                          <span className={`badge ${TONE_CLASS[r.tone] ?? "b-mut"}`}>
+                            <span className="d" />{r.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <Pagination page={list.page} pageSize={PAGE_SIZE} totalItems={list.total}
+                pageCount={list.pageCount} onPageChange={list.setPage} noun="entries" />
+            </>
+          )}
+        </div>
+      </div>
+      <GroupDrawer row={openGroup} query={query} onClose={() => setOpenGroup(null)} />
+    </div>
+  );
+}
+
+// Where a decision was made — said once in the drawer's header, not 40 times.
+const WHERE_NOTES = [" · on the exceptions review link", " · on the exceptions screen in the portal"];
+// The drawer reads a bulk update 50 changes at a time ("Load more").
+const GROUP_PAGE = 50;
+
+/** Every change in one bulk save, in a right-hand drawer — the full record the
+ *  single summary line stands for, one row per value, as it was saved. */
+function GroupDrawer({ row, query, onClose }: {
+  row: AuditRow | null; query: AuditQuery; onClose: () => void;
+}) {
+  const [items, setItems] = useState<AuditRow[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [more, setMore] = useState(false);
+  const [err, setErr] = useState(false);
+  const key = row?.group?.key ?? null;
+
+  useEffect(() => {
+    if (!key) return;
+    let cancelled = false;
+    setItems(null); setTotal(0); setErr(false);
+    getAuditGroup(query, key, 0, GROUP_PAGE)
+      .then(r => { if (!cancelled) { setItems(r.items); setTotal(r.total); } })
+      .catch(() => { if (!cancelled) setErr(true); });
+    return () => { cancelled = true; };
+    // The filters are those the row was counted under; re-fetch only per row.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  // The next 50, added under the ones already read — the list only grows.
+  const loadMore = () => {
+    if (!key || !items || more) return;
+    setMore(true);
+    getAuditGroup(query, key, items.length, GROUP_PAGE)
+      .then(r => { setItems(prev => [...(prev ?? []), ...r.items]); setTotal(r.total); })
+      .catch(() => setErr(true))
+      .finally(() => setMore(false));
+  };
+
+  useEffect(() => {
+    if (!row) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [row, onClose]);
+
+  const open = !!row;
+  const noun = row?.group?.noun ?? "changes";
+  // Said once in the header rather than on every one of forty lines.
+  const where = WHERE_NOTES.find(n => !!items?.length && items.every(i => i.detail.endsWith(n)));
+  const L: React.CSSProperties = { textAlign: "left" };
+
+  return (
+    <>
+      <div className={`scrim${open ? " on" : ""}`} onClick={onClose} />
+      <aside className={`drawer wide${open ? " on" : ""}`} aria-hidden={!open}>
+        <div className="drawer-h">
+          <div>
+            <h4>{row?.action_label}</h4>
+            <div className="sub">
+              {row ? <>{row.actor} · {row.actor_role} · {fmtDateTime(row.at)}</> : " "}
+            </div>
+            {row?.target && row.target !== "—" && (
+              <div className="sub">{row.target_kind ? `${row.target_kind}: ` : ""}{row.target}</div>
+            )}
+            {where && <div className="sub">Made {where.replace(" · ", "")}.</div>}
+          </div>
+          <button type="button" className="closeb" aria-label="Close" onClick={onClose}>×</button>
+        </div>
+        <div className="drawer-b" style={{ padding: 0 }}>
+          {err && <div className="note warn" style={{ margin: 16 }}>Could not load these changes.</div>}
+          {!items && !err && <div className="muted" style={{ padding: 20 }}>Loading…</div>}
+          {items && items.length === 0 && (
+            <div className="empty" style={{ padding: 20 }}>Nothing to show for these filters.</div>
+          )}
+          {items && items.length > 0 && (
+            <div className="tbl-wrap">
+              <table>
+                <thead><tr>
+                  <th style={L}>#</th>
+                  <th style={L}>{noun === "bordereaux" ? "Bordereau due" : "What changed"}</th>
+                  <th style={L}>Status</th>
+                </tr></thead>
+                <tbody>
+                  {items.map((i, n) => (
+                    <tr key={i.id}>
+                      <td className="muted" style={L}>{n + 1}</td>
+                      <td style={{ ...L, whiteSpace: "normal" }}>
+                        {where ? i.detail.slice(0, -where.length) : i.detail}
+                      </td>
+                      <td style={L}>
+                        <span className={`badge ${TONE_CLASS[i.tone] ?? "b-mut"}`}>
+                          <span className="d" />{i.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="card-h" style={{ justifyContent: "space-between", borderBottom: "none",
+                                               borderTop: "1px solid var(--p-border)" }}>
+                <span className="sub">Showing {items.length} of {total} {noun}</span>
+                {items.length < total && (
+                  <button type="button" className="btn sm" disabled={more} onClick={loadMore}>
+                    {more ? "Loading…" : `Load ${Math.min(GROUP_PAGE, total - items.length)} more`}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}

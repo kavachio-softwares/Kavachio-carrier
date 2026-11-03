@@ -1,3 +1,4 @@
+import { ReactNode } from "react";
 // The "invite is on its way" confirmation dialog — the green tick popup shown
 // after Add Broker and Invite User. It was copy-pasted in both of those pages;
 // it now lives here so every flow that mails an invite (first send AND resend)
@@ -8,12 +9,24 @@
 // existing screens look exactly as they did.
 export function InviteSentModal({
   title, message, email, emailLabel = "Invite sent to", note,
-  doneLabel = "Done", onDone,
+  doneLabel = "Done", onDone, kind = "sent",
 }: {
+  /** WHAT ACTUALLY HAPPENED. The green tick is a claim, not decoration: it
+   *  says "done", and it is the first thing anybody reads — before the
+   *  headline and long before the paragraph.
+   *
+   *  "pending" is for the acts that have NOT happened yet, only been asked
+   *  for: a carrier user's broker onboarding waits for their carrier admin,
+   *  and nothing at all is sent until it is approved. Those get an amber clock
+   *  instead. A tick there told people their invitation was on its way, which
+   *  is the one thing it was not. */
+  kind?: "sent" | "pending";
   /** Headline, e.g. "User created" / "Invite re-sent". */
   title: string;
-  /** One line of context under the headline. */
-  message: string;
+  /** One line of context under the headline. ReactNode so the thing being
+   *  talked about can be named in bold — the same one-sentence shape the
+   *  approve-setup dialog settled on. */
+  message: ReactNode;
   /** Recipient shown in the envelope row; omit to hide the row. */
   email?: string;
   emailLabel?: string;
@@ -22,15 +35,35 @@ export function InviteSentModal({
   doneLabel?: string;
   onDone: () => void;
 }) {
+  // Its colours, card and button all come from the .proto design tokens
+  // (--p-surface, --p-ink, .proto .btn), which only exist inside a .proto
+  // container. Rendered from a page that is not one — Configure Program — it
+  // lost every one of them and drew as a see-through card with a bare-text
+  // button. Carrying its own scope makes it look the same wherever it is
+  // used; proto-embed drops .proto's page background, and the overlay is
+  // position:fixed, so the wrapper itself takes up no space.
   return (
+    <div className="proto proto-embed">
     <div className="proto-modal-overlay">
       <div className="proto-modal tenant-success" onClick={e => e.stopPropagation()}>
         <div className="ts-icon">
-          <svg viewBox="0 0 56 56" fill="none" aria-hidden="true">
-            <circle cx="28" cy="28" r="28" fill="var(--p-ok-soft)" />
-            <path d="M18 28.5l6.5 6.5L38 21" stroke="var(--p-ok)" strokeWidth="3"
-              strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          {kind === "pending" ? (
+            /* A clock, amber — the same colour every "waiting on somebody"
+               state wears across the app (b-info/warn badges, the approval
+               tiles). Nothing has gone wrong; it simply is not done. */
+            <svg viewBox="0 0 56 56" fill="none" aria-hidden="true">
+              <circle cx="28" cy="28" r="28" fill="var(--p-warn-soft)" />
+              <circle cx="28" cy="28" r="13" stroke="var(--p-warn)" strokeWidth="3" />
+              <path d="M28 21v7.5l5 3" stroke="var(--p-warn)" strokeWidth="3"
+                strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 56 56" fill="none" aria-hidden="true">
+              <circle cx="28" cy="28" r="28" fill="var(--p-ok-soft)" />
+              <path d="M18 28.5l6.5 6.5L38 21" stroke="var(--p-ok)" strokeWidth="3"
+                strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          )}
         </div>
         <h3 className="ts-title">{title}</h3>
         <p className="ts-org">{message}</p>
@@ -47,6 +80,7 @@ export function InviteSentModal({
         {note && <p className="ts-sub">{note}</p>}
         <button className="btn pri ts-done" onClick={onDone}>{doneLabel}</button>
       </div>
+    </div>
     </div>
   );
 }

@@ -35,6 +35,7 @@ import {
   getProgrammeBrokers, getScopedContracts,
   type ProgrammeBroker, type ScopedContract,
 } from "../api/outputTemplate";
+import { contractLabel } from "../utils/contractLabel";
 
 export function useBrokerContractScope(programId: number | "") {
   const [brokers, setBrokers] = useState<ProgrammeBroker[]>([]);
@@ -62,8 +63,11 @@ export function useBrokerContractScope(programId: number | "") {
     if (programId === "") { setAllContracts([]); return; }
     setContractsLoading(true);
     getScopedContracts(Number(programId),
-                       brokerPartyId === "" ? null : Number(brokerPartyId), true)
-      .then(setAllContracts)
+                       brokerPartyId === "" ? null : Number(brokerPartyId))
+      // A superseded contract was replaced by its renewal, so a setup is never
+      // built on it. A setup already built on it keeps working: files for its
+      // old period still reach it through the renewal chain.
+      .then(rows => setAllContracts(rows.filter(c => c.lifecycle !== "superseded")))
       .catch(() => setAllContracts([]))
       .finally(() => setContractsLoading(false));
   }, [programId, brokerPartyId]);
@@ -92,13 +96,32 @@ export function useBrokerContractScope(programId: number | "") {
                                  && selectable.has(c.broker_party_id));
   }, [allContracts, brokerPartyId, brokers]);
 
-  // The contract this scope resolves to. One live contract means the scope is
-  // that contract; several means the broker holds more than one and the scope
-  // stops at the broker — a template made here covers all of them, which is
-  // what a broker-level template is for.
-  const contractId = useMemo<number | "">(
-    () => (contracts.length === 1 ? contracts[0].id : ""),
-    [contracts]);
+  // WHICH contract this scope resolves to.
+  //
+  // One live contract is not a choice — it is the only answer, so it arrives
+  // chosen and nothing is asked. SEVERAL is a real question: a broker holding
+  // two live contracts has two different sets of terms, and which of them a
+  // given bordereau was written under is something only the person holding the
+  // file knows. It used to resolve to nothing in that case and the screens
+  // simply stopped at the broker, which is why a run measured every file
+  // against whichever contract the setup happened to be built on.
+  const [picked, setPicked] = useState<number | "">("");
+
+  // A new list invalidates the pick — a contract from the last broker is not on
+  // this one. Keyed on the IDS rather than the array: the fetch hands back a
+  // fresh array every time, and resetting on identity would wipe the pick on
+  // any unrelated re-render.
+  const contractKey = contracts.map(c => c.id).join(",");
+  useEffect(() => {
+    setPicked(contracts.length === 1 ? contracts[0].id : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contractKey]);
+
+  // Never a contract that is no longer in the list: the pick is state, and
+  // state outlives the thing it points at.
+  const contractId: number | "" =
+    contracts.some(c => c.id === picked) ? picked : "";
+  const selected = contracts.find(c => c.id === contractId) ?? null;
 
   return {
     brokers, contracts, awaitingBroker, loading, contractsLoading,
@@ -107,14 +130,20 @@ export function useBrokerContractScope(programId: number | "") {
     awaitingBrokerCount: new Set(awaitingBroker.map(c => c.broker_party_id)).size,
     brokerPartyId, setBrokerPartyId,
     contractId,
+    /** Pick which of several contracts this scope is for. A no-op where there
+     *  is only one — that one is already chosen. */
+    setContractId: setPicked,
+    /** Whether the scope holds a question nobody has answered: several
+     *  contracts on file and none of them picked. */
+    needsContractChoice: contracts.length > 1 && contractId === "",
+    selectedContract: selected,
     /** Has the carrier put ANY broker on this programme? Until they have, there
      *  is no production relationship to build a setup against — which is why
      *  the setup screen holds its uploads shut on this. `null` while loading,
      *  so the screen never flashes the empty answer before it has one. */
     hasBrokers: programId === "" ? false : (loading ? null : brokers.length > 0),
     brokerName: brokers.find(b => b.id === brokerPartyId)?.legal_name ?? null,
-    contractName: contracts.length === 1
-      ? (contracts[0].filename || `Contract ${contracts[0].id}`) : null,
+    contractName: selected ? contractLabel(selected) : null,
     /** Every contract the scope covers — what a setup binds, and what the
      *  screen shows in place of the dropdown that used to be here. */
     boundContracts: contracts,
@@ -153,10 +182,11 @@ export function BrokerSelect({ scope, disabled }: {
             old behaviour, where leaving it blank pulled in every broker's
             contracts and let one broker's terms validate another's bordereau.
 
-            Leaving it unselected is still valid and still builds a
-            programme-wide setup on the carrier's own contracts. A placeholder
-            cannot say that and stay a placeholder, so ProgrammeWideNote says it
-            under the dropdown instead. */}
+            Picking one is REQUIRED (9 Oct): a setup left without a broker
+            uploaded its contract with no broker, and every broker on the
+            programme could then see it and be checked against it. The later
+            tabs stay shut until a broker is picked; ProgrammeWideNote says so
+            under the dropdown. */}
         <option value="" disabled>Select Broker…</option>
         {scope.brokers.map(b => (
           <option key={b.id} value={b.id}>
@@ -172,15 +202,11 @@ export function BrokerSelect({ scope, disabled }: {
  *
  *  `contract_count` includes contracts still waiting on the carrier, so a
  *  broker could be offered as having "1 contract" on a screen that says in the
- *  next breath that the programme has nothing approved. The approved count is
- *  the one that decides whether they can be worked with, and a broker with none
+ *  next breath that the programme has nothing on it. A broker with no contract
  *  says so rather than looking ready. */
 function brokerNote(b: ProgrammeBroker): string {
   const live = b.approved_contract_count ?? b.contract_count;
   if (live > 0) return `${live} live contract${live === 1 ? "" : "s"}`;
-  if (b.pending_approvals > 0) {
-    return `${b.pending_approvals} contract${b.pending_approvals === 1 ? "" : "s"} awaiting your approval`;
-  }
   return "no contract yet";
 }
 
@@ -220,8 +246,8 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
   if (!scope.loading && scope.brokers.length === 0) {
     return (
       <Hint>
-        No broker has been put on this programme yet, so this setup covers the
-        whole programme. Add one on the Brokers screen to scope it further.
+        No broker has been put on this programme yet. A setup is always for one
+        broker, so add one first (Programmes → Configure Program).
       </Hint>
     );
   }
@@ -232,15 +258,15 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
   if (scope.contracts.length === 0) {
     // Nothing bound, but that can mean two different things and only one of
     // them is a problem. Contracts DO exist here — they just belong to brokers
-    // nobody has chosen yet, and saying "no approved contract" would send
-    // someone off to upload a duplicate of one already on file.
+    // nobody has chosen yet, and saying "no contract" would send someone off
+    // to upload a duplicate of one already on file.
     if (scope.awaitingBroker.length > 0) {
       const n = scope.awaitingBroker.length;
       const b = scope.awaitingBrokerCount;
       return (
         <>
         <Hint>
-          {n} approved contract{n === 1 ? "" : "s"} on this programme, held by{" "}
+          {n} contract{n === 1 ? "" : "s"} on this programme, held by{" "}
           {b} broker{b === 1 ? "" : "s"}. <b>Pick the broker</b> to bring theirs
           in — a contract belongs to one broker, so it cannot be attached until
           you say whose.
@@ -252,9 +278,14 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
     return (
       <>
       <Hint tone="warn">
+        {/* There is no approval step: the gate this used to describe was
+            removed along with the broker-side upload it policed, and the
+            contract field below files one under the picked broker straight
+            away. The old wording told people to wait for something that can
+            never happen. */}
         {scope.brokerPartyId === ""
-          ? "This programme has no approved contract yet. A contract a broker uploads stays out until the carrier approves it."
-          : "This broker has no approved contract on the programme yet. A contract they uploaded stays out of this list until the carrier approves it."}
+          ? "This programme has no contract yet — upload one below."
+          : "This broker has no contract on this programme yet — upload one below."}
       </Hint>
       <ProgrammeWideNote scope={scope} />
       </>
@@ -300,7 +331,7 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
                   className="shrink-0 accent-navy"
                   onChange={() => onSelect(c.id)} />
                 <span className={`min-w-0 flex-1 truncate ${on ? "font-medium" : "text-ink-muted"}`}>
-                  {c.filename || `Contract ${c.id}`}
+                  {contractLabel(c)}
                 </span>
                 <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10.5px] text-ink-muted">
                   {c.broker_name ? c.broker_name : "carrier held"}
@@ -350,21 +381,21 @@ export function ContractPicker({ scope, programPicked, selectedId, onSelect, onC
   );
 }
 
-/** What happens if the broker is left unselected.
+/** Why nothing after Setup Details opens yet.
  *
- *  The dropdown reads "Select Broker…" so it names the thing you are meant to
- *  do — but leaving it alone is not a dead end, it builds a setup covering the
- *  whole programme. A placeholder cannot say that and stay a placeholder, so it
- *  is said here. Without it the one supported route to a programme-wide setup
- *  would be undiscoverable. */
+ *  A setup used to be allowed with no broker, covering the whole programme on
+ *  the carrier's own contracts — but the contract it uploaded then had no
+ *  broker, and every broker on the programme could see it and be checked
+ *  against it. Since 9 Oct a broker must be picked first. */
 function ProgrammeWideNote({ scope }: {
   scope: ReturnType<typeof useBrokerContractScope>;
 }) {
   if (scope.brokerPartyId !== "" || scope.brokers.length === 0) return null;
   return (
     <Hint>
-      No broker selected, so this setup covers the whole programme and uses only
-      the carrier&rsquo;s own contracts.
+      <b>Pick the broker</b> to continue — a setup and its contract always
+      belong to one broker. The Documents and Output BDX Template tabs open once
+      one is picked.
     </Hint>
   );
 }

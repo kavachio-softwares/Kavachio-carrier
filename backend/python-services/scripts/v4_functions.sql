@@ -71,55 +71,11 @@ END;
 $function$;
 
 
--- The ONE approval: who uploaded it decides whether it waits. A client can
--- never assert "approved" — this reads the submitter's own role.
-CREATE OR REPLACE FUNCTION public.set_contract_approval()
-RETURNS trigger LANGUAGE plpgsql AS $function$
-DECLARE submitter app_user%ROWTYPE;
-BEGIN
-  IF NEW.contract_submitted_by_id IS NOT NULL THEN
-    SELECT * INTO submitter FROM app_user WHERE user_id = NEW.contract_submitted_by_id;
-    IF FOUND AND submitter.user_role IN ('broker_admin', 'operator') THEN
-      NEW.contract_approval_status := 'pending_approval';
-      NEW.submitted_at := COALESCE(NEW.submitted_at, now());
-      RETURN NEW;
-    END IF;
-  END IF;
-  NEW.contract_approval_status := COALESCE(NEW.contract_approval_status, 'approved');
-  RETURN NEW;
-END;
-$function$;
-
-
--- Who may approve, reject or submit a contract.
-CREATE OR REPLACE FUNCTION public.enforce_approval_authority()
-RETURNS trigger LANGUAGE plpgsql AS $function$
-DECLARE
-  actor        app_user%ROWTYPE;
-  owner_tenant bigint;
-BEGIN
-  SELECT * INTO actor FROM app_user WHERE user_id = NEW.approval_acted_by_id;
-  SELECT tenant_id INTO owner_tenant FROM contract
-   WHERE contract_id = NEW.approval_contract_id;
-
-  IF NEW.approval_action IN ('approved', 'rejected') THEN
-    IF actor.user_role NOT IN ('carrier_admin', 'kavachio_admin') THEN
-      RAISE EXCEPTION 'Only a carrier admin may approve or reject a contract (% tried)', actor.user_role;
-    END IF;
-    IF actor.user_role = 'carrier_admin'
-       AND actor.user_tenant_id IS DISTINCT FROM owner_tenant THEN
-      RAISE EXCEPTION 'A carrier may only approve contracts on its own programmes';
-    END IF;
-  END IF;
-
-  IF NEW.approval_action = 'submitted'
-     AND actor.user_role NOT IN ('broker_admin', 'operator', 'carrier_admin') THEN
-    RAISE EXCEPTION 'Only a broker seat or a carrier admin may submit a contract (% tried)', actor.user_role;
-  END IF;
-
-  RETURN NEW;
-END;
-$function$;
+-- The carrier's approval gate used to live here: set_contract_approval marked
+-- a broker-submitted contract pending, and enforce_approval_authority policed
+-- who could decide on it. Both are gone, along with the broker-side upload they
+-- existed for — a contract is raised by the carrier, so there is nobody left to
+-- approve it. Dropped by scripts/drop_approval_gate.sql.
 
 
 -- Every login except the first Kavachio account records who let it in.

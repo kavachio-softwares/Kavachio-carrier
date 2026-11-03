@@ -1,6 +1,6 @@
 """Generic (contract-INDEPENDENT) validation rule library.
 
-`generic_rule_specification` holds Kavachio's standard BDX checks — the ones that
+`generic_rule_spec` holds Kavachio's standard BDX checks — the ones that
 are true for every program regardless of what the contract says (policy number
 present, zip format valid, paid <= incurred, …). They are NOT extracted from a
 contract, so they never pass through Call 1 (clause extraction) or Call 2 (intent
@@ -59,7 +59,7 @@ _SEVERITY = {"Critical": "critical", "Major": "critical", "Minor": "warning"}
 # literal; otherwise it stays None and the mapper works from rule_description
 # (e.g. the zip/NAICS/SIC patterns, which are stated in prose in validation_logic).
 #
-# Kept in CODE rather than as columns on generic_rule_specification so the table
+# Kept in CODE rather than as columns on generic_rule_spec so the table
 # stays the plain business-facing catalogue it was created as.
 _INTENT_BY_CLASS = {
     "NotNull":                          ("required",             None),
@@ -245,34 +245,51 @@ def is_supported_class(class_name):
 
 
 def load_generic_rules(tenant_id=None):
-    """Active rule-library rows in scope for this upload, schema-agnostic read.
+    """Active rule-library rows in scope for this upload.
 
     Loads GLOBAL rules (tenant_id IS NULL — Kavachio's platform baseline that
-    applies to every tenant) PLUS, when tenant_id is given, that tenant's OWN
-    active rules. A tenant never sees another tenant's rules. Only is_active
+    applies to every carrier) PLUS, when tenant_id is given, that carrier's OWN
+    active rules. A carrier never sees another carrier's rules. Only is_active
     rows are returned so a disabled rule stops firing without being deleted.
+
+    Read through the GenericRuleSpecification model — the SAME one the Rule
+    Library screen (/rule-library) writes — so the screen and Bordereau Setup
+    cannot drift onto different tables again. They did: the model moved to the
+    canonical `generic_rule_spec` and this read stayed on the pre-v4
+    `generic_rule_specification`, so nothing done on the screen ever ran.
+    Migration 30 copied the old rows across with their ids kept.
 
     Returns [] (and prints, rather than raising) when the table is absent, so a
     deployment that has not run the migration still generates contract rules.
     """
-    from sqlalchemy.sql import text
-    from db import canonical_engine
+    from sqlalchemy import or_
+    from db import SessionLocal, GenericRuleSpecification as G
 
+    in_scope = G.tenant_id.is_(None)
+    if tenant_id is not None:
+        in_scope = or_(in_scope, G.tenant_id == tenant_id)
     try:
-        with canonical_engine.connect() as conn:
-            rows = conn.execute(text("""
-                SELECT id, rule_name, severity, class_name, validation_logic, tenant_id
-                FROM generic_rule_specification
-                WHERE is_generic = TRUE
-                  AND is_active = TRUE
-                  AND (tenant_id IS NULL OR tenant_id = :tid)
-                ORDER BY tenant_id NULLS FIRST, id
-            """), {"tid": tenant_id}).mappings().all()
+        with SessionLocal() as s:
+            rows = (s.query(G)
+                     .filter(G.is_generic.is_(True), G.is_active.is_(True), in_scope)
+                     .order_by(G.tenant_id.is_(None).desc(), G.id)
+                     .all())
+            if not rows and not s.query(G.id).limit(1).first():
+                # An EMPTY library, not a disabled one. On a database that still
+                # has its rules only in the old table this is migration 30 not
+                # yet run — say so, because it is otherwise silent: every setup
+                # would simply get no standard checks.
+                print("[Generic] generic_rule_spec is empty — no standard checks "
+                      "will be added. If the rules are still in "
+                      "generic_rule_specification, run "
+                      "migrations/30_generic_rule_library_one_table.sql.")
     except Exception as exc:
-        print(f"[Generic] generic_rule_specification unavailable ({exc}); "
+        print(f"[Generic] generic_rule_spec unavailable ({exc}); "
               f"skipping the generic rule library.")
         return []
-    return [dict(r) for r in rows]
+    return [{"id": r.id, "rule_name": r.rule_name, "severity": r.severity,
+             "class_name": r.class_name, "validation_logic": r.validation_logic,
+             "tenant_id": r.tenant_id} for r in rows]
 
 
 def _build_intents(rules):
@@ -354,9 +371,10 @@ def _existing_template_field_keys(synth_outputs):
 # validation_rule_generator) and the generic library overlap by construction:
 # both emit a baseline check per column, phrased differently ("Insured Zip Code
 # must be a valid postal code for Insured State" vs "Insured ZIP Code Must Be
-# Valid"). When both land on the SAME column the reviewer sees two
-# near-identical rules. The library rule wins: it is the tenant-editable,
-# business-facing catalogue entry.
+# Valid"). When both run the SAME check (template) on the SAME columns the
+# reviewer sees two near-identical rules. The library rule wins: it is the
+# tenant-editable, business-facing catalogue entry. A DIFFERENT check on the same
+# column is not a duplicate and both ship.
 #
 # NOTHING here is template-specific: the derived rules are generated from
 # whatever columns the template happens to have, so the set of templates/params
@@ -404,22 +422,42 @@ def _carry_dispatch_params(derived_ir, generic_irs) -> int:
     return moved
 
 
+def _same_check_key(ir):
+    """(template, validated column, other columns) — two rules are the same check
+    only when all three agree. A column alone is not enough: a library
+    pattern_check on a ZIP column only tests the value's shape, while a derived
+    zip_state_consistency on it also tests the ZIP against the row's state, so
+    the shape check must not displace it. The dispatch params are left out of the
+    column set because the library rule cannot carry them (they are moved onto
+    it instead — see _carry_dispatch_params)."""
+    from contract_upload_services.rule_ir import field_refs
+    col = _primary_column(ir)
+    if not col or not ir.get("template"):
+        return None
+    params = {k: v for k, v in (ir.get("params") or {}).items()
+              if k not in _DISPATCH_PARAMS}
+    refs = field_refs({"template": ir["template"], "params": params})
+    others = frozenset(r.strip().lower() for r in refs[1:] if isinstance(r, str))
+    return ir["template"], col, others - {col}
+
+
 def drop_derived_duplicates(synth_outputs, generic_entries):
-    """Remove auto-derived data-quality candidates whose validated column a
-    generic library rule also validates — so only the generic rule ships.
+    """Remove auto-derived data-quality candidates that a generic library rule
+    duplicates — same template on the same columns — so only the generic rule
+    ships. A different check on the same column keeps both.
 
     Mutates `synth_outputs` in place (entries emptied of all candidates are
     removed) and returns the number of derived candidates dropped. Only entries
     whose clause text starts with "[Derived rule]" are eligible — contract
     clauses and "[Derived formula]" arithmetic are never touched.
     """
-    generic_by_col = {}
+    generic_by_check = {}
     for entry in (generic_entries or []):
         for ir in (entry.get("candidates") or []):
-            col = _primary_column(ir)
-            if col:
-                generic_by_col.setdefault(col, []).append(ir)
-    if not generic_by_col:
+            key = _same_check_key(ir)
+            if key:
+                generic_by_check.setdefault(key, []).append(ir)
+    if not generic_by_check:
         return 0
 
     dropped = carried = 0
@@ -429,7 +467,7 @@ def drop_derived_duplicates(synth_outputs, generic_entries):
             continue
         keep = []
         for ir in (entry.get("candidates") or []):
-            twins = generic_by_col.get(_primary_column(ir))
+            twins = generic_by_check.get(_same_check_key(ir))
             if twins:
                 dropped += 1
                 carried += _carry_dispatch_params(ir, twins)
@@ -441,7 +479,7 @@ def drop_derived_duplicates(synth_outputs, generic_entries):
             synth_outputs.remove(entry)
     if dropped:
         print(f"[Generic] dropped {dropped} derived data-quality rule(s) already "
-              f"covered by a library rule on the same column (library wins"
+              f"covered by the same library check on the same column(s) (library wins"
               + (f"; carried {carried} reference-dispatch param(s) onto the "
                  f"surviving rule)." if carried else ")."))
     return dropped

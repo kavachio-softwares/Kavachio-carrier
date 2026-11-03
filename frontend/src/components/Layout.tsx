@@ -2,22 +2,31 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Building2, LogOut, UserCog, Zap,Database, Users2, Boxes, ChevronRight, ChevronLeft, Layers, ListChecks, ClipboardList,
-  FileCheck, Server, Inbox,
+  FileCheck, CalendarDays, ScrollText, History,
 } from "lucide-react";
+import { useCarrierSeat, addsCarrierUsers } from "../hooks/useCarrierSeat";
 import { AUTH_EVENT, clearAuth, currentMga, getRefreshToken, getTenantBrand, getUser, isBrokerSeat, isKavachioAdmin, normalizeRole, ROLE_LABEL, setTenantBrand, type Role, userRole } from "../auth";
 import { canAccessPath, hasRole } from "../access";
+import { BrokerCarrierSwitch } from "./BrokerCarrierSwitch";
+import { BrokerOrgCard } from "./BrokerOrgCard";
 import { api, getDeduped } from "../api/client";
 import { GlobalLoadingOverlay } from "./Busy";
 import PlatformNotificationCard from "./PlatformNotificationCard";
 import DeadlineReminderCard from "./DeadlineReminderCard";
 import NotificationBell from "./NotificationBell";
+import IngestionDock from "./IngestionDock";
 import { initials } from "../branding";
+import { InfoTip as UiInfoTip } from "./ui/InfoTip";
 
 // Items carry no role of their own: whether one is visible is derived from the
 // destination's entry in ROUTE_ACCESS (access.ts), which is also what guards the
 // route. One source of truth, so the sidebar can never offer a link that would
 // bounce the user straight back to their dashboard.
-type Item = { to: string; label: string; icon: React.ElementType };
+// `carrierAdminOnly` is the one rule ROUTE_ACCESS cannot express: everyone at a
+// carrier holds the same `carrier_admin` DB role, so the carrier admin is told
+// apart from a carrier user by the organisation's owner pointer, which arrives
+// with the brand rather than with the token (see hooks/useCarrierSeat).
+type Item = { to: string; label: string; icon: React.ElementType; carrierAdminOnly?: boolean };
 
 // Nav grouped to match the prototype's sidebar. All existing destinations are
 // preserved; each item is shown only when the current role may actually open it
@@ -26,30 +35,44 @@ type Item = { to: string; label: string; icon: React.ElementType };
 // broker_admin requirement). `only` is an EXACT set, for sections that belong
 // to one side of the platform and must not leak to the other: a carrier admin
 // outranks a broker but has no business on the broker's screens.
-const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[] = [
+// `carrierUserTitle` renames a SECTION for the carrier USER only. A heading
+// has to describe the rows under it, and two carrier seats can be left with
+// different rows: the items inside a section are filtered per seat, so a
+// heading that is right for the admin can end up sitting over something else
+// entirely for a carrier user.
+const GROUPS: {
+  title: string; carrierUserTitle?: string;
+  requires?: Role; only?: Role[]; items: Item[];
+}[] = [
   {
     // The broker's own world. They create no carriers and no programmes — a
     // carrier puts them on one, and everything here follows from that.
     title: "",
     only: ["broker_admin", "operator"],
     items: [
-      // Two landing screens, one per seat. canAccessPath() shows each role only
-      // its own — an admin asks "what is holding me up", an operator asks "what
-      // do I have to run". ROUTE_ACCESS marks both `only`, so neither leaks.
+      // The broker admin's landing screen. The operator's own (/operator) went
+      // with the broker user seat on 29 Sep 2026.
       { to: "/broker", label: "Dashboard", icon: LayoutDashboard },
-      { to: "/operator", label: "Dashboard", icon: LayoutDashboard },
       // The monthly run — the reason a broker has a login at all, so it sits
       // directly under the dashboards rather than below the reference screens.
+      // BOTH broker seats see it: an admin runs the file as readily as an
+      // operator does (ROUTE_ACCESS says so, and canAccessPath follows).
+      // Sending to the carrier is no longer a separate step: a real
+      // submission here (not a self-check) both processes the file AND sends
+      // it on — see RunResult's "Sent to the carrier" note.
       { to: "/broker/bordereau", label: "Process Bordereau", icon: Zap },
-      { to: "/broker/contracts", label: "My Contracts", icon: FileCheck },
-      // Admin-only inside the broker's own group: an operator is a seat in
-      // this team, not a manager of it. canAccessPath() filters it out for
-      // them (ROUTE_ACCESS marks the path `only: ["broker_admin"]`).
-      { to: "/broker/users", label: "Users & Roles", icon: UserCog },
+      // What is owed and when — the list Process Bordereau works down.
+      { to: "/broker/calendar", label: "Bordereau Calendar", icon: CalendarDays },
+      // My Contracts has no entry here: the broker admin opens it from the
+      // dashboard's Active Contracts tile.
+      // No Users & Roles: broker users were retired on 29 Sep 2026, so the
+      // broker admin has no team to staff.
+      // Audit Logs is NOT here any more — it is its own "Logs" section at the
+      // foot of every sidebar (see the last group in this file).
     ],
   },
   {
-    title: "Run",
+    title: "Operations",
     requires: "carrier_admin",
     items: [
       { to: "/home", label: "Dashboard", icon: LayoutDashboard },
@@ -57,13 +80,54 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
       // exists and is still reached from a carrier's page — only the nav entry
       // is commented out.
       // { to: "/program-management", label: "Program Management", icon: ClipboardList },
+      // Kept in the list on purpose, though no carrier seat sees it any more:
+      // ROUTE_ACCESS now closes /direct to them (a carrier does not produce the
+      // submission it is checking), and canAccessPath filters this row out
+      // accordingly. Kavachio staff still get it, and deleting the row would
+      // take it from them too.
       { to: "/direct", label: "Process Bordereau", icon: Zap },
+      // WHAT HAS BEEN RUN. Listed in its own right now, because for a carrier
+      // it is the only place the month's files can be watched: they no longer
+      // start a run, so their whole involvement is reading what arrived, how it
+      // validated, and what is still open. It used to have no nav entry at all
+      // — reachable only from the Dashboard's "Recent File Submissions" card —
+      // which was survivable while Process Bordereau sat above it and led to
+      // the same history, and is not now that the entry above is gone for them.
+      //
+      // It also covers the file a KAVACHIO admin ran on this carrier's behalf:
+      // /direct/runs is scoped to the tenant, never to who pressed the button,
+      // so such a run is listed here beside the brokers' own.
+      { to: "/runs", label: "File Submissions", icon: History },
+      // The carrier's calendar IS listed: it is a whole-book view — every
+      // broker's obligation for a due month — so unlike My Calendar it does not
+      // belong inside one setup. It sits next to Process Bordereau because
+      // "what is owed to me" and "run one" are the same job on two days.
+      { to: "/bordereau-calendar", label: "Bordereau Calendar", icon: CalendarDays },
       // My Calendar is deliberately NOT listed. Deadlines belong to a specific
       // carrier + program, so the calendar now lives inside that setup's own
       // screen where both are already fixed. The /calendar route still exists
       // and is still reached from the bell, the deadline card, the dashboard
       // link and the deadline email — it is the only place a program with no
       // bordereau setup yet can have its schedule set.
+      //
+      // Files is the last step of the same day's work — what a broker sent and
+      // what has landed — so it sits here rather than in a section of its own.
+      // A one-item section spent a heading and a rule on a single link, and
+      // read as a separate area of the app when it is really where Process
+      // Bordereau's input comes from. Same `requires` either way, so nobody
+      // gains or loses sight of it by the move.
+      //
+      // ONE item, not two. "How Files Arrive" and "Files Received" were
+      // separate entries that each carried a button to the other, and nothing
+      // in the nav said which one you wanted on a Tuesday morning. They are two
+      // tabs on /files now: the inbox lands first because it is the daily work,
+      // and the ways in sit behind it because a route is set up once when a
+      // broker is onboarded and then rarely touched.
+      //
+      // Hidden from the sidebar for now: Files is reached from the Dashboard's
+      // "Incoming Files" card instead. The /files route and its access rule
+      // are unchanged — only the nav entry is commented out.
+      // { to: "/files", label: "Files", icon: Inbox },
     ],
   },
   {
@@ -74,30 +138,65 @@ const GROUPS: { title: string; requires?: Role; only?: Role[]; items: Item[] }[]
     // bordereau setup. Reading the section top to bottom IS the flow.
     items: [
       { to: "/programs", label: "Programmes", icon: Layers },
-      // Brokers, not carriers. Kavachio creates carriers (Platform → Carriers)
-      // and this tenant IS one — what a carrier manages is the brokers that
-      // produce into its programmes. The old "All Carriers" entry pointed at
-      // /parties, a leftover from when a tenant was an MGA that held carriers.
-      { to: "/brokers", label: "Brokers", icon: Users2 },
-      { to: "/direct/setups", label: "Bordereau Setup", icon: Layers },
-      // Set up once when a broker is onboarded, then rarely touched — which
-      // is why the ways in sit under Configure and not in the monthly run.
+      // Party and Contracts are hidden from the sidebar for now. Both routes
+      // and both access rules are unchanged — only the nav entries are
+      // commented out, the same as Program Management above and Files below.
       //
-      // TEMPORARILY HIDDEN from the menu. The routes, the access rules and the
-      // links between the two screens all still work — /intake and
-      // /intake/arrivals are reachable by URL and from each other. Put these
-      // two lines back to show them again.
-      // { to: "/intake", label: "How Files Arrive", icon: Server },
-      // { to: "/intake/arrivals", label: "Files Received", icon: Inbox },
+      // Neither screen is stranded by it: the Dashboard's "Parties" and
+      // "Contracts" tiles open them, Broker Performance has "All brokers →",
+      // and a contract is normally reached from the programme it hangs off
+      // rather than from a flat list of every contract in the book.
+      // { to: "/brokers", label: "Party", icon: Users2 },
+      // { to: "/contracts", label: "Contracts", icon: FileCheck },
+      // Signatures is NOT a sidebar entry. Watching a round is watching a
+      // contract, so it is reached from Contracts ("Signature history") and
+      // from the contract's own record, filtered to that contract. A top-level
+      // tab put it beside Contracts as though it were a separate thing to
+      // manage, and gave a second front door to a flow whose only correct
+      // beginning is the contract itself — the same reason there has never
+      // been a "start a round" entry. The screen still lives at
+      // /contracts/signatures; only the way in changed.
+      { to: "/direct/setups", label: "Bordereau Setup", icon: Layers },
     ],
   },
   {
-    title: "Admin",
+    // "Profile" for the carrier admin: their organisation's own settings,
+    // their colleagues, and the rules the carrier validates by.
+    //
+    // A carrier USER does not get Company, so the section holds the brokers
+    // they invited and the Rule Library, which they may read but not change.
+    // "Profile" over those reads as the person's own account settings, which
+    // is the one thing it is not.
+    title: "Profile",
+    carrierUserTitle: "Brokers & Rules",
     requires: "carrier_admin",
     items: [
-      { to: "/tenant", label: "Organization", icon: Building2 },
+      // The organisation's own settings — name, logo, currency. That is the
+      // carrier admin's alone; a carrier user does the carrier's work inside
+      // the company but does not change what the company IS.
+      { to: "/tenant", label: "Company", icon: Building2, carrierAdminOnly: true },
+      // The old party directory. It is a directory to look things up in, not
+      // part of building the book, so it sits with the other admin screens.
       { to: "/users", label: "Users & Roles", icon: UserCog },
       { to: "/rule-library", label: "Rule Library", icon: ListChecks },
+    ],
+  },
+  {
+    // ONE section, no `requires` and no `only`, so every seat that reaches this
+    // list gets it — a broker operator as much as a carrier admin. That is not
+    // laxity: /audit is deliberately open to all four seats (ROUTE_ACCESS says
+    // so) and the SERVER decides whose rows come back, so there is nothing here
+    // for a group gate to add.
+    //
+    // A section of its own rather than a row inside Profile or the broker's
+    // block. What someone did is not a setting and not part of the day's work,
+    // and it is the one screen a person may be sent to by someone else — an
+    // auditor, a carrier asking what happened to a file. Sitting last, under
+    // its own heading, it is findable without being read as a step in any
+    // flow above it.
+    title: "Logs",
+    items: [
+      { to: "/audit", label: "Audit Logs", icon: ScrollText },
     ],
   },
   {
@@ -117,10 +216,27 @@ const ADMIN_GROUPS: typeof GROUPS = [
     title: "",
     items: [
       { to: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      // NO "Process Bordereau" / "File Submissions" here, deliberately. Both
+      // screens are tenant-scoped and read `currentMga()`, and Kavachio staff
+      // have no tenant: the login response sets `mga: null` for them
+      // (app_routes ~582) and nothing in the app lets them pick one, so
+      // currentMga() falls through to the literal "default" and every such call
+      // answers "platform admin must select a tenant". Listing the screens here
+      // would put two links in the sidebar that lead to an error page. What is
+      // missing is a tenant selector for platform staff, not a nav entry.
       { to: "/tenants", label: "Carriers", icon: Boxes },
       { to: "/admin/users", label: "Users & Roles", icon: UserCog },
       { to: "/admin/mapping-tasks", label: "Data Mapping Queue", icon: Database },
       { to: "/rule-library", label: "Rule Library", icon: ListChecks },
+    ],
+  },
+  {
+    // The same "Logs" section the other sidebars end on, so the screen is in
+    // the same place whoever signs in. For Kavachio it is the whole platform's
+    // trail: every carrier, every broker, named.
+    title: "Logs",
+    items: [
+      { to: "/audit", label: "Audit Logs", icon: ScrollText },
     ],
   },
 ];
@@ -135,24 +251,36 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // The column-mapping workflow (/uploads/mapper/*) belongs to Data Mapping Queue.
   if (pathname.startsWith("/uploads/mapper")) return "/admin/mapping-tasks";
 
-  // Programs / Outputs are the orphaned party → program → template → output
-  // stepper — no sidebar entry of their own, so they roll up under Trading
-  // Partners (programs/contracts are scoped to a carrier).
   // Programmes now own their own sub-screens (create, and a programme's
   // brokers), so they highlight Programmes rather than the old party directory.
   if (under("/programs")) return "/programs";
-  // Brokers have their own entry again, so a broker's page highlights it
-  // rather than borrowing the programme's.
-  if (under("/brokers")) return "/brokers";
+  // Party has no sidebar entry any more, and neither do contracts. Both are
+  // opened from the Dashboard's tiles, so — like /files — they keep Dashboard
+  // lit rather than pointing at a row that is no longer drawn, which would
+  // leave nothing highlighted at all.
+  if (under("/brokers")) return "/home";
+  if (under("/contracts")) return "/home";
   // An output template is part of a Bordereau Setup, and that is where the user
   // came from — highlighting anything else while they review a template they
   // opened from the setup screen makes the sidebar lie about where they are.
-  // The whole /outputs area belongs to that setup: /parties is no longer in the
-  // sidebar, so pointing at it would highlight nothing at all.
-  if (under("/outputs")) return "/direct/setups";
+  // A template is the only thing left under /outputs: the old Output Delivery
+  // screen and its party → program → template → output stepper are gone.
+  // The platform admin reaches a template from the carrier's page and has no
+  // Setups entry at all, so for them it rolls up under Carriers.
+  if (under("/outputs")) return isKavachioAdmin() ? "/tenants" : "/direct/setups";
+
+  // Files has no sidebar entry — it is opened from the Dashboard — so /files
+  // (and /intake, which redirects there) keeps Dashboard lit.
+  if (under("/intake") || under("/files")) return "/home";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";
+  // Inviting a broker uses the Users & Roles form, but is never reached from
+  // Users & Roles — that screen invites colleagues only. It is Party's "Invite
+  // a party", so Party stays lit. (Configure Program's "Add Broker" invites in
+  // a dialog on its own screen and never comes here.)
+  if (pathname === "/users/new" && new URLSearchParams(search).get("for") === "broker")
+    return "/home";
   if (under("/users")) return "/users";
   if (under("/rule-library")) return "/rule-library";
 
@@ -162,17 +290,24 @@ function subScreenOwner(pathname: string, search: string): string | null {
   if (pathname === "/direct/setup" || pathname.startsWith("/direct/setup/")) return "/direct/setups";
   if (pathname.startsWith("/direct/setups/")) return "/direct/setups";
 
-  // Run History + exception triage are linked from both Dashboard and Process
-  // Bordereau — whichever one the user actually came from stays highlighted.
-  const isRunsOrExceptions = pathname === "/runs"
-    || /^\/uploads\/[^/]+\/exceptions(\/rule\/[^/]+)?$/.test(pathname);
-  if (isRunsOrExceptions) {
+  // Exception triage is linked from both Dashboard and Process Bordereau —
+  // whichever one the user actually came from stays highlighted.
+  //
+  // /runs is NOT in here any more. It has a nav entry of its own now (File
+  // Submissions), so it lights that entry, the way every other listed screen
+  // does. Rolling it up under whichever card linked to it made the sidebar say
+  // "Dashboard" while the reader was plainly on the history screen.
+  if (/^\/uploads\/[^/]+\/exceptions(\/rule\/[^/]+)?$/.test(pathname)) {
     const from = new URLSearchParams(search).get("from");
     if (from === "home") return "/home";
+    if (from === "admin") return "/admin/dashboard";
     if (from === "direct") return "/direct";
     // A broker reviewing its own run's exceptions came from THEIR Process
     // Bordereau, which is a different path from the carrier's.
     if (from === "broker") return "/broker/bordereau";
+    if (from === "calendar") return "/bordereau-calendar";
+    // Files Received has no sidebar entry; the Dashboard is its way in.
+    if (from === "files") return "/home";
   }
   return null;
 }
@@ -196,8 +331,11 @@ export default function Layout() {
   useEffect(() => {
     if (!mga || mga === "default" || isKavachioAdmin()) return;
     let cancelled = false;
-    getDeduped<{ legal_name?: string | null; logo?: string | null }>(`/tenants/${mga}`)
-      .then(r => { if (!cancelled) setTenantBrand({ mga, legal_name: r.data?.legal_name, logo: r.data?.logo ?? null }); })
+    getDeduped<{ legal_name?: string | null; logo?: string | null; owner_user_id?: number | null;
+                 approvals_enabled?: boolean }>(`/tenants/${mga}`)
+      .then(r => { if (!cancelled) setTenantBrand({ mga, legal_name: r.data?.legal_name, logo: r.data?.logo ?? null,
+                                                    owner_user_id: r.data?.owner_user_id ?? null,
+                                                    approvals_enabled: !!r.data?.approvals_enabled }); })
       .catch(() => { /* sidebar just falls back to the Kavachio mark */ });
     return () => { cancelled = true; };
   }, [mga]);
@@ -227,12 +365,34 @@ export default function Layout() {
     if (g.only) return r !== null && g.only.includes(r);
     return g.requires === undefined || hasRole(g.requires);
   };
+  // Everyone at a carrier holds the carrier_admin DB role; only the owner is
+  // the Carrier Admin. The rest are Carrier Users (see hooks/useCarrierSeat).
+  const seat = useCarrierSeat();
   const groups = isKavachioAdmin()
     ? ADMIN_GROUPS
     : GROUPS
-        .map(g => ({ ...g, items: g.items.filter(i => canAccessPath(i.to)) }))
+        // A carrier-admin-only item stays hidden until the seat is KNOWN to be
+        // an admin's. The brand is hydrated from localStorage, so that is
+        // settled on the first paint of every load after signing in.
+        // Renamed only for the seat it is wrong for, and only once the seat
+        // is KNOWN — an unresolved seat is null, not "user", so a carrier
+        // admin never sees the other heading flash on first paint.
+        .map(g => ({
+          ...g,
+          title: g.carrierUserTitle && seat === "user" ? g.carrierUserTitle : g.title,
+          items: g.items.filter(
+            i => canAccessPath(i.to)
+              && (!i.carrierAdminOnly || addsCarrierUsers(seat))),
+        }))
         .filter(g => g.items.length > 0);
-  const roleLabel = user ? ROLE_LABEL[normalizeRole(user.role)] : "";
+  // The sidebar footer names the side, not the seat: "Carrier" / "Broker",
+  // never "… Admin". Other screens keep ROLE_LABEL's full wording.
+  const role = user ? normalizeRole(user.role) : null;
+  const roleLabel = !role ? ""
+    : seat === "user" ? "Carrier User"
+    : role === "carrier_admin" ? "Carrier"
+    : role === "broker_admin" ? "Broker"
+    : ROLE_LABEL[role];
   // The workspace card's contents — shared by its interactive (admin) and
   // static (Operator) forms below.
   const workspaceIdentity = brand?.legal_name ? (
@@ -245,7 +405,7 @@ export default function Layout() {
       </span>
       <span className="wscard-meta">
         <span className="wscard-name">{brand.legal_name}</span>
-        <span className="wscard-sub">Organization</span>
+        <span className="wscard-sub">Company</span>
       </span>
     </>
   ) : null;
@@ -281,17 +441,22 @@ export default function Layout() {
             <img className="shield" src="/kavachio_sidebar_logo.png" alt="Kavachio" />
             <div>
               <h1>Kavachio</h1>
-              <div className="tag">Bordereau Platform</div>
+              <div className="tag">Bordereau Management</div>
             </div>
           </div>
 
           {/* Organization settings are admin-only, so for an Operator the card
               is identity only — same logo, name and live dot, but no chevron
               and nothing to click (it would only bounce them to the dashboard).
-              Admins get the interactive card exactly as before. */}
-          {!isKavachioAdmin() && brand?.legal_name && (
-            canAccessPath("/tenant") ? (
-              <button type="button" className="wscard" title="Open Organization settings"
+              Admins get the interactive card exactly as before.
+              A BROKER seat is excluded and gets its own card below: `brand` is
+              the CARRIER tenant, so naming it "Company" in a broker's sidebar
+              would label the wrong organisation as theirs. */}
+          {!isKavachioAdmin() && !isBrokerSeat() && brand?.legal_name && (
+            // Same rule as the Company nav item: a carrier user gets the card
+            // as identity only, so this is not a second door into the settings.
+            canAccessPath("/tenant") && addsCarrierUsers(seat) ? (
+              <button type="button" className="wscard" title="Open Company settings"
                 onClick={() => nav("/tenant")}>
                 {workspaceIdentity}
                 <ChevronRight className="wscard-go" size={15} strokeWidth={2} />
@@ -300,6 +465,18 @@ export default function Layout() {
               <div className="wscard wscard-static">{workspaceIdentity}</div>
             )
           )}
+
+          {/* The broker's own company: whose seat this is. Read-only — a
+              broker does not choose their own organisation. */}
+          {isBrokerSeat() && <BrokerOrgCard />}
+
+          {/* …and under it, which carrier they are working on. In the sidebar,
+              above the nav, because it scopes every screen below it — a scope
+              control living inside one page would look like that page's
+              filter, and the broker would not know the dashboard and the
+              bordereau run were following it too. Renders nothing for a broker
+              on one carrier: there is no choice to make. */}
+          {isBrokerSeat() && <BrokerCarrierSwitch />}
         </div>
 
         <nav className="nav">
@@ -362,6 +539,13 @@ export default function Layout() {
                 broker belongs to none, so for both it is a bell that can only
                 ever be empty. */}
             {!isKavachioAdmin() && !isBrokerSeat() && <NotificationBell />}
+            {/* The Ingestion panel — what became of every file once it was run.
+                Beside the bell because the footer is the one piece of the shell
+                on every screen. Same seats as the bell get the button; anyone
+                who can open Files gets the drawer, so its page button works. */}
+            {canAccessPath("/files") && (
+              <IngestionDock showButton={!isKavachioAdmin() && !isBrokerSeat()} />
+            )}
           </div>
           <button className="signout" title="Sign out" onClick={() => {
             // Send the refresh token in the body, read SYNCHRONOUSLY here. The
@@ -385,8 +569,10 @@ export default function Layout() {
   );
 }
 
-export function PageHeader({ title, subtitle, action }:
-  { title: string | null; subtitle?: string; action?: React.ReactNode }) {
+export function PageHeader({ title, subtitle, action, info }:
+  { title: string | null; subtitle?: string; action?: React.ReactNode;
+    /** An explanation behind an ⓘ beside the title, instead of a subtitle. */
+    info?: React.ReactNode }) {
   return (
     <div className="px-8 pt-7 pb-4 border-b border-border bg-white">
       <div className="flex items-start justify-between gap-6">
@@ -395,7 +581,10 @@ export function PageHeader({ title, subtitle, action }:
             until its label wrapped mid-phrase — the page's primary action,
             broken across two lines by a sentence of explanation. */}
         <div className="min-w-0">
-          <h1 className="text-[22px] font-semibold tracking-tight">{title}</h1>
+          <h1 className="text-[22px] font-semibold tracking-tight flex items-center gap-2">
+            {title}
+            {info && <UiInfoTip text={info} />}
+          </h1>
           {subtitle && (
             <p className="text-sm text-ink-muted mt-1 max-w-3xl leading-relaxed">{subtitle}</p>
           )}

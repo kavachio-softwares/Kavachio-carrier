@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 log = logging.getLogger("bdx.main")
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
@@ -37,15 +37,28 @@ from auth_deps import current_principal, Principal
 from validation_routes import router as validation_router
 from direct_routes import router as direct_router
 from hierarchy_routes import router as hierarchy_router
+from broker_onboarding_routes import router as broker_onboarding_router
 from broker_routes import router as broker_router
 from output_template_routes import router as output_template_router
 # Feature 10 — file intake channels ("How Files Arrive" / "Files Received").
 from intake_routes import router as intake_router
+from itd_routes import router as itd_router
 # Feature 10.2 — the machine-to-machine way in (/v1). API-key auth, not JWT.
 from intake_api_routes import router as intake_api_router
 from carrier_routes import router as carrier_router
+from contract_routes import router as contract_router
 # The carrier's own business-segment list, assigned when a programme is made.
 from segment_routes import router as segment_router
+# Create-a-Contract step 4 — Signatures. Two routers on purpose: the carrier's
+# side is Bearer-authenticated and tenant-scoped, the signing side has NO auth
+# at all because the emailed token is the credential (esign_routes.py).
+from esign_routes import router as esign_router, public_router as esign_public_router
+from audit_routes import router as audit_router
+# The broker exception loop: the secure correction link (public, token-
+# authenticated like e-sign) and the carrier's delivery rule / notify contacts.
+# No tables of its own — see submission_service.
+from fix_link_routes import router as fix_link_router
+from submission_routes import router as submission_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -54,6 +67,8 @@ from mapper import (
     signature_multi,
 )
 import storage  # blob storage abstraction (Azure/Azurite; DB-blob fallback)
+import rule_scope  # which of a contract's rule sets belong to which template
+import validation_outcome as _vo  # what a validation run actually checked
 
 init_db()
 
@@ -81,6 +96,10 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Let the browser read a download's filename: without this, a cross-origin
+    # response hides Content-Disposition and every file saves under the name
+    # the screen guessed (a signed contract would lose its "(signed)").
+    expose_headers=["Content-Disposition"],
     # Cache preflight (OPTIONS) responses for an hour so the browser doesn't
     # re-preflight every cross-origin call — without this the network tab shows
     # 2 entries (OPTIONS + real request) for nearly every api call on the
@@ -101,13 +120,35 @@ app.include_router(app_router)
 app.include_router(validation_router)
 app.include_router(direct_router)
 app.include_router(hierarchy_router)
+app.include_router(broker_onboarding_router)
 app.include_router(broker_router)
 # Output BDX template: create from a reporting standard or a contract, edit,
 # validate, and resolve the one that applies to a carrier+programme+broker+contract.
 app.include_router(output_template_router)
 app.include_router(intake_router)
 app.include_router(intake_api_router)
+# The contract as a RECORD: raise it from its terms, attach its wording,
+# references and endorsements, negotiate, sign, renew or terminate it. Its
+# paths sit at /contracts/… and do not overlap the programme-scoped upload
+# routes on app_router.
+app.include_router(contract_router)
 app.include_router(segment_router)
+# The signing round: set one up and watch it (/esign/…), and sign one from an
+# emailed link (/esign/sign/…). The public router is registered FIRST so its
+# fixed /esign/sign prefix is matched before any future /esign/{id} pattern
+# could swallow it.
+app.include_router(esign_public_router)
+app.include_router(esign_router)
+# Audit Logs (/audit/…). Every seat has one; what differs is whose rows come
+# back, which audit_feed.scope_for decides — so there is no role guard here to
+# fall out of step with it.
+app.include_router(audit_router)
+# The secure correction link — no login, the emailed token is the credential.
+app.include_router(fix_link_router)
+app.include_router(submission_router)
+# ITD handling: a setup's ITD settings, a file's row comparison, a feed's
+# running total (itd_routes.py).
+app.include_router(itd_router)
 
 
 def _mark_deprecated_aliases() -> None:
@@ -120,7 +161,7 @@ def _mark_deprecated_aliases() -> None:
     model, the rule library, platform admin) is deliberately left alone.
     """
     superseded = (
-        "/programs", "/contracts", "/approvals", "/brokers", "/hierarchy",
+        "/programs", "/contracts", "/brokers", "/hierarchy",
     )
     note = ("Deprecated — use the carrier-centric equivalent under "
             "/carriers/{carrier_id}/programs/{program_id}/brokers/"
@@ -142,16 +183,65 @@ _mark_deprecated_aliases()
 import sweep_scheduler  # noqa: E402
 sweep_scheduler.start(app)
 
-# 10.1 — SFTP collector. Looks in each broker's folder every few minutes. OFF
-# unless SFTP_POLLER_ENABLED=1, so nothing changes until it is turned on.
+# 10 — tells an open Files screen the moment a file lands (Postgres
+# LISTEN/NOTIFY → GET /intake/events), replacing its 60-second refresh. Started
+# before the collectors so their very first arrivals are announced.
+# Opt out with INTAKE_LIVE_ENABLED=0.
+import intake_events  # noqa: E402
+intake_events.start(app)
+
+# 10.1 — SFTP collector. Collects the moment a file lands in a broker's folder
+# (a filesystem watcher), with a slow backup sweep; falls back to a timer where
+# the folder cannot be watched. ON by default — collecting is what the screen
+# promises a broker. Opt out with SFTP_POLLER_ENABLED=0.
 import sftp_poller  # noqa: E402
 sftp_poller.start(app)
 
-# 10.3 — email collector. Reads the intake mailbox every few minutes. OFF unless
-# EMAIL_POLLER_ENABLED=1 *and* a mailbox is configured, so a deployment with no
-# IMAP settings behaves exactly as it did before.
+# 10.1 — external SFTP pull. Kavachio logs in to a broker's (or the carrier's)
+# OWN SFTP server on each such route's interval (5/15/60 min), collects the
+# finished files and moves them to a processed folder there. Idle until
+# migration 35 adds intake_route.route_sftp_config. Opt out with
+# SFTP_PULL_ENABLED=0; POST /intake/routes/{id}/poll still collects on request.
+import sftp_pull  # noqa: E402
+sftp_pull.start(app)
+
+# Kavachio's own SFTP server (6 Oct 2026). Each broker's SFTP channel has a
+# login of its own, emailed to them (sftp_accounts); signed in, a broker sees
+# only their channel's /incoming (upload — the collector above takes the file
+# from there) and /outbound (our answer to each file). Listens on
+# SFTP_SERVER_PORT (default 2022). Opt out with SFTP_SERVER_ENABLED=0 where
+# something else serves SFTP_ROOT.
+import sftp_server  # noqa: E402
+sftp_server.start(app)
+
+# 10.3 — email collector. Waits on the intake mailbox with IMAP IDLE and reads
+# it the moment mail arrives; falls back to a timer on a server without IDLE.
+# ON by default, but ONLY where a mailbox is configured — start() returns early
+# without IMAP_HOST/USER/PASS, so a deployment with no IMAP settings behaves
+# exactly as it did before. Opt out with EMAIL_POLLER_ENABLED=0.
+# It MOVES the mail it reads into IMAP_PROCESSED_FOLDER. It still sends nothing:
+# replying to a refused sender remains EMAIL_REPLY_ON_REFUSAL, off by default.
 import email_poller  # noqa: E402
 email_poller.start(app)
+
+# Auto-run — an accepted file (email, SFTP, API, or a held file somebody
+# released) is run against its programme's live setup and the result linked
+# back to the arrival. Files accepted before this existed are left alone
+# (migration 29). Opt out with INTAKE_AUTORUN_ENABLED=0.
+import intake_autorun  # noqa: E402
+intake_autorun.start(app)
+
+# Feature 12.3 — the nightly retention sweep. Refused and held files are kept
+# so somebody can review them, not for ever; this is what forgets the bytes
+# and keeps the record.
+import intake_review  # noqa: E402
+intake_review.start(app)
+
+# The broker exception loop's deadline rule, applied every 5 minutes
+# (SUBMISSION_DEADLINE_SWEEP_SECONDS; 0 = off). Broker emails stay off until
+# BROKER_NOTIFY_ENABLED=1.
+import submission_service  # noqa: E402
+submission_service.start(app)
 
 
 # --- DB audit middleware ---------------------------------------------------
@@ -166,28 +256,44 @@ import asyncio as _asyncio  # noqa: E402
 from starlette.concurrency import run_in_threadpool as _run_in_threadpool  # noqa: E402
 
 
-async def _audit_activity(auth_header, method, path, status, ip):
+async def _audit_activity(auth_header, method, path, status, ip, esign=None):
     """Look up the actor + write the activity row. Runs OFF the request's
     critical path (see below) — the email lookup + insert are 2 extra DB
     round-trips that must not add latency to every write."""
     try:
         uid, tid = _audit.actor_from_token(auth_header)
         email = _audit.actor_email(uid)
+        target = _audit.redact_path(path)
+        details = {"status": status, "ip": ip, "method": method}
+        if esign:
+            # A signing link: the contract it was for, and who it was sent to
+            # (an emailed signer has no login — the address is who signed).
+            if esign.get("contract_id"):
+                target = f"contract:{esign['contract_id']}"
+            details["signer"] = esign.get("email")
+            tid = tid if tid is not None else esign.get("tenant_id")
+            email = email or esign.get("email")
         await _run_in_threadpool(
             _audit.log_activity, tid, email,
-            _audit.friendly_action(method, path), path,
-            {"status": status, "ip": ip, "method": method},
+            # The target is redacted too, not only the action: a signing link
+            # in the path is a live credential, and it was still being stored
+            # here in full (found 6 Oct 2026). Ids are kept — they name the record.
+            _audit.friendly_action(method, path), target, details,
+            # The acting SEAT, not just the display email: a broker token
+            # carries no tenant_id, so without this the row belongs to nobody
+            # the Audit Logs screen can scope it to (see db.ActivityEvent).
+            actor_user_id=uid,
         )
     except Exception:  # noqa: BLE001 — auditing must never break anything
         pass
 
 
-async def _audit_access(auth_header, path, ip):
+async def _audit_access(auth_header, path, ip, action="download"):
     try:
         uid, tid = _audit.actor_from_token(auth_header)
         email = _audit.actor_email(uid)
         await _run_in_threadpool(
-            _audit.log_access, email, path, "download", ip, uid, tid,
+            _audit.log_access, email, path, action, ip, uid, tid,
         )
     except Exception:  # noqa: BLE001
         pass
@@ -195,6 +301,14 @@ async def _audit_access(auth_header, path, ip):
 
 @app.middleware("http")
 async def _db_audit_middleware(request, call_next):
+    # A signing link's contract must be read BEFORE the request: signing
+    # clears the token. Only these few public requests pay for the lookup.
+    esign = None
+    if request.method == "POST" and request.url.path.startswith("/esign/sign/"):
+        try:
+            esign = await _run_in_threadpool(_audit.esign_context, request.url.path)
+        except Exception:  # noqa: BLE001
+            esign = None
     response = await call_next(request)
     try:
         method = request.method
@@ -208,9 +322,13 @@ async def _db_audit_middleware(request, call_next):
             # adding the email-lookup + insert round-trips to EVERY mutating
             # request's latency (writes felt slow against a remote DB).
             if method in ("POST", "PUT", "PATCH", "DELETE") and not _audit.is_self_logged(method, path):
-                _asyncio.ensure_future(_audit_activity(auth_header, method, path, status, ip))
+                _asyncio.ensure_future(_audit_activity(auth_header, method, path, status, ip,
+                                                       esign))
             elif method == "GET" and _audit.is_access_path(path):
-                _asyncio.ensure_future(_audit_access(auth_header, path, ip))
+                # A download only when the Download button asked for the file;
+                # a screen loading it to show it is a view (audit.DOWNLOAD_HEADER).
+                action = "download" if request.headers.get(_audit.DOWNLOAD_HEADER) else "view"
+                _asyncio.ensure_future(_audit_access(auth_header, path, ip, action))
     except Exception:  # noqa: BLE001 — auditing must never break the request
         pass
     return response
@@ -1446,19 +1564,44 @@ def dwh_list(
 
 # --- Export: user-defined output BDX templates -----------------------------
 
-def _active_contract_id_for_template(session, template_id: int) -> Optional[int]:
+def _current_contract_for_template(session, template_id):
+    """The contract on this template that is IN FORCE TODAY.
+
+    Replaces `Contract.status == "active"` + `ORDER BY id DESC`. Currency is no
+    longer stored — every approved version stays `active` and the calendar
+    decides which one is current, so this is resolve_as_of(today) scoped to a
+    template. Returns the Contract row (or None) so callers can read .filename.
+    """
+    from contract_upload_services.contract_asof import current_for_template
+    cid = current_for_template(session, template_id)
+    return session.get(Contract, cid) if cid else None
+
+
+def _active_contract_id_for_template(session, template_id: int,
+                                     on_date=None) -> Optional[int]:
     """Resolve the active contract linked to an output template via the new
-    hierarchy (Contract.output_template_id == template_id, status='active')."""
+    hierarchy (Contract.output_template_id == template_id, status='active').
+
+    Feature 7 §7.1: with `on_date` supplied, the result is narrowed from "the
+    version that is current" to "the version that was IN FORCE on that date" —
+    for a prior-period file those are different rows, and the status='active'
+    filter below selects precisely the wrong one. The narrowing happens after
+    this query rather than inside it for exactly that reason: a superseded
+    version cannot be found by a filter on 'active'.
+
+    `on_date=None` (every existing caller) keeps the behaviour unchanged.
+    """
     # Only the id is wanted — select that column, not the whole contract row
     # (which carries the extracted-clauses and field-mapping JSON).
-    return (
-        session.query(Contract.id)
-        .filter(Contract.output_template_id == template_id,
-                Contract.status == "active")
-        .order_by(Contract.id.desc())
-        .limit(1)
-        .scalar()
-    )
+    from contract_upload_services.contract_asof import current_for_template
+    cid = current_for_template(session, template_id)
+    if cid is None or on_date is None:
+        return cid
+    try:
+        from contract_upload_services import contract_asof as _asof
+        return _asof.resolve_sibling_as_of(session, cid, on_date) or cid
+    except Exception:  # noqa: BLE001 — fail-open
+        return cid
 
 
 def _contract_id_for_template(session, t: ExportTemplate) -> Optional[int]:
@@ -1643,15 +1786,7 @@ def export_template_contract_mapping(template_id: int,
     """
     with SessionLocal() as s:
         # Find the active contract whose output_template_id == template_id
-        active_contract = (
-            s.query(Contract)
-            .filter(
-                Contract.output_template_id == template_id,
-                Contract.status == "active",
-            )
-            .order_by(Contract.id.desc())
-            .first()
-        )
+        active_contract = _current_contract_for_template(s, template_id)
         if not active_contract:
             return {"contract": None, "field_rules": {}}
         assert_tenant_owns(principal, active_contract.tenant_id)
@@ -1670,15 +1805,19 @@ def export_template_contract_mapping(template_id: int,
         with CanonicalSession() as cs:
             rows = cs.execute(
                 text(
-                    "SELECT rule_id, rule_engine, rule_name, rule_description, "
+                    "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                     "severity, canonical_target, rule_spec, error_message, "
-                    "source_verbatim_text, generation_confidence "
+                    f"source_verbatim_text, generation_confidence, {rule_scope.tag_select(cs)} "
                     "FROM validation_rule "
                     "WHERE contract_id = :cid AND rule_status != 'disabled' "
                     "ORDER BY severity, rule_name"
                 ),
                 {"cid": contract_id},
             ).mappings().all()
+            # The rules a setup on THIS template runs — a set added to the
+            # contract for another template is not this template's (rule_scope.py).
+            rows = rule_scope.filter_rules(cs, [dict(r) for r in rows],
+                                           setup_template_id=template_id)
 
             import json as _json
 
@@ -1735,13 +1874,7 @@ def export_template_build_rules(template_id: int,
             raise HTTPException(404, "template not found")
         assert_tenant_owns(principal, t.tenant_id)
         structure = t.structure or {}
-        active = (
-            s.query(Contract)
-            .filter(Contract.output_template_id == template_id,
-                    Contract.status == "active")
-            .order_by(Contract.id.desc())
-            .first()
-        )
+        active = _current_contract_for_template(s, template_id)
         if not active:
             return {"contract": None, "rules_ok": 0, "unprocessable": [],
                     "message": "No active contract linked to this template."}
@@ -1751,14 +1884,16 @@ def export_template_build_rules(template_id: int,
     with CanonicalSession() as cs:
         rule_rows = cs.execute(
             text(
-                "SELECT rule_id, rule_engine, rule_name, rule_description, "
-                "severity, canonical_target, rule_spec, error_message "
+                "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
+                "severity, canonical_target, rule_spec, error_message, "
+                f"{rule_scope.tag_select(cs)} "
                 "FROM validation_rule "
                 "WHERE contract_id = :cid AND rule_status != 'disabled'"
             ),
             {"cid": active.id},
         ).mappings().all()
-        rules = [dict(r) for r in rule_rows]
+        rules = rule_scope.filter_rules(cs, [dict(r) for r in rule_rows],
+                                        setup_template_id=template_id)
 
     # Empty records per sheet + full column set from the template, so SQL can be
     # compiled and dry-run without any BDX data.
@@ -1799,6 +1934,8 @@ async def export_template_generate(
     file: UploadFile = File(...),
     carrier_party_id: Optional[int] = Form(default=None),
     contract_id: Optional[int] = Form(default=None),
+    program_id: Optional[int] = Form(default=None),
+    broker_party_id: Optional[int] = Form(default=None),
     sheets: Optional[list[str]] = Form(default=None),
     output_format: str = Form(default="xlsx"),
     principal: Principal = Depends(current_principal),
@@ -1810,7 +1947,28 @@ async def export_template_generate(
     of this template produces; xlsx preserves the sample workbook's styling.
 
     `sheets` restricts the template to the sheets the user chose; the generated
-    output will then contain only those sheets."""
+    output will then contain only those sheets.
+
+    `program_id`, `broker_party_id` and `contract_id` tie the layout to the
+    programme, broker and contract it was uploaded for, the way a template built
+    from the standard or the contract is tied, so the lookup never offers one
+    broker's uploaded layout to another broker on the same programme. The
+    contract is sent only when the setup is for a contract already on file; a
+    contract the setup uploads afterwards names this layout itself
+    (contract.output_template_id), and the layout stays the broker's, so the
+    broker's other contracts can still reach it."""
+    # The same check the other two ways of making a template run: the broker
+    # must be on the programme, the contract must be theirs. A broker or a
+    # contract with no programme is a scope nothing could ever resolve to.
+    # Checked before the file is read, so a refused scope never pays for the AI
+    # mapping below.
+    if (broker_party_id is not None or contract_id is not None) and program_id is None:
+        raise HTTPException(400, "a broker or contract can only be set together with its programme")
+    if program_id is not None:
+        from output_template_routes import _scope_check
+        with SessionLocal() as s:
+            _scope_check(s, principal, resolve_tenant_id(s, principal, mga),
+                         program_id, broker_party_id, contract_id)
     file_bytes = await file.read()
     structure = await run_in_threadpool(parse_template, file_bytes, filename=file.filename)
     if not structure["sheets"]:
@@ -1865,9 +2023,11 @@ async def export_template_generate(
             tenant_id=tid, name=name, version=version, is_active=is_active,
             carrier=carrier_name,
             carrier_party_id=carrier_party_id, contract_id=contract_id,
+            program_id=program_id, broker_party_id=broker_party_id,
             structure=structure, template_blob=tmpl_bytes,
             template_blob_ref=tmpl_ref, approved=0,
             output_format=_norm_fmt(output_format),
+            source_kind="uploaded",
         )
         s.add(t)
         s.commit()
@@ -1877,7 +2037,10 @@ async def export_template_generate(
             log_activity(t.tenant_id, actor_email(principal.user_id),
                          "output_template_generated", target=f"template:{t.name}",
                          details={"template_id": t.id, "name": t.name,
-                                  "version": t.version, "carrier_party_id": t.carrier_party_id})
+                                  "version": t.version, "carrier_party_id": t.carrier_party_id,
+                                  "program_id": t.program_id,
+                                  "broker_party_id": t.broker_party_id,
+                                  "contract_id": t.contract_id})
         except Exception:  # noqa: BLE001 — auditing must never break the response
             pass
         return _template_to_dict(t, s)
@@ -1937,13 +2100,39 @@ def export_template_update(template_id: int, body: UpdateExportTemplateBody,
 
 @app.get("/export/template")
 def export_template_list(mga: Optional[str] = None,
+                         page: Optional[int] = Query(None, ge=1),
+                         page_size: Optional[int] = Query(None, ge=1, le=200),
                          principal: Principal = Depends(current_principal)):
+    """Every output template this carrier has.
+
+    Pagination is OPT-IN and changes the shape: with `page` it answers
+    {items, total}, without it the bare list it always did. Building one
+    template's dict is not free — it reads the structure summary behind it —
+    so a paged call does that work for ten rows rather than for all of them.
+    """
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
         q = s.query(ExportTemplate).filter(ExportTemplate.tenant_id == tid)
         summaries = _structure_summaries(s, tid)
-        return [_template_to_dict(t, s, structure=summaries.get(t.id))
-                for t in q.order_by(ExportTemplate.id.desc()).all()]
+        ordered = q.order_by(ExportTemplate.id.desc())
+        if page is None:
+            return [_template_to_dict(t, s, structure=summaries.get(t.id))
+                    for t in ordered.all()]
+
+        total = q.order_by(None).count()
+        # Counted over EVERY template, not the page: the card's header states
+        # "N draft" beside the total, and a count of the drafts that happen to
+        # be on screen is a different number wearing the same label.
+        # `approved` is an INTEGER column, 0/1, not a boolean — comparing it
+        # to False is a Postgres type error, not a falsy test. The dict this
+        # endpoint returns says bool(t.approved) for the same reason.
+        drafts = q.filter(or_(ExportTemplate.approved.is_(None),
+                              ExportTemplate.approved == 0)).count()
+        size = page_size or 10
+        rows = ordered.offset((page - 1) * size).limit(size).all()
+        return {"items": [_template_to_dict(t, s, structure=summaries.get(t.id))
+                          for t in rows],
+                "total": total, "drafts": drafts}
 
 
 @app.get("/export/templates")
@@ -2602,6 +2791,13 @@ def _attach_recommendations(excs: list) -> list:
             continue
         e = dict(e)
         spec = spec_by_id.get(e.get("rule_id"))
+        # An aggregate's limit, so its total can be shown against it ("7,700
+        # over the 100,000 limit") instead of as a bare sum that matches no
+        # cell. Display only — nothing that checks a file reads it.
+        if isinstance(e.get("aggregate"), dict) and "max" not in e["aggregate"]:
+            lim = _aggregate_limit(spec)
+            if lim:
+                e["aggregate"] = {**e["aggregate"], **lim}
         if e.get("confidence") is None:
             e["confidence"] = conf_by_id.get(e.get("rule_id"))
         if e.get("contract_clause_text") in (None, ""):
@@ -2726,18 +2922,35 @@ def _field_of(e: dict):
     return c if c is not None else e.get("field")
 
 
-def _attach_direct_lane_decisions(excs: list, landing_id: int) -> list:
+def _decider_labels(viewer, user_ids) -> dict:
+    """{user_id: the words THIS viewer may see for who decided} — see
+    decision_log.Labeller: a broker user reads as their company to the carrier.
+    Empty without a viewer, and never allowed to break the exception list."""
+    if viewer is None:
+        return {}
+    try:
+        import decision_log
+        with SessionLocal() as s:
+            lab = decision_log.Labeller(s, viewer)
+            return {u: lab.label(u) for u in {x for x in user_ids if x is not None}}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _attach_direct_lane_decisions(excs: list, landing_id: int, viewer=None) -> list:
     """Attach decisions for a DIRECT-LANE export from landing_correction, keyed by
     (output_sheet, output_row, output_field) — no canonical policy involved."""
     try:
         with SessionLocal() as s:
             rows = s.execute(
                 text("SELECT output_sheet, output_row, output_field, kind, reason, "
-                     "new_value FROM landing_correction WHERE landing_id = :l"),
+                     "new_value, decided_by, decided_at FROM landing_correction "
+                     "WHERE landing_id = :l"),
                 {"l": landing_id},
             ).mappings().all()
     except Exception:
         return excs
+    labels = _decider_labels(viewer, [x["decided_by"] for x in rows])
     by_key = {(x["output_sheet"], x["output_row"], x["output_field"]): x for x in rows}
     if not by_key:
         return excs
@@ -2758,11 +2971,13 @@ def _attach_direct_lane_decisions(excs: list, landing_id: int) -> list:
             e = dict(e)
             e["status"] = _KIND_STATUS.get(hit["kind"], "resolved")
             e["resolution_note"] = hit["reason"]
+            e["decided_by"] = labels.get(hit["decided_by"])
+            e["decided_at"] = _iso_utc(hit["decided_at"])
         out.append(e)
     return out
 
 
-def _attach_decisions(excs: list, r: OutputExport) -> list:
+def _attach_decisions(excs: list, r: OutputExport, viewer=None) -> list:
     """Attach any saved decision (status + resolution_note) to stored output-stage
     exceptions, so the review screen shows the reviewer's Approve/Fix/Dismiss/Reject
     state across refreshes.
@@ -2782,7 +2997,7 @@ def _attach_decisions(excs: list, r: OutputExport) -> list:
     except Exception:
         landing_id = None
     if landing_id is not None:
-        return _attach_direct_lane_decisions(excs, int(landing_id))
+        return _attach_direct_lane_decisions(excs, int(landing_id), viewer)
 
     pns = [e["policy_number"] for e in excs
            if isinstance(e, dict) and e.get("policy_number")]
@@ -2798,7 +3013,8 @@ def _attach_decisions(excs: list, r: OutputExport) -> list:
                 return excs
             drows = cs.execute(
                 text("SELECT exception_id, rule_id, source_entity_id, field_path, "
-                     "status, resolution_note FROM validation_exception "
+                     "status, resolution_note, resolved_by_user_id, resolved_at "
+                     "FROM validation_exception "
                      "WHERE source_entity_id = ANY(:pids) ORDER BY exception_id"),
                 {"pids": pids},
             ).mappings().all()
@@ -2806,6 +3022,7 @@ def _attach_decisions(excs: list, r: OutputExport) -> list:
         return excs
     by_key = {(x["rule_id"], x["source_entity_id"], x["field_path"]): x
               for x in drows}
+    labels = _decider_labels(viewer, [x["resolved_by_user_id"] for x in drows])
     out = []
     for e in excs:
         if not isinstance(e, dict):
@@ -2819,12 +3036,14 @@ def _attach_decisions(excs: list, r: OutputExport) -> list:
             e["exception_id"] = row["exception_id"]
             e["status"] = row["status"]
             e["resolution_note"] = row["resolution_note"]
+            e["decided_by"] = labels.get(row["resolved_by_user_id"])
+            e["decided_at"] = _iso_utc(row["resolved_at"])
         out.append(e)
     return out
 
 
 def _export_to_dict(r: OutputExport, with_exceptions: bool = False,
-                    mga: Optional[str] = None) -> dict:
+                    mga: Optional[str] = None, viewer=None) -> dict:
     d = {
         "id": r.id, "mga": mga, "tenant_id": r.tenant_id, "template_id": r.template_id,
         "template_name": r.template_name, "filename": r.filename,
@@ -2852,7 +3071,7 @@ def _export_to_dict(r: OutputExport, with_exceptions: bool = False,
     }
     if with_exceptions:
         excs = _attach_recommendations(r.exceptions or [])
-        d["exceptions"] = _attach_decisions(excs, r)
+        d["exceptions"] = _attach_decisions(excs, r, viewer)
     return d
 
 
@@ -2995,6 +3214,29 @@ def _example_from_ir(rule_spec) -> Optional[dict]:
     return {"example": hint.get("example"), "format": hint.get("format")}
 
 
+def _aggregate_limit(rule_spec) -> dict:
+    """The bound an aggregate_cap rule holds its total to — {"max": n} and/or
+    {"min": n} — or {} for any other rule."""
+    import json as _json
+    if isinstance(rule_spec, str):
+        try:
+            rule_spec = _json.loads(rule_spec)
+        except Exception:
+            return {}
+    ir = rule_spec.get("ir") if isinstance(rule_spec, dict) else None
+    if not isinstance(ir, dict) or ir.get("template") != "aggregate_cap":
+        return {}
+    params = ir.get("params") or {}
+    out = {}
+    for k in ("max", "min"):
+        try:
+            if params.get(k) is not None:
+                out[k] = float(params[k])
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def _expected_from_ir(rule_spec) -> Optional[str]:
     """Human-readable description of the constraint a contract rule enforces — the
     "Expected:" hint shown in the Modify-here editor. Derived deterministically
@@ -3127,13 +3369,7 @@ def _resolve_export_target(s, template_id, upload_id, policy_ids, principal=None
         assert_tenant_owns(principal, t.tenant_id)
 
     # Active contract linked to this output template (new hierarchy).
-    active_contract = (
-        s.query(Contract)
-        .filter(Contract.output_template_id == template_id,
-                Contract.status == "active")
-        .order_by(Contract.id.desc())
-        .first()
-    )
+    active_contract = _current_contract_for_template(s, template_id)
     active_contract_id = active_contract.id if active_contract else None
     active_contract_info = (
         {"id": active_contract.id, "filename": active_contract.filename}
@@ -3209,15 +3445,16 @@ def export_validate(
     with CanonicalSession() as cs:
         rule_rows = cs.execute(
             text(
-                "SELECT rule_id, rule_engine, rule_name, rule_description, "
+                "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                 "severity, canonical_target, rule_spec, error_message, "
-                "source_verbatim_text, source_page_number "
+                f"source_verbatim_text, source_page_number, {rule_scope.tag_select(cs)} "
                 "FROM validation_rule "
                 "WHERE contract_id = :cid AND rule_status != 'disabled'"
             ),
             {"cid": active_contract_id},
         ).mappings().all()
-        contract_validation_rules = [dict(r) for r in rule_rows]
+        contract_validation_rules = rule_scope.filter_rules(
+            cs, [dict(r) for r in rule_rows], setup_template_id=template_id)
 
     if not contract_validation_rules:
         return empty
@@ -3236,6 +3473,7 @@ def export_validate(
 
     exceptions: list[dict] = []
     unprocessable: list[dict] = []
+    _dv, dv_error = None, None
     try:
         from duckdb_validation import run_validation as _duck_validate
         _dv = _duck_validate(
@@ -3244,6 +3482,10 @@ def export_validate(
             contract=tgt["active_contract_info"],
             template_id=template_id,
             schema_cols=schema_cols,
+            # A rule on a column this template never resolves is not checked,
+            # rather than run on empty cells (validation_outcome).
+            filled_cols=_vo.filled_cols_from_structure(structure),
+            inactive_cols=_vo.inactive_cols(structure),
         )
         exceptions = _dv["exceptions"]
         unprocessable = _dv["unprocessable"]
@@ -3252,7 +3494,14 @@ def export_validate(
         import traceback as _tb
         _tb.print_exc()
         print(f"[DuckDB validate-only] ERROR — skipped: {dv_exc}")
-        return empty
+        dv_error = dv_exc
+
+    # A crash, or rows that never reached a rule, is NOT "no exceptions": say so
+    # in the popup (and persist nothing for it — there is no row to attach to).
+    status, status_reason = _vo.outcome(
+        input_rows=0, projected_rows=sum(len(b.get("records") or []) for b in records),
+        error=dv_error, stats=(_dv or {}).get("stats"), exceptions=exceptions)
+    notice = [_vo.not_validated_entry(status_reason)] if status == _vo.NOT_VALIDATED else []
 
     # Shape each DuckDB exception into the frontend popup's CustomViolation.
     violations = [
@@ -3273,7 +3522,7 @@ def export_validate(
             "affectedRecords": None,
             "violationDetail": None,
         }
-        for e in exceptions
+        for e in notice + exceptions
     ]
     critical = sum(1 for v in violations if v["severity"] == "critical")
     warning = sum(1 for v in violations if v["severity"] in ("warning", "warn"))
@@ -3369,6 +3618,11 @@ def export_validate(
         "warning": warning,
         "violations": violations,
         "unprocessable_rules": unprocessable,
+        "status": status,
+        "status_reason": status_reason,
+        "rows_total": ((_dv or {}).get("stats") or {}).get("rows_total"),
+        "rows_validated": ((_dv or {}).get("stats") or {}).get("rows_validated"),
+        "rows_excluded": ((_dv or {}).get("stats") or {}).get("rows_excluded"),
     }
 
 
@@ -3403,15 +3657,7 @@ def export_generate(
 
         # Find the active contract for this Output Template (new hierarchy).
         # The ops DB Contract row carries output_template_id and status.
-        active_contract = (
-            s.query(Contract)
-            .filter(
-                Contract.output_template_id == template_id,
-                Contract.status == "active",
-            )
-            .order_by(Contract.id.desc())
-            .first()
-        )
+        active_contract = _current_contract_for_template(s, template_id)
         active_contract_id = active_contract.id if active_contract else None
         active_contract_info = (
             {"id": active_contract.id, "filename": active_contract.filename}
@@ -3459,15 +3705,16 @@ def export_generate(
         with CanonicalSession() as cs:
             rule_rows = cs.execute(
                 text(
-                    "SELECT rule_id, rule_engine, rule_name, rule_description, "
+                    "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                     "severity, canonical_target, rule_spec, error_message, "
-                    "source_verbatim_text, source_page_number "
+                    f"source_verbatim_text, source_page_number, {rule_scope.tag_select(cs)} "
                     "FROM validation_rule "
                     "WHERE contract_id = :cid AND rule_status != 'disabled'"
                 ),
                 {"cid": active_contract_id},
             ).mappings().all()
-            contract_validation_rules = [dict(r) for r in rule_rows]
+            contract_validation_rules = rule_scope.filter_rules(
+                cs, [dict(r) for r in rule_rows], setup_template_id=template_id)
 
     with CanonicalSession() as cs:
         policies = fetch_policies(cs, ids)
@@ -3520,6 +3767,7 @@ def export_generate(
         for sh in (structure.get("sheets") or [])
     }
     unprocessable: list[dict] = []
+    _dv, dv_error = None, None
     try:
         from duckdb_validation import run_validation as _duck_validate
         _dv = _duck_validate(
@@ -3528,21 +3776,42 @@ def export_generate(
             contract=active_contract_info,
             template_id=template_id,
             schema_cols=schema_cols,
+            # A rule on a column this template never resolves is not checked,
+            # rather than run on empty cells (validation_outcome).
+            filled_cols=_vo.filled_cols_from_structure(structure),
+            inactive_cols=_vo.inactive_cols(structure),
         )
         exceptions = _dv["exceptions"]
         unprocessable = _dv["unprocessable"]
+        print(f"[DuckDB validation] {_dv['stats']}")
+    except Exception as dv_exc:
+        # Never let validation failure block the export — but never store the
+        # file as clean either: the outcome below marks it not validated.
+        import traceback as _tb
+        _tb.print_exc()
+        print(f"[DuckDB validation] ERROR — skipped: {dv_exc}")
+        exceptions = []
+        dv_error = dv_exc
+    if _dv is not None:
         # Label each row-level exception with the offending policy's number (the
         # compiled SQL for value-set/range rules doesn't emit one), so the review
-        # UI shows a real policy id instead of "Dataset-level".
-        from duckdb_validation import label_exceptions_with_policy
-        label_exceptions_with_policy(exceptions, structure, records)
-        print(f"[DuckDB validation] {_dv['stats']}")
+        # UI shows a real policy id instead of "Dataset-level". Cosmetic, so a
+        # failure here keeps the findings.
+        try:
+            from duckdb_validation import label_exceptions_with_policy
+            label_exceptions_with_policy(exceptions, structure, records)
+        except Exception as _lx:
+            print(f"[DuckDB validation] policy labelling skipped: {_lx}")
         # A rule reaches `unprocessable` here only when its created query is
         # missing or FAILS TO RUN against the data — i.e. a clause that was
         # supposed to validate but didn't. Surface each one as a highlighted
         # "not validated" notice so the user knows the clause did not work
-        # (rather than silently assuming it passed).
+        # (rather than silently assuming it passed). A rule skipped only because
+        # the template leaves its column empty is not a clause that failed — it
+        # joins the one grouped, uncounted "not checked" entry instead.
         for u in unprocessable:
+            if u.get("kind") == "not_filled":
+                continue
             exceptions.append({
                 "severity": "warning",
                 "code": u.get("rule_name") or "not_validated",
@@ -3553,12 +3822,20 @@ def export_generate(
                 "message": f"This clause was NOT validated: {u.get('message')}",
                 "error_class": "not_validated",
             })
-    except Exception as dv_exc:
-        # Never let validation failure block the export.
-        import traceback as _tb
-        _tb.print_exc()
-        print(f"[DuckDB validation] ERROR — skipped: {dv_exc}")
-        exceptions = []
+
+    status, status_reason = _vo.outcome(
+        input_rows=0, projected_rows=sum(len(b.get("records") or []) for b in records),
+        error=dv_error, stats=(_dv or {}).get("stats"), exceptions=exceptions)
+    if status == _vo.NOT_VALIDATED:
+        exceptions.insert(0, _vo.not_validated_entry(status_reason))
+    _not_checked = _vo.not_checked_entry(
+        [u for u in unprocessable if u.get("kind") == "not_filled"],
+        (_dv or {}).get("partially_checked"))
+    if _not_checked:
+        exceptions.append(_not_checked)
+    counted = _vo.countable(exceptions)
+    # Only an entry with a row can be painted onto a cell.
+    cell_exceptions = [e for e in counted if e.get("row") is not None]
 
     from output_serializers import (
         serialize as _serialize_output, output_extension as _output_ext,
@@ -3573,9 +3850,9 @@ def export_generate(
         # are visible in the downloaded file. No-op (and never raises) when clean.
         # (Cell highlighting is Excel-only; CSV/XML/JSON carry exceptions in the
         # OutputExport record instead.)
-        if exceptions:
+        if cell_exceptions:
             from exporter import highlight_exceptions
-            output_bytes = highlight_exceptions(output_bytes, structure, exceptions)
+            output_bytes = highlight_exceptions(output_bytes, structure, cell_exceptions)
     else:
         output_bytes = _serialize_output(
             _sheets_from_blocks(structure, records), output_format)
@@ -3591,15 +3868,15 @@ def export_generate(
         content_type=_ct_for(fname),
     )
 
-    sev_crit, sev_warn, sev_info = exception_severity_counts(exceptions)
+    sev_crit, sev_warn, sev_info = exception_severity_counts(counted)
     with SessionLocal() as s:
         rec = OutputExport(
             tenant_id=template_tid, template_id=template_id, template_name=template_name,
             filename=fname, source_upload_id=upload_id, policy_ids=ids,
             generated_by=actor, policy_count=len(policies),
-            exception_count=len(exceptions), exceptions=exceptions,
+            exception_count=len(counted), exceptions=exceptions,
             critical_count=sev_crit, warning_count=sev_warn, info_count=sev_info,
-            status="has_exceptions" if exceptions else "clean",
+            status=status,
             blob=export_blob_bytes,
             blob_ref=export_blob_ref,
         )
@@ -3608,12 +3885,16 @@ def export_generate(
             tenant_id=template_tid, actor=actor, action="output_generated",
             target=f"export:{template_name}",
             details={"filename": fname, "policies": len(policies),
-                     "exceptions": len(exceptions)},
+                     "exceptions": len(counted), "status": status},
+            **_audit.actor_columns(principal),
         ))
         s.commit()
         s.refresh(rec)
         out = _export_to_dict(rec, with_exceptions=True, mga=_tenant_name(s, rec.tenant_id))
         out["unprocessable_rules"] = unprocessable
+        out["status_reason"] = status_reason
+        for _k in ("rows_total", "rows_validated", "rows_excluded"):
+            out[_k] = ((_dv or {}).get("stats") or {}).get(_k)
         return out
 
 
@@ -3653,7 +3934,45 @@ def export_download_get(export_id: int,
         # Not assert_tenant_owns: a BROKER seat has no tenant, so that guard
         # 404s them out of the exceptions for a run they made themselves.
         assert_can_read_export(s, principal, r)
-        return _export_to_dict(r, with_exceptions=True, mga=_tenant_name(s, r.tenant_id))
+        out = _export_to_dict(r, with_exceptions=True, mga=_tenant_name(s, r.tenant_id),
+                              viewer=principal)
+        out["about"] = _export_about(s, r)
+        return out
+
+
+def _export_about(s, r: OutputExport) -> dict:
+    """What a run is FOR, in names — the strip above its exceptions: which
+    programme, broker and contract, which reporting period, which version."""
+    from exception_tally import export_versions
+    v = export_versions(s, [r.id]).get(r.id) or {}
+    prog = s.get(Program, r.program_id) if r.program_id else None
+    broker = s.get(Party, r.broker_party_id) if r.broker_party_id else None
+    cid = v.get("contract_id") or r.contract_id
+    con = s.get(Contract, cid) if cid else None
+    return {
+        "programme": prog.name if prog else None,
+        "broker": (broker.legal_name or broker.dba_name) if broker else None,
+        "contract": (con.name or con.filename) if con else None,
+        "reporting_period": v.get("reporting_period"),
+        "version_no": v.get("version_no"),
+        # Delivered to the carrier, and whether it can still be corrected:
+        # open while a critical or warning exception is unanswered or a
+        # decision is unsent, locked once neither (submission_service).
+        "delivery": _export_delivery(s, r),
+    }
+
+
+def _export_delivery(s, r: OutputExport) -> Optional[dict]:
+    try:
+        import submission_service as subs
+        th = subs.load(s, getattr(r, "submission_ref", None)) if r.submission_ref else None
+        if th is None or th.current_export_id != r.id:
+            return None
+        st = subs.delivery_state(s, th)
+        return st if st["delivered"] else None
+    except Exception:  # noqa: BLE001 — a banner; never what breaks the screen
+        log.warning("could not read delivery state of export %s", r.id, exc_info=True)
+        return None
 
 
 @app.get("/export/downloads/{export_id}/file")
@@ -3664,15 +3983,139 @@ def export_download_file(export_id: int,
         if not r:
             raise HTTPException(404, "export file not found")
         assert_can_read_export(s, principal, r)
-        data = storage.resolve_bytes(r.blob_ref, r.blob)
-        if not data:
+        got = export_file_bytes(s, export_id, row=r)
+        if not got:
             raise HTTPException(404, "export file not found")
-        from output_serializers import content_type_for_filename
+        filename, data, media_type = got
         return Response(
             content=data,
-            media_type=content_type_for_filename(r.filename),
-            headers={"Content-Disposition": _content_disposition(r.filename)},
+            media_type=media_type,
+            headers={"Content-Disposition": _content_disposition(filename)},
         )
+
+
+def export_file_bytes(s, export_id: int, row=None):
+    """The generated BDX exactly as "Download BDX" serves it — exceptions
+    highlighted, each with its note — as (filename, bytes, media type), or None.
+    Also what the broker's exception email attaches."""
+    r = row if row is not None else _export_file_row(s, export_id)
+    if not r:
+        return None
+    data = storage.resolve_bytes(r.blob_ref, r.blob)
+    if not data:
+        return None
+    from output_serializers import content_type_for_filename
+    return r.filename, data, content_type_for_filename(r.filename)
+
+
+def _export_results(s, export_id: int, principal):
+    """Every row of one stored output with its outcome (export_results.compute),
+    read from the file as it was delivered plus the decisions saved since."""
+    import export_results as xr
+    r = _export_file_row(s, export_id)
+    if not r:
+        raise HTTPException(404, "export not found")
+    assert_can_read_export(s, principal, r)
+    data = storage.resolve_bytes(r.blob_ref, r.blob)
+    grid = _output_to_grid(data, r.filename, max_rows=1_000_000,
+                           header_row_by_sheet=_export_header_rows(s, r)) if data else []
+    data_names = _export_data_sheet_names(s, r)
+    if data_names:
+        for sh in grid:
+            sh["is_data"] = " ".join(str(sh["sheet"]).split()).strip().lower() in data_names
+    sheets, columns = xr.grid_to_sheets(grid)
+    full = s.get(OutputExport, export_id)
+    excs = _attach_decisions(_attach_recommendations(full.exceptions or []), full, principal)
+    res = xr.compute(sheets, excs, not_validated=((full.status or "") == "not_validated"),
+                     columns=columns)
+    return full, sheets, columns, res
+
+
+def _export_versions(s, out) -> list[dict]:
+    """Every version of the submission this export belongs to, newest first,
+    each with its own output (History & Downloads). An export made before
+    submissions existed is its own only version."""
+    import submission_service as svc
+    th = svc.load(s, out.submission_ref) if getattr(out, "submission_ref", None) else None
+    cols = (OutputExport.id, OutputExport.filename, OutputExport.status,
+            OutputExport.exception_count, OutputExport.policy_count,
+            OutputExport.output_format, OutputExport.created_at)
+    if th is None:
+        return [{"version": out.version_no or 1, "export_id": out.id, "current": True,
+                 "status": None, "status_text": None, "source": None,
+                 "created_at": _iso_utc(out.created_at), "filename": out.filename,
+                 "exceptions": out.exception_count or 0, "rows": out.policy_count or 0,
+                 "output_format": getattr(out, "output_format", None),
+                 "replaced_by": None}]
+    ids = [v.export_id for v in th.versions if v.export_id]
+    meta = {row[0]: row for row in s.query(*cols).filter(OutputExport.id.in_(ids)).all()} if ids else {}
+    current = th.current_export_id
+    turns = [v for v in th.versions if v.export_id]
+    items = []
+    for i, v in enumerate(th.versions):
+        m = meta.get(v.export_id)
+        later = next((w.no for w in turns if w.no > v.no), None)
+        items.append({
+            "version": v.no, "export_id": v.export_id,
+            "current": bool(v.export_id) and v.export_id == current,
+            "status": v.status, "status_text": svc.STATUS_WORDS.get(v.status, v.status),
+            "source": v.source, "created_at": _iso_utc(v.created_at),
+            "filename": m[1] if m else None,
+            "exceptions": (m[3] or 0) if m else None, "rows": (m[4] or 0) if m else None,
+            "output_format": m[5] if m else None,
+            "replaced_by": later if (v.status == "superseded" and later) else None,
+        })
+    return list(reversed(items))
+
+
+@app.get("/export/downloads/{export_id}/results")
+def export_download_results(export_id: int, outcome: str | None = None,
+                            q: str | None = None, page: int = 1, page_size: int = 50,
+                            principal: Principal = Depends(current_principal)):
+    """The Results tab of one checked file: Summary (rows passed, failed and
+    open, resolved, not checked), All Records (every row with its outcome and
+    exceptions, filtered and paged here) and History (every version)."""
+    with SessionLocal() as s:
+        full, _sheets, _cols, res = _export_results(s, export_id, principal)
+        versions = _export_versions(s, full)
+    rows = res["rows"]
+    if outcome in ("passed", "open", "resolved", "not_checked"):
+        rows = [r for r in rows if r["outcome"] == outcome]
+    if q and q.strip():
+        needle = q.strip().lower()
+        rows = [r for r in rows
+                if needle in str(r.get("policy_number") or "").lower()
+                or any(needle in str(x.get("rule") or "").lower()
+                       or needle in str(x.get("field") or "").lower()
+                       for x in r["exceptions"])]
+    page_size = max(1, min(int(page_size or 50), 500))
+    pages = max(1, -(-len(rows) // page_size))
+    page = max(1, min(int(page or 1), pages))
+    return {
+        "export_id": export_id,
+        "status": full.status,
+        "summary": res["summary"],
+        "by_rule": res["by_rule"],
+        "records": {"items": rows[(page - 1) * page_size: page * page_size],
+                    "total": len(rows), "page": page, "page_size": page_size,
+                    "pages": pages},
+        "versions": versions,
+    }
+
+
+@app.get("/export/downloads/{export_id}/results.csv")
+def export_download_results_csv(export_id: int,
+                                principal: Principal = Depends(current_principal)):
+    """The whole file as CSV with each row's result and exceptions."""
+    import re
+    import export_results as xr
+    with SessionLocal() as s:
+        full, sheets, cols, res = _export_results(s, export_id, principal)
+        name = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", full.filename or f"export_{export_id}")
+    body = xr.results_csv(sheets, res, cols)
+    return Response(content=body.encode("utf-8-sig"), media_type="text/csv",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{name}-results.csv"'})
 
 
 @app.get("/export/downloads/{export_id}/data")

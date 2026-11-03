@@ -1,9 +1,15 @@
 """Feature 10.3 — the collector that takes bordereaux out of a mailbox.
 
-The email twin of sftp_poller. It logs into one IMAP mailbox every few minutes,
-takes the attachments off anything new, hands each one to
-intake_service.land_file, and moves the message out of the way so it is never
-read twice.
+The email twin of sftp_poller. It reads one IMAP mailbox, takes the attachments
+off anything new, hands each one to intake_service.land_file, and moves the
+message out of the way so it is never read twice.
+
+WHEN IT LOOKS. It used to log in every five minutes and ask. Now one connection
+waits in IMAP IDLE (imap_idle) and the server says the instant a message lands,
+so the mailbox is read within a second or two. That connection re-issues IDLE
+every EMAIL_IDLE_REFRESH_SECONDS — a keepalive; nothing is read — and a slow
+backup sweep (EMAIL_SWEEP_SECONDS) catches anything a dropped connection hid.
+A server without IDLE, or EMAIL_IDLE_ENABLED=0, falls back to the old timer.
 
 It talks to IMAP with the standard library — `imaplib` and `email`, no new
 dependency. Whatever hosts the mailbox (Dovecot, an appliance, a provider that
@@ -21,12 +27,28 @@ WHAT IS DIFFERENT FROM SFTP, and why the two collectors are not one function:
     so a refusal can actually reach the person who sent it. Off by default —
     see EMAIL_REPLY_ON_REFUSAL below.
 
-OFF BY DEFAULT. Set EMAIL_POLLER_ENABLED=1 to run it. Nothing in the app behaves
-differently until you do, and "Collect now" on the screen works either way.
+ON BY DEFAULT, but only where a mailbox is actually configured — start() below
+returns early unless IMAP_HOST/USER/PASS are set, so turning this on cannot make
+an unconfigured deployment start reaching for a mail server. Collecting is what
+the screen promises a broker, so it should not depend on anybody remembering to
+set a variable. Set EMAIL_POLLER_ENABLED=0 to stop it; POST
+/intake/routes/{id}/poll works either way.
+
+NOTE the blast radius: when this runs it MOVES the mail it reads out of INBOX
+and into IMAP_PROCESSED_FOLDER. It does not send anything — replying to a
+refused sender is still EMAIL_REPLY_ON_REFUSAL, still off by default.
 
 Configuration:
-  EMAIL_POLLER_ENABLED    0/1   (default 0 — off)
-  EMAIL_POLL_SECONDS      int   (default 300 — the design's "every 5 minutes")
+  EMAIL_POLLER_ENABLED    0/1   (default 1 — on, when a mailbox is configured)
+  EMAIL_STRICT_SENDERS    0/1   (default 0) take mail ONLY from an address a
+                                route already knows; anything else is left in
+                                the mailbox and never recorded
+  EMAIL_IDLE_ENABLED      0/1   (default 1) wait for mail with IMAP IDLE
+  EMAIL_IDLE_REFRESH_SECONDS int (default 180) re-issue IDLE this often — kept
+                                under the ~4-minute idle timeout of cloud NATs
+                                and load balancers, which drop silent sockets
+  EMAIL_SWEEP_SECONDS     int   (default 3600) backup sweep while in IDLE
+  EMAIL_POLL_SECONDS      int   (default 300)  the timer, only without IDLE
   EMAIL_MAX_ATTACHMENT_MB int   (default 25)  skip anything larger
   EMAIL_REPLY_ON_REFUSAL  0/1   (default 0 — off) tell the sender we refused it
   EMAIL_REPLY_MAX_PER_DAY int   (default 3)   per sender, a loop-breaker
@@ -34,23 +56,36 @@ Configuration:
 """
 from __future__ import annotations
 
-import asyncio
 import imaplib
 import logging
 import os
 import ssl
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 
 import email_intake_service as mail
+import imap_idle
 import intake_service as svc
+import storage
 from db import SessionLocal
 from intake_models import FileArrival, IntakeRoute
 
 log = logging.getLogger("kavachio.email_poller")
 
-_task: asyncio.Task | None = None
+_thread: threading.Thread | None = None
+_stop = threading.Event()
+# What the collector is actually doing, for the screen:
+# idle | timer | connecting | off.
+_mode = "off"
+
+# After a pass that did not get through (database down, mailbox refused us),
+# how soon to try again rather than waiting for the backup sweep.
+_RETRY_SECONDS = 60
+# Reconnect backoff after the IDLE connection drops, doubling to the ceiling.
+_BACKOFF_START, _BACKOFF_MAX = 5, 300
 
 # Namespace for the Postgres advisory lock, distinct from sftp_poller's so the
 # two collectors can never block each other.
@@ -62,16 +97,53 @@ imaplib._MAXLINE = max(getattr(imaplib, "_MAXLINE", 10000), 10_000_000)
 
 
 def _enabled() -> bool:
-    return os.getenv("EMAIL_POLLER_ENABLED", "0").strip().lower() in (
+    return os.getenv("EMAIL_POLLER_ENABLED", "1").strip().lower() in (
         "1", "true", "yes", "on",
     )
 
 
 def _interval() -> int:
+    """The timer, used only when the server cannot IDLE."""
     try:
         return max(10, int(os.getenv("EMAIL_POLL_SECONDS", "300")))
     except ValueError:
         return 300
+
+
+def _idle_enabled() -> bool:
+    return os.getenv("EMAIL_IDLE_ENABLED", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _idle_refresh() -> int:
+    """How long one IDLE runs before it is ended and re-issued.
+
+    Capped at 29 minutes, the most RFC 2177 allows before a server may hang up.
+    """
+    try:
+        return min(29 * 60, max(30, int(os.getenv("EMAIL_IDLE_REFRESH_SECONDS", "180"))))
+    except ValueError:
+        return 180
+
+
+def _sweep_interval() -> int:
+    try:
+        return max(60, int(os.getenv("EMAIL_SWEEP_SECONDS", "3600")))
+    except ValueError:
+        return 3600
+
+
+def status() -> dict:
+    """How mail is being noticed in this process, for the Ways in panel."""
+    if not _enabled():
+        mode = "off"
+    elif not mail.is_configured():
+        mode = "not_configured"
+    else:
+        mode = _mode
+    return {"mode": mode,
+            "check_seconds": _sweep_interval() if mode == "idle" else _interval()}
 
 
 def _max_bytes() -> int:
@@ -96,13 +168,17 @@ def _reply_cap() -> int:
 
 # ── IMAP plumbing ───────────────────────────────────────────────────────────
 
-def connect(cfg: mail.MailboxConfig) -> imaplib.IMAP4:
+def connect(cfg: mail.MailboxConfig, readonly: bool = False) -> imaplib.IMAP4:
     """Log in and select the folder. Raises on failure — the caller reports it.
 
     Port 993 is implicit TLS; 143 is plaintext upgraded by STARTTLS. The
     credential never crosses the wire unencrypted either way, and a server that
     refuses STARTTLS on 143 fails here rather than silently sending the password
     in the clear.
+
+    `readonly` selects with EXAMINE. The IDLE connection uses it: it only ever
+    waits, and on a read-only mailbox a CLOSE can never expunge messages that
+    somebody else's mail client flagged for deletion.
     """
     context = ssl.create_default_context()
     if cfg.use_ssl:
@@ -111,7 +187,7 @@ def connect(cfg: mail.MailboxConfig) -> imaplib.IMAP4:
         imap = imaplib.IMAP4(cfg.host, cfg.port)
         imap.starttls(ssl_context=context)
     imap.login(cfg.user, cfg.password)
-    imap.select(cfg.folder)
+    imap.select(cfg.folder, readonly=readonly)
     return imap
 
 
@@ -142,7 +218,10 @@ def _new_uids(imap: imaplib.IMAP4, search: str) -> list[bytes]:
 
 
 def _fetch(imap: imaplib.IMAP4, uid: bytes) -> bytes | None:
-    typ, data = imap.uid("FETCH", uid, "(RFC822)")
+    # PEEK: reading a message must not mark it read. The intake mailbox can be
+    # a person's working inbox (Kavachio's own); only a message we actually
+    # took a bordereau from is moved — see _retire.
+    typ, data = imap.uid("FETCH", uid, "(BODY.PEEK[])")
     if typ != "OK" or not data:
         return None
     for part in data:
@@ -222,12 +301,29 @@ def notify_sender(session, arrival: FileArrival,
       * never to automated senders (Auto-Submitted, Precedence: bulk, no-reply);
       * never more than EMAIL_REPLY_MAX_PER_DAY times to one sender;
       * off entirely unless EMAIL_REPLY_ON_REFUSAL is set.
+
+    Two more, so a refused file gets one email, not two, and 'Sender Notified'
+    on Files Received is only said of a reply that really went:
+
+      * not to a broker we know while broker emails are on — the broker loop
+        already sends them 'File rejected' with the reason (submission_service),
+        so this plain reply is only for senders nobody else tells;
+      * not to an address the MAIL_ALLOWED_RECIPIENTS test guard would skip —
+        send_email drops it without raising.
     """
     if not _reply_on_refusal():
         return False
     if arrival.outcome != "turned_away":
         return False
     if parsed.is_automated or not parsed.from_addr:
+        return False
+    import submission_service
+    if (getattr(arrival, "matched_broker_party_id", None) is not None
+            and submission_service.notifications_enabled()):
+        return False
+    if submission_service._blocked_by_test_mode(parsed.from_addr):
+        log.info("not replying to %s — not in MAIL_ALLOWED_RECIPIENTS (test mode)",
+                 parsed.from_addr)
         return False
     if _already_told_today(session, parsed.from_addr) >= _reply_cap():
         log.info("not replying to %s — daily cap reached", parsed.from_addr)
@@ -266,6 +362,24 @@ def notify_sender(session, arrival: FileArrival,
 
 # ── collecting ──────────────────────────────────────────────────────────────
 
+def _strict_senders() -> bool:
+    """Only take mail from an address a route already knows.
+
+    OFF by default, and that default is the safer one. Mail with a spreadsheet
+    attached that matches no route is currently recorded as "We do not recognise
+    the sender", and that row is how you find out a broker changed the mailbox
+    their export sends from. Switch it off and that discovery becomes silence:
+    their files simply stop arriving and nothing says so.
+
+    ON is right when the intake mailbox is shared with people, where a colleague
+    forwarding a spreadsheet would otherwise land in Files Received as a refusal
+    every single time.
+    """
+    return os.getenv("EMAIL_STRICT_SENDERS", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def _fallback_tenant(session) -> int | None:
     """Whose Files Received should an UNRECOGNISED sender appear on?
 
@@ -296,7 +410,7 @@ def _handle_message(session, raw: bytes, summary: dict):
                  configuration fix picks it up next time rather than losing it.
     """
     parsed = mail.parse_message(raw)
-    route, how = mail.resolve_route(session, None, parsed)
+    route, how, refusal = mail.resolve_route(session, None, parsed)
 
     if not parsed.has_files:
         # A plain message with nothing attached is not a refusal, it is not
@@ -305,6 +419,15 @@ def _handle_message(session, raw: bytes, summary: dict):
         # is not downloaded again, but never moved — see _retire.
         summary["no_attachment"] += 1
         return "nothing"
+
+    # Strict mode: no route, no record. The message is left exactly where it is
+    # and touched in no way, so registering that sender later picks it up on the
+    # next sweep rather than losing it.
+    if route is None and _strict_senders():
+        log.info("strict senders: leaving mail from %s — no route knows it",
+                 parsed.from_addr or "an unknown sender")
+        summary["unattributable"] += 1
+        return False
 
     tenant_id = route.tenant_id if route else _fallback_tenant(session)
     if tenant_id is None:
@@ -316,12 +439,6 @@ def _handle_message(session, raw: bytes, summary: dict):
 
     took = False
     for attachment in parsed.attachments:
-        if attachment.size > _max_bytes():
-            log.warning("skipping %s from %s — %d bytes is over the limit",
-                        attachment.filename, parsed.from_addr, attachment.size)
-            summary["too_large"] += 1
-            continue
-
         # A crash between landing an attachment and retiring the message would
         # re-read it. The duplicate check would catch that, but it would tell a
         # broker their good file was a duplicate of itself — so make the retry
@@ -335,14 +452,49 @@ def _handle_message(session, raw: bytes, summary: dict):
             took = True          # it IS ours, we just have it already
             continue
 
+        # 12.2 — an attachment over the mail limit used to be dropped here
+        # with nothing but a log line: no arrival row, no reason, no reply. The
+        # broker sent a file and heard nothing, and we had no record it ever
+        # came. It now goes through the same landing as everything else and is
+        # refused BY the size check, which writes the row and the reason, and
+        # notify_sender tells them. Mail has a tighter cap than the other two
+        # doors (servers cap attachments anyway), so it passes its own.
+        # 12.3 — keep our OWN copy before deciding anything.
+        #
+        # SFTP moves the file into a folder we own; the API stores the bytes
+        # before it lands them. Email did neither: the row was written and the
+        # only copy of the file stayed in the mailbox. Move that message, rotate
+        # the mailbox, or let somebody tidy old mail, and the file is gone —
+        # so "a refused file is kept exactly as it arrived" was simply not true
+        # for one door in three.
+        #
+        # Stored BEFORE the checks run, deliberately. A file refused for its
+        # size or a virus signature is the one you most need to still have.
+        blob_ref = None
+        try:
+            blob_ref, _ = storage.store_or_keep(
+                "intake", tenant_id, attachment.filename, attachment.content)
+        except Exception as exc:
+            # Losing the copy must not lose the RECORD. Better an arrival row
+            # with no blob than a file that vanishes with nothing to show it
+            # ever came.
+            log.error("could not store %s from %s: %s",
+                      attachment.filename, parsed.from_addr, exc)
+
         arrival = svc.land_file(
             session, tenant_id=tenant_id, filename=attachment.filename,
             file_bytes=attachment.content, route=route,
+            max_bytes=_max_bytes(), blob_ref=blob_ref,
             # The From: header is a CLAIM, not proof — anyone can write anything
             # in it. Recorded as sent so "who tried?" has an answer even when it
             # matched nobody.
             claimed_sender=parsed.from_addr or None,
             idempotency_key=key,
+            # "Bordereau – July 2026" in the subject names the reporting period
+            # when the attachment's own name does not.
+            period_hint=parsed.subject,
+            # Known sender, carrier not copied: recorded, and turned away.
+            refusal=refusal,
         )
         notify_sender(session, arrival, parsed)
         session.commit()
@@ -377,6 +529,10 @@ def collect_mailbox(session, account: str = "") -> dict:
     cfg = mail.mailbox_config(account)
     summary: dict = {"mailbox": cfg.user, "folder": cfg.folder,
                      "messages": 0, "accepted": 0, "held": 0, "turned_away": 0,
+                     # `too_large` stays in the shape for the screen that reads
+                     # it, but is now always 0: since 12.2 an oversized
+                     # attachment is a recorded refusal, counted under
+                     # turned_away with a reason the sender is told.
                      "no_attachment": 0, "too_large": 0, "already_seen": 0,
                      "unattributable": 0, "files": []}
 
@@ -414,7 +570,7 @@ def collect_mailbox(session, account: str = "") -> dict:
             imap = connect(cfg)
         except Exception as exc:
             # Wrong password, server down, folder renamed. Reported rather than
-            # raised so "Collect now" can say what happened on the screen.
+            # raised so a manual poll can say what happened.
             summary["error"] = f"could not open the mailbox: {exc}"
             return summary
 
@@ -445,7 +601,7 @@ def collect_mailbox(session, account: str = "") -> dict:
 
 
 def collect_route(session, route: IntakeRoute) -> dict:
-    """"Collect now" for one email route.
+    """A manual poll (POST /intake/routes/{id}/poll) for one email route.
 
     Reading a mailbox cannot be narrowed to a single broker — every email route
     shares the inbox — so this collects everything and then says which of the
@@ -465,7 +621,7 @@ def collect_route(session, route: IntakeRoute) -> dict:
 
 
 def collect_all() -> dict:
-    """The whole mailbox, for the timer. Safe to run repeatedly."""
+    """The whole mailbox, for the collector thread. Safe to run repeatedly."""
     totals = {"messages": 0, "accepted": 0, "held": 0, "turned_away": 0}
     with SessionLocal() as s:
         try:
@@ -482,44 +638,123 @@ def collect_all() -> dict:
     return totals
 
 
-async def _loop() -> None:
-    from fastapi.concurrency import run_in_threadpool
-    interval = _interval()
-    cfg = mail.mailbox_config()
-    log.info("email poller started — every %ss, mailbox=%s folder=%s",
-             interval, cfg.user or "(unset)", cfg.folder)
-    while True:
+def _collect_safely() -> bool:
+    """One pass over the mailbox. False when it did not get through."""
+    try:
+        totals = collect_all()
+    except Exception as exc:
+        # Never let a bad pass kill the collector; the caller retries.
+        log.exception("reading the mailbox failed: %s", exc)
+        return False
+    if totals.get("messages"):
+        log.info("email: %s", totals)
+    if totals.get("error"):
+        log.warning("email: %s", totals["error"])
+        return False
+    return True
+
+
+def _run_timer() -> None:
+    """The old way, for a server without IDLE: read the mailbox on a clock."""
+    global _mode
+    _mode = "timer"
+    log.info("email collector: checking %s every %ss",
+             mail.mailbox_config().user, _interval())
+    while not _stop.is_set():
+        _collect_safely()
+        _stop.wait(_interval())
+
+
+def _run_idle() -> None:
+    """Wait in IDLE; read the mailbox when mail lands. Reconnects on its own."""
+    global _mode
+    backoff = _BACKOFF_START
+    while not _stop.is_set():
+        cfg = mail.mailbox_config()
+        imap = None
         try:
-            totals = await run_in_threadpool(collect_all)
-            if totals.get("messages"):
-                log.info("email poll: %s", totals)
-        except asyncio.CancelledError:
-            raise
+            _mode = "connecting"
+            imap = connect(cfg, readonly=True)
+            if not imap_idle.server_supports_idle(imap):
+                log.warning("mail server %s does not support IMAP IDLE — "
+                            "falling back to a timer", cfg.host)
+                _close(imap)
+                imap = None
+                _run_timer()
+                return
+
+            reader = imap_idle.LineReader(imap.sock)
+            _mode = "idle"
+            backoff = _BACKOFF_START
+            log.info("email collector: waiting on %s / %s with IMAP IDLE "
+                     "(backup sweep every %ss)", cfg.user, cfg.folder,
+                     _sweep_interval())
+
+            # Whatever arrived while nothing was listening — at startup, or in
+            # the gap before a reconnect.
+            ok = _collect_safely()
+            last_pass = time.monotonic()
+            while not _stop.is_set():
+                new_mail = imap_idle.wait_for_mail(
+                    imap, reader, _idle_refresh() if ok else _RETRY_SECONDS, _stop)
+                if _stop.is_set():
+                    break
+                if (new_mail or not ok
+                        or time.monotonic() - last_pass >= _sweep_interval()):
+                    ok = _collect_safely()
+                    last_pass = time.monotonic()
         except Exception as exc:
-            # Never let a bad poll kill the loop; the next one retries.
-            log.exception("email poll failed: %s", exc)
-        await asyncio.sleep(interval)
+            # Dropped connection, wrong password, server restarting. The pass
+            # straight after reconnecting picks up anything that came meanwhile.
+            log.warning("email IDLE connection lost (%s) — reconnecting in %ss",
+                        exc, backoff)
+            _mode = "connecting"
+            _close(imap)
+            imap = None
+            _stop.wait(backoff)
+            backoff = min(backoff * 2, _BACKOFF_MAX)
+        finally:
+            _close(imap)
+
+
+def _run() -> None:
+    """The collector's thread.
+
+    A thread, not an asyncio task: imaplib blocks, and so does everything
+    collect_mailbox does after it.
+    """
+    global _mode
+    try:
+        if _idle_enabled():
+            _run_idle()
+        else:
+            _run_timer()
+    finally:
+        _mode = "off"
 
 
 def start(app) -> None:
-    """Attach the poller to the app's startup, the same way sftp_poller does."""
+    """Attach the collector to the app's startup, the same way sftp_poller does."""
     if not _enabled():
-        log.info("email poller disabled (set EMAIL_POLLER_ENABLED=1 to run it)")
+        log.info("email collector off (EMAIL_POLLER_ENABLED=0) — no mail will "
+                 "be read")
         return
     if not mail.is_configured():
-        log.warning("email poller enabled but no mailbox configured — "
+        log.warning("email collector enabled but no mailbox configured — "
                     "set IMAP_HOST, IMAP_USER and IMAP_PASS")
         return
 
     @app.on_event("startup")
-    async def _start_email_poller() -> None:      # pragma: no cover - wiring
-        global _task
-        if _task is None or _task.done():
-            _task = asyncio.create_task(_loop())
+    async def _start_email_collector() -> None:   # pragma: no cover - wiring
+        global _thread, _mode
+        if _thread is None or not _thread.is_alive():
+            _stop.clear()
+            _mode = "connecting"
+            _thread = threading.Thread(target=_run, name="email-collector", daemon=True)
+            _thread.start()
 
     @app.on_event("shutdown")
-    async def _stop_email_poller() -> None:       # pragma: no cover - wiring
-        global _task
-        if _task is not None:
-            _task.cancel()
-            _task = None
+    async def _stop_email_collector() -> None:    # pragma: no cover - wiring
+        # Noticed within a second by the IDLE wait. Daemon, so a pass halfway
+        # through a large attachment never holds up exit.
+        _stop.set()

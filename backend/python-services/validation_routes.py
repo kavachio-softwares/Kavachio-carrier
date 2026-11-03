@@ -23,10 +23,44 @@ from sqlalchemy import text
 
 from db import SessionLocal
 from app_routes import resolve_tenant_id, assert_tenant_owns
-from auth_deps import current_principal, Principal
+from auth_deps import current_principal, Principal, resolve_broker_party_id
 
 log = logging.getLogger("bdx.validation")
 router = APIRouter()
+
+
+def _assert_broker_still_on(s, principal: Principal, *, upload_id: Optional[int] = None,
+                            exception_ids: Optional[list] = None) -> None:
+    """Refuse a broker who has been taken off the programme this file was sent
+    to — they can read it but no longer change it (carrier_scope.
+    assert_broker_on_programme). For the upload-keyed routes, where the file's
+    programme is not in hand: it is read off the broker's own exports of that
+    upload, the same link the exception UPDATE below already scopes by."""
+    if not principal.is_broker:
+        return
+    bid = resolve_broker_party_id(s, principal)
+    if bid is None:
+        return
+    from carrier_scope import assert_broker_on_programme
+    if exception_ids is not None:
+        ids = [int(i) for i in exception_ids if i is not None]
+        if not ids:
+            return
+        rows = s.execute(text(
+            "SELECT DISTINCT oe.program_id FROM validation_exception ve "
+            "LEFT JOIN validation_run vr ON vr.run_id = ve.validation_run_id "
+            "JOIN output_exports oe ON oe.broker_party_id = :bid "
+            "  AND oe.source_upload_id IN (ve.upload_id, vr.bdx_upload_id) "
+            "WHERE ve.exception_id = ANY(:ids) AND oe.program_id IS NOT NULL"),
+            {"bid": bid, "ids": ids}).fetchall()
+    else:
+        rows = s.execute(text(
+            "SELECT DISTINCT program_id FROM output_exports "
+            "WHERE source_upload_id = :u AND broker_party_id = :bid "
+            "AND program_id IS NOT NULL"),
+            {"u": upload_id, "bid": bid}).fetchall()
+    for (pid,) in rows:
+        assert_broker_on_programme(s, bid, pid)
 
 
 class ValidateBody(BaseModel):
@@ -298,7 +332,39 @@ def _persist(s, body, tenant_id, contract_id, result) -> Optional[int]:
 #         "proceedToCanonical": result.get("proceedToCanonical", True),
 #     }
 
-def _resolve_contract_for_validation(s, template_id: int, tenant_id) -> Optional[int]:
+def _as_of_or(s, contract_id: Optional[int], on_date) -> Optional[int]:
+    """Feature 7 §7.2 — swap a "latest wins" contract for the version that was
+    IN FORCE on `on_date`.
+
+    Wrapped around the existing resolvers rather than folded into them: their
+    job is "which contract governs this template", which is unchanged and still
+    correct. This adds the one thing §7 needs on top — "and which VERSION of it
+    governs this date" — without touching a line of the logic that finds the
+    contract in the first place.
+
+    Returns `contract_id` untouched whenever as-of resolution cannot improve on
+    it (flag off, no date, migration 20_1 not applied, or no sibling version
+    covering the date), so every caller's pre-Feature-7 behaviour is preserved
+    exactly.
+    """
+    if contract_id is None or on_date is None:
+        return contract_id
+    try:
+        from contract_upload_services import contract_asof as _asof
+        return _asof.resolve_sibling_as_of(s, contract_id, on_date) or contract_id
+    except Exception:  # noqa: BLE001 — fail-open: never break validation over this
+        return contract_id
+
+
+def _resolve_contract_for_validation(s, template_id: int, tenant_id,
+                                     on_date=None) -> Optional[int]:
+    """Find the contract whose rules govern an output template — then, when a
+    transaction date is supplied, the VERSION of it in force on that date
+    (Feature 7 §7.1). `on_date=None` keeps the historical behaviour exactly."""
+    return _as_of_or(s, _resolve_contract_latest(s, template_id, tenant_id), on_date)
+
+
+def _resolve_contract_latest(s, template_id: int, tenant_id) -> Optional[int]:
     """Find the contract whose rules govern an output template, so the output
     stage runs the CONTRACT rules (not just global ones) even when the chosen
     template isn't directly linked to a contract — which otherwise means no
@@ -312,8 +378,15 @@ def _resolve_contract_for_validation(s, template_id: int, tenant_id) -> Optional
         return None
     # Latest contract directly linked to this output template (status column on the
     # ops contract table is 'status_ops'; we don't filter on it — latest wins).
+    # Except a renewal that is not in force yet: it copies its predecessor's
+    # template the moment it is created, and as the newest row it would win
+    # here while still a draft. A renewal governs once it is active
+    # (contract_routes._mark_renewal_live sets status_ops then).
     cid = s.execute(
         text("SELECT contract_id FROM contract WHERE output_template_id = :t "
+             "AND NOT (contract_renews_contract_id IS NOT NULL "
+             "AND COALESCE(status_ops, '') IN ('drafted', 'rejected', 'failed', "
+             "'cancelled', 'extracting')) "
              "ORDER BY contract_id DESC LIMIT 1"),
         {"t": template_id},
     ).scalar()
@@ -359,6 +432,11 @@ def _resolve_contract_for_validation(s, template_id: int, tenant_id) -> Optional
 
 @router.post("/api/validate")
 def validate(body: ValidateBody, principal: Principal = Depends(current_principal)):
+    # Re-validating writes a new run of the file — the carrier's or broker's call.
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
+    with SessionLocal() as _s:
+        _assert_broker_still_on(_s, principal, upload_id=body.uploadId)
     engines = body.engines or ["global", "custom", "ajv"]
     stage = body.stage or "input"
 
@@ -501,9 +579,14 @@ class FieldEditBody(BaseModel):
     apply: bool = False
 
 
-def _resolve_contract_id(s, body, policy_id) -> Optional[int]:
+def _resolve_contract_id(s, body, policy_id, on_date=None) -> Optional[int]:
     """Find the contract whose rules govern this edit (so re-validation uses the
-    SAME rule set the original output validation did)."""
+    SAME rule set the original output validation did).
+
+    Feature 7: with `on_date` supplied, the result is narrowed to the version in
+    force on that date. Note the ordering — an explicit body.contractId still
+    wins outright, because an operator naming a contract version has said which
+    one they mean and must not be second-guessed by a date lookup."""
     if body.contractId is not None:
         return body.contractId
     if body.exceptionId is not None:
@@ -515,18 +598,26 @@ def _resolve_contract_id(s, body, policy_id) -> Optional[int]:
         ).scalar()
         if cid is not None:
             return cid
-    # Fall back to the contract that owns this output template.
+    # Fall back to the contract that owns this output template. This is the
+    # "latest wins" lookup Feature 7 exists to correct, so it is the one that
+    # gets the as-of wrap; the exceptionId path above does NOT, because the
+    # contract that produced an exception is already the right version to
+    # re-validate against, by construction.
+    # A renewal not yet in force is skipped, as in the lookup above.
     cid = s.execute(
         text("SELECT contract_id FROM contract WHERE output_template_id = :t "
+             "AND NOT (contract_renews_contract_id IS NOT NULL "
+             "AND COALESCE(status_ops, '') IN ('drafted', 'rejected', 'failed', "
+             "'cancelled', 'extracting')) "
              "ORDER BY contract_id DESC LIMIT 1"),
         {"t": body.templateId},
     ).scalar()
     if cid is not None:
-        return cid
+        return _as_of_or(s, cid, on_date)
     # Last resort: the policy's own contract_id (often NULL).
-    return s.execute(
+    return _as_of_or(s, s.execute(
         text("SELECT policy_contract_id FROM policy WHERE policy_id = :p"), {"p": policy_id}
-    ).scalar()
+    ).scalar(), on_date)
 
 
 def _scope_for_policy(s, policy_id: int):
@@ -854,6 +945,10 @@ def save_fields(body: FieldsSaveBody,
     new SCD-2 version per affected record — several edits on the same row become a
     SINGLE new version. Returns per-edit status; writes nothing if any edit would
     introduce a new validation exception."""
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
+    with SessionLocal() as _s:
+        _assert_broker_still_on(_s, principal, upload_id=body.uploadId)
     from scd2_sql import (
         resolve_field, pick_target_row, find_target_in_upload, coerce_value,
         build_scd2_sql, physical_columns, missing_scd_columns, pk_is_identity_always,
@@ -1330,6 +1425,8 @@ def decide_exceptions(body: DecideRequest,
     """Persist Approve/Fix/Dismiss/Reject decisions onto validation_exception rows.
 
     Returns {ok, updated, skipped}. Unknown kinds are skipped (never raises)."""
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
     # Tenant scoping (by-id / IDOR-prone): a regular user may only decide
     # exceptions belonging to their own tenant; the UPDATE is pinned to the
     # token tenant so another tenant's exception_id simply matches no row (it is
@@ -1338,6 +1435,19 @@ def decide_exceptions(body: DecideRequest,
     tid_filter = None if principal.is_platform_admin else principal.tenant_id
     updated, skipped = 0, []
     with SessionLocal() as s:
+        # A BROKER seat has no tenant, so the tenant pin above is None for it —
+        # which used to mean "any tenant". Pin it to its own broker instead: an
+        # exception is theirs only if it came from a run made for their broker
+        # (output_exports.broker_party_id), whichever of their users ran it.
+        # -1 matches nothing, for a broker seat with no broker bound.
+        bid_filter = ((resolve_broker_party_id(s, principal) or -1)
+                      if principal.is_broker else None)
+        _assert_broker_still_on(s, principal,
+                                exception_ids=[d.exception_id for d in body.decisions])
+        # WHO decided comes from the login, never from body.user_id — a value
+        # the browser sends is a claim, and the audit trail is not a claim.
+        import decision_log
+        who = decision_log.decider(s, principal)
         for d in body.decisions:
             status = _DECISION_STATUS.get((d.kind or "").lower())
             if not status:
@@ -1354,24 +1464,40 @@ def decide_exceptions(body: DecideRequest,
                            modified_at         = now()
                      WHERE exception_id = :eid
                        AND (:tid IS NULL OR tenant_id = :tid)
+                       AND (CAST(:bid AS INTEGER) IS NULL
+                            OR upload_id IN (
+                                SELECT oe.source_upload_id FROM output_exports oe
+                                 WHERE oe.broker_party_id = :bid)
+                            OR validation_run_id IN (
+                                SELECT vr.run_id FROM validation_run vr
+                                  JOIN output_exports oe
+                                    ON oe.source_upload_id = vr.bdx_upload_id
+                                 WHERE oe.broker_party_id = :bid))
                     """
                 ),
                 {
                     "status": status,
                     "note": _decision_note(d.kind, d.value, d.reason),
-                    "user": body.user_id,
+                    "user": principal.user_id,
                     "eid": d.exception_id,
                     "tid": tid_filter,
+                    "bid": bid_filter,
                 },
             )
             if res.rowcount:
                 updated += res.rowcount
+                decision_log.record(
+                    s, who, lane="upload", kind=d.kind,
+                    tenant_id=principal.tenant_id, exception_id=d.exception_id,
+                    broker_party_id=bid_filter if bid_filter != -1 else None,
+                    new_value=d.value, reason=d.reason)
             else:
                 skipped.append({"exception_id": d.exception_id, "reason": "not found"})
         s.commit()
     try:
-        from audit import log_activity, actor_email
-        log_activity(principal.tenant_id, actor_email(principal.user_id), "exception_decided",
+        from audit import log_activity, actor_for
+        log_activity(principal.tenant_id, actor_for(principal), "exception_decided",
+                     principal=principal,
                      target=f"exceptions:{updated}",
                      details={"updated": updated, "skipped": len(skipped),
                               "kinds": sorted({(d.kind or '').lower() for d in body.decisions})})
@@ -1406,7 +1532,10 @@ class ExportDecideRequest(BaseModel):
     apply: bool = True
 
 
-def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest) -> dict:
+def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest,
+                        principal: Optional[Principal], exp=None,
+                        who: Optional[dict] = None,
+                        decided_by: Optional[str] = None) -> dict:
     """Persist decisions for a DIRECT-LANE export (output projected from
     landing_record.data, not canonical). Each decision is upserted into
     landing_correction keyed by (landing_id, sheet, row, field); Fix/Approve with
@@ -1434,7 +1563,15 @@ def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest) -> dict:
     column_mapping = _as_dict(fmt and fmt["column_mapping"])
     landing_data = _as_dict(rec["data"])
     tenant_id = rec["tenant_id"]
-    decided_by = str(body.user_id) if body.user_id is not None else None
+    # From the login, never body.user_id (see decide_exceptions). The secure
+    # correction link has no login: it passes the broker it acts for (`who`)
+    # and the person's email (`decided_by`) instead.
+    import decision_log
+    if who is None:
+        who = decision_log.decider(s, principal)
+    if decided_by is None:
+        decided_by = str(principal.user_id)
+    exp = exp or {}
 
     updated, skipped = 0, []
     for d in body.decisions:
@@ -1484,6 +1621,13 @@ def _decide_direct_lane(s, landing_id: int, body: ExportDecideRequest) -> dict:
              "reason": note, "ish": in_sheet, "iidx": in_idx, "scol": source_col,
              "old": old_val, "new": new_val, "by": decided_by},
         )
+        decision_log.record(
+            s, who, lane="direct", kind=kind, tenant_id=exp.get("tenant_id") or tenant_id,
+            export_id=exp.get("id"), landing_id=landing_id,
+            program_id=exp.get("program_id"), broker_party_id=exp.get("broker_party_id"),
+            rule_id=d.rule_id, policy_number=d.policy_number, sheet=d.sheet,
+            row=d.row, field=d.field, old_value=old_val,
+            new_value=new_val if new_val is not None else d.value, reason=d.reason)
         updated += 1
     s.commit()
     return {"ok": True, "updated": updated, "skipped": skipped,
@@ -1497,6 +1641,8 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
 
     Idempotent: re-deciding the same (rule, policy, field) updates its row instead
     of adding another. Returns {ok, updated, skipped, writeback}."""
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
     with SessionLocal() as s:
         exp = s.execute(
             text("SELECT id, tenant_id, template_id, source_upload_id, policy_ids, "
@@ -1511,20 +1657,32 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
         # program_id/broker_party_id are what answer that — see
         # carrier_scope.assert_can_read_export. Platform admin bypasses.
         from types import SimpleNamespace
-        from carrier_scope import assert_can_read_export
+        from carrier_scope import assert_can_read_export, assert_broker_on_programme
+        # Taken off the programme since sending this: no more changes. Asked
+        # BEFORE the read check, which answers a removed broker with a bare
+        # "not found" — true, but it reads as a fault, not a decision.
+        assert_broker_on_programme(s, resolve_broker_party_id(s, principal),
+                                   exp["program_id"], exp["broker_party_id"])
         assert_can_read_export(s, principal, SimpleNamespace(
             tenant_id=exp["tenant_id"], program_id=exp["program_id"],
             broker_party_id=exp["broker_party_id"]))
+        # Delivered and every critical/warning answered and sent: final.
+        import submission_service as _subs
+        try:
+            _subs.assert_not_locked(s, export_id)
+        except _subs.CannotCorrect as exc:
+            raise HTTPException(409, str(exc))
         # Direct-lane export? (output built from a landing_record, not canonical)
         landing = s.execute(
             text("SELECT id FROM landing_record WHERE output_export_id = :id "
                  "ORDER BY id DESC LIMIT 1"), {"id": export_id},
         ).scalar()
         if landing is not None:
-            _res = _decide_direct_lane(s, int(landing), body)
+            _res = _decide_direct_lane(s, int(landing), body, principal, exp)
             try:
-                from audit import log_activity, actor_email
-                log_activity(exp["tenant_id"], actor_email(principal.user_id), "exception_decided",
+                from audit import log_activity, actor_for
+                log_activity(exp["tenant_id"], actor_for(principal), "exception_decided",
+                             principal=principal,
                              target=f"export:{export_id}",
                              details={"updated": _res.get("updated"), "skipped": len(_res.get("skipped") or []), "lane": "direct"})
             except Exception:
@@ -1539,6 +1697,8 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
             s, upload_id=upload_id, policy_ids=exp["policy_ids"],
             policy_numbers=[d.policy_number for d in body.decisions])
 
+        import decision_log
+        who = decision_log.decider(s, principal)
         updated, skipped, edits = 0, [], []
         for d in body.decisions:
             status = _DECISION_STATUS.get((d.kind or "").lower())
@@ -1575,7 +1735,7 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
                          " :note, :u, now(), now(), now()) RETURNING exception_id"),
                     {"t": row_tenant, "r": d.rule_id, "p": pid, "f": d.field,
                      "av": d.actual_value, "st": status, "note": note,
-                     "u": body.user_id},
+                     "u": principal.user_id},
                 ).scalar()
             else:
                 s.execute(
@@ -1583,8 +1743,14 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
                          "resolution_note = :note, resolved_by_user_id = :u, "
                          "resolved_at = now(), modified_at = now() "
                          "WHERE exception_id = :e"),
-                    {"st": status, "note": note, "u": body.user_id, "e": eid},
+                    {"st": status, "note": note, "u": principal.user_id, "e": eid},
                 )
+            decision_log.record(
+                s, who, lane="canonical", kind=d.kind, tenant_id=exp["tenant_id"],
+                export_id=exp["id"], exception_id=eid, program_id=exp["program_id"],
+                broker_party_id=exp["broker_party_id"], rule_id=d.rule_id,
+                policy_number=d.policy_number, field=d.field,
+                old_value=d.actual_value, new_value=d.value, reason=d.reason)
             updated += 1
             # Fix/Approve with a concrete value → queue a canonical write-back.
             if (d.kind or "").lower() in ("fix", "approve") \
@@ -1604,8 +1770,9 @@ def decide_export_exceptions(export_id: int, body: ExportDecideRequest,
             contractId=None, edits=edits, apply=True), principal)
 
     try:
-        from audit import log_activity, actor_email
-        log_activity(exp["tenant_id"], actor_email(principal.user_id), "exception_decided",
+        from audit import log_activity, actor_for
+        log_activity(exp["tenant_id"], actor_for(principal), "exception_decided",
+                     principal=principal,
                      target=f"export:{export_id}",
                      details={"updated": updated, "skipped": len(skipped), "lane": "canonical"})
     except Exception:  # noqa: BLE001

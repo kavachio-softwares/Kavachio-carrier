@@ -1,17 +1,20 @@
 import { useEffect, useState } from "react";
 import { useParams, useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import {
-  getUploadExceptions, getDownloadExceptions, runValidation, rerenderExport,
-  type UploadExceptionsResponse,
+  getUploadExceptions, getDownloadReview, runValidation, rerenderExport,
+  type UploadExceptionsResponse, type DownloadAbout,
 } from "../api/validation";
 import { groupByRule, exportCSV, buildReverseSpec, tallyDecisions } from "../components/ExceptionCards";
-import RuleExplanationBlock, { hasExplanation } from "../components/RuleExplanation";
+import RuleExplanationBlock from "../components/RuleExplanation";
 import { downloadFile } from "../api/client";
-import { isBrokerSeat } from "../auth";
+import { canAmendExceptions, isBrokerSeat } from "../auth";
+import { canAccessPath } from "../access";
 import { CheckCircle2 } from "lucide-react";
 import { LoadingOverlay } from "../components/Busy";
 import BdxInlineReview from "../components/BdxInlineReview";
+import ResultsPanel from "../components/ResultsPanel";
 import Modal from "../components/ui/Modal";
+import { fmtDateTime, periodLabel } from "../utils/date";
 
 /** Fix & re-run reloads the page — the success toast crosses the reload here. */
 const RERUN_TOAST_KEY = "kavachio.rerun-toast";
@@ -27,6 +30,13 @@ export default function UploadExceptions() {
   // Carries the sidebar-highlight context (Dashboard vs Process Bordereau)
   // through to the per-rule review sub-screen.
   const fromParam = params.get("from");
+  // Everyone opens this screen; only the BROKER seats change anything on it.
+  // Deciding, correcting and Fix & Validate are answering for the file that was
+  // sent, so they belong to the broker who sent it — Kavachio staff and both
+  // carrier seats read it and nothing more. The API refuses them too
+  // (carrier_scope.assert_can_amend); this keeps the screen from offering what
+  // would only fail.
+  const roleViewOnly = !canAmendExceptions();
   const navigate = useNavigate();
   // Set when the reviewer comes back from a rule's Decisions screen having
   // recorded decisions — we prompt them that Approved/Fixed values are NOT in
@@ -43,6 +53,14 @@ export default function UploadExceptions() {
     navigate(location.pathname + location.search, { replace: true, state: null });
   }, [reviewed]);
   const [data, setData] = useState<UploadExceptionsResponse | null>(null);
+  const [about, setAbout] = useState<DownloadAbout | null>(null);
+  // Delivered to the carrier: still correctable while a critical or warning
+  // exception is open or a decision is unsent (each Fix & Validate sends the
+  // carrier a corrected version); locked once neither — the server refuses
+  // changes then too (submission_service.delivery_state).
+  const delivery = about?.delivery ?? null;
+  const locked = !!delivery?.locked;
+  const viewOnly = roleViewOnly || locked;
   const [loading, setLoading] = useState(true);
   const [revalidating, setRevalidating] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
@@ -54,6 +72,10 @@ export default function UploadExceptions() {
   // row, failed cells highlighted and actionable in place). The modal viewer is
   // still used elsewhere; here the review happens inline.
   const [bdxOpen, setBdxOpen] = useState(false);
+  // Exceptions (decide and fix) or Results (every row, the counts, every
+  // version). Only an output has Results; `?tab=results` opens on it.
+  const [tab, setTab] = useState<"exceptions" | "results">(
+    params.get("tab") === "results" ? "results" : "exceptions");
 
   // Where "back" goes. This used to be a hardcoded /direct, which is the
   // CARRIER's Process Bordereau — a broker reviewing their own run was sent to
@@ -67,10 +89,17 @@ export default function UploadExceptions() {
   const back = (() => {
     if (fromParam === "broker") return { to: "/broker/bordereau", label: "Process Bordereau" };
     if (fromParam === "home") return { to: "/home", label: "Dashboard" };
+    if (fromParam === "admin") return { to: "/admin/dashboard", label: "Dashboard" };
     if (fromParam === "direct") return { to: "/direct", label: "Process Bordereau" };
-    return isBrokerSeat()
-      ? { to: "/broker/bordereau", label: "Process Bordereau" }
-      : { to: "/direct", label: "Process Bordereau" };
+    if (fromParam === "files") return { to: "/files", label: "Files Received" };
+    if (fromParam === "calendar") return { to: "/bordereau-calendar", label: "Bordereau Calendar" };
+    if (isBrokerSeat()) return { to: "/broker/bordereau", label: "Process Bordereau" };
+    // A carrier seat no longer has a Process Bordereau screen to go back to,
+    // and sending them to one access.ts now refuses would bounce them to their
+    // dashboard anyway — so go there directly, with the honest label.
+    return canAccessPath("/direct")
+      ? { to: "/direct", label: "Process Bordereau" }
+      : { to: "/home", label: "Dashboard" };
   })();
 
   // Success confirmation — a "Done" modal the reviewer must acknowledge,
@@ -87,7 +116,8 @@ export default function UploadExceptions() {
       if (downloadId) {
         // Output-stage: the generated download's exceptions, mapped to the
         // shared shape so the same UI renders them.
-        const exceptions = await getDownloadExceptions(downloadId);
+        const { exceptions, about } = await getDownloadReview(downloadId);
+        setAbout(about);
         setData({
           success: true, uploadId, validated: true, run: null, exceptions,
           source_file: null, mga: null, mapper_id: null,
@@ -129,8 +159,13 @@ export default function UploadExceptions() {
     setRegenerating(true); setErr(null); setMsg(null);
     try {
       const res = await rerenderExport(downloadId);
+      // Fix & Validate sends the fixes in as the next version (the secure
+      // link's way); the version fixed here is kept, marked replaced.
       sessionStorage.setItem(RERUN_TOAST_KEY,
-        "Your corrections have been applied.");
+        res?.version && res?.from_version
+          ? `Version ${res.version} was made from your fixes and checked again. `
+            + `Version ${res.from_version} is kept, marked as replaced.`
+          : "Your corrections have been applied.");
       if (res?.export_id && String(res.export_id) !== String(downloadId)) {
         const qs = new URLSearchParams();
         qs.set("download", String(res.export_id));
@@ -148,7 +183,14 @@ export default function UploadExceptions() {
   }
 
   const run        = data?.run ?? null;
-  const exceptions = data?.exceptions ?? [];
+  // Row-less notices about the run itself — its checks did not run, or some
+  // rules could not — are not findings a person can decide on, so they are
+  // shown above the rule cards instead of as cards.
+  const isNotice = (e: { error_class?: string | null; rule_id: number | null }) =>
+    e.error_class === "not_checked" || (e.error_class === "not_validated" && e.rule_id == null);
+  const notices    = (data?.exceptions ?? []).filter(isNotice);
+  const exceptions = (data?.exceptions ?? []).filter(e => !isNotice(e));
+  const notValidated = notices.some(n => n.error_class === "not_validated");
   const allGroups  = groupByRule(exceptions);
   const revSpec    = buildReverseSpec(data?.mapper_spec);
   const filteredGroups = groupByRule(
@@ -209,6 +251,17 @@ export default function UploadExceptions() {
               {exceptions.length} exception{exceptions.length === 1 ? "" : "s"} across{" "}
               {allGroups.length} rule{allGroups.length === 1 ? "" : "s"}.
             </p>
+            {about && (about.reporting_period || about.programme || about.broker || about.contract) && (
+              <div className="about-strip">
+                {about.reporting_period && (
+                  <span className="chip lead">
+                    {periodLabel(about.reporting_period)}
+                    {about.version_no != null && about.version_no > 1 && ` · Version ${about.version_no}`}
+                  </span>)}
+                {about.programme && <span className="chip"><span className="k">Programme</span>{about.programme}</span>}
+                {about.broker && <span className="chip"><span className="k">Broker</span>{about.broker}</span>}
+                {about.contract && <span className="chip"><span className="k">Contract</span>{about.contract}</span>}
+              </div>)}
           </div>
           <div className="actions">
             <button className="btn" onClick={() => navigate(back.to)}>
@@ -232,11 +285,13 @@ export default function UploadExceptions() {
               </button>
             )}
             {downloadId ? (
-              <button className="btn pri" onClick={regenerate} disabled={regenerating || loading || !data}>
+              <button className="btn pri" onClick={regenerate} disabled={viewOnly || regenerating || loading || !data}
+                title={viewOnly ? "View only — only the broker who sent this file can fix or re-validate it." : undefined}>
                 Fix &amp; Validate
               </button>
             ) : (
-              <button className="btn pri" onClick={revalidate} disabled={revalidating || loading || !data}>
+              <button className="btn pri" onClick={revalidate} disabled={viewOnly || revalidating || loading || !data}
+                title={viewOnly ? "View only — only the broker who sent this file can fix or re-validate it." : undefined}>
                 Fix &amp; Validate
               </button>
             )}
@@ -268,8 +323,8 @@ export default function UploadExceptions() {
                   {applied > 0 ? (
                     <>
                       Your approved and fixed values are saved, but they are <b>not in the output yet</b>.
-                      Run <b>Fix &amp; Validate</b> to write them into the bordereau and re-check the
-                      remaining exceptions.
+                      Run <b>Fix &amp; Validate</b> to send them in as the next version of this file and
+                      re-check the remaining exceptions. This version is kept.
                     </>
                   ) : (
                     <>
@@ -308,6 +363,24 @@ export default function UploadExceptions() {
             <p className="text-[15px] font-medium text-ink leading-relaxed">{msg}</p>
           </div>
         </Modal>
+        {delivery?.delivered && (
+          <div className={`note${locked ? "" : " warn"}`} data-testid="delivery-note"
+            style={{ marginBottom: 18 }}>
+            <b>{delivery.flagged ? "Delivered to the carrier with open exceptions" : "Delivered to the carrier"}
+              {delivery.delivered_at ? ` on ${fmtDateTime(delivery.delivered_at)}` : ""}.</b>{" "}
+            {locked
+              ? "Every critical and warning exception is resolved, so this version is locked."
+              : roleViewOnly
+                ? "The broker can still resolve the open exceptions; each Fix & Validate sends you a corrected version."
+                : "You can still resolve the open exceptions. Each Fix & Validate makes a new version and sends it to the carrier as the corrected file; this one is kept."}
+          </div>
+        )}
+        {roleViewOnly && (
+          <div className="note" style={{ marginBottom: 18 }}>
+            <b>View only.</b> You can open every rule and the BDX, but only the broker who sent
+            this file can approve, fix, dismiss or re-validate it.
+          </div>
+        )}
         {err && <div className="note warn" style={{ marginBottom: 18 }}>{err}</div>}
 
         {/* In-page BDX review — the whole generated workbook with each flagged
@@ -315,6 +388,7 @@ export default function UploadExceptions() {
             place. Additional to the rule-card flow below, which is unchanged. */}
         {bdxOpen && downloadId && data && (
           <BdxInlineReview
+            readOnly={viewOnly}
             exportId={downloadId}
             exceptions={exceptions}
             onSaved={n => {
@@ -325,7 +399,30 @@ export default function UploadExceptions() {
           />
         )}
 
-        {loading ? null : !data ? (
+        {/* The "Checks not run" notice (rules a sparse setup can't feed yet)
+            is left out of the page — it's informational noise for the review
+            flow, not something to act on here. "Not validated" stays: that
+            one means the file itself never ran. */}
+        {!loading && notices.filter(n => n.error_class === "not_validated").map((n, i) => (
+          <div key={`notice-${i}`} className="note warn" style={{ marginBottom: 18 }}>
+            <strong>Not validated.</strong> {n.error_message}
+          </div>
+        ))}
+
+        {downloadId && !loading && data && (
+          <div className="tabs" role="tablist">
+            <button role="tab" className={tab === "exceptions" ? "on" : ""} onClick={() => setTab("exceptions")}>
+              Exceptions
+            </button>
+            <button role="tab" className={tab === "results" ? "on" : ""} onClick={() => setTab("results")}>
+              Check Summary
+            </button>
+          </div>
+        )}
+
+        {downloadId && tab === "results" && !loading && data ? (
+          <ResultsPanel exportId={downloadId} uploadId={uploadId} fromParam={fromParam} />
+        ) : loading ? null : !data ? (
           err ? null : (
             <div className="card pad">
               <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
@@ -343,11 +440,15 @@ export default function UploadExceptions() {
             </button>
           </div>
         ) : exceptions.length === 0 ? (
+          notValidated ? null : (
           <div className="card">
             <div className="empty" style={{ color: "var(--p-ok-ink)" }}>
-              ✓ No exceptions — {downloadId ? "the generated output is clean." : "upload passed validation."}
+              {notices.length
+                ? "✓ No exceptions among the checks that ran."
+                : <>✓ No exceptions — {downloadId ? "the generated output is clean." : "upload passed validation."}</>}
             </div>
           </div>
+          )
         ) : (
           <>
             {/* ── tiles ── */}
@@ -357,34 +458,6 @@ export default function UploadExceptions() {
               <div className="tile"><div className="k">Warning</div><div className="v" style={{ color: "var(--p-warn)" }}>{warning}</div></div>
               <div className="tile"><div className="k">Resolved</div><div className="v" style={{ color: "var(--p-ok)" }}>{resolved}</div></div>
               <div className="tile"><div className="k">Open</div><div className="v">{open}</div></div>
-            </div>
-
-            {/* ── how to resolve ── */}
-            <div className="card" style={{ marginTop: 18, marginBottom: 18 }}>
-              <div className="card-h"><h3>How to resolve</h3></div>
-              <div className="grid g-3" style={{ padding: "16px 20px" }}>
-                {[
-                  { n: 1, cls: "b-crit", title: "Open a rule to review",
-                    body: "Each rule above shows the contract clause it came from and how many policies are affected. Click Review to open its table — one row per affected policy with its actual value and the recommendation." },
-                  { n: 2, cls: "b-warn", title: "Decide each policy",
-                    body: "For every row pick a decision — Approve the recommendation, Fix with a corrected value, or Dismiss (keep as-is). Select rows to apply a bulk decision, then Save decisions." },
-                  { n: 3, cls: "b-info", title: downloadId ? "Re-generate the output" : "Re-upload & re-validate",
-                    body: downloadId
-                      ? "After saving, click Fix & Validate to produce a corrected BDX — Fixed & Approved values are written in, Dismissed rows keep their value, and decisions carry over."
-                      : "Upload the corrected file, then Fix & Validate to re-validate and confirm the exceptions are resolved." },
-                ].map(s => (
-                  <div key={s.n} style={{ display: "flex", gap: 10 }}>
-                    <span className={`badge ${s.cls}`}
-                      style={{ width: 24, height: 24, justifyContent: "center", borderRadius: "50%", padding: 0, flex: "0 0 auto" }}>
-                      {s.n}
-                    </span>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 13 }}>{s.title}</div>
-                      <div className="muted" style={{ fontSize: 12, marginTop: 2, lineHeight: 1.5 }}>{s.body}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
             </div>
 
             {/* ── search ── */}
@@ -415,45 +488,35 @@ export default function UploadExceptions() {
                     onClick={() => navigate(ruleRoute(g))}>
                     <div className="card-h">
                       <h3>{g.ruleName}</h3>
-                      <span className="sub mono">{g.ruleId != null ? `RULE-${g.ruleId}` : g.ruleKey}</span>
                       <div className="right">
                         <span className={`badge ${SEV_BADGE[g.severity] ?? "b-info"}`}>
                           <span className="d" />{SEV_LABEL[g.severity] ?? g.severity} · {g.count} {g.count === 1 ? "policy" : "policies"}
                         </span>
-                        <span className="linkish">Review →</span>
+                        <span className="linkish">{viewOnly ? "View →" : "Review →"}</span>
                       </div>
                     </div>
-                    <div style={{ padding: "0 20px 14px" }}>
-                      {(g.contractFilename || sheets.length > 0) && (
-                        <div style={{ color: "var(--p-muted)", fontSize: 11.5, marginBottom: 8,
-                                      display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          {g.contractFilename && (
-                            <span>Enforced by <strong>{g.contractFilename}</strong>
-                              {g.clausePage ? ` · p.${g.clausePage}` : ""}</span>
-                          )}
-                          {sheets.length > 0 && (
-                            <span>Sheet{sheets.length > 1 ? "s" : ""}: <strong>{sheets.join(", ")}</strong></span>
-                          )}
-                        </div>
-                      )}
-                      {/* What the rule requires, in plain English, with the raw
-                          clause demoted into a collapsible. Falls back to the
-                          old error message for rules the backend can't explain. */}
-                      {hasExplanation(g.explanation) || g.contractClause ? (
-                        <div style={{ marginBottom: 8 }}>
-                          <RuleExplanationBlock
-                            explanation={g.explanation}
-                            clauseFallback={g.contractClause}
-                            clausePage={g.clausePage}
-                          />
-                        </div>
-                      ) : (
-                        g.errorMessage && (
-                          <div style={{ color: "var(--p-muted)", fontSize: 12.5, marginBottom: 8 }}>
-                            {g.errorMessage}
-                          </div>
-                        )
-                      )}
+                    {/* Matches .card-h's own 15px padding, so the chips clear the
+                        header rule instead of sitting on it. */}
+                    <div style={{ padding: "14px 20px" }}>
+                      {/* One row of chips: WHERE the rule fired and WHAT KIND of
+                          check it is. The kind carries an "i" with its meaning.
+                          What the rule requires, what went wrong, the contract
+                          wording and how to fix it are all on the rule's own
+                          review screen, one click away behind Review. */}
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap",
+                                    alignItems: "center", marginBottom: 10 }}>
+                        {sheets.length > 0 && (
+                          <span className="badge b-mut"><span className="d" />
+                            Sheet{sheets.length > 1 ? "s" : ""}: {sheets.join(", ")}
+                          </span>
+                        )}
+                        {g.contractFilename && (
+                          <span className="badge b-mut"><span className="d" />
+                            {g.contractFilename}{g.clausePage ? ` · p.${g.clausePage}` : ""}
+                          </span>
+                        )}
+                        <RuleExplanationBlock chipsOnly explanation={g.explanation} />
+                      </div>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                         <span className="badge b-ok">Approved {t.approve}</span>
                         <span className="badge b-info">Fixed {t.fix}</span>
@@ -468,6 +531,52 @@ export default function UploadExceptions() {
                 <div className="card"><div className="empty">No rules match "{search}".</div></div>
               )}
             </div>
+
+            {/* ── how to resolve ── (steps a view-only reader cannot take).
+                Kept BELOW the rules: on the way in it only pushed the work
+                off the screen, and it is read after a rule is open. */}
+            {!viewOnly && <div className="card" style={{ marginTop: 18 }}>
+              <div className="card-h"><h3>How to resolve</h3></div>
+              <div className="grid g-3" style={{ padding: "16px 20px" }}>
+                {[
+                  { n: 1, cls: "b-crit", title: "Open a rule to review",
+                    bullets: [
+                      "See the clause it came from and the policies it hit.",
+                      "Click Review to see each row and our suggestion.",
+                    ] },
+                  { n: 2, cls: "b-warn", title: "Decide each policy",
+                    bullets: [
+                      "Approve, Fix, or Dismiss each row.",
+                      "Or select rows and decide in bulk, then Save.",
+                    ] },
+                  { n: 3, cls: "b-info", title: downloadId ? "Re-generate the output" : "Re-upload & re-validate",
+                    bullets: downloadId
+                      ? [
+                          "Click Fix & Validate for a corrected BDX.",
+                          "Decisions are applied and carry over.",
+                        ]
+                      : [
+                          "Upload the corrected file, then Fix & Validate.",
+                          "Decisions are applied and carry over.",
+                        ] },
+                ].map(s => (
+                  <div key={s.n} style={{ display: "flex", gap: 10 }}>
+                    <span className={`badge ${s.cls}`}
+                      style={{ width: 24, height: 24, justifyContent: "center", borderRadius: "50%", padding: 0, flex: "0 0 auto" }}>
+                      {s.n}
+                    </span>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{s.title}</div>
+                      <ul className="muted" style={{ fontSize: 12, marginTop: 4, lineHeight: 1.5, paddingLeft: 16, listStyle: "disc outside" }}>
+                        {s.bullets.map((b, i) => (
+                          <li key={i} style={{ listStyle: "disc", marginBottom: 4 }}>{b}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>}
 
             
             

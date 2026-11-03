@@ -221,6 +221,26 @@ def _label_of(stem: str, version: Optional[str]) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+# Which of a standard workbook's territory tabs are OFFERED. The bundled
+# Lloyd's workbook ships eleven — Australia, Hong Kong, Singapore Risk, a
+# "Template for all" superset and the rest — and the book written on this
+# platform is only ever placed in these three, so the other eight were eight
+# ways to build a template nobody here reports against.
+#
+# Narrowing what is OFFERED, not what can be read: a template already saved
+# against another tab still resolves its layout (fields() and sheet_bytes()
+# look the tab up in the workbook, not in this list).
+OFFERED_JURISDICTIONS = ("Canada", "UK", "US")
+
+
+def _offered(jurisdictions: list[str]) -> list[str]:
+    """The workbook's tabs narrowed to the ones on offer, in the workbook's own
+    order. A standard naming none of them keeps all of its own, rather than
+    being reduced to an empty dropdown."""
+    kept = [j for j in jurisdictions if j in OFFERED_JURISDICTIONS]
+    return kept or list(jurisdictions)
+
+
 def discover() -> list[dict[str, Any]]:
     """Every bundled standard, newest-named first. [] when none are bundled."""
     out: list[dict[str, Any]] = []
@@ -243,7 +263,7 @@ def discover() -> list[dict[str, Any]]:
             "label": _label_of(stem, version),
             "version": version,
             "path": path,
-            "jurisdictions": list(parsed["layouts"].keys()),
+            "jurisdictions": _offered(list(parsed["layouts"].keys())),
             "requirement_count": len(parsed["requirements"]),
         })
     return out

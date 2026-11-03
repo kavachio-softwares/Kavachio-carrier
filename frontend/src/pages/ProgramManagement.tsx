@@ -46,7 +46,7 @@ const STAGE_COLOR: Record<string, string> = {
 const FALLBACK = [C.blue, C.purple, C.info, C.slate, C.warn, C.ok];
 
 // Program Book page size. 10 to match every other page-level list (Carriers,
-// Users & Roles, Tenants, Recent Runs) — ProgramCalendar's 12 is the odd one out
+// Users & Roles, Tenants, Recent File Submissions) — ProgramCalendar's 12 is the odd one out
 // and it is an embedded component, not a page.
 //
 // Client-side on purpose: the endpoint is one aggregate call whose KPI cards and
@@ -322,7 +322,9 @@ export default function ProgramManagement() {
               <div className="empty" style={{ padding: 28 }}>
                 {q.trim()
                   ? "No carrier matches that search."
-                  : <>No carriers yet — <Link className="linkish" to="/parties/new">add one</Link> to get started.</>}
+                  : <>No carriers yet — add one from{" "}
+                      <Link className="linkish" to="/users">Users &amp; Roles</Link>{" "}
+                      to get started.</>}
               </div>
             ) : (
               <>

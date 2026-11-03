@@ -203,8 +203,12 @@ export default function DeadlineReminderCard() {
                             {meta.label}
                           </div>
                           <div className="text-xs text-ink-muted mt-1 truncate">
-                            {String(e.details?.period ?? "")}
-                            {e.details?.due_date ? ` · due ${e.details.due_date}` : ""}
+                            {/* A deadline is its period; anything else is what it
+                                is about — same line the bell shows. */}
+                            {e.details?.period
+                              ? `${e.details.period}${e.details?.due_date ? ` · due ${e.details.due_date}` : ""}`
+                              : [e.details?.name, e.details?.filename, e.details?.broker_name, e.details?.note]
+                                  .filter(Boolean).join(" · ")}
                           </div>
                         </div>
                         <span className="text-[11px] text-ink-soft shrink-0">

@@ -1,28 +1,35 @@
 import { useMemo, useState, useEffect, useRef } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import {
   CheckCircle2, AlertTriangle, FileSpreadsheet, ShieldCheck, FileUp, FileText,
-  FileSpreadsheet as FileOut, FileWarning, UploadCloud, ShieldAlert, ArrowRight,
+  FileSpreadsheet as FileOut, UploadCloud, ShieldAlert, ArrowRight,
   Save, Trash2, Sparkles,
 } from "lucide-react";
-import { api } from "../api/client";
+import { api, downloadFile, downloadErrorText } from "../api/client";
+import { getHierarchy } from "../api/hierarchy";
+import { readyForSetupUrl, hasSettledContract } from "../components/ProgrammeStepper";
+import { onProgramme } from "../api/hierarchy";
 import { currentMga, isTenantAdmin } from "../auth";
 import { PageBody, PageHeader } from "../components/Layout";
+import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { Field, Select, TextInput } from "../components/ui/Field";
 import { InfoTip } from "../components/ui/InfoTip";
 import { LoadingOverlay } from "../components/Busy";
-import { MissingColumnsList, UnmappedClausesList } from "../components/MissingColumnsNote";
+import { BuildGapTabs, ownUnmappedClauses } from "../components/MissingColumnsNote";
 import { errText, MissingColumnsResp, scheduleOf } from "../utils/directSetup";
+import { contractLabel } from "../utils/contractLabel";
 import {
   uploadContract, generateContractRules, type ExternalReference,
 } from "../api/contracts";
 import CreateOutputTemplate from "../components/CreateOutputTemplate";
-import { SHOW_BDX_TEMPLATE_BUILDER } from "../featureFlags";
+import { SetupTabs, useSetupTab, type SetupTab } from "../components/SetupTabs";
+import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
+import { OutputTemplateEditor } from "./OutputTemplate";
 import OutputTemplateState from "../components/OutputTemplateState";
-import MappingReview, { type MappingReviewData } from "../components/MappingReview";
+import { type MappingReviewData } from "../components/MappingReview";
 import {
   ContractPicker, BrokerSelect, useBrokerContractScope,
 } from "../components/BrokerContractScope";
@@ -36,10 +43,10 @@ import { DROP_TONES, DropBadge, type DropTone } from "../components/ui/FileDrop"
 // ---- types -----------------------------------------------------------------
 type Party = { id: number; legal_name: string; is_active?: boolean };
 type Program = { id: number; name: string; status?: string };
-const BDX_FREQUENCIES: [string, string][] = [
-  ["monthly", "Monthly"], ["quarterly", "Quarterly"],
-  ["semi-annual", "Semi-Annual"], ["annual", "Annual"],
-];
+// One list for the whole app — see constants/frequency.ts. The values here used
+// to be "semi-annual" and "annual", which the calendar engine could not build a
+// schedule from: picking either produced a programme with no deadlines and no
+// explanation on screen.
 type Rule = { kind: "copy" | "const" | "source_sheet"; source?: string; value?: string };
 type RouteT = { output_sheet: string; sources: { input_sheet: string }[]; filter: null | { column: string; equals?: string } };
 type Routing = { version: number; mode: string; confidence: string; routes: RouteT[] };
@@ -58,7 +65,8 @@ type OutField = { sheet: string; field: string; clauses: Clause[] };
 // A Pipeline binds this scope's Input Template (a DirectFormat) + Output
 // Template + contracts, and carries the run-time active status.
 type Pipeline = {
-  id: number; name: string | null; status: "draft" | "active" | "superseded";
+  id: number; name: string | null;
+  status: "draft" | "pending_approval" | "active" | "superseded";
   input_format_id: number | null; output_template_id: number | null;
   ready: boolean; ready_reason: string;
   contracts: { contract_id: number; sheet_key: string | null }[];
@@ -67,20 +75,6 @@ type Pipeline = {
   broker_party_id: number | null; broker_name: string | null;
 };
 
-// Program metadata captured on inline create — mirrors the Programs screen.
-type ProgramForm = {
-  name: string; lead_carrier: string; admin_party: string; bdx_frequency: string;
-  business_segment: string; product_line: string; distribution_channel: string;
-  territory: string; status: string;
-};
-const EMPTY_PROGRAM: ProgramForm = {
-  name: "", lead_carrier: "", admin_party: "", bdx_frequency: "",
-  business_segment: "", product_line: "", distribution_channel: "", territory: "", status: "draft",
-};
-const PROGRAM_META_KEYS: (keyof ProgramForm)[] = [
-  "lead_carrier", "admin_party", "bdx_frequency", "business_segment",
-  "product_line", "distribution_channel", "territory", "status",
-];
 
 // External document(s) a contract defers rules to (halt payload shape). The
 // shape comes from the upload module that produces it, so the two cannot drift.
@@ -112,9 +106,54 @@ function buildLabel(step: string): string {
   return `${s} ${KEEP_OPEN}`;
 }
 
+/**
+ * The way in to this screen.
+ *
+ * A carrier's FIRST setup is made from its programme — Configure Program,
+ * step 4 — where the programme, its broker and the contract are already in
+ * place. Every link from a programme (the flow, the programme stepper, a
+ * broker row, a contract) names the programme in the address, so that is
+ * what lets the screen open. Reached any other way while the carrier has no
+ * setup at all AND no programme ready for one (a broker with a settled
+ * contract) — typed in, bookmarked — it goes back to the Bordereau Setups
+ * list, which says what is missing. Once a setup exists, or a programme is
+ * ready for one, the screen opens as it always did.
+ */
 export default function DirectSetup() {
+  const [params] = useSearchParams();
+  const mga = currentMga();
+  const fromProgramme = !!params.get("program_id");
+  // Null while asking. Asked only when no programme is named — the one case
+  // the answer decides.
+  const [hasAny, setHasAny] = useState<boolean | null>(fromProgramme ? true : null);
+  useEffect(() => {
+    if (fromProgramme) { setHasAny(true); return; }
+    let cancelled = false;
+    Promise.all([
+      api.get<{ total: number }>("/pipelines", { params: { mga, page: 1, page_size: 1 } }),
+      getHierarchy(),
+    ])
+      .then(([r, h]) => {
+        if (!cancelled) setHasAny((r.data?.total ?? 0) > 0 || !!readyForSetupUrl(h.programmes));
+      })
+      // Fail open: a check that could not run must not lock the screen.
+      .catch(() => { if (!cancelled) setHasAny(true); });
+    return () => { cancelled = true; };
+  }, [mga, fromProgramme]);
+
+  if (hasAny === null) return null;
+  if (!hasAny) return <Navigate to="/direct/setups" replace />;
+  return <DirectSetupScreen />;
+}
+
+function DirectSetupScreen() {
   const mga = currentMga();
   const isAdmin = isTenantAdmin();
+  // Which of the two CARRIER seats — isTenantAdmin() is the role, which both of
+  // them hold. A carrier user finishing a setup sends it for approval; the
+  // carrier admin puts it live. The button has to say which it will do.
+  const carrierAdmin = addsCarrierUsers(useCarrierSeat());
+  const finishLabel = carrierAdmin ? "Activate Setup" : "Send for Approval";
   const navigate = useNavigate();
   // The setup's edit page opens with a "back" target so its header button
   // returns the user to wherever they came from — here, Bordereau Setup —
@@ -139,9 +178,9 @@ export default function DirectSetup() {
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   // The input template (DirectFormat) currently loaded in the editor.
   const [loadedSetupId, setLoadedSetupId] = useState<number | null>(null);
-  const [creatingProgram, setCreatingProgram] = useState(false);
-  const [programForm, setProgramForm] = useState<ProgramForm>(EMPTY_PROGRAM);
-  const [createBusy, setCreateBusy] = useState(false);
+  // Null until /programs has answered, so "no programme yet" is never said
+  // while the list is still on its way.
+  const [programsLoaded, setProgramsLoaded] = useState(false);
 
   // contracts already uploaded for the selected program (+ inline detail)
   // Per-schedule contracts: {output_sheet: contract_id}. A contract can govern
@@ -171,19 +210,22 @@ export default function DirectSetup() {
   // server rather than patched up locally.
   const [resolveTick, setResolveTick] = useState(0);
   const [showCreateTemplate, setShowCreateTemplate] = useState(false);
-  // The template this session just made. Held so the screen can hand the user
-  // the one link that matters next — the full column list, with any required
-  // column that has nothing to fill it named there rather than in the dialog
-  // they have already closed.
-  const [justCreated, setJustCreated] = useState<{ id: number; name: string } | null>(null);
   // "Create Output BDX Template" needs both sides of the job in front of it —
   // the bordereau to see what can be filled, the contract to see what must be
   // reported. When one is missing this names it instead of opening a dialog
   // that could only produce a worse answer.
-  const [createGate, setCreateGate] = useState<string[] | null>(null);
+  const [createGate, setCreateGate] = useState(false);
 
   // the three uploads
   const [outFile, setOutFile] = useState<File | null>(null);
+  // The staged output file a template HAS been created from, so "uploaded" can
+  // be told from "uploaded and built". buildSetup does not clear outFile — the
+  // box on Documents goes on showing what you gave it — so without this the
+  // screen cannot tell the two apart, and "a new template will be created from
+  // the file you uploaded" stays on screen forever after it has been. Holding
+  // the File itself, not a flag, is what keeps a REPLACEMENT upload on a
+  // loaded setup correctly pending.
+  const [builtOutFile, setBuiltOutFile] = useState<File | null>(null);
   // Contracts to upload on Build (REQUIRED, one or more). When more than one,
   // sheetContractMap assigns each output sheet to a contract (by index).
   const [contractFiles, setContractFiles] = useState<File[]>([]);
@@ -219,6 +261,19 @@ export default function DirectSetup() {
     setReusedContracts(scope.boundContracts.length === 1 ? scope.boundContracts : []);
   }, [boundIds]);   // eslint-disable-line react-hooks/exhaustive-deps
 
+  // THE CONTRACT THIS SETUP IS FOR — what the radio above holds. The scope hook
+  // only names a contract when the broker holds exactly one; with several on
+  // file it stays blank and the radio is the only thing that says which. The
+  // output-template lookup and the create dialog both read THIS, because a
+  // template is filed under one contract and the server (rightly) never hands
+  // a contract's template out to a broker-wide question — so a lookup sent
+  // without the pick came back empty for a template made a minute earlier.
+  const pickedContractId: number | null =
+    reusedContracts[0]?.id
+    ?? (scope.contractId === "" ? null : Number(scope.contractId));
+  const pickedContractName: string | null =
+    reusedContracts[0] ? contractLabel(reusedContracts[0]) : scope.contractName;
+
   // The contracts this build will use, in one list: the ones already on file
   // first, then anything newly picked. Everything downstream — the extraction
   // loop, the schedule auto-match, the sheet map, the counts — reads THIS, so a
@@ -231,7 +286,7 @@ export default function DirectSetup() {
   const staged = useMemo<StagedContract[]>(() => [
     ...reusedContracts.map(c => ({
       kind: "existing" as const, id: c.id,
-      name: c.filename || `Contract ${c.id}`,
+      name: contractLabel(c),
     })),
     ...contractFiles.map(f => ({ kind: "file" as const, file: f, name: f.name })),
   ], [reusedContracts, contractFiles]);
@@ -305,7 +360,7 @@ export default function DirectSetup() {
     pipelineId: number | null;
     inputSheets: number; outputSheets: number; contracts: number;
     rules: number; fieldsWithRules: number; totalFields: number;
-    sheetsBoundToContract: number; deferredCount: number;
+    deferredCount: number;
     // How each output column got its source. Shown here because a required
     // column with no source is invisible until the file is opened.
     mappingReview: MappingReviewData | null;
@@ -315,6 +370,11 @@ export default function DirectSetup() {
     // (no contract, or unavailable); the build itself is unaffected either way.
     missing: MissingColumnsResp | null;
   }>(null);
+  // Which of the summary dialog's two lists is open. "missing" is the default
+  // because a column the bordereau does not carry is the finding that changes
+  // what the delivered file looks like; a clause awaiting a column only means
+  // one fewer check ran.
+  const [summaryTab, setSummaryTab] = useState<"missing" | "clauses">("missing");
 
   // results of the build
   const [templateId, setTemplateId] = useState<number | null>(null);
@@ -343,14 +403,18 @@ export default function DirectSetup() {
     // The carrier owns its programmes directly, so this is the whole scope
     // picker now: pick a programme of your own book.
     resetEditor();
-    setPrograms([]); setProgramId("");
-    api.get(`/programs`, { params: { mga } })
-      // Inactive programs are hidden here — you can't build a setup on them.
-      .then(r => {
-        const list: Program[] = Array.isArray(r.data) ? r.data : (r.data?.items ?? []);
-        setPrograms(list.filter(p => p.status !== "inactive"));
-      })
-      .catch(() => setPrograms([]));
+    setPrograms([]); setProgramId(""); setProgramsLoaded(false);
+    // Only programmes that got as far as a contract: a setup is built for a
+    // broker's contract, so a programme with no broker or no contract has
+    // nothing to set up. Read from the same hierarchy the Programmes screen
+    // shows, so every programme listed there as "1 contract" is offered here
+    // (older ones not marked app-managed included).
+    getHierarchy()
+      .then(h => setPrograms(h.programmes
+        .filter(p => p.brokers.some(b => onProgramme(b.link_status) && hasSettledContract(b)))
+        .map(p => ({ id: p.id, name: p.name }))))
+      .catch(() => setPrograms([]))
+      .finally(() => setProgramsLoaded(true));
   }, [mga]);
 
   // Arriving from Process Bordereau with a selection already made. The screen
@@ -359,6 +423,9 @@ export default function DirectSetup() {
   // Applied once the programme list is in (a programme cannot be selected
   // before it is listed), and only while nothing has been picked by hand.
   const [params, setParams] = useSearchParams();
+  // Read once, before the link's params are consumed below: arrived from the
+  // Configure Program flow, so its stepper is shown above this screen.
+  const [fromFlow] = useState(() => params.get(FLOW_PARAM) === "1");
   useEffect(() => {
     if (!programs.length) return;
     const wanted = Number(params.get("program_id") || 0);
@@ -415,7 +482,7 @@ export default function DirectSetup() {
     setMsg(null); setErr(null);
     if (opts?.keepUploads) return;
     // Staged uploads + everything derived from them.
-    setOutFile(null); setInputFile(null); setContractFiles([]);
+    setOutFile(null); setBuiltOutFile(null); setInputFile(null); setContractFiles([]);
     setRefFiles([]); setSuppFile(null);
     // Sheet pickers / review derived from the staged workbooks.
     setSheetReview(null);
@@ -457,7 +524,19 @@ export default function DirectSetup() {
           // just to know its format id, for the supplement-management section
           // and the sheet-contracts fetch below (mapping review/edit itself
           // now happens on the setup's own edit page).
-          const target = list.find(p => p.status === "active") ?? (list.length === 1 ? list[0] : null);
+          // With a contract picked, the live setup built for IT first — a
+          // broker with two contracts on two BDX templates has two live setups.
+          const forContract = pickedContractId == null ? undefined
+            : list.find(p => p.status === "active"
+                && p.contracts?.some(c => c.contract_id === pickedContractId));
+          // Live first, then one waiting for the carrier admin: for a carrier
+          // user who has just sent theirs up, the setup waiting IS the one
+          // this screen is about, and landing on a blank builder would read as
+          // the work having been lost.
+          const target = forContract
+            ?? list.find(p => p.status === "active")
+            ?? list.find(p => p.status === "pending_approval")
+            ?? (list.length === 1 ? list[0] : null);
           const fid = target?.input_format_id ?? null;
           if (fid != null && fid !== loadedSetupId) loadSetup(fid);
         }
@@ -491,13 +570,13 @@ export default function DirectSetup() {
       program_id: Number(programId),
       carrier_party_id: carrierId === "" ? null : Number(carrierId),
       broker_party_id: scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId),
-      contract_id: scope.contractId === "" ? null : Number(scope.contractId),
+      contract_id: pickedContractId,
     })
       .then(r => { if (!stale) setResolved(r); })
       .catch(() => { if (!stale) setResolved(null); })
       .finally(() => { if (!stale) setResolving(false); });
     return () => { stale = true; };
-  }, [mga, programId, carrierId, scope.brokerPartyId, scope.contractId, resolveTick]);
+  }, [mga, programId, carrierId, scope.brokerPartyId, pickedContractId, resolveTick]);
 
   // Load saved per-schedule contract bindings whenever the active format changes.
   useEffect(() => {
@@ -539,6 +618,29 @@ export default function DirectSetup() {
   // Setup/template name is derived from the scope — no separate field needed.
   const programName = programs.find(p => p.id === programId)?.name ?? "";
   const setupName = [carrierName, programName].filter(Boolean).join(" — ") || "Direct setup";
+  // The scope an uploaded output layout is filed under: the programme, the
+  // broker, and the contract only when this build REUSES one already on file.
+  // Not pickedContractId: that falls back to the broker's only contract even
+  // after Clear, and a layout filed under a contract the user just set aside
+  // would take over that contract's lookup. A contract the build uploads names
+  // the layout itself (contract.output_template_id).
+  const layoutContract = reusedContracts[0] ?? null;
+  const uploadBrokerId = scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId);
+  // The name it is saved under, and so which template it becomes the next
+  // version of. Versions share a name, and the setup lookup matches a layout to
+  // a setup by name, so two scopes must never share one: the upload joins an
+  // existing layout only when that layout is filed under exactly this scope.
+  // Otherwise the broker's name goes in (under the programme's name alone, a
+  // second broker's upload became version 2 of the first broker's), and the
+  // contract's when it is filed under one.
+  const agreed = resolved?.found ? resolved.template : null;
+  const sameScope = !!agreed && programId !== ""
+    && agreed.scope.program_id === Number(programId)
+    && (agreed.scope.broker_party_id ?? null) === uploadBrokerId
+    && (agreed.scope.contract_id ?? null) === (layoutContract?.id ?? null);
+  const uploadTemplateName = sameScope && agreed ? agreed.name
+    : [setupName, scope.brokerName,
+       layoutContract ? contractLabel(layoutContract) : null].filter(Boolean).join(" — ");
   // The uploads are all scoped to a (carrier, program) pair — nothing picked
   // yet means there's nowhere for a file to attach to, so every drop zone
   // stays disabled until both are selected.
@@ -559,26 +661,14 @@ export default function DirectSetup() {
     && pipelines.length === 0;
   const scopeIncomplete =
     programId === "" || (scope.hasBrokers !== true && pipelines.length === 0);
+  // A broker must be picked before anything after Setup Details opens (9 Oct).
+  // Left blank, the contract uploaded here was saved with no broker, and every
+  // broker on the programme could then see it and be checked against it.
+  const brokerMissing = programId === "" || scope.brokerPartyId === "";
+  const brokerGateMsg = programId === ""
+    ? "Select a programme and a broker first."
+    : "Select a broker first.";
 
-  // ---- inline create of carrier / program ---------------------------------
-  async function createProgram() {
-    if (!programForm.name.trim() || carrierId === "") return;
-    setCreateBusy(true); setErr(null);
-    try {
-      const payload: Record<string, unknown> = { name: programForm.name.trim(), party_id: carrierId };
-      for (const k of PROGRAM_META_KEYS) {
-        const v = programForm[k]?.trim();
-        if (v) payload[k] = v;
-      }
-      const { data } = await api.post(`/programs`, payload, { params: { mga } });
-      setPrograms(prev => [...prev, { id: data.id, name: data.name }]);
-      setProgramId(data.id);
-      setCreatingProgram(false); setProgramForm(EMPTY_PROGRAM);
-    } catch (e: unknown) { setErr(errText(e)); } finally { setCreateBusy(false); }
-  }
-  function setProgramField<K extends keyof ProgramForm>(k: K, v: ProgramForm[K]) {
-    setProgramForm(prev => ({ ...prev, [k]: v }));
-  }
 
   // Populate the editor from an upload/editor response (shared by build + load).
   function applyMapping(upObj: UploadResp, fields: OutField[], cid: number | null, tid: number | null) {
@@ -642,12 +732,20 @@ export default function DirectSetup() {
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
-  // Activate an existing pipeline directly (supersedes the others for this scope).
+  // Finish an existing pipeline. The carrier ADMIN's goes live (superseding the
+  // others for this scope); a carrier USER's goes to the admin for approval.
+  // One endpoint, because it is one intent — the server knows which seat asked
+  // and therefore which of the two it means.
   async function activateExisting(pipelineId: number) {
     setBusy(true); setErr(null); setMsg(null);
     try {
-      await api.post(`/pipelines/${pipelineId}/activate`);
-      setMsg("Setup activated — Operator can now process bordereaux for this carrier + program.");
+      const { data } = await api.post<{ status?: string }>(
+        `/pipelines/${pipelineId}/activate`);
+      setMsg(data?.status === "pending_approval"
+        ? "Sent to the carrier. Nothing reaches the broker until they "
+          + "approve it — the programme, the contract and the BDX template all "
+          + "wait with it."
+        : "Setup activated — bordereaux can now be processed for this carrier + program.");
       refreshExisting();
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
   }
@@ -691,6 +789,8 @@ export default function DirectSetup() {
   // none ticked — and "upload one" is the wrong advice for the second.
   function missingForBuild(): string[] {
     const missing: string[] = [];
+    if (programId === "") missing.push("a programme and a broker");
+    else if (scope.brokerPartyId === "") missing.push("a broker");
     if (!inputFile) missing.push("the input template");
     if (staged.length === 0) {
       missing.push(scope.boundContracts.length > 0
@@ -700,21 +800,53 @@ export default function DirectSetup() {
     return missing;
   }
 
-  // What the template builder still needs. An input format already saved on
-  // the loaded setup counts as the input side; a contract already approved for
-  // the scope counts as the contract side — neither has to be re-uploaded.
+  // The part of that list the CURRENT tab can do something about. Setup
+  // Details picks the programme, broker and contract; uploads (the input
+  // template, a contract file) happen on Documents.
+  function missingOnTab(): string[] {
+    const all = missingForBuild();
+    if (tab !== "details") return all;
+    return all.filter(m => m !== "the input template" && m !== "a contract");
+  }
+
+  // The two things the output template is worked out from, and whether each is
+  // here yet. An input format already saved on the loaded setup counts as the
+  // input side; a contract already on file for the scope counts as the contract
+  // side — neither has to be re-uploaded.
+  //
+  // A FUNCTION, read at render rather than captured when the dialog opens: the
+  // gate used to hold the list it was opened with, so a document added — or a
+  // programme changed — while it was up left it naming the wrong file.
+  function createNeeds() {
+    return [
+      { label: "Input template",
+        have: !!inputFile || !!up?.format_id,
+        why: "a sample of the bordereau you receive. It shows which columns "
+           + "actually get filled." },
+      { label: "Contract",
+        have: staged.length > 0,
+        why: "says what this binder must report. It decides which extra "
+           + "columns to add." },
+    ];
+  }
+
   function missingForCreate(): string[] {
-    const missing: string[] = [];
-    if (!inputFile && !up?.format_id) missing.push("the input template");
-    if (staged.length === 0) missing.push("the contract");
-    return missing;
+    return createNeeds().filter(n => !n.have).map(n => n.label.toLowerCase());
   }
 
   function openCreateTemplate() {
-    const missing = missingForCreate();
-    if (missing.length) { setCreateGate(missing); return; }
+    if (missingForCreate().length) { setCreateGate(true); return; }
     setErr(null);
     setShowCreateTemplate(true);
+  }
+
+  // The saved template as a file. Offered only once a template EXISTS (the
+  // created banner and the template card) — inside the create dialog nothing
+  // is saved yet, so a download there would be a draft that can still change.
+  function downloadTemplate(id: number) {
+    downloadFile(`/output-template/${id}/download`)
+      .catch(async e => setErr(await downloadErrorText(e,
+        "We couldn't download the output template — please try again.")));
   }
 
   // ---- build setup from the uploads ----------------------------------------
@@ -723,9 +855,9 @@ export default function DirectSetup() {
     // from a reporting standard or from the contract counts too, and when the
     // scope already resolves to one there is nothing to upload at all.
     const existingTemplateId = resolved?.template?.id ?? 0;
-    if (carrierId === "" || programId === "" || !inputFile || staged.length === 0) {
-      setErr(carrierId === "" || programId === ""
-        ? "Pick a carrier and program first."
+    if (carrierId === "" || brokerMissing || !inputFile || staged.length === 0) {
+      setErr(carrierId === "" || brokerMissing
+        ? brokerGateMsg
         : `Still needed: ${missingForBuild().join("; ")}.`);
       return;
     }
@@ -756,12 +888,20 @@ export default function DirectSetup() {
       // that split before any rules are generated — the modal drives step 2 + 3.
       setStep("Creating output template…");
       const fOut = new FormData();
-      fOut.append("mga", mga); fOut.append("name", setupName); fOut.append("file", outFile);
+      fOut.append("mga", mga); fOut.append("name", uploadTemplateName); fOut.append("file", outFile);
       fOut.append("carrier_party_id", String(carrierId));
+      // Filed under the scope worked out above (layoutContract), like a
+      // template built from the standard or the contract, so the lookup never
+      // offers it to another broker on the same programme.
+      fOut.append("program_id", String(programId));
+      if (uploadBrokerId != null) fOut.append("broker_party_id", String(uploadBrokerId));
+      if (layoutContract) fOut.append("contract_id", String(layoutContract.id));
       if (outputSheetOpts) for (const sh of outputSheetSel) fOut.append("sheets", sh);
       const tplRes = await api.post(`/export/template/generate`, fOut);
       const tid = tplRes.data.id as number;
       setTemplateId(tid);
+      // The server has read this file now; it is no longer pending.
+      setBuiltOutFile(outFile);
       // Only pause for review when the classifier actually flagged a reference
       // tab — otherwise there is nothing to confirm, so continue the build straight
       // through to contract + mapping.
@@ -980,6 +1120,7 @@ export default function DirectSetup() {
         missingCols = data;
       } catch { missingCols = null; }
     }
+    setSummaryTab("missing");
     setBuildSummary({
       pipelineId: pid,
       inputSheets: u.data.input_sheets.length, outputSheets: u.data.output_sheets.length,
@@ -987,7 +1128,7 @@ export default function DirectSetup() {
       rules: ruleIds.size,
       fieldsWithRules: of.data.fields.filter(f => (f.clauses?.length ?? 0) > 0).length,
       totalFields: of.data.fields.length,
-      sheetsBoundToContract: nMapped, deferredCount: missing.length,
+      deferredCount: missing.length,
       missing: missingCols,
       mappingReview: u.data.mapping_review ?? null,
     });
@@ -1119,6 +1260,60 @@ export default function DirectSetup() {
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
+  // ---- the three sections of this screen -----------------------------------
+  // ONE form, shown a third at a time. Every value is still held by this
+  // component, so a tab is only what is on screen: the staged File objects in
+  // particular could not be re-created after an unmount, and never have to be.
+  // The build action is NOT in here — it sits under all three, because the
+  // thing it builds is made of all three.
+  const tabs: SetupTab[] = useMemo(() => [
+    { key: "details", label: "Setup Details", step: 1 },
+    { key: "documents", label: "Documents", step: 2,
+      disabled: brokerMissing, disabledReason: brokerGateMsg },
+    { key: "output", label: "Output BDX Template", step: 3,
+      disabled: brokerMissing, disabledReason: brokerGateMsg },
+  ], [brokerMissing, brokerGateMsg]);
+  const [tab, setTab] = useSetupTab(tabs);
+  // A link or a refresh can open ?tab=documents with no broker picked; send it
+  // back to Setup Details. Not while a broker named in the link is still being
+  // selected (the effect that picks it clears broker_party_id once it has).
+  useEffect(() => {
+    if (brokerMissing && tab !== "details" && !params.get("broker_party_id")) {
+      setTab("details");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brokerMissing, tab]);
+  // What comes after the open tab, so the footer can offer it by name. Read
+  // off the same list the strip is drawn from — a second, hand-written order
+  // here is how the two would eventually disagree.
+  const nextTab = tabs[tabs.findIndex(t => t.key === tab) + 1];
+
+  // The template review used to be a route of its own, opened in a second
+  // browser tab, because leaving this screen would have dropped every staged
+  // file. It is the third tab here instead.
+  //
+  // It loads its own copy of the template and can hold unsaved edits, so it is
+  // mounted on first visit and kept mounted — hidden — afterwards. Rebuilding
+  // it on every tab change would discard those edits without saying so.
+  const [outputOpened, setOutputOpened] = useState(false);
+  useEffect(() => { if (tab === "output") setOutputOpened(true); }, [tab]);
+
+  // Which template that tab is showing. Normally whatever the scope resolved
+  // to; the override only stands while an edit has just versioned the template
+  // onto a new id and the re-resolve has not answered yet.
+  // An output layout is STAGED here and created on the server only when Set Up
+  // Bordereau Pipeline runs. Until it does, nothing has read the file: it has
+  // no id, no columns and no version, so there is nothing of it to review.
+  const pendingOutUpload = !!outFile && outFile !== builtOutFile;
+  const [reviewOverrideId, setReviewOverrideId] = useState<number | null>(null);
+  const resolvedTemplateId = resolved?.template?.id ?? templateId ?? null;
+  const reviewTemplateId = reviewOverrideId ?? resolvedTemplateId;
+  useEffect(() => { setReviewOverrideId(null); }, [resolvedTemplateId]);
+
+  // Read here, not when the gate opened — see createNeeds.
+  const gateNeeds = createNeeds();
+  const gateMissing = gateNeeds.filter(n => !n.have);
+
   return (
     <>
       {building && (
@@ -1142,12 +1337,13 @@ export default function DirectSetup() {
           </Modal>
         </div>
       )}
-      {/* Widened only when there is a missing-column list to read — column names
-          plus their reason are unreadable at the summary-only width, and the
-          summary-only case keeps exactly the width it had. */}
+      {/* Widened only when there is a list to read — a column name plus its
+          reason, or a quoted clause, is unreadable at the summary-only width,
+          and the summary-only case keeps exactly the width it had. */}
       <Modal open={!!buildSummary} onClose={() => setBuildSummary(null)}
         title="Mapping Generated"
-        size={buildSummary?.missing?.items.length ? "2xl" : "md"}
+        size={(buildSummary?.missing?.items.length
+               || ownUnmappedClauses(buildSummary?.missing).length) ? "2xl" : "md"}
         footer={
           <div className="flex items-center gap-2">
             {/* Review the mapping on the setup's own page … */}
@@ -1179,53 +1375,49 @@ export default function DirectSetup() {
             })()}
           </div>
         }>
-        {buildSummary && (
-          <div className="text-center">
-            <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-full bg-emerald-50 text-emerald-600">
-              <CheckCircle2 size={28} />
-            </div>
+        {buildSummary && (() => {
+          const missingItems = buildSummary.missing?.items ?? [];
+          // The contract's own clauses only — the same count the setup's
+          // "Rules with no column" sub-tab shows.
+          const clauses = ownUnmappedClauses(buildSummary.missing);
+          // One list at a time. Stacked, the two boxes each scrolled inside a
+          // dialog that scrolled too — three nested scrollbars, and the actions
+          // pushed below the fold. Tabs make the dialog one screen again.
+          const tab = missingItems.length === 0 && clauses.length > 0 ? "clauses" : summaryTab;
+          return (
+          <div>
             <p className="text-sm text-ink-muted mb-4">
               <span className="font-semibold text-ink">{setupName}</span> is mapped and ready to review.
             </p>
-            <div className="grid grid-cols-2 gap-2.5 text-left">
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-[20px] font-semibold text-ink">{buildSummary.outputSheets}</div>
-                <div className="text-[11px] text-ink-muted">
-                  Output Sheet{buildSummary.outputSheets === 1 ? "" : "s"} From{" "}
-                  {buildSummary.inputSheets} Input Sheet{buildSummary.inputSheets === 1 ? "" : "s"}
-                </div>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-[20px] font-semibold text-ink">{buildSummary.rules}</div>
-                <div className="text-[11px] text-ink-muted">
-                  Contract Rule{buildSummary.rules === 1 ? "" : "s"} Across{" "}
-                  {buildSummary.fieldsWithRules} Of {buildSummary.totalFields} Fields
-                </div>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-[20px] font-semibold text-ink">{buildSummary.contracts}</div>
-                <div className="text-[11px] text-ink-muted">
-                  Contract{buildSummary.contracts === 1 ? "" : "s"} Processed
-                </div>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-[20px] font-semibold text-ink">{buildSummary.sheetsBoundToContract}</div>
-                <div className="text-[11px] text-ink-muted">
-                  Sheet{buildSummary.sheetsBoundToContract === 1 ? "" : "s"} Bound To A Contract
-                </div>
-              </div>
+            {/* Three across, pinned. The dialog's width does not follow the
+                viewport once past it, so a `sm:` breakpoint would be measuring
+                the wrong thing; and at two columns the last tile sits alone in
+                a half-empty row. */}
+            <div className="grid grid-cols-3 gap-2.5 text-left">
+              <Stat v={buildSummary.rules}
+                k={`Contract Rule${buildSummary.rules === 1 ? "" : "s"} Created`} />
+              <Stat v={buildSummary.fieldsWithRules}
+                k={`Of ${buildSummary.totalFields} Columns Carry a Rule`} />
+              <Stat v={clauses.length} k={`Rule${clauses.length === 1 ? "" : "s"} with No Column`}
+                tone={clauses.length > 0 ? "warn" : undefined} />
             </div>
-            {/* The mapping ladder's verdict. A required output column with no
-                confident source will be EMPTY in the delivered file, so it is
-                said here rather than found later. */}
-            {buildSummary.mappingReview && (
-              <div className="mt-4 text-left">
-                <MappingReview review={buildSummary.mappingReview} compact />
-              </div>
-            )}
+            <p className="mt-2 text-[11px] text-ink-soft">
+              {buildSummary.outputSheets} output sheet{buildSummary.outputSheets === 1 ? "" : "s"} from{" "}
+              {buildSummary.inputSheets} input sheet{buildSummary.inputSheets === 1 ? "" : "s"} ·{" "}
+              {buildSummary.contracts} contract{buildSummary.contracts === 1 ? "" : "s"} processed
+            </p>
+
+            {/* The mapping ladder's verdict (MappingReview) used to sit here.
+                REMOVED from this dialog on purpose: it restated the two tiles
+                above it — "of N columns carry a rule" already says how the
+                mapping went — and pushed the two lists that need acting on
+                below the fold. It is unchanged on the setup's own page, which
+                is where a column-by-column read belongs. `mappingReview` is
+                still carried on buildSummary; render it here again to restore. */
+            }
 
             {buildSummary.deferredCount > 0 && (
-              <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 text-amber-800 text-xs px-3 py-2.5 text-left">
+              <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 text-amber-800 text-xs px-3 py-2.5">
                 <AlertTriangle size={14} className="mt-0.5 shrink-0" />
                 <span>
                   {buildSummary.deferredCount} contract{buildSummary.deferredCount === 1 ? "" : "s"}{" "}
@@ -1235,56 +1427,13 @@ export default function DirectSetup() {
               </div>
             )}
 
-            {/* NOTE: what the contract asks for that this bordereau doesn't
-                provide. Every column is listed (the list scrolls inside its own
-                box, so a long one can't push the actions out of reach), and the
-                same note is kept on the setup's own page. */}
-            {buildSummary.missing && buildSummary.missing.items.length > 0 && (
-              <div className="mt-4 text-left">
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <FileWarning size={15} className="shrink-0 text-amber-600" />
-                  <span className="text-sm font-semibold text-ink">
-                    Note · {buildSummary.missing.counts.total} Column
-                    {buildSummary.missing.counts.total === 1 ? "" : "s"} May Be Missing From Your Bordereau
-                  </span>
-                  {buildSummary.missing.counts.required > 0 && (
-                    <span className="pill pill-red">{buildSummary.missing.counts.required} Required</span>
-                  )}
-                  {buildSummary.missing.counts.recommended > 0 && (
-                    <span className="pill pill-amber">
-                      {buildSummary.missing.counts.recommended} Recommended</span>
-                  )}
-                </div>
-                <MissingColumnsList items={buildSummary.missing.items} maxHeight="15rem" />
-                <p className="mt-2 text-[11px] text-ink-soft">
-                  This note stays on the setup — you can review it any time from Configured
-                  Bordereau Setups.
-                </p>
-              </div>
+            {/* The same two lists, in the same words, as the setup's Contract
+                Rules tab — "Rules with no column" and "Columns Missing from BDX". */}
+            {(missingItems.length > 0 || clauses.length > 0) && (
+              <BuildGapTabs data={buildSummary.missing} tab={tab} onTab={setSummaryTab} />
             )}
-            {/* The DERIVED half: clauses the extraction wanted a rule for but
-                could not bind to a column. No model call behind these, so they
-                show even when the check above couldn't run. Resolved from the
-                setup's own page, which is where the column picker lives. */}
-            {(buildSummary.missing?.unmapped_clauses?.length ?? 0) > 0 && (
-              <div className="mt-4 text-left">
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <FileWarning size={15} className="shrink-0 text-sky-600" />
-                  <span className="text-sm font-semibold text-ink">
-                    {buildSummary.missing!.unmapped_clauses!.length} Clause
-                    {buildSummary.missing!.unmapped_clauses!.length === 1 ? "" : "s"} Awaiting a Column
-                  </span>
-                </div>
-                <UnmappedClausesList items={buildSummary.missing!.unmapped_clauses!}
-                  maxHeight="15rem" />
-                <p className="mt-2 text-[11px] text-ink-soft">
-                  Pick a column for each on the setup's page to generate its rule.
-                </p>
-              </div>
-            )}
-            {buildSummary.missing?.analyzed && buildSummary.missing.items.length === 0
-              && (buildSummary.missing.unmapped_clauses?.length ?? 0) === 0 && (
-              <div className="mt-3 flex items-start gap-2 rounded-lg bg-emerald-50 text-emerald-700 text-xs px-3 py-2.5 text-left">
+            {buildSummary.missing?.analyzed && missingItems.length === 0 && clauses.length === 0 && (
+              <div className="mt-3 flex items-start gap-2 rounded-lg bg-emerald-50 text-emerald-700 text-xs px-3 py-2.5">
                 <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
                 <span>
                   Every contract clause is mapped to a column, and your bordereau provides
@@ -1293,11 +1442,13 @@ export default function DirectSetup() {
               </div>
             )}
           </div>
-        )}
+          );
+        })()}
       </Modal>
       <PageHeader title="Bordereau Setup"
-        subtitle="Done once per carrier and programme. Kavachio learns how your data maps to the output, and from then on your team just uploads each new bordereau and gets a validated file back." />
+        subtitle="Configure and upload your Bordereau file. Start by selecting your details below." />
       <PageBody>
+        {fromFlow && <ProgrammeFlowBar programId={programId === "" ? null : Number(programId)} at={4} />}
         {err && <Banner kind="error"><AlertTriangle size={15} /> {err}</Banner>}
 
         <Modal open={multiTableModal != null} size="xl"
@@ -1309,339 +1460,365 @@ export default function DirectSetup() {
           <p className="text-sm text-ink">{multiTableModal}</p>
         </Modal>
 
-        {/* Both sides, before the columns can be decided. */}
-        <Modal open={createGate != null} size="lg"
+        {/* Both sides, before the columns can be decided. A ticked list rather
+            than a paragraph: the question in front of the person is "which one
+            am I missing?", and a tick answers it without being read. */}
+        <Modal open={createGate} size="md"
           title={<span className="flex items-center gap-2">
             <AlertTriangle size={17} className="text-amber-500" />
-            Upload {(createGate ?? []).join(" and ")} first
+            Add the missing document{gateMissing.length > 1 ? "s" : ""}
           </span>}
-          onClose={() => setCreateGate(null)}
-          footer={<Button onClick={() => setCreateGate(null)}>Got It</Button>}>
-          <div className="space-y-2 text-sm text-ink">
+          onClose={() => setCreateGate(false)}
+          footer={<Button onClick={() => { setCreateGate(false); setTab("documents"); }}>
+            Got It
+          </Button>}>
+          <div className="space-y-3 text-sm text-ink">
             <p>
-              The output BDX template is worked out from two things, and{" "}
-              {(createGate ?? []).length === 1
-                ? `${createGate?.[0]} is missing.`
-                : "neither is here yet."}
+              We need two files to build your output template.{" "}
+              {gateMissing.length > 1 ? "Both are missing." : "One is missing."}
             </p>
-            <ul className="list-disc pl-5 space-y-1 text-ink-muted">
-              <li>
-                <b>The input template</b> — a sample of the bordereau you
-                receive. A reporting standard publishes hundreds of columns per
-                territory and most of them will not apply to this binder; your
-                own file is what says which ones can actually be filled.
-              </li>
-              <li>
-                <b>The contract</b> — what this binder is obliged to report.
-                Its terms are read to work out the columns the standard does not
-                cover, and to keep the ones it does.
-              </li>
+            <ul className="space-y-2">
+              {gateNeeds.map(n => (
+                <li key={n.label} className="flex gap-2">
+                  <span className={`shrink-0 font-semibold ${
+                    n.have ? "text-emerald-600" : "text-amber-600"}`}>
+                    {n.have ? "✓" : "✗"}
+                  </span>
+                  <span>
+                    <b>{n.label}</b> — <span className="text-ink-muted">{n.why}</span>
+                  </span>
+                </li>
+              ))}
             </ul>
             <p className="text-ink-muted">
-              Add {(createGate ?? []).join(" and ")} above, then try again.
+              Upload the missing {gateMissing.length > 1 ? "documents" : "document"}{" "}
+              on the <b>Documents</b> tab, then try again.
             </p>
           </div>
         </Modal>
         {msg && <Banner kind="ok"><CheckCircle2 size={15} /> {msg}</Banner>}
 
-        {justCreated && (
-          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3.5
-            flex items-start gap-3">
-            <CheckCircle2 size={17} className="text-emerald-600 mt-0.5 shrink-0" />
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-emerald-900">
-                Output template “{justCreated.name}” created
-              </div>
-              <p className="text-[12.5px] text-emerald-800 mt-0.5 leading-relaxed">
-                Open it to see the file it produces as a spreadsheet, check the
-                columns and their sources, and deal with anything the standard
-                requires that your bordereau does not carry. Your uploads here
-                stay put while you do.
-              </p>
-              <div className="flex gap-2 mt-2">
-                <Button variant="secondary"
-                  onClick={() => navigate(`/outputs/templates/${justCreated.id}`)}>
-                  Review the columns <ArrowRight size={14} />
-                </Button>
-                <Button variant="ghost" onClick={() => setJustCreated(null)}>
-                  Later — build the setup
-                </Button>
-              </div>
+        {/* No "just created" banner. The template's own row further down says
+            the same thing permanently — name, version, how specific the match
+            is, and Review fields / Download / Replace — so a second block of
+            the same buttons only appeared for the few seconds after creating
+            one. See components/OutputTemplateState.tsx. */}
+
+        <Card>
+          <SetupTabs tabs={tabs} current={tab} onChange={setTab} />
+
+          {/* ---- Setup Details — who the setup is for ----------------------
+              Hidden rather than unmounted, here and on the tab below. Each
+              panel holds live form state and two of them hold staged File
+              objects, which nothing on the page could rebuild: unmounting a
+              tab would quietly empty the form the moment somebody looked at a
+              different part of it. */}
+          <div role="tabpanel" aria-label="Setup Details"
+            className={tab === "details" ? "" : "hidden"}>
+            {/* Each panel opens by saying what it is for, in one line. Three
+                tabs that begin with a bare form field give no sense of where
+                you are or why this part comes first. */}
+            <p className="mb-3 text-xs text-ink-muted">
+              Pick the programme and the broker — the contract, the templates and
+              the rules all follow from them.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* The carrier is who you are, not a choice, so it is not asked for
+                  or shown here — it is already in the setup's name. */}
+              <Field label="Program">
+                {/* Programmes are made on the Programmes screen (Configure
+                    Program), never here: a programme needs its brokers and a
+                    contract before a setup can be built on it, and a bare one
+                    made here had neither. */}
+                <Select value={programId} onChange={e =>
+                  setProgramId(e.target.value ? Number(e.target.value) : "")}>
+                  <option value="" disabled>Select Program</option>
+                  {programs.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </Select>
+              </Field>
+              {/* The broker. The contract follows from it rather than being asked
+                  for again — see BrokerContractScope for why. */}
+              <BrokerSelect scope={scope} disabled={scopeIncomplete} />
             </div>
-          </div>
-        )}
-
-        <Card title="1 · Scope & Uploads">
-          <div className="mb-3 flex items-baseline gap-2">
-            <h3 className="text-[13px] font-semibold">Scope</h3>
-            <span className="text-xs text-ink-muted">Who this setup is for.</span>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl">
-            {/* The carrier is who you are, not a choice. Shown so the scope
-                is unambiguous, but there is nothing here to pick. */}
-            <Field label="Carrier">
-              <div className="input flex items-center bg-surface-2 text-ink-muted">
-                {carrierName || mga}
-              </div>
-            </Field>
-            <Field label="Program">
-              <Select value={creatingProgram ? "__new__" : programId} onChange={e => {
-                if (e.target.value === "__new__") {
-                  // Clear the loaded setup + contracts for the previously-selected
-                  // program. setProgramId("") cascades through the scope effects
-                  // (resetEditor + refreshExisting/refreshContracts run on it).
-                  setCreatingProgram(true);
-                  setProgramId("");
-                  return;
-                }
-                setCreatingProgram(false);
-                setProgramId(e.target.value ? Number(e.target.value) : "");
-              }}>
-                <option value="" disabled>Select Program</option>
-                {programs.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                <option value="__new__">➕ Add New Program…</option>
-              </Select>
-            </Field>
-
-            {/* The broker. The contract follows from it rather than being asked
-                for again — see BrokerContractScope for why. */}
-            <BrokerSelect scope={scope} disabled={scopeIncomplete} />
-          </div>
-          <div className="max-w-2xl mt-3">
-            {/* Which contract on file this setup runs on — ONE of them. The
-                radio and the "on file" chip on the Contracts field below are
-                the SAME state (reusedContracts, held at a single entry), so
-                clearing it here removes the chip and dropping the chip clears
-                the radio. */}
-            <ContractPicker scope={scope} programPicked={programId !== ""}
-              selectedId={reusedContracts[0]?.id ?? null}
-              onSelect={id => setReusedContracts(
-                scope.boundContracts.filter(c => c.id === id))}
-              onClear={() => setReusedContracts([])} />
-          </div>
-
-          {/* Why everything below is shut. Said once, where the answer is —
-              not repeated on each of the five upload boxes. */}
-          {noBrokerYet && (
-            <div className="max-w-2xl mt-3 rounded-md border border-amber-300
-              bg-amber-50 px-3 py-2.5 text-[12px] text-amber-800 leading-relaxed">
-              <div className="font-medium flex items-center gap-1.5">
-                <AlertTriangle size={14} /> No broker on this programme yet
-              </div>
-              <p className="mt-1">
-                A bordereau arrives from a broker, under a contract you have
-                approved — so there is nobody for this setup to be for until one
-                is on the programme. Put a broker on it from the{" "}
-                <button type="button" className="underline font-medium"
-                  onClick={() => navigate("/users/new")}>Users &amp; Roles</button>{" "}
-                screen and the uploads below open up. A programme that already
-                has a saved setup is not held shut this way — those predate the
-                broker level and stay editable.
-              </p>
-            </div>
-          )}
-
-          {creatingProgram && (
-            <div className="mt-4 max-w-3xl rounded-lg border border-border bg-surface-2 p-4 space-y-3">
-              <div className="text-sm font-medium">Add New Program</div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <Field label="Program Name *">
-                  <TextInput autoFocus value={programForm.name} placeholder="e.g. Property Binder 2025"
-                    onChange={e => setProgramField("name", e.target.value)}
-                    onKeyDown={e => { if (e.key === "Enter") createProgram(); }} />
-                </Field>
-                {/* <Field label="Lead carrier">
-                  <TextInput value={programForm.lead_carrier} placeholder="Optional"
-                    onChange={e => setProgramField("lead_carrier", e.target.value)} />
-                </Field>
-                <Field label="Admin party">
-                  <TextInput value={programForm.admin_party} placeholder="Optional"
-                    onChange={e => setProgramField("admin_party", e.target.value)} />
-                </Field> */}
-                <Field label="BDX Frequency">
-                  <Select value={programForm.bdx_frequency}
-                    onChange={e => setProgramField("bdx_frequency", e.target.value)}>
-                    <option value="">—</option>
-                    {BDX_FREQUENCIES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                  </Select>
-                </Field>
-                {/* <Field label="Business segment">
-                  <TextInput value={programForm.business_segment} placeholder="Optional"
-                    onChange={e => setProgramField("business_segment", e.target.value)} />
-                </Field>
-                <Field label="Product line">
-                  <TextInput value={programForm.product_line} placeholder="Optional"
-                    onChange={e => setProgramField("product_line", e.target.value)} />
-                </Field>
-                <Field label="Distribution channel">
-                  <TextInput value={programForm.distribution_channel} placeholder="Optional"
-                    onChange={e => setProgramField("distribution_channel", e.target.value)} />
-                </Field>
-                <Field label="Territory">
-                  <TextInput value={programForm.territory} placeholder="Optional"
-                    onChange={e => setProgramField("territory", e.target.value)} />
-                </Field> */}
-                <Field label="Status">
-                  <Select value={programForm.status}
-                    onChange={e => setProgramField("status", e.target.value)}>
-                    <option value="active">Active</option>
-                    <option value="inactive">Inactive</option>
-                  </Select>
-                </Field>
-              </div>
-              <div className="flex gap-2">
-                <Button onClick={createProgram} disabled={createBusy || !programForm.name.trim()}>
-                  Add Program
-                </Button>
-                <Button variant="ghost"
-                  onClick={() => { setCreatingProgram(false); setProgramForm(EMPTY_PROGRAM); }}>Cancel</Button>
-              </div>
-            </div>
-          )}
-          {carrierId !== "" && programId !== "" && (
-            <div className="mt-3 inline-flex max-w-2xl items-center gap-2 rounded-md
-              border border-border bg-surface-2 px-3 py-1.5">
-              <span className="text-[10.5px] uppercase tracking-wide text-ink-soft">
-                Setup name
-              </span>
-              <span className="truncate text-[12.5px] font-medium">{setupName}</span>
-            </div>
-          )}
-
-          {/* THE DOCUMENTS, in one grid — required first, optional after.
-              They used to sit in two grids of three and two, which made the
-              bottom pair half again as wide as the top three: five boxes doing
-              the same job, drawn at two different sizes, with the widest given
-              to the ones you may skip. One grid keeps every box the same size
-              and lets the reading order carry the meaning instead.
-
-              Three across only from xl: the sidebar eats ~200px, so 3-up below
-              that leaves the hints too cramped to read. */}
-          <div className="mt-5 border-t border-border pt-4">
-            <div className="mb-3 flex items-baseline gap-2">
-              <h3 className="text-[13px] font-semibold">Documents</h3>
-              <span className="text-xs text-ink-muted">
-                The three required ones teach Kavachio the mapping; the rest are extras.
-              </span>
-            </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 items-start">
-            <div className="space-y-2">
-              <FilePick label="Input Template" icon={<FileUp size={15} />} file={inputFile} tone="required" required
-                onPick={f => pickFileWithSheets("input", f)} hint="A representative input sample"
-                disabled={scopeIncomplete} />
-              <SheetPicker kind="input" options={inputSheetOpts}
-                selected={inputSheetSel} onToggle={n => toggleSheet("input", n)}
-                hint="Only the checked sheets are mapped to the output." />
-            </div>
-            <div className="space-y-2">
-              {/* Tone follows `required`, which is itself conditional: once the
-                  scope resolves to a template there is nothing you must upload
-                  here, and a box painted as mandatory would say otherwise. */}
-              <FilePick label="Output Template" icon={<FileOut size={15} />} file={outFile}
-                tone={resolved?.template ? "optional" : "required"}
-                required={!resolved?.template}
-                onPick={f => pickFileWithSheets("output", f)}
-                hint={SHOW_BDX_TEMPLATE_BUILDER
-                  ? "Upload the layout you have been asked for, or build one here"
-                  : "Upload the layout you have been asked for"}
-                // No altAction when the builder is off, which puts the card back
-                // to opening the file dialog wherever you click it.
-                altAction={SHOW_BDX_TEMPLATE_BUILDER ? {
-                  label: "Create BDX Template",
-                  onClick: openCreateTemplate,
-                  hint: "Built from a reporting standard or the contract, and "
-                      + "checked against your bordereau",
-                } : undefined}
-                disabled={scopeIncomplete} />
-              <SheetPicker kind="output" options={outputSheetOpts}
-                selected={outputSheetSel} onToggle={n => toggleSheet("output", n)}
-                hint="The generated output will contain only the checked sheets." />
-              {/* The "not configured" case is NOT reported here any more: the
-                  box above now carries both ways to fix it, and saying it twice
-                  read as a fault rather than as a choice.
-
-                  The whole box is off while the builder is: it names the
-                  template a scope already has, says which way it was built and
-                  links into the field editor, all of which belong to the flow
-                  being kept off screen. Note that it also carries two real
-                  warnings — a template inherited from a broader scope, and a
-                  setup built against a different template — so those go quiet
-                  too until the flag comes back on. */}
-              {SHOW_BDX_TEMPLATE_BUILDER && (
-                <OutputTemplateState
-                  resolving={resolving} resolved={resolved}
-                  disabled={scopeIncomplete}
-                  uploading={!!outFile}
-                  hideMissing
-                  onCreate={openCreateTemplate}
-                  onOpen={id => navigate(`/outputs/templates/${id}`)} />
-              )}
-            </div>
-
-            {/* Contracts — REQUIRED, so it sits with the other two you must
-                provide rather than below them. One contract applies to every
-                sheet; with more than one, map each schedule sheet to its
-                contract below. */}
-            <div className="space-y-2">
-              <ContractPick
-                files={contractFiles}
-                /* Already approved for this programme and broker — shown here
-                   so the required field is satisfied without asking for the
-                   same document twice. Removable, because replacing a contract
-                   with a newer one is a real thing to want. */
-                existing={reusedContracts.map(c => ({
-                  id: c.id, name: c.filename || `Contract ${c.id}`,
-                  from: c.broker_name,
-                }))}
-                onRemoveExisting={id =>
-                  setReusedContracts(cs => cs.filter(c => c.id !== id))}
-                loadingExisting={scope.contractsLoading}
-                /* Contracts DO exist for this programme, they just belong to a
-                   broker nobody has picked. Without this the field reads as
-                   "nothing on file" and the next thing someone does is upload a
-                   second copy of a contract already approved. */
-                unselectedOnFile={reusedContracts.length === 0
-                  ? scope.boundContracts.length : 0}
-                awaitingBroker={scope.awaitingBroker.length > 0
-                  ? { contracts: scope.awaitingBroker.length,
-                      brokers: scope.awaitingBrokerCount }
-                  : null}
-                onAdd={fs => setContractFiles(cs => {
-                  const seen = new Set(cs.map(c => `${c.name}|${c.size}`));
-                  return [...cs, ...fs.filter(f => !seen.has(`${f.name}|${f.size}`))];
-                })}
-                onRemoveAt={i => setContractFiles(cs => cs.filter((_, j) => j !== i))}
-                disabled={scopeIncomplete}
-              />
-            </div>
-
-            {/* Supplementary data — optional, uploaded ONCE here like the templates.
-                Stored with the setup and captured alongside the BDX on every run;
-                never asked for again at run time. */}
-            <div className="space-y-2">
-              <FilePick label="Supplementary Data" icon={<FileUp size={15} />} tone="optional"
-                file={suppFile} onPick={setSuppFile}
-                hint="Extra data captured alongside the BDX on every run — uploaded once here"
-                disabled={scopeIncomplete} />
-              {suppCurrentName && !suppFile && (
-                <div className="text-xs text-ink-muted flex items-center gap-2">
-                  Stored: <b className="truncate min-w-0 flex-1">{suppCurrentName}</b>
-                  <button className="text-red-400 hover:text-red-600 shrink-0" onClick={removeSupplement}>Remove</button>
+            {programsLoaded && programs.length === 0 && (
+              <div className="max-w-2xl mt-3 rounded-md border border-amber-300
+                bg-amber-50 px-3 py-2.5 text-[12px] text-amber-800 leading-relaxed">
+                <div className="font-medium flex items-center gap-1.5">
+                  <AlertTriangle size={14} /> No programme yet
                 </div>
-              )}
-              {up?.format_id && suppFile && (
-                <Button onClick={saveSupplementNow} disabled={savingSupp}>
-                  <Save size={14} /> Save Supplement
-                </Button>
-              )}
+                <p className="mt-1">
+                  A bordereau setup is the last step of configuring a programme.
+                  Create the programme, add its brokers and a contract, and the
+                  setup follows from there.
+                </p>
+                <button type="button"
+                  className="mt-2 rounded bg-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-navy-dark"
+                  onClick={() => navigate("/programs/new")}>
+                  Configure Program →
+                </button>
+              </div>
+            )}
+            <div className="mt-3">
+              {/* Which contract on file this setup runs on — ONE of them. The
+                  radio and the "on file" chip on the Contracts field below are
+                  the SAME state (reusedContracts, held at a single entry), so
+                  clearing it here removes the chip and dropping the chip clears
+                  the radio. */}
+              <ContractPicker scope={scope} programPicked={programId !== ""}
+                selectedId={reusedContracts[0]?.id ?? null}
+                onSelect={id => setReusedContracts(
+                  scope.boundContracts.filter(c => c.id === id))}
+                onClear={() => setReusedContracts([])} />
             </div>
 
-            {/* Reference document(s) — optional (Path A). External docs the contract
-                defers to ("per the Purchasing Guidelines on file"); their text is fed
-                into extraction so deferred clauses (e.g. Authorized / Excluded Classes
-                of Business) resolve into real rules. If omitted and the contract
-                defers, the build pauses below and asks for them (Path B). */}
-            <div className="space-y-2">
+            {/* Why everything below is shut. Said once, where the answer is —
+                not repeated on each of the five upload boxes. */}
+            {noBrokerYet && (
+              <div className="max-w-2xl mt-3 rounded-md border border-amber-300
+                bg-amber-50 px-3 py-2.5 text-[12px] text-amber-800 leading-relaxed">
+                <div className="font-medium flex items-center gap-1.5">
+                  <AlertTriangle size={14} /> No broker on this programme yet
+                </div>
+                <p className="mt-1">
+                  A bordereau arrives from a broker, under a contract you have
+                  approved — so there is nobody for this setup to be for until one
+                  is on the programme. Put a broker on it from the{" "}
+                  <button type="button" className="underline font-medium"
+                    onClick={() => navigate("/brokers")}>Brokers</button>{" "}
+                  screen and the uploads on the <b>Documents</b> tab open up. Setups
+                  already saved stay editable from the Bordereau Setups list.
+                </p>
+              </div>
+            )}
+
+            {/* What the selection above adds up to. It was a small grey chip
+                with grey text inside it — the one line on the tab that states
+                a result, drawn fainter than the fields that produced it. */}
+            {carrierId !== "" && programId !== "" && (
+              <div className="mt-4 flex items-center gap-2.5 rounded-lg border
+                border-border bg-surface-2/70 px-3.5 py-2.5">
+                <FileSpreadsheet size={15} className="shrink-0 text-accent" />
+                <span className="shrink-0 text-[10.5px] font-semibold uppercase
+                  tracking-wide text-ink-soft">
+                  Setup name
+                </span>
+                <span className="truncate text-[13px] font-semibold">{setupName}</span>
+              </div>
+            )}
+
+            {pipelines.length > 0 && (
+              <div className="mt-3 rounded-md border border-border p-3">
+                <div className="flex items-center gap-1.5 text-sm font-medium mb-2">
+                  {/* The heading names the scope it is actually showing. Saying
+                      "Carrier + Program" while the list is narrowed to a broker
+                      is how someone concludes a setup has gone missing. */}
+                  <ShieldCheck size={15} />{" "}
+                  {scope.brokerName
+                    ? <>Saved Setups for This Programme + {scope.brokerName}</>
+                    : <>Programme-wide Saved Setups</>}
+                  <span className="text-[11px] rounded-full px-2 py-0.5 bg-surface-2 text-ink-muted">{pipelines.length}</span>
+                  <InfoTip text={scope.brokerName
+                    ? `Setups built for ${scope.brokerName} on this programme, plus any programme-wide setup that also covers them. A setup is built against a contract and a contract belongs to one broker, so another broker's setups are not listed here. The active one loads automatically. Activating a setup replaces whichever was previously active for the same scope.`
+                    : "Setups on this programme that are not tied to a broker — they cover everyone on it. Pick a broker above to see the setups built on their contract. The active setup for the current scope loads automatically, and activating one replaces whichever was previously active for that same scope."} />
+                </div>
+                <ul className="space-y-1.5">
+                  {pipelines.map(p => (
+                    <li key={p.id} className="flex items-center gap-2 text-sm">
+                      <span className="font-medium">{p.name}</span>
+                      <span className={`text-[11px] rounded-full px-2 py-0.5 ${
+                        p.status === "active" ? "bg-emerald-100 text-emerald-700"
+                        : p.status === "pending_approval" ? "bg-sky-50 text-sky-700"
+                        : "bg-surface-2 text-ink-muted"}`}>
+                        {p.status === "active" ? "Active"
+                         : p.status === "pending_approval" ? "Awaiting approval"
+                         : p.status === "superseded" ? "Superseded" : "Draft"}</span>
+                      {/* Which of the two kinds this is. Without it a programme-wide
+                          setup sitting beside a broker's own looks identical, and
+                          activating the wrong one is silent. */}
+                      <span className="text-[11px] text-ink-soft">
+                        {p.broker_name ?? "programme-wide"}
+                      </span>
+                      {/* <span className="text-xs text-ink-muted">#{p.id}</span> */}
+                      <div className="ml-auto flex gap-1.5">
+                        <Button variant="ghost" className="!py-1"
+                          onClick={() => navigate(editHrefFor(p.id))}>Open / Edit</Button>
+                        {p.status !== "active" && p.status !== "pending_approval" && (
+                          <Button variant="ghost" className="!py-1" disabled={busy || !p.ready}
+                            title={p.ready ? undefined : p.ready_reason}
+                            onClick={() => activateExisting(p.id)}>
+                            {carrierAdmin ? "Activate" : "Send for approval"}</Button>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+          </div>
+
+          {/* ---- Documents — what the setup is built from ----------------- */}
+          <div role="tabpanel" aria-label="Documents"
+            className={tab === "documents" ? "" : "hidden"}>
+            {/* THE DOCUMENTS — the three you must provide, then the two you may.
+                ONE ROW PER GROUP, and nothing but the boxes in it.
+
+                The five used to share a single grid so that every box came out
+                the same width. They did — but a grid row is as tall as its
+                tallest cell, and the output column carries whatever the scope
+                RESOLVED to underneath it. That one card set the height of the
+                whole row: the other two boxes were left with a band of dead space
+                below them, and the optional pair began wherever that band ended,
+                beside a third column with nothing in it.
+
+                So what a box PRODUCES no longer lives inside the box's cell. The
+                sheet choices and the template that applies sit full width beneath
+                the trio, where they have room to be read — and the trio itself is
+                three boxes of exactly equal height, because the cells now hold
+                nothing that can push one of them down.
+
+                Widths: 1-up, then 2-up, then 3-up from xl (the sidebar eats
+                ~200px, so 3 across below that leaves the hints too cramped). At
+                the 2-up step the third box spans both columns rather than sitting
+                alone beside a gap. */}
+            <div>
+              {/* No "Documents" heading: the tab above already carries the
+                  word, and the sentence is the half of it worth reading. */}
+              <p className="mb-3 text-xs text-ink-muted">
+                The three required ones teach Kavachio the mapping; the rest are extras.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                <FilePick label="Input Template" icon={<FileUp size={15} />} file={inputFile} tone="required" required
+                  onPick={f => pickFileWithSheets("input", f)} hint="A representative input sample"
+                  disabled={scopeIncomplete} />
+                {/* Tone follows `required`, which is itself conditional: once the
+                    scope resolves to a template there is nothing you must upload
+                    here, and a box painted as mandatory would say otherwise. */}
+                <FilePick label="Output Template" icon={<FileOut size={15} />} file={outFile}
+                  tone={resolved?.template ? "optional" : "required"}
+                  required={!resolved?.template}
+                  onPick={f => pickFileWithSheets("output", f)}
+                  hint="Upload the layout you have been asked for, or build one here"
+                  altAction={{
+                    label: "Create BDX Template",
+                    onClick: openCreateTemplate,
+                    hint: "Built from a reporting standard or the contract, and "
+                        + "checked against your bordereau",
+                  }}
+                  disabled={scopeIncomplete} />
+
+              {/* Contracts — REQUIRED, so it sits with the other two you must
+                  provide rather than below them. One contract applies to every
+                  sheet; with more than one, map each schedule sheet to its
+                  contract below. */}
+              <div className="sm:col-span-2 xl:col-span-1 flex">
+                {/* `flex` wrapper + `w-full` so the box fills the cell it was
+                    given, spanned or not, and still stretches to the row. */}
+                <ContractPick
+                  files={contractFiles}
+                  /* Already approved for this programme and broker — shown here
+                     so the required field is satisfied without asking for the
+                     same document twice. Removable, because replacing a contract
+                     with a newer one is a real thing to want. */
+                  existing={reusedContracts.map(c => ({
+                    id: c.id, name: contractLabel(c),
+                    from: c.broker_name,
+                  }))}
+                  onRemoveExisting={id =>
+                    setReusedContracts(cs => cs.filter(c => c.id !== id))}
+                  loadingExisting={scope.contractsLoading}
+                  /* Contracts DO exist for this programme, they just belong to a
+                     broker nobody has picked. Without this the field reads as
+                     "nothing on file" and the next thing someone does is upload a
+                     second copy of a contract already approved. */
+                  unselectedOnFile={reusedContracts.length === 0
+                    ? scope.boundContracts.length : 0}
+                  awaitingBroker={scope.awaitingBroker.length > 0
+                    ? { contracts: scope.awaitingBroker.length,
+                        brokers: scope.awaitingBrokerCount }
+                    : null}
+                  onAdd={fs => setContractFiles(cs => {
+                    const seen = new Set(cs.map(c => `${c.name}|${c.size}`));
+                    return [...cs, ...fs.filter(f => !seen.has(`${f.name}|${f.size}`))];
+                  })}
+                  onRemoveAt={i => setContractFiles(cs => cs.filter((_, j) => j !== i))}
+                  disabled={scopeIncomplete}
+                />
+                </div>
+              </div>
+
+            {/* WHAT THE THREE ABOVE PRODUCED — the sheets they offer. Below the
+                trio rather than inside it, so nothing can push one of those
+                boxes down.
+
+                WHICH TEMPLATE APPLIES is no longer answered here. It now has a
+                tab of its own, and the answer given twice — once as a green
+                card under the upload boxes, once as the tab beside them — was
+                two places to check for one fact.
+
+                THE SAME COLUMN TRACK AS THE TRIO, and each thing PLACED in the
+                column of the box it belongs to. A two-column band under a
+                three-column row put "Input Sheets to Map" one and a half boxes
+                wide, ending in the middle of the Output Template above it — near
+                enough to look like an attempt at alignment and far enough to look
+                like a mistake. The explicit col-start matters for a second
+                reason: with auto-placement, an output sheet list would slide into
+                column one whenever the input had none, and sit under the wrong
+                box entirely. */}
+            {(inputSheetOpts || outputSheetOpts) && (
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3
+                              gap-4 items-start">
+                <div className="xl:col-start-1">
+                  <SheetPicker kind="input" options={inputSheetOpts}
+                    selected={inputSheetSel} onToggle={n => toggleSheet("input", n)}
+                    hint="Only the checked sheets are mapped to the output." />
+                </div>
+                <div className="sm:col-start-2 xl:col-start-2">
+                  <SheetPicker kind="output" options={outputSheetOpts}
+                    selected={outputSheetSel} onToggle={n => toggleSheet("output", n)}
+                    hint="The generated output will contain only the checked sheets." />
+                </div>
+              </div>
+            )}
+
+            {/* THE OPTIONAL PAIR, on a row of their own and said to be optional in
+                words. Two across at every width above a phone: a pair drawn as
+                halves reads as a pair, where the same two boxes squeezed into a
+                row of three left a column of nothing beside them. */}
+            <div className="mt-5 mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <h4 className="text-[12px] font-semibold">Extras</h4>
+              <span className="text-xs text-ink-muted">
+                Neither is needed to set the pipeline up — add them when the
+                contract calls for them.
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
+              {/* Supplementary data — optional, uploaded ONCE here like the templates.
+                  Stored with the setup and captured alongside the BDX on every run;
+                  never asked for again at run time. */}
+              <div className="space-y-2">
+                <FilePick label="Supplementary Data" icon={<FileUp size={15} />} tone="optional"
+                  file={suppFile} onPick={setSuppFile}
+                  hint="Extra data captured alongside the BDX on every run — uploaded once here"
+                  disabled={scopeIncomplete} />
+                {suppCurrentName && !suppFile && (
+                  <div className="text-xs text-ink-muted flex items-center gap-2">
+                    Stored: <b className="truncate min-w-0 flex-1">{suppCurrentName}</b>
+                    <button className="text-red-400 hover:text-red-600 shrink-0" onClick={removeSupplement}>Remove</button>
+                  </div>
+                )}
+                {up?.format_id && suppFile && (
+                  <Button onClick={saveSupplementNow} disabled={savingSupp}>
+                    <Save size={14} /> Save Supplement
+                  </Button>
+                )}
+              </div>
+
+              {/* Reference document(s) — optional (Path A). External docs the contract
+                  defers to ("per the Purchasing Guidelines on file"); their text is fed
+                  into extraction so deferred clauses (e.g. Authorized / Excluded Classes
+                  of Business) resolve into real rules. If omitted and the contract
+                  defers, the build pauses below and asks for them (Path B). */}
               <ReferencePick
                 files={refFiles}
                 onAdd={fs => setRefFiles(prev => [...prev, ...fs])}
@@ -1649,119 +1826,137 @@ export default function DirectSetup() {
                 disabled={scopeIncomplete}
               />
             </div>
-          </div>
+            </div>
+
+            {!up?.format_id && !building && staged.length > 1 && outputSheetOpts && outputSheetSel.size > 0 && (
+              <div className="mt-4">
+                <div className="text-sm font-medium mb-1">Map Contracts to Schedule Sheets</div>
+                <p className="text-xs text-ink-muted mb-2">
+                  Pre-filled by name (e.g. a “Sch H” contract → the “Schedule H” sheet).
+                  One contract can cover several sheets — just pick it on each. Leave a
+                  sheet on <b>No Contract</b> to skip contract validation for it.
+                </p>
+                <div className="grid grid-cols-1  gap-2 max-w-3xl">
+                  {[...outputSheetSel].map(sh => {
+                    const auto = staged.findIndex(
+                      e => scheduleOf(e.name) && scheduleOf(e.name) === scheduleOf(sh));
+                    return (
+                      <div key={sh} className="flex items-center gap-2 text-sm">
+                        <span className="w-48 truncate">{sh}</span>
+                        <select className="text-xs px-2 py-1 rounded border border-border bg-white flex-1"
+                          value={sheetContractMap[sh] ?? auto}
+                          onChange={e => setSheetContractMap(m => ({ ...m, [sh]: Number(e.target.value) }))}>
+                          <option value={-1}>— No Contract —</option>
+                          {staged.map((e, i) => (
+                            <option key={i} value={i}>
+                              {e.name}{e.kind === "existing" ? " (on file)" : ""}
+                            </option>))}
+                        </select>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
           </div>
 
-          {!up?.format_id && !building && staged.length > 1 && outputSheetOpts && outputSheetSel.size > 0 && (
-            <div className="mt-4">
-              <div className="text-sm font-medium mb-1">Map Contracts to Schedule Sheets</div>
-              <p className="text-xs text-ink-muted mb-2">
-                Pre-filled by name (e.g. a “Sch H” contract → the “Schedule H” sheet).
-                One contract can cover several sheets — just pick it on each. Leave a
-                sheet on <b>No Contract</b> to skip contract validation for it.
-              </p>
-              <div className="grid grid-cols-1  gap-2 max-w-3xl">
-                {[...outputSheetSel].map(sh => {
-                  const auto = staged.findIndex(
-                    e => scheduleOf(e.name) && scheduleOf(e.name) === scheduleOf(sh));
-                  return (
-                    <div key={sh} className="flex items-center gap-2 text-sm">
-                      <span className="w-48 truncate">{sh}</span>
-                      <select className="text-xs px-2 py-1 rounded border border-border bg-white flex-1"
-                        value={sheetContractMap[sh] ?? auto}
-                        onChange={e => setSheetContractMap(m => ({ ...m, [sh]: Number(e.target.value) }))}>
-                        <option value={-1}>— No Contract —</option>
-                        {staged.map((e, i) => (
-                          <option key={i} value={i}>
-                            {e.name}{e.kind === "existing" ? " (on file)" : ""}
-                          </option>))}
-                      </select>
-                    </div>
-                  );
-                })}
-              </div>
+          {/* ---- Output BDX Template — the layout a run delivers ------------
+              This review used to be a route of its own, opened in a SECOND
+              BROWSER TAB because leaving this screen would have dropped every
+              staged file. It is a tab here instead.
+
+              Mounted only once somebody asks for it — it fetches a template of
+              its own, not worth doing for the visits that never open it — and
+              kept mounted afterwards, because it can hold unsaved column edits
+              that a remount would discard without saying so. */}
+          {outputOpened && (
+            <div role="tabpanel" aria-label="Output BDX Template"
+              className={tab === "output" ? "" : "hidden"}>
+              {/* WHICH TEMPLATE APPLIES, above the template itself. It is the
+                  question this tab exists to answer, and the editor below
+                  cannot answer it: the editor shows a template, this says
+                  whether it is THIS selection's or one inherited from further
+                  up, and carries the ways to change that. `onOpen` is dropped —
+                  "Review fields" led here, and we are here. */}
+              {scopeIncomplete ? (
+                <div className="rounded-md border border-amber-300 bg-amber-50
+                  px-3 py-2.5 text-[12px] leading-relaxed text-amber-800">
+                  <div className="font-medium flex items-center gap-1.5">
+                    <AlertTriangle size={14} /> Nothing to show yet
+                  </div>
+                  <p className="mt-1">
+                    Pick a programme and a broker on <b>Setup Details</b> first —
+                    which template applies follows from that selection.
+                  </p>
+                </div>
+              ) : pendingOutUpload ? (
+                /* UPLOADED, NOT YET CREATED. The two ways to get a template do
+                   not arrive here at the same moment: "Create BDX Template"
+                   makes one on the server there and then, while an uploaded
+                   layout is only staged and is read when the build runs.
+                   Without this branch the tab answered the upload with the
+                   template the scope resolved to — somebody else's columns,
+                   under a heading naming the file they had just chosen. */
+                <div className="rounded-md border border-sky-200 bg-sky-50
+                  px-3 py-2.5 text-[12px] leading-relaxed text-sky-800">
+                  <div className="font-medium flex items-center gap-1.5">
+                    <FileOut size={14} /> Uploaded — not created yet
+                  </div>
+                  <p className="mt-1">
+                    <b className="break-all">{outFile!.name}</b> becomes{" "}
+                    {/* Only that template's next version if the upload is saved
+                        under its name, which happens only when it is filed
+                        under exactly the same programme, broker and contract.
+                        Otherwise the upload is saved beside it. */}
+                    {resolved?.found && resolved.template!.name === uploadTemplateName
+                      ? <>version {resolved.template!.version + 1} of{" "}
+                          <b>{resolved.template!.name}</b></>
+                      : <>this selection's Output BDX Template</>}{" "}
+                    when you run <b>Set Up Bordereau Pipeline</b>. Nothing has
+                    read the file yet, so there are no columns to review here
+                    until then — and the template{" "}
+                    {resolved?.found ? <>active in the meantime</> : <>that applies</>}{" "}
+                    is not shown, because it is not the file you chose.
+                  </p>
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    <Button variant="ghost" onClick={() => setTab("documents")}>
+                      Back to Documents
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <OutputTemplateState
+                    resolving={resolving} resolved={resolved}
+                    onCreate={openCreateTemplate}
+                    // The editor below has its own Download Template; one
+                    // button for the same file, not two.
+                    onDownload={reviewTemplateId ? undefined : downloadTemplate} />
+                  {reviewTemplateId && (
+                    <OutputTemplateEditor
+                      key={reviewTemplateId}
+                      templateId={reviewTemplateId}
+                      embedded
+                      /* A template that is in use is versioned rather than
+                         edited, so an edit can land on a NEW id. Follow it here
+                         and ask the server to resolve the scope again;
+                         navigating to it would unmount this whole screen, which
+                         is what the second browser tab existed to avoid. */
+                      onVersioned={nextId => {
+                        setReviewOverrideId(nextId);
+                        setResolveTick(n => n + 1);
+                      }} />
+                  )}
+                </div>
+              )}
             </div>
           )}
 
-          {/* The action, and — when it is off — WHY, in words on the page.
-              A greyed button whose only explanation is a tooltip asks the user
-              to discover that hovering it is worth doing; most people conclude
-              the screen is broken instead. The same sentence still rides along
-              as `title` for anyone who does hover. */}
-          <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border pt-4">
-            <Button onClick={buildSetup}
-              disabled={building || !inputFile || staged.length === 0}
-              title={!building && (!inputFile || staged.length === 0)
-                ? `Still needed: ${missingForBuild().join("; ")}`
-                : (!building && !outFile && !resolved?.template
-                    ? "No output template yet — you'll be offered the two ways to create one"
-                    : undefined)}
-              className="!px-5 !py-2.5 !text-[13.5px] !rounded-lg
-                shadow-md hover:shadow-lg hover:brightness-110 transition disabled:hover:brightness-100
-                disabled:shadow-none">
-              {"Set Up Bordereau Pipeline"}
-            </Button>
-            {!building && (!inputFile || staged.length === 0) && (
-              <span className="inline-flex items-center gap-1.5 text-[12.5px] text-warn">
-                <AlertTriangle size={14} className="shrink-0" />
-                Still needed: {missingForBuild().join(", ")}
-              </span>
-            )}
-            {/* Deliberately NOT gated on having an output template: without one
-                the click OFFERS the two ways to create it (see buildSetup), which
-                is the whole point. Gating it here would leave a user staring at a
-                dead button with no way to find out what is missing. */}
-            {!building && inputFile && staged.length > 0 && !outFile && !resolved?.template && (
-              <span className="text-[12.5px] text-ink-muted">
-                No output template yet — you'll be offered the two ways to create one.
-              </span>
-            )}
-          </div>
-
-          {pipelines.length > 0 && (
-            <div className="mt-3 rounded-md border border-border p-3">
-              <div className="flex items-center gap-1.5 text-sm font-medium mb-2">
-                {/* The heading names the scope it is actually showing. Saying
-                    "Carrier + Program" while the list is narrowed to a broker
-                    is how someone concludes a setup has gone missing. */}
-                <ShieldCheck size={15} />{" "}
-                {scope.brokerName
-                  ? <>Saved Setups for This Programme + {scope.brokerName}</>
-                  : <>Programme-wide Saved Setups</>}
-                <span className="text-[11px] rounded-full px-2 py-0.5 bg-surface-2 text-ink-muted">{pipelines.length}</span>
-                <InfoTip text={scope.brokerName
-                  ? `Setups built for ${scope.brokerName} on this programme, plus any programme-wide setup that also covers them. A setup is built against a contract and a contract belongs to one broker, so another broker's setups are not listed here. The active one loads automatically. Activating a setup replaces whichever was previously active for the same scope.`
-                  : "Setups on this programme that are not tied to a broker — they cover everyone on it. Pick a broker above to see the setups built on their contract. The active setup for the current scope loads automatically, and activating one replaces whichever was previously active for that same scope."} />
-              </div>
-              <ul className="space-y-1.5">
-                {pipelines.map(p => (
-                  <li key={p.id} className="flex items-center gap-2 text-sm">
-                    <span className="font-medium">{p.name}</span>
-                    <span className={`text-[11px] rounded-full px-2 py-0.5 ${p.status === "active"
-                      ? "bg-emerald-100 text-emerald-700" : "bg-surface-2 text-ink-muted"}`}>
-                      {p.status === "active" ? "Active" : p.status === "superseded" ? "Superseded" : "Draft"}</span>
-                    {/* Which of the two kinds this is. Without it a programme-wide
-                        setup sitting beside a broker's own looks identical, and
-                        activating the wrong one is silent. */}
-                    <span className="text-[11px] text-ink-soft">
-                      {p.broker_name ?? "programme-wide"}
-                    </span>
-                    {/* <span className="text-xs text-ink-muted">#{p.id}</span> */}
-                    <div className="ml-auto flex gap-1.5">
-                      <Button variant="ghost" className="!py-1"
-                        onClick={() => navigate(editHrefFor(p.id))}>Open / Edit</Button>
-                      {p.status !== "active" && (
-                        <Button variant="ghost" className="!py-1" disabled={busy || !p.ready}
-                          title={p.ready ? undefined : p.ready_reason}
-                          onClick={() => activateExisting(p.id)}>Activate</Button>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
+          {/* ---- Under every tab -------------------------------------------
+              What the button builds is made of all three tabs, so the button —
+              and whatever the last build has to say about itself — belongs to
+              none of them and sits beneath all of them. */}
           {/* Deferred external references (multi-contract, non-halting flow):
               contract(s) name documents that weren't attached — rules from those
               documents were NOT generated. Fewer clauses/rules than expected is
@@ -1779,7 +1974,8 @@ export default function DirectSetup() {
                 ))}
               </ul>
               <p className="text-xs text-amber-800/90 mt-2">
-                Attach these under <b>Reference document(s)</b> above and click
+                Attach these under <b>Reference document(s)</b> on the{" "}
+                <b>Documents</b> tab and click
                 <b> Set Up Bordereau Pipeline</b> again — their clauses then become real rules.
               </p>
             </div>
@@ -1807,6 +2003,71 @@ export default function DirectSetup() {
               </div>
             </div>
           )}
+          {/* The action, and — when it is off — WHY, in words on the page.
+              A greyed button whose only explanation is a tooltip asks the user
+              to discover that hovering it is worth doing; most people conclude
+              the screen is broken instead. The same sentence still rides along
+              as `title` for anyone who does hover. */}
+          <div className="-mx-5 -mb-5 mt-6 flex flex-wrap items-center gap-x-4
+            gap-y-3 rounded-b-lg border-t border-border bg-surface-2/60 px-5 py-4">
+            <Button onClick={buildSetup}
+              disabled={building || brokerMissing || !inputFile || staged.length === 0}
+              title={!building && (brokerMissing || !inputFile || staged.length === 0)
+                ? `Still needed: ${missingForBuild().join("; ")}`
+                : (!building && !outFile && !resolved?.template
+                    ? "No output template yet — you'll be offered the two ways to create one"
+                    : undefined)}
+              /* Disabled goes GREY rather than half-strength teal. At 50%
+                 opacity the brand colour turns into a washed-out version of
+                 itself, which reads as a rendering fault; a flat grey control
+                 reads as one that is switched off. */
+              className="!px-5 !py-2.5 !text-[13.5px] !rounded-lg
+                shadow-md hover:shadow-lg hover:brightness-110 transition disabled:hover:brightness-100
+                disabled:shadow-none disabled:!opacity-100 disabled:!bg-surface-2
+                disabled:!text-ink-soft disabled:ring-1 disabled:ring-inset disabled:ring-border">
+              {"Set Up Bordereau Pipeline"}
+            </Button>
+            {/* Only what can be done on THIS tab. Setup Details has no upload,
+                so the input template (and uploading a contract) are named on
+                Documents, not here — "Next: Documents" is the way there. */}
+            {!building && (brokerMissing || !inputFile || staged.length === 0)
+              && missingOnTab().length > 0 && (
+              <span className="inline-flex items-center gap-1.5 text-[12.5px] text-warn">
+                <AlertTriangle size={14} className="shrink-0" />
+                Still needed: {missingOnTab().join(", ")}
+              </span>
+            )}
+            {/* Deliberately NOT gated on having an output template: without one
+                the click OFFERS the two ways to create it (see buildSetup), which
+                is the whole point. Gating it here would leave a user staring at a
+                dead button with no way to find out what is missing. */}
+            {!building && inputFile && staged.length > 0 && !outFile && !resolved?.template && (
+              <span className="text-[12.5px] text-ink-muted">
+                No output template yet — you'll be offered the two ways to create one.
+              </span>
+            )}
+            {/* The way FORWARD, named rather than numbered. The tabs above can
+                be clicked in any order, but nothing on the first tab said that
+                the form continues past it — so somebody who filled it in and
+                found the build button disabled had no next move on screen.
+                Only up to the last tab. HIGHLIGHTED while the build cannot run
+                yet — then going forward is the next move (e.g. the input
+                template is uploaded on Documents); plain once the build button
+                is live, so the two never compete. */}
+            {nextTab && (
+              <Button
+                variant={!building && !nextTab.disabled
+                         && (brokerMissing || !inputFile || staged.length === 0)
+                  ? "primary" : "secondary"}
+                className="ml-auto"
+                disabled={!!nextTab.disabled}
+                title={nextTab.disabled ? nextTab.disabledReason : undefined}
+                onClick={() => setTab(nextTab.key)}>
+                Next: {nextTab.label} <ArrowRight size={14} />
+              </Button>
+            )}
+          </div>
+
         </Card>
 
         {/* The reference-document decision. Both actions resume the paused build
@@ -1906,13 +2167,11 @@ export default function DirectSetup() {
               </div>
             </div>
           }>
-          <p className="text-sm text-ink-muted">
-            The AI classified each tab from its column headers.{" "}
-            <strong>Data</strong> tabs are validated (rules are generated &amp; run on them).{" "}
-            <strong>Reference</strong> tabs are lookup / mapping tables, and{" "}
-            <strong>Summary</strong> tabs roll up totals from the data tabs — both are{" "}
-            <strong>excluded from rule generation</strong>. Fix any that are wrong, then proceed.
-          </p>
+          <ul className="list-disc pl-5 text-sm text-ink-muted space-y-0.5">
+            <li><strong>Data:</strong> the actual records.</li>
+            <li><strong>Reference:</strong> lookup lists, like codes.</li>
+            <li><strong>Summary:</strong> totals from the data tabs.</li>
+          </ul>
           <div className="mt-3 space-y-1.5">
             {sheetReview?.structure.sheets.map((sh, i) => {
               const bucket = sheetBucket(sh);
@@ -1948,21 +2207,19 @@ export default function DirectSetup() {
           </div>
         </Modal>
 
-        {/* Not mounted at all while the builder is off, so nothing of it can
-            be reached by a stray state change during a demo. */}
-        {SHOW_BDX_TEMPLATE_BUILDER && <CreateOutputTemplate
+        <CreateOutputTemplate
           open={showCreateTemplate}
           onClose={() => setShowCreateTemplate(false)}
           mga={mga}
           programId={programId === "" ? 0 : Number(programId)}
           carrierPartyId={carrierId === "" ? null : Number(carrierId)}
           brokerPartyId={scope.brokerPartyId === "" ? null : Number(scope.brokerPartyId)}
-          contractId={scope.contractId === "" ? null : Number(scope.contractId)}
+          contractId={pickedContractId}
           scopeNames={{
             carrier: carrierName || mga,
             programme: programs.find(p => p.id === programId)?.name ?? null,
             broker: scope.brokerName,
-            contract: scope.contractName,
+            contract: pickedContractName,
           }}
           // Both sides of the job. The bordereau says which of a territory's
           // published columns can actually be filled; the contracts say what
@@ -1982,11 +2239,7 @@ export default function DirectSetup() {
             // the only thing that knows which setup would run against it.
             setResolveTick(n => n + 1);
             setMsg(null);
-            // The uploads staged here are NOT thrown away by reviewing the
-            // template — the card below links out and the user comes back to
-            // the same screen with the same files attached.
-            setJustCreated({ id: t.id, name: t.name });
-          }} />}
+          }} />
 
         {/* Save / Activate / Delete for the setup just built (or loaded) in this
             scope. Editing the mapping itself still happens on the setup's own
@@ -2002,11 +2255,15 @@ export default function DirectSetup() {
               border-t border-border shadow-[0_-1px_8px_rgba(17,24,39,0.06)]"
               style={{ left: "var(--sidebar-w, 256px)" }}>
               <div className="flex flex-wrap items-center gap-2">
-                {currentPipeline.status !== "active" && (
+                {/* A setup already WAITING is not finished again from here —
+                    deciding on it is the carrier admin's, on the setup's own
+                    page where the whole chain is laid out to be read. */}
+                {currentPipeline.status !== "active"
+                  && currentPipeline.status !== "pending_approval" && (
                   <Button onClick={() => activateExisting(currentPipeline.id)}
                     disabled={busy || !currentPipeline.ready}
                     title={currentPipeline.ready ? undefined : currentPipeline.ready_reason}>
-                    <CheckCircle2 size={15} /> Activate Setup
+                    <CheckCircle2 size={15} /> {finishLabel}
                   </Button>
                 )}
                 <Button variant="secondary" onClick={saveDraft} disabled={busy}>
@@ -2097,10 +2354,11 @@ function FilePick({ label, icon, file, onPick, accept, hint, tone, required, dis
         if (disabled) return;
         const f = e.dataTransfer.files?.[0]; if (f) onPick(f);
       }}
-      className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
+      className={`h-full flex flex-col justify-center rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
           : `${cardOpens ? "cursor-pointer" : ""} ${drag ? "border-navy bg-navy/5" : file ? "border-emerald-300 bg-emerald-50/40" : t.idle}`}`}>
-      <input ref={ref} type="file" accept={accept ?? ".xlsx,.xls,.csv,.xml,.json"} className="hidden" disabled={disabled}
+      <input ref={ref} type="file" aria-label={label}
+        accept={accept ?? ".xlsx,.xls,.csv,.xml,.json"} className="hidden" disabled={disabled}
         onClick={e => e.stopPropagation()}
         onChange={e => onPick(e.target.files?.[0] ?? null)} />
       <div className="flex flex-wrap items-center justify-center gap-1.5 text-sm font-medium mb-1.5">
@@ -2115,7 +2373,7 @@ function FilePick({ label, icon, file, onPick, accept, hint, tone, required, dis
             onClick={e => { e.stopPropagation(); onPick(null); if (ref.current) ref.current.value = ""; }}>✕</button>
         </div>
       ) : disabled ? (
-        <div className="text-[11px] text-ink-muted">Select a carrier and program first</div>
+        <div className="text-[11px] text-ink-muted">Select a programme and broker first</div>
       ) : altAction ? (
         <div className="text-[11px] text-ink-muted">
           <div className="flex flex-wrap items-center justify-center gap-2">
@@ -2168,7 +2426,7 @@ function ReferencePick({ files, onAdd, onRemoveAt, disabled }: {
         if (disabled) return;
         const fs = Array.from(e.dataTransfer.files || []); if (fs.length) onAdd(fs);
       }}
-      className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
+      className={`h-full flex flex-col justify-center rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
           : `cursor-pointer ${drag ? "border-navy bg-navy/5" : files.length ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.optional.idle}`}`}>
       <input ref={ref} type="file" multiple accept=".pdf,.docx,.doc,.txt,.xlsx,.xls,.csv" className="hidden" disabled={disabled}
@@ -2193,7 +2451,7 @@ function ReferencePick({ files, onAdd, onRemoveAt, disabled }: {
           </div>
         </div>
       ) : disabled ? (
-        <div className="text-[11px] text-ink-muted">Select a carrier and program first</div>
+        <div className="text-[11px] text-ink-muted">Select a programme and broker first</div>
       ) : (
         <div className="text-[11px] text-ink-muted">
           <span className={`inline-flex items-center gap-1 font-medium ${DROP_TONES.optional.cta}`}>
@@ -2241,7 +2499,7 @@ function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
         if (disabled) return;
         const fs = Array.from(e.dataTransfer.files || []); if (fs.length) onAdd(fs);
       }}
-      className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none
+      className={`h-full w-full flex flex-col justify-center rounded-lg border-2 border-dashed p-4 text-center transition select-none
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
           : `cursor-pointer ${drag ? "border-navy bg-navy/5" : have ? "border-emerald-300 bg-emerald-50/40" : DROP_TONES.required.idle}`}`}>
       <input ref={ref} type="file" multiple accept=".pdf,.docx" className="hidden" disabled={disabled}
@@ -2304,7 +2562,7 @@ function ContractPick({ files, existing, onRemoveExisting, loadingExisting,
           </div>
         </div>
       ) : disabled ? (
-        <div className="text-[11px] text-ink-muted">Select a carrier and program first</div>
+        <div className="text-[11px] text-ink-muted">Select a programme and broker first</div>
       ) : (
         <div className="text-[11px] text-ink-muted">
           <span className={`inline-flex items-center gap-1 font-medium ${DROP_TONES.required.cta}`}>
@@ -2354,6 +2612,20 @@ function SheetPicker({ kind, options, selected, onToggle, hint }: {
         ))}
       </div>
       <p className="mt-1.5 text-[11px] text-ink-muted">{hint}</p>
+    </div>
+  );
+}
+
+
+/** One headline number from the build. `tone` marks the count that is work
+ *  still to do, so it is not read at the same weight as the two that are done. */
+function Stat({ v, k, tone }: { v: number; k: string; tone?: "warn" }) {
+  return (
+    <div className={`rounded-lg border p-3 ${
+      tone === "warn" && v > 0 ? "border-amber-200 bg-amber-50/60" : "border-border"}`}>
+      <div className={`text-[20px] font-semibold ${
+        tone === "warn" && v > 0 ? "text-amber-700" : "text-ink"}`}>{v}</div>
+      <div className="text-[11px] text-ink-muted">{k}</div>
     </div>
   );
 }

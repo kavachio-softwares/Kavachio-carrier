@@ -1,5 +1,6 @@
-import { api } from "./client";
+import { api, streamNdjson } from "./client";
 import { currentMga } from "../auth";
+import type { ItdSummary } from "./itd";
 
 // Feature 10 — File Intake Channels. Backs "How Files Arrive" and
 // "Files Received".
@@ -19,7 +20,8 @@ export type IntakeRoute = {
   address: string;
   /** The full address to hand a broker — composed server-side from SFTP_HOST. */
   display_address: string;
-  /** Email routes only: the plus-address to hand THIS broker. Email is the one
+  /** Email routes only: the intake mailbox to hand THIS broker (the same for
+   *  every broker — From: and the carrier in Cc say whose file it is). Email is the one
    *  channel where the address a broker sends FROM and the address they send TO
    *  are different things, so the screen needs both. */
   send_to: string | null;
@@ -41,27 +43,163 @@ export type IntakeRoute = {
   disabled_at: string | null;
   /** Only returned by create — the folder that was made on disk. */
   folder?: string | null;
+  /** Only returned by create (email): the carrier address to copy. */
+  cc?: string | null;
+  /** Only returned by create (email / SFTP): who is being emailed the
+   *  instructions, and whether broker emails are switched on at all. */
+  guide?: GuideSent;
+  /** SFTP pull routes only: the server Kavachio collects from. The password
+   *  or key is never sent back — `has_secret` only says one is stored. Absent
+   *  (or null) on an SFTP route on Kavachio's own server. */
+  sftp?: SftpRouteInfo | null;
+  /** SFTP routes on Kavachio's own server: the broker's login. Null when the
+   *  channel has none yet (one made before logins existed). */
+  login?: SftpLogin | null;
 };
 
+/** `blocked`: recipients the MAIL_ALLOWED_RECIPIENTS test guard will skip —
+ *  "sending" to them delivers nothing. */
+export type GuideSent = { recipients: string[]; sending: boolean; blocked?: string[] };
+
+// ── Kavachio's own SFTP server ──────────────────────────────────────────────
+// The broker signs in with a login of their own and uploads into /incoming;
+// Kavachio's answer to each file is put in /outbound.
+
+/** A broker's login. The password is only ever in the response that made it. */
+export type SftpLogin = {
+  username: string;
+  host: string;
+  port: number;
+  /** Where they upload — and where a login starts. */
+  folder: string;
+  /** Where Kavachio puts its receipt and result for each file. */
+  results_folder: string;
+  /** When the current password was made. */
+  issued_at: string | null;
+  last_login_at: string | null;
+  live: boolean;
+  password?: string;
+};
+
+export type SftpServerInfo = {
+  host: string;
+  port: number;
+  /** listening | waiting | failed | starting | not_started | off */
+  status: { mode: string; port?: number; error?: string | null };
+  fingerprints: { type: string; fingerprint: string }[];
+};
+
+/** A new password for the broker's login (or their first login), emailed to
+ *  them. The old password stops working at once. */
+export async function newSftpLogin(routeId: number): Promise<{ login: SftpLogin; guide: GuideSent }> {
+  const { data } = await api.post(`/intake/routes/${routeId}/sftp-login`, null,
+    { params: { mga: currentMga() } });
+  return data;
+}
+
+// ── external SFTP pull ──────────────────────────────────────────────────────
+// Kavachio signs in to the carrier's (or the broker's) own SFTP server as a
+// client, collects finished files from one folder, then moves or deletes them.
+
+export type SftpAuth = "password" | "key";
+export type SftpAfter = "move" | "delete";
+export type SftpInterval = 5 | 15 | 60;
+
+/** What the server keeps about a pull route — never the secret itself. */
+export type SftpRouteInfo = {
+  host: string;
+  port: number;
+  username: string;
+  auth: SftpAuth;
+  remote_dir: string;
+  after: SftpAfter;
+  processed_dir: string | null;
+  interval_minutes: number;
+  fingerprint: string | null;
+  last_checked_at: string | null;
+  last_error: string | null;
+  last_collected: number | null;
+  has_secret: boolean;
+};
+
+/** The connection details as typed in the dialog. Exactly one of `password`
+ *  / `private_key` is sent, matching `auth`. */
+export type SftpConnection = {
+  host: string;
+  port: number;
+  username: string;
+  auth: SftpAuth;
+  password?: string;
+  private_key?: string;
+  passphrase?: string;
+  remote_dir: string;
+  after?: SftpAfter;
+  processed_dir?: string;
+};
+
+export type SftpTestResult = {
+  ok: boolean;
+  /** SHA256 of the server's host key — pinned on create. */
+  fingerprint: string | null;
+  key_type: string | null;
+  files_found: number | null;
+  sample: string[];
+  /** Whether we could write to the processed folder (null: not checked). */
+  can_write: boolean | null;
+  warnings: string[];
+  /** Plain words, when ok is false. */
+  error: string | null;
+  error_code: "dns" | "refused" | "timeout" | "auth" | "host_key" | "no_dir"
+    | "permission" | "protocol" | null;
+};
+
+/** Try the connection without saving anything. Never throws for a connection
+ *  problem — `ok: false` with a plain-words `error` instead. */
+export async function testSftp(body: SftpConnection): Promise<SftpTestResult> {
+  const { data } = await api.post("/intake/sftp/test", body, { params: { mga: currentMga() } });
+  return data;
+}
+
 export type BrokerLite = { party_id: number; legal_name: string };
-export type ProgrammeLite = { program_id: number; name: string };
+
+/** An address we already hold for a broker — their portal login, NOT necessarily
+ *  the mailbox their export job sends as. Offered as a suggestion the user can
+ *  overwrite, never taken on trust. */
+export type BrokerEmail = { email: string; name: string | null; status: string };
+export type ProgrammeLite = {
+  program_id: number; name: string;
+  /** Short code a sender can write instead of the name, e.g. PRG-7K3QMA. */
+  code?: string;
+  /** The contracts this broker's files on it can be written under. */
+  contracts?: { contract_id: number; name: string; code?: string }[];
+};
 
 export type RoutesResponse = {
   routes: IntakeRoute[];
   brokers: BrokerLite[];
   /** Which programmes each broker is on, keyed by party_id as a string. */
   broker_programmes: Record<string, ProgrammeLite[]>;
+  /** Known addresses per broker, active first. Keyed by party_id as a string. */
+  broker_emails: Record<string, BrokerEmail[]>;
   channels: Channel[];
-  /** Channels we PULL from — these get a "Collect now". */
+  /** Channels we PULL from, as opposed to being pushed to. */
   collecting: Channel[];
   /** Channels that are wired end to end and can be created. */
   creatable: Channel[];
   sftp_host: string;
+  /** Kavachio's own SFTP server, where an SFTP channel's broker signs in.
+   *  Optional so an older server that does not send it still renders. */
+  sftp_server?: SftpServerInfo;
   /** 10.3 — the inbox brokers email. Config like sftp_host, not data. */
   email_mailbox: string | null;
+  /** The carrier address brokers must copy (Cc) on every bordereau email. */
+  carrier_cc?: string | null;
   /** True once IMAP_HOST/USER/PASS are set, so the screen can say whether the
    *  mailbox is actually reachable rather than implying it is. */
   email_ready: boolean;
+  /** How each pulled channel is noticing files right now. Optional so an older
+   *  server that does not send it still renders. */
+  collector?: { sftp: CollectorStatus; email: CollectorStatus };
   tiles: {
     ways_on: number;
     ways_total: number;
@@ -103,41 +241,80 @@ export type Arrival = {
   sender_notified_at: string | null;
   sender_notified_via: string | null;
   bdx_upload_id: number | null;
+  /** The reference a partner quotes back at us. */
+  public_ref?: string | null;
+  /** The submission this file is a version of, and which version. A
+   *  corrected file is the next version of the same submission. */
+  submission_ref?: string | null;
+  version_no?: number | null;
+  /** The reporting period the file was FOR ('YYYY-MM'), when known. */
+  reporting_period?: string | null;
+  // ── 12.3 — what a PERSON decided ─────────────────────────────────────────
+  /** null means nobody has looked at this yet — which is what makes it a queue. */
+  resolution: "released" | "discarded" | null;
+  resolved_at: string | null;
+  resolved_by_user_id: number | null;
+  /** That person's name, so the record says who rather than "user 12". */
+  resolved_by_name?: string | null;
+  resolution_note: string | null;
+  /** Set once retention has deleted the stored bytes. The row outlives them. */
+  bytes_purged_at: string | null;
+  /** False when there is no stored copy, it has been purged, or the file failed
+   *  the security scan — an infected file is never handed to anybody. */
+  can_download: boolean;
+  is_infected: boolean;
+  // ── What became of it once it was run (migration 29) ─────────────────────
+  /** One word for the run, in this screen's vocabulary. null while it has not
+   *  been run — or is being run right now. */
+  run_result: RunResult | null;
+  /** The raw state: null (waiting), running, done, failed, not_run, or
+   *  pre_autorun (arrived before auto-run existed). */
+  run_state: "running" | "done" | "failed" | "not_run" | "pre_autorun" | null;
+  /** Why a run failed, or why it could not be run automatically. */
+  run_error: string | null;
+  run_at: string | null;
+  /** The output the run produced — /uploads/:id/exceptions opens it. */
+  run_export_id: number | null;
+  run_exception_count: number | null;
+  run_rows: number | null;
+  /** The contract the file was checked against. */
+  contract_id: number | null;
+  contract_name: string | null;
+  /** Who uploaded it, for a manual upload. */
+  submitted_by_name: string | null;
+  // ── ITD bordereaux (feature 13) ──────────────────────────────────────────
+  /** Whether the file was read as inception-to-date. null when the setup has
+   *  ITD handling off, or the file was not run. */
+  load_type?: "itd" | "regular" | null;
+  /** Why it was read that way, in a sentence. */
+  load_type_reason?: string | null;
+  /** The span the file covers (ISO dates). */
+  period_start?: string | null;
+  period_end?: string | null;
+  /** What the comparison found. null when ITD handling is off. */
+  itd_summary?: ItdSummary | null;
 };
+
+/** ingested — every row passed · exceptions — clean rows in, the rest held for
+ *  a decision · not_checked — run, but the contract checks could not run ·
+ *  failed — stopped, nothing written · not_run — could not be run automatically. */
+export type RunResult = "ingested" | "exceptions" | "not_checked" | "failed" | "not_run";
 
 export type ArrivalsResponse = {
   rows: Arrival[];
-  counts: { total: number; accepted: number; held: number; turned_away: number };
+  counts: { total: number; accepted: number; held: number; turned_away: number;
+            /** Held AND unresolved — the only number anybody has to act on. */
+            waiting: number };
 };
 
-export type PollResult = {
-  route_id: number;
-  address: string;
-  looked_in: string;
-  accepted: number;
-  turned_away: number;
-  /** SFTP only — a file still being written is left for the next sweep. */
-  skipped_still_writing?: number;
-  files: { filename: string; outcome: Outcome; reason: string | null;
-           arrival_id: number; from?: string; matched?: string; subject?: string }[];
-  error?: string;
-  skipped?: string;
-  // ── email only (10.3) ────────────────────────────────────────────────────
-  /** Messages read this sweep. */
-  messages?: number;
-  held?: number;
-  /** Mail with nothing attached — a newsletter, an out-of-office. Not a
-   *  refusal: recording those would bury the real arrivals. */
-  no_attachment?: number;
-  too_large?: number;
-  /** Already landed on a previous sweep, matched on Message-ID. */
-  already_seen?: number;
-  /** Matched no route, and no single tenant owns email intake — left in the
-   *  mailbox rather than filed against the wrong carrier. */
-  unattributable?: number;
-  /** How many of the files collected belong to the route you clicked. */
-  for_this_route?: number;
-  note?: string;
+/** How a pulled channel notices a file, as the server reports it.
+ *  `watching` (SFTP, a filesystem watcher) and `idle` (email, IMAP IDLE) both
+ *  mean the moment it lands; `timer` is the fallback when that cannot run.
+ *  `check_seconds` is the backup sweep for the first two, the timer for the
+ *  third. */
+export type CollectorStatus = {
+  mode: "watching" | "idle" | "timer" | "connecting" | "off" | "not_configured";
+  check_seconds: number;
 };
 
 /** A refused file the design would call "held": kept, and waiting on a person. */
@@ -162,9 +339,24 @@ export async function createRoute(body: {
    *  broker emails the same inbox, so the mailbox cannot tell routes apart —
    *  who the mail comes from is what does. */
   sender_email?: string;
+  /** Channel "sftp" only, and only to collect from the BROKER's own server.
+   *  `fingerprint` must be the one the last successful test returned — it is
+   *  pinned, and the server re-tests before it saves. Left out, the channel is
+   *  on Kavachio's own SFTP server: the reply carries the broker's new `login`
+   *  (with its password, once) and the email that takes it to them. */
+  sftp?: SftpConnection & {
+    after: SftpAfter; interval_minutes: SftpInterval; fingerprint: string;
+  };
   display_name?: string; file_style?: FileStyle; note?: string;
 }): Promise<IntakeRoute> {
   const { data } = await api.post("/intake/routes", body, { params: { mga: currentMga() } });
+  return data;
+}
+
+/** Email the broker this channel's "How They Send It" again. */
+export async function emailRouteGuide(routeId: number): Promise<GuideSent> {
+  const { data } = await api.post(`/intake/routes/${routeId}/guide`, null,
+    { params: { mga: currentMga() } });
   return data;
 }
 
@@ -182,11 +374,102 @@ export async function listArrivals(limit = 100): Promise<ArrivalsResponse> {
   return data;
 }
 
-/** Collect this folder now instead of waiting for the timer. */
-export async function pollRoute(routeId: number): Promise<PollResult> {
-  const { data } = await api.post(`/intake/routes/${routeId}/poll`, null,
+// ── the review queue (12.3) ─────────────────────────────────────────────────
+// A refused file is kept so somebody can look at it. These are the three things
+// they can do about it — until they existed, the screen's buttons were built
+// disabled because a decision had nowhere to be recorded.
+
+export type ReviewResult = {
+  arrival_id: number; outcome: Outcome;
+  resolution: "released" | "discarded"; resolved_at: string | null;
+};
+
+/** "This is fine, load it." Held files only — a turned-away file is one we
+ *  could not read, and releasing it would hand processing something broken. */
+export async function releaseArrival(arrivalId: number, note?: string,
+                                     contractId?: number | null): Promise<ReviewResult> {
+  const { data } = await api.post(`/intake/arrivals/${arrivalId}/release`,
+    { note: note || null, contract_id: contractId ?? null },
     { params: { mga: currentMga() } });
   return data;
+}
+
+export type ContractChoice = {
+  id: number; name: string; code: string;
+  inception_dt: string | null; expiry_dt: string | null;
+  renews_contract_id: number | null;
+};
+
+/** The contracts a held file can be released under (its programme and broker). */
+export async function arrivalContractChoices(arrivalId: number):
+    Promise<{ choices: ContractChoice[]; current: number | null }> {
+  const { data } = await api.get(`/intake/arrivals/${arrivalId}/contract-choices`,
+    { params: { mga: currentMga() } });
+  return data;
+}
+
+/** Run a file that went through again — after a failed run, or one that could
+ *  not be run automatically. It goes back in the auto-run queue. */
+export async function rerunArrival(arrivalId: number): Promise<void> {
+  await api.post(`/intake/arrivals/${arrivalId}/rerun`, null,
+    { params: { mga: currentMga() } });
+}
+
+/** "Ignore this." The row and the reason stay; only the decision is added. */
+export async function discardArrival(arrivalId: number, note?: string): Promise<ReviewResult> {
+  const { data } = await api.post(`/intake/arrivals/${arrivalId}/discard`,
+    { note: note || null }, { params: { mga: currentMga() } });
+  return data;
+}
+
+/** Open the stored copy. Saved through the browser rather than fetched into
+ *  memory: these are whole bordereaux, and the download is logged server-side
+ *  either way. */
+export async function downloadArrival(arrivalId: number, filename: string): Promise<void> {
+  const res = await api.get(`/intake/arrivals/${arrivalId}/download`,
+    { params: { mga: currentMga() }, responseType: "blob" });
+  const url = URL.createObjectURL(res.data as Blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename || "arrival";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Calls `onChange` whenever this carrier's files change — a file landed by any
+ *  way in, or somebody decided one. The server pushes it the moment the change
+ *  commits (GET /intake/events), which replaced a 60-second poll.
+ *
+ *  Keeps itself connected until `signal` aborts. A dropped stream, a server
+ *  restart and the server's own periodic close (it re-checks the token) all
+ *  reconnect — and a REconnect calls `onChange` too, because anything that
+ *  landed in the gap was announced to nobody. */
+export function watchArrivals(onChange: () => void, signal: AbortSignal): void {
+  void (async () => {
+    let connectedBefore = false;
+    let wait = 1000;
+    while (!signal.aborted) {
+      const opened = Date.now();
+      try {
+        await streamNdjson("/intake/events", { mga: currentMga() ?? undefined }, msg => {
+          if (msg?.type === "ready") {
+            if (connectedBefore) onChange();
+            connectedBefore = true;
+          } else if (msg?.type === "arrivals") {
+            onChange();
+          }
+        }, signal, { quiet: true });
+      } catch { /* dropped, restarting or signed out — retried below */ }
+      if (signal.aborted) return;
+      // A stream that ran a while ended normally: reconnect at once. One that
+      // failed straight away backs off, so a server that is down is not hammered.
+      wait = Date.now() - opened > 30_000 ? 1000 : Math.min(wait * 2, 30_000);
+      await new Promise<void>(resolve => {
+        const t = window.setTimeout(resolve, wait);
+        signal.addEventListener("abort", () => { window.clearTimeout(t); resolve(); },
+          { once: true });
+      });
+    }
+  })();
 }
 
 
@@ -212,6 +495,8 @@ export type NewIntakeKey = {
   label: string | null;
   api_key: string;
   warning: string;
+  /** Who the key and its instructions were emailed to. */
+  guide?: GuideSent | null;
 };
 
 export async function listKeys(routeId: number): Promise<IntakeKey[]> {

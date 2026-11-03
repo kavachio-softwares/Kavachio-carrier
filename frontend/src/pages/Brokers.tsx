@@ -12,205 +12,326 @@
  * links there rather than offering a second way in that would leave brokers
  * with no way to log in.
  *
- * From here: a broker's own page (what it holds, across every programme), or
- * the programme screen where it is put on one.
+ * A TABLE, the same shape as Programmes beside it in the sidebar. The list
+ * used to be a stack of cards, each a different height depending on how many
+ * programmes it named, so the eye could not run down a column to compare two
+ * brokers' contracts or users. One row per broker, one column per fact, and
+ * the facts line up. It carries no table classes of its own: the app-wide
+ * rules in index.css give it the same header band, padding and hover as every
+ * other list.
  *
- * The row is built around what makes a broker USABLE, in the order it becomes
- * true: are they on a programme, do they hold a contract, has anyone signed in.
- * A broker missing the first of those is the one you came here to find, so the
- * row says so in words rather than leaving a 0 to be spotted.
+ * The columns keep the old reading order — are they on a programme, do they
+ * hold a contract, has anyone signed in — and the state that blocks everything
+ * (no programme) is still said in words, not left as a 0 to be spotted.
  */
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { Layers, FileText, UserPlus, Users2, Search, ArrowRight } from "lucide-react";
-import { PageBody, PageHeader } from "../components/Layout";
-import { Card } from "../components/ui/Card";
-import { Metric } from "../components/ui/Metric";
+import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { ChevronRight, FileText, Layers, Search, UserPlus, Users2 } from "lucide-react";
 import { OrgAvatar } from "../components/ui/OrgAvatar";
-import { Sk } from "../components/ui/Skeleton";
-import { OnboardingBadge } from "../components/OnboardingBadge";
-import { getBrokers, type BrokerSummary } from "../api/hierarchy";
+import { InfoTip } from "../components/InfoTip";
+import { Pagination } from "../components/Pagination";
+import {
+  getBrokersPaged, resendBrokerInvitation, revokeBrokerInvitation,
+  type BrokerSummary,
+} from "../api/hierarchy";
+import { fmtDate } from "../utils/date";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { useServerList } from "../hooks/useServerList";
+import { seesAllBrokers, useCarrierSeat } from "../hooks/useCarrierSeat";
+import { getUser } from "../auth";
+
+/** How many programme chips a row shows before it says "+N more". Enough for
+ *  the common case, few enough that one busy broker cannot make its row tall. */
+const MAX_CHIPS = 2;
+
+/** Rows per page. The server cuts the page, so this is what gets fetched. */
+const PAGE_SIZE = 10;
+
+/** The onboarding state as a .proto pill — the same labels and hover text as
+ *  OnboardingBadge, drawn in the badge styles every other list here uses. */
+const ONBOARDING: Record<string, { label: string; cls: string; title: string }> = {
+  not_invited: { label: "Not invited", cls: "b-mut",
+    title: "This broker is on your list but nobody there has a login yet." },
+  invited: { label: "Invited", cls: "b-warn",
+    title: "They were invited and haven't used the link yet — worth chasing." },
+  active: { label: "Active", cls: "b-ok",
+    title: "Someone there has set a password and signed in." },
+  suspended: { label: "Suspended", cls: "b-crit",
+    title: "The company itself was switched off. Their history stays readable." },
+};
 
 export default function Brokers() {
-  const [rows, setRows] = useState<BrokerSummary[] | null>(null);
+  const nav = useNavigate();
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
+  const [note, setNote] = useState("");
+  // Debounced because the search runs on the SERVER now — an undebounced box
+  // would be one request per keystroke.
+  const dq = useDebouncedValue(q, 300);
+  // A carrier user's list is the broker companies THEY invited; the carrier
+  // admin's is the whole company's (the server decides — `mine` below). An
+  // invitation is chased or called off only by the carrier user who sent it,
+  // or by the carrier admin, who oversees them all (the server refuses anyone
+  // else).
+  const seat = useCarrierSeat();
+  const me = getUser();
+  const mayChase = (byUserId?: number | null) =>
+    seesAllBrokers(seat) || (!!me?.id && byUserId === me.id);
 
-  useEffect(() => {
-    getBrokers().then(setRows).catch(e =>
-      setErr(e?.response?.data?.detail || "Could not load brokers"));
-  }, []);
+  const {
+    items: shown, total, page, pageCount, loading, setPage, extra,
+    reload: load,
+  } = useServerList<BrokerSummary, { stranded?: number }>(
+    (pg, size) => getBrokersPaged({
+      q: dq.trim() || undefined, page: pg, page_size: size, mine: true,
+    }).catch(e => {
+      setErr(e?.response?.data?.detail || "Could not load brokers");
+      throw e;
+    }),
+    dq.trim(), PAGE_SIZE,
+  );
+  const needle = dq.trim();
 
-  const shown = (rows ?? []).filter(b =>
-    !q.trim() || b.legal_name.toLowerCase().includes(q.trim().toLowerCase()));
+  // An unanswered invitation was a dead end: nothing showed it, and inviting
+  // again was refused. These are the two things a carrier can actually do
+  // about one.
+  async function resend(id: number) {
+    setNote("");
+    try { setNote((await resendBrokerInvitation(id)).message ?? "Sent again."); }
+    catch { setNote("Could not send that again."); }
+  }
+  async function revoke(id: number) {
+    setNote("");
+    try {
+      setNote((await revokeBrokerInvitation(id)).message ?? "Withdrawn.");
+      load();
+    } catch { setNote("Could not withdraw that invitation."); }
+  }
+
+  // Said once above the table, the way Programmes says "has no broker yet",
+  // rather than leaving the reader to scan a column for the amber cells.
+  // Counted by the server across the WHOLE directory — a count that shrank as
+  // you paged would be a different sentence.
+  const stranded = extra?.stranded ?? 0;
+
+  const invite = (
+    /* One action, whether or not the broker already has a login. Which of the
+       two it is depends on facts about somebody else's book, and a second
+       button would let a carrier discover them by seeing which one worked. */
+    <Link to="/users/new?for=broker" className="btn pri">
+      <UserPlus size={15} /> Invite a party
+    </Link>
+  );
 
   return (
-    <>
-      <PageHeader
-        title="Brokers"
-        subtitle="The broker organisations that produce into your programmes."
-        action={
-          <Link
-            to="/users/new"
-            className="inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md
-              bg-navy px-3.5 py-2 text-sm font-medium text-white transition hover:bg-navy-dark"
-          >
-            <UserPlus size={15} /> Invite a broker
-          </Link>
-        }
-      />
-      <PageBody>
-        {err && (
-          <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">
-            {err}
+    <div className="proto">
+      <div className="view full">
+        <div className="page-head">
+          <div className="t">
+            <h2>
+              Party
+              <InfoTip text={(seat === "user"
+                  ? "The broker companies you invited, and how far each one reaches. "
+                  : "The party organisations that produce into your programmes. ")
+                + "Open a party to see its contracts and people across "
+                + "every programme. Put a party on a programme from that "
+                + "programme's page."} />
+            </h2>
+          </div>
+          <div className="actions">{invite}</div>
+        </div>
+
+        {note && <div className="note ok" style={{ marginBottom: 16 }}>{note}</div>}
+        {err && <div className="note warn" style={{ marginBottom: 16 }}>{err}</div>}
+
+        {/* Said once above the table, the way Contracts says a document is
+            missing, rather than leaving the reader to scan for amber cells. */}
+        {stranded > 0 && (
+          <div className="note warn"
+               style={{ marginBottom: 16, display: "flex", gap: 9, alignItems: "center" }}>
+            <Layers size={15} style={{ flex: "0 0 auto" }} />
+            <span>
+              <b>
+                {stranded === 1
+                  ? "One party is not on a programme yet"
+                  : `${stranded} parties are not on a programme yet`}
+              </b>
+              , so {stranded === 1 ? "it" : "they"} cannot produce anything.
+            </span>
           </div>
         )}
 
-        {rows === null ? (
-          <div className="grid gap-3">
-            {Array.from({ length: 3 }, (_, i) => <Sk key={i} className="h-24 w-full" />)}
-          </div>
-        ) : rows.length === 0 ? (
-          <Card>
-            <div className="py-12 text-center">
-              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2">
-                <Users2 size={20} className="text-ink-soft" />
-              </div>
-              <p className="text-sm font-medium">No brokers yet</p>
-              <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">
-                A broker is created by inviting its first admin — that person is
+        {loading && shown.length === 0 ? (
+          <div className="card"><div className="empty">Loading…</div></div>
+        ) : total === 0 && !needle ? (
+          <div className="card">
+            <div className="empty">
+              <Users2 size={22} style={{ margin: "0 auto 10px", display: "block" }} />
+              <b style={{ color: "var(--p-ink)" }}>No parties yet</b>
+              <div style={{ maxWidth: 420, margin: "4px auto 14px" }}>
+                A party is created by inviting its first admin — that person is
                 what makes the organisation reachable.
-              </p>
-              <Link
-                to="/users/new"
-                className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-navy px-3.5 py-2
-                  text-sm font-medium text-white transition hover:bg-navy-dark"
-              >
-                <UserPlus size={15} /> Invite a broker
-              </Link>
+              </div>
+              {invite}
             </div>
-          </Card>
+          </div>
         ) : (
-          <>
+          <div className="card">
             {/* Search and the count sit on one line: the count is what tells you
                 the search did something, so it belongs beside the box rather
-                than left to be inferred from the list length. */}
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="input flex max-w-sm flex-1 items-center gap-2">
-                <Search size={14} className="shrink-0 text-ink-soft" />
-                <input
-                  className="flex-1 bg-transparent text-sm outline-none"
-                  placeholder="Search brokers…"
-                  value={q}
-                  onChange={e => setQ(e.target.value)}
-                />
+                than left to be inferred from the table length. */}
+            <div className="card-h" style={{ gap: 14, flexWrap: "wrap" }}>
+              <div className="search">
+                <Search className="ic" />
+                <input placeholder="Search parties…" value={q}
+                  onChange={e => setQ(e.target.value)} />
               </div>
-              <span className="text-xs text-ink-muted">
-                {q.trim()
-                  ? `${shown.length} of ${rows.length}`
-                  : `${rows.length} broker${rows.length === 1 ? "" : "s"}`}
-              </span>
+              <div className="right">
+                <span className="sub">
+                  {needle
+                    ? `${total} match${total === 1 ? "" : "es"}`
+                    : `${total} part${total === 1 ? "y" : "ies"}`}
+                </span>
+              </div>
             </div>
 
-            <div className="grid gap-3">
-              {shown.map(b => {
-                const stranded = b.programmes.length === 0;
-                return (
-                  <Card key={b.id} className="transition hover:border-navy/30 hover:shadow-md">
-                    <div className="flex flex-wrap items-start gap-3.5">
-                      <OrgAvatar name={b.legal_name} />
+            <div className="tbl-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Party</th>
+                    <th>Status</th>
+                    <th>Programmes</th>
+                    <th>Contracts</th>
+                    <th style={{ width: 44 }} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {shown.map(b => {
+                    const invited = b.relationship === "invited";
+                    const extra = b.programmes.length - MAX_CHIPS;
+                    const look = invited ? ONBOARDING.invited
+                      : b.onboarding_status ? ONBOARDING[b.onboarding_status] : undefined;
+                    return (
+                      <tr
+                        key={b.id}
+                        className="click party-row"
+                        onClick={() => nav(`/brokers/${b.id}`)}
+                      >
+                        <td>
+                          {/* A link as well as a clickable row: the row alone gives
+                              no affordance, and cannot be opened in a new tab or
+                              reached by keyboard. */}
+                          <div className="party-org">
+                            <OrgAvatar name={b.legal_name} />
+                            <div style={{ minWidth: 0 }}>
+                              <Link
+                                to={`/brokers/${b.id}`}
+                                onClick={e => e.stopPropagation()}
+                                className="party-nm"
+                              >
+                                {b.legal_name}
+                              </Link>
+                              {invited && b.invitation ? (
+                                <div className="sub">
+                                  Invited {b.invitation.email}
+                                  {b.invitation.invited_at
+                                    && <> on {fmtDate(b.invitation.invited_at)}</>}
+                                  {mayChase(b.invitation.by_user_id) && <>
+                                  {" · "}
+                                  <span
+                                    className="linkish" role="button" tabIndex={0}
+                                    onClick={e => { e.stopPropagation(); resend(b.invitation!.id); }}
+                                  >
+                                    Send again
+                                  </span>
+                                  {" · "}
+                                  <span
+                                    className="linkish mut" role="button" tabIndex={0}
+                                    onClick={e => { e.stopPropagation(); revoke(b.invitation!.id); }}
+                                  >
+                                    Withdraw
+                                  </span>
+                                  </>}
+                                </div>
+                              ) : b.dba_name ? (
+                                <div className="sub party-dba">{b.dba_name}</div>
+                              ) : null}
+                            </div>
+                          </div>
+                        </td>
 
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Link
-                            to={`/brokers/${b.id}`}
-                            className="truncate text-[15px] font-semibold text-ink hover:text-navy hover:underline"
-                          >
-                            {b.legal_name}
-                          </Link>
-                          <OnboardingBadge status={b.onboarding_status} />
-                          {b.pending_approvals > 0 && (
-                            // Still worth surfacing — a contract they submitted
-                            // is not live until it is approved.
-                            <span className="pill pill-amber">
-                              {b.pending_approvals} awaiting approval
+                        <td>
+                          {/* The relationship with US, which is not the same as
+                              how far the broker has got with their own account:
+                              one who works with another carrier is fully set up
+                              and still only INVITED here until they answer. A
+                              party that isn't a producer carries no onboarding
+                              state at all, and shows a dash. */}
+                          {look ? (
+                            <span className={`badge ${look.cls}`} title={look.title}>
+                              <span className="d" />{look.label}
                             </span>
-                          )}
-                        </div>
+                          ) : <span className="faint">—</span>}
+                        </td>
 
-                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <td>
                           {/* No programme is the state that blocks everything
                               else, so it is named rather than counted. */}
-                          {stranded ? (
-                            <Metric
-                              icon={<Layers size={12} />}
-                              value="No"
-                              label="programme yet"
-                              tone="attention"
-                              title="Until they are on a programme they cannot produce anything."
-                            />
-                          ) : (
-                            <Metric
-                              icon={<Layers size={12} />}
-                              value={b.programmes.length}
-                              label={b.programmes.length === 1 ? "programme" : "programmes"}
-                            />
-                          )}
-                          <Metric
-                            icon={<FileText size={12} />}
-                            value={b.contract_count}
-                            label={b.contract_count === 1 ? "contract" : "contracts"}
-                          />
-                          <Metric
-                            icon={<Users2 size={12} />}
-                            value={b.user_count}
-                            label={b.user_count === 1 ? "user" : "users"}
-                          />
-                        </div>
-
-                        {b.programmes.length > 0 && (
-                          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                            <span className="text-[10.5px] uppercase tracking-wide text-ink-soft">
-                              On
+                          {b.programmes.length === 0 ? (
+                            <span className="badge b-warn"
+                              title="Until they are on a programme they cannot produce anything.">
+                              Needs a programme
                             </span>
-                            {b.programmes.map(p => (
-                              <Link
-                                key={p.id}
-                                to={`/programs/${p.id}/brokers`}
-                                className="rounded-md border border-border px-2 py-0.5 text-[11.5px]
-                                  text-ink-muted transition hover:border-navy hover:text-navy"
-                              >
-                                {p.name}
-                              </Link>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                          ) : (
+                            <div className="party-chips">
+                              {b.programmes.slice(0, MAX_CHIPS).map(p => (
+                                <Link
+                                  key={p.id}
+                                  to={`/programs/${p.id}/setup`}
+                                  onClick={e => e.stopPropagation()}
+                                  className="party-chip"
+                                >
+                                  {p.name}
+                                </Link>
+                              ))}
+                              {extra > 0 && (
+                                <span
+                                  className="sub"
+                                  title={b.programmes.slice(MAX_CHIPS).map(p => p.name).join(", ")}
+                                >
+                                  +{extra} more
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </td>
 
-                      <Link
-                        to={`/brokers/${b.id}`}
-                        className="inline-flex shrink-0 items-center gap-1 self-center rounded-md border
-                          border-border px-2.5 py-1.5 text-[12.5px] font-medium text-ink-muted
-                          transition hover:border-navy hover:text-navy"
-                      >
-                        Open <ArrowRight size={13} />
-                      </Link>
-                    </div>
-                  </Card>
-                );
-              })}
+                        <td>
+                          <span className={`party-count${b.contract_count === 0 ? " zero" : ""}`}>
+                            <FileText size={14} />
+                            {b.contract_count}
+                          </span>
+                        </td>
 
+                        <td>
+                          <ChevronRight size={16} className="party-chev" />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
               {shown.length === 0 && (
-                <Card>
-                  <p className="py-8 text-center text-sm text-ink-muted">
-                    No broker matches “{q}”.
-                  </p>
-                </Card>
+                <div className="empty">No party matches “{q}”.</div>
               )}
             </div>
-          </>
+
+            <Pagination page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
+              totalItems={total} onPageChange={setPage} noun="parties" />
+          </div>
         )}
-      </PageBody>
-    </>
+      </div>
+    </div>
   );
 }

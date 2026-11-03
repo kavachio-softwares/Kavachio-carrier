@@ -1,0 +1,2441 @@
+/**
+ * Create a Contract — the four-step flow from the carrier design
+ * (kavachio_carrier_centric_design.html: c-generate → c-draft → c-review →
+ * c-sign).
+ *
+ *   1 Terms            what you are making, who it is with, and the limits you
+ *                      agreed — each limit carrying how serious a breach of it
+ *                      is
+ *   2 Wording          the sections, written from those terms, editable
+ *   3 Read it through  the finished document, the checks it will run, and
+ *                      anything worth a second look
+ *   4 Signatures       who signs — handed to the signature screen
+ *
+ * THE IDEA THE FLOW IS BUILT ON. A limit typed in step 1 becomes two things at
+ * once: a sentence in the contract and a check on every bordereau row. They
+ * stay tied because the sentence stores a TOKEN, not the number — change the
+ * cap and the wording and the check both move. The design puts it plainly:
+ * type "15%" by hand and the two quietly drift apart, which is how a contract
+ * ends up saying one thing while the system checks another.
+ *
+ * Which is also why this flow produces better contracts than uploading one: a
+ * contract written from its own terms never has a clause the checks cannot
+ * read. Somebody who already HAS a signed PDF should not be here — the footer
+ * points them at Upload Contract, which reads what it can out of the document.
+ *
+ * Nothing is written until the last step. A programme or broker created inline
+ * is the exception, and says so: those are shared things.
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowLeft, Check, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
+import { canAccessPath } from "../access";
+import { getHierarchy, type HierarchyProgramme } from "../api/hierarchy";
+import AddContractModal from "../components/AddContractModal";
+import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
+import { SubSteps } from "../components/FlowStepper";
+import { InfoTip } from "../components/InfoTip";
+import { WordingEditor } from "../components/WordingEditor";
+import { SignaturePlacer, signerTargets }
+  from "../components/SignaturePlacer";
+import { TermDurationField, useTermDuration } from "../components/TermDuration";
+import { EXPIRY_FIELD, INCEPTION_FIELD, type TermSpec } from "../utils/term";
+import {
+  chipEdits, readTermMove, restoreChips, type TermMove,
+} from "../utils/wordingEdits";
+import { currentMga, getTenantBrand } from "../auth";
+import {
+  createContract, createEndorsement, downloadDraft, fieldErrors, getContract,
+  getContractTypes, getCounterparties, listContracts, previewEndorsement,
+  previewWording, skipReview,
+  type AgreedLimits, type AgreedLimitSpec, type ContractTypeSpec,
+  type SignatureBlockSpec, type SignatureLayout, type SeveritySpec,
+  type ContractRecord as ContractRecordT, type Counterparty,
+  type ContractField, type EndorsementPreview, type FieldErrors,
+  type LimitGroup,
+  type WordingPreview, type WordingSection,
+} from "../api/contractRecord";
+
+/** Examples, only where one actually helps. A date input needs none, and a
+ *  placeholder on every field is noise. */
+// No PLACEHOLDER map here. The examples are SERVED with the field spec
+// (contract_types.FIELDS["…"]["example"]), so this screen and the contract
+// record show the same reference text, and a field that is renamed or removed
+// cannot leave a stale example behind — which is exactly what this map did.
+
+const STEPS = [
+  { key: "terms", label: "Terms" },
+  { key: "wording", label: "Wording" },
+  { key: "review", label: "Read it through" },
+  { key: "signatures", label: "Signatures" },
+] as const;
+
+/** An endorsement never walks the four steps above — there is no wording to
+ *  write and no signature setup, only the change and the document recording
+ *  it, both on this one screen. It still gets a trail of its own: hiding the
+ *  bar outright made the header jump the moment "A mid-term change" was
+ *  picked, and left the screen with nothing saying where you are. */
+const ENDORSE_STEPS = [
+  { key: "change", label: "The change" },
+  { key: "attach", label: "Attach it" },
+] as const;
+
+/** What you are making. The design asks this first because the three end in
+ *  different places — and they really do, so each option has to DO something
+ *  different or it should not be offered:
+ *
+ *    new       everything starts blank
+ *    renewal   pick last year's contract; its terms and wording come across so
+ *              the broker only reads the numbers that moved, and the new
+ *              contract points back at it
+ *    endorse   belongs on the contract that is already running, not here — so
+ *              this option routes there instead of pretending to handle it
+ */
+const KINDS = [
+  { key: "new", title: "A brand-new contract",
+    sub: "Nothing existed before. Everything below starts blank." },
+  { key: "renew", title: "A renewal",
+    sub: "Next year's version of one you already have. Its terms come across and the two stay linked." },
+  { key: "endorse", title: "A mid-term change",
+    sub: "An endorsement — the contract keeps running; only what you change is re-agreed." },
+] as const;
+
+export default function ContractNew() {
+  const nav = useNavigate();
+  const [params] = useSearchParams();
+  // Read once: arrived from the Configure Program flow.
+  const [fromFlow] = useState(() => params.get(FLOW_PARAM) === "1");
+
+  const [step, setStep] = useState(0);
+  const [furthest, setFurthest] = useState(0);
+  const [kind, setKind] = useState<string>("new");
+
+  const [specs, setSpecs] = useState<ContractTypeSpec[] | null>(null);
+  const [limitSpec, setLimitSpec] = useState<AgreedLimitSpec[]>([]);
+  const [limitGroups, setLimitGroups] = useState<LimitGroup[]>([]);
+  const [termSpec, setTermSpec] = useState<TermSpec | null>(null);
+  // What a signature block may contain, and what this contract's will. Both
+  // come from the SERVER — the vocabulary so the form cannot offer a line the
+  // wording builder has no way to draw, and the starting layout so a contract
+  // nobody touches comes out exactly as every contract did before the block
+  // was configurable.
+  const [sigSpec, setSigSpec] = useState<SignatureBlockSpec | null>(null);
+  // How hard a check may bite, in the server's words. Never typed here — see
+  // SeveritySpec: the picker, the summary badge and the contract document all
+  // read the same vocabulary, so renaming a severity is one change on the
+  // server rather than seven strings across two screens.
+  const [sevSpec, setSevSpec] = useState<SeveritySpec[]>([]);
+  const sevLabel = (k?: string | null) =>
+    sevSpec.find(x => x.key === k)?.label ?? k ?? "—";
+  const [sigLayout, setSigLayout] = useState<SignatureLayout | null>(null);
+  const [typeKey, setTypeKey] = useState("");
+
+  const [programmes, setProgrammes] = useState<HierarchyProgramme[]>([]);
+  const [programId, setProgramId] = useState(params.get("program_id") ?? "");
+  const [counterparties, setCounterparties] = useState<Counterparty[] | null>(null);
+  // Pre-addressed when you arrive from a programme's broker card: that page
+  // already knows which pair the contract is for, and re-picking both is
+  // exactly the kind of retyping that makes one flow feel like two screens.
+  // The select keeps this value once the options load; if the broker turns out
+  // not to be on the programme, it simply matches nothing and stays unpicked.
+  const [brokerId, setBrokerId] = useState(params.get("broker_party_id") ?? "");
+  // "Upload the signed PDF instead" — the upload dialog, over this page, carrying
+  // whatever programme and broker are already chosen here.
+  const [uploading, setUploading] = useState(false);
+
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [limits, setLimits] = useState<AgreedLimits>({});
+
+  const [sections, setSections] = useState<WordingSection[] | null>(null);
+  const [activeSection, setActiveSection] = useState(0);
+  // Which part of step 3 / step 4 the rail is showing. Steps 2's rail is the
+  // section list, so it keeps using activeSection.
+  const [readPane, setReadPane] = useState(0);
+  const [signPane, setSignPane] = useState(0);
+  // What was taken OUT of the wording on purpose. The server writes a clause
+  // for any term the document does not state — that is what stops a term
+  // agreed after the wording was written from going unsaid — so it has to be
+  // told which silences were deliberate, or deleting a clause would be
+  // impossible: it would be back the next time this screen re-read the wording.
+  const [dropped, setDropped] = useState<{ sections: string[]; terms: string[] }>(
+    { sections: [], terms: [] });
+  // Bumped when the wording is REGENERATED, so the editor rebuilds its DOM.
+  // Ordinary typing must not trigger that — rebuilding on every keystroke
+  // throws the caret to the start of the line.
+  const [wordingVersion, setWordingVersion] = useState(0);
+  const insertChip = useRef<((token: string) => void) | null>(null);
+  const [preview, setPreview] = useState<WordingPreview | null>(null);
+
+  // Who signs. Named here only to save doing it later — Kavachio sends
+  // nothing, which step 4 says plainly.
+
+  // Endorsement: which live contract is being changed, and what the change
+  // looks like. Kept apart from the create state because an endorsement does
+  // not create a contract — it amends one.
+  const [endorseId, setEndorseId] = useState("");
+  const [endorsable, setEndorsable] = useState<ContractRecordT[]>([]);
+  const [endorseFrom, setEndorseFrom] = useState("");
+  const [endorseNote, setEndorseNote] = useState("");
+  const [endorsePv, setEndorsePv] = useState<EndorsementPreview | null>(null);
+
+  // Renewal: which contract this one renews, and the pool to pick from.
+  const [renewsId, setRenewsId] = useState("");
+  const [renewable, setRenewable] = useState<ContractRecordT[]>([]);
+
+  const [touched, setTouched] = useState(false);
+  const [errors, setErrors] = useState<FieldErrors>({});
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState("");
+
+  const carrierName = getTenantBrand()?.legal_name || currentMga();
+
+  /** What a chip is called in the toolbar and in its tooltip. The limits use
+   *  the plain-English question from step 1; the handful that are not limits
+   *  (the parties, the term) are named here. */
+  const tokenLabels = useMemo(() => {
+    const out: Record<string, string> = {
+      contract_name: "Contract name", inception: "Start date",
+      expiry: "End date", class_of_business: "Class of business",
+      carrier_name: "Carrier", counterparty_name: "Broker",
+      programme_name: "Programme", notice_period_days: "Notice to cancel",
+    };
+    limitSpec.forEach(l => { out[l.name] = l.question; });
+    return out;
+  }, [limitSpec]);
+
+  useEffect(() => {
+    getContractTypes()
+      .then(d => {
+        setSpecs(d.types);
+        setLimitSpec(d.agreed_limits);
+        setLimitGroups(d.limit_groups);
+        setTermSpec(d.term);
+        setSigSpec(d.signature_block);
+        setSevSpec(d.severities);
+        setSigLayout(l => l ?? d.signature_block.default);
+        setTypeKey(k => k || d.default);
+      })
+      .catch(() => setMessage("Could not load the contract form."));
+    getHierarchy().then(h => setProgrammes(h.programmes)).catch(() => setProgrammes([]));
+    // Anything in force or lapsed can be renewed. A draft cannot — there is
+    // nothing agreed yet to carry forward.
+    listContracts()
+      .then(rows => {
+        setRenewable(rows.filter(
+          c => ["active", "expired", "terminated"].includes(c.lifecycle)));
+        // Only a contract that is RUNNING can be endorsed. A draft is changed
+        // by editing its terms; one that has ended is not changed at all.
+        setEndorsable(rows.filter(c => ["active", "expired"].includes(c.lifecycle)));
+      })
+      .catch(() => { setRenewable([]); setEndorsable([]); });
+  }, []);
+
+  /** Load the contract being endorsed, and start from its CURRENT terms — the
+   *  change is expressed by editing them, which is how somebody actually
+   *  thinks about a mid-term change. */
+  async function loadEndorseSource(id: string) {
+    setEndorseId(id);
+    setEndorsePv(null);
+    if (!id) return;
+    setBusy("endorse-load");
+    try {
+      const prior = await getContract(Number(id));
+      setLimits(prior.agreed_limits ?? {});
+      setValues(v => ({ ...v, name: prior.name }));
+      setProgramId(prior.programme ? String(prior.programme.id) : "");
+      setBrokerId(prior.counterparty ? String(prior.counterparty.id) : "");
+    } catch (e) {
+      setMessage(fieldErrors(e).message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  /** What the change would say, and which checks would move. */
+  const refreshEndorsement = useCallback(async () => {
+    if (!endorseId) return;
+    try {
+      setEndorsePv(await previewEndorsement(Number(endorseId), {
+        agreed_limits: limits, effective_from: endorseFrom || null,
+        note: endorseNote || null }));
+    } catch (e) { setMessage(fieldErrors(e).message); }
+  }, [endorseId, limits, endorseFrom, endorseNote]);
+
+  useEffect(() => {
+    if (kind !== "endorse" || !endorseId) return;
+    const t = setTimeout(refreshEndorsement, 350);
+    return () => clearTimeout(t);
+  }, [kind, endorseId, refreshEndorsement]);
+
+  async function endorse() {
+    if (!endorseId) return;
+    setBusy("endorse");
+    setMessage("");
+    try {
+      const r = await createEndorsement(Number(endorseId), {
+        agreed_limits: limits, effective_from: endorseFrom || null,
+        note: endorseNote || null, sections: endorsePv?.sections });
+      nav(`/contracts/${r.id}`, { state: { notice:
+        `Endorsement ${r.endorsement.number} attached. The wording and the `
+        + `endorsement are both active — re-read the contract to rebuild its `
+        + `rules from the pair.` } });
+    } catch (e) {
+      setMessage(fieldErrors(e).message);
+    } finally { setBusy(""); }
+  }
+
+  /** Bring last year's contract across. Everything the new one starts from,
+   *  except the term — a renewal is a new year, so the dates are the one thing
+   *  that must be stated fresh. */
+  async function loadRenewalSource(id: string) {
+    setRenewsId(id);
+    if (!id) return;
+    setBusy("renewal");
+    try {
+      const prior = await getContract(Number(id));
+      // A treaty renews as a treaty. Guarded against the free text that older
+      // rows carry in this column, which matches no spec and would blank the
+      // form. Unrecognised leaves the picker where the carrier put it.
+      if (prior.contract_type
+          && (specs ?? []).some(t => t.key === prior.contract_type)) {
+        setTypeKey(prior.contract_type);
+      }
+      setProgramId(prior.programme ? String(prior.programme.id) : "");
+      setBrokerId(prior.counterparty ? String(prior.counterparty.id) : "");
+      setValues(v => ({
+        ...v,
+        name: prior.name ? `${prior.name} — renewal` : v.name,
+        schedule_key: prior.schedule_key ?? v.schedule_key ?? "",
+        class_of_business: prior.class_of_business ?? v.class_of_business ?? "",
+        notice_period_days: prior.notice_period_days != null
+          ? String(prior.notice_period_days) : (v.notice_period_days ?? ""),
+      }));
+      if (prior.agreed_limits) setLimits(prior.agreed_limits);
+      // Its wording too, so the broker reads the same document with new numbers.
+      if (prior.wording_sections?.length) {
+        setSections(prior.wording_sections);
+        setWordingVersion(v => v + 1);
+      }
+    } catch (e) {
+      setMessage(fieldErrors(e).message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  /** "Use the same contract as <sibling broker>": start from a contract a
+   *  sibling broker on the same programme already has — its type, term,
+   *  limits and wording — for the broker in the link. Not a renewal (no
+   *  renews_contract_id) and never the sibling's broker: the programme and
+   *  broker stay as the link addressed them. This broker still agrees and
+   *  signs its own copy. */
+  const [copyFrom] = useState(() => params.get("copy_from"));
+  const [copyFromName, setCopyFromName] = useState<string | null>(null);
+  const [copyLoaded, setCopyLoaded] = useState(false);
+  useEffect(() => {
+    if (!copyFrom || copyLoaded || !specs) return;
+    setCopyLoaded(true);
+    setBusy("copy");
+    getContract(Number(copyFrom))
+      .then(prior => {
+        if (prior.contract_type && specs.some(t => t.key === prior.contract_type)) {
+          setTypeKey(prior.contract_type);
+        }
+        setCopyFromName(prior.counterparty?.name ?? null);
+        const str = (v: string | number | null | undefined) => (v == null ? "" : String(v));
+        // Everything that makes it the same contract. Not executed_date — this
+        // copy has not been signed by anyone yet.
+        setValues(v => ({
+          ...v,
+          name: prior.name || v.name || "",
+          schedule_key: str(prior.schedule_key) || v.schedule_key || "",
+          inception_dt: str(prior.inception_dt) || v.inception_dt || "",
+          expiry_dt: str(prior.expiry_dt) || v.expiry_dt || "",
+          class_of_business: str(prior.class_of_business) || v.class_of_business || "",
+          year_of_account: str(prior.year_of_account) || v.year_of_account || "",
+          notice_period_days: str(prior.notice_period_days) || v.notice_period_days || "",
+          premium_cap_amount: str(prior.premium_cap_amount) || v.premium_cap_amount || "",
+          premium_cap_currency: str(prior.premium_cap_currency) || v.premium_cap_currency || "",
+          earnings_pattern: str(prior.earnings_pattern) || v.earnings_pattern || "",
+        }));
+        if (prior.agreed_limits) setLimits(prior.agreed_limits);
+        if (prior.wording_sections?.length) {
+          setSections(prior.wording_sections);
+          setWordingVersion(v => v + 1);
+        }
+      })
+      .catch(e => setMessage(fieldErrors(e).message))
+      .finally(() => setBusy(""));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [copyFrom, copyLoaded, specs]);
+
+  const spec = useMemo(
+    () => (specs ?? []).find(t => t.key === typeKey) ?? null, [specs, typeKey]);
+
+  // WHO the other side may be is the type's business, not this screen's. A
+  // broker has to be on the programme before it can hold a contract there; a
+  // reinsurer has no such gate, so making it wait for a programme would be a
+  // condition the server does not impose.
+  const gatedOnProgramme = spec?.counterparty_must_be_on_programme ?? true;
+  const counterpartyLabel = spec?.counterparty_label ?? "Counterparty";
+
+  useEffect(() => {
+    if (!spec) { setCounterparties(null); return; }
+    if (gatedOnProgramme && !programId) { setCounterparties(null); return; }
+    setCounterparties(null);
+    getCounterparties(spec.counterparty_party_type,
+                      gatedOnProgramme ? Number(programId) : undefined)
+      .then(list => {
+        setCounterparties(list);
+        // Re-apply the broker the URL asked for, once the list it has to come
+        // from exists. Arriving from a broker's page names the counterparty but
+        // not always the programme, and choosing a programme deliberately
+        // clears the selection — a broker who is not on the new one must not
+        // stay picked. Without this the prefill would be wiped by the very
+        // step it was waiting for. Only ever re-selects somebody genuinely on
+        // the chosen programme, because that is all this list contains.
+        const wanted = params.get("broker_party_id");
+        if (wanted && list.some(c => String(c.id) === wanted)) {
+          setBrokerId(prev => (prev ? prev : wanted));
+        }
+      })
+      .catch(() => setCounterparties([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spec, gatedOnProgramme, programId]);
+
+  const programme = programmes.find(p => String(p.id) === programId);
+  const counterparty = (counterparties ?? []).find(c => String(c.id) === brokerId);
+
+  // The contract's own identity — everything the chosen TYPE asks for that is
+  // not one of the agreed limits. Taken from the server's spec rather than
+  // written out here, so "required" on this form and "required" on the server
+  // are the same list. Hardcoding it is what let the form call class of
+  // business optional while the server refused to save without it.
+  const limitNames = useMemo(
+    () => new Set(limitSpec.map(l => l.name)), [limitSpec]);
+  const basicFields = (spec?.fields ?? []).filter(
+    f => f.name !== "counterparty_party_id" && !limitNames.has(f.name));
+  const optionalBasics = basicFields.filter(f => !f.required);
+  const filledOptional = optionalBasics.filter(
+    f => (values[f.name] ?? "").trim()).length;
+
+  // A folded field that is filled in, or that the server has just objected to,
+  // is a field the user needs to see — leaving it hidden would show a marked
+  // input nobody can find.
+  useEffect(() => {
+    if (showMoreBasics) return;
+    const hidden = optionalBasics.some(
+      f => (values[f.name] ?? "").trim() || errors[f.name]);
+    if (hidden) setShowMoreBasics(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [values, errors, optionalBasics.length]);
+
+  // Inception, duration, expiry. The duration is not a field and is never
+  // stored — it writes the expiry date and is forgotten. See utils/term.ts.
+  const term = useTermDuration({
+    spec: termSpec,
+    inception: values[INCEPTION_FIELD] ?? "",
+    expiry: values[EXPIRY_FIELD] ?? "",
+    setInception: v => set(INCEPTION_FIELD, v),
+    setExpiry: v => set(EXPIRY_FIELD, v),
+  });
+
+  /** One identity field. Placeholder and hint come from the spec too. */
+  function input(f: ContractField) {
+    const bad = errors[f.name]
+      ?? (touched && f.required && !(values[f.name] ?? "").trim()
+          ? `${f.label} is required.` : "");
+    // The expiry is the duration's to write unless the person has said Custom.
+    // Two editable ways of stating one fact is how a contract ends up reading
+    // "12 months" beside a date twelve months does not produce.
+    const shut = f.name === EXPIRY_FIELD && term.ready && !term.custom;
+    return (
+      <div className="field" key={f.name} style={{ marginBottom: 0 }}>
+        <label>
+          {f.label}
+          {f.required
+            ? <span style={{ color: "var(--p-crit-ink)" }}>*</span>
+            : <span className="muted" style={{ fontWeight: 500 }}> — optional</span>}
+          {(shut || f.hint) && (
+            <InfoTip text={shut ? "Set by the duration — choose Custom to type a date."
+                                : f.hint ?? ""} />
+          )}
+        </label>
+        <input
+          type={f.kind === "date" ? "date"
+               : f.kind === "int" || f.kind === "decimal" ? "number" : "text"}
+          step={f.kind === "decimal" ? "0.01" : undefined}
+          placeholder={f.example ?? undefined}
+          value={values[f.name] ?? ""}
+          disabled={shut}
+          // The dates go through the term so the three inputs stay one fact:
+          // moving inception moves an expiry that was stated as a length, and
+          // typing an expiry is how you say "not one of those lengths".
+          onChange={e => (
+            f.name === INCEPTION_FIELD ? term.onInception(e.target.value)
+            : f.name === EXPIRY_FIELD ? term.onExpiry(e.target.value)
+            : set(f.name, e.target.value))}
+          style={bad ? { borderColor: "var(--p-crit)" } : undefined}
+        />
+        {bad && <div className="hint" style={{ color: "var(--p-crit-ink)" }}>{bad}</div>}
+      </div>
+    );
+  }
+
+  /** The spec's fields, with the duration picker slipped in ahead of the
+   *  expiry — it belongs between the two dates it works out. Which list the
+   *  expiry is in is the TYPE's business, so this works either way rather than
+   *  assuming the required one. */
+  function renderFields(list: ContractField[]) {
+    return list.flatMap(f => f.name === EXPIRY_FIELD && term.ready
+      ? [<TermDurationField key="term-duration" term={term} tip />, input(f)]
+      : [input(f)]);
+  }
+
+  /** What the preview and the composer both need. One shape, so the wording,
+   *  the checks and the PDF can never be computed from different inputs. */
+  const wordingInput = useCallback((secs?: WordingSection[] | null) => ({
+    contract_type: typeKey,
+    // Everything typed, not a chosen six. The schedule prints year of
+    // account, risk code and section when they are set, so a subset here meant
+    // a treaty's own identifying terms never reached the page.
+    values: { ...values },
+    agreed_limits: limits,
+    sections: secs ?? undefined,
+    carrier_name: carrierName,
+    counterparty_name: counterparty?.name ?? null,
+    programme_name: programme?.name ?? null,
+    // Sent so the draft PDF carries the block that was actually chosen. Left
+    // out, the preview would show four lines while the real document showed
+    // whatever step 4 asked for, and the first place anyone would notice is
+    // the copy that went out for signature.
+    signature_layout: sigLayout,
+    // Sections and terms deleted here, so the server's top-up leaves them out.
+    dropped_sections: dropped.sections,
+    dropped_terms: dropped.terms,
+    // No `signers`: nobody is named at this step any more, so the draft prints
+    // the two unnamed blocks — "For the Carrier" over a ruled line — which is
+    // what an unsigned contract looks like on paper anyway.
+  }), [typeKey, values, limits, carrierName, counterparty, programme,
+       sigLayout, dropped]);
+
+  /** The document the signature blocks are dragged onto, on step 4.
+   *
+   *  Composed with an AUTOMATIC arrangement, never the placed one being edited:
+   *  a page composed from the blocks you are moving would print them where they
+   *  were a moment ago and leave a ghost behind the one under your pointer. So
+   *  the pages show the contract, and the boxes on top of them are the thing
+   *  being chosen. The page COUNT is the same either way — the composer
+   *  reserves the signature page whichever arrangement is asked for — so a
+   *  block placed on page 3 here is on page 3 of what comes out.
+   *
+   *  The fields are kept, because those do change what is printed. */
+  const placeBody = useMemo(() => ({
+    ...wordingInput(sections),
+    signature_layout: sigLayout && {
+      ...sigLayout,
+      // ALL of them, because every block is part of the document now — one
+      // tied to a clause and one dropped on a page are both typeset, and the
+      // wording below either of them moves down. The canvas has to show that
+      // or there is no reflow to look at.
+      //
+      // The server RESERVES a dropped block rather than drawing it (see
+      // blank_signature_space): the room is made, and the box being dragged
+      // sits in the room. Drawn as well, every drop would leave a printed twin
+      // behind the box that is still moving.
+      blocks: sigLayout.blocks ?? {},
+    },
+  }), [wordingInput, sections, sigLayout]);
+
+  /** Sides that asked to be placed by hand and have not been. The server
+   *  refuses a layout like that — a contract with nowhere to sign is worse
+   *  than the wrong layout — so the finish buttons say so rather than being
+   *  offered and 400ing. Empty for every automatic arrangement. */
+  const unplacedSides = (sigLayout?.arrangement === "placed"
+    ? (sigSpec?.sides ?? []).filter(k => !sigLayout.blocks?.[k])
+    : []);
+  const blocksUnplaced = unplacedSides.length > 0;
+
+  /** Step 4's three parts, named once so the rail and the panel agree. */
+  const SIGN_PARTS = [
+    { heading: "What each side has to fill in",
+      desc: "The lines printed under each signature on the document." },
+    { heading: "How the two blocks sit on the page",
+      desc: "Kavachio can place them for you, or you can drop them where your "
+            + "broker's lawyers want them." },
+    { heading: "What you are about to create",
+      desc: "None of the three ways to finish makes the contract active: both "
+            + "signatures do that, on its own signature page." },
+  ];
+
+  /** The PDF as it stands. Composed from what is typed and saved nowhere —
+   *  offered both above step 3 and on the part where the document is read. */
+  async function draft() {
+    setBusy("draft");
+    try { await downloadDraft(wordingInput(sections)); }
+    catch (e) { setMessage(fieldErrors(e).message); }
+    finally { setBusy(""); }
+  }
+
+  /** A section you write yourself. BOTH fields empty — the body especially:
+   *  "Write this section in your own words." is an instruction, and leaving it
+   *  as the value means that sentence goes into the contract if nobody
+   *  overwrites it. Instructions belong in placeholders. */
+  function addSection() {
+    setSections(list => {
+      const next = [...(list ?? []), {
+        key: `custom_${Date.now()}`, title: "", body: "",
+        origin: "your own words" }];
+      setActiveSection(next.length - 1);
+      return next;
+    });
+  }
+
+  /** Re-read the wording. Called when entering steps 2 and 3, and whenever a
+   *  term changes while they are open — the chips have to follow. */
+  const refresh = useCallback(async (secs?: WordingSection[] | null) => {
+    try {
+      const pv = await previewWording(wordingInput(secs));
+      setPreview(pv);
+      setSections(pv.sections);
+      // Sections came back with clauses the wording did not have — terms
+      // agreed after it was written. Said out loud: the wording is the
+      // carrier's, and text appearing in it is not something to slip in.
+      if (secs && pv.added?.length) {
+        setWordingVersion(v => v + 1);
+        setMessage(
+          `The wording now states ${pv.added.map(a => a.question).join(", ")}`
+          + ` — ${pv.added.length === 1 ? "that term was" : "those terms were"}`
+          + " agreed after it was written, so the clause was missing from the"
+          + " contract and from the PDF. Everything you had typed is untouched.");
+      }
+      if (!secs) {
+        // Written again from the terms, so every clause is back by definition
+        // and there is nothing left to remember as deleted. Keeping the old
+        // list would silence the top-up for a term the carrier has just had
+        // written back in.
+        setDropped({ sections: [], terms: [] });
+        setWordingVersion(v => v + 1);
+      }
+      return pv;
+    } catch (e) {
+      setMessage(fieldErrors(e).message);
+      return null;
+    }
+  }, [wordingInput]);
+
+  // Keep the preview current while step 1 is being filled in, so the check
+  // count and the per-row "what this becomes" are the real answers rather than
+  // a guess the screen makes for itself. Debounced and cheap — the preview
+  // involves no model call, only arithmetic on the terms.
+  useEffect(() => {
+    if (step !== 0) return;
+    const t = setTimeout(() => {
+      previewWording(wordingInput(null)).then(setPreview).catch(() => {});
+    }, 350);
+    return () => clearTimeout(t);
+  }, [step, wordingInput]);
+
+  // A term can move from the WORDING step too, by typing over a chip — so the
+  // chips and the check list have to be re-read there as well, not only while
+  // step 1 is being filled in. Keyed on the TERMS alone: keyed on the sections
+  // it would fire on every keystroke, and rebuild the editor under the caret.
+  useEffect(() => {
+    if (step !== 1) return;
+    const t = setTimeout(() => {
+      previewWording(wordingInput(sections)).then(setPreview).catch(() => {});
+    }, 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, limits]);
+
+  function set(name: string, value: string) {
+    setValues(v => ({ ...v, [name]: value }));
+    setErrors(e => {
+      if (!e[name]) return e;
+      const { [name]: _drop, ...rest } = e;
+      return rest;
+    });
+  }
+
+  function setLimit(key: string, patch: Partial<AgreedLimits[string]>) {
+    setLimits(l => {
+      const cur = l[key] ?? { value: "" };
+      const next = { ...cur, ...patch };
+      if (next.value === "") { const { [key]: _d, ...rest } = l; return rest; }
+      return { ...l, [key]: next };
+    });
+  }
+
+  /**
+   * A chip was typed over — so move the term, not just the sentence.
+   *
+   * The banner on the wording step promises this in one direction: change a
+   * term and every sentence quoting it follows. This is the other direction,
+   * and without it the two drift apart exactly where it matters most — the
+   * clause reads 15% while the check still enforces 11, and the review screen
+   * is the first place anybody finds out.
+   *
+   * Only where the answer is not a guess: one value standing in the slot, of
+   * the kind that term takes. A chip deleted, replaced with prose, or replaced
+   * with two numbers moves nothing and is reported on the review instead.
+   */
+  function chipsEdited(before: string, after: string) {
+    const moves: TermMove[] = [];
+    for (const edit of chipEdits(before, after)) {
+      const term = limitSpec.find(l => l.name === edit.token);
+      if (!term) continue;          // a name, a date — not a term you agreed
+      const move = readTermMove(edit, { kind: term.kind, choices: term.choices });
+      if (!move) continue;
+      if (String(limits[edit.token]?.value ?? "") === move.value) continue;
+      moves.push(move);
+    }
+    if (!moves.length) return;
+
+    const nextLimits: AgreedLimits = { ...limits };
+    for (const m of moves) {
+      nextLimits[m.token] = { ...(nextLimits[m.token] ?? {}), value: m.value };
+    }
+    const body = restoreChips(before, after, moves);
+    const nextSections = (sections ?? []).map(
+      (x, j) => j === activeSection ? { ...x, body } : x);
+
+    setLimits(nextLimits);
+    setSections(nextSections);
+    // The DOM is only rebuilt when the section key changes, and the chip has to
+    // come back with the new value on it.
+    setWordingVersion(v => v + 1);
+    setMessage(
+      moves.map(m => {
+        const term = limitSpec.find(l => l.name === m.token);
+        return `${term?.question ?? m.token} is now `
+             + `${m.value}${term?.unit ?? ""}`;
+      }).join(", ")
+      + " — the term moved with the sentence, so the check moves too. Change "
+      + "it back on Terms if that is not what you meant.");
+
+    // Re-reading is left to the effect that watches the terms — it runs after
+    // this render, so it sees the limit that was just set. Doing it here would
+    // send the OLD one, because none of the state above has landed yet.
+  }
+
+  /** A chip edited IN PLACE — clicked, and a new value typed into the box that
+   *  opens over it. The same rule as typing over one: the value moves the term,
+   *  or nothing happens. The sentence needs no editing at all here, because the
+   *  chip already quotes the term. */
+  function chipValue(token: string, text: string) {
+    const term = limitSpec.find(l => l.name === token);
+    if (!term) return;
+    const move = readTermMove({ token, text },
+                              { kind: term.kind, choices: term.choices });
+    if (!move) return;
+    if (String(limits[token]?.value ?? "") === move.value) return;
+    setLimits({ ...limits,
+                [token]: { ...(limits[token] ?? {}), value: move.value } });
+    setMessage(`${term.question} is now ${move.value}${term.unit ?? ""} — here, `
+             + "on Terms, and in the check behind it.");
+  }
+
+  /** Which chips can be changed from here. The agreed terms can; the carrier's
+   *  name and the programme cannot — those are not terms of this contract. */
+  const chipEditable = (token: string) =>
+    limitSpec.some(l => l.name === token);
+
+  /** Everything still missing, checked against the SERVER's own required list.
+   *  The server re-checks on save and is the authority; this exists so the gap
+   *  is named on the step that owns it rather than surfacing as a refusal three
+   *  steps later with nothing marked. */
+  function missing(): string[] {
+    const out: string[] = [];
+    if (!programId) out.push("Choose the programme this contract sits on.");
+    if (!brokerId && spec) {
+      out.push(`Choose the ${spec.counterparty_label.toLowerCase()} this `
+               + `contract is with.`);
+    }
+    for (const f of basicFields) {
+      if (f.required && !(values[f.name] ?? "").trim()) {
+        out.push(`${f.label} is required.`);
+      }
+    }
+    return out;
+  }
+
+  async function go(to: number) {
+    if (to > step) {
+      const gaps = missing();
+      if (gaps.length) {
+        setTouched(true);
+        setMessage(gaps[0]);
+        // Everything `missing()` names lives in The basics, so open it rather
+        // than leaving the message pointing at a panel that is not on screen.
+        setSec("basics");
+        return;
+      }
+    }
+    setMessage("");
+    // Entering the wording or the review re-reads from the current terms, so a
+    // number changed on step 1 is reflected in both — and a term AGREED on
+    // step 1 since the wording was written gets the clause it never had, which
+    // is the server's doing (contract_wording.missing_clauses), not a rebuild.
+    if (to >= 1) await refresh(sections);
+    setStep(to);
+    setFurthest(f => Math.max(f, to));
+  }
+
+  /** The identity fields, shaped for the API: blank is null, and the spec's
+   *  own `kind` decides whether a value goes as a number. Built from the spec
+   *  so a field added to contract_types.py needs no change here. */
+  function typedValues(): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const f of basicFields) {
+      const raw = (values[f.name] ?? "").trim();
+      out[f.name] = raw === ""
+        ? null
+        : (f.kind === "int" || f.kind === "decimal") ? Number(raw) : raw;
+    }
+    return out;
+  }
+
+  /** Finish the wizard.
+   *
+   *  `sign` is not a way of CREATING a contract — the server has no such mode,
+   *  and would be asserting an agreement nobody made if it did. It is two acts:
+   *  the contract is written down as a draft, and then the carrier settles its
+   *  terms alone. Doing it in that order means a failure at the second step
+   *  leaves a saved draft rather than a lost afternoon's work, and the history
+   *  shows both facts rather than one that hides the other. */
+  async function create(mode: "draft" | "review" | "live" | "sign") {
+    if (!spec) return;
+    setBusy("create");
+    setErrors({});
+    setMessage("");
+    try {
+      const created = await createContract({
+        program_id: Number(programId),
+        contract_type: typeKey,
+        counterparty_party_id: Number(brokerId),
+        // Every field the chosen TYPE asks for. Naming a handful by hand left
+        // year_of_account out of the request entirely — mandatory on a treaty,
+        // so an insurer ↔ reinsurer contract could not be saved at all.
+        ...typedValues(),
+        agreed_limits: limits,
+        renews_contract_id: kind === "renew" && renewsId ? Number(renewsId) : null,
+        signature_layout: sigLayout,
+        wording_sections: (sections ?? []).map(
+          ({ rendered: _r, tokens: _t, ...keep }) => keep),
+        // Deleted here, and deleted in what gets saved: the server writes a
+        // clause for any agreed term the wording does not state, so it has to
+        // know which silences were meant.
+        dropped_sections: dropped.sections,
+        dropped_terms: dropped.terms,
+        create_as: mode === "sign" ? "draft" : mode,
+      } as never);
+      if (mode === "sign") {
+        // The draft is SAVED at this point. If settling the terms is refused —
+        // a term the type wants left blank, a referenced document never
+        // uploaded — the work is not lost and the outer catch must not run: it
+        // would send the carrier back to Terms as though nothing had been
+        // created, and they would fill the form in a second time. The contract
+        // record says what is wrong and offers the same skip button.
+        try {
+          await skipReview(created.id);
+          // Signing is the carrier ADMIN's. Sending a carrier user to the
+          // signature page would bounce them off it (ROUTE_ACCESS) and lose
+          // the contract they just raised, so they land on the record — which
+          // is where their part of the work ends anyway.
+          nav(canAccessPath(`/contracts/${created.id}/signature`)
+              ? `/contracts/${created.id}/signature`
+              : `/contracts/${created.id}`);
+        } catch {
+          nav(`/contracts/${created.id}`);
+        }
+        return;
+      }
+      nav(`/contracts/${created.id}`);
+    } catch (err) {
+      const { message: m, errors: fe } = fieldErrors(err);
+      // Name the fields in the message. The server's own sentence says only
+      // that something is missing, which is no use on step 4 where none of
+      // those inputs are on screen.
+      const named = Object.keys(fe)
+        .map(k => basicFields.find(f => f.name === k)?.label ?? k);
+      setMessage(named.length
+        ? `${m} Missing: ${named.join(", ")}. Taken back to Terms so you can `
+          + `fill it in.`
+        : m);
+      setErrors(fe);
+      setTouched(true);
+      setStep(0);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  // Which limits to show up front. Seventeen empty rows is a wall — most
+  // contracts set five or six of them, and the ones that matter get lost among
+  // the ones that do not. So the common ones are here and the rest are one
+  // click away, already filled ones always shown.
+  // WHICH limits are offered before "show every term" is the vocabulary's
+  // business, not this screen's — `common` is served with each one. It was a
+  // list here, which meant a limit added to contract_types.py appeared in the
+  // wording, in the checks and on the record, but not on the form where
+  // somebody would have typed it.
+  const [showAllLimits, setShowAllLimits] = useState(false);
+  // Which section of step 1 is open. The step asks exactly what it always
+  // asked — the one long card is cut into panels and the rail picks one.
+  const [sec, setSec] = useState("start");
+  const [showMoreBasics, setShowMoreBasics] = useState(false);
+  const [openBecomes, setOpenBecomes] = useState<string | null>(null);
+
+  const visibleLimits = limitSpec.filter(
+    l => showAllLimits || l.common || limits[l.name] !== undefined);
+  const hiddenCount = limitSpec.length - visibleLimits.length;
+
+  /** The check a single limit currently produces — so the row can show what it
+   *  becomes at the moment the number is typed, rather than three steps later. */
+  function checkFor(name: string) {
+    return preview?.checks.find(c => c.from === name) ?? null;
+  }
+
+  function limitRow(l: AgreedLimitSpec) {
+    const entry = limits[l.name];
+    const sev = entry?.severity ?? l.default_severity;
+    const has = entry !== undefined;
+    const becomes = openBecomes === l.name ? checkFor(l.name) : null;
+    return (
+      <div className="lim" key={l.name}>
+        <div className="lq">
+          <b>{l.question}</b>
+          <span>{l.sub}</span>
+          {has && l.checkable && (
+            <span
+              className="linkish" role="button" style={{ fontSize: 11.5 }}
+              onClick={() => setOpenBecomes(o => o === l.name ? null : l.name)}
+            >
+              {openBecomes === l.name ? "Hide" : "What this becomes"}
+            </span>
+          )}
+        </div>
+        <div className={l.kind === "choice" ? "" : "unit"}>
+          {l.choices ? (
+            <select
+              value={String(entry?.value ?? "")}
+              onChange={e => setLimit(l.name, { value: e.target.value })}
+            >
+              <option value="">Not agreed</option>
+              {l.choices.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          ) : (
+            <>
+              <input
+                value={String(entry?.value ?? "")}
+                onChange={e => setLimit(l.name, { value: e.target.value })}
+                placeholder="—"
+              />
+              {(l.unit || l.kind === "money") && (
+                <em>{l.unit
+                     || String(limits.currency?.value ?? "").toUpperCase()
+                     || "—"}</em>
+              )}
+            </>
+          )}
+        </div>
+        <div>
+          {/* The severity question only exists once there is a limit to
+              break. Asking how serious a breach of nothing would be is asking
+              about nothing. */}
+          {!has ? (
+            <span className="sub">—</span>
+          ) : l.checkable ? (
+            <>
+              <div className="segpick">
+                {sevSpec.map(sv => (
+                  <button
+                    key={sv.key} type="button" title={sv.hint}
+                    className={sev === sv.key ? "on" : ""}
+                    onClick={() => setLimit(l.name, { severity: sv.key })}
+                  >
+                    {sv.label}
+                  </button>
+                ))}
+              </div>
+              {/* No "Stops the row" line here. Each option already carries
+                  the same explanation in its `title`, and the row's own
+                  "In the contract → On every row" strip below spells out the
+                  consequence in context — three sayings of one fact made the
+                  row noisy. */}
+            </>
+          ) : (
+            <span className="sub">
+              Goes in the wording. Nothing in a file to check it against.
+            </span>
+          )}
+        </div>
+        {becomes && (
+          <div className="lim-becomes">
+            <b>In the contract:</b> the clause quoting{" "}
+            <span className="term">{preview?.tokens[l.name]}</span>
+            <span className="arrow">→</span>
+            <b>On every row:</b>{" "}
+            <span className="mono">{becomes.expression}</span>
+            <span className="arrow">→</span>
+            <span className={`badge ${becomes.severity === "critical" ? "b-crit" : "b-warn"}`}>
+              <span className="d" />
+              {sevLabel(becomes.severity)}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+
+  const active = sections?.[activeSection];
+
+  /** Step 3's parts. The "Worth a look" part (terms that produce no check,
+   *  and term combinations to double-check) was taken out of this step; the
+   *  preview still returns both lists. */
+  const readParts = [
+    { key: "sum", heading: "Summary",
+      desc: "What this contract adds up to, before you read it." },
+    { key: "doc", heading: "The document",
+      desc: "Exactly what the broker will open, with every live value filled in." },
+    { key: "checks", heading: "Rules to be set up",
+      desc: "From the moment both parties sign. These do nothing until the "
+            + "contract is created and active — a draft never checks anything." },
+  ];
+  // Clamped, so the rail never points past the end of its own list.
+  const readAt = Math.min(readPane, readParts.length - 1);
+  // Named in the nested step row: "Contract for Test Org".
+  const flowBroker = counterparties?.find(c => String(c.id) === String(brokerId))?.name;
+  // The endorsement trail follows the rail: everything up to the terms is
+  // "the change", the last section is where it gets attached.
+  const endorseStage = sec === "attach" ? 1 : 0;
+
+
+  /* ── Step 1 · the pieces the rail switches between ────────────────────────
+     Not one question moved or changed: the single long card was cut at the
+     headings it already had, and `sec` says which piece is on screen. An
+     endorsement keeps the whole card in one scroll — it uses a different half
+     of this screen, and has only ever had two parts. */
+  const secKind = (
+    <>
+        {copyFrom && (
+          <div className="note" style={{ marginBottom: 12 }}>
+            {busy === "copy" ? "Bringing the contract's terms across…" : <>
+              <b>Started from {copyFromName ? `${copyFromName}'s` : "the other broker's"} contract.</b>{" "}
+              Its terms, limits and wording are filled in for{" "}
+              {flowBroker ?? "this broker"}. Change anything that differs —
+              this broker agrees and signs their own copy.
+            </>}
+          </div>
+        )}
+        <div className="fh">
+          What are you making?
+          <InfoTip text="They end in different places, so this is the first question." />
+        </div>
+        <div className="startpick">
+          {KINDS.map(k => (
+            <div
+              key={k.key}
+              className={`sp ${kind === k.key ? "on" : ""}`}
+              onClick={() => setKind(k.key)}
+            >
+              <b>{k.title}</b><span>{k.sub}</span>
+            </div>
+          ))}
+        </div>
+        {kind === "renew" && (
+          <div className="note" style={{ marginTop: 12 }}>
+            <b>Which contract is this the renewal of?</b>
+            <p style={{ margin: "4px 0 10px" }}>
+              Its terms, limits and wording come across so the broker only
+              reads the numbers that moved. Last year's contract is not
+              touched — everything already checked against it keeps its
+              meaning.
+            </p>
+            <div className="field" style={{ marginBottom: 0, maxWidth: 460 }}>
+              <select
+                value={renewsId}
+                onChange={e => loadRenewalSource(e.target.value)}
+              >
+                <option value="">Select the contract being renewed…</option>
+                {renewable.map(c => (
+                  <option key={c.id} value={String(c.id)}>
+                    {c.name}
+                    {c.counterparty ? ` — ${c.counterparty.name}` : ""}
+                    {c.expiry_dt ? ` (ends ${c.expiry_dt})` : ""}
+                  </option>
+                ))}
+              </select>
+              {busy === "renewal" && (
+                <div className="hint">Bringing its terms across…</div>
+              )}
+            </div>
+          </div>
+        )}
+        {kind === "endorse" && (
+          <div className="note" id="endorse-change" style={{ marginTop: 12 }}>
+            <b>Which contract are you changing?</b>
+            <p style={{ margin: "4px 0 10px" }}>
+              An endorsement is not a new contract. This one keeps
+              running, keeps its id and keeps every bordereau already
+              checked against it — you change some of its terms from a
+              date, and both documents stay active together.
+            </p>
+            <div className="grid g-3">
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Contract to endorse</label>
+                <select value={endorseId}
+                        onChange={e => loadEndorseSource(e.target.value)}>
+                  <option value="">Select a live contract…</option>
+                  {endorsable.map(c => (
+                    <option key={c.id} value={String(c.id)}>
+                      {c.name}
+                      {c.counterparty ? ` — ${c.counterparty.name}` : ""}
+                    </option>
+                  ))}
+                </select>
+                {endorsable.length === 0 && (
+                  <div className="hint">
+                    Nothing is running yet. Only an active contract can
+                    be endorsed.
+                  </div>
+                )}
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Takes effect from</label>
+                <input type="date" value={endorseFrom}
+                       onChange={e => setEndorseFrom(e.target.value)} />
+                <div className="hint">
+                  Business before this date is judged on the old terms.
+                </div>
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>
+                  Reason{" "}
+                  <span className="muted" style={{ fontWeight: 500 }}>
+                    — optional
+                  </span>
+                </label>
+                <input value={endorseNote}
+                       placeholder="e.g. Agreed at the mid-year review"
+                       onChange={e => setEndorseNote(e.target.value)} />
+              </div>
+            </div>
+            {busy === "endorse-load" && (
+              <div className="hint">Loading its current terms…</div>
+            )}
+          </div>
+        )}
+    </>
+  );
+  const secEndorseParties = (
+    <>
+      {
+            endorseId && endorsePv && (
+              <>
+                <div className="fh">
+                  The contract you are changing
+                  <InfoTip text="None of this moves — an endorsement changes terms, not parties." />
+                </div>
+                <div className="grid g-3" style={{ marginBottom: 18 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Contract</label>
+                    <input className="ro" readOnly
+                           value={endorsePv.contract.name} />
+                  </div>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Broker</label>
+                    <input className="ro" readOnly
+                           value={counterparty?.name ?? "—"} />
+                  </div>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Its term</label>
+                    <input className="ro" readOnly
+                           value={endorsePv.contract.inception_dt
+                             ? `${endorsePv.contract.inception_dt} → ${endorsePv.contract.expiry_dt}`
+                             : "—"} />
+                  </div>
+                </div>
+              </>
+            )
+      }
+    </>
+  );
+  const secWho = (
+    <>
+        {/* WHICH KIND of contract. Asked before the basics because it
+            decides what the rest of the card asks for: a binder needs
+            the class of business the broker may write under, a treaty
+            needs the year of account it attaches to and the notice
+            needed to get out of it. Both lists come from the server's
+            spec, so this picker only chooses a key — the inputs below
+            rearrange themselves. */}
+        <div className="fh">
+          Who is it with?
+          <InfoTip text="This decides what the contract has to state." />
+        </div>
+        {/* Two across, not the three the class assumes: there are two
+            types, and a trailing empty column reads as a missing option. */}
+        <div
+          className="startpick"
+          style={{ marginBottom: 18,
+                   gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
+        >
+          {(specs ?? []).map(t => (
+            <div
+              key={t.key}
+              className={`sp ${typeKey === t.key ? "on" : ""}`}
+              onClick={() => {
+                if (t.key === typeKey) return;
+                setTypeKey(t.key);
+                // The organisation already chosen is the wrong KIND for
+                // the new type, and the server refuses it on save. Better
+                // to clear it here than to explain it three steps later.
+                setBrokerId("");
+              }}
+            >
+              <b>{t.label}</b><span>{t.blurb}</span>
+            </div>
+          ))}
+        </div>
+    </>
+  );
+  const secBasics = (
+    <>
+        <div className="fh">
+          The basics
+          <InfoTip text="Who the contract is with, and how long it runs." />
+        </div>
+        <div className="grid g-3">
+          <div className="field">
+            <label>Carrier</label>
+            <input className="ro" value={carrierName} readOnly />
+          </div>
+          <div className="field">
+            <label>Programme</label>
+            <select
+              value={programId}
+              onChange={e => { setProgramId(e.target.value); setBrokerId(""); }}
+              style={touched && !programId
+                ? { borderColor: "var(--p-crit)" } : undefined}
+            >
+              <option value="">Select a programme</option>
+              {programmes.map(p => (
+                <option key={p.id} value={String(p.id)}>{p.name}</option>
+              ))}
+            </select>
+
+          </div>
+          <div className="field">
+            <label>{counterpartyLabel}</label>
+            <select
+              value={brokerId} disabled={gatedOnProgramme && !programId}
+              onChange={e => setBrokerId(e.target.value)}
+              style={touched && !brokerId
+                ? { borderColor: "var(--p-crit)" } : undefined}
+            >
+              <option value="">
+                {gatedOnProgramme && !programId
+                  ? "Choose a programme first"
+                  : `Select a ${counterpartyLabel.toLowerCase()}…`}
+              </option>
+              {(counterparties ?? []).map(c => (
+                <option key={c.id} value={String(c.id)}>{c.name}</option>
+              ))}
+            </select>
+
+          </div>
+        </div>
+
+
+
+        {/* Driven by the SERVER's field spec, not a hand-written list.
+            Hardcoding these is what let the form call class of business
+            optional while the server required it — the exact drift the
+            spec is served to prevent.
+
+            Required inline; the rest folded away. Nine optional inputs
+            shown flat made the required ones hard to find, and a contract
+            that needs none of them should not have to scroll past them. */}
+        <div className="grid g-3">
+          {renderFields(basicFields.filter(f => f.required))}
+        </div>
+
+        {optionalBasics.length > 0 && (
+          <div style={{ marginTop: 4 }}>
+            <button
+              className="btn sm" type="button"
+              onClick={() => setShowMoreBasics(v => !v)}
+            >
+              {showMoreBasics
+                ? "Hide the rest"
+                : `＋ More about this contract (${optionalBasics.length})`}
+            </button>
+            <InfoTip text="Reference, year of account and the like — leave them out and nothing asks again." />
+            {filledOptional > 0 && (
+              <span className="sub" style={{ marginLeft: 8 }}>{filledOptional} set</span>
+            )}
+            {showMoreBasics && (
+              <div className="grid g-3" style={{ marginTop: 14 }}>
+                {renderFields(optionalBasics)}
+              </div>
+            )}
+          </div>
+        )}
+    </>
+  );
+  const limitsHead = (
+    <>
+        <div className="fh">
+          {kind === "endorse" ? "The terms — change what moved" : "The limits you agreed"}
+          <InfoTip text={kind === "endorse"
+            ? "These are its current terms — edit the ones the "
+              + "endorsement changes and leave the rest alone."
+            : "Each line becomes a clause in the contract and a check "
+              + "that runs on every file the broker sends."} />
+        </div>
+    </>
+  );
+  const limitsFold = (
+    <>
+        {hiddenCount > 0 && (
+          <div style={{ paddingTop: 12 }}>
+            <button
+              className="btn sm" type="button"
+              onClick={() => setShowAllLimits(v => !v)}
+            >
+              {showAllLimits
+                ? "Show fewer"
+                : `＋ ${hiddenCount} more you can set`}
+            </button>
+            <InfoTip text="Brokerage, profit commission, settlement, tax — leave them out and the contract simply does not mention them." />
+          </div>
+        )}
+    </>
+  );
+  const checksLine = (
+    <>
+        {kind !== "endorse" && (
+        <>
+        <div className="divider" />
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <span className="badge b-ok" style={{ flex: "0 0 auto" }}>
+            <span className="d" />
+            {preview?.checks.length
+              ?? (Object.entries(limits).filter(([k]) =>
+                    limitSpec.find(l => l.name === k)?.checkable).length
+                  + (values.inception_dt && values.expiry_dt ? 1 : 0))}{" "}
+            checks
+          </span>
+          <InfoTip text={"One for each limit above that a spreadsheet can be "
+            + "measured against, plus one from the dates — a risk that "
+            + "starts outside the contract term is not covered by it. "
+            + "Because you typed these numbers rather than us reading "
+            + "them out of somebody else's PDF, every one of them can be "
+            + "checked automatically."} />
+        </div>
+        </>
+        )}
+    </>
+  );
+  /* An endorsement ends on what it says: the changes, the wording it will
+     carry and the button that attaches it. Its own section, like the rest. */
+  const endorseAttach = (
+    <>
+    <div className="fh" id="endorse-attach">
+      What this endorsement says
+      {endorsePv && <> · Endorsement {endorsePv.number}</>}
+      <InfoTip text="Nothing is attached until you press the button." />
+    </div>
+      {!endorsePv || endorsePv.changes.length === 0 ? (
+        <div className="empty">
+          {!endorseId
+            ? "Pick the contract you are changing on the first section."
+            : "Change a term on one of the terms sections and it will appear here."}
+        </div>
+      ) : (
+        <>
+          <div className="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Term</th><th>Was</th><th>Becomes</th>
+                  <th>The check it runs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {endorsePv.changes.map(ch => (
+                  <tr key={ch.key}>
+                    <td>
+                      <b>{ch.question}</b>
+                      <div className="sub">{ch.kind}</div>
+                    </td>
+                    <td className="mono">{ch.from || "—"}</td>
+                    <td className="mono">{ch.to || "—"}</td>
+                    <td>
+                      {ch.check_after ? (
+                        <>
+                          <span className="mono">{ch.check_after}</span>
+                          {ch.check_before
+                           && ch.check_before !== ch.check_after && (
+                            <div className="sub mono">
+                              was {ch.check_before}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <span className="sub">
+                          Recorded in the wording — nothing to check
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ paddingTop: 16 }}>
+            {endorsePv.sections.map(sec => (
+              <div key={sec.key} style={{ marginBottom: 12 }}>
+                <b style={{ fontSize: 13 }}>{sec.title}</b>
+                <div className="muted" style={{ fontSize: 13,
+                     lineHeight: 1.7, whiteSpace: "pre-line",
+                     marginTop: 4 }}>
+                  {sec.body}
+                </div>
+              </div>
+            ))}
+            <div className="note">
+              <b>Both documents stay active.</b> The endorsement is
+              attached beside the wording, not instead of it — so the
+              contract still says what it always said, and this says
+              what changed. Its rules are rebuilt from the pair when
+              you re-read the contract.
+            </div>
+            <div className="rowacts">
+              <button
+                className="btn pri" type="button"
+                disabled={!!busy || !endorsePv.changes.length}
+                onClick={endorse}
+              >
+                {busy === "endorse"
+                  ? "Endorsing…"
+                  : `Endorse ${endorsePv.contract.name}`}
+              </button>
+              <Link to={`/contracts/${endorseId}`} className="linkish">
+                Open the contract instead →
+              </Link>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+
+  /** One limit group's panel — the markup the group map used to produce. */
+  function limitPanel(g: LimitGroup) {
+        const rows = visibleLimits.filter(l => l.group === g.key);
+        if (!rows.length) return null;
+        return (
+          // A panel per group, with its name banded across the top.
+          // The groups ask about different things — what may be written
+          // at all, how much the broker may commit you to, who pays
+          // whom — and a loose caption between them let the last row of
+          // one be read as the first row of the next.
+          <div className="limgrp" key={g.key}>
+            <div className="limgrp-h">
+              <div className="sub-h">
+                {g.label}
+                {g.sub && <InfoTip text={g.sub} />}
+              </div>
+            </div>
+            <div className="limgrp-b">
+              <div className="lim lim-h">
+                <div className="lq"><b>What you agreed</b></div>
+                <div className="sub">The limit</div>
+                <div className="sub">Severity Classification</div>
+              </div>
+              {rows.map(limitRow)}
+            </div>
+          </div>
+        );
+  }
+
+  /* What the rail lists, in the order the card used to run. The counts are
+     read off the answers already in state — nothing new is stored. */
+  const basicsShort = (programId ? 0 : 1) + (brokerId || !spec ? 0 : 1)
+    + basicFields.filter(f => f.required && !(values[f.name] ?? "").trim()).length;
+  const limitsSet = (key: string) =>
+    limitSpec.filter(l => l.group === key && limits[l.name] !== undefined).length;
+
+  const endorseChanges = endorsePv?.changes.length ?? 0;
+
+  const SECS: { key: string; label: string; cap?: string; meta: string;
+                done: boolean; short: boolean; body: React.ReactNode }[] =
+    kind === "endorse" ? [
+    { key: "start", label: "What are you changing?",
+      meta: endorsePv?.contract.name
+        ?? (endorseId ? "Reading its terms…" : "No contract picked"),
+      done: !!endorseId, short: !endorseId, body: secKind },
+    { key: "parties", label: "The contract you are changing",
+      meta: counterparty?.name ?? "—", done: !!endorsePv, short: false,
+      body: endorsePv ? secEndorseParties : (
+        <div className="empty">
+          {endorseId
+            ? "Reading its terms…"
+            : "Pick the contract you are changing on the first section."}
+        </div>
+      ) },
+    ...limitGroups.map((g, i) => ({
+      key: g.key, label: g.label,
+      cap: i === 0 ? "The terms — change what moved" : undefined,
+      meta: limitsSet(g.key) ? `${limitsSet(g.key)} set` : "None set",
+      done: limitsSet(g.key) > 0, short: false,
+      body: <>{limitsHead}{limitPanel(g)}{limitsFold}</>,
+    })),
+    { key: "attach", label: "What this endorsement says",
+      meta: endorseChanges
+        ? `${endorseChanges} change${endorseChanges !== 1 ? "s" : ""}`
+        : "No change yet",
+      done: endorseChanges > 0, short: false, body: endorseAttach },
+  ] : [
+    { key: "start", label: "What are you making?",
+      meta: KINDS.find(k => k.key === kind)?.title ?? "—",
+      done: kind !== "renew" || !!renewsId,
+      short: kind === "renew" && !renewsId,
+      body: secKind },
+    { key: "with", label: "Who is it with?",
+      meta: spec?.label ?? "—", done: !!typeKey, short: false,
+      body: secWho },
+    { key: "basics", label: "The basics",
+      meta: basicsShort ? `${basicsShort} still to answer` : "All answered",
+      done: basicsShort === 0, short: basicsShort > 0,
+      body: secBasics },
+    ...limitGroups.map((g, i) => ({
+      key: g.key, label: g.label,
+      cap: i === 0 ? "The limits you agreed" : undefined,
+      meta: limitsSet(g.key) ? `${limitsSet(g.key)} set` : "None set",
+      done: limitsSet(g.key) > 0, short: false,
+      body: <>{limitsHead}{limitPanel(g)}{limitsFold}</>,
+    })),
+  ];
+  const secAt = Math.max(0, SECS.findIndex(s => s.key === sec));
+  const curSec = SECS[secAt];
+
+  return (
+    <div className="proto">
+      <div className="view full">
+        {/* Opened from Configure Program: ONE stepper — the programme's
+            set-up, with this contract's four steps nested under Contracts.
+            Anywhere else, the contract's own trail, as before. */}
+        {fromFlow ? (
+          /* Opened from Configure Program, so the programme's stepper stays on
+             screen with THIS screen's own steps nested under Contracts — an
+             endorsement is still something you are doing inside step 3, so it
+             nests the same way a new contract does. */
+          <ProgrammeFlowBar programId={Number(programId) || null} at={3}>
+            <SubSteps
+              caption={kind === "endorse"
+                ? (flowBroker ? `Endorsement for ${flowBroker}` : "This endorsement")
+                : (flowBroker ? `Contract for ${flowBroker}` : "This contract")}
+              steps={kind === "endorse" ? ENDORSE_STEPS : STEPS}
+              current={kind === "endorse" ? endorseStage : step}
+              furthest={kind === "endorse" ? endorseStage : furthest}
+              onPick={i => kind === "endorse"
+                ? setSec(i === 0 ? "start" : "attach")
+                : go(i)} />
+          </ProgrammeFlowBar>
+        ) : kind === "endorse" ? (
+          <div className="trail">
+            {ENDORSE_STEPS.map((s, i) => (
+              <span key={s.key} style={{ display: "contents" }}>
+                {i > 0 && <span className="sep">›</span>}
+                {/* The trail's two parts are the rail's first and last
+                    sections, so a step opens one rather than scrolling. */}
+                <button
+                  type="button"
+                  className={`step-c ${i === endorseStage ? "on" : i < endorseStage ? "done" : "off"}`}
+                  aria-current={i === endorseStage ? "step" : undefined}
+                  onClick={() => setSec(i === 0 ? "start" : "attach")}
+                >
+                  <span className="n">
+                    {i < endorseStage ? <Check size={12} strokeWidth={3} /> : i + 1}
+                  </span>
+                  <span className="lvbox">
+                    <span className="lv">Step {i + 1}</span>
+                    <span className="nm">{s.label}</span>
+                  </span>
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : (
+        <div className="trail">
+          {STEPS.map((s, i) => (
+            <span key={s.key} style={{ display: "contents" }}>
+              {i > 0 && <span className="sep">›</span>}
+              {/* Every step is a way there. Going forward runs the same
+                  check as the Next button, so a step whose terms are still
+                  missing stops on step 1 with the gap named, not a blank page. */}
+              <button
+                type="button"
+                className={`step-c ${i === step ? "on" : i < furthest || i < step ? "done" : "off"}`}
+                aria-current={i === step ? "step" : undefined}
+                title={i === step ? undefined : `Go to ${s.label}`}
+                onClick={() => i !== step && go(i)}
+              >
+                <span className="n">
+                  {i !== step && (i < furthest || i < step) ? <Check size={12} strokeWidth={3} /> : i + 1}
+                </span>
+                <span className="lvbox">
+                  <span className="lv">Step {i + 1}</span>
+                  <span className="nm">{s.label}</span>
+                </span>
+              </button>
+            </span>
+          ))}
+        </div>
+        )}
+
+        {/* ══ STEP 1 · TERMS ══ */}
+        {step === 0 && (
+          <div>
+            <div className="page-head">
+              <div className="t">
+                <h2>
+                  {kind === "endorse" ? "Endorse a Contract" : "Create a Contract"}
+                  <InfoTip text={kind === "endorse"
+                    ? "Change some terms of a contract that is already running. "
+                      + "Kavachio writes the endorsement, attaches it beside the "
+                      + "wording, and moves the checks — nothing is attached "
+                      + "until you press the button."
+                    : "Answer these questions once. Kavachio writes the "
+                      + "document, you read it through, then it goes out for "
+                      + "signature — and nothing is sent to anybody until that "
+                      + "last step."} />
+                </h2>
+              </div>
+              <div className="actions">
+                <Link to="/contracts" className="btn">
+                  <ArrowLeft size={14} /> Contracts
+                </Link>
+                {kind !== "endorse" && (
+                  <button className="btn pri" type="button" onClick={() => go(1)}>
+                    Next: the wording →
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {message && (
+              <div className="note warn" style={{ marginBottom: 16 }}>{message}</div>
+            )}
+
+            {/* One section at a time, whichever screen this is: the rail says
+                where you are and what is still short. An endorsement's list is
+                simply a different list — the same panel shows it. */}
+            <div className="wizbody">
+                <nav className="secrail" aria-label="Sections of this step">
+                  <div className="cap">On this step</div>
+                  {SECS.map((s, i) => (
+                    <span key={s.key} style={{ display: "contents" }}>
+                      {s.cap && <div className="cap">{s.cap}</div>}
+                      <button
+                        type="button"
+                        className={`secitem ${i === secAt ? "on"
+                          : s.short && touched ? "warn" : s.done ? "done" : "todo"}`}
+                        aria-current={i === secAt ? "true" : undefined}
+                        onClick={() => setSec(s.key)}
+                      >
+                        <span className="n">
+                          {s.done && i !== secAt
+                            ? <Check size={12} strokeWidth={3} /> : i + 1}
+                        </span>
+                        <span className="lvbox">
+                          <span className="t">{s.label}</span>
+                          <span className="m">{s.meta}</span>
+                        </span>
+                      </button>
+                    </span>
+                  ))}
+                  {kind !== "endorse" && <div className="tail">{checksLine}</div>}
+                </nav>
+
+                <div className="secmain">
+                <div className="card pad">
+                  {curSec?.body}
+
+                  <div className="secnav">
+                    <button
+                      className="btn" type="button" disabled={secAt === 0}
+                      onClick={() => setSec(SECS[secAt - 1].key)}
+                    >
+                      <ArrowLeft size={14} /> Back
+                    </button>
+                    <span className="sub">
+                      Section {secAt + 1} of {SECS.length} · nothing is
+                      {kind === "endorse"
+                        ? " attached until you press Endorse"
+                        : " written until the last step"}
+                    </span>
+                    {secAt < SECS.length - 1 ? (
+                      <button
+                        className="btn pri" type="button"
+                        onClick={() => setSec(SECS[secAt + 1].key)}
+                      >
+                        Next: {SECS[secAt + 1].label} →
+                      </button>
+                    ) : kind !== "endorse" ? (
+                      /* The endorsement's last section carries its own button —
+                         the one that actually attaches it. */
+                      <button className="btn pri" type="button" onClick={() => go(1)}>
+                        Next: the wording →
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                {kind !== "endorse" && (
+                <p className="muted" style={{ fontSize: 12.5, lineHeight: 1.6,
+                     textAlign: "center", margin: "16px auto 0", maxWidth: 640 }}>
+                  Already have a contract somebody else drafted?{" "}
+                  <span className="linkish" role="button" onClick={() => setUploading(true)}>
+                    Upload the signed PDF instead →
+                  </span>
+                  <InfoTip text={"Kavachio reads the terms out of it and builds "
+                    + "what checks it can — but a contract written from its own "
+                    + "terms never has a clause the checks cannot read."} />
+                </p>
+                )}
+                </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* ══ STEP 2 · WORDING ══ */}
+        {step === 1 && (
+          <>
+            <div className="page-head">
+              <div className="t">
+                <h2>
+                  Write the Wording
+                  <InfoTip text={"Kavachio has written the wording from your "
+                    + "terms. The shaded bits are live values, not typed text — "
+                    + "click one to change it without leaving this page, or "
+                    + "change it on Terms; either way every sentence quoting it "
+                    + "updates, and so does the check behind it. Anything you "
+                    + "type yourself stays exactly as you typed it."} />
+                </h2>
+                <p>
+                  {values.name || "This contract"}
+                  {counterparty && <>, for {counterparty.name}</>}
+                  {programme && <> on {programme.name}</>}.{" "}
+                  {sections?.length ?? 0} sections, written for you already.
+                </p>
+              </div>
+              <div className="actions">
+                <button className="btn" type="button" onClick={() => go(0)}>
+                  ← Terms
+                </button>
+                <button className="btn pri" type="button" onClick={() => go(2)}>
+                  Read it through →
+                </button>
+              </div>
+            </div>
+
+            {/* The section list is the rail; the editor is the panel. Same
+                shape as steps 3 and 4 below. */}
+            <WizardStep
+              cap="The sections"
+              at={activeSection}
+              onPick={i => setActiveSection(Math.max(0, i))}
+              parts={(sections ?? []).map((sec, i) => ({
+                key: sec.key,
+                title: sec.title || <span className="faint">Untitled section</span>,
+                meta: sec.origin,
+                state: "done" as const,
+                extra: sec.locked ? (
+                  <span className="keep" title="Every contract has to say who the parties are — this one cannot be removed">🔒</span>
+                ) : (
+                  <span
+                    className="rm" title="Delete this section"
+                    onClick={e => {
+                      e.stopPropagation();
+                      // Remembered as deleted, along with every term it quoted:
+                      // the server writes a clause for any term the wording does
+                      // not state, and without this the section would reappear
+                      // on the next re-read.
+                      setDropped(d => ({
+                        sections: [...d.sections, sec.key],
+                        terms: [...d.terms,
+                                ...[...sec.body.matchAll(/\{\{([a-z_]+)\}\}/g)]
+                                  .map(m => m[1])],
+                      }));
+                      setSections(list => (list ?? []).filter((_, j) => j !== i));
+                      setActiveSection(a => Math.max(0, a - (i <= a ? 1 : 0)));
+                    }}
+                  >
+                    ×
+                  </span>
+                ),
+              }))}
+              tail={
+                <>
+                  <button className="btn sm" type="button" onClick={addSection}>
+                    <Plus size={13} /> Add a section
+                  </button>
+                  <button className="btn sm" type="button"
+                          onClick={() => refresh(sections)}>
+                    Refresh from my terms
+                  </button>
+                  <button className="btn sm" type="button"
+                          onClick={() => refresh(null)}>
+                    Start the wording again
+                  </button>
+                  <div className="sub" style={{ textAlign: "center" }}>
+                    What these do
+                    <InfoTip text={"“Refresh from my terms” rewrites the "
+                      + "clauses your terms drive and keeps what you typed."
+                      + "\n\n“Start the wording again” throws away your edits "
+                      + "and rewrites every section from the terms."} />
+                  </div>
+                </>
+              }
+              title={active
+                ? <>§{activeSection + 1} &nbsp;{active.title
+                    || <span className="faint">Untitled section</span>}</>
+                : "No sections yet"}
+              desc={active
+                ? "Click into the text and type. This is the wording that will "
+                  + "appear in the signed contract."
+                : undefined}
+              foot={`Section ${Math.min(activeSection + 1, sections?.length ?? 1)} of ${sections?.length ?? 0} · nothing is sent to anybody until step 4`}
+              nextLabel={activeSection < (sections?.length ?? 0) - 1
+                ? "Next section →" : "Read it through →"}
+              onNext={() => (activeSection < (sections?.length ?? 0) - 1
+                ? setActiveSection(activeSection + 1) : go(2))}
+            >
+              {active ? (
+                <>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Section title</label>
+                    <input
+                      value={active.title}
+                      placeholder="Name this section"
+                      onChange={e => setSections(list => (list ?? []).map(
+                        (x, j) => j === activeSection
+                          ? { ...x, title: e.target.value } : x))}
+                    />
+                  </div>
+                  <WordingEditor
+                    sectionKey={`${active.key}:${wordingVersion}`}
+                    body={active.body}
+                    tokens={preview?.tokens ?? {}}
+                    labels={tokenLabels}
+                    onInsertRequest={fn => { insertChip.current = fn; }}
+                    onChipsEdited={chipsEdited}
+                    onChipValue={chipValue}
+                    chipEditable={chipEditable}
+                    onChange={body => setSections(list => (list ?? []).map(
+                      (x, j) => j === activeSection
+                        ? { ...x, body,
+                            origin: x.origin === "from your terms"
+                              ? "from your terms · edited" : x.origin }
+                        : x))}
+                  />
+
+                  <div className="termbar">
+                    <span className="muted" style={{ fontSize: 11.5,
+                          alignSelf: "center", marginRight: 2 }}>
+                      Drop in a live value
+                      <InfoTip text={"A chip is tied to the term you set in "
+                        + "step 1. Click one to change it — here, on Terms, and "
+                        + "in the check behind it, all at once — or change it "
+                        + "on Terms and every sentence quoting it follows. "
+                        + "Either way the contract and the checks say the same "
+                        + "thing."} />
+                    </span>
+                    {Object.keys(preview?.tokens ?? {}).map(t => (
+                      <button
+                        key={t} type="button"
+                        onClick={() => insertChip.current?.(t)}
+                      >
+                        {tokenLabels[t] ?? t}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="empty">
+                  No sections yet. Add one, or go back and set some terms.
+                </div>
+              )}
+            </WizardStep>
+          </>
+        )}
+
+        {/* ══ STEP 3 · READ IT THROUGH ══ */}
+        {step === 2 && preview && (
+          <>
+            <div className="page-head">
+              <div className="t">
+                <h2>Read It Through</h2>
+                <p>
+                  {values.name} · {preview.pages} pages · {preview.sections.length}{" "}
+                  sections · {preview.checks.length} automatic checks.{" "}
+                  <b>Nothing has been sent yet.</b>
+                </p>
+              </div>
+              <div className="actions">
+                <button className="btn" type="button" onClick={() => go(1)}>
+                  ← Back to the wording
+                </button>
+                <button className="btn" type="button" disabled={!!busy}
+                        onClick={draft}>
+                  <Download size={14} />
+                  {busy === "draft" ? "Composing…" : "Download the draft"}
+                </button>
+              </div>
+            </div>
+
+            {/* Cards down a long page became parts of one: the rail says how
+                big each is — 8 sections, 10 checks — before it is opened, and
+                the buttons above never scroll away. */}
+            <WizardStep
+              cap="What to look at"
+              at={readAt}
+              onPick={setReadPane}
+              parts={[
+                { key: "sum", title: "Summary", state: "done" as const,
+                  meta: `${preview.pages} pages · ${preview.checks.length} rule${preview.checks.length === 1 ? "" : "s"}` },
+                { key: "doc", title: "The document", state: "done" as const,
+                  meta: `${preview.sections.length} sections` },
+                { key: "checks", title: "Rules to be set up", state: "done" as const,
+                  meta: `${preview.checks.length} rule${preview.checks.length === 1 ? "" : "s"}` },
+              ]}
+              title={readParts[readAt]?.heading}
+              desc={readParts[readAt]?.desc}
+              actions={readParts[readAt]?.key === "doc" ? (
+                <button
+                  className="btn sm" type="button" disabled={!!busy}
+                  onClick={draft}
+                >
+                  <Download size={13} />
+                  {busy === "draft" ? "Composing…" : "Download the draft"}
+                </button>
+              ) : undefined}
+              foot={`${readAt + 1} of ${readParts.length} · nothing has been sent yet`}
+              nextLabel={readAt < readParts.length - 1
+                ? "Next →" : "Set up signatures →"}
+              onNext={() => (readAt < readParts.length - 1
+                ? setReadPane(readAt + 1) : go(3))}
+            >
+              {readParts[readAt]?.key === "sum" && (
+                <>
+                  <div className="tiles t3">
+                    <div className="tile">
+                      <div className="k">Pages</div>
+                      <div className="v">{preview.pages}</div>
+                      <div className="foot">including the signature page</div>
+                    </div>
+                    <div className="tile">
+                      <div className="k">Sections</div>
+                      <div className="v">{preview.sections.length}</div>
+                      <div className="foot">
+                        {preview.sections.filter(s => s.origin === "your own words").length}{" "}
+                        you wrote yourself
+                      </div>
+                    </div>
+                    <div className="tile">
+                      <div className="k">Rules to be set up</div>
+                      <div className="v">{preview.checks.length}</div>
+                      <div className="foot">on every row of every file</div>
+                    </div>
+                  </div>
+                  <div className="note">
+                    <b>Nothing has been sent.</b> Download the draft to read it
+                    as a PDF — that copy is not saved anywhere and nobody is
+                    told about it.
+                  </div>
+                </>
+              )}
+
+              {readParts[readAt]?.key === "doc" && (
+                <>
+                  <div>
+                    {preview.sections.map((s, i) => (
+                      <div key={s.key} style={{ marginBottom: 14 }}>
+                        <b style={{ fontSize: 13 }}>§{i + 1} &nbsp; {s.title}</b>
+                        <div className="muted" style={{ fontSize: 13, lineHeight: 1.7,
+                             whiteSpace: "pre-line", marginTop: 4 }}>
+                          {s.rendered}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="note">
+                    <b>Kavachio adds the signature page.</b> Both signature
+                    blocks are placed on it for you. You can move them in the
+                    next step if your broker's lawyers want them somewhere else.
+                  </div>
+                </>
+              )}
+
+              {readParts[readAt]?.key === "checks" && (
+                <div className="tbl-wrap">
+                  <table>
+                    <thead>
+                      <tr><th>From</th><th>What gets checked</th><th>How serious</th></tr>
+                    </thead>
+                    <tbody>
+                      {preview.checks.map((c, i) => (
+                        <tr key={i}>
+                          <td>{c.title}</td>
+                          <td className="mono">{c.expression}</td>
+                          <td>
+                            <span className={`badge ${c.severity === "critical" ? "b-crit" : "b-warn"}`}>
+                              <span className="d" />
+                              {sevLabel(c.severity)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </WizardStep>
+          </>
+        )}
+
+        {/* ══ STEP 4 · SIGNATURES ══
+            This step SETS UP the signing; it does not do any of it. ONE thing
+            is decided here and written onto the contract: what the signature
+            page will ask each side to fill in.
+
+            NAMING THE SIGNERS USED TO BE HERE TOO, and it is gone. A name and
+            an email typed at the end of authoring are a guess: the contract has
+            not been agreed yet, the round may be weeks away, and the person who
+            will actually sign is decided when it goes out — which is why the
+            signature page asks for them anyway, and why this form's own empty
+            state told you that you could do it later. Two places to name a
+            signer, one of them optional and neither of them the one that sends
+            anything, is a form that exists to be skipped. It is named where it
+            is used: the contract's signature page (`updateContract({signers})`).
+
+            NOTHING IS EMAILED FROM THIS STEP. That had to be said out loud on
+            the screen, because everything about it suggested otherwise: an
+            Email field, an "Add signer" button, and a finish button that read
+            "Create and send it to the broker" — which creates the contract and
+            puts it in the broker's queue in Kavachio, and sends no mail at all
+            (contract_routes sends none; the only mail in this flow comes from
+            esign_routes when a signing round actually goes out). A carrier who
+            believed a link had gone would wait for a reply that was never
+            coming. So the words now say what the buttons do. */}
+        {step === 3 && (
+          <>
+            <div className="page-head">
+              <div className="t">
+                <h2>
+                  Set up the signing
+                  <InfoTip text={"Choose what each side has to fill in when "
+                    + "they sign. None of these buttons makes the contract "
+                    + "active — it becomes active when both sides have signed it, "
+                    + "on its own signature page."} />
+                </h2>
+                {/* Kept on screen, not in the (i): see the note above this step
+                    — a carrier who thinks a link went out waits for a reply
+                    that is never coming. */}
+                <p>{values.name} · <b>Nothing is emailed from here.</b></p>
+              </div>
+              {/* ONLY the way back. The three ways to FINISH live on the step
+                  itself — two under the summary of what is about to be created,
+                  and the primary one in the step's own footer beside Back.
+                  They were here as well, which put the same three decisions in
+                  two places on one screen: whichever a person read first, the
+                  other set looked like different buttons doing something else.
+                  The step is where the decision is described, so that is where
+                  it is taken. */}
+              <div className="actions">
+                <button className="btn" type="button" onClick={() => go(2)}>
+                  ← Read it through
+                </button>
+              </div>
+            </div>
+
+            {message && (
+              <div className="note warn" style={{ marginBottom: 16 }}>{message}</div>
+            )}
+            {blocksUnplaced && (
+              <div className="note warn" style={{ marginBottom: 16 }}>
+                <b>Drag the signature blocks onto the page first.</b> You chose
+                to place them by hand, and {unplacedSides.length === 1
+                  ? "one side has" : "both sides have"} nowhere to sign yet —
+                still to place:{" "}
+                {unplacedSides.map(k => (k === "carrier"
+                  ? `${carrierName} (you)`
+                  : counterparty?.name ?? "the counterparty")).join(" and ")}.
+              </div>
+            )}
+
+            {/* Three parts, not one two-column page: what each side fills in,
+                where the blocks sit, then a read-back before the three ways to
+                finish. The placer gets the full width it needs. */}
+            {sigSpec && sigLayout && (
+            <WizardStep
+              cap="Set up signing"
+              at={signPane}
+              onPick={setSignPane}
+              parts={[
+                { key: "fields", title: "What each side fills in",
+                  state: "done" as const,
+                  meta: `${(sigLayout.fields[sigSpec.sides[0]] ?? []).length} line`
+                    + `${(sigLayout.fields[sigSpec.sides[0]] ?? []).length === 1 ? "" : "s"} each` },
+                { key: "layout", title: "Where the blocks sit",
+                  state: blocksUnplaced ? "warn" as const : "done" as const,
+                  meta: blocksUnplaced
+                    ? `${unplacedSides.length} still to place`
+                    : sigSpec.arrangements
+                        .find(a => a.key === sigLayout.arrangement)?.label },
+                { key: "finish", title: "Check and finish",
+                  meta: "3 ways to finish" },
+              ]}
+              title={SIGN_PARTS[signPane].heading}
+              desc={SIGN_PARTS[signPane].desc}
+              foot={`${signPane + 1} of 3 · nothing is emailed from this step`}
+              nextLabel={signPane < 2
+                ? "Next →"
+                : busy === "create" ? "Creating…" : "Create and send it for review"}
+              nextDisabled={signPane === 2 && (!!busy || blocksUnplaced)}
+              onNext={() => (signPane < 2 ? setSignPane(signPane + 1) : create("review"))}
+            >
+              {/* What the signature page ASKS FOR. Every contract used to get
+                  the same four lines because they were written into the
+                  document builder, and changing them meant changing code. They
+                  are a choice now, and the choice is offered from the server's
+                  own list — so this cannot offer a line the document has no way
+                  to draw, and a line added to that list turns up here with no
+                  change to this file. */}
+              {signPane === 0 && (
+                <>
+                  <div className="grid g-2">
+                    {sigSpec.sides.map(side => (
+                      <div key={side}>
+                        <div className="sub-h" style={{ marginTop: 0 }}>
+                          {side === "carrier"
+                            ? `${carrierName} (you)`
+                            : counterparty?.name ?? "The counterparty"}
+                        </div>
+                        {sigSpec.fields.map(f => {
+                          const on = (sigLayout.fields[side] ?? []).includes(f.key);
+                          return (
+                            <label key={f.key} className="kv"
+                                   style={{ alignItems: "flex-start",
+                                            cursor: f.fixed ? "default" : "pointer" }}>
+                              <span className="k">
+                                <input
+                                  type="checkbox" checked={on}
+                                  disabled={f.fixed}
+                                  style={{ marginRight: 9 }}
+                                  onChange={() => setSigLayout(l => {
+                                    if (!l) return l;
+                                    const had = l.fields[side] ?? [];
+                                    return {
+                                      ...l,
+                                      fields: {
+                                        ...l.fields,
+                                        [side]: on
+                                          ? had.filter(k => k !== f.key)
+                                          : [...had, f.key],
+                                      },
+                                    };
+                                  })}
+                                />
+                                <b style={{ color: "var(--p-ink)" }}>{f.label}</b>
+                                {/* Inside the checkbox's <label>: without this,
+                                    clicking the (i) would tick the box. */}
+                                {f.hint && (
+                                  <span onClick={e => e.preventDefault()}>
+                                    <InfoTip text={f.hint} />
+                                  </span>
+                                )}
+                                {f.fixed && (
+                                  <div className="sub" style={{ marginLeft: 24 }}>
+                                    always on
+                                  </div>
+                                )}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="note">
+                    <b>Ticked</b> — the signer gets a box they have to fill in on
+                    the real document. <b>Unticked</b> — the line is not on the
+                    page at all; nobody is asked for it, and nothing is left
+                    blank. <b>Who signs is not decided here:</b> the contract's
+                    own signature page names them, once there is a document for
+                    them to sign.
+                  </div>
+                </>
+              )}
+
+              {signPane === 1 && (
+                <>
+                  <div className="field" style={{ marginBottom: 0, maxWidth: 360 }}>
+                    <label>
+                      How the two blocks sit on the page
+                      {sigSpec.arrangements
+                        .find(a => a.key === sigLayout.arrangement)?.hint && (
+                        <InfoTip text={sigSpec.arrangements
+                          .find(a => a.key === sigLayout.arrangement)?.hint ?? ""} />
+                      )}
+                    </label>
+                    <select
+                      value={sigLayout.arrangement}
+                      onChange={e => setSigLayout(
+                        l => l && { ...l, arrangement: e.target.value })}
+                    >
+                      {/* EVERY arrangement, placing by hand included. It used to
+                          be filtered out here, because dragging a block needs
+                          pages and there is no contract to get them from until
+                          this form is saved. The document was composable from
+                          what this form holds the whole time; that is what
+                          "Download the draft" does. It is served as PAGES too,
+                          so the choice can be made where it is made. */}
+                      {sigSpec.arrangements.map(a => (
+                        <option key={a.key} value={a.key}>{a.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Placed by hand: the pages below are this contract as it
+                      stands, composed from what is typed and saved nowhere.
+                      Drag the blocks onto them. */}
+                  {sigLayout.arrangement === "placed" && (
+                    <>
+                      <SignaturePlacer
+                        source={{ kind: "draft", key: "wizard", body: placeBody }}
+                        layout={sigLayout}
+                        block={sigSpec.placed_block}
+                        targets={signerTargets(
+                          sigSpec.sides, null,
+                          side => (side === "carrier"
+                            ? `${carrierName} (you)`
+                            : counterparty?.name ?? "The counterparty"))}
+                        onPlace={(key, spot) => setSigLayout(l => l && ({
+                          ...l, blocks: { ...(l.blocks ?? {}), [key]: spot },
+                        }))}
+                        onRemove={key => setSigLayout(l => {
+                          if (!l) return l;
+                          const rest = { ...(l.blocks ?? {}) };
+                          delete rest[key];
+                          return { ...l, blocks: rest };
+                        })}
+                        onAnchor={(key, after) => setSigLayout(l => l && ({
+                          ...l, blocks: { ...(l.blocks ?? {}), [key]: { after } },
+                        }))}
+                      />
+                      <div className="hint">
+                        How placing works
+                        <InfoTip text={"Drop a block anywhere — the wording "
+                          + "moves down to make room for it, so it never covers "
+                          + "a clause.\n\nOne block per side here — nobody is "
+                          + "named to sign until the contract exists. Name them "
+                          + "afterwards on the contract's own signature page, "
+                          + "and each person gets a block of their own to place "
+                          + "next to these."} />
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {/* What is about to be created, and one line on what each button
+                  does with it. This was five paragraphs explaining the three
+                  buttons, read once and never again. What survives is the part
+                  that is not written on any button: none of them makes the
+                  contract live. */}
+              {signPane === 2 && (
+                <>
+                  <div>
+                    <div className="kv">
+                      <span className="k">Contract</span>
+                      <span className="v">{values.name}</span>
+                    </div>
+                    <div className="kv">
+                      <span className="k">With</span>
+                      <span className="v">{counterparty?.name ?? "—"}</span>
+                    </div>
+                    <div className="kv">
+                      <span className="k">Programme</span>
+                      <span className="v">{programme?.name ?? "—"}</span>
+                    </div>
+                    <div className="kv">
+                      <span className="k">Sections</span>
+                      <span className="v">{sections?.length ?? 0}</span>
+                    </div>
+                    <div className="kv">
+                      <span className="k">Rules to be set up</span>
+                      <span className="v">{preview?.checks.length ?? 0}</span>
+                    </div>
+                  </div>
+                  {/* Named, never "they": the other side is a specific
+                      company, and the reader should not have to work out who. */}
+                  {(() => {
+                    const other = counterparty?.name
+                      ?? `the ${spec?.counterparty_label?.toLowerCase() ?? "broker"}`;
+                    return (
+                      <ul className="hint" style={{ paddingLeft: 18, listStyle: "disc" }}>
+                        <li><b>Save as a draft</b> — only you can see it. {other} is
+                          not shown it yet.</li>
+                        <li><b>Create and send it for review</b> — {other} can review
+                          and agree the terms in Kavachio. No email is sent.</li>
+                        <li><b>Create and sign it now</b> — you sign straight away and
+                          {" "}{other} does not review the terms first. The skipped
+                          review is recorded under your name.</li>
+                        <li>None of these makes the contract active. It becomes
+                          active once both you and {other} have signed it.</li>
+                      </ul>
+                    );
+                  })()}
+                  <div className="rowacts">
+                    <button className="btn" type="button"
+                            disabled={!!busy || blocksUnplaced}
+                            onClick={() => create("draft")}>
+                      {busy === "create" ? "Saving…" : "Save as a draft"}
+                    </button>
+                    {/* Straight to signing, for a contract with nothing left to
+                        agree — a renewal on last year's wording — or one whose
+                        counterparty has no seat here to read it. Kept out of the
+                        primary slot: not asking the other side is the exception,
+                        and it should not be the easiest button to hit. */}
+                    <button className="btn" type="button"
+                            disabled={!!busy || blocksUnplaced}
+                            onClick={() => create("sign")}>
+                      <PenLine size={14} />
+                      {busy === "create" ? "Creating…" : "Create and sign it now"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </WizardStep>
+            )}
+            {!(sigSpec && sigLayout) && (
+              <div className="card"><div className="empty">
+                Reading what this contract's signature page can ask for…
+              </div></div>
+            )}
+          </>
+        )}
+      </div>
+
+      <AddContractModal
+        open={uploading}
+        onClose={() => setUploading(false)}
+        programId={programId ? Number(programId) : undefined}
+        brokerId={brokerId ? Number(brokerId) : undefined}
+        onAdded={() => {}} />
+    </div>
+  );
+}
+
+/**
+ * One step of the flow: its parts as a rail down the left, one part at a time
+ * in the panel on the right.
+ *
+ * The four STAGES stay across the top of the page; this is the level below
+ * them, and the two never replace each other. Steps 2, 3 and 4 were a section
+ * list, a stack of four cards and a two-column form — three shapes for the
+ * same job, each of which scrolled past what came next. One shape, so the
+ * whole flow reads alike, and so a part can say how big it is (8 sections,
+ * 2 worth a look, 8 checks) before it is opened.
+ *
+ * Nothing here decides what a part CONTAINS: every field, note, table and
+ * button of the old layout is passed in by the step that owns it.
+ */
+type WizPart = {
+  key: string;
+  title: React.ReactNode;
+  /** The line under the title — a count, or where a section came from. */
+  meta?: React.ReactNode;
+  state?: "done" | "warn";
+  /** Drawn at the right of the rail row: step 2's delete / locked marks. */
+  extra?: React.ReactNode;
+};
+
+function WizardStep({
+  cap, parts, at, onPick, tail, title, desc, actions, foot,
+  nextLabel, onNext, nextDisabled, children,
+}: {
+  cap: string;
+  parts: WizPart[];
+  at: number;
+  onPick: (i: number) => void;
+  /** Under the rail: the buttons that act on the LIST rather than on one part. */
+  tail?: React.ReactNode;
+  title: React.ReactNode;
+  desc?: React.ReactNode;
+  actions?: React.ReactNode;
+  foot?: React.ReactNode;
+  nextLabel: string;
+  onNext: () => void;
+  nextDisabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="wiz">
+      <nav className="wiz-rail" aria-label={cap}>
+        <div className="cap">{cap}<span className="ct">{parts.length}</span></div>
+        {parts.map((p, i) => (
+          <button
+            key={p.key} type="button"
+            className={`sec ${i === at ? "on" : p.state ?? ""}`}
+            aria-current={i === at ? "true" : undefined}
+            onClick={() => onPick(i)}
+          >
+            <span className="n">
+              {p.state === "done" && i !== at
+                ? <Check size={12} strokeWidth={3} /> : i + 1}
+            </span>
+            <span className="txt">
+              <span className="t">{p.title}</span>
+              {p.meta && <span className="m">{p.meta}</span>}
+            </span>
+            {p.extra}
+          </button>
+        ))}
+        {tail && <div className="tail">{tail}</div>}
+      </nav>
+
+      <section className="wiz-pane">
+        <div className="wiz-pane-h">
+          <div style={{ minWidth: 0 }}>
+            <h3>{title}</h3>
+            {desc && <p>{desc}</p>}
+          </div>
+          {actions && <div className="r">{actions}</div>}
+        </div>
+        <div className="wiz-pane-b">{children}</div>
+        <div className="wiz-pane-f">
+          <span className="sub">{foot}</span>
+          <span className="r">
+            <button className="btn" type="button" disabled={at === 0}
+                    onClick={() => onPick(at - 1)}>
+              ← Back
+            </button>
+            <button className="btn pri" type="button" disabled={nextDisabled}
+                    onClick={onNext}>
+              {nextLabel}
+            </button>
+          </span>
+        </div>
+      </section>
+    </div>
+  );
+}

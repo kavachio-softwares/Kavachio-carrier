@@ -47,7 +47,8 @@ log = logging.getLogger("bdx.ingester")
 from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, delete, func, insert, or_, select, text
 from sqlalchemy.orm import Session
 
-from canonical import CANONICAL_TABLES, column_names, pk_column, tenant_col
+from canonical import (CANONICAL_TABLES, POLICY_SUBMITTER_COL, column_names,
+                       pk_column, tenant_col)
 
 # Tables that, when present in a record, hang off the policy via their own
 # `<table>_policy_id` FK column.
@@ -494,7 +495,9 @@ def _ensure_contract(session: Session, tenant_id: int, program_id: int) -> int |
 
 
 def _resolve_contract(session: Session, tenant_id: int, program_id: int,
-                      pol_eff_dt) -> int | None:
+                      pol_eff_dt, broker_party_id: int | None = None,
+                      run_contract_id: int | None = None,
+                      mint_placeholder: bool = True) -> int | None:
     """Resolve the contract a policy belongs to BY ITS EFFECTIVE DATE.
 
     Palms BDX Ingestion BRD v1.2, Appendix 2 §2.10:
@@ -517,27 +520,73 @@ def _resolve_contract(session: Session, tenant_id: int, program_id: int,
     wins, so the result is deterministic rather than dependent on row order.
 
     NO MATCH: falls back to the placeholder, exactly as before, and logs.
+
+    WHOSE CONTRACT, when the load knows the run it came from (the direct lane
+    does; /bdx/upload does not, and resolves exactly as before):
+      * ``run_contract_id`` — the contract the run was made under — wins when
+        it covers the policy's start date. An open (NULL) inception or expiry
+        counts as covering. That is the contract the file was submitted and
+        checked against.
+      * otherwise ``broker_party_id`` narrows the date rule to that broker's
+        own contracts and the ones the carrier holds for the whole programme
+        (broker NULL), its own first. Another broker's contract on a shared
+        programme never collects this broker's policies.
+
+    ``mint_placeholder=False`` (a load whose programme is the RUN's — a real
+    programme on the carrier's screens): nothing covering the date leaves the
+    policy unbound rather than minting an "Auto contract" onto that
+    programme's contract list.
+
+    The date arrives as the file wrote it (a string, an Excel serial) and is
+    converted here the way it is stored (_coerce), so the window is tested
+    against the same day the policy row will carry.
     """
     if "contract" not in CANONICAL_TABLES:
         return None
+    pol_eff_dt = _coerce(pol_eff_dt, Date())
+
+    def _placeholder():
+        return (_ensure_contract(session, tenant_id, program_id)
+                if mint_placeholder else None)
+
     if not pol_eff_dt:
         # Unreachable via ingest_record — §2.2's guard drops a record with no
         # effective date before _upsert_policy runs. Kept so a future caller
         # cannot silently get a date-blind join.
-        return _ensure_contract(session, tenant_id, program_id)
+        return _placeholder()
 
     t = CANONICAL_TABLES["contract"]
+    broker_col = t.c.get("contract_broker_party_id")
 
     def _resolve():
+        if run_contract_id:
+            own = session.execute(
+                select(t.c.contract_id)
+                .where(t.c.contract_id == run_contract_id)
+                .where(t.c.contract_program_id == program_id)
+                .where(or_(t.c[tenant_col("contract")] == tenant_id,
+                           t.c[tenant_col("contract")].is_(None)))
+                .where(or_(t.c.contract_inception_date.is_(None),
+                           t.c.contract_inception_date <= pol_eff_dt))
+                .where(or_(t.c.contract_expiry_date.is_(None),
+                           t.c.contract_expiry_date > pol_eff_dt))   # §2.10 `<`
+            ).fetchone()
+            if own:
+                return own[0]
         stmt = (
             select(t.c.contract_id)
             .where(t.c[tenant_col("contract")] == tenant_id)
             .where(t.c.contract_program_id == program_id)
             .where(t.c.contract_inception_date <= pol_eff_dt)   # >= inception
             .where(t.c.contract_expiry_date > pol_eff_dt)       # <  expiry (§2.10)
-            .order_by(t.c.contract_inception_date.desc())
-            .limit(1)
         )
+        if broker_party_id is not None and broker_col is not None:
+            stmt = (stmt.where(or_(broker_col == broker_party_id,
+                                   broker_col.is_(None)))
+                    # False sorts first: the broker's own before carrier-held.
+                    .order_by(broker_col.is_(None)))
+        stmt = (stmt.order_by(t.c.contract_inception_date.desc())
+                .limit(1))
         # The auto:: placeholders span all of time; they must never win here.
         stmt = stmt.where(or_(t.c.contract_primary_umr.is_(None),
                               ~t.c.contract_primary_umr.like("auto::%")))
@@ -550,16 +599,18 @@ def _resolve_contract(session: Session, tenant_id: int, program_id: int,
         if row:
             return row[0]
         log.warning("no contract covers policy effective %s on program %s "
-                    "(tenant %s) — using the placeholder contract; this row is "
-                    "not bound to a real contract window", pol_eff_dt,
-                    program_id, tenant_id)
-        return _ensure_contract(session, tenant_id, program_id)
+                    "(tenant %s) — %s; this row is not bound to a real "
+                    "contract window", pol_eff_dt, program_id, tenant_id,
+                    "using the placeholder contract" if mint_placeholder
+                    else "left unbound")
+        return _placeholder()
 
     # The date MUST be part of the memo key. _memo is per-session (≈ per-upload)
     # and keyed only on (tenant, program) the first row's contract would be
     # handed to every later row whatever its date — defeating the whole point.
     return _memo(session, "contract_by_date",
-                 (tenant_id, program_id, pol_eff_dt), _resolve)
+                 (tenant_id, program_id, pol_eff_dt, broker_party_id,
+                  run_contract_id, mint_placeholder), _resolve)
 
 
 def _contract_broker_party_id(session: Session, contract_id: int | None) -> int | None:
@@ -714,35 +765,51 @@ def _scd2_version_inplace(session: Session, table: str, pk_col: str, pk_value,
 
 def _upsert_policy(session: Session, tenant_id: int, program_id: int | None,
                    payload: dict, policyholder_payload: dict | None = None,
+                   broker_party_id: int | None = None,
+                   run_contract_id: int | None = None,
+                   mint_placeholder: bool = True,
                    ) -> tuple[int | None, bool]:
     """Returns (policy_id, is_new). `is_new` is True when this call CREATED the
     policy (no prior row existed) — the caller can then skip the re-ingest
     child-cleanup, which is a no-op for a brand-new policy but costs ~a dozen
-    round-trips per row."""
+    round-trips per row.
+
+    ``broker_party_id`` / ``run_contract_id`` are the broker and contract of
+    the run the record came from, when the loader knows them (see
+    ingest_record). Without them this behaves exactly as it always has."""
     if not payload:
         return None, False
     polno = payload.get("policy_number")
     t = CANONICAL_TABLES["policy"]
+    submitter_col = t.c.get(POLICY_SUBMITTER_COL)
 
     # §2.10: bind the policy to the contract in force on its EFFECTIVE DATE,
     # not to a catch-all placeholder. Falls back to the placeholder (previous
     # behaviour) when no real contract covers the date.
     contract_id = _resolve_contract(
-        session, tenant_id, program_id, payload.get("policy_effective_date")
+        session, tenant_id, program_id, payload.get("policy_effective_date"),
+        broker_party_id=broker_party_id, run_contract_id=run_contract_id,
+        mint_placeholder=mint_placeholder,
     ) if program_id else None
     # v4: the insured is its own entity, keyed on policyholder_natural_key.
     policyholder_id = _ensure_policyholder(
         session, tenant_id, policyholder_payload or {}, polno)
 
-    base = _filter_to_schema("policy", {
-        **payload,
+    fields = {
+        # The sender is the run's to say, never the file's.
+        **{k: v for k, v in payload.items() if k != POLICY_SUBMITTER_COL},
         "tenant_id": tenant_id,
         "policy_program_id": program_id,
         "policy_contract_id": contract_id,
         "policy_policyholder_id": policyholder_id,
         # Derived, never supplied: the broker comes from the contract.
         "policy_contract_broker_party_id": _contract_broker_party_id(session, contract_id),
-    })
+    }
+    if broker_party_id is not None:
+        # Only ever SET: a load that does not know its broker (/bdx/upload)
+        # leaves the recorded sender alone rather than wiping it.
+        fields[POLICY_SUBMITTER_COL] = broker_party_id
+    base = _filter_to_schema("policy", fields)
 
     if polno:
         stmt = (
@@ -750,6 +817,21 @@ def _upsert_policy(session: Session, tenant_id: int, program_id: int | None,
             .where(t.c[tenant_col("policy")] == tenant_id)
             .where(t.c.policy_number == polno)
         )
+        if broker_party_id is not None and submitter_col is not None:
+            # Two brokers can send the same policy number to one carrier. Each
+            # one's policy is its own: this load must never version another
+            # broker's row — that would hand it these figures and retire its
+            # children. A row with no sender recorded (loaded before senders
+            # were) is taken over by the first broker to send that number; the
+            # broker's own row is preferred when both exist.
+            stmt = (stmt.where(or_(submitter_col == broker_party_id,
+                                   submitter_col.is_(None)))
+                    .order_by(submitter_col.is_(None)))
+        elif submitter_col is not None:
+            # A load that does not know its broker (/bdx/upload, a carrier run
+            # with no broker picked) updates the row nobody is recorded as
+            # sending before it touches any one broker's.
+            stmt = stmt.order_by(submitter_col.isnot(None))
         # A 'Modify here' edit can leave a retired (is_current_version=FALSE)
         # version alongside the active one for the same (tenant, policy_number).
         # Re-ingest must update the ACTIVE version, never a superseded one.
@@ -940,15 +1022,20 @@ def _ensure_ambient_party(session: Session, tenant_id: int, label: str) -> int |
         session, tenant_id, label, party_type="agency", legal_name=label)
 
 
-def _clear_policy_children(session: Session, policy_id: int, policy_number: str | None) -> None:
+def _clear_policy_children(session: Session, policy_id: int, policy_number: str | None,
+                           keep_transactions: bool = False) -> None:
     """Re-ingest cleanup (Option A — sheet wins, prior edits kept as history):
     RETIRE the policy's existing canonical child rows (mark them inactive SCD-2
     history) instead of deleting them, so a re-upload preserves prior edits; the
     caller then inserts the fresh sheet rows as the new ACTIVE versions. Tables
     without SCD columns are still deleted so they don't accumulate.
+
+    ``keep_transactions`` (the ITD append load): leave premium_transaction and
+    its tax / commission lines alone — an ITD delta carries only the policy's
+    NEW transactions, so retiring the rest would hide every earlier one.
     """
     # 1a. transaction-children first (keyed by this policy's active transaction ids)
-    pt = CANONICAL_TABLES.get("premium_transaction")
+    pt = None if keep_transactions else CANONICAL_TABLES.get("premium_transaction")
     if pt is not None and "premium_transaction_policy_id" in pt.c:
         tstmt = select(pt.c.premium_transaction_id).where(
             pt.c.premium_transaction_policy_id == policy_id)
@@ -991,6 +1078,8 @@ def _clear_policy_children(session: Session, policy_id: int, policy_number: str 
 
     # policy-children (incl. premium_transaction itself)
     for table_name in POLICY_CHILDREN:
+        if keep_transactions and table_name == "premium_transaction":
+            continue
         t = CANONICAL_TABLES.get(table_name)
         fk = _CHILD_FK.get(table_name)
         if t is None or fk not in t.c:
@@ -1015,18 +1104,50 @@ def _clear_policy_children(session: Session, policy_id: int, policy_number: str 
                     _supersede(session, ct, ct.c[fk] == ambient_id)
 
 
+def _existing_txn_keys(session: Session, tenant_id: int, keys: list[str]) -> set[str]:
+    """Which of these premium_transaction row keys are already loaded (current)."""
+    pt = CANONICAL_TABLES.get("premium_transaction")
+    if pt is None or not keys or "premium_transaction_row_key" not in pt.c:
+        return set()
+    stmt = select(pt.c.premium_transaction_row_key).where(
+        pt.c.premium_transaction_row_key.in_(keys))
+    tcol = tenant_col("premium_transaction")
+    if tcol and tcol in pt.c:
+        stmt = stmt.where(pt.c[tcol] == tenant_id)
+    if "is_current_version" in pt.c:
+        stmt = stmt.where(pt.c.is_current_version.isnot(False))
+    return {r[0] for r in session.execute(stmt).fetchall()}
+
+
 def ingest_record(session: Session, mga: str, record: dict,
-                  canonical_upload_id: int | None = None) -> int | None:
+                  canonical_upload_id: int | None = None,
+                  run: dict | None = None, mode: str = "replace") -> int | None:
     """Ingest one merged record. Returns the policy_id created (or None).
 
     Idempotent: if the policy already exists, its child canonical rows are
     retired and re-inserted with the freshly merged data.
 
+    ``mode="append"`` is the ITD load (itd.py): the record is ONE new
+    transaction (or one adjustment) of the policy. The policy's other
+    transactions stay as they are; a transaction whose row key is already
+    loaded is skipped, so loading the same ITD delta twice adds nothing. The
+    policy's descriptive children (coverage, location, …) still follow the
+    latest row, exactly as in the default mode.
+
     `canonical_upload_id` (when supplied) is stamped on premium_transaction
     rows (ingestion lineage) and on ingested_party rows.
+
+    `run` is what the bordereau run that produced this record was made FOR —
+    ``program_id``, ``broker_party_id``, ``contract_id``, any of them — when
+    the loader knows it (the direct lane reads it off the run's export). The
+    programme the file was submitted under beats a programme name read out of
+    the file, the policy is bound to the run's contract, and the broker is
+    recorded as the policy's sender. Omitted (/bdx/upload), nothing changes.
     """
+    run = run or {}
     tenant_id = _ensure_tenant(session, mga)
-    program_id = _upsert_program(session, tenant_id, record.get("program") or {})
+    program_id = (run.get("program_id")
+                  or _upsert_program(session, tenant_id, record.get("program") or {}))
     pol_payload = record.get("policy") or {}
     ph_payload = record.get("policyholder") or {}
     if isinstance(ph_payload, list):
@@ -1074,12 +1195,35 @@ def ingest_record(session: Session, mga: str, record: dict,
                     "policy_effective_date", polno)
         return None
     policy_id, policy_is_new = _upsert_policy(
-        session, tenant_id, program_id, pol_payload, ph_payload)
+        session, tenant_id, program_id, pol_payload, ph_payload,
+        broker_party_id=run.get("broker_party_id"),
+        run_contract_id=run.get("contract_id"),
+        # The run's programme is a real one on the carrier's screens: never
+        # mint an "Auto contract" onto it.
+        mint_placeholder=not run.get("program_id"))
     # Re-ingest cleanup retires a policy's existing child rows before re-inserting.
     # A brand-new policy has none, so skip it — that saves ~a dozen DB round-trips
     # per row, which dominates the cost of a fresh (10k-row) upload.
+    append = mode == "append"
     if policy_id is not None and not policy_is_new:
-        _clear_policy_children(session, policy_id, polno)
+        _clear_policy_children(session, policy_id, polno, keep_transactions=append)
+
+    # ITD append: drop the transactions this feed has already loaded. When
+    # every one of the record's transactions is already there, its tax and
+    # commission lines are not loaded again either.
+    skip_txn_children = False
+    if append:
+        txn_items = _as_list(record.get("premium_transaction"))
+        keyed = [t.get("premium_transaction_row_key") for t in txn_items
+                 if isinstance(t, dict) and t.get("premium_transaction_row_key")]
+        if keyed:
+            have = _existing_txn_keys(session, tenant_id, keyed)
+            fresh = [t for t in txn_items
+                     if not (isinstance(t, dict)
+                             and t.get("premium_transaction_row_key") in have)]
+            if len(fresh) != len(txn_items):
+                record = {**record, "premium_transaction": fresh}
+                skip_txn_children = not fresh
 
     ctx = {"policy_payload": pol_payload}
 
@@ -1112,7 +1256,8 @@ def ingest_record(session: Session, mga: str, record: dict,
     # Children that hang off premium_transaction. If the BDX provides taxes/
     # commissions without an explicit premium_transaction in the record, we
     # still need a transaction to attach them to — synthesise one.
-    needs_txn_parent = any(record.get(t) for t in TRANSACTION_CHILDREN)
+    needs_txn_parent = (any(record.get(t) for t in TRANSACTION_CHILDREN)
+                        and not skip_txn_children)
     if needs_txn_parent and not txn_ids:
         ids = _insert_children(
             session, "premium_transaction", [{}], parent_ctx=ctx,
@@ -1120,7 +1265,7 @@ def ingest_record(session: Session, mga: str, record: dict,
             premium_transaction_upload_id=canonical_upload_id,
         )
         txn_ids = ids
-    parent_txn_id = txn_ids[0] if txn_ids else None
+    parent_txn_id = txn_ids[0] if txn_ids and not skip_txn_children else None
     for table in TRANSACTION_CHILDREN:
         items = _as_list(record.get(table))
         if not items or parent_txn_id is None:

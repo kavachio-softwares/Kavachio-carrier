@@ -10,23 +10,32 @@ the interesting work happens in intake_service and sftp_poller.
 """
 from __future__ import annotations
 
+import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
 
+import intake_events
+import intake_review as review
 import intake_service as svc
+import sftp_accounts
+import sftp_pull
 from app_routes import (
     _actor, _iso_utc, _log, _tenant_name, assert_tenant_owns, resolve_tenant_id,
 )
 from auth_deps import Principal, current_principal, require_role
-from db import Party, Program, ProgramBroker, SessionLocal
+from db import AppUser, Party, Program, ProgramBroker, SessionLocal
 from intake_auth import mask, mint_key
 from intake_models import FileArrival, IntakeCredential, IntakeRoute
 
 router = APIRouter(prefix="/intake", tags=["intake"])
+log = logging.getLogger(__name__)
 
 # The five ways in. Fixed on purpose — "you cannot invent a sixth". Adding a
 # route gives ONE BROKER their own address on one of these, it does not create
@@ -46,6 +55,30 @@ CREATABLE_CHANNELS = ("sftp", "api", "email")
 
 # ── request bodies ──────────────────────────────────────────────────────────
 
+class SftpTestBody(BaseModel):
+    """An EXTERNAL SFTP server Kavachio logs in to and collects from (see
+    sftp_pull). The password / key comes in here and is never sent back out.
+    Everything has a default so a half-filled form gets a plain-words answer
+    from the test rather than a validation error."""
+    host: str = ""
+    port: Optional[int] = 22
+    username: str = ""
+    auth: str = "password"                 # password | key
+    password: Optional[str] = None
+    private_key: Optional[str] = None
+    passphrase: Optional[str] = None
+    remote_dir: str = ""                   # "" = the folder the login starts in
+    processed_dir: Optional[str] = None    # default "<remote_dir>/processed"
+    after: str = "move"                    # move | delete
+
+
+class SftpSettings(SftpTestBody):
+    interval_minutes: int = 15             # 5 | 15 | 60
+    # The fingerprint /intake/sftp/test showed. It is PINNED: the route trusts
+    # that server key and no other, so it must still be the one presented now.
+    fingerprint: Optional[str] = None
+
+
 class RouteCreate(BaseModel):
     channel: str
     broker_party_id: int
@@ -62,6 +95,11 @@ class RouteCreate(BaseModel):
     # from another; who the mail comes from is what does. See
     # email_intake_service.build_email_address.
     sender_email: Optional[str] = None
+    # SFTP — the broker's own server that Kavachio collects FROM (sftp_pull).
+    # Without it an SFTP route is a folder on KAVACHIO's server (sftp_server):
+    # the broker gets a login of their own, emailed to them, and uploads; the
+    # collector (sftp_poller) takes it from there.
+    sftp: Optional[SftpSettings] = None
 
 
 class KeyCreate(BaseModel):
@@ -96,27 +134,64 @@ def _mail_ready() -> bool:
         return False
 
 
-def _send_to(r: IntakeRoute) -> Optional[str]:
-    """The address to hand THIS broker, for an email route.
+def _collector_status() -> dict:
+    """How each pulled channel is noticing files right now.
 
-    Plus-addressing, so the address a broker is given identifies them the way an
-    SFTP folder does — bordereaux+bridge-brokers@… can only be arrived at by
-    being told it. Falls back to the plain mailbox when the server does not
-    support tags; the From: match still resolves the route either way.
+    "The moment it lands" is only true while the folder watcher or the IDLE
+    connection is actually up, so the screen reads this rather than printing a
+    promise. Per process — every replica runs its own collectors.
     """
+    import email_poller
+    import sftp_poller
+    return {"sftp": sftp_poller.status(), "email": email_poller.status(),
+            "sftp_pull": sftp_pull.status()}
+
+
+def _send_to(r: IntakeRoute) -> Optional[str]:
+    """The address to hand THIS broker, for an email route: Kavachio's intake
+    mailbox, the same for every broker. Who sent it (From:) and which carrier
+    is copied (Cc) say whose file it is — see email_intake_service."""
     if r.channel != "email":
         return None
     mailbox = _mail_cfg().user
-    if not mailbox or "@" not in mailbox:
-        return None
+    return mailbox if mailbox and "@" in mailbox else None
+
+
+def _carrier_cc(s, tenant_id: int) -> Optional[str]:
+    """The carrier address a broker must copy on every bordereau email."""
     import email_intake_service as mailsvc
-    local, _, domain = mailbox.partition("@")
-    return f"{local}+{mailsvc.route_label(r)}@{domain}"
+    try:
+        return mailsvc.carrier_cc(s, tenant_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _login_view(cred) -> Optional[dict]:
+    """A broker's login on Kavachio's SFTP server, as the screen shows it. Never
+    the password — only its fingerprint is kept, so it cannot be shown."""
+    if cred is None:
+        return None
+    return {"username": cred.key_prefix, "host": svc.sftp_host(), "port": svc.sftp_port(),
+            # Where they upload (and start), and where Kavachio answers.
+            "folder": "/incoming", "results_folder": "/outbound",
+            "issued_at": _iso_utc(cred.created_at),
+            "last_login_at": _iso_utc(cred.last_used_at), "live": cred.revoked_at is None}
+
+
+def _sftp_server_info() -> dict:
+    """Kavachio's own SFTP server as brokers are told about it, and whether it
+    is actually up in this process — a login to a server that is not running
+    is a broker who cannot send."""
+    import sftp_server
+    return {"host": svc.sftp_host(), "port": svc.sftp_port(),
+            "status": sftp_server.status(), "fingerprints": sftp_server.fingerprints()}
 
 
 def _route_dict(r: IntakeRoute, broker_name: Optional[str],
                 files_this_month: int = 0,
-                program_name: Optional[str] = None) -> dict:
+                program_name: Optional[str] = None,
+                sftp: Optional[dict] = None,
+                login: Optional[dict] = None) -> dict:
     return {
         "route_id": r.id,
         "channel": r.channel,
@@ -138,6 +213,12 @@ def _route_dict(r: IntakeRoute, broker_name: Optional[str],
         "collecting": r.channel in COLLECTING_CHANNELS,
         "created_at": _iso_utc(r.created_at),
         "disabled_at": _iso_utc(r.disabled_at),
+        # An SFTP route that collects from someone else's server: its settings
+        # and last check (sftp_pull.public_view) — never the password or key.
+        "sftp": sftp,
+        # An SFTP route on Kavachio's own server: the broker's login
+        # (_login_view), or None when it has none yet.
+        "login": login,
     }
 
 
@@ -167,8 +248,17 @@ def list_routes(mga: Optional[str] = None,
         counts = svc.month_counts(s, tid)
         _prog_names = {p.id: p.name for p in
                        s.query(Program).filter(Program.tenant_id == tid).all()}
+        # One query for every pull route's settings; none at all when the
+        # carrier has none (or before migration 35 — then it returns {}).
+        pull = (sftp_pull.configs_for_tenant(s, tid)
+                if any(svc.is_external_sftp(r) for r in rows) else {})
+        # And every login on Kavachio's own server, in one query too.
+        logins = (sftp_accounts.logins_for_tenant(s, tid)
+                  if any(sftp_accounts.is_hosted(r) for r in rows) else {})
         routes = [_route_dict(r, names.get(r.broker_party_id), counts.get(r.id, 0),
-                              _prog_names.get(getattr(r, "program_id", None)))
+                              _prog_names.get(getattr(r, "program_id", None)),
+                              sftp=sftp_pull.public_view(pull.get(r.id)),
+                              login=_login_view(logins.get(r.id)))
                   for r in rows]
 
         # Brokers that may be given a way in: those actually on one of this
@@ -188,15 +278,47 @@ def list_routes(mga: Optional[str] = None,
         # so the Add dialog has to be able to offer the choice.
         prog_names = {p.id: p.name for p in
                       s.query(Program).filter(Program.tenant_id == tid).all()}
+        # With the contracts each one's files can be written under, so the
+        # dialog's example names one — and says whether it has to.
         broker_programmes: dict[str, list] = {}
         for pb in (s.query(ProgramBroker)
                    .filter(ProgramBroker.tenant_id == tid,
                            ProgramBroker.status == "active").all()):
             broker_programmes.setdefault(str(pb.broker_party_id), []).append(
                 {"program_id": pb.program_id,
-                 "name": prog_names.get(pb.program_id, f"Programme {pb.program_id}")})
+                 "name": prog_names.get(pb.program_id, f"Programme {pb.program_id}"),
+                 "code": svc.programme_code(pb.program_id),
+                 "contracts": [{"contract_id": c.id, "name": svc.contract_label(c),
+                                "code": svc.contract_code(c)}
+                               for c in svc.live_contracts(s, tid, pb.program_id,
+                                                           pb.broker_party_id)]})
         for v in broker_programmes.values():
             v.sort(key=lambda x: (x["name"] or "").lower())
+
+        # The addresses we already know for each broker, so the email dialog can
+        # offer them instead of asking somebody to retype one.
+        #
+        # These are PORTAL LOGINS, not sending addresses — the person who signs
+        # in is often not the mailbox their export job sends as. So they are
+        # offered as a suggestion the screen fills in and the user can overwrite,
+        # never as a value taken on trust. Active first: an unaccepted invite is
+        # not evidence of a working mailbox.
+        # The broker's ADMINS only: its users (operators) belong to the broker
+        # alone and are never shown to the carrier.
+        broker_emails: dict[str, list] = {}
+        if broker_ids:
+            from auth_deps import db_role_values
+            for u in (s.query(AppUser)
+                      .filter(AppUser.broker_party_id.in_(list(broker_ids)),
+                              AppUser.role.in_(db_role_values("broker_admin")))
+                      .all()):
+                if not u.email:
+                    continue
+                broker_emails.setdefault(str(u.broker_party_id), []).append(
+                    {"email": u.email, "name": u.full_name,
+                     "status": u.status or "active"})
+        for v in broker_emails.values():
+            v.sort(key=lambda x: (x["status"] != "active", x["email"].lower()))
 
         month_start = datetime.now(timezone.utc).replace(
             day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -215,15 +337,21 @@ def list_routes(mga: Optional[str] = None,
             "routes": routes,
             "brokers": brokers,
             "broker_programmes": broker_programmes,
+            "broker_emails": broker_emails,
             "channels": list(CHANNELS),
             "collecting": list(COLLECTING_CHANNELS),
             "creatable": list(CREATABLE_CHANNELS),
             "sftp_host": svc.sftp_host(),
+            # Kavachio's own SFTP server: where an SFTP channel's broker signs in.
+            "sftp_server": _sftp_server_info(),
             # 10.3 — the inbox brokers send TO. Config, not data, exactly like
             # sftp_host: a route stores who a broker sends FROM, so moving the
             # intake mailbox must not strand every stored address.
             "email_mailbox": _mail_cfg().user or None,
+            # Who brokers copy (Cc) on every bordereau email to this carrier.
+            "carrier_cc": _carrier_cc(s, tid),
             "email_ready": _mail_ready(),
+            "collector": _collector_status(),
             "tiles": {
                 "ways_on": sum(1 for r in rows if r.is_enabled),
                 "ways_total": len(CHANNELS),
@@ -234,6 +362,20 @@ def list_routes(mga: Optional[str] = None,
                 "held": held,
             },
         }
+
+
+@router.post("/sftp/test")
+def test_sftp(body: SftpTestBody,
+              principal: Principal = Depends(require_role("carrier_admin"))):
+    """The Configure dialog's Test button for an external SFTP server.
+
+    Connects, shows the server's fingerprint (what the route will trust), lists
+    the folder and checks that a collected file can be moved or deleted — with
+    a tiny test file of our own, never a real one. Always 200: a server that
+    cannot be reached is ok=false with plain words and an error_code, because
+    "it did not work, and this is why" IS the answer.
+    """
+    return sftp_pull.test_connection(body.model_dump())
 
 
 @router.post("/routes")
@@ -253,6 +395,21 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
                                  f"you can create {' or '.join(CREATABLE_CHANNELS)}")
     if body.file_style not in ("whole_book", "changes_only"):
         raise HTTPException(400, "file_style must be whole_book or changes_only")
+
+    # SFTP from someone else's server: test it again — against the fingerprint
+    # the carrier was shown, which is what gets pinned — before anything is
+    # written, and outside the database session so a slow server never holds a
+    # connection open.
+    pull_address, pull_cfg = None, None
+    if body.channel == "sftp" and body.sftp is not None:
+        if not sftp_pull.column_ready(fresh=True):
+            raise HTTPException(503, "Collecting from an SFTP server needs database update 35 "
+                                     "(migrations/35_intake_route_sftp_config.sql). Ask your "
+                                     "administrator to run it, then try again.")
+        try:
+            pull_address, pull_cfg = sftp_pull.prepare_route(body.sftp.model_dump())
+        except sftp_pull.SetupRefused as exc:
+            raise HTTPException(400, str(exc))
 
     with SessionLocal() as s:
         tid = resolve_tenant_id(s, principal, mga)
@@ -285,9 +442,47 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
                 address = mailsvc.build_email_address(body.sender_email or "")
             except ValueError as exc:
                 raise HTTPException(400, str(exc))
+        elif pull_address is not None:
+            # "sftp://user@host:port/folder" — the server we collect from.
+            address = pull_address
         else:
-            address = svc.build_sftp_address(carrier_name, broker.legal_name)
+            address = svc.build_sftp_address(carrier_name, broker.legal_name,
+                                             tenant_id=tid, broker_party_id=broker.id,
+                                             program_id=body.program_id)
 
+        # One API channel per broker + programme (uq_intake_route_api_scope):
+        # say so, rather than let the insert fail with a server error.
+        if body.channel == "api":
+            twin = (s.query(IntakeRoute)
+                    .filter(IntakeRoute.tenant_id == tid, IntakeRoute.channel == "api",
+                            IntakeRoute.broker_party_id == broker.id,
+                            IntakeRoute.program_id.is_(None) if body.program_id is None
+                            else IntakeRoute.program_id == body.program_id).first())
+            if twin is not None:
+                raise HTTPException(409, f"{broker.legal_name} already has an API channel "
+                                         "for this. Make a new key on it instead.")
+        # One SFTP login per broker per programme on Kavachio's server: a second
+        # channel covering a programme the broker already has a login for would
+        # only hand them a second user name and password for the same thing.
+        # "All of their programmes" covers every one, so it clashes with any.
+        if body.channel == "sftp" and pull_cfg is None:
+            for twin in (s.query(IntakeRoute)
+                         .filter(IntakeRoute.tenant_id == tid, IntakeRoute.channel == "sftp",
+                                 IntakeRoute.broker_party_id == broker.id).all()):
+                if svc.is_external_sftp(twin):
+                    continue
+                if twin.program_id is None or body.program_id is None \
+                        or twin.program_id == body.program_id:
+                    scope = "all their programmes"
+                    if twin.program_id is not None:
+                        p = s.get(Program, twin.program_id)
+                        scope = p.name if p else "that programme"
+                    cred = sftp_accounts.credential(s, twin.id)
+                    raise HTTPException(409, (
+                        f"{broker.legal_name} already has an SFTP login for {scope}"
+                        + (f" (user {cred.key_prefix})" if cred else "")
+                        + ". Use that one — Ingestion Channels → Make a New Password "
+                          "emails them a fresh password."))
         existing = None
         if body.channel != "api":
             existing = (s.query(IntakeRoute)
@@ -297,8 +492,8 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
         if existing is not None:
             # UNIQUE (tenant_id, channel, address) would raise anyway; saying
             # which broker already holds it is more use than a 500.
-            raise HTTPException(409, f"{broker.legal_name} already has a "
-                                     f"{body.channel} way in at {address}")
+            raise HTTPException(409, f"This channel already exists for "
+                                     f"{broker.legal_name}: {address}")
 
         route = IntakeRoute(
             tenant_id=tid,
@@ -314,27 +509,133 @@ def create_route(body: RouteCreate, mga: Optional[str] = None,
         )
         s.add(route)
         s.flush()
+        if pull_cfg is not None:
+            # Raw SQL, same transaction: the column is never mapped on the
+            # model (see sftp_pull), so a database without it still works.
+            sftp_pull.save_config(s, route.id, pull_cfg)
 
         # Create the folders now, not on first file. A broker given an address
         # will test it immediately, and an SFTP put into a folder that does not
         # exist fails with a permission error that looks like a credential
         # problem — the hardest kind of support call to answer.
         created_dir = None
-        if route.channel == "sftp":
+        if route.channel == "sftp" and pull_cfg is None:
             try:
                 created_dir = str(svc.ensure_route_dirs(route))
             except OSError as exc:
                 raise HTTPException(500, f"could not create the folder: {exc}")
+
+        # A folder on Kavachio's own server: the broker's login is made with the
+        # channel, in the same transaction — an SFTP channel nobody can sign in
+        # to is not a way in at all.
+        login_cred, password = None, None
+        if sftp_accounts.is_hosted(route):
+            login_cred, password = sftp_accounts.issue(
+                s, route, broker_name=broker.legal_name, carrier_name=carrier_name,
+                user_id=getattr(principal, "user_id", None))
 
         s.commit()
         s.refresh(route)
         _log(_tenant_name(s, tid) or "", _actor(principal), "intake_route_created",
              target=str(route.id),
              details={"channel": route.channel, "address": route.address,
-                      "broker_party_id": route.broker_party_id})
-        out = _route_dict(route, broker.legal_name, 0)
+                      "broker_party_id": route.broker_party_id,
+                      # Which server key was trusted, and by whom (the actor).
+                      **({"host_key": pull_cfg["host_key"]["fingerprint_sha256"]}
+                         if pull_cfg else {}),
+                      **({"sftp_user": login_cred.key_prefix} if login_cred else {})})
+        out = _route_dict(route, broker.legal_name, 0,
+                          sftp=sftp_pull.public_view(pull_cfg),
+                          login=_login_view(login_cred))
         out["folder"] = created_dir
+        out["cc"] = _carrier_cc(s, tid) if route.channel == "email" else None
+        # The broker is told how to name what they send — the same example
+        # the dialog shows — so their first file is not a refused one.
+        # API: emailed with its key, the moment the key is minted (create_key).
+        # SFTP on our server: emailed with the login, the moment it is made.
+        out["guide"] = (_email_guide(s, route, carrier_name,
+                                     sftp_login=({"username": login_cred.key_prefix,
+                                                  "password": password}
+                                                 if login_cred else None))
+                        if route.channel != "api" else None)
+        if login_cred:
+            # Returned once, like an API key. The screen shows it only when the
+            # email could not carry it; it is not kept anywhere.
+            out["login"]["password"] = password
         return out
+
+
+def _email_guide(s, route: IntakeRoute, carrier: str, *,
+                 api_key: Optional[str] = None, api_base: Optional[str] = None,
+                 sftp_login: Optional[dict] = None) -> dict:
+    """Email the broker this channel's "How They Send It". Never fails the
+    request that asked for it: the dialog still shows the example to copy."""
+    import intake_guide
+    try:
+        return intake_guide.send(s, route, carrier=carrier, send_to=_send_to(route),
+                                 api_key=api_key, api_base=api_base,
+                                 sftp_login=sftp_login)
+    except Exception:  # noqa: BLE001
+        log.warning("could not email the channel guide for route %s", route.id, exc_info=True)
+        return {"recipients": [], "sending": False}
+
+
+@router.post("/routes/{route_id}/guide")
+def email_route_guide(route_id: int, mga: Optional[str] = None,
+                      principal: Principal = Depends(require_role("carrier_admin"))):
+    """Send the broker this channel's instructions again. For an SFTP channel
+    on Kavachio's server that includes their user name — never a password,
+    which is not kept (POST /routes/{id}/sftp-login makes a new one)."""
+    with SessionLocal() as s:
+        route = s.get(IntakeRoute, route_id)
+        if route is None:
+            raise HTTPException(404, "route not found")
+        assert_tenant_owns(principal, route.tenant_id)
+        if route.channel not in ("email", "sftp"):
+            raise HTTPException(400, "only email and SFTP channels have instructions to send")
+        cred = (sftp_accounts.credential(s, route.id)
+                if sftp_accounts.is_hosted(route) else None)
+        login = ({"username": cred.key_prefix,
+                  "issued_on": cred.created_at.strftime("%d %B %Y") if cred.created_at else None}
+                 if cred is not None and cred.revoked_at is None else None)
+        return _email_guide(s, route, _tenant_name(s, route.tenant_id) or "your carrier",
+                            sftp_login=login)
+
+
+@router.post("/routes/{route_id}/sftp-login")
+def new_sftp_login(route_id: int, mga: Optional[str] = None,
+                   principal: Principal = Depends(require_role("carrier_admin"))):
+    """A new password for the broker's login on Kavachio's SFTP server — or
+    their first login, for a channel made before logins existed — emailed to
+    them with how to send. The old password stops working at once, and anyone
+    signed in with it is disconnected.
+
+    The password comes back in this response, once: the screen shows it only
+    when the email cannot carry it."""
+    import sftp_server
+    with SessionLocal() as s:
+        route = s.get(IntakeRoute, route_id)
+        if route is None:
+            raise HTTPException(404, "route not found")
+        assert_tenant_owns(principal, route.tenant_id)
+        if not sftp_accounts.is_hosted(route):
+            raise HTTPException(400, "Only an SFTP channel on Kavachio's server has a login.")
+        broker = s.get(Party, route.broker_party_id) if route.broker_party_id else None
+        tenant_name = _tenant_name(s, route.tenant_id)
+        first = sftp_accounts.credential(s, route.id) is None
+        cred, password = sftp_accounts.issue(
+            s, route, broker_name=broker.legal_name if broker else "",
+            carrier_name=tenant_name or "carrier",
+            user_id=getattr(principal, "user_id", None))
+        s.commit()
+        closed = sftp_server.drop_sessions(route.id)
+        _log(tenant_name or "", _actor(principal), "intake_sftp_login_issued",
+             target=str(route.id),
+             details={"username": cred.key_prefix, "first_login": first,
+                      "sessions_closed": closed})
+        guide = _email_guide(s, route, tenant_name or "your carrier",
+                             sftp_login={"username": cred.key_prefix, "password": password})
+        return {"login": {**_login_view(cred), "password": password}, "guide": guide}
 
 
 @router.patch("/routes/{route_id}")
@@ -361,12 +662,106 @@ def patch_route(route_id: int, body: RoutePatch, mga: Optional[str] = None,
 
         s.commit()
         s.refresh(route)
+        # Switched off means off now: a broker already signed in to Kavachio's
+        # SFTP server is disconnected, not left uploading into a dead channel.
+        if body.is_enabled is False and sftp_accounts.is_hosted(route):
+            import sftp_server
+            sftp_server.drop_sessions(route.id)
         names = _broker_names(s, route.tenant_id)
         _log(_tenant_name(s, route.tenant_id) or "", _actor(principal),
              "intake_route_updated", target=str(route.id),
              details=body.model_dump(exclude_unset=True))
         return _route_dict(route, names.get(route.broker_party_id),
-                           svc.month_counts(s, route.tenant_id).get(route.id, 0))
+                           svc.month_counts(s, route.tenant_id).get(route.id, 0),
+                           sftp=(sftp_pull.public_view(sftp_pull.load_config(s, route.id))
+                                 if svc.is_external_sftp(route) else None),
+                           login=(_login_view(sftp_accounts.credential(s, route.id))
+                                  if sftp_accounts.is_hosted(route) else None))
+
+
+# What an arrival that has not been run reports. Keys match _run_facts.
+_NO_RUN = {"run_result": None, "run_state": None, "run_error": None, "run_at": None,
+           "run_export_id": None, "run_exception_count": None, "run_rows": None,
+           "contract_id": None, "contract_name": None, "submitted_by_name": None,
+           "reporting_period": None,
+           "resolved_by_name": None}
+
+
+def _run_result(state: Optional[str], export_status: Optional[str],
+                exception_count: Optional[int]) -> Optional[str]:
+    """One word for what the run did, in the Files screen's vocabulary:
+    ingested · exceptions · not_checked · failed · not_run. None while it has
+    not been run (or is being run right now)."""
+    if state == "failed":
+        return "failed"
+    if state == "not_run":
+        return "not_run"
+    if state != "done":
+        return None
+    if export_status == "not_validated":
+        return "not_checked"
+    if export_status == "clean" or not exception_count:
+        return "ingested"
+    return "exceptions"
+
+
+def _run_facts(s, rows) -> dict:
+    """{arrival_id: run facts} for a page of arrivals — three small queries,
+    never the export's multi-MB payload columns."""
+    from db import Contract, OutputExport
+    exp_ids = {a.run_export_id for a in rows if a.run_export_id}
+    exports = {}
+    if exp_ids:
+        exports = {e.id: e for e in s.query(
+            OutputExport.id, OutputExport.status, OutputExport.exception_count,
+            OutputExport.policy_count, OutputExport.contract_id,
+        ).filter(OutputExport.id.in_(exp_ids)).all()}
+    # The run's contract, else the one the file arrived for (picked, sent,
+    # named or the only one) — so a file shows its contract before it is run.
+    con_ids = ({e.contract_id for e in exports.values() if e.contract_id}
+               | {a.contract_id for a in rows if getattr(a, "contract_id", None)})
+    contracts = {}
+    if con_ids:
+        contracts = {c.id: (c.name or c.filename or f"Contract #{c.id}")
+                     for c in s.query(Contract.id, Contract.name, Contract.filename)
+                     .filter(Contract.id.in_(con_ids)).all()}
+    # Who uploaded it and who released or discarded it — one lookup for both.
+    user_ids = {uid for a in rows
+                for uid in (a.submitted_by_user_id, a.resolved_by_user_id) if uid}
+    users = {}
+    if user_ids:
+        users = {u.id: (u.full_name or u.email)
+                 for u in s.query(AppUser).filter(AppUser.id.in_(user_ids)).all()}
+    # The reporting period each file was FOR. A file landed with migration 32
+    # carries it; any other run says so through the calendar version its
+    # export filled in.
+    period_of = {}
+    if exp_ids:
+        from db import SubmissionVersion
+        period_of = {eid: p for eid, p in
+                     s.query(SubmissionVersion.received_export_id, SubmissionVersion.period)
+                     .filter(SubmissionVersion.received_export_id.in_(exp_ids)).all() if p}
+    out = {}
+    for a in rows:
+        e = exports.get(a.run_export_id)
+        cid = (e.contract_id if e else None) or getattr(a, "contract_id", None)
+        out[a.id] = {
+            "reporting_period": (getattr(a, "reporting_period", None)
+                                 or period_of.get(a.run_export_id)),
+            "run_result": _run_result(a.run_state, e.status if e else None,
+                                      e.exception_count if e else None),
+            "run_state": a.run_state,
+            "run_error": a.run_error,
+            "run_at": _iso_utc(a.run_at),
+            "run_export_id": a.run_export_id,
+            "run_exception_count": e.exception_count if e else None,
+            "run_rows": e.policy_count if e else None,
+            "contract_id": cid,
+            "contract_name": contracts.get(cid),
+            "submitted_by_name": users.get(a.submitted_by_user_id),
+            "resolved_by_name": users.get(a.resolved_by_user_id),
+        }
+    return out
 
 
 @router.get("/arrivals")
@@ -393,14 +788,18 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
         # and the screen shows that honestly rather than guessing.
         prog_names = {p.id: p.name for p in
                       s.query(Program).filter(Program.tenant_id == tid).all()}
+        runs = _run_facts(s, rows)
 
         out = []
         for a in rows:
             route = routes.get(a.route_id)
+            # A manual upload has no route; it carries its own channel and
+            # programme (migration 29).
+            prog_id = (getattr(route, "program_id", None) if route else None) or a.program_id
             out.append({
                 "arrival_id": a.id,
                 "filename": a.filename,
-                "channel": route.channel if route else None,
+                "channel": route.channel if route else a.channel,
                 "route_id": a.route_id,
                 "route_address": route.address if route else None,
                 "broker_party_id": a.matched_broker_party_id,
@@ -413,9 +812,8 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
                 "file_hash_sha256": a.file_hash_sha256,
                 # The programme the route is pinned to, so the screen does not
                 # have to join arrivals to routes itself.
-                "program_id": getattr(route, "program_id", None) if route else None,
-                "program_name": prog_names.get(
-                    getattr(route, "program_id", None)) if route else None,
+                "program_id": prog_id,
+                "program_name": prog_names.get(prog_id),
                 "received_at": _iso_utc(a.received_at),
                 "outcome": a.outcome,
                 "turned_away_reason": a.turned_away_reason,
@@ -424,23 +822,234 @@ def list_arrivals(mga: Optional[str] = None, limit: int = Query(100, ge=1, le=50
                 "sender_notified_at": _iso_utc(a.sender_notified_at),
                 "sender_notified_via": a.sender_notified_via,
                 "bdx_upload_id": a.bdx_upload_id,
+                "public_ref": a.public_ref,
+                # Which submission this file is a version of (migration 32) —
+                # the screen shows a submission once, as its latest file.
+                "submission_ref": a.submission_ref,
+                "version_no": a.version_no,
+                # The period the file is for — with programme and contract,
+                # what makes a later file the next version of this one.
+                "reporting_period": a.reporting_period,
+                # ITD handling (migration 38, itd_run.py): how the run read the
+                # file, and what it did with its rows. NULL unless the setup's
+                # ITD settings are on.
+                "load_type": a.load_type,
+                "load_type_reason": a.load_type_reason,
+                "period_start": a.period_start.isoformat() if a.period_start else None,
+                "period_end": a.period_end.isoformat() if a.period_end else None,
+                "itd_summary": a.itd_summary,
+                # ── 12.3 — what a person decided, and whether the file is
+                # still there to look at. The screen needs both: a resolved row
+                # must stop asking to be worked, and a download button that
+                # cannot work should not be offered.
+                "resolution": a.resolution,
+                "resolved_at": _iso_utc(a.resolved_at),
+                "resolved_by_user_id": a.resolved_by_user_id,
+                "resolution_note": a.resolution_note,
+                "bytes_purged_at": _iso_utc(a.bytes_purged_at),
+                "can_download": bool(
+                    a.blob_ref and a.bytes_purged_at is None
+                    and not review.is_infected(a)),
+                "is_infected": review.is_infected(a),
+                # ── migration 29 — what became of it once it was run ──
+                **runs.get(a.id, _NO_RUN),
             })
         counts = {
             "total": len(out),
             "accepted": sum(1 for a in out if a["outcome"] == "accepted"),
             "held": sum(1 for a in out if a["outcome"] == "held"),
             "turned_away": sum(1 for a in out if a["outcome"] == "turned_away"),
+            # The only number anybody has to act on: held, and nobody has
+            # looked at it yet. This is what the queue is.
+            "waiting": sum(1 for a in out
+                           if a["outcome"] == "held" and not a["resolution"]),
         }
         return {"rows": out, "counts": counts}
 
 
+# ── the review queue (feature 12.3) ─────────────────────────────────────────
+# A refused file is kept so somebody can look at it. Until these three
+# endpoints existed there was nothing to look WITH: the screen's buttons were
+# built disabled because a decision had nowhere to be recorded.
+
+
+class ReviewDecision(BaseModel):
+    note: Optional[str] = None
+    # Release only: the contract to run it under. Asked when a file was held
+    # because its contract was renewed and the period did not say which term it
+    # belongs to — without it, the run would fall back to the setup's pin.
+    contract_id: Optional[int] = None
+
+
+def _arrival_for_review(s, arrival_id: int, principal: Principal) -> FileArrival:
+    arrival = s.get(FileArrival, arrival_id)
+    if arrival is None:
+        raise HTTPException(404, "no such arrival")
+    assert_tenant_owns(principal, arrival.tenant_id)
+    return arrival
+
+
+@router.post("/arrivals/{arrival_id}/rerun")
+def rerun_arrival(arrival_id: int,
+                  principal: Principal = Depends(require_role("carrier_admin"))):
+    """Run a file that went through again — after its run failed, after it could
+    not be run automatically, or when it arrived before auto-run existed.
+
+    It does not run here: it goes back in the auto-run queue (run_state NULL),
+    so a retry takes exactly the path the first run took. The failed attempt's
+    landing record stays; the new run gets its own."""
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        if arrival.outcome != "accepted":
+            raise HTTPException(400, "Only accepted files can be processed.")
+        if arrival.run_state not in ("failed", "not_run", "pre_autorun"):
+            raise HTTPException(
+                400, "This file is being run now." if arrival.run_state == "running"
+                else "This file has already been run.")
+        arrival.run_state = None
+        arrival.run_error = None
+        s.commit()
+        _log(_tenant_name(s, arrival.tenant_id) or "", _actor(principal),
+             "intake_arrival_rerun", target=str(arrival.id),
+             details={"filename": arrival.filename})
+    import intake_autorun
+    intake_autorun.wake()
+    return {"arrival_id": arrival_id, "run_state": None}
+
+
+@router.post("/arrivals/{arrival_id}/release")
+def release_arrival(arrival_id: int, body: ReviewDecision = ReviewDecision(),
+                    principal: Principal = Depends(require_role("carrier_admin"))):
+    """"This is fine, load it." Held files only — see intake_review.release."""
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        if body.contract_id is not None:
+            import intake_service as svc
+            allowed = {c.id for c in svc.live_contracts(
+                s, arrival.tenant_id, arrival.program_id,
+                arrival.matched_broker_party_id)}
+            if body.contract_id not in allowed:
+                raise HTTPException(400, "That contract is not one this file's "
+                                         "programme and broker can be run under.")
+            arrival.contract_id = body.contract_id
+        try:
+            review.release(s, arrival, user_id=principal.user_id, note=body.note)
+        except review.ReviewError as exc:
+            raise HTTPException(400, str(exc))
+        s.commit()
+        # Released means "load it": auto-run takes it now rather than next tick.
+        import intake_autorun
+        intake_autorun.wake()
+        return {"arrival_id": arrival.id, "outcome": arrival.outcome,
+                "resolution": arrival.resolution,
+                "resolved_at": _iso_utc(arrival.resolved_at)}
+
+
+@router.get("/arrivals/{arrival_id}/contract-choices")
+def arrival_contract_choices(arrival_id: int,
+                             principal: Principal = Depends(require_role("carrier_admin"))):
+    """The contracts a held file can be released under: the live contracts of
+    its programme for its broker, with code and term, newest first."""
+    import intake_service as svc
+    from db import Contract
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        ids = [c.id for c in svc.live_contracts(
+            s, arrival.tenant_id, arrival.program_id, arrival.matched_broker_party_id)]
+        rows = (s.query(Contract).filter(Contract.id.in_(ids))
+                .order_by(Contract.id.desc()).all()) if ids else []
+        return {"choices": [{
+            "id": c.id, "name": c.name or c.filename or f"Contract {c.id}",
+            "code": svc.contract_code(c),
+            "inception_dt": str(c.inception_dt) if c.inception_dt else None,
+            "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None,
+            "renews_contract_id": c.renews_contract_id,
+        } for c in rows], "current": arrival.contract_id}
+
+
+@router.post("/arrivals/{arrival_id}/discard")
+def discard_arrival(arrival_id: int, body: ReviewDecision = ReviewDecision(),
+                    principal: Principal = Depends(require_role("carrier_admin"))):
+    """"Ignore this." The row stays; only the decision is added."""
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        try:
+            review.discard(s, arrival, user_id=principal.user_id, note=body.note)
+        except review.ReviewError as exc:
+            raise HTTPException(400, str(exc))
+        s.commit()
+        return {"arrival_id": arrival.id, "outcome": arrival.outcome,
+                "resolution": arrival.resolution,
+                "resolved_at": _iso_utc(arrival.resolved_at)}
+
+
+@router.get("/arrivals/{arrival_id}/download")
+def download_arrival(arrival_id: int, request: Request,
+                     principal: Principal = Depends(require_role("carrier_admin"))):
+    """The stored copy, so a reviewer can open what they are judging.
+
+    Never for a file that failed the security scan, and every read is logged —
+    these are files that failed inspection, and one day somebody will ask who
+    looked at one.
+    """
+    with SessionLocal() as s:
+        arrival = _arrival_for_review(s, arrival_id, principal)
+        try:
+            data = review.fetch_bytes(
+                arrival, user_id=principal.user_id,
+                ip=request.client.host if request.client else None)
+        except review.ReviewError as exc:
+            raise HTTPException(400, str(exc))
+        safe_name = (arrival.filename or "file").replace('"', "")
+        return Response(
+            content=data, media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'})
+
+
+@router.post("/retention/run")
+def run_retention(principal: Principal = Depends(require_role("carrier_admin"))):
+    """Run the retention sweep now rather than waiting for the nightly task.
+
+    Exists for the same reason /routes/{id}/poll does: a rule that only ever
+    runs at 3am cannot be demonstrated, and "did it work?" should have an answer
+    on screen rather than in a log file next week.
+    """
+    return review.run_retention()
+
+
+@router.get("/events")
+async def arrival_events(request: Request, mga: Optional[str] = None,
+                         principal: Principal = Depends(current_principal)):
+    """A live feed for the Files screen: one line whenever this carrier's
+    files change — a file landed by any way in, or somebody decided one.
+
+    Replaces the screen asking for the whole list every 60 seconds. Newline-
+    delimited JSON (`ready`, then `arrivals` / `ping`), read with fetch so the
+    bearer token travels in a header like every other call. The lines carry no
+    data at all — the screen re-reads /intake/arrivals, which is where the
+    tenant scoping lives. See intake_events.
+    """
+    def _tenant() -> int:
+        with SessionLocal() as s:
+            return resolve_tenant_id(s, principal, mga)
+
+    tid = await run_in_threadpool(_tenant)
+    return StreamingResponse(
+        intake_events.stream(tid, request),
+        media_type="application/x-ndjson",
+        # A proxy that buffers the response would hold every line back until
+        # the stream ends, which is the whole point defeated.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @router.post("/routes/{route_id}/poll")
 def poll_route(route_id: int, principal: Principal = Depends(require_role("carrier_admin"))):
-    """Collect this route's folder right now instead of waiting for the timer.
+    """Collect this route's folder or mailbox right now.
 
-    Exists so the feature can be tested and demonstrated without waiting five
-    minutes, and so "is my folder working?" has an answer on the screen rather
-    than in a log file.
+    The screen no longer needs this — files are collected the moment they land
+    (sftp_watch, IMAP IDLE) — so it has no button any more. It stays for support
+    and scripts: the one-call answer to "is this folder working?", with a
+    summary of exactly what was found.
     """
     with SessionLocal() as s:
         route = s.get(IntakeRoute, route_id)
@@ -454,6 +1063,9 @@ def poll_route(route_id: int, principal: Principal = Depends(require_role("carri
         # rather than there being one that understands both.
         if route.channel == "email":
             from email_poller import collect_route
+        elif svc.is_external_sftp(route):
+            # Someone else's server: log in and collect now (sftp_pull).
+            from sftp_pull import collect_route
         else:
             from sftp_poller import collect_route
         result = collect_route(s, route)
@@ -469,7 +1081,7 @@ MAX_LIVE_KEYS = 2      # an overlap for rotation, without letting keys pile up
 
 
 @router.post("/routes/{route_id}/keys", status_code=201)
-def create_key(route_id: int, body: KeyCreate,
+def create_key(route_id: int, body: KeyCreate, request: Request,
                principal: Principal = Depends(require_role("carrier_admin"))):
     """Mint a key. The plaintext is returned exactly ONCE and never stored —
     the screen has to say so plainly before it disappears."""
@@ -479,14 +1091,14 @@ def create_key(route_id: int, body: KeyCreate,
             raise HTTPException(404, "route not found")
         assert_tenant_owns(principal, route.tenant_id)
         if route.channel != "api":
-            raise HTTPException(400, "only an API way in has keys")
+            raise HTTPException(400, "Only API channels have keys.")
 
         live = (s.query(IntakeCredential)
                 .filter(IntakeCredential.route_id == route_id,
                         IntakeCredential.revoked_at.is_(None)).count())
         if live >= MAX_LIVE_KEYS:
-            raise HTTPException(409, f"this way in already has {live} live keys "
-                                     "— revoke one before creating another")
+            raise HTTPException(409, f"This channel already has {live} active keys "
+                                     "— revoke one before creating another.")
 
         full, prefix, digest = mint_key()
         cred = IntakeCredential(
@@ -500,11 +1112,18 @@ def create_key(route_id: int, body: KeyCreate,
         _log(_tenant_name(s, route.tenant_id) or "", _actor(principal),
              "intake_key_created", target=str(cred.id),
              details={"route_id": route.id, "label": cred.label})
+        # The broker is emailed the key with how to use it — now, the only
+        # moment the plaintext exists. The address is this API's own.
+        from intake_api_routes import _base_url
+        base = (os.getenv("API_PUBLIC_URL") or "").strip() or _base_url(request)
+        guide = _email_guide(s, route, _tenant_name(s, route.tenant_id) or "your carrier",
+                             api_key=full, api_base=base)
         return {
             "credential_id": cred.id,
             "label": cred.label,
             "api_key": full,
             "warning": "Copy this now. It is not stored and cannot be shown again.",
+            "guide": guide,
         }
 
 

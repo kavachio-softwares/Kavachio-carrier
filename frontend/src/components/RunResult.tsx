@@ -17,23 +17,111 @@
  * Everything below reads the run payload, which is identical either way.
  */
 import { useState } from "react";
+import { AlertTriangle } from "lucide-react";
 import { api, downloadFile } from "../api/client";
+import { InfoTip } from "./InfoTip";
 import {
   InlineAllRows, HighlightGrid, firstDataSheet, HL_BG, HL_BD,
   HL_WARN_BG, HL_WARN_BD, type Sheet,
 } from "./OutputRows";
+import { contractLabel } from "../utils/contractLabel";
+import { type ItdSummary } from "../api/itd";
+import { ItdRunCard } from "./ItdRunCard";
 
 export type RunException = {
   severity?: string; sheet?: string; row?: number;
   column?: string; field?: string; rule_name?: string;
   policy_number?: string; actual_value?: string | number;
   expected_value?: string | number; reason?: string; message?: string;
+  /** "not_validated" — the run's checks did not run; "not_checked" — the one
+   *  row-less summary of rules that could not run (shown as a note, not a finding). */
+  error_class?: string;
+  /** On the "not_checked" entry: the columns its rules needed. */
+  columns?: string[];
+  /** On the "not_checked" entry: rules that did not run at all… */
+  rules?: { rule_name?: string; columns?: string[] }[];
+  /** …and rules that ran on only some of their sheets. */
+  partial?: { rule_name?: string; sheets?: string[]; columns?: string[] }[];
 };
 
 export type GoverningContract = {
   sheet: string; contract_id: number | null;
+  /** What the contract is CALLED. A contract written in Kavachio is typed and
+   *  has only this; one that arrived as a document has only a filename. Both
+   *  are served, and contractLabel picks. */
+  contract_name?: string | null;
   contract_filename: string | null; fallback: boolean;
 };
+
+export type LayoutChanges = {
+  missing_columns: string[]; extra_columns?: string[];
+  expected_count: number; changed_pct: number;
+};
+
+/** "Missing Columns" / "Extra Columns": one list open at a time, the
+ *  columns as chips in a box that scrolls. Shared by the card below and
+ *  Process Bordereau's "columns don't match" popup. */
+export function ColumnToggles({ changes, actions, indent = 0 }: {
+  changes: LayoutChanges | null | undefined;
+  actions?: React.ReactNode;
+  indent?: number;
+}) {
+  const [open, setOpen] = useState<"missing" | "new" | null>(null);
+  const missing = changes?.missing_columns ?? [];
+  const extra = changes?.extra_columns ?? [];
+  const shown = open === "missing" ? missing : open === "new" ? extra : [];
+  // Missing in red, extra in green — the button carries the count, and the
+  // open one gets a solid border.
+  const tab = (k: "missing" | "new", label: string, n: number) => {
+    const c = k === "missing" ? "crit" : "ok";
+    return n > 0 && (
+      <button className="btn sm" aria-expanded={open === k}
+        onClick={() => setOpen(o => (o === k ? null : k))}
+        style={{ color: `var(--p-${c}-ink)`, background: `var(--p-${c}-soft)`,
+                 borderColor: open === k ? `var(--p-${c})` : "transparent" }}>
+        {label} ({n})
+      </button>
+    );
+  };
+  if (!missing.length && !extra.length && !actions) return null;
+  return (
+    <>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: `12px 0 0 ${indent}px` }}>
+        {tab("missing", "Missing Columns", missing.length)}
+        {tab("new", "Extra Columns", extra.length)}
+        {actions && <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>{actions}</div>}
+      </div>
+      {shown.length > 0 && (
+        <div style={{ margin: `10px 0 0 ${indent}px`, padding: 10, maxHeight: 220, overflowY: "auto",
+                      display: "flex", flexWrap: "wrap", gap: 6, background: "var(--p-surface-2)",
+                      border: "1px solid var(--p-border)", borderRadius: "var(--p-r-sm)" }}>
+          {shown.map(c => (
+            <span key={c} className={`badge ${open === "missing" ? "b-crit" : "b-ok"}`}
+              style={{ fontWeight: 500 }}>{c}</span>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** A file's headings against the setup's input template, shown after a run. */
+export function LayoutChangesCard({ changes, title, message }: {
+  changes: LayoutChanges | null | undefined;
+  title: string;
+  message: React.ReactNode;
+}) {
+  return (
+    <div className="card spine warn pad" style={{ marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <AlertTriangle size={17} style={{ color: "var(--p-warn)", flexShrink: 0 }} />
+        <span style={{ fontSize: 15, fontWeight: 600 }}>{title}</span>
+      </div>
+      <div style={{ color: "var(--p-muted)", fontSize: 13, margin: "6px 0 0 27px" }}>{message}</div>
+      <ColumnToggles changes={changes} indent={27} />
+    </div>
+  );
+}
 
 export type RunResp = {
   export_id: number; filename: string; row_count: number;
@@ -41,10 +129,49 @@ export type RunResp = {
   status: string; datamodel_mapped: boolean; admin_task_id?: number | null;
   datamodel_queued?: boolean;
   format_drift?: boolean;
+  /** The setup's input columns this file lacks; null when its layout is the
+   *  setup's own. */
+  layout_changes?: LayoutChanges | null;
   governing_contracts?: GoverningContract[];
   /** True when produced by the pre-submission self-check — not ingested, not
    *  recorded as a run. */
   check_only?: boolean;
+  /** Why the run is "not_validated" (null otherwise). */
+  status_reason?: string | null;
+  /** Rows the checks ran over, and rows set aside as blank/summary rows. Null
+   *  when there was nothing to check with. */
+  rows_total?: number | null;
+  rows_validated?: number | null;
+  rows_excluded?: number | null;
+  rules_not_checked?: number;
+  rules_partly_checked?: number;
+  /** What the automatic send-to-carrier did — Process Bordereau IS Send
+   *  Bordereau now, there is no separate screen or button. null/absent when
+   *  this run had no broker on it (nothing to send on anyone's behalf) or was
+   *  a self-check, which never sends. */
+  sent_to_carrier?: {
+    to: string[]; cc: string[];
+    mail_sent: boolean; mail_error?: string | null;
+  } | null;
+  /** What ITD handling made of the file. Absent when the setup has it off. */
+  itd?: RunItd;
+};
+
+/** The ITD half of a run: whether the file was read as inception-to-date, and
+ *  what was sent on from it. */
+export type RunItd = {
+  load_type: "itd" | "regular";
+  /** The period the file runs up to, e.g. "2025-08". */
+  as_at: string | null;
+  reason: string | null;
+  summary: ItdSummary;
+  /** A self-check: compared, but nothing recorded in the running total. */
+  check_only: boolean;
+  applied?: number;
+  /** Rows that could not be recorded — another file changed them at once. */
+  conflicts?: number;
+  /** The output is fine, but the running total could not be updated. */
+  apply_error?: string | null;
 };
 
 export type RunUrls = {
@@ -62,6 +189,7 @@ export function fetchPreview(urls: RunUrls, exportId: number): Promise<Sheet | n
 
 export function RunResult({
   result, preview, urls, onError, actions, footNote, findings = "check-only",
+  carrierNotes = true,
 }: {
   result: RunResp;
   preview: Sheet | null;
@@ -85,6 +213,10 @@ export function RunResult({
   findings?: "check-only" | "always";
   /** Screen-specific line under the notes (e.g. who to ask about a drift). */
   footNote?: React.ReactNode;
+  /** Notes about the SETUP rather than the file — checks not run because a
+   *  column is not mapped, a data-model mapping task raised. Only the carrier
+   *  can act on them, so the broker's screen turns them off. */
+  carrierNotes?: boolean;
 }) {
   const [showAll, setShowAll] = useState(false);
   const [allSheets, setAllSheets] = useState<Sheet[] | null>(null);
@@ -93,6 +225,11 @@ export function RunResult({
   const isCheck = !!result.check_only;
   const spine = result.status === "clean" ? "ok" : "warn";
   const listFindings = findings === "always" || isCheck;
+  const notValidated = result.status === "not_validated";
+  // The grouped "checks not run" entry is a note about the run, not a finding.
+  const notChecked = result.exceptions.find(e => e.error_class === "not_checked");
+  const findingsList = result.exceptions.filter(e => e.error_class !== "not_checked");
+  const notRun = notChecked?.rules?.length ?? result.rules_not_checked ?? 0;
 
   // "See all rows": the full output (every sheet, all rows) with the same
   // highlighting as the download, expanded IN PLACE rather than in a modal.
@@ -117,7 +254,7 @@ export function RunResult({
     const header = ["Severity", "Rule", "Policy", "Sheet", "Column",
                     "Actual value", "Expected", "Reason"];
     const cell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const rows = result.exceptions.map(e => [
+    const rows = findingsList.map(e => [
       e.severity, e.rule_name, e.policy_number, e.sheet,
       e.column ?? e.field, e.actual_value, e.expected_value,
       e.reason ?? e.message,
@@ -135,7 +272,11 @@ export function RunResult({
         style={{ margin: "18px 0", display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
         <div style={{ flex: 1, minWidth: 220 }}>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 3 }}>
-            {isCheck && result.status === "clean"
+            {notValidated
+              ? <span style={{ color: "var(--p-warn-ink)" }}>
+                  Not validated — {result.status_reason ?? "the checks did not run on this file"}
+                </span>
+              : isCheck && result.status === "clean"
               ? <span style={{ color: "var(--p-ok)" }}>✓ Ready to send — no issues found</span>
               : <>
                   {result.row_count.toLocaleString()} rows {isCheck ? "checked" : "validated"}
@@ -153,6 +294,14 @@ export function RunResult({
                 // what they can do is read the list below and send a fixed file.
                 : "Sent. Exceptions don't block the file — the carrier has it either way. Fix what's listed below and send again if you need to."}
           </div>
+          {result.rows_validated != null && (
+            <div style={{ color: "var(--p-muted)", fontSize: 12.5, marginTop: 3 }}>
+              {result.rows_validated.toLocaleString()} of {(result.rows_total ?? 0).toLocaleString()} rows checked
+              {result.rows_excluded
+                ? ` · ${result.rows_excluded.toLocaleString()} set aside as blank or summary rows`
+                : ""}
+            </div>
+          )}
         </div>
         {listFindings && result.exception_count > 0 && (
           <button className="btn" onClick={downloadFixList}>Download Fix-List (CSV)</button>
@@ -165,10 +314,72 @@ export function RunResult({
         {actions}
       </div>
 
+      {/* WHAT THE AUTOMATIC SEND DID. Process Bordereau IS Send Bordereau now
+          — there is no second screen and no second click, so this is the
+          only place the outcome is ever shown. Absent entirely for a
+          self-check or a run with no broker on it (nothing to send). */}
+      {/* {result.sent_to_carrier && (
+        <div className={`note${result.sent_to_carrier.mail_sent
+          || result.sent_to_carrier.mail_error?.includes("disabled") ? "" : " warn"}`}
+          style={{ marginBottom: 18 }}>
+          {result.sent_to_carrier.mail_sent ? (
+            <>
+              <b>Sent to the carrier</b> — emailed to{" "}
+              <b>{result.sent_to_carrier.to.join(", ") || "—"}</b>
+              {result.sent_to_carrier.cc.length > 0 && (
+                <> (cc {result.sent_to_carrier.cc.join(", ")})</>
+              )}, and now visible to them on their own Bordereau Calendar.
+            </>
+          ) : result.sent_to_carrier.mail_error?.includes("disabled") ? (
+            <>
+              <b>Recorded — the carrier email is switched off for now.</b>{" "}
+              This period is already visible to the carrier in the portal;
+              no email went out.
+            </>
+          ) : (
+            <>
+              <b>Recorded, but the email could not be delivered</b>
+              {result.sent_to_carrier.mail_error ? ` (${result.sent_to_carrier.mail_error})` : ""}.
+              It is already visible to the carrier in the portal — send this
+              period again if you need to reach their inbox too.
+            </>
+          )}
+        </div>
+      )} */}
+
+      {/* ITD: what went into the output BDX from a file that repeats earlier periods, so
+          "89 rows" above is not read as 89 rows delivered. */}
+      {result.itd && <ItdRunCard itd={result.itd} />}
+
       {/* The findings, inline. Read-only in both cases: on a check because a
           check is a look, not a submission; on a real run because whoever sees
           this list here is the party that has no triage screen. */}
-      {listFindings && result.exceptions.length > 0 && (
+      {carrierNotes && notChecked && (
+        <div className="note warn" style={{ marginBottom: 18 }}>
+          {/* An entry carrying only partly-run checks has no "not run" line. */}
+          {(notRun > 0 || !notChecked.partial?.length) && <>
+            <strong>
+              {notRun || "Some"} check{notRun === 1 ? "" : "s"} not run
+              {notChecked.columns?.length ? " — columns not mapped" : ""}.
+            </strong>{" "}
+            {notChecked.columns?.length
+              ? <InfoTip text={`Map these in Bordereau Setup, or add or switch them on in the output template, to run them: ${notChecked.columns.join(", ")}.`} />
+              : notChecked.message}
+          </>}
+          {!!notChecked.partial?.length && (
+            <div style={{ marginTop: notRun ? 6 : 0 }}>
+              <strong>
+                {notChecked.partial.length} check{notChecked.partial.length === 1 ? "" : "s"} ran on only some sheets.
+              </strong>{" "}
+              {notChecked.partial.slice(0, 5).map(p =>
+                `${p.rule_name ?? "A check"} skipped ${(p.sheets ?? []).join(", ")}`).join("; ")}
+              {notChecked.partial.length > 5 ? ` and ${notChecked.partial.length - 5} more` : ""}.
+            </div>
+          )}
+        </div>
+      )}
+
+      {listFindings && findingsList.length > 0 && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-h">
             <h3>{isCheck ? "What to Fix Before Sending" : "What Failed Validation"}</h3>
@@ -182,7 +393,7 @@ export function RunResult({
                 <tr><th>Severity</th><th>Policy</th><th>Field</th><th>Value</th><th>Why</th></tr>
               </thead>
               <tbody>
-                {result.exceptions.slice(0, 200).map((e, i) => {
+                {findingsList.slice(0, 200).map((e, i) => {
                   const sev = (e.severity || "").toLowerCase();
                   const tone = sev.includes("crit") || sev === "error" ? "var(--p-crit)"
                     : sev.includes("warn") ? "var(--p-warn, #b45309)" : "var(--p-muted)";
@@ -205,7 +416,7 @@ export function RunResult({
               </tbody>
             </table>
           </div>
-          {result.exceptions.length > 200 && (
+          {findingsList.length > 200 && (
             <div className="note" style={{ margin: 12 }}>
               Showing the first 200 of {result.exception_count.toLocaleString()} — download the CSV for the full list.
             </div>
@@ -220,7 +431,8 @@ export function RunResult({
         const withContract = gcs.filter(g => g.contract_id != null);
         const distinct = new Set(withContract.map(g => g.contract_id));
         const nameOf = (g: GoverningContract) =>
-          g.contract_filename || `Contract #${g.contract_id}`;
+          contractLabel({ id: g.contract_id ?? 0, name: g.contract_name,
+                          filename: g.contract_filename });
         if (distinct.size === 1 && withContract.length === gcs.length) {
           return (
             <div className="note" style={{ marginBottom: 18 }}>
@@ -258,12 +470,12 @@ export function RunResult({
       })()}
 
       {result.format_drift && (
-        <div className="note warn" style={{ marginBottom: 18 }}>
-          This file's columns differ from the setup's input template — the output
-          may be incomplete. {footNote}
-        </div>
+        <LayoutChangesCard changes={result.layout_changes}
+          title="Some columns don't match the carrier's input BDX template"
+          message={<>Your file was processed, but some column names are different
+            from the Bordereau Input Template. {footNote}</>} />
       )}
-      {!isCheck && !result.datamodel_mapped && (
+      {carrierNotes && !isCheck && !result.datamodel_mapped && (
         <div className="note" style={{ marginBottom: 18 }}>
           New input format — a one-time admin task was raised to map it to the data model
           {result.admin_task_id ? ` (task #${result.admin_task_id})` : ""}. Delivery is complete regardless.

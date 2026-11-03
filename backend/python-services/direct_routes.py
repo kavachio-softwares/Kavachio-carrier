@@ -23,7 +23,7 @@ import os
 import re
 import threading
 from difflib import SequenceMatcher
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 import pandas as pd
@@ -31,18 +31,22 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import text, func, or_
+from sqlalchemy.orm import aliased
 
 import direct_lane as dl
 import direct_mapper as dm
 import direct_render as dr
+import rule_scope as _rule_scope_mod
 import missing_columns as mc
+import validation_outcome as vo
+import intake_service as svc_intake
 import storage  # blob storage abstraction (Azure/Azurite; DB-blob fallback)
 from app_routes import _iso_utc, _parse_client_dt
 from db import (
     ActivityEvent, AdminMappingTask, CanonicalSession, Contract, DirectFormat,
     ExportTemplate, LandingRecord, Mapper, MissingBdxColumn, OutputExport, Party,
-    Pipeline, PipelineContract, Program, ReferenceDocument, SessionLocal, Tenant,
-    exception_severity_counts,
+    Pipeline, PipelineContract, Program, ProgramBroker, ReferenceDocument,
+    SessionLocal, SetupApproval, Tenant, exception_severity_counts,
 )
 from exporter import parse_template, spec_sheet_names, is_reference_sheet
 from streaming import heartbeat_stream_response
@@ -188,6 +192,13 @@ def assert_tenant_owns(principal: Principal, tenant_id: Optional[int]) -> None:
     admins bypass). 404 not 403, so ids in other tenants can't be probed."""
     if principal.is_platform_admin:
         return
+    # No tenant on the caller (a broker seat) matches NOTHING here. Compared
+    # as-is, None == None let every broker seat through on any row that has no
+    # tenant — global parties, legacy contracts. A broker reaches carrier rows
+    # only through the carrier_scope chain, whose acting principal carries
+    # the carrier's real tenant.
+    if principal.tenant_id is None:
+        raise HTTPException(404, "not found")
     if tenant_id != principal.tenant_id:
         raise HTTPException(404, "not found")
 
@@ -537,6 +548,48 @@ def _column_types_from_structure(structure: dict) -> dict:
     return out
 
 
+def _confirmed_mapping(column_mapping: Optional[dict], decisions: Optional[dict],
+                       approved: bool, structure: dict) -> Optional[dict]:
+    """The part of a stored, not-yet-known format's mapping that may be handed
+    back to the proposer as ALREADY DECIDED.
+
+    The proposer treats whatever it is given as a person's decision — final,
+    recorded MANUALLY_CONFIRMED (semantic_mapping, rung 1). Handing it the whole
+    stored mapping of an unapproved format therefore turned the previous run's
+    unreviewed AI guesses into "confirmed by a person" on the next upload.
+
+    So only these pass:
+      · everything, when the format is approved;
+      · a rule the proposer never recorded a decision for, or whose source
+        differs from the one it recorded — a person put it there;
+      · a rule whose recorded decision is already MANUAL;
+      · anything but a `copy` rule — the proposer only ever writes copies.
+    An unapproved rule that is still exactly what the proposer suggested is
+    left out, and is proposed afresh. A MANUAL decision written by the old
+    behaviour cannot be told from a real one and keeps its standing."""
+    if not column_mapping:
+        return None
+    if approved:
+        return column_mapping
+    decisions = decisions or {}
+    out: dict = {}
+    for sheet, rules in column_mapping.items():
+        recorded = {d.get("field_key"): d for d in (decisions.get(sheet) or [])
+                    if isinstance(d, dict)}
+        key_of = {f["column_name"]: f["field_key"]
+                  for f in dm._output_fields_for_sheet(structure, sheet)}
+        kept = {}
+        for col, rule in (rules or {}).items():
+            d = recorded.get(key_of.get(col))
+            if (d is None or d.get("method") == dm.sm.MANUAL
+                    or not isinstance(rule, dict) or rule.get("kind") != "copy"
+                    or d.get("source") != rule.get("source")):
+                kept[col] = rule
+        if kept:
+            out[sheet] = kept
+    return out
+
+
 def _routing_input_sheets(routing: Optional[dict]) -> set[str]:
     """Input sheet names actually consumed by a routing (across all routes)."""
     names: set[str] = set()
@@ -746,10 +799,15 @@ async def direct_upload(
                 routing = dl.propose_sheet_routing(input_sheets, output_sheets)
                 # A previously-confirmed mapping for this format outranks
                 # everything the proposer finds — a re-run must never move a
-                # column somebody already fixed by hand.
+                # column somebody already fixed by hand. Only what a person
+                # confirmed counts, never the last run's unreviewed proposal
+                # (see _confirmed_mapping).
+                prior = (_confirmed_mapping(fmt.column_mapping, fmt.mapping_decisions,
+                                            bool(fmt.approved), structure)
+                         if fmt else None)
                 column_mapping, candidates, decisions = await run_in_threadpool(
                     dm.propose_column_mapping, cols_by_sheet, structure, routing,
-                    samples_by_sheet, (fmt.column_mapping if fmt else None), True)
+                    samples_by_sheet, prior, True, tenant_id=tid)
                 if fmt is None:
                     fmt = DirectFormat(
                         tenant_id=tid, name=name, fingerprint=fp,
@@ -870,6 +928,8 @@ class DirectFormatUpdate(BaseModel):
     carrier_party_id: Optional[int] = None
     program_id: Optional[int] = None
     approved: Optional[bool] = None
+    governing_date_field: Optional[str] = None
+    asof_config: Optional[dict] = None
 
 
 class PipelineContractIn(BaseModel):
@@ -888,6 +948,13 @@ class PipelineCreate(BaseModel):
     input_format_id: int
     output_template_id: int
     contracts: list[PipelineContractIn] = []
+    # Which of its contracts' rule sets this setup runs — see rule_scope.py.
+    # Omitted, the setup runs its own template's rules, as every setup did.
+    rule_scope: Optional[dict] = None
+    # ITD handling (itd.py) — omitted, ITD stays off, as every setup was.
+    itd_config: Optional[dict] = None
+    governing_date_field: Optional[str] = None
+    asof_config: Optional[dict] = None
 
 
 class PipelineUpdate(BaseModel):
@@ -896,6 +963,14 @@ class PipelineUpdate(BaseModel):
     input_format_id: Optional[int] = None
     output_template_id: Optional[int] = None
     contracts: Optional[list[PipelineContractIn]] = None  # replaces the set when given
+    # Replaces the setup's rule choice when sent; an empty object clears it.
+    # Left out, the stored choice is kept.
+    rule_scope: Optional[dict] = None
+    # Replaces the setup's ITD settings when sent (itd.py); an empty object
+    # clears them. Left out, the stored settings are kept.
+    itd_config: Optional[dict] = None
+    governing_date_field: Optional[str] = None
+    asof_config: Optional[dict] = None
 
 
 @router.get("/direct/format/{format_id}")
@@ -938,6 +1013,10 @@ def direct_format_update(format_id: int, body: DirectFormatUpdate,
             f.carrier_party_id = body.carrier_party_id
         if body.program_id is not None:
             f.program_id = body.program_id
+        if body.governing_date_field is not None:
+            f.governing_date_field = body.governing_date_field
+        if body.asof_config is not None:
+            f.asof_config = body.asof_config
         if body.approved is not None:
             f.approved = 1 if body.approved else 0
             # Supersede any prior active setup for the same carrier + program:
@@ -1008,7 +1087,8 @@ def direct_landing_get(landing_id: int, principal: Principal = Depends(current_p
 
 
 @router.post("/direct/landing/{landing_id}/load-datamodel")
-def direct_landing_load_datamodel(landing_id: int, background_tasks: BackgroundTasks):
+def direct_landing_load_datamodel(landing_id: int, background_tasks: BackgroundTasks,
+                                  principal: Principal = Depends(current_principal)):
     """Additive DATA-LANE trigger — push one landing into the canonical data model
     when (and only when) its format's input→data-model mapping is already done.
 
@@ -1024,6 +1104,10 @@ def direct_landing_load_datamodel(landing_id: int, background_tasks: BackgroundT
         rec = s.get(LandingRecord, landing_id)
         if not rec:
             raise HTTPException(404, "landing record not found")
+        # It had no sign-in at all: anyone could push any carrier's (or
+        # broker's) landing into the data model. Same owner check as reading
+        # the landing (the route above).
+        assert_tenant_owns(principal, rec.tenant_id)
         fmt = s.get(DirectFormat, rec.format_id) if rec.format_id else None
         mapping_ready = bool(fmt and fmt.datamodel_mapped and fmt.datamodel_mapper_id)
         status = rec.datamodel_status
@@ -1062,6 +1146,8 @@ def _format_to_dict(f: DirectFormat) -> dict:
         "datamodel_mapped": bool(f.datamodel_mapped),
         "datamodel_mapper_id": f.datamodel_mapper_id,
         "approved": bool(f.approved), "hit_count": f.hit_count,
+        "governing_date_field": getattr(f, "governing_date_field", None),
+        "asof_config": getattr(f, "asof_config", None),
     }
 
 
@@ -1077,6 +1163,176 @@ def _pipeline_contracts(s, pipeline_id: int) -> list[PipelineContract]:
             .all())
 
 
+def _asof_governing_date(landing_data: dict, *cfg_sources):
+    """The date that decides which contract version governs this run.
+
+    Returns (date | None, note). Reads the configured — or auto-detected —
+    governing column out of the landing record and reduces its values to one
+    date per the configured strategy. See contract_asof_config for why the
+    column is configuration rather than a constant: for a premium bordereau it
+    is policy inception, for claims it is date of loss, and choosing wrong
+    produces plausible-looking wrong money rather than an error.
+    """
+    from contract_upload_services import contract_asof_config as _cfg
+    sheets = (landing_data or {}).get("sheets") or {}
+    columns, values = [], []
+    for sh in sheets.values():
+        if isinstance(sh, dict):
+            columns.extend(sh.get("columns") or [])
+    field = _cfg.governing_date_field(columns, *cfg_sources)
+    if not field:
+        return None, _cfg.describe(None, None)
+    for sh in sheets.values():
+        for row in (sh.get("rows") or []) if isinstance(sh, dict) else []:
+            if isinstance(row, dict) and field in row:
+                values.append(row[field])
+    strategy = _cfg.setting("date_strategy", _cfg.DATE_STRATEGY, *cfg_sources)
+    governing = _cfg.pick_date(values, strategy)
+    return governing, _cfg.describe(field, governing, strategy)
+
+
+# Per-row scoping helpers live in contract_upload_services.contract_asof —
+# they are pure functions over dicts, and keeping them out of this module lets
+# them be tested without importing the route layer (and with it the LLM client,
+# the rule library and a live database).
+from contract_upload_services.contract_asof import (          # noqa: E402
+    AsofCfg as _AsofCfg,
+    contract_windows as _asof_contract_windows,
+    row_dates_from_blocks as _asof_row_dates,
+    filter_exceptions_by_window as _asof_filter_exceptions,
+)
+
+
+def _apply_asof_contracts(s, landing_data, pipe, fmt, sheet_contracts, eff_contract_id):
+    """Feature 7 §7.2 — re-point this run's contracts at the versions IN FORCE
+    on the file's transaction dates, instead of whichever version is pinned.
+
+    The pin (pipeline_contract / direct_format.contract_id) says WHICH contract
+    governs this setup. That stays correct and untouched. This asks the second
+    question §7 adds — which VERSION of it applied on these dates — and swaps
+    only the version, keeping the pin's choice of contract lineage.
+
+    Returns (sheet_contracts, eff_contract_id, note, extra_ids, uncovered).
+    `uncovered` is None, or {"contract_id", "dates", "label"} when some rows
+    carry a date no version covers — see the per-row block below. Every failure
+    path returns the inputs unchanged, so a run can never break because as-of
+    resolution was unavailable or misconfigured.
+    """
+    from contract_upload_services import contract_asof as _asof
+    from contract_upload_services import contract_asof_config as _cfg
+
+    if not _cfg.enabled(pipe, fmt):
+        return sheet_contracts, eff_contract_id, None, [], None
+
+    governing, note = _asof_governing_date(landing_data, pipe, fmt)
+    if governing is None:
+        return sheet_contracts, eff_contract_id, note, [], None
+
+    on_unresolved = _cfg.setting("on_unresolved", _cfg.ON_UNRESOLVED, pipe, fmt)
+
+    def _swap(cid):
+        """Pinned version → the sibling in force on `governing`."""
+        if not cid:
+            return cid, None
+        found = _asof.resolve_sibling_as_of(s, int(cid), governing)
+        if found and int(found) != int(cid):
+            return int(found), f"contract {cid} → {found}"
+        if found is None and on_unresolved == "skip":
+            # No version covers this date. 'skip' drops the contract so the run
+            # is not silently validated by rules that never applied; 'pin' (the
+            # default) keeps it, preserving pre-Feature-7 behaviour.
+            return None, f"contract {cid} → none (no version covers {governing})"
+        return cid, None
+
+    swaps = []
+    new_sheets = {}
+    for k, v in (sheet_contracts or {}).items():
+        nv, msg = _swap(v)
+        new_sheets[k] = nv
+        if msg:
+            swaps.append(f"sheet '{k}': {msg}")
+    new_eff, msg = _swap(eff_contract_id)
+    if msg:
+        swaps.append(f"fallback: {msg}")
+
+    # ── Per-row scoping (§7.1 "resolve EACH transaction") ────────────────
+    # `governing` above is ONE date for the whole run, so a file straddling a
+    # renewal resolves entirely to one version and the rows on the other side
+    # are judged by rules that never applied to them. Collect every version the
+    # file's dates actually touch; each one's rules then run, and
+    # _asof_filter_exceptions discards the ones that fired outside their own
+    # window. Off (`row_scoped: false`) keeps the single-version behaviour.
+    extra_ids, uncovered = [], None
+    if _cfg.setting("row_scoped", "true", pipe, fmt) not in ("false", "0", "no"):
+        anchor = new_eff or eff_contract_id
+        lineage = _asof.lineage_of(s, int(anchor)) if anchor else None
+        if lineage is not None:
+            seen = {int(c) for c in list((new_sheets or {}).values()) + [new_eff] if c}
+            missing = set()
+            for row_date in sorted({d for d in _row_dates_of(landing_data, pipe, fmt)}):
+                cid = _asof.resolve_as_of(s, lineage, row_date)
+                if cid is None:
+                    missing.add(row_date)
+                elif int(cid) not in seen:
+                    seen.add(int(cid))
+                    extra_ids.append(int(cid))
+            # A row whose date NO version covers is checked against the
+            # contract in force today (the pinned one if none is in force) —
+            # the agreed behaviour, 1 Oct 2026 — and its exceptions name that
+            # contract and its period. Without this, the window filter dropped
+            # every exception on such a row, so it was not checked at all.
+            # 'skip' keeps its meaning: no contract for those rows.
+            if missing and on_unresolved != "skip":
+                today_cid = int(_asof.resolve_as_of(s, lineage, date.today()) or anchor)
+                if today_cid not in seen:
+                    seen.add(today_cid)
+                    extra_ids.append(today_cid)
+                uncovered = {"contract_id": today_cid, "dates": missing,
+                             "label": _asof_contract_label(s, lineage, today_cid)}
+                swaps.append(f"{len(missing)} date(s) covered by no version → "
+                             f"checked against contract {today_cid}")
+            if extra_ids:
+                swaps.append(f"row-scoped: also governing {extra_ids}")
+
+    note = note + ("; " + "; ".join(swaps) if swaps else "; no version change")
+    return new_sheets, new_eff, note, extra_ids, uncovered
+
+
+def _asof_contract_label(s, lineage, contract_id: int) -> str:
+    """'"Spectrum Binder" (Endorsement 1, from 1 Apr 2025)' — the name and the
+    period a fallback exception points the reader at."""
+    from contract_upload_services import contract_asof as _asof
+    try:
+        row = next((r for r in _asof.timeline(s, lineage)
+                    if int(r["contract_id"]) == int(contract_id)), None)
+    except Exception:      # noqa: BLE001 — a label must never fail a run
+        row = None
+    c = s.get(Contract, int(contract_id))
+    name = (getattr(c, "name", None) or getattr(c, "filename", None)
+            or f"Contract #{contract_id}")
+    return _asof.describe_version(name, row)
+
+
+def _row_dates_of(landing_data, *cfg_sources):
+    """Every distinct governing date in the landing record — the set of dates
+    the file's rows actually carry, so only the versions genuinely touched are
+    pulled in (a file inside one window stays a single-contract run)."""
+    from contract_upload_services import contract_asof_config as _cfg
+    sheets = (landing_data or {}).get("sheets") or {}
+    dates = set()
+    for sh in sheets.values():
+        if not isinstance(sh, dict):
+            continue
+        field = _cfg.governing_date_field(sh.get("columns") or [], *cfg_sources)
+        if not field:
+            continue
+        for row in sh.get("rows") or []:
+            d = _cfg.coerce_date(row.get(field)) if isinstance(row, dict) else None
+            if d is not None:
+                dates.add(d)
+    return dates
+
+
 def _pipeline_ready(s, p: Pipeline) -> tuple[bool, str]:
     """A pipeline can be activated once it has an input template, an output
     template, and at least one contract. Permissive: individual output sheets
@@ -1086,9 +1342,81 @@ def _pipeline_ready(s, p: Pipeline) -> tuple[bool, str]:
         return False, "Add an input template before activating."
     if not p.output_template_id:
         return False, "Add an output template before activating."
-    if not _pipeline_contracts(s, p.id):
+    pcs = _pipeline_contracts(s, p.id)
+    if not pcs:
         return False, "Add at least one contract before activating."
+    unsettled = _contracts_not_yet_settled(s, pcs, p.tenant_id)
+    if unsettled:
+        return False, (
+            "This setup is built on a contract that is not settled yet: "
+            + ", ".join(unsettled)
+            + ". A bordereau is produced UNDER a contract, so the contract has "
+              "to be finished first. One written here is finished when the "
+              "broker has agreed the terms and your carrier has signed "
+              "it; one that was uploaded, when your carrier has accepted "
+              "it. Open the contract to see which of the two it is waiting "
+              "for, then come back here.")
     return True, ""
+
+
+# The states a contract passes through before anyone at the carrier has put
+# their name to it. A setup built on one of these would be measuring files
+# against terms that can still move — and against a contract the broker may yet
+# push back on.
+#
+# `agreed` is NOT here, and that is the whole of what the carrier admin's
+# signature releases. The terms stop moving when the broker agrees them, but
+# the contract is not the carrier's word until the carrier admin signs it — and
+# once they have, the only thing still outstanding is the BROKER's signature,
+# which is theirs to give and no reason to hold up work on this side. So an
+# `agreed` contract blocks while the carrier has not signed and stops blocking
+# the moment it has, which is exactly where the flow says the setup may start.
+_CONTRACT_UNSETTLED = ("draft", "pending", "in_review", "changes_requested")
+
+
+def _contracts_not_yet_settled(s, pcs, tenant_id=None) -> list:
+    """Which of this setup's contracts have not got past the carrier admin.
+
+    READ OFF THE STORED COLUMN, not _effective_lifecycle, and deliberately: a
+    contract that predates the lifecycle column has NULL there, and
+    _effective_lifecycle reads NULL as `draft` — which would have made this gate
+    refuse every setup built before any of this existed. A contract only blocks
+    a setup if it is explicitly sitting in one of the pre-signature states.
+    """
+    ids = [pc.contract_id for pc in pcs if pc.contract_id]
+    if not ids:
+        return []
+    # Tenant-scoped, although every id here came off this pipeline's own rows:
+    # the return value is put in front of a user, and a name is the one part of
+    # a contract that is worth nothing to the reader and everything to whoever
+    # should not have seen it.
+    q = s.query(Contract).filter(Contract.id.in_(ids))
+    if tenant_id is not None:
+        q = q.filter(Contract.tenant_id == tenant_id)
+    out = []
+    for c in q.all():
+        state = (c.lifecycle or "").strip().lower()
+        if state in _CONTRACT_UNSETTLED:
+            out.append(c.name or c.filename or f"contract {c.id}")
+        elif state == "agreed" and not _carrier_has_signed(s, c):
+            out.append(c.name or c.filename or f"contract {c.id}")
+    return out
+
+
+def _carrier_has_signed(s, c) -> bool:
+    """Has the carrier admin put the carrier's name to this contract yet?
+
+    Asked through contract_routes so there is one answer to it — the record
+    screen, the dashboard tile and this gate all read the same signature rows,
+    and a second opinion here is how a setup comes to be refused on a contract
+    the screen says is signed. Fails OPEN: a setup must not become
+    un-activatable because a signature could not be read.
+    """
+    try:
+        import contract_routes as _cr
+        return "carrier" not in _cr._unsigned_sides(_cr._signatures(s, c.id))
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _contract_reference_documents(c) -> dict:
@@ -1154,6 +1482,16 @@ def _derive_reference_documents(s, contract_id):
         log.exception("could not derive reference documents for contract %s",
                       contract_id)
         return []
+
+
+def _pipeline_itd_config(s, pipeline_id: int) -> Optional[dict]:
+    """A setup's ITD settings for the screens — None when it has none or the
+    database cannot hold them yet; never the reason a setup fails to load."""
+    try:
+        import itd_store
+        return itd_store.read_config(s, pipeline_id)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
@@ -1226,15 +1564,27 @@ def _pipeline_to_dict(s, p: Pipeline, derive_refs: bool = False) -> dict:
             for pc in _pcs
         ],
         "reference_documents": _ref_docs,
+        "rule_scope": _rule_scope_mod.pipeline_scope(s, p.id),
+        "itd_config": _pipeline_itd_config(s, p.id),
         "ready": ready, "ready_reason": reason,
+        "governing_date_field": getattr(p, "governing_date_field", None),
+        "asof_config": getattr(p, "asof_config", None),
+        # Who sent this up for approval and when. Both NULL on a setup that
+        # never went up — one a carrier ADMIN built, or one from before
+        # approvals existed — which is what the queue sorts and captions by.
+        "submitted_by_user_id": getattr(p, "submitted_by_user_id", None),
+        "submitted_by": _user_names(
+            s, [getattr(p, "submitted_by_user_id", None)]).get(
+                getattr(p, "submitted_by_user_id", None)),
+        "submitted_at": _iso_utc(getattr(p, "submitted_at", None)),
         "created_at": _iso_utc(p.created_at),
         "modified_at": _iso_utc(p.modified_at),
     }
 
 
 def _activate_pipeline(s, p: Pipeline) -> None:
-    """Enforce completeness, then make this the single active pipeline for its
-    (carrier, program) — superseding any prior active one. Raises HTTP 400 with
+    """Enforce completeness, then make this pipeline live — superseding the live
+    ones it replaces (same carrier, program and broker, overlapping contracts). Raises HTTP 400 with
     a user-facing reason when the pipeline isn't complete.
 
     Transition mirror: also flip the input DirectFormat's ``approved`` flag so
@@ -1243,11 +1593,18 @@ def _activate_pipeline(s, p: Pipeline) -> None:
     ready, reason = _pipeline_ready(s, p)
     if not ready:
         raise HTTPException(400, reason)
-    # Supersede other active pipelines for the same (carrier, program, broker).
-    # Including the broker means one programme can run a different input layout
-    # per broker — and, because a pre-broker setup has broker_party_id NULL and
-    # only ever collides with another NULL, nothing that exists today changes.
-    s.query(Pipeline).filter(
+    # Supersede the live setups this one REPLACES: same (carrier, program,
+    # broker), AND covering any of the same contracts. Including the broker
+    # means one programme can run a different input layout per broker; including
+    # the contracts means one broker can run a different BDX template per
+    # contract — a setup built for contract B no longer switches off the one
+    # built for contract A. A setup listing no contracts (made before contracts
+    # were attached) covers every contract, so it still collides with every
+    # other one exactly as before, and a pre-broker setup (broker NULL) still
+    # only ever collides with another NULL.
+    from setup_scope import contract_ids_of
+    mine = contract_ids_of(s, p.id)
+    peers = s.query(Pipeline).filter(
         Pipeline.tenant_id == p.tenant_id,
         Pipeline.carrier_party_id == p.carrier_party_id,
         Pipeline.program_id == p.program_id,
@@ -1255,18 +1612,33 @@ def _activate_pipeline(s, p: Pipeline) -> None:
          else Pipeline.broker_party_id == p.broker_party_id),
         Pipeline.id != p.id,
         Pipeline.status == "active",
-    ).update({Pipeline.status: "superseded"})
+    ).all()
+    for peer in peers:
+        theirs = contract_ids_of(s, peer.id)
+        if not mine or not theirs or (mine & theirs):
+            peer.status = "superseded"
     p.status = "active"
     p.modified_at = datetime.utcnow()
 
-    # Mirror onto the input DirectFormat (transition-only).
+    # Mirror onto the input DirectFormat (transition-only): approve this one,
+    # and withdraw approval from every other format of the (carrier, program)
+    # EXCEPT those still behind a setup that stays live beside this one.
     if p.input_format_id and p.carrier_party_id is not None and p.program_id is not None:
+        s.flush()
+        still_live = {fid for (fid,) in s.query(Pipeline.input_format_id).filter(
+            Pipeline.tenant_id == p.tenant_id,
+            Pipeline.carrier_party_id == p.carrier_party_id,
+            Pipeline.program_id == p.program_id,
+            Pipeline.status == "active",
+            Pipeline.id != p.id,
+        ).all() if fid}
+        still_live.add(p.input_format_id)
         s.query(DirectFormat).filter(
             DirectFormat.tenant_id == p.tenant_id,
             DirectFormat.carrier_party_id == p.carrier_party_id,
             DirectFormat.program_id == p.program_id,
-            DirectFormat.id != p.input_format_id,
-        ).update({DirectFormat.approved: 0})
+            DirectFormat.id.notin_(still_live),
+        ).update({DirectFormat.approved: 0}, synchronize_session=False)
         df = s.get(DirectFormat, p.input_format_id)
         if df:
             df.approved = 1
@@ -1533,6 +1905,24 @@ def _principal_email(principal) -> Optional[str]:
         return None
 
 
+def _actor_label(principal, requested: Optional[str] = None) -> Optional[str]:
+    """Who to record as having done something, on rows the CARRIER reads.
+
+    A broker seat is recorded as its broker company (audit.actor_for), the way
+    a run submitted through the broker's lane already is. Anyone else is
+    recorded as they always were — the name they asked to be recorded under,
+    else their email. A broker seat's ``requested`` name is ignored: it would
+    put whatever they typed on the carrier's rows.
+    """
+    if principal is not None and getattr(principal, "is_broker", False):
+        try:
+            from audit import actor_for
+            return actor_for(principal)
+        except Exception:  # noqa: BLE001 — never raises into the request
+            return None
+    return requested or _principal_email(principal)
+
+
 def _principal_name(principal) -> Optional[str]:
     """The acting user's display name, for anything a PERSON reads.
 
@@ -1592,44 +1982,80 @@ def _scope_template_conflict(s, tid: int, scope: dict, pipe, fmt) -> Optional[st
 def _mapping_review(decisions: Optional[dict]) -> dict:
     """A short summary of the mapping ladder's verdict, for the setup screen.
 
-    Three numbers and two lists. `unresolved_required` is the one that matters:
-    those columns will be EMPTY in the delivered file, and the plan is explicit
-    that they must not be silently generated as if all were well.
+    Every field the bordereau is meant to fill lands in one of four states —
+    auto (wired up), verify (a proposal a person must confirm), unmapped
+    (nothing suitable) and ai_failed (the model never answered, so "no match"
+    would be untrue). A field configured to come from the contract, a party
+    record or a constant is not the bordereau's to fill and is left out.
+    `unresolved_required` is still the one that matters: those columns will be
+    EMPTY in the delivered file.
     """
     decisions = decisions or {}
-    auto = review = 0
+    counts = {"auto": 0, "verify": 0, "unmapped": 0, "ai_failed": 0}
+    entries: list[dict] = []
     unresolved: list[dict] = []
     ambiguous: list[dict] = []
     for sheet, rows in decisions.items():
         for d in rows or []:
-            if d.get("status") in ("AUTO_MAPPED", "MANUALLY_CONFIRMED"):
-                auto += 1
+            state = _review_state(d)
+            if state is None:
                 continue
-            review += 1
+            counts[state] += 1
+            cands = d.get("candidates") or []
             entry = {"sheet": sheet, "field": d.get("display_name"),
                      "field_key": d.get("field_key"),
+                     "state": state, "required": bool(d.get("required")),
+                     "source": d.get("source"),
+                     "suggestion": d.get("suggestion") or (
+                         cands[0].get("source") if state == "verify" and cands else None),
                      "confidence": d.get("confidence"),
-                     "reason": d.get("reason"),
-                     "candidates": [c.get("source") for c in (d.get("candidates") or [])][:4]}
-            if d.get("required"):
-                unresolved.append(entry)
-            else:
-                ambiguous.append(entry)
+                     "ai_confidence": d.get("ai_confidence"),
+                     "similarity": d.get("similarity"),
+                     "reason": d.get("reason"), "error": d.get("ai_error"),
+                     "candidates": [c.get("source") for c in cands][:4]}
+            entries.append(entry)
+            if state != "auto":
+                (unresolved if entry["required"] else ambiguous).append(entry)
     return {
-        "checked": auto + review,
-        "auto_mapped": auto,
-        "needs_review": review,
+        "checked": len(entries),
+        "auto_mapped": counts["auto"],
+        "needs_review": len(entries) - counts["auto"],
         # Required and unmapped — blocks a clean delivery.
         "unresolved_required": unresolved,
         # Optional and unmapped — worth a look, not a blocker.
         "unmapped_optional": ambiguous,
+        "counts": counts,
+        "entries": entries,
         "threshold": _semantic_threshold(),
+        "review_floor": _review_floor(),
     }
 
 
+def _review_state(d: dict) -> Optional[str]:
+    """Which of the four states one saved decision is in — None when the field
+    is not the bordereau's to fill. A decision saved before the states existed
+    carries only REVIEW_REQUIRED: with a candidate it reads as verify, without
+    one as unmapped."""
+    status = d.get("status")
+    if status in ("AUTO_MAPPED", "MANUALLY_CONFIRMED"):
+        return "auto"
+    if status == "NOT_FROM_INPUT":
+        return None
+    if status == "AI_UNAVAILABLE":
+        return "ai_failed"
+    if status == "UNMAPPED":
+        return "unmapped"
+    return "verify" if (d.get("suggestion") or d.get("candidates")) else "unmapped"
+
+
 def _semantic_threshold() -> float:
-    from semantic_mapping import min_confidence
-    return min_confidence()
+    from semantic_mapping import auto_accept_confidence
+    return auto_accept_confidence()
+
+
+def _review_floor() -> float:
+    from semantic_mapping import review_confidence
+    return review_confidence()
 
 
 def _output_sample_layout(s, template_id: Optional[int]) -> Optional[dict]:
@@ -1664,6 +2090,10 @@ async def _render_landing(
     actor: Optional[str], extra_consts: dict, auto_ingest: bool = False,
     reuse_export_id: Optional[int] = None, pipeline_id: Optional[int] = None,
     check_only: bool = False, scope: Optional[dict] = None,
+    rule_scope_pipeline_id: Optional[int] = None,
+    run_by_user_id: Optional[int] = None,
+    mark_calendar: bool = True,
+    period: Optional[str] = None,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -1691,15 +2121,45 @@ async def _render_landing(
         # contracts come from the PIPELINE when running against one; otherwise
         # (the /direct/render setup-preview path) they come from fmt, unchanged.
         pipe = s.get(Pipeline, pipeline_id) if pipeline_id else None
+        # Which of its contracts' rule sets the setup runs (rule_scope.py).
+        # None for the setup-preview path and for every setup that never chose.
+        # A Re-generate renders without its pipeline (the format decides the
+        # layout, as it always has) but must still run what that setup chose,
+        # so it names the pipeline for its rule choice alone.
+        run_rule_scope = _rule_scope_mod.pipeline_scope(s, pipe.id) if pipe else None
+        _rs_pipe = None
+        if pipe is None and rule_scope_pipeline_id:
+            _rs_pipe = s.get(Pipeline, rule_scope_pipeline_id)
+            if _rs_pipe is not None and _rs_pipe.tenant_id == rec.tenant_id:
+                run_rule_scope = _rule_scope_mod.pipeline_scope(s, _rs_pipe.id)
+            else:
+                _rs_pipe = None
+        # WHOSE CONTRACTS govern: the setup's. A Re-generate names its setup
+        # (above) for the same reason it names it for the rule choice — the
+        # input format is SHARED by every setup with the same layout and output
+        # template, and each setup build re-points the format's contracts at
+        # its own. Reading them off the format re-checked one broker's file
+        # against whichever setup was built last, which may be another
+        # broker's contract. The layout still comes from the format.
+        contracts_pipe = pipe or _rs_pipe
         if pipe:
             eff_output_template_id = pipe.output_template_id
-            _pcs = _pipeline_contracts(s, pipe.id)
+        else:
+            eff_output_template_id = fmt.output_template_id
+        if contracts_pipe:
+            _pcs = _pipeline_contracts(s, contracts_pipe.id)
             sheet_contracts = {pc.sheet_key: pc.contract_id
                                for pc in _pcs if pc.sheet_key}
             fallback_contract_id = next(
                 (pc.contract_id for pc in _pcs if not pc.sheet_key), None)
+        elif rule_scope_pipeline_id:
+            # A Re-generate whose setup has since been deleted. The contract
+            # the export itself records (passed in as contract_id) governs
+            # alone: the format's pins belong to whichever setup was built
+            # last, not to the one this file was made by.
+            sheet_contracts = {}
+            fallback_contract_id = None
         else:
-            eff_output_template_id = fmt.output_template_id
             sheet_contracts = fmt.sheet_contracts or {}
             fallback_contract_id = fmt.contract_id
         # The template here is always the SETUP's own — see this module's
@@ -1715,15 +2175,42 @@ async def _render_landing(
         output_format = _norm_fmt(getattr(tpl, "output_format", None))
         tenant_id = rec.tenant_id
         eff_contract_id = contract_id or fallback_contract_id
+        # A file named under a renewal (or under the contract it renewed) is
+        # checked on THAT contract's rules on every sheet, even where the setup
+        # pinned another term of the same chain. renewal_chain.follow_pins.
+        if contract_id and sheet_contracts:
+            import renewal_chain as _rc
+            if _rc.routing_enabled():
+                sheet_contracts = _rc.follow_pins(
+                    sheet_contracts, int(contract_id),
+                    _rc.chain_ids(s, int(contract_id)))
+
+        # ── Feature 7 §7.2 — Prior Period Files ──────────────────────────
+        # The pin above answers "which contract governs this setup". For a late
+        # or corrected file that is not the whole question: the version pinned
+        # today may not be the version that applied when the transactions
+        # happened. Swap each pinned contract for the sibling IN FORCE on the
+        # file's own dates, keeping the pin's choice of contract lineage.
+        #
+        # Fail-open: on any error the run keeps the contracts the pin gave it,
+        # so this can never be the reason a bordereau fails to process.
+        asof_note, asof_extra_ids, asof_uncovered = None, [], None
+        try:
+            (sheet_contracts, eff_contract_id, asof_note, asof_extra_ids,
+             asof_uncovered) = _apply_asof_contracts(
+                    s, rec.data, contracts_pipe, fmt, sheet_contracts,
+                    eff_contract_id)
+            if asof_note:
+                log.info(f"[AsOf] {asof_note}")
+        except Exception as _asof_exc:  # noqa: BLE001 — fail-open by design
+            log.info(f"[AsOf] skipped ({_asof_exc}) — run keeps its pinned contracts")
+
         # Per-schedule contracts: each output sheet can have its OWN contract.
         # Governing set = the per-sheet contracts ∪ the fallback contract. Every
         # governing contract's rules are validated (each only fires on the sheets
         # its compiled SQL references), and their constants are merged.
-        governing_ids = []
-        for cid in ([int(v) for v in sheet_contracts.values() if v]
-                    + ([eff_contract_id] if eff_contract_id else [])):
-            if cid not in governing_ids:
-                governing_ids.append(cid)
+        governing_ids = _governing_ids(sheet_contracts, eff_contract_id,
+                                       asof_extra_ids)
         base_consts = {}
         for cid in governing_ids:
             base_consts.update(_contract_constants(s, cid))
@@ -1734,9 +2221,30 @@ async def _render_landing(
         # that sheet; an unmapped sheet falls back to the format's contract ONLY
         # when that contract isn't itself pinned elsewhere (otherwise the sheet
         # has no governing contract and isn't contract-validated).
-        _fname = {c.id: c.filename for c in
-                  (s.query(Contract).filter(Contract.id.in_(governing_ids)).all()
-                   if governing_ids else [])}
+        asof_windows = {}
+        asof_cfg = [_AsofCfg(x) for x in (contracts_pipe, fmt) if x is not None]
+        try:
+            if asof_extra_ids or asof_uncovered:
+                asof_windows = _asof_contract_windows(s, governing_ids)
+        except Exception:      # noqa: BLE001 — fail-open: no filter, no harm
+            asof_windows = {}
+        # BOTH labels, because a contract may carry either. One written in
+        # Kavachio is typed and has a name and no file at all; one that arrived
+        # as a document has a filename. Sending only the filename left the run
+        # result calling a named contract "Contract #4019" — the one place the
+        # operator checks that the file was measured against what they chose.
+        _gov_rows = (s.query(Contract).filter(Contract.id.in_(governing_ids)).all()
+                     if governing_ids else [])
+        _fname = {c.id: c.filename for c in _gov_rows}
+        _cname = {c.id: c.name for c in _gov_rows}
+        # Each governing contract's margin (19.3) — every tolerance-taking
+        # rule of that contract runs with it unless it has its own value.
+        try:
+            from contract_margin import contract_margin_pct
+            contract_margins = {c.id: contract_margin_pct(c.extracted)
+                                for c in _gov_rows}
+        except Exception:      # noqa: BLE001 — fail-open: rules as stored
+            contract_margins = None
         _mapped = {str(k).strip(): int(v)
                    for k, v in sheet_contracts.items() if v}
         _pinned = set(_mapped.values())
@@ -1752,12 +2260,14 @@ async def _render_landing(
             governing_contracts.append({
                 "sheet": _sh,
                 "contract_id": _cid,
+                "contract_name": _cname.get(_cid) if _cid else None,
                 "contract_filename": _fname.get(_cid) if _cid else None,
                 "fallback": _is_fallback,
             })
         routing = fmt.sheet_routing or dl.propose_sheet_routing(
             list((rec.data or {}).get("sheets", {})), _output_sheet_names(structure))
         column_mapping = fmt.column_mapping
+        supplement_cfg = fmt.supplement or {}
         # Overlay any saved Fix/Approve corrections (raw capture stays untouched).
         landing_data = _apply_landing_corrections(s, landing_id, rec.data)
         # Corrections with no writable input cell are applied after projection.
@@ -1793,17 +2303,32 @@ async def _render_landing(
     # their own schedule); the deterministic date/amount TYPE checks run
     # regardless (they need only the output template's column types).
     exceptions: list[dict] = []
+    dv = None                  # run_validation's result, once it has returned
+    validation_error = None    # what stopped it, if something did
     try:
         rules: list[dict] = []
         if governing_ids:
+            import rule_scope
             with CanonicalSession() as cs:
                 rule_rows = cs.execute(
                     text("SELECT rule_id, contract_id, rule_engine, rule_name, "
-                         "severity, canonical_target, rule_spec, error_message "
+                         "severity, canonical_target, rule_spec, error_message, "
+                         f"{rule_scope.tag_select(cs)} "
                          "FROM validation_rule WHERE contract_id = ANY(:cids) "
-                         "AND rule_status != 'disabled'"),
+                         # Only rules cleared to run. A rule paused as
+                         # needs_review (e.g. a referral whose trigger
+                         # direction the generator could not confirm from the
+                         # contract) must not fire until a person confirms it —
+                         # 'active' only, not merely 'not disabled'.
+                         "AND rule_status = 'active'"),
                     {"cids": governing_ids}).mappings().all()
-                rules = [dict(r) for r in rule_rows]
+                # A contract can carry a rule set per output template; run the
+                # ones this setup runs. Untouched for every setup that made no
+                # choice and every contract with one set — see rule_scope.py.
+                rules = rule_scope.filter_rules(
+                    cs, [dict(r) for r in rule_rows],
+                    setup_template_id=eff_output_template_id,
+                    scope=run_rule_scope)
 
         # A rule is "schedule-scoped" when its clause explicitly names the
         # schedules it applies to (IR params scope_sheets/sheets, e.g.
@@ -1821,32 +2346,95 @@ async def _render_landing(
             return bool(params.get("scope_sheets") or params.get("sheets"))
         rule_scoped = {r.get("rule_id"): _rule_is_scoped(r) for r in rules}
 
-        schema_cols = {
-            sh.get("sheet_name", ""): [c.get("column_name")
-                                       for c in (sh.get("columns") or [])
-                                       if c.get("column_name")]
-            for sh in structure.get("sheets", [])}
-        column_types = _column_types_from_structure(structure)
+        # Every sheet's table keeps the full template column set (a fan-out
+        # rule must find its column on each sheet it reads), but a column the
+        # user switched off is not written (direct_render uses the same test),
+        # so it is neither type-checked nor counted as filled.
+        schema_cols = vo.template_schema_cols(structure)
+        _active = {str(sh).strip(): set(cols)
+                   for sh, cols in vo.active_schema_cols(structure).items()}
+        column_types = {sh: kinds for sh, kinds in (
+            (sh, {c: k for c, k in kinds.items() if c in _active.get(sh, ())})
+            for sh, kinds in _column_types_from_structure(structure).items()) if kinds}
+        # Contract margin (19.3) + policy totals (19.2), applied in memory by
+        # the run (contract_margin.apply_rule_settings). Resolving who set a
+        # tolerance before tolerance_source existed is ONE audit query.
+        rule_settings = None
+        try:
+            if rules:
+                import contract_margin as _cm
+                from duckdb_validation import _policy_number_columns
+                with SessionLocal() as _ms:
+                    _own = _cm.rules_with_legacy_own_tolerance(
+                        _ms, [r.get("rule_id") for r in rules
+                              if _cm.tolerance_template(r.get("rule_spec"))])
+                rule_settings = {
+                    "margins": contract_margins,
+                    "own_tolerance_rule_ids": sorted(_own),
+                    "policy_columns": _policy_number_columns(structure),
+                }
+        except Exception as _mx:  # noqa: BLE001 — never block validation
+            log.info(f"[margin] contract margin / policy totals skipped ({_mx})")
+            rule_settings = None
         if rules or column_types:
             from duckdb_validation import run_validation
             dv = run_validation(blocks, rules, template_id=eff_output_template_id,
-                                schema_cols=schema_cols, column_types=column_types)
+                                schema_cols=schema_cols, column_types=column_types,
+                                # what the setup writes into — a rule reading a
+                                # column it leaves empty is not checked
+                                filled_cols=vo.filled_cols_from_mapping(column_mapping),
+                                inactive_cols=vo.inactive_cols(structure),
+                                tenant_id=tenant_id,
+                                rule_settings=rule_settings)
             exceptions = dv.get("exceptions", [])
-            # Label each row-level exception with the offending policy's number so
-            # the review UI shows a real policy id instead of "Dataset-level".
+    except Exception as e:  # noqa: BLE001 — never block delivery on validation
+        # …but never call it clean either: the outcome below records it.
+        validation_error = e
+        log.warning("direct render validation skipped: %s", e)
+
+    # Everything below refines results the rules already returned. Each step
+    # fails on its own, so a problem in one keeps the findings instead of
+    # discarding them and storing the file as clean.
+    if dv is not None:
+        # ── Feature 7 §7.1, per row ──────────────────────────────────
+        # Every version the file spans has just had its rules run over
+        # EVERY row, so a row is currently judged by versions that never
+        # governed it. Keep only the exceptions whose contract was in force
+        # on that row's own date. Filtering after the run rather than
+        # scoping each rule's SQL means the compiler and the engine are
+        # untouched — the multi-contract machinery that already serves
+        # per-schedule contracts does the work.
+        if asof_windows or asof_uncovered:
+            try:
+                _rd = _asof_row_dates(blocks, *asof_cfg)
+                exceptions, _dropped = _asof_filter_exceptions(
+                    exceptions, _rd, asof_windows, fallback=asof_uncovered)
+                if _dropped:
+                    log.info(f"[AsOf] row-scoped: dropped {_dropped} exception(s) "
+                             f"raised by a version that did not govern the row")
+            except Exception as _fx:  # noqa: BLE001 — fail-open: keep them all
+                log.info(f"[AsOf] row scoping skipped ({_fx})")
+
+        # Label each row-level exception with the offending policy's number so
+        # the review UI shows a real policy id instead of "Dataset-level".
+        try:
             from duckdb_validation import label_exceptions_with_policy
             label_exceptions_with_policy(exceptions, structure, blocks)
-            # Per-schedule isolation: unscoped rules fan out to every sheet that
-            # carries their columns (rule_compiler.compile_ir) — NOT to the contract
-            # they came from. So on a multi-schedule BDX whose schedules share the
-            # same column layout (e.g. RiskSmith Sch A/B/C), an unscoped rule from
-            # Schedule H's contract also fires on the other schedules. When the user
-            # has mapped sheets to contracts, keep an UNSCOPED rule's exceptions only
-            # on the sheet(s) its own contract governs. A SCOPED rule (its clause
-            # names the schedules, e.g. "G, H, I, J") is left alone — its SQL is
-            # already limited to those schedules. Type-check exceptions carry no
-            # contract_id, so they are never dropped. No-op unless sheet_contracts
-            # is set (single-contract runs unaffected).
+        except Exception as _lx:  # noqa: BLE001 — labels are cosmetic
+            log.warning("policy labelling skipped: %s", _lx)
+
+        # Per-schedule isolation: unscoped rules fan out to every sheet that
+        # carries their columns (rule_compiler.compile_ir) — NOT to the contract
+        # they came from. So on a multi-schedule BDX whose schedules share the
+        # same column layout (e.g. RiskSmith Sch A/B/C), an unscoped rule from
+        # Schedule H's contract also fires on the other schedules. When the user
+        # has mapped sheets to contracts, keep an UNSCOPED rule's exceptions only
+        # on the sheet(s) its own contract governs. A SCOPED rule (its clause
+        # names the schedules, e.g. "G, H, I, J") is left alone — its SQL is
+        # already limited to those schedules. Type-check exceptions carry no
+        # contract_id, so they are never dropped. No-op unless sheet_contracts
+        # is set (single-contract runs unaffected).
+        try:
             if sheet_contracts:
                 sheet_owner = {str(sh).strip(): int(cid)
                                for sh, cid in sheet_contracts.items() if cid}
@@ -1874,8 +2462,31 @@ async def _render_landing(
                     log.info("per-schedule scoping dropped %d out-of-scope "
                              "exception(s) across %d mapped sheet(s)",
                              dropped, len(sheet_owner))
-    except Exception as e:  # noqa: BLE001 — never block delivery on validation
-        log.warning("direct render validation skipped: %s", e)
+        except Exception as _sx:  # noqa: BLE001 — fail-open: keep them all
+            log.warning("per-schedule scoping skipped: %s", _sx)
+
+    # What the run actually checked decides its status, not merely whether the
+    # list came back empty — see validation_outcome. A not-validated run carries
+    # one critical entry saying so; rules that could not run are summed up in
+    # one informational entry that is shown but never counted.
+    projected_rows = sum(len(v) for v in projected.values())
+    stats = (dv or {}).get("stats")
+    status, status_reason = vo.outcome(
+        input_rows=vo.input_row_count(landing_data, supplement_cfg),
+        # the file's rows on the sheets the routing reads — tells a sheet
+        # mismatch from a filter that let nothing through
+        routed_rows=vo.routed_row_count(landing_data, supplement_cfg, routing),
+        projected_rows=projected_rows, error=validation_error,
+        stats=stats, exceptions=exceptions)
+    if status == vo.NOT_VALIDATED:
+        exceptions.insert(0, vo.not_validated_entry(status_reason))
+    not_checked = vo.not_checked_entry((dv or {}).get("unprocessable"),
+                                       (dv or {}).get("partially_checked"))
+    if not_checked:
+        exceptions.append(not_checked)
+    counted = vo.countable(exceptions)
+    # Only an entry with a row can be painted onto a cell.
+    cell_exceptions = [e for e in counted if e.get("row") is not None]
 
     from output_serializers import (
         serialize as _serialize_output, output_extension as _output_ext,
@@ -1888,12 +2499,36 @@ async def _render_landing(
             dr.render_output, structure, projected, template_blob)
         # Cell highlighting is Excel-only; CSV/XML/JSON carry exceptions in the
         # OutputExport record instead.
-        if exceptions:
+        if cell_exceptions:
             try:
                 from exporter import highlight_exceptions
-                output_bytes = highlight_exceptions(output_bytes, structure, exceptions)
+                output_bytes = highlight_exceptions(output_bytes, structure, cell_exceptions)
             except Exception as e:  # noqa: BLE001
                 log.warning("highlight skipped: %s", e)
+        # The counts of what happened to every row (plan 22.3): a "Results"
+        # sheet after the template's own sheets. Decisions already saved on
+        # this landing count as resolved. Before the formulas, which must stay
+        # last; never costs the file (add_results_sheet returns it unchanged
+        # on any failure).
+        try:
+            import export_results as _xr
+            with SessionLocal() as _s:
+                _dec = [dict(m) for m in _s.execute(text(
+                    "SELECT output_sheet, output_row, output_field, kind "
+                    "FROM landing_correction WHERE landing_id = :l"),
+                    {"l": landing_id}).mappings()]
+                _src = _s.execute(text(
+                    "SELECT source_filename FROM landing_record WHERE id = :l"),
+                    {"l": landing_id}).scalar()
+            _res = _xr.compute(projected, _xr.apply_decisions(counted, _dec),
+                               not_validated=(status == vo.NOT_VALIDATED))
+            # The grey line under the title: which file, which period, when.
+            from datetime import datetime as _dt, timezone as _tz
+            output_bytes = _xr.add_results_sheet(output_bytes, _res, about={
+                "File": _src, "Period": period,
+                "Checked": _dt.now(_tz.utc).replace(microsecond=0)})
+        except Exception as e:  # noqa: BLE001
+            log.warning("results sheet skipped: %s", e)
         # LAST step on purpose: highlighting re-saves the workbook via openpyxl,
         # which would drop injected formulas/cached values. Patches each detected
         # totals cell with =SUM(...) + a cached value recomputed from the
@@ -1920,7 +2555,7 @@ async def _render_landing(
         storage.store_or_keep, "exports", tenant_id, fname, output_bytes,
         _ct_for(fname))
 
-    sev_crit, sev_warn, sev_info = exception_severity_counts(exceptions)
+    sev_crit, sev_warn, sev_info = exception_severity_counts(counted)
     # Does the file we just wrote match the sample the recipient supplied?
     # Advisory only (plan section 15): a sample is optional, and a difference is
     # something for a person to look at, never a reason to withhold a delivery.
@@ -1940,11 +2575,14 @@ async def _render_landing(
                 tenant_id=tenant_id, template_id=out_template_id,
                 template_name=template_name, filename=fname,
                 source_upload_id=None, policy_ids=None, generated_by=actor,
+                # Set on a new export only: a re-render further down keeps the
+                # person who originally sent the file.
+                generated_by_user_id=run_by_user_id,
                 policy_count=sum(len(v) for v in projected.values()),
-                exception_count=len(exceptions), exceptions=exceptions,
+                exception_count=len(counted), exceptions=exceptions,
                 critical_count=sev_crit, warning_count=sev_warn,
                 info_count=sev_info,
-                status="has_exceptions" if exceptions else "clean",
+                status=status,
                 blob=exp_bytes, blob_ref=exp_ref,
                 # What this file was made from and for. template_version is the
                 # one that has to be right: a later edit forks the template, and
@@ -1964,27 +2602,38 @@ async def _render_landing(
             out.template_name = template_name
             out.filename = fname
             out.policy_count = sum(len(v) for v in projected.values())
-            out.exception_count = len(exceptions)
+            out.exception_count = len(counted)
             out.exceptions = exceptions
             out.critical_count = sev_crit
             out.warning_count = sev_warn
             out.info_count = sev_info
-            out.status = "has_exceptions" if exceptions else "clean"
+            out.status = status
             out.blob = exp_bytes
             out.blob_ref = exp_ref
             out.generated_by = actor or out.generated_by
             out.template_version = out_template_version
             out.output_format = output_format
             out.sample_comparison = sample_report
+        from audit import actor_columns as _actor_columns
         s.add(ActivityEvent(
             tenant_id=tenant_id, actor=actor,
             action="direct_output_checked" if check_only else "direct_output_generated",
             target=f"direct:{template_name}",
             details={"filename": fname, "rows": out.policy_count,
-                     "exceptions": len(exceptions)}))
+                     "exceptions": len(counted), "status": status},
+            # `actor` is the broker COMPANY for a broker-lane run, so the seat
+            # behind it is recorded separately for the Audit Logs screen.
+            **_actor_columns(user_id=run_by_user_id)))
         s.commit()
         s.refresh(out)
         export_id = out.id
+        # Set below when this run both satisfies a period AND is a broker's own
+        # (out.broker_party_id set) — the outcome of the auto-send, surfaced on
+        # the response so the screen can say what happened without a second
+        # page or a second click. None means "not applicable" (no broker on
+        # this run, or mark_calendar=False — see received's own comment), never
+        # "failed silently".
+        sent_to_carrier = None
 
         # Link the uploaded file (landing) to the output it produced, so the run
         # history can show "uploaded X → generated Y (N exceptions)". A pre-submission
@@ -2001,15 +2650,94 @@ async def _render_landing(
                 # is a look, not a submission, and must not tick off a deadline.
                 # Best-effort: the calendar is a side-feature and must never break
                 # delivery, so any failure here is swallowed.
+                #
+                # `mark_calendar` is False for an auto-run of a file that already
+                # ticked the calendar the moment it arrived (land_file) — ticking
+                # again would record one file as an original AND a correction.
+                #
+                # `received` is initialized before the try: `cal_program_id is
+                # None` (no programme attributed, or mark_calendar=False) skips
+                # the mark_received call entirely without raising, which would
+                # otherwise leave `received` undefined by the time the
+                # auto-send check below reads it.
+                received = None
                 try:
-                    fmt = s.get(DirectFormat, lr.format_id) if lr.format_id else None
-                    if fmt is not None and fmt.program_id is not None:
+                    # WHICH programme: the one this run was made for. The input
+                    # format is shared by every setup with the same layout and
+                    # output template, so its programme is whichever setup was
+                    # built first — ticking that one marked another programme's
+                    # deadline (possibly another broker's) and left this one
+                    # overdue. The run's own programme first, then its setup's
+                    # (the export records it, so a Re-generate — which renders
+                    # without its pipeline — still finds it), and the format's
+                    # only for a run that had neither.
+                    cal_program_id = out.program_id
+                    _cal_pipe_id = pipeline_id or out.pipeline_id
+                    if cal_program_id is None and _cal_pipe_id:
+                        _cal_pipe = s.get(Pipeline, _cal_pipe_id)
+                        cal_program_id = _cal_pipe.program_id if _cal_pipe else None
+                    if cal_program_id is None and lr.format_id:
+                        fmt = s.get(DirectFormat, lr.format_id)
+                        cal_program_id = fmt.program_id if fmt else None
+                    if not mark_calendar:
+                        cal_program_id = None
+                    if cal_program_id is not None:
                         from submission_calendar_service import mark_received
-                        if mark_received(s, fmt.program_id, export_id=export_id) is not None:
+                        # WHICH period, and WHOSE. An explicit `period` (picked
+                        # from the real calendar — see /direct/periods and
+                        # carrier_routes.contract_bordereau_periods) is always
+                        # trusted over a guess. When none is given, the
+                        # uploaded file's name is the next best statement of
+                        # the period — a July file sent in September satisfies
+                        # July — and when the name says nothing either,
+                        # mark_received falls back to the oldest open period
+                        # and records that it guessed.
+                        received = mark_received(
+                            s, cal_program_id, export_id=export_id,
+                            broker_party_id=out.broker_party_id,
+                            source_filename=lr.source_filename,
+                            period=period)
+                        if received is not None:
                             s.commit()
                 except Exception as _e:  # noqa: BLE001
                     log.warning("submission-calendar mark_received failed: %s", _e)
                     s.rollback()
+                    received = None
+
+                # AUTOMATIC SEND — the whole point of folding Send Bordereau
+                # into this screen: a broker's own submission satisfying a
+                # period is what used to require a second visit to Send
+                # Bordereau and a second click. It now IS that act. Only for a
+                # BROKER's run (out.broker_party_id set) that actually ticked
+                # the calendar just above (`received is not None`) — a run
+                # with no broker has nobody's period to send on, Kavachio
+                # staff running on a carrier's own behalf via /direct never
+                # sets one either, and mark_calendar=False (an auto-arrived
+                # file already ticked elsewhere) naturally skips this too,
+                # since `received` stays None in that case.
+                #
+                # Reuses send_bordereau() UNCHANGED from the (now-removed)
+                # standalone Send Bordereau screen — same recipient
+                # resolution (carrier_contacts To, broker_contacts Cc,
+                # regardless of who is running the file), same attachment,
+                # same record_release() call, same audit event. Its own
+                # try/except already means a mail failure is recorded rather
+                # than raised (mirrors record_chase); this outer one is only
+                # for the RARE case that fails before it gets that far (e.g.
+                # the DB write itself), which must still never break the run
+                # the broker is looking at the result of.
+                if received is not None and out.broker_party_id is not None:
+                    try:
+                        from submission_calendar_service import send_bordereau
+                        sent_to_carrier = send_bordereau(
+                            s, received["expected_id"], out.broker_party_id,
+                            actor_email=actor, actor_user_id=run_by_user_id)
+                        s.commit()
+                    except Exception as _e:  # noqa: BLE001
+                        log.warning("auto-send to carrier failed: %s", _e)
+                        s.rollback()
+                        sent_to_carrier = {"mail_sent": False, "mail_error": str(_e),
+                                           "to": [], "cc": []}
 
         # DATA LANE trigger: if this format isn't mapped to the data model yet,
         # raise (or append to) a one-time admin task. Off the delivery path. A
@@ -2032,15 +2760,29 @@ async def _render_landing(
         "export_id": export_id,
         "filename": fname,
         "row_count": sum(len(v) for v in projected.values()),
-        "exception_count": len(exceptions),
+        "exception_count": len(counted),
         "exceptions": exceptions,
-        "status": "has_exceptions" if exceptions else "clean",
+        "status": status,
+        # Why a run is not_validated (None otherwise), and how many rows the
+        # checks actually ran over — None when there was nothing to check with.
+        "status_reason": status_reason,
+        "rows_total": (stats or {}).get("rows_total"),
+        "rows_validated": (stats or {}).get("rows_validated"),
+        "rows_excluded": (stats or {}).get("rows_excluded"),
+        "rules_not_checked": len((not_checked or {}).get("rules") or []),
+        "rules_partly_checked": len((not_checked or {}).get("partial") or []),
         "datamodel_mapped": datamodel_mapped,
         "datamodel_queued": datamodel_queued,
         "admin_task_id": admin_task_id,
         "governing_contracts": governing_contracts,
         "preview": {k: v[:20] for k, v in projected.items()},
         "check_only": check_only,
+        # None when this run had no broker on it (nothing to send on anyone's
+        # behalf), was a self-check, or mark_calendar was False. Otherwise
+        # what the automatic send did — {"to", "cc", "mail_sent",
+        # "mail_error"} — so the screen can say what happened without a
+        # second page or a second click.
+        "sent_to_carrier": sent_to_carrier,
     }
 
 
@@ -2076,9 +2818,16 @@ class RerenderRequest(BaseModel):
 @router.post("/export/downloads/{export_id}/rerender")
 async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None,
                           principal: Principal = Depends(current_principal)):
-    """Re-generate a DIRECT-LANE export's output BDX with saved Fix/Approve
-    corrections applied. Produces a NEW output_exports (the landing's corrections
-    persist across renders, since they're keyed by landing, not export)."""
+    """Fix & Validate: send the fixes and decisions saved on this export in as
+    the NEXT VERSION of its submission — the same call the secure link's Submit
+    makes (submission_service.submit_corrections). The version corrected here
+    is kept, marked replaced once the new one is checked; the response names
+    the new version's export, so the screen opens it.
+
+    An export that belongs to no submission (made before submissions existed)
+    is still re-checked in place, as before."""
+    from carrier_scope import assert_can_amend
+    assert_can_amend(principal)
     with SessionLocal() as s:
         lr = s.execute(
             text("SELECT id, tenant_id FROM landing_record WHERE output_export_id = :e "
@@ -2090,23 +2839,77 @@ async def rerender_export(export_id: int, body: Optional[RerenderRequest] = None
         # Guarded on the EXPORT, not on the landing's tenant: the export is what
         # carries the broker this run was made for, and a broker seat has no
         # tenant for the old comparison to match.
-        from carrier_scope import assert_can_read_export
+        from carrier_scope import assert_can_read_export, assert_broker_on_programme
+        from auth_deps import resolve_broker_party_id
         _exp = s.get(OutputExport, export_id)
         if _exp is None:
             raise HTTPException(404, "export not found")
+        # Taken off the programme since sending this: no more changes. Asked
+        # BEFORE the read check, which answers a removed broker with a bare
+        # "not found" — true, but it reads as a fault, not a decision.
+        assert_broker_on_programme(s, resolve_broker_party_id(s, principal),
+                                   getattr(_exp, "program_id", None),
+                                   getattr(_exp, "broker_party_id", None))
         assert_can_read_export(s, principal, _exp)
+        export_pipeline_id = getattr(_exp, "pipeline_id", None)
+        # The contract this export was made under. Re-generate measures the
+        # file against THAT, as the first run did — never against whatever the
+        # shared input format was last pointed at by another setup's build.
+        export_contract_id = getattr(_exp, "contract_id", None)
+        actor = _actor_label(principal,
+                             requested=(body.actor if body else None))
+        import submission_service
+        try:
+            versioned = submission_service.correctable_thread(s, export_id) is not None
+        except submission_service.CannotCorrect as exc:
+            raise HTTPException(409, str(exc))
+    if versioned:
+        from audit import actor_columns
+        try:
+            out = await run_in_threadpool(
+                submission_service.fix_and_validate, export_id,
+                _principal_email(principal), actor=actor,
+                actor_cols=actor_columns(principal))
+        except submission_service.CannotCorrect as exc:
+            raise HTTPException(409, str(exc))
+        if not out.get("export_id"):
+            # Landed but not checked yet (the auto-run has it): say where it is.
+            raise HTTPException(409, out.get("run_error") or (
+                f"Version {out.get('version') or ''} was sent in but is still being "
+                "checked. Open it from Files Received in a moment.").replace("  ", " "))
+        return out
     # Re-render IN PLACE so the export id/header stays stable across Re-generate.
-    return await _render_landing(int(landing_id), None, None,
-                                 (body.actor if body else None) or _principal_email(principal), {},
-                                 auto_ingest=False, reuse_export_id=export_id)
+    # run_by_user_id: the person who pressed Re-generate, for the audit row
+    # only — `actor` is the broker COMPANY for a broker seat, which left the
+    # row reading "Wani org" instead of who it was. The export is re-rendered
+    # in place, so its own generated_by_user_id is untouched.
+    result = await _render_landing(int(landing_id), export_contract_id, None,
+                                   actor, {},
+                                   auto_ingest=False, reuse_export_id=export_id,
+                                   rule_scope_pipeline_id=export_pipeline_id,
+                                   run_by_user_id=getattr(principal, "user_id", None) or None)
+    # The broker exception loop: refresh this file's submission (and deliver
+    # it if what held it back is now fixed or answered). Never raises.
+    import submission_service
+    await run_in_threadpool(submission_service.on_export_rerendered, export_id)
+    return result
 
 
 def _contract_clauses_by_field(contract_id: Optional[int],
-                               field_names: list[str]) -> dict[str, list[dict]]:
+                               field_names: list[str],
+                               template_id: Optional[int] = None,
+                               setup_rule_scope: Optional[dict] = None,
+                               ) -> dict[str, list[dict]]:
     """Index a contract's validation clauses by the OUTPUT field they govern, so
     the UI can show the clause that 'follows' whichever output field is chosen.
     A clause is matched to a field when the field name appears in the rule's
-    spec/target (the same vocabulary contract rules are written in)."""
+    spec/target (the same vocabulary contract rules are written in).
+
+    `template_id` is the template being shown: only the rules a setup on it
+    would run are listed (rule_scope.filter_rules), so a rule set added for a
+    different template never appears under this one's columns. Each clause
+    carries `rule_template_id` — the template of the set it was added for, or
+    None for the contract's own set."""
     out: dict[str, list[dict]] = {}
     if not contract_id or not field_names:
         return out
@@ -2123,12 +2926,18 @@ def _contract_clauses_by_field(contract_id: Optional[int],
     seen_sig: dict[str, set] = {}
     try:
         with CanonicalSession() as cs:
+            import rule_scope
             rows = cs.execute(
-                text("SELECT rule_id, rule_name, severity, canonical_target, "
+                text("SELECT rule_id, contract_id, rule_name, severity, canonical_target, "
                      "rule_spec, error_message, source_verbatim_text, "
-                     "source_page_number FROM validation_rule "
+                     f"source_page_number, {rule_scope.tag_select(cs)} "
+                     "FROM validation_rule "
                      "WHERE contract_id=:c AND rule_status != 'disabled'"),
                 {"c": contract_id}).mappings().all()
+            if template_id:
+                rows = rule_scope.filter_rules(
+                    cs, [dict(r) for r in rows], setup_template_id=template_id,
+                    scope=setup_rule_scope)
     except Exception as e:  # noqa: BLE001
         log.warning("contract clause lookup failed: %s", e)
         return out
@@ -2207,6 +3016,7 @@ def _contract_clauses_by_field(contract_id: Optional[int],
                 "page": r.get("source_page_number"),
                 "match": match, "score": score,
                 "scoped": scoped, "sql_sheets": sql_sheets,
+                "rule_template_id": r.get("rule_template_id"),
             })
     return out
 
@@ -2236,20 +3046,26 @@ def _unbound_setup_contract_id(program_id: Optional[int],
         return None
     try:
         with SessionLocal() as s:
-            row = (s.query(Contract.id)
-                   .filter(Contract.program_id == program_id,
-                           Contract.output_template_id == output_template_id,
-                           Contract.status == "active")
-                   .order_by(Contract.id.desc())
-                   .first())
-            return row[0] if row else None
+            # Currency is no longer stored: every approved version stays
+            # `active` and the calendar says which is current, so this asks for
+            # the version in force TODAY rather than the newest id.
+            from contract_upload_services.contract_asof import current_for_template
+            cid = current_for_template(s, output_template_id)
+            if cid is None:
+                return None
+            # The template lookup is programme-agnostic; keep the original
+            # programme guard so a setup can never adopt another one's contract.
+            owner = s.query(Contract.program_id).filter(Contract.id == cid).scalar()
+            return cid if owner == program_id else None
     except Exception as e:  # noqa: BLE001 — a failed lookup must not break the page
         log.warning("unbound-setup contract lookup failed: %s", e)
         return None
 
 
 def _attach_clauses(fields: list[dict], contract_id: Optional[int],
-                    sheet_contracts: Optional[dict]) -> None:
+                    sheet_contracts: Optional[dict],
+                    template_id: Optional[int] = None,
+                    setup_rule_scope: Optional[dict] = None) -> None:
     """Attach each (sheet, field) row's contract clauses IN PLACE, honouring the
     per-sheet contract governance:
 
@@ -2261,10 +3077,14 @@ def _attach_clauses(fields: list[dict], contract_id: Optional[int],
       the sheets its compiled SQL targets.
     """
     names = [f["field"] for f in fields]
+    # Only what a caller actually set, so a lookup that predates template-aware
+    # rules (and every stub of it) is called exactly as before.
+    scope_kw = {k: v for k, v in (("template_id", template_id),
+                                  ("setup_rule_scope", setup_rule_scope)) if v}
     mapped = {str(k).strip(): int(v)
               for k, v in (sheet_contracts or {}).items() if v}
     if not mapped:
-        clauses = _contract_clauses_by_field(contract_id, names)
+        clauses = _contract_clauses_by_field(contract_id, names, **scope_kw)
         for f in fields:
             f["clauses"] = clauses.get(f["field"], [])
         return
@@ -2274,7 +3094,8 @@ def _attach_clauses(fields: list[dict], contract_id: Optional[int],
     for cid in list(mapped.values()) + ([default_cid] if default_cid else []):
         if cid not in gov_cids:
             gov_cids.append(cid)
-    by_cid = {cid: _contract_clauses_by_field(cid, names) for cid in gov_cids}
+    by_cid = {cid: _contract_clauses_by_field(cid, names, **scope_kw)
+              for cid in gov_cids}
     for f in fields:
         sheet_key = str(f.get("sheet") or "").strip()
         own = mapped.get(sheet_key, default_cid)
@@ -2298,12 +3119,25 @@ def direct_output_fields(template_id: int, contract_id: Optional[int] = None,
     clause along. Pass `format_id` to honour the setup's sheet↔contract mapping:
     each sheet's fields then only show clauses from the contract that governs
     that sheet (scoped clauses show on the schedules they name)."""
+    # Setup screens only — the carrier's. A broker seat has no tenant, so the
+    # checks below could not scope it; it never builds a setup, so it is refused.
+    if principal.is_broker:
+        raise HTTPException(403, "insufficient role")
     sheet_contracts = None
     program_id = None
     with SessionLocal() as s:
         tpl = s.get(ExportTemplate, template_id)
-        if not tpl:
+        # 404 on another carrier's template or contract, exactly as on a
+        # missing one: this returns contract clauses verbatim, so an id from
+        # somewhere else must not read them. Platform-wide templates (no
+        # tenant) stay open to every carrier.
+        if not tpl or (not principal.is_platform_admin
+                       and tpl.tenant_id not in (None, principal.tenant_id)):
             raise HTTPException(404, "output template not found")
+        if contract_id and not principal.is_platform_admin:
+            c = s.get(Contract, contract_id)
+            if not c or c.tenant_id not in (None, principal.tenant_id):
+                raise HTTPException(404, "contract not found")
         structure = _load_structure(tpl)
         if format_id:
             fmt = s.get(DirectFormat, format_id)
@@ -2321,20 +3155,32 @@ def direct_output_fields(template_id: int, contract_id: Optional[int] = None,
         if is_reference_sheet(sh):
             continue          # reference/lookup tab — no rule fields shown for it
         for c in sorted(sh.get("columns", []), key=lambda x: x.get("column_index", 0)):
+            # A column removed from the template (active False) is never
+            # delivered, so it is not a mapping target and not "unsourced".
+            if c.get("active") is False:
+                continue
             name = c.get("column_name")
             if name:
                 fields.append({"sheet": sh.get("sheet_name", ""), "field": name})
-    _attach_clauses(fields, contract_id, sheet_contracts)
+    _attach_clauses(fields, contract_id, sheet_contracts, template_id)
     return {"template_id": template_id, "contract_id": contract_id, "fields": fields}
 
 
 @router.get("/direct/format/{format_id}/editor")
-def direct_format_editor(format_id: int,
+def direct_format_editor(format_id: int, original_sample: bool = False,
                          principal: Principal = Depends(current_principal)):
     """Rebuild the full Setup editor view for an EXISTING setup: its saved routing
     + column mapping, the output template's fields (with contract clauses), and the
     input columns/sheets from its latest landing record — so a saved setup can be
-    reopened, reviewed and edited exactly like a fresh upload."""
+    reopened, reviewed and edited exactly like a fresh upload.
+
+    ``original_sample`` reads the input columns from the sample the carrier built
+    the setup from instead: the FIRST landing in the setup's own layout. The latest
+    landing is whatever was processed last, a broker's file included, so a column
+    the broker added or dropped would otherwise show up on the carrier's own setup.
+    (Not the newest of that layout either: headings are fingerprinted trimmed, in
+    any case and any order, so a broker's re-ordered file is "the same layout".)
+    The read-only setup page asks for this; every other caller is unchanged."""
     with SessionLocal() as s:
         f = s.get(DirectFormat, format_id)
         if not f:
@@ -2343,9 +3189,15 @@ def direct_format_editor(format_id: int,
         tpl = s.get(ExportTemplate, f.output_template_id) if f.output_template_id else None
         structure = _load_structure(tpl) if tpl else {"sheets": []}
         output_sheets = _output_sheet_names(structure)
-        rec = (s.query(LandingRecord)
-               .filter(LandingRecord.format_id == format_id)
-               .order_by(LandingRecord.id.desc()).first())
+        if original_sample:
+            q = s.query(LandingRecord).filter(LandingRecord.format_id == format_id)
+            rec = ((q.filter(LandingRecord.fingerprint == f.fingerprint)
+                    .order_by(LandingRecord.id.asc()).first() if f.fingerprint else None)
+                   or q.order_by(LandingRecord.id.asc()).first())
+        else:
+            rec = (s.query(LandingRecord)
+                   .filter(LandingRecord.format_id == format_id)
+                   .order_by(LandingRecord.id.desc()).first())
         input_sheets: list[str] = []
         input_columns: dict[str, list[str]] = {}
         landing_id = None
@@ -2375,10 +3227,12 @@ def direct_format_editor(format_id: int,
         if is_reference_sheet(sh):
             continue          # reference/lookup tab — no rule fields shown for it
         for c in sorted(sh.get("columns", []), key=lambda x: x.get("column_index", 0)):
+            if c.get("active") is False:
+                continue      # removed from the template — see direct_output_fields
             nm = c.get("column_name")
             if nm:
                 fields.append({"sheet": sh.get("sheet_name", ""), "field": nm})
-    _attach_clauses(fields, contract_id, sheet_contracts)
+    _attach_clauses(fields, contract_id, sheet_contracts, template_id)
 
     return {
         "format_id": format_id, "landing_id": landing_id, "known_format": True,
@@ -2427,6 +3281,30 @@ def _replace_pipeline_contracts(s, pipe: Pipeline, contracts: list) -> None:
         pos += 1
 
 
+def _store_rule_scope(s, pipeline_id: int, raw: dict) -> None:
+    """Save a setup's rule choice (rule_scope.py), inside the caller's
+    transaction. A choice that cannot be stored — the database has not had
+    migration 21 — is refused rather than silently dropped."""
+    try:
+        _rule_scope_mod.write_pipeline_scope(s, pipeline_id, raw)
+    except LookupError:
+        s.rollback()
+        raise HTTPException(409, "This setup's rule choices cannot be saved yet: "
+                                 "the database is missing migration 21.")
+
+
+def _store_itd_config(s, pipeline_id: int, raw: dict) -> None:
+    """Save a setup's ITD settings (itd_store.write_config), inside the
+    caller's transaction — refused out loud on a database without migration 38."""
+    import itd_store
+    try:
+        itd_store.write_config(s, pipeline_id, raw)
+    except LookupError:
+        s.rollback()
+        raise HTTPException(409, "This setup's ITD settings cannot be saved yet: "
+                                 "the database is missing migration 38.")
+
+
 @router.post("/pipelines")
 def pipeline_create(body: PipelineCreate, mga: Optional[str] = None,
                     principal: Principal = Depends(current_principal)):
@@ -2439,10 +3317,22 @@ def pipeline_create(body: PipelineCreate, mga: Optional[str] = None,
             carrier_party_id=body.carrier_party_id, program_id=body.program_id,
             broker_party_id=body.broker_party_id,
             input_format_id=body.input_format_id,
-            output_template_id=body.output_template_id, status="draft")
+            output_template_id=body.output_template_id, status="draft",
+            governing_date_field=body.governing_date_field,
+            asof_config=body.asof_config)
         s.add(pipe)
         s.flush()
         _replace_pipeline_contracts(s, pipe, body.contracts)
+        if body.rule_scope is not None:
+            _store_rule_scope(s, pipe.id, body.rule_scope)
+        if body.itd_config is not None:
+            _store_itd_config(s, pipe.id, body.itd_config)
+        else:
+            # A new setup starts with ITD filled in from its own input sheets
+            # (on only when they carry a transaction id and a reported period).
+            # Nobody fills these in by hand — no screen shows them.
+            import itd_store
+            itd_store.auto_fill(s, pipe)
         s.commit()
         s.refresh(pipe)
         return _pipeline_to_dict(s, pipe)
@@ -2505,7 +3395,11 @@ def pipeline_list(
                      )))
 
         total = query.order_by(None).count()
-        ordered = query.order_by(Pipeline.id.desc())
+        # Newest first. Id descending already achieved this, but by accident of
+        # insertion order rather than by saying so — created_at is the fact the
+        # list is meant to be in, with id as the tiebreak.
+        ordered = query.order_by(Pipeline.created_at.desc().nullslast(),
+                                 Pipeline.id.desc())
         if page is not None:
             size = page_size or 10
             ordered = ordered.offset((page - 1) * size).limit(size)
@@ -2575,50 +3469,437 @@ def pipeline_update(pipeline_id: int, body: PipelineUpdate,
             p.name = body.name
         if body.broker_party_id is not None:
             p.broker_party_id = body.broker_party_id
+        if body.governing_date_field is not None:
+            p.governing_date_field = body.governing_date_field
+        if body.asof_config is not None:
+            p.asof_config = body.asof_config
+        input_changed = (body.input_format_id is not None
+                         and body.input_format_id != p.input_format_id)
         if body.input_format_id is not None:
             p.input_format_id = body.input_format_id
         if body.output_template_id is not None:
             p.output_template_id = body.output_template_id
         if body.contracts is not None:
             _replace_pipeline_contracts(s, p, body.contracts)
+            # THE GATE HAS TO HOLD AFTERWARDS TOO. Activation checks that every
+            # contract under a setup is settled, but this endpoint can swap the
+            # contracts on a setup that is already live — so a setup could be
+            # activated on a signed contract and then quietly re-pointed at one
+            # nobody has agreed, and the broker would go on producing bordereaux
+            # under it. Only checked for a setup that has already been sent up
+            # or gone live; a draft is still being built and is allowed to hold
+            # anything while it is.
+            if (p.status or "").strip().lower() in ("active", PENDING_APPROVAL):
+                s.flush()
+                unsettled = _contracts_not_yet_settled(
+                    s, _pipeline_contracts(s, p.id), p.tenant_id)
+                if unsettled:
+                    raise HTTPException(400, (
+                        "This setup is live, so every contract under it has to "
+                        "be settled: " + ", ".join(unsettled) + " has not been "
+                        "signed yet. Settle the contract first, or take this "
+                        "setup back to draft."))
+        if body.rule_scope is not None:
+            _store_rule_scope(s, p.id, body.rule_scope)
+        if body.itd_config is not None:
+            _store_itd_config(s, p.id, body.itd_config)
+        elif input_changed:
+            # New input sheets: automatic ITD settings follow them. Settings a
+            # person saved, and a setup that never had any, are left alone.
+            import itd_store
+            s.flush()
+            itd_store.auto_fill(s, p, refill=True)
         p.modified_at = datetime.utcnow()
         s.commit()
         s.refresh(p)
         return _pipeline_to_dict(s, p)
 
 
+# ---- Bordereau Setup approval ----------------------------------------------
+#
+# A setup a carrier USER builds waits for the carrier admin, who sees the whole
+# chain — programme, broker, contract, BDX template — and decides once. A setup
+# the carrier ADMIN builds goes live the moment they finish it: their own act
+# IS the approval, and there is nobody left to ask.
+#
+# Nothing a pending setup touches reaches the broker. That does not need
+# enforcing in each reader because nearly every one of them asks for
+# `status == "active"` — in particular setup_scope._live, the single gate
+# behind Process Bordereau, the broker's readiness check, the template lookup
+# and the template download. See migration 27.
+
+PENDING_APPROVAL = "pending_approval"
+
+
+def _setup_facts(result: dict) -> list:
+    """The chain a setup IS, for an approval email and an audit row.
+
+    Levels the setup does not have are left out rather than shown empty: a
+    pre-broker setup has no broker, and "Broker: —" reads as something missing
+    rather than as a level that does not apply to this setup."""
+    contracts = ", ".join(
+        c.get("filename") or f"Contract {c.get('contract_id')}"
+        for c in (result.get("contracts") or [])) or None
+    pairs = [("Programme", result.get("program_name")),
+             ("Broker", result.get("broker_name")),
+             ("Carrier", result.get("carrier_name")),
+             ("Output BDX template", result.get("output_template_name")),
+             ("Contracts", contracts)]
+    return [(k, v) for k, v in pairs if v]
+
+
+def _log_setup_decision(tenant_id, principal, action: str, result: dict,
+                        note: Optional[str] = None) -> None:
+    """One audit row for a setup decision.
+
+    These endpoints are in audit._SELF_LOGGED, so the middleware writes nothing
+    for them and this is the only record. It has to be, because the event
+    depends on who asked: the same POST /pipelines/{id}/activate is an
+    activation from the carrier admin and a submission from a carrier user, and
+    a path-keyed name would record a decision nobody made.
+
+    Best-effort, like every other audit call here — a setup must not fail to be
+    approved because the trail could not be written."""
+    try:
+        from audit import log_activity
+        details = {"pipeline_id": result.get("id"),
+                   "name": result.get("name"),
+                   "program_id": result.get("program_id"),
+                   "program_name": result.get("program_name"),
+                   "broker_party_id": result.get("broker_party_id"),
+                   "broker_name": result.get("broker_name"),
+                   "status": result.get("status")}
+        if note:
+            details["note"] = note
+        log_activity(tenant_id, _principal_email(principal), action,
+                     target=f"pipeline:{result.get('id')}", details=details,
+                     principal=principal)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _activate_links_for(s, p: Pipeline) -> int:
+    """Put the programme→broker link(s) this setup depends on live.
+
+    A carrier user's link is created pending (hierarchy_routes), so the broker
+    cannot see the programme, its contracts or anything else on it until the
+    setup built on top of it is approved. Approving the setup is what releases
+    it — one decision covering the whole chain, which is what was asked for.
+
+    A setup with no broker predates the broker level and covers every broker on
+    its programme, so it releases every link waiting on that programme.
+    Returns how many were flipped, for the audit row."""
+    if not p.program_id:
+        return 0
+    q = s.query(ProgramBroker).filter(
+        ProgramBroker.program_id == p.program_id,
+        ProgramBroker.status == PENDING_APPROVAL)
+    if p.broker_party_id is not None:
+        q = q.filter(ProgramBroker.broker_party_id == p.broker_party_id)
+    rows = q.all()
+    for link in rows:
+        link.status = "active"
+    return len(rows)
+
+
+def _go_live(s, p: Pipeline, principal: Principal) -> tuple[dict, bool, int]:
+    """Make a setup live and release its programme link(s). Shared by the
+    carrier admin's own activation and their approval of somebody else's, which
+    differ in who asked and in nothing else.
+
+    Returns (serialised pipeline, whether this was a real transition, links
+    released). Commits."""
+    # Re-clicking Activate on the setup that is ALREADY live is a no-op, so it
+    # must not raise a second notification — only a real transition into active
+    # is "a setup was activated".
+    became_active = (p.status or "").strip().lower() != "active"
+    _activate_pipeline(s, p)
+    links = _activate_links_for(s, p)
+    s.commit()
+    s.refresh(p)
+    return _pipeline_to_dict(s, p), became_active, links
+
+
+def _after_go_live(result: dict, tenant_id, format_id, principal) -> None:
+    """The three things that follow a setup going live, whoever released it.
+
+    All swallow their own errors and run after the commit, so none can affect
+    the activation that triggered them."""
+    actor = _principal_email(principal)
+    # Raise the mapping task FIRST: the notification is about that task, so it
+    # has to exist before we look for it.
+    _queue_datamodel_mapping(tenant_id, format_id, actor)
+    _notify_setup_activated(result, actor, _principal_name(principal))
+    # Files that arrived while this programme had no setup were kept, not run.
+    # They go back in the auto-run queue now (a no-op when nothing is waiting).
+    import intake_autorun
+    intake_autorun.requeue_waiting(tenant_id, result.get("program_id"),
+                                   result.get("broker_party_id"))
+
+
 @router.post("/pipelines/{pipeline_id}/activate")
 def pipeline_activate(pipeline_id: int,
                       principal: Principal = Depends(current_principal)):
-    """Activate a pipeline (requires input template + output template + >=1
-    contract). Supersedes the prior active pipeline for the same carrier+program.
+    """Finish a setup (requires input template + output template + >=1
+    contract).
 
-    Also raises the admin data-model mapping task for the input format, when it
-    doesn't have one yet — see `_queue_datamodel_mapping`, and notifies Kavachio
-    platform admins — see `_notify_setup_activated`. Both run after the commit
-    below and swallow their own errors, so neither can affect activation."""
+    WHAT THAT MEANS DEPENDS ON WHO ASKS, and the server is what knows:
+
+      carrier admin   it goes live, superseding the setups it replaces (same
+                      carrier, program and broker, covering any of the same
+                      contracts — see _activate_pipeline), exactly as it always
+                      did. Their own act is the approval.
+      carrier user    it goes to `pending_approval` and waits for the carrier
+                      admin. Nothing about it reaches the broker until then.
+
+    ONE endpoint and ONE button, deliberately. The intent being expressed is
+    the same either way — "this setup is finished" — and which of the two it
+    turns into is not something the screen should have to work out and could
+    get wrong. It also means the existing button kept working, unchanged, for
+    everyone who had it before.
+
+    Re-clicking on a setup that is already live, or already waiting, is a
+    no-op — as it has always been.
+
+    With the approval flow switched off (carrier_scope.carrier_approvals_enabled,
+    the default since 29 Sep 2026) every carrier seat takes the admin's road.
+    """
+    from carrier_scope import needs_carrier_approval
     with SessionLocal() as s:
         p = s.get(Pipeline, pipeline_id)
         if not p:
             raise HTTPException(404, "pipeline not found")
         assert_tenant_owns(principal, p.tenant_id)
-        # Re-clicking Activate on the setup that is ALREADY live is a no-op, so
-        # it must not raise a second notification — only a real draft/superseded
-        # → active transition is "a setup was activated".
-        became_active = (p.status or "").strip().lower() != "active"
-        _activate_pipeline(s, p)
+        status = (p.status or "").strip().lower()
+
+        admin = not needs_carrier_approval(s, principal)
+
+        # ── the carrier admin: live, as before ──
+        if admin:
+            result, became_active, _links = _go_live(s, p, principal)
+            tenant_id, format_id = p.tenant_id, p.input_format_id
+
+        # ── a carrier user: up for approval ──
+        else:
+            if status in ("active", PENDING_APPROVAL):
+                return _pipeline_to_dict(s, p)
+            ready, reason = _pipeline_ready(s, p)
+            if not ready:
+                raise HTTPException(400, reason)
+            p.status = PENDING_APPROVAL
+            p.submitted_by_user_id = principal.user_id
+            p.submitted_at = datetime.utcnow()
+            s.add(SetupApproval(tenant_id=p.tenant_id, pipeline_id=p.id,
+                                action="submitted",
+                                acted_by_user_id=principal.user_id))
+            s.commit()
+            s.refresh(p)
+            result = _pipeline_to_dict(s, p)
+            tenant_id, format_id = p.tenant_id, None
+
+    # Everything below runs with the session CLOSED, as it always has: these
+    # open their own, they swallow their own errors, and none of them may
+    # affect the decision that has already been committed above.
+    if admin:
+        if became_active:
+            _log_setup_decision(tenant_id, principal,
+                                "bordereau_setup_activated", result)
+        _after_go_live(result, tenant_id, format_id, principal)
+    else:
+        _log_setup_decision(tenant_id, principal,
+                            "bordereau_setup_submitted", result)
+        _notify_setup_submitted(tenant_id, result, principal)
+    return result
+
+
+@router.post("/pipelines/{pipeline_id}/approve")
+def pipeline_approve(pipeline_id: int,
+                     principal: Principal = Depends(current_principal)):
+    """Approve a setup a colleague built, and put it live.
+
+    The carrier admin's alone. Guarded here rather than by a dependency because
+    the 404 below has to come first: which setups exist at this carrier is not
+    something a 403 should confirm to somebody who cannot see them anyway.
+    """
+    from carrier_scope import is_carrier_admin_seat
+    with SessionLocal() as s:
+        p = s.get(Pipeline, pipeline_id)
+        if not p:
+            raise HTTPException(404, "pipeline not found")
+        assert_tenant_owns(principal, p.tenant_id)
+        if not is_carrier_admin_seat(s, principal):
+            raise HTTPException(
+                403, "only the carrier can approve a "
+                     "bordereau setup.")
+        if (p.status or "").strip().lower() != PENDING_APPROVAL:
+            raise HTTPException(
+                409, "this setup is not waiting for approval — it is "
+                     f"{p.status or 'draft'}.")
+        submitted_by = p.submitted_by_user_id
+        result, _became_active, links = _go_live(s, p, principal)
+        s.add(SetupApproval(tenant_id=p.tenant_id, pipeline_id=p.id,
+                            action="approved",
+                            acted_by_user_id=principal.user_id))
+        s.commit()
+        tenant_id, format_id = p.tenant_id, p.input_format_id
+
+    # How many programme links this released — the broker gained a programme,
+    # not just a setup, so the screen can say so.
+    result["links_released"] = links
+    _log_setup_decision(tenant_id, principal, "bordereau_setup_approved", result)
+    _after_go_live(result, tenant_id, format_id, principal)
+    _notify_setup_decided(result, submitted_by, principal, approved=True)
+    return result
+
+
+class SetupRejectBody(BaseModel):
+    note: Optional[str] = None
+
+
+@router.post("/pipelines/{pipeline_id}/reject")
+def pipeline_reject(pipeline_id: int, body: SetupRejectBody = SetupRejectBody(),
+                    principal: Principal = Depends(current_principal)):
+    """Send a setup back to the colleague who built it.
+
+    A reason is REQUIRED. A setup returned with nothing said about it is a
+    setup its author cannot act on, and they would have to come and ask — which
+    is the conversation this screen exists to save.
+
+    It goes back to `draft`, which is where it came from: the work is all still
+    there, and re-submitting it is the same button they pressed the first time.
+    """
+    note = (body.note or "").strip()
+    if not note:
+        raise HTTPException(400, {
+            "message": "Say why you are sending this back — whoever built it "
+                       "has to know what to change.",
+            "errors": {"note": "required"}})
+    from carrier_scope import is_carrier_admin_seat
+    with SessionLocal() as s:
+        p = s.get(Pipeline, pipeline_id)
+        if not p:
+            raise HTTPException(404, "pipeline not found")
+        assert_tenant_owns(principal, p.tenant_id)
+        if not is_carrier_admin_seat(s, principal):
+            raise HTTPException(
+                403, "only the carrier can decide on a "
+                     "bordereau setup.")
+        if (p.status or "").strip().lower() != PENDING_APPROVAL:
+            raise HTTPException(
+                409, "this setup is not waiting for approval — it is "
+                     f"{p.status or 'draft'}.")
+        submitted_by = p.submitted_by_user_id
+        p.status = "draft"
+        s.add(SetupApproval(tenant_id=p.tenant_id, pipeline_id=p.id,
+                            action="rejected", note=note,
+                            acted_by_user_id=principal.user_id))
         s.commit()
         s.refresh(p)
         result = _pipeline_to_dict(s, p)
-        tenant_id, format_id = p.tenant_id, p.input_format_id
+        tenant_id = p.tenant_id
 
-    actor = _principal_email(principal)
-    # Raise the mapping task FIRST: the notification is about that task, so it
-    # has to exist before we look for it.
-    _queue_datamodel_mapping(tenant_id, format_id, actor)
-    if became_active:
-        _notify_setup_activated(result, actor, _principal_name(principal))
+    _log_setup_decision(tenant_id, principal, "bordereau_setup_rejected",
+                        result, note=note)
+    _notify_setup_decided(result, submitted_by, principal, approved=False,
+                          note=note)
     return result
+
+
+@router.get("/pipelines/{pipeline_id}/approvals")
+def pipeline_approvals(pipeline_id: int,
+                       principal: Principal = Depends(current_principal)):
+    """Every decision ever made on this setup, newest first.
+
+    The pipeline row says what it is NOW; this says how it got there, which is
+    what "why was this sent back in June?" needs. Readable by both carrier
+    seats: the person who built it has as much reason to see the history as the
+    person who decided on it."""
+    with SessionLocal() as s:
+        p = _pipeline_for_principal(s, pipeline_id, principal)
+        rows = (s.query(SetupApproval)
+                .filter(SetupApproval.pipeline_id == p.id)
+                .order_by(SetupApproval.id.desc()).all())
+        names = _user_names(s, [r.acted_by_user_id for r in rows])
+        return [{"id": r.id, "action": r.action, "note": r.note,
+                 "acted_by_user_id": r.acted_by_user_id,
+                 "acted_by": names.get(r.acted_by_user_id),
+                 "acted_at": _iso_utc(r.acted_at)} for r in rows]
+
+
+def _user_names(s, user_ids) -> dict:
+    """{user_id: display name} for the people on a decision list. One query,
+    and it falls back to the address when an account has no name rather than
+    leaving a decision unattributed."""
+    ids = {int(u) for u in user_ids if u}
+    if not ids:
+        return {}
+    from db import AppUser
+    return {u.id: (u.full_name or u.email)
+            for u in s.query(AppUser).filter(AppUser.id.in_(ids)).all()}
+
+
+def _notify_setup_submitted(tenant_id, result: dict, principal) -> None:
+    """Tell the carrier admin a setup is waiting on them.
+
+    Email only, and deliberately: the in-app notification feed
+    (PlatformNotification) is Kavachio's own, read cross-tenant by platform
+    admins, so a row there would be invisible to the one person this is for and
+    visible to several it is not. Their in-app equivalent is the approvals
+    queue, which reads the pending setups themselves."""
+    try:
+        from notifications import (CARRIER_ADMIN_FOOTER,
+                                   carrier_admin_recipients, notify_people)
+        who = _principal_name(principal) or _principal_email(principal) or "A colleague"
+        name = result.get("name") or f"Setup {result.get('id')}"
+        notify_people(
+            carrier_admin_recipients(tenant_id),
+            f"{who} has sent a bordereau setup for your approval",
+            body=("Nothing about it reaches the broker until you approve it — "
+                  "the programme, the contract and the BDX template all wait "
+                  "with it."),
+            facts=[("Setup", name)] + _setup_facts(result)
+                  + [("Sent by", who)],
+            link_path="/direct/setups?status=pending_approval",
+            link_label="Review it",
+            action="Approve or send it back",
+            subject=f"Approval needed: {name}",
+            footer=CARRIER_ADMIN_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _notify_setup_decided(result: dict, submitted_by, principal, *,
+                          approved: bool, note: Optional[str] = None) -> None:
+    """Tell whoever built a setup what was decided about it.
+
+    Nobody to tell when the setup was never submitted — a carrier admin's own
+    setup has no author waiting on an answer — so an absent submitter is the
+    normal case, not a failure."""
+    if not submitted_by:
+        return
+    try:
+        from notifications import (CARRIER_USER_FOOTER, notify_people,
+                                   user_recipients)
+        who = _principal_name(principal) or _principal_email(principal) or "Your carrier"
+        name = result.get("name") or f"Setup {result.get('id')}"
+        facts = [("Setup", name)] + _setup_facts(result) + [("Decided by", who)]
+        if note:
+            facts.append(("Reason", note))
+        notify_people(
+            user_recipients(submitted_by),
+            (f"{who} approved your bordereau setup" if approved
+             else f"{who} sent your bordereau setup back"),
+            body=("It is live — the broker can now upload against it."
+                  if approved else
+                  "The work is all still there. Make the change and send it "
+                  "up again."),
+            facts=facts,
+            link_path="/direct/setups",
+            link_label="Open the setup",
+            subject=(f"Approved: {name}" if approved else f"Sent back: {name}"),
+            footer=CARRIER_USER_FOOTER)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.delete("/pipelines/{pipeline_id}")
@@ -2701,7 +3982,7 @@ def direct_runs(
     # two different sets of rules and should not see them mixed.
     contract_id: Optional[int] = None,
     q: Optional[str] = None,
-    result: Optional[str] = None,       # "clean" | "exceptions"
+    result: Optional[str] = None,       # "clean" | "exceptions" | "not_validated"
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     page: Optional[int] = Query(None, ge=1),
@@ -2725,6 +4006,9 @@ def direct_runs(
         if tid is None:
             return {"items": [], "total": 0, "page": page, "page_size": page_size} if page is not None else []
 
+        # A second alias of Party: the carrier's and the broker's names both
+        # live there.
+        BrokerParty = aliased(Party)
         # Select ONLY the columns this listing renders — never whole entities.
         # Each of these three tables carries multi-MB payload columns that the
         # list has no use for: OutputExport.exceptions (the full exception list,
@@ -2743,11 +4027,22 @@ def direct_runs(
                      DirectFormat.carrier_party_id, DirectFormat.program_id,
                      OutputExport.id, OutputExport.filename,
                      OutputExport.exception_count, OutputExport.status,
-                     Party.legal_name, Program.name)
+                     Party.legal_name, Program.name,
+                     OutputExport.broker_party_id, BrokerParty.legal_name,
+                     OutputExport.contract_id,
+                     func.coalesce(Contract.name, Contract.filename))
                  .join(DirectFormat, LandingRecord.format_id == DirectFormat.id)
                  .join(OutputExport, LandingRecord.output_export_id == OutputExport.id)
                  .outerjoin(Party, DirectFormat.carrier_party_id == Party.id)
                  .outerjoin(Program, DirectFormat.program_id == Program.id)
+                 # The broker the run was made for (stamped on the export). NULL
+                 # on exports written before broker_party_id existed, and on a
+                 # run Kavachio made with no broker scope.
+                 .outerjoin(BrokerParty, OutputExport.broker_party_id == BrokerParty.id)
+                 # The contract the file was validated against (stamped on the
+                 # export). Its name, or the uploaded file's name when none was
+                 # given.
+                 .outerjoin(Contract, OutputExport.contract_id == Contract.id)
                  .filter(LandingRecord.tenant_id == tid))
         if carrier_party_id is not None:
             query = query.filter(DirectFormat.carrier_party_id == carrier_party_id)
@@ -2755,7 +4050,13 @@ def direct_runs(
         if ids:
             query = query.filter(DirectFormat.carrier_party_id.in_(ids))
         if program_id is not None:
-            query = query.filter(DirectFormat.program_id == program_id)
+            # The programme the RUN was made for (stamped on the export), not
+            # the shared format's: one approved format serves every programme
+            # with the same layout, so filtering on it hid runs made on the
+            # others. The format's programme is only the fallback for exports
+            # written before output_exports.program_id existed.
+            query = query.filter(func.coalesce(OutputExport.program_id,
+                                               DirectFormat.program_id) == program_id)
         # Filtered on the EXPORT, not the format: the format is the shared
         # setup, while output_exports.broker_party_id is the scope the run was
         # actually made for (stamped by _render_landing from run_scope).
@@ -2763,10 +4064,22 @@ def direct_runs(
             query = query.filter(OutputExport.broker_party_id == broker_party_id)
         if contract_id is not None:
             query = query.filter(OutputExport.contract_id == contract_id)
+        # One row per SUBMISSION: a later file for the same programme, contract
+        # and month is the next version and replaces the earlier one here; the
+        # older versions stay in the database and in the submission's history.
+        # A file under a replaced contract stays listed (labelled), for audit.
+        from exception_tally import contract_flags, current_export_ids, export_versions
+        query = query.filter(OutputExport.id.in_(
+            current_export_ids(s, tenant_id=tid, include_replaced=True) or {-1}))
         if result == "clean":
-            query = query.filter(OutputExport.status == "clean")
+            query = query.filter(OutputExport.status == vo.CLEAN)
         elif result == "exceptions":
-            query = query.filter(OutputExport.status != "clean", OutputExport.exception_count > 0)
+            # A not-validated run carries a notice, not findings to review — it
+            # has its own filter below.
+            query = query.filter(OutputExport.status.notin_((vo.CLEAN, vo.NOT_VALIDATED)),
+                                 OutputExport.exception_count > 0)
+        elif result == vo.NOT_VALIDATED:
+            query = query.filter(OutputExport.status == vo.NOT_VALIDATED)
         if q and q.strip():
             ql = f"%{q.strip().lower()}%"
             query = query.filter(or_(
@@ -2774,6 +4087,8 @@ def direct_runs(
                 func.lower(func.coalesce(OutputExport.filename, "")).like(ql),
                 func.lower(func.coalesce(Party.legal_name, "")).like(ql),
                 func.lower(func.coalesce(Program.name, "")).like(ql),
+                func.lower(func.coalesce(BrokerParty.legal_name, "")).like(ql),
+                func.lower(func.coalesce(Contract.name, Contract.filename, "")).like(ql),
             ))
         df_, dt_ = _parse_client_dt(date_from), _parse_client_dt(date_to)
         if df_:
@@ -2801,6 +4116,10 @@ def direct_runs(
             "program_id": program_id_,
             "carrier_name": carrier_name,
             "program_name": program_name,
+            "broker_party_id": broker_party_id_,
+            "broker_name": broker_name,
+            "contract_id": contract_id_,
+            "contract_name": contract_name,
             "export_id": export_id,
             "filename": filename,
             "exception_count": exception_count or 0,
@@ -2808,79 +4127,217 @@ def direct_runs(
             "datamodel_status": datamodel_status,
         } for (landing_id, source_filename, row_count, created_at, datamodel_status,
                carrier_party_id_, program_id_, export_id, filename,
-               exception_count, status_, carrier_name, program_name) in rows]
+               exception_count, status_, carrier_name, program_name,
+               broker_party_id_, broker_name, contract_id_, contract_name) in rows]
+
+        vers = export_versions(s, [i["export_id"] for i in items])
+        flags = contract_flags(s, [i["export_id"] for i in items])
+        for i in items:
+            v = vers.get(i["export_id"]) or {}
+            i["version_no"], i["reporting_period"] = v.get("version_no"), v.get("reporting_period")
+            i.update(flags.get(i["export_id"]) or {"contract_replaced": False,
+                                                   "contract_renewed": False, "counted": True})
 
         if page is not None:
             return {"items": items, "total": int(total), "page": page, "page_size": page_size or 20}
         return items
 
 
-@router.post("/direct/run")
-async def direct_run(
-    mga: str = Form(...),
-    carrier_party_id: int = Form(...),
-    program_id: int = Form(...),
-    file: UploadFile = File(...),
-    filename: Optional[str] = Form(default=None),
-    actor: Optional[str] = Form(default=None),
-    skip_rows: int = Form(default=0),
-    check_only: bool = Form(default=False),
-    # The broker and contract this bordereau is FOR. Both optional: a setup made
-    # before the broker level existed sends neither and behaves exactly as it
-    # always has. When they ARE sent, they pick the output template the four
-    # levels agreed on — see plan sections 18/19.
-    broker_party_id: Optional[int] = Form(default=None),
-    contract_id: Optional[int] = Form(default=None),
-    principal: Principal = Depends(current_principal),
-):
-    """DATA step: ops uploads a real data file for a carrier + program. Uses the
-    active setup (DirectFormat) for that pair — no mapping review needed. If the
-    setup has a supplementary data file, its sheets are captured alongside the
-    BDX automatically (no per-run upload).
+def _run_contract_for_render(chosen: Optional[int], pipeline_id: Optional[int],
+                             legacy_fallback: Optional[int]) -> Optional[int]:
+    """Which contract a run hands the renderer, in one place.
 
-    ``check_only`` is the broker pre-submission self-check (V-5): run every
-    validation and return the full row/field fix-list WITHOUT ingesting to the
-    data model, creating an admin task, or recording a run — a dry run to answer
-    "will this pass before I send it?"."""
-    file_bytes = await file.read()
-    sheets_dict = await run_in_threadpool(read_excel_all_sheets, file_bytes, skip_rows)
+    THE CHOICE ON THE SCREEN WINS. Named on the run, the contract is what the
+    file is measured against — it replaces the setup's own sheet-less pin, which
+    is the contract the setup happened to be built on rather than the one this
+    bordereau was written under. That pin used to win unconditionally, so a
+    broker's second contract could be chosen on screen and never reach the
+    validation at all.
+
+    Named nothing, this is byte-for-byte what it always did: with a pipeline the
+    pipeline's own contracts govern (None, so the renderer reads them off it),
+    and on the legacy no-pipeline path the format's contract stays the fallback.
+    """
+    if chosen:
+        return chosen
+    return None if pipeline_id else legacy_fallback
+
+
+def _governing_ids(sheet_contracts: dict, eff_contract_id: Optional[int],
+                   asof_extra_ids=None) -> list:
+    """Every contract whose rules run on this bordereau, in order, deduplicated.
+
+    Per-schedule pins FIRST and always: a setup that gives each output sheet its
+    own contract is answering a different question from "which contract is this
+    file under", and one answer there must never wipe out several here. Each
+    such rule only fires on the sheets its compiled SQL names, so they coexist.
+    """
+    out: list = []
+    for cid in ([int(v) for v in sheet_contracts.values() if v]
+                + ([eff_contract_id] if eff_contract_id else [])
+                + list(asof_extra_ids or [])):
+        if cid not in out:
+            out.append(cid)
+    return out
+
+
+def _assert_run_contract(s, tid: int, program_id: int,
+                         broker_party_id: Optional[int],
+                         contract_id: int) -> Contract:
+    """The contract this run says its bordereau is written under, checked.
+
+    It arrives from a form field, and a form field is a request — not a fact.
+    Left unchecked it would let a run be pointed at any contract id in the
+    database, and the terms of somebody else's binder would then be the terms
+    this bordereau was measured against. So the same rule the picker is built
+    from is applied again here, on the server:
+
+      · the contract is on THIS programme, and
+      · it belongs to the broker this run named, or to no broker at all — a
+        carrier-held contract predates the broker level and governs the whole
+        programme.
+
+    Refused with a plain 400 rather than silently ignored: a run that quietly
+    measured the file against a different contract than the screen said is the
+    failure this whole change exists to prevent.
+    """
+    c = s.get(Contract, contract_id)
+    prog = s.get(Program, program_id)
+    if c is None or prog is None or prog.tenant_id != tid or c.tenant_id != tid:
+        raise HTTPException(400, "that contract is not on this programme")
+    if c.program_id != program_id:
+        raise HTTPException(
+            400, "that contract belongs to a different programme, so its terms "
+                 "do not govern this bordereau")
+    if c.broker_party_id is not None and c.broker_party_id != broker_party_id:
+        raise HTTPException(
+            400, "that contract belongs to a different broker. A contract "
+                 "belongs to one programme and one broker — pick the broker it "
+                 "is held by, or choose one of this broker's own.")
+    return c
+
+
+def _run_setup(s, tid: int, carrier_party_id: int, program_id: int,
+               broker_party_id: Optional[int], contract_id: Optional[int]):
+    """(pipeline, input format) a run executes against; (None, None) if none."""
+    # This broker's own setup first, then the programme-wide one — and when
+    # the bordereau names its contract, the setup built for THAT contract.
+    # A broker with two contracts on two templates has two live setups;
+    # setup_scope decides between them, the same answer every screen shows.
+    from setup_scope import live_setup_for
+    pipe = live_setup_for(s, tid, carrier_party_id, program_id,
+                          broker_party_id, contract_id)
+    if pipe and pipe.input_format_id:
+        return pipe, s.get(DirectFormat, pipe.input_format_id)
+    # Temporary rollout fallback: no pipeline yet → use the legacy
+    # approved-DirectFormat so an in-flight setup keeps running until it
+    # is backfilled/activated as a pipeline. Remove after soak (plan Step 7).
+    return None, (s.query(DirectFormat)
+                  .filter(DirectFormat.tenant_id == tid,
+                          DirectFormat.carrier_party_id == carrier_party_id,
+                          DirectFormat.program_id == program_id,
+                          DirectFormat.approved == 1)
+                  .order_by(DirectFormat.id.desc()).first())
+
+
+def _scoped_sheets(fmt, sheets_dict: dict) -> dict:
+    """Only the input sheets the setup actually maps — extra sheets in the ops
+    file are ignored, so the fingerprint stays comparable to setup."""
+    wanted = _routing_input_sheets(fmt.sheet_routing)
+    if wanted:
+        filtered = {k: v for k, v in sheets_dict.items() if k in wanted}
+        if filtered:
+            return filtered
+    return sheets_dict
+
+
+# At least this share of the setup's input columns must be in a broker's file.
+# Fewer, and Process Bordereau stops to ask before running it; otherwise the
+# file runs and the result lists what changed.
+LAYOUT_MIN_MATCH_PCT = 90
+
+
+def _layout_changes(s, fmt, sheets_dict: dict) -> Optional[dict]:
+    """The setup's input columns this file does not have (and what share of the
+    setup's columns that is), and the file's columns the setup does not know
+    (extra — a run ignores them). None when the file's layout is the setup's own
+    (same fingerprint — the sample is never loaded then) or the sample the
+    setup was built from is no longer on file. Headings compare as the
+    fingerprint does: trimmed, any case."""
+    if not fmt.fingerprint or fmt.fingerprint == signature_hash(signature_multi(sheets_dict)):
+        return None
+    import bordereau_template as bt
+    rec = bt.sample_landing(s, fmt)
+    expected = list(dict.fromkeys(
+        c for _, cols in bt.input_layout((rec.data or {}).get("sheets") if rec else None,
+                                         fmt.sheet_routing)
+        for c in cols))
+    if not expected:
+        return None
+    got = list(dict.fromkeys(str(c).strip() for df in sheets_dict.values() for c in df.columns))
+    have = {c.lower() for c in got}
+    known = {c.strip().lower() for c in expected}
+    missing = [c for c in expected if c.strip().lower() not in have]
+    return {"missing_columns": missing,
+            "extra_columns": [c for c in got if c.lower() not in known],
+            "expected_count": len(expected),
+            "changed_pct": round(100 * len(missing) / len(expected), 1)}
+
+
+def _layout_gate(tid: int, sheets_dict: dict, *, carrier_party_id: int, program_id: int,
+                 broker_party_id: Optional[int], contract_id: Optional[int]) -> None:
+    """409 `layout_mismatch` when fewer than LAYOUT_MIN_MATCH_PCT of the setup's
+    columns are in the file. Answered on the spot: the broker downloads the input template or
+    sends `confirm_layout` to run it anyway. Raised before the file is recorded
+    as an arrival, so running it anyway is not then refused as a duplicate."""
+    with SessionLocal() as s:
+        _, fmt = _run_setup(s, tid, carrier_party_id, program_id,
+                            broker_party_id, contract_id)
+        # No setup: _prepare_run refuses with its own reason.
+        changes = _layout_changes(s, fmt, _scoped_sheets(fmt, sheets_dict)) if fmt else None
+    # Counts, not the rounded percentage, so exactly 90% matched still runs.
+    if changes and (len(changes["missing_columns"]) * 100
+                    > (100 - LAYOUT_MIN_MATCH_PCT) * changes["expected_count"]):
+        raise HTTPException(409, {
+            "code": "layout_mismatch",
+            "message": (f"About {round(changes['changed_pct'])}% of the columns your "
+                        "carrier set up are not the same in this file "
+                        f"({len(changes['missing_columns'])} of {changes['expected_count']}). "
+                        f"At least {LAYOUT_MIN_MATCH_PCT}% of the columns should be the same."),
+            "min_match_pct": LAYOUT_MIN_MATCH_PCT,
+            **changes})
+
+
+async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
+                       file_bytes: bytes, source_filename: Optional[str],
+                       skip_rows: int = 0, broker_party_id: Optional[int] = None,
+                       contract_id: Optional[int] = None,
+                       arrival_id: Optional[int] = None,
+                       period: Optional[str] = None,
+                       check_only: bool = False,
+                       sheets_dict: Optional[dict] = None) -> dict:
+    """Everything a run does BEFORE validation: read the workbook, find the live
+    setup, refuse what cannot run, and write the landing record.
+
+    Shared by /direct/run (a person uploading) and intake_autorun (a file that
+    arrived by email, SFTP or API), so both go through exactly one path. Every
+    refusal here is a real HTTPException raised before any output exists.
+
+    ITD handling (itd_run.py) happens here too, just before the landing is
+    written, on a setup whose ITD settings are switched on: an ITD file's
+    landing then holds only its new rows and adjustments. `arrival_id`,
+    `period` and `check_only` are only used for that.
+    """
+    if sheets_dict is None:
+        sheets_dict = await run_in_threadpool(read_excel_all_sheets, file_bytes, skip_rows)
     if not sheets_dict:
         raise HTTPException(400, "workbook has no readable sheets")
 
     with SessionLocal() as s:
-        tid = resolve_tenant_id(s, principal, mga)
-        # Resolve the active PIPELINE for this carrier+program — that's the
-        # config a run executes against. The pipeline's Input Template (a
-        # DirectFormat) supplies the input layout below.
-        def _active_pipeline(broker: Optional[int]):
-            q = (s.query(Pipeline)
-                 .filter(Pipeline.tenant_id == tid,
-                         Pipeline.carrier_party_id == carrier_party_id,
-                         Pipeline.program_id == program_id,
-                         Pipeline.status == "active"))
-            q = q.filter(Pipeline.broker_party_id == broker if broker is not None
-                         else Pipeline.broker_party_id.is_(None))
-            return q.order_by(Pipeline.id.desc()).first()
-
-        # This broker's own setup first, then the programme-wide one. A broker
-        # with no setup of its own runs on the programme's, which is what every
-        # setup looks like today.
-        pipe = _active_pipeline(broker_party_id) if broker_party_id else None
-        if pipe is None:
-            pipe = _active_pipeline(None)
-        if pipe and pipe.input_format_id:
-            fmt = s.get(DirectFormat, pipe.input_format_id)
-        else:
-            # Temporary rollout fallback: no pipeline yet → use the legacy
-            # approved-DirectFormat so an in-flight setup keeps running until it
-            # is backfilled/activated as a pipeline. Remove after soak (plan Step 7).
-            pipe = None
-            fmt = (s.query(DirectFormat)
-                   .filter(DirectFormat.tenant_id == tid,
-                           DirectFormat.carrier_party_id == carrier_party_id,
-                           DirectFormat.program_id == program_id,
-                           DirectFormat.approved == 1)
-                   .order_by(DirectFormat.id.desc()).first())
+        if contract_id:
+            _assert_run_contract(s, tid, program_id, broker_party_id, contract_id)
+        pipe, fmt = _run_setup(s, tid, carrier_party_id, program_id,
+                               broker_party_id, contract_id)
         if not fmt:
             raise HTTPException(
                 400, "no active pipeline for this carrier + program — activate "
@@ -2912,14 +4369,21 @@ async def direct_run(
                 {n: list(map(str, df.columns)) for n, df in sheets_dict.items()})
         if multi_tables:
             raise HTTPException(400, _multi_table_error(multi_tables))
-        # Restrict to the input sheets the setup actually maps — extra sheets in
-        # the ops file are ignored, so the fingerprint stays comparable to setup.
-        wanted = _routing_input_sheets(fmt.sheet_routing)
-        if wanted:
-            filtered = {k: v for k, v in sheets_dict.items() if k in wanted}
-            if filtered:
-                sheets_dict = filtered
+        sheets_dict = _scoped_sheets(fmt, sheets_dict)
         landing = await run_in_threadpool(dl.build_landing_record, sheets_dict)
+
+        # ITD (itd_run.py): compare the file with what this feed has already
+        # delivered and keep only what is new. A no-op — the landing comes back
+        # untouched and itd_plan is None — unless the setup switched ITD on.
+        import itd_run
+        try:
+            landing, itd_plan = itd_run.prepare(
+                s, tenant_id=tid, pipe=pipe, program_id=program_id,
+                broker_party_id=broker_party_id, landing=landing,
+                file_bytes=file_bytes, arrival_id=arrival_id, period=period,
+                check_only=check_only)
+        except itd_run.OlderItdFile as e:
+            raise HTTPException(409, {"code": "older_itd", "message": str(e)})
 
         # Supplement: capture the setup's stored supplementary sheets alongside the
         # BDX (no policy-number join — a supplement file just carries extra data).
@@ -2931,6 +4395,7 @@ async def direct_run(
 
         fp = signature_hash(signature_multi(sheets_dict))
         drift = bool(fmt.fingerprint and fmt.fingerprint != fp)
+        layout_changes = _layout_changes(s, fmt, sheets_dict) if drift else None
         eff_contract_id = contract_id or fmt.contract_id
 
         # A scope was named, so the output template must be the one agreed for
@@ -2952,7 +4417,7 @@ async def direct_run(
                 raise HTTPException(400, conflict)
 
         rec = LandingRecord(
-            tenant_id=tid, format_id=fmt.id, source_filename=file.filename,
+            tenant_id=tid, format_id=fmt.id, source_filename=source_filename,
             fingerprint=fp, data=landing, row_count=landing["row_count"],
             datamodel_status="pending")
         s.add(rec)
@@ -2960,22 +4425,231 @@ async def direct_run(
         s.refresh(rec)
         landing_id = rec.id
         pipeline_id = pipe.id if pipe else None
+        if itd_plan:
+            itd_run.stage(s, itd_plan, landing_id)
+            s.commit()
+
+    return {"landing_id": landing_id, "pipeline_id": pipeline_id,
+            "contract_id": contract_id, "eff_contract_id": eff_contract_id,
+            "run_scope": run_scope, "drift": drift, "supp_stats": supp_stats,
+            "itd": itd_plan,
+            "layout_changes": layout_changes}
+
+
+async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Optional[str],
+                           check_only: bool = False,
+                           run_by_user_id: Optional[int] = None,
+                           mark_calendar: bool = True,
+                           period: Optional[str] = None) -> dict:
+    """Validation + output for a prepared run. With a pipeline, governing
+    contracts come from it (contract_id=None); on the fallback path the legacy
+    fallback contract is kept."""
+    governing = _run_contract_for_render(prep["contract_id"], prep["pipeline_id"],
+                                         prep["eff_contract_id"])
+    result = await _render_landing(
+        prep["landing_id"], governing,
+        filename, actor, {}, auto_ingest=not check_only,
+        pipeline_id=prep["pipeline_id"], check_only=check_only,
+        scope=prep["run_scope"], run_by_user_id=run_by_user_id,
+        mark_calendar=mark_calendar, period=period)
+    result["format_drift"] = prep["drift"]
+    result["layout_changes"] = prep.get("layout_changes")
+    if prep["supp_stats"] is not None:
+        result["supplement"] = prep["supp_stats"]
+    if prep.get("itd"):
+        # The output exists: move the feed's ITD running total forward.
+        import itd_run
+        result["itd"] = await run_in_threadpool(
+            itd_run.finish, prep["landing_id"], prep["itd"])
+    return result
+
+
+def _record_manual_arrival(tid: int, principal: Principal, file_bytes: bytes,
+                           filename: str, broker_party_id: Optional[int],
+                           program_id: int, confirm_duplicate: bool,
+                           period: Optional[str] = None,
+                           contract_id: Optional[int] = None) -> Optional[int]:
+    """Land a hand-uploaded file as an arrival (channel 'upload') and return its
+    id. A refused file is still recorded, then refused here with its reason; a
+    duplicate the person has not confirmed is a 409 they answer on the spot."""
+    blob_ref = None
+    try:
+        blob_ref, _ = storage.store_or_keep("intake", tid, filename, file_bytes)
+    except Exception as e:  # noqa: BLE001 — a missing copy never blocks a run
+        log.warning("could not keep a copy of manual upload %s: %s", filename, e)
+    with SessionLocal() as s:
+        try:
+            arrival = svc_intake.land_manual_upload(
+                s, tenant_id=tid, filename=filename, file_bytes=file_bytes,
+                user_id=principal.user_id, broker_party_id=broker_party_id,
+                program_id=program_id, confirm_duplicate=confirm_duplicate,
+                blob_ref=blob_ref, period=period, contract_id=contract_id)
+        except svc_intake.DuplicateUpload as d:
+            raise HTTPException(409, {"code": "duplicate_file", "message": d.message})
+        s.commit()
+        if arrival.outcome != "accepted":
+            raise HTTPException(400, arrival.turned_away_reason
+                                or "The file did not pass the upload checks.")
+        return arrival.id
+
+
+@router.get("/direct/periods")
+def direct_periods(mga: str = Query(...), program_id: int = Query(...),
+                   broker_party_id: int = Query(...),
+                   principal: Principal = Depends(current_principal)):
+    """The same reporting periods carrier_routes.contract_bordereau_periods
+    lists for a broker's own lane, for KAVACHIO STAFF running a bordereau on a
+    carrier's behalf (the /direct route). Broker-scoped because a period is
+    always somebody's — see ExpectedSubmission.broker_party_id.
+
+    Excludes FUTURE periods the same way and for the same reason as the
+    broker's own listing — see contract_bordereau_periods."""
+    from db import ExpectedSubmission
+    today = datetime.utcnow().date()
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        rows = (s.query(ExpectedSubmission)
+                .filter(ExpectedSubmission.tenant_id == tid,
+                        ExpectedSubmission.program_id == program_id,
+                        ExpectedSubmission.broker_party_id == broker_party_id,
+                        ExpectedSubmission.period_end <= today)
+                .order_by(ExpectedSubmission.due_date.desc())
+                .limit(24).all())
+        return {"periods": [
+            {"expected_id": e.id, "period": e.period,
+             "due_date": e.due_date.isoformat() if e.due_date else None,
+             "status": e.status, "processed": e.received_at is not None}
+            for e in rows
+        ]}
+
+
+@router.post("/direct/run")
+async def direct_run(
+    mga: str = Form(...),
+    carrier_party_id: int = Form(...),
+    program_id: int = Form(...),
+    file: UploadFile = File(...),
+    filename: Optional[str] = Form(default=None),
+    actor: Optional[str] = Form(default=None),
+    skip_rows: int = Form(default=0),
+    check_only: bool = Form(default=False),
+    # The reporting period this run is FOR, e.g. "2026-08" — passed straight
+    # to mark_received() as the EXPLICIT period (always trusted, never
+    # guessed). Optional here so a caller that predates this (an older UI
+    # build, a script) still behaves exactly as before: the guess-from-
+    # filename-or-oldest-open fallback is untouched. The broker's own lane
+    # (carrier_routes.contract_bordereau_run) requires it before it ever calls
+    # here.
+    period: Optional[str] = Form(default=None),
+    # The broker and contract this bordereau is FOR. Both optional: a setup made
+    # before the broker level existed sends neither and behaves exactly as it
+    # always has. When they ARE sent, they pick the output template the four
+    # levels agreed on — see plan sections 18/19.
+    #
+    # `contract_id` also decides WHOSE TERMS the file is measured against. A
+    # broker with two live contracts has two different sets of terms, and which
+    # of them governs a given bordereau is a question only the person holding
+    # the file can answer. It used to be dropped the moment a setup was running
+    # — the setup's own pinned contract governed every run — so a bordereau
+    # written under the second contract was silently checked against the first.
+    broker_party_id: Optional[int] = Form(default=None),
+    contract_id: Optional[int] = Form(default=None),
+    # Set when the person has been told this exact file was loaded before and
+    # chose to run it anyway. Without it a duplicate comes back as a 409.
+    confirm_duplicate: bool = Form(default=False),
+    # Stop a file whose headings mostly differ from the setup's (_layout_gate).
+    # Only the broker's Process Bordereau asks for it, and sends it off again
+    # when the broker chooses to run the file anyway.
+    check_layout: bool = Form(default=False),
+    principal: Principal = Depends(current_principal),
+):
+    """DATA step: ops uploads a real data file for a carrier + program. Uses the
+    active setup (DirectFormat) for that pair — no mapping review needed. If the
+    setup has a supplementary data file, its sheets are captured alongside the
+    BDX automatically (no per-run upload).
+
+    ``check_only`` is the broker pre-submission self-check (V-5): run every
+    validation and return the full row/field fix-list WITHOUT ingesting to the
+    data model, creating an admin task, or recording a run — a dry run to answer
+    "will this pass before I send it?"."""
+    file_bytes = await file.read()
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        # Every file says which reporting period it is for — the same rule as
+        # email, SFTP, API and the broker's own Process Bordereau. Asked only
+        # where the calendar has one to pick: a run for no broker, or for a
+        # broker with no period set up yet, has nothing to choose from.
+        if not check_only and not (period or "").strip() and broker_party_id:
+            from db import ExpectedSubmission
+            if (s.query(ExpectedSubmission.id)
+                    .filter(ExpectedSubmission.tenant_id == tid,
+                            ExpectedSubmission.program_id == program_id,
+                            ExpectedSubmission.broker_party_id == broker_party_id,
+                            ExpectedSubmission.period_end <= datetime.utcnow().date())
+                    .first() is not None):
+                raise HTTPException(400, "Pick the reporting period this bordereau "
+                                         "is for before generating it.")
+
+    # Read once here when the layout is checked; _prepare_run reuses it.
+    sheets_dict = None
+    if check_layout:
+        sheets_dict = await run_in_threadpool(read_excel_all_sheets, file_bytes, skip_rows)
+        if sheets_dict:
+            _layout_gate(tid, sheets_dict, carrier_party_id=carrier_party_id,
+                         program_id=program_id, broker_party_id=broker_party_id,
+                         contract_id=contract_id)
+
+    # A real upload is an ARRIVAL too — the same door as email, SFTP and API, so
+    # the Files screen shows every file however it came in. A self-check is a
+    # dry run and is not a file arriving, so it is never recorded.
+    arrival_id = None
+    if not check_only:
+        arrival_id = _record_manual_arrival(
+            tid, principal, file_bytes, file.filename or filename or "upload.xlsx",
+            broker_party_id, program_id, confirm_duplicate, period=period,
+            contract_id=contract_id)
+
+    try:
+        prep = await _prepare_run(
+            tid, carrier_party_id=carrier_party_id, program_id=program_id,
+            file_bytes=file_bytes, source_filename=file.filename,
+            skip_rows=skip_rows, broker_party_id=broker_party_id,
+            contract_id=contract_id, arrival_id=arrival_id, period=period,
+            check_only=check_only, sheets_dict=sheets_dict)
+    except HTTPException as e:
+        if arrival_id:
+            # An ITD older than one already loaded is kept, not loaded — not
+            # a failed run (itd_run.OlderItdFile).
+            older_itd = isinstance(e.detail, dict) and e.detail.get("code") == "older_itd"
+            svc_intake.mark_run(
+                arrival_id, state="not_run" if older_itd else "failed",
+                error=(e.detail.get("message") if isinstance(e.detail, dict)
+                       else str(e.detail)))
+        raise
 
     # Validation + output generation can exceed the Azure ingress ~4-min idle
     # timeout, so run it under a heartbeat stream (whitespace bytes keep the
     # connection alive; the JSON result is the final chunk). Everything above
     # this line still returns real 4xx (no sheets / no active pipeline); a
     # failure past here arrives in the body and the frontend interceptor
-    # rethrows it. With a pipeline, governing contracts come from it (pass
-    # contract_id=None); on the fallback path keep the legacy fallback contract.
+    # rethrows it.
     async def _render():
-        result = await _render_landing(
-            landing_id, None if pipeline_id else eff_contract_id,
-            filename, actor or mga, {}, auto_ingest=not check_only,
-            pipeline_id=pipeline_id, check_only=check_only, scope=run_scope)
-        result["format_drift"] = drift
-        if supp_stats is not None:
-            result["supplement"] = supp_stats
+        try:
+            result = await _render_prepared(prep, filename=filename, actor=actor or mga,
+                                            check_only=check_only,
+                                            run_by_user_id=principal.user_id,
+                                            period=period)
+        except Exception as e:
+            if arrival_id:
+                svc_intake.mark_run(arrival_id, state="failed",
+                                    error=str(getattr(e, "detail", None) or e),
+                                    landing_id=prep["landing_id"])
+            raise
+        if arrival_id:
+            svc_intake.mark_run(arrival_id, state="done",
+                                landing_id=prep["landing_id"],
+                                export_id=result.get("export_id"))
+            result["arrival_id"] = arrival_id
         return result
 
     return heartbeat_stream_response(_render())
@@ -3368,6 +5042,30 @@ def _ingest_landing_background(landing_id: int, actor: Optional[str] = None) -> 
         log.warning("auto data-model ingest failed for landing %s: %s", landing_id, e)
 
 
+def _landing_run_context(s, rec: LandingRecord) -> dict:
+    """What the run that produced this landing was made FOR — its programme,
+    broker and contract — for the data-model load (ingester.ingest_record).
+
+    Read off the run's export, which records exactly that scope. The programme
+    falls back to the run's setup, and — for a run made before setups existed,
+    whose format was looked up BY programme — to the format's. Keys the run
+    did not have are left out; an empty dict loads exactly as before.
+    """
+    exp = s.get(OutputExport, rec.output_export_id) if rec.output_export_id else None
+    if exp is None:
+        return {}
+    program_id = exp.program_id
+    if program_id is None and exp.pipeline_id:
+        pipe = s.get(Pipeline, exp.pipeline_id)
+        program_id = pipe.program_id if pipe else None
+    if program_id is None and not exp.pipeline_id and rec.format_id:
+        fmt = s.get(DirectFormat, rec.format_id)
+        program_id = fmt.program_id if fmt else None
+    ctx = {"program_id": program_id, "broker_party_id": exp.broker_party_id,
+           "contract_id": exp.contract_id}
+    return {k: v for k, v in ctx.items() if v is not None}
+
+
 def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
                       actor: Optional[str] = None) -> int:
     """Reconstruct DataFrames from a landing record and load them into the
@@ -3379,10 +5077,23 @@ def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
         data = rec.data or {}
         tenant_mga = mga or _tenant_name(s, rec.tenant_id)
         rec_tenant_id = rec.tenant_id
+        # Whose policies these are and which contract they were checked
+        # against: the loaded policies are bound to that contract and record
+        # that broker as their sender, so a broker only ever reads its own.
+        run_ctx = _landing_run_context(s, rec)
+
+    # An ITD delta (itd_run.py) loads in append mode: each row is one new
+    # transaction or adjustment, carrying its key in itd.RESERVED_COLUMNS.
+    import itd as _itd
+    itd_append = (data.get("itd") or {}).get("load_type") == _itd.ITD
+    if itd_append:
+        spec_by_sheet = _itd.data_model_spec(spec_by_sheet)
 
     sheets_dict: dict[str, pd.DataFrame] = {}
     for name, sheet in (data.get("sheets") or {}).items():
         cols = sheet.get("columns") or []
+        if itd_append:
+            cols = [*cols, *[c for c in _itd.RESERVED_COLUMNS if c not in cols]]
         rows = sheet.get("rows") or []
         sheets_dict[name] = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
@@ -3397,19 +5108,36 @@ def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
 
     loaded = 0
     with CanonicalSession() as cs:
-        # Each record ingests inside its own SAVEPOINT so a single failing INSERT
-        # (a duplicate invoice, a bad value, a constraint hit) rolls back only that
-        # record instead of aborting the whole Postgres transaction — which
-        # otherwise makes every following record fail with InFailedSqlTransaction.
-        # Good rows still commit.
-        for record in records:
+        if itd_append:
+            # An ITD delta loads whole or not at all: the feed's running total
+            # already counts every one of these rows as delivered, so a half
+            # load would leave the data model short with nothing to say so.
+            # Append mode skips rows already loaded, so a retry is safe.
             try:
-                with cs.begin_nested():
-                    ingest_record(cs, tenant_mga, record)
-                loaded += 1
+                for record in records:
+                    ingest_record(cs, tenant_mga, record, run=run_ctx, mode="append")
+                    loaded += 1
+                cs.commit()
             except Exception as e:  # noqa: BLE001
-                log.warning("ingest_record failed during backfill: %s", e)
-        cs.commit()
+                cs.rollback()
+                log.warning("ITD data-model load of landing %s rolled back at "
+                            "record %d of %d: %s", landing_id, loaded + 1,
+                            len(records), e)
+                loaded = 0
+        else:
+            # Each record ingests inside its own SAVEPOINT so a single failing INSERT
+            # (a duplicate invoice, a bad value, a constraint hit) rolls back only that
+            # record instead of aborting the whole Postgres transaction — which
+            # otherwise makes every following record fail with InFailedSqlTransaction.
+            # Good rows still commit.
+            for record in records:
+                try:
+                    with cs.begin_nested():
+                        ingest_record(cs, tenant_mga, record, run=run_ctx)
+                    loaded += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning("ingest_record failed during backfill: %s", e)
+            cs.commit()
 
     with SessionLocal() as s:
         r = s.get(LandingRecord, landing_id)
@@ -3431,3 +5159,24 @@ def _backfill_landing(landing_id: int, spec_by_sheet: dict, mga: Optional[str],
     except Exception:  # noqa: BLE001 — auditing must never break ingestion
         pass
     return loaded
+
+
+@router.get("/pipelines/{pipeline_id}/bordereau-template")
+def pipeline_bordereau_template(pipeline_id: int,
+                                principal: Principal = Depends(current_principal)):
+    """The blank bordereau this setup reads — its Input Template's sheets and
+    column headings, nothing under them. What to fill in before Process
+    Bordereau; bordereau_template says why it is the input layout, not the
+    output template."""
+    from fastapi import Response
+    import bordereau_template as bt
+    with SessionLocal() as s:
+        p = s.get(Pipeline, pipeline_id)
+        if not p:
+            raise HTTPException(404, "setup not found")
+        assert_tenant_owns(principal, p.tenant_id)
+        try:
+            data, name = bt.setup_input_template(s, p)
+        except bt.TemplateUnavailable as e:
+            raise HTTPException(404, str(e))
+    return Response(content=data, media_type=bt.XLSX, headers=bt.attachment(name))

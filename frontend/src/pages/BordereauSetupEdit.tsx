@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { getScopedContracts } from "../api/outputTemplate";
+import SetupOutputTemplate from "../components/SetupOutputTemplate";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, CheckCircle2, ChevronDown,
   ChevronRight, FileSpreadsheet, FileText, Save, Trash2,
 } from "lucide-react";
+import { SetupTabs, SheetChips, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { api } from "../api/client";
 import { currentMga, isTenantAdmin } from "../auth";
 import { fmtStamp } from "../utils/date";
@@ -13,18 +16,20 @@ import { Button } from "../components/ui/Button";
 import { Banner } from "../components/ui/Banner";
 import { Select, TextInput } from "../components/ui/Field";
 import { Sk } from "../components/ui/Skeleton";
+import { Modal } from "../components/ui/Modal";
 import {
   ContractInline, ContractStatusChip, ScoreChip, SevBadge, ClauseMatchChip, Combo, TagPill,
+  InlineExtraTab,
 } from "../components/DirectMappingWidgets";
 import { ClauseText } from "../components/ClauseText";
-import { MissingColumnsNote } from "../components/MissingColumnsNote";
+import { MissingBdxColumnsPanel, useMissingColumns } from "../components/MissingColumnsNote";
 import {
   MissingReferenceDocsNote, useRefDocs, PipelineRefDocs,
 } from "../components/MissingReferenceDocsNote";
 import ProgramCalendar from "../components/ProgramCalendar";
 import {
   assignmentFor, outputsForInput, seedFromColumnMapping, sheetFieldKey, errText,
-  MappingRule, SheetRouting, OutField, Contract, ContractDetailT,
+  MappingRule, SheetRouting, OutField, Contract, ContractDetailT, feedIndex,
 } from "../utils/directSetup";
 
 type PipelineDetail = {
@@ -76,6 +81,10 @@ export default function BordereauSetupEdit() {
   const [notFound, setNotFound] = useState(false);
 
   const [busy, setBusy] = useState(false);
+  // "Activate with empty columns?" — see save().
+  const [confirmUnsourced, setConfirmUnsourced] = useState(false);
+  // "Delete this draft?" — see deleteSetup().
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -84,11 +93,16 @@ export default function BordereauSetupEdit() {
   const [extra, setExtra] = useState<Record<string, MappingRule>>({});
   const [rowSheet, setRowSheet] = useState<Record<string, string>>({});
   const [conflict, setConflict] = useState<{ sheet: string; col: string; field: string; other: string } | null>(null);
-  const [collapsedSheets, setCollapsedSheets] = useState<Set<string>>(new Set());
+  // Field mapping shows one input sheet at a time; this is the one picked.
+  const [activeSheet, setActiveSheet] = useState("");
 
   // per-schedule contract bindings + the setup's fallback/default contract
   const [sheetContracts, setSheetContracts] = useState<Record<string, number | "">>({});
   const [contractId, setContractId] = useState<number | null>(null);
+  // The output template the Output BDX tab is looking at. Held HERE rather than
+  // in the tab, so moving to another tab does not throw away a version an edit
+  // just created — that is what made an added column look like it vanished.
+  const [shownTplId, setShownTplId] = useState<number | null>(null);
   const [savingSC, setSavingSC] = useState(false);
   const [scSaved, setScSaved] = useState(false);
 
@@ -98,6 +112,9 @@ export default function BordereauSetupEdit() {
   const [contractBusy, setContractBusy] = useState(false);
   // Bumped whenever a rule's mapping changes, to re-read the missing-columns note.
   const [noteKey, setNoteKey] = useState(0);
+  // The stored contract-vs-bordereau check, read once for the whole page — its
+  // list is the "Columns Missing from BDX" sub-tab of Contract Rules.
+  const mc = useMissingColumns(pipeline?.id, { refreshKey: noteKey });
 
   async function load() {
     if (!id) return;
@@ -112,7 +129,7 @@ export default function BordereauSetupEdit() {
           api.get(`/direct/format/${p.input_format_id}`),
         ]);
         setEditor(ed);
-        setCollapsedSheets(new Set(ed.input_sheets));
+        setActiveSheet(prev => ed.input_sheets.includes(prev) ? prev : (ed.input_sheets[0] ?? ""));
         const { sel: seededSel, extra: seededExtra } = seedFromColumnMapping(ed.column_mapping);
         setSel(seededSel); setExtra(seededExtra); setRowSheet({});
         setSheetContracts((fmt?.sheet_contracts as Record<string, number>) || {});
@@ -126,6 +143,19 @@ export default function BordereauSetupEdit() {
     } finally { setLoading(false); }
   }
   useEffect(() => { load(); }, [id]);
+
+  // True rule total across this setup's contracts (see ruleCount). Re-read after
+  // a rule changes (noteKey) so Generate Rule / Remove update the number.
+  const [contractRuleTotal, setContractRuleTotal] = useState<number | null>(null);
+  useEffect(() => {
+    if (!pipeline?.program_id || pipeline.contracts.length === 0) { setContractRuleTotal(null); return; }
+    let alive = true;
+    Promise.all(pipeline.contracts.map(pc =>
+      api.get<ContractDetailT>(`/programs/${pipeline.program_id}/contracts/${pc.contract_id}`)
+        .then(r => (r.data.rules ?? []).length).catch(() => null)))
+      .then(ns => { if (alive) setContractRuleTotal(ns.some(n => n == null) ? null : ns.reduce<number>((a, n) => a + (n ?? 0), 0)); });
+    return () => { alive = false; };
+  }, [pipeline, noteKey]);
 
   async function toggleContract(cid: number) {
     if (openContractId === cid) { setOpenContractId(null); setContractDetail(null); return; }
@@ -145,15 +175,21 @@ export default function BordereauSetupEdit() {
     // missing-columns note so it drops that entry without a page reload.
     setNoteKey(k => k + 1);
     // The rule just edited may belong to the field-mapping editor's clauses too.
-    if (editor && pipeline?.input_format_id) {
-      try {
-        const of = await api.get<{ fields: OutField[] }>(`/direct/output-fields`, {
-          params: { template_id: pipeline.output_template_id ?? undefined,
-                    contract_id: contractId ?? undefined, format_id: pipeline.input_format_id },
-        });
-        setEditor(prev => prev && { ...prev, fields: of.data.fields });
-      } catch { /* leave clauses as-is on failure */ }
-    }
+    await reloadOutputFields();
+  }
+  /** Re-read the output columns the Field mapping tab lists (and the
+   *  "Field(s) Unsourced" count is worked out from). Also run on its own when
+   *  coming back from Output BDX, where a column may have been added or
+   *  removed — whether or not a contract is open. */
+  async function reloadOutputFields() {
+    if (!editor || !pipeline?.input_format_id) return;
+    try {
+      const of = await api.get<{ fields: OutField[] }>(`/direct/output-fields`, {
+        params: { template_id: pipeline.output_template_id ?? undefined,
+                  contract_id: contractId ?? undefined, format_id: pipeline.input_format_id },
+      });
+      setEditor(prev => prev && { ...prev, fields: of.data.fields });
+    } catch { /* leave the list as-is on failure */ }
   }
 
   const clauseByField = useMemo(() => {
@@ -175,17 +211,39 @@ export default function BordereauSetupEdit() {
   // DISTINCT contract rules (by rule_id), not clause attachments — one rule can
   // attach to several output fields, so summing per-field clause counts overstates
   // it (e.g. a 17-rule contract showing as 36). Matches the count the build modal shows.
-  const ruleCount = (() => {
+  const shownRuleCount = (() => {
     const ids = new Set<number>();
     for (const f of editor?.fields ?? []) for (const c of (f.clauses ?? [])) ids.add(c.rule_id);
     return ids.size;
   })();
+  // The count above is read off the per-column view, which leaves out a rule
+  // with no column yet and shows a paragraph once per column even when two rules
+  // quote it — so it can come up short. The true total comes from the contracts,
+  // and is the same number the Contract Rules tab lists.
+  const ruleCount = contractRuleTotal ?? shownRuleCount;
   const fieldsWithClauses = (editor?.fields ?? []).filter(f => (f.clauses?.length ?? 0) > 0).length;
 
   // Reference documents the contract defers rules to — the same summary the
   // read-only setup view shows, so a document that was never attached is
   // visible from the screen where the setup is actually being fixed.
   const refDocs = useRefDocs(pipeline?.reference_documents);
+  // Setup-level gaps, shown as sub-tabs inside the contract panel beside
+  // "Rules with no column": BDX columns the contract asks for that the broker's
+  // file lacks, and documents the contract defers rules to that were never
+  // attached. (These were on the old "Summary & Missing Items" tab.)
+  const extraTabs: InlineExtraTab[] = [
+    { key: "missing-bdx", label: "Columns Missing from BDX", count: mc.data?.items.length ?? 0,
+      tileLabel: "Columns Missing from BDX",
+      content: <MissingBdxColumnsPanel state={mc} /> },
+    { key: "missing-docs", label: "Missing documents", count: refDocs.missing.length,
+      content: refDocs.missing.length > 0
+        ? <MissingReferenceDocsNote refDocs={refDocs} showSources={(pipeline?.contracts.length ?? 0) > 1} />
+        : <p className="flex items-center gap-1.5 text-xs text-emerald-700">
+            <CheckCircle2 size={13} /> Every document the contract refers to was provided at setup.
+          </p> },
+  ];
+  // BDX output column → the broker column(s) feeding it, for Contracts & rules.
+  const feedFor = useMemo(() => feedIndex(sel, extra), [sel, extra]);
 
   function outFieldsFor(outSheet: string): string[] {
     return (editor?.fields ?? []).filter(f => f.sheet === outSheet).map(f => f.field);
@@ -207,6 +265,19 @@ export default function BordereauSetupEdit() {
     const used = new Set(Object.entries(sel).filter(([k]) => k.startsWith(`${outSheet}||`)).map(([, v]) => v));
     return outFieldsFor(outSheet).filter(f => !used.has(f) && !extra[sheetFieldKey(outSheet, f)]);
   }
+  // The amber list: every output column no input column feeds — the unsourced
+  // ones AND those filled by a Constant / Source Tab Name, so that choice stays
+  // on screen and can be changed back. Only the unsourced ones are counted.
+  function columnsWithoutInput(outSheet: string): string[] {
+    const used = new Set(Object.entries(sel).filter(([k]) => k.startsWith(`${outSheet}||`)).map(([, v]) => v));
+    return outFieldsFor(outSheet).filter(f => {
+      if (used.has(f)) return false;
+      const kind = extra[sheetFieldKey(outSheet, f)]?.kind;
+      // Any other saved kind (e.g. a calculation) has no choice in this
+      // dropdown to show, so it stays out of the list as before.
+      return !kind || kind === "const" || kind === "source_sheet";
+    });
+  }
   const unsourcedFields = useMemo(() => {
     const used = new Set<string>();
     for (const [k, v] of Object.entries(sel)) used.add(`${k.split("||")[0]}::${v}`);
@@ -225,6 +296,9 @@ export default function BordereauSetupEdit() {
     const otherKey = Object.entries(sel).find(([k, v]) => k !== key && k.startsWith(`${sheet}||`) && v === field);
     if (otherKey) { setConflict({ sheet, col, field, other: otherKey[0].split("||")[1] }); return; }
     setSel(p => ({ ...p, [key]: field }));
+    // A real input column wins: drop any Constant / Source Tab Name set on
+    // this output column, which buildMapping would otherwise let override it.
+    setExtraRule(sheet, field, null);
   }
   function resolveConflict(mode: "move" | "both" | "cancel") {
     if (!conflict) return;
@@ -236,6 +310,7 @@ export default function BordereauSetupEdit() {
         n[sheetFieldKey(sheet, col)] = field;
         return n;
       });
+      setExtraRule(sheet, field, null);   // same as chooseOutput
     }
     setConflict(null);
   }
@@ -267,8 +342,12 @@ export default function BordereauSetupEdit() {
       return n;
     });
   }
-  function toggleSheetCollapse(s: string) {
-    setCollapsedSheets(prev => { const n = new Set(prev); n.has(s) ? n.delete(s) : n.add(s); return n; });
+  // Output columns still unfilled across the output sheets one input sheet
+  // feeds — the amber count on its chip.
+  function unsourcedFor(inputSheet: string): number {
+    if (!editor) return 0;
+    return outputsForInput(editor.sheet_routing, inputSheet)
+      .reduce((n, o) => n + unmappedOutputs(o).length, 0);
   }
 
   async function saveSheetContracts() {
@@ -295,15 +374,15 @@ export default function BordereauSetupEdit() {
     return out;
   }
 
-  async function save(activate: boolean) {
+  async function save(activate: boolean, confirmed = false) {
     if (!pipeline || !editor) return;
-    if (activate && unsourcedFields.length > 0) {
-      const preview = unsourcedFields.slice(0, 8).map(f => `• ${f.field}`).join("\n");
-      const more = unsourcedFields.length > 8 ? `\n…and ${unsourcedFields.length - 8} more` : "";
-      const ok = window.confirm(
-        `${unsourcedFields.length} output column(s) are still unsourced:\n${preview}${more}\n\n`
-        + `Activate anyway? These fields will be blank in the output until they're sourced.`);
-      if (!ok) return;
+    // Activating while output columns have nothing feeding them asks first —
+    // in the dialog at the foot of this page, not the browser's own pop-up.
+    // Its "Activate Anyway" comes back here with `confirmed`; closing it does
+    // nothing, exactly as Cancel on the old pop-up did.
+    if (activate && !confirmed && unsourcedFields.length > 0) {
+      setConfirmUnsourced(true);
+      return;
     }
     setBusy(true); setErr(null); setMsg(null);
     try {
@@ -323,23 +402,70 @@ export default function BordereauSetupEdit() {
         input_format_id: editor.format_id, output_template_id: pipeline.output_template_id,
         contracts: contractsBody,
       });
-      if (activate) await api.post(`/pipelines/${pipeline.id}/activate`);
-      // Activating never navigates the user away — it stays on this page with a
-      // success message and reloads, so nothing can bounce them to onboarding.
-      setMsg(activate
-        ? "Setup activated — Operator can now process bordereaux for this carrier + program. Any previous setup was superseded."
-        : "Saved.");
+      if (activate) {
+        await api.post(`/pipelines/${pipeline.id}/activate`);
+        // An activated setup exists to be RUN, so hand the user straight to
+        // Process Bordereau with this setup's scope already picked. The broker
+        // is not on the pipeline — it hangs off the contract, so it is looked
+        // up here rather than left for the run screen to guess.
+        await goRun();
+        return;
+      }
+      setMsg("Saved.");
       await load();
+      // A save can rebind contracts, which changes the missing-columns read.
+      setNoteKey(k => k + 1);
     } catch (e: unknown) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
-  async function deleteSetup() {
+  /** Process Bordereau, opened on this setup's carrier + program (+ broker and
+   *  contract where the setup names one). */
+  /** Point this setup at `tplId` — the version the column edits are in. Sent on
+   *  its own, and with the setup's existing contracts, so saving the output
+   *  layout never disturbs the mapping being edited on another tab. */
+  async function saveOutputTemplate(tplId: number) {
+    if (!pipeline) return;
+    await api.put(`/pipelines/${pipeline.id}`, {
+      input_format_id: pipeline.input_format_id,
+      output_template_id: tplId,
+      contracts: pipeline.contracts.map(c => ({
+        contract_id: c.contract_id, sheet_key: c.sheet_key,
+      })),
+    });
+    await load();
+    setShownTplId(tplId);
+    // A different template means different BDX columns to check against.
+    setNoteKey(k => k + 1);
+  }
+
+  async function goRun() {
+    const q = new URLSearchParams();
+    if (pipeline?.carrier_party_id != null) q.set("carrier_party_id", String(pipeline.carrier_party_id));
+    if (pipeline?.program_id != null) q.set("program_id", String(pipeline.program_id));
+    if (contractId != null) {
+      q.set("contract_id", String(contractId));
+      // The run screen only offers a broker's contracts once that broker is
+      // picked, so the pair has to travel together or the contract is dropped.
+      if (pipeline?.program_id != null) {
+        try {
+          const rows = await getScopedContracts(pipeline.program_id, null);
+          const bid = rows.find(c => c.id === contractId)?.broker_party_id;
+          if (bid != null) q.set("broker_party_id", String(bid));
+        } catch { /* scope is a convenience — never block the redirect on it */ }
+      }
+    }
+    navigate(`/direct?${q.toString()}`);
+  }
+
+  async function deleteSetup(confirmed = false) {
     if (!pipeline?.input_format_id) return;
     if (pipeline.status === "active") {
       setErr("This setup is active — activate a different setup for this carrier + program before deleting it.");
       return;
     }
-    if (!window.confirm("Discard this setup? This cannot be undone.")) return;
+    // Asked in the dialog at the foot of this page, not the browser's pop-up;
+    // its Delete Draft comes back here with `confirmed`, Cancel does nothing.
+    if (!confirmed) { setConfirmDelete(true); return; }
     setBusy(true); setErr(null);
     try {
       await api.delete(`/direct/format/${pipeline.input_format_id}`);
@@ -382,14 +508,56 @@ export default function BordereauSetupEdit() {
           <div className="border-t border-border px-4 py-3">
             {contractBusy ? null : contractDetail
               ? <ContractInline detail={contractDetail} programId={pipeline?.program_id ?? ""}
-                  contractId={c.id} mga={mga} onChanged={reloadContractDetail}
-                  canEditVariations={isAdmin} />
+                  contractId={c.id} mga={mga} onChanged={reloadContractDetail} feedFor={feedFor}
+                  canEditVariations={isAdmin} extraTabs={extraTabs} />
               : <div className="text-sm text-ink-muted">Could not load this contract.</div>}
           </div>
         )}
       </div>
     );
   };
+
+  // ── the tabs ── the read-only view's, less its Setup Summary; Output BDX
+  // Template is editable here. Contract Rules comes first: it is where the
+  // missing items are listed (and most are fixed). Named for what is done on
+  // each; the ⓘ on the tab says the rest on hover.
+  const tabs: SetupTab[] = [
+    { key: "contracts", label: "Contract Rules", count: ruleCount,
+      info: "The rules taken from the contract and the BDX column each one "
+        + "checks — plus contract rules with no column yet, BDX columns the "
+        + "contract asks for that the broker's file lacks, and documents it "
+        + "refers to that were never added. The number is how many rules there are." },
+    { key: "mapping", label: "Map Input & Output Columns",
+      info: "Match each input column (from the broker's file) to an output "
+        + "column (in your BDX). The amber number is how many output columns "
+        + "have no input column yet.",
+      ...(unsourcedFields.length ? { count: unsourcedFields.length, warn: true } : {}) },
+    { key: "output", label: "Output BDX Template",
+      info: "The layout of your BDX: its sheets and columns. Add or remove "
+        + "columns here." },
+    ...(pipeline?.program_id != null
+      ? [{ key: "calendar" as const, label: "Due Dates",
+           info: "How often the broker must send a bordereau, the day each one "
+             + "is due, and how early you are reminded." }] : []),
+  ];
+  const [tab, setTab] = useSetupTab(tabs);
+  // A setup with a single contract opens it on Contracts & rules.
+  useEffect(() => {
+    if (tab === "contracts" && pipeline?.contracts.length === 1 && openContractId == null
+        && contracts.some(c => c.id === pipeline.contracts[0].contract_id))
+      toggleContract(pipeline.contracts[0].contract_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, pipeline, contracts]);
+
+  // Leaving a tab re-reads what the next one lists. Columns are added and
+  // removed on Output BDX, and both the Contracts & rules column picker and the
+  // Field mapping list (with its Unsourced count) were copies taken earlier —
+  // an added column was missing from them and a removed one lingered.
+  useEffect(() => {
+    if (tab === "contracts") reloadContractDetail();
+    else if (tab !== "output") reloadOutputFields();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   if (loading) {
     return (
@@ -416,45 +584,35 @@ export default function BordereauSetupEdit() {
   }
 
   return (
-    <>
+    // Full screen height, so the action bar below can sit at the bottom of the
+    // screen on every tab. `sticky bottom-0` alone only holds once the page is
+    // taller than the screen; on a short tab (Contracts & rules, Submission
+    // calendar) the bar sat halfway up, right under the content.
+    <div className="flex min-h-screen flex-col">
       <PageHeader title={setupName}
         subtitle={`${STATUS_LABEL[pipeline.status]} · Last Modified ${fmtStamp(pipeline.modified_at)}`}
         action={
-          <Button variant="secondary" onClick={() => navigate(backTo)}>
+          <Button variant="secondary" onClick={() => navigate(
+            // Back to the setup's own view: on the same tab.
+            backTo.startsWith("/direct/setups/") ? `${backTo}?tab=${tab}` : backTo)}>
             <ArrowLeft size={15} /> {backLabel}
           </Button>
         } />
-      <PageBody>
+      {/* PageBody's own spacing, as a flex column so the bar can take mt-auto. */}
+      <div className="flex flex-1 flex-col gap-5 px-8 py-6">
         {err && <Banner kind="error"><AlertTriangle size={15} /> {err}</Banner>}
         {msg && <Banner kind="ok"><CheckCircle2 size={15} /> {msg}</Banner>}
 
-        {/* 1) Bordereau Setup — identity + contracts list, with expand-to-detail */}
+        <SetupTabs tabs={tabs} current={tab} onChange={setTab} />
+
+        {/* ── Contracts & rules ── each contract expands to its terms, rules
+            and clause routing, editable. */}
+        {tab === "contracts" && (
         <Card title={<span className="flex items-center gap-2">
-          <FileText size={16} className="text-navy" /> Bordereau Setup</span>}>
-          <div className="flex flex-wrap items-center gap-2 mb-4">
-            <span className="font-medium text-sm">{pipeline.name || `Setup #${pipeline.id}`}</span>
-            <span className={`text-[11px] rounded-full px-2 py-0.5 font-medium ${pipeline.status === "active"
-              ? "bg-emerald-100 text-emerald-700" : "bg-surface-2 text-ink-muted"}`}>
-              {STATUS_LABEL[pipeline.status]}
-            </span>
-
-          </div>
-
-          {/* Documents the contract defers rules to that were never supplied —
-              first, because it explains why some clauses produced no rule at
-              all, which otherwise reads as a mapping gap below. */}
-          <MissingReferenceDocsNote refDocs={refDocs} className="mb-4"
-            showSources={pipeline.contracts.length > 1} />
-
-          {/* What this setup's contract asks for that its bordereau doesn't
-              provide — above the contracts on purpose: it is read BEFORE the
-              contract it was judged against. Self-loading from the stored
-              check, so opening this page costs no model call. */}
-          <MissingColumnsNote pipelineId={pipeline.id} refreshKey={noteKey} className="mb-4" />
-
-          <div className="text-sm font-semibold mb-2">
-            Contracts <span className="text-xs font-normal text-ink-muted">({pipeline.contracts.length})</span>
-          </div>
+          <FileText size={16} className="text-navy" /> Contracts
+          <span className="text-xs font-normal text-ink-muted">({pipeline.contracts.length})</span>
+          <span className="text-xs font-normal text-ink-muted">· {ruleCount} rule(s) across {fieldsWithClauses} output column(s)</span>
+        </span>}>
           <div className="space-y-2">
             {pipeline.contracts.length === 0 && (
               <div className="text-sm text-ink-muted">No contracts bound to this setup yet.</div>
@@ -472,6 +630,7 @@ export default function BordereauSetupEdit() {
             })}
           </div>
         </Card>
+        )}
 
         {/* 2) Submission Calendar — when this setup's bordereaux are due.
             Placed here, directly under the setup identity, rather than at the
@@ -480,21 +639,33 @@ export default function BordereauSetupEdit() {
             it. The carrier and program come from the pipeline, so unlike the
             standalone My Calendar page there is nothing to select — offering a
             picker here would let the section contradict the setup it is in. */}
-        {pipeline.program_id != null && (
+        {tab === "output" && (
+          /* The output half of this setup: the layout the delivered file has.
+             Editable here — this is the Edit screen — while the setup view
+             beside it only shows it. */
+          <SetupOutputTemplate boundId={pipeline.output_template_id}
+            templateName={pipeline.output_template_name}
+            shownId={shownTplId ?? pipeline.output_template_id}
+            onShown={setShownTplId}
+            onSave={saveOutputTemplate}
+            editable />
+        )}
+
+        {tab === "calendar" && pipeline.program_id != null && (
           <Card title={<span className="flex items-center gap-2">
-            <CalendarDays size={16} className="text-navy" /> Submission Calendar</span>}>
+            <CalendarDays size={16} className="text-navy" /> Due Dates</span>}>
             <ProgramCalendar
               programId={pipeline.program_id}
               programName={pipeline.program_name}
               carrierName={pipeline.carrier_name}
-              collapsible
               /* Editor only. This page configures the schedule; reading the
                  periods belongs on My Calendar and Program Management. */
               showPeriods={false} />
           </Card>
         )}
 
-        {/* 3) Sheet Mapping — which input feeds each output sheet, and which contract validates it */}
+        {/* ── Field mapping ── sheet → contract, then one input sheet at a time. */}
+        {tab === "mapping" && (<>
         {editor && editor.output_sheets.length > 0 && contracts.length > 0 && (
           <Card title={<span className="flex items-center gap-2">
             <FileSpreadsheet size={16} className="text-navy" /> Sheet Mapping</span>}
@@ -584,35 +755,29 @@ export default function BordereauSetupEdit() {
         {editor && editor.input_sheets.length > 0 && (
           <div className="mt-3 flex flex-col justify-between gap-3 rounded-md border border-border bg-white p-3">
             <h1 className="font-semibold">Field Mapping &amp; Validation Rules</h1>
-            {editor.input_sheets.map(inputSheet => {
+            <SheetChips sheets={editor.input_sheets}
+              current={editor.input_sheets.includes(activeSheet) ? activeSheet : editor.input_sheets[0]}
+              onPick={setActiveSheet} unsourced={unsourcedFor} />
+            {editor.input_sheets
+              .filter(s => s === (editor.input_sheets.includes(activeSheet) ? activeSheet : editor.input_sheets[0]))
+              .map(inputSheet => {
               const outs = outputsForInput(editor.sheet_routing, inputSheet);
               const inputCols = editor.input_columns[inputSheet] ?? [];
               const multi = outs.length > 1;
               const sheetUnsourced = outs.reduce((n, o) => n + unmappedOutputs(o).length, 0);
-              const collapsed = collapsedSheets.has(inputSheet);
               return (
                 <Card key={inputSheet}
-                  title={<button type="button" onClick={() => toggleSheetCollapse(inputSheet)}
-                    className="flex items-center gap-2 text-left hover:text-navy transition">
-                    {collapsed ? <ChevronRight size={16} className="shrink-0 text-ink-muted" />
-                      : <ChevronDown size={16} className="shrink-0 text-ink-muted" />}
+                  title={<span className="flex items-center gap-2">
                     <FileSpreadsheet size={16} className="text-navy" /> {inputSheet}
-                  </button>}
+                  </span>}
                   action={sheetUnsourced > 0
                     ? <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2.5 py-1 bg-amber-50 text-amber-700">
-                        <AlertTriangle size={12} /> {sheetUnsourced} Unsourced</span>
+                        <AlertTriangle size={12} /> {sheetUnsourced} Not Matched</span>
                     : outs.length > 0
                       ? <span className="inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2.5 py-1 bg-emerald-50 text-emerald-700">
-                          <CheckCircle2 size={12} /> All Sourced</span>
+                          <CheckCircle2 size={12} /> All Matched</span>
                       : undefined}>
-                  {collapsed ? (
-                    <p className="text-xs text-ink-muted">
-                      {outs.length === 0
-                        ? "Not mapped to any output sheet yet."
-                        : <>Maps to <span className="font-medium text-ink">{outs.join(", ")}</span> ·{" "}
-                            {inputCols.length} input column{inputCols.length === 1 ? "" : "s"}. Expand to edit.</>}
-                    </p>
-                  ) : outs.length === 0 ? (
+                  {outs.length === 0 ? (
                     <p className="text-sm text-ink-muted">
                       This input sheet isn't mapped to any output sheet.
                     </p>
@@ -690,17 +855,23 @@ export default function BordereauSetupEdit() {
                         </div>
                       </div>
 
-                      {outs.map(outSheet => unmappedOutputs(outSheet).length > 0 && (
+                      {outs.map(outSheet => columnsWithoutInput(outSheet).length > 0 && (
                         <div key={outSheet} className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 overflow-hidden">
                           <div className="flex items-center gap-1.5 text-sm font-medium px-4 py-2.5 border-b border-amber-200 text-amber-800">
-                            <AlertTriangle size={14} /> Output Columns Not Yet Sourced
+                            <AlertTriangle size={14} />
+                            {unmappedOutputs(outSheet).length > 0
+                              ? "Output Columns Not Matched Yet"
+                              : "Output Columns Filled Without an Input Column"}
                             {multi && <span className="font-mono text-xs">· {outSheet}</span>}
                           </div>
                           <div className="divide-y divide-amber-200/70">
-                            {unmappedOutputs(outSheet).map(f => (
+                            {columnsWithoutInput(outSheet).map(f => (
                               <div key={f} className="flex items-center gap-2 text-sm px-4 py-2.5">
                                 <span className="w-56 truncate font-medium">{f}</span>
-                                <Select className="!py-1 !w-44" onChange={e => {
+                                <Select className="!py-1 !w-44"
+                                  value={extra[sheetFieldKey(outSheet, f)]?.kind === "const" ? "const"
+                                    : extra[sheetFieldKey(outSheet, f)]?.kind === "source_sheet" ? "tab" : ""}
+                                  onChange={e => {
                                   const v = e.target.value;
                                   if (v === "const") setExtraRule(outSheet, f, { kind: "const", value: "" });
                                   else if (v === "tab") setExtraRule(outSheet, f, { kind: "source_sheet" });
@@ -735,9 +906,10 @@ export default function BordereauSetupEdit() {
             sheet above, otherwise they'll be blank in the output.
           </Banner>
         )}
+        </>)}
 
 
-        <div className="sticky bottom-0 z-30 -mx-8 mt-2 px-8 py-3 bg-white/95 backdrop-blur
+        <div className="sticky bottom-0 z-30 -mx-8 -mb-6 mt-auto px-8 py-3 bg-white/95 backdrop-blur
           border-t border-border shadow-[0_-1px_8px_rgba(17,24,39,0.06)]">
           <div className="flex flex-wrap items-center gap-2">
             {/* <span className={`inline-flex items-center gap-1 text-[11px] rounded-full px-2.5 py-1 mr-1 font-medium ${
@@ -749,20 +921,104 @@ export default function BordereauSetupEdit() {
             </Button>
             <Button variant="secondary" onClick={() => save(false)} disabled={busy}>Save Draft</Button>
             {isAdmin && (
-              <Button variant="danger" onClick={deleteSetup}
+              <Button variant="danger" onClick={() => deleteSetup()}
                 disabled={busy || pipeline.status === "active"}
                 title={pipeline.status === "active" ? "This setup is active — activate a different setup before deleting it" : undefined}>
                 <Trash2 size={15} /> Delete Draft
               </Button>
             )}
             {unsourcedFields.length > 0 && (
-              <span className="inline-flex items-center gap-1 text-xs text-amber-600 ml-auto">
-                <AlertTriangle size={13} /> {unsourcedFields.length} Field(s) Unsourced
-              </span>
+              <button type="button" onClick={() => setTab("mapping")}
+                className="ml-auto inline-flex items-center gap-1 text-xs text-amber-600 hover:underline">
+                <AlertTriangle size={13} /> {unsourcedFields.length} Output Column{unsourcedFields.length === 1 ? "" : "s"} Not Matched · show me
+              </button>
             )}
           </div>
         </div>
-      </PageBody>
-    </>
+
+        {/* Activate while output columns have nothing feeding them. It used to
+            be the browser's own pop-up — a bare list of eight names under
+            "localhost says", with no way to see the rest or get to where they
+            are fixed. The choice is unchanged: go back, or activate anyway. */}
+        {confirmUnsourced && (() => {
+          const n = unsourcedFields.length;
+          const one = n === 1;
+          // Columns a contract rule checks first — an empty one means that
+          // rule is skipped, which is the part worth reading before choosing.
+          const ruled = unsourcedFields.filter(f => (f.clauses?.length ?? 0) > 0);
+          const listed = [...ruled, ...unsourcedFields.filter(f => !(f.clauses?.length ?? 0))];
+          const multiSheet = (editor?.output_sheets.length ?? 0) > 1;
+          return (
+            <Modal open title={`${n} output column${one ? "" : "s"} not mapped to any input column`} size="lg"
+              onClose={() => setConfirmUnsourced(false)}
+              footer={<>
+                <Button variant="ghost" onClick={() => setConfirmUnsourced(false)}>Cancel</Button>
+                <Button variant="secondary"
+                  onClick={() => { setConfirmUnsourced(false); setTab("mapping"); }}>
+                  Match Columns First
+                </Button>
+                <Button disabled={busy}
+                  onClick={() => { setConfirmUnsourced(false); save(true, true); }}>
+                  <CheckCircle2 size={15} /> Activate Anyway
+                </Button>
+              </>}>
+              <div className="space-y-3 text-sm text-ink-muted">
+                <p>
+                  {one ? "This output column has" : "These output columns have"} no matching input column,
+                  so {one ? "it" : "they"} will be <b className="text-ink">empty in every BDX</b>.
+                </p>
+                {ruled.length > 0 && (
+                  <Banner kind="warn">
+                    <AlertTriangle size={15} />
+                    <span>
+                      Contract checks on <b>{ruled.length}</b> of {one ? "it" : "them"} will be skipped.
+                    </span>
+                  </Banner>
+                )}
+                <ul className="max-h-64 divide-y divide-border overflow-y-auto rounded-lg border border-border">
+                  {listed.map(f => (
+                    <li key={`${f.sheet}::${f.field}`}
+                      className="flex items-center gap-2 px-3 py-2 text-[13px] text-ink">
+                      <span className="min-w-0 truncate">{f.field}</span>
+                      {multiSheet && <span className="shrink-0 text-[11px] text-ink-soft">· {f.sheet}</span>}
+                      {(f.clauses?.length ?? 0) > 0 && (
+                        <span className="ml-auto shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+                          title={f.clauses!.map(c => c.text).filter(Boolean).join("\n")}>
+                          Contract rules skipped
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </Modal>
+          );
+        })()}
+
+        {/* Delete Draft — the app's own dialog, not the browser's pop-up. The
+            choice is the one it always was: Cancel, or delete. What goes is the
+            input side of the setup (the DirectFormat the delete removes); the
+            programme, contracts, rules, template and due dates are their own
+            records and stay. */}
+        <Modal open={confirmDelete} title="Delete this draft?" size="md"
+          onClose={() => setConfirmDelete(false)}
+          footer={<>
+            <Button variant="secondary" onClick={() => setConfirmDelete(false)}>Cancel</Button>
+            <Button variant="danger" disabled={busy}
+              onClick={() => { setConfirmDelete(false); deleteSetup(true); }}>
+              <Trash2 size={15} /> Delete Draft
+            </Button>
+          </>}>
+          <div className="space-y-2 text-sm text-ink-muted">
+            <p>
+              Everything set up on <b className="text-ink">Map Input &amp; Output Columns</b> for{" "}
+              <b className="text-ink">{setupName}</b> is deleted. Your programme, contracts,
+              rules, output BDX template and due dates are not affected.
+            </p>
+            <p className="font-medium text-danger">This can't be undone.</p>
+          </div>
+        </Modal>
+      </div>
+    </div>
   );
 }

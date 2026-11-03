@@ -31,8 +31,13 @@ import {
   type CalendarResponse, type CalendarStatus, type ScheduleState,
 } from "../api/calendar";
 import { Pagination } from "./Pagination";
+import { FREQUENCIES, FREQUENCY_LABEL } from "../constants/frequency";
 
 const PAGE_SIZE = 12;
+
+// Tailwind's preflight strips the marker off every list, so a bulleted note
+// has to ask for the disc back by hand.
+const LI: React.CSSProperties = { listStyle: "disc", marginBottom: 4 };
 
 // One colour per step of the deadline, escalating grey → blue → amber → red, so
 // the table can be read by colour alone. Grey means "nothing for you to do":
@@ -50,14 +55,22 @@ const STATUS_META: Record<CalendarStatus, { label: string; cls: string }> = {
   received_late: { label: "Sent late",         cls: "b-mut" },
 };
 
+// All five, from the one shared list — this editor is where an existing weekly
+// schedule can still be seen and changed, so unlike the programme forms it does
+// not hide it. Half-yearly and yearly used to be missing here entirely, which
+// is why a programme created as "Annual" had no way to get a calendar.
 const FREQ_OPTIONS: [string, string][] = [
-  ["", "— use contract —"], ["monthly", "Monthly"],
-  ["quarterly", "Quarterly"], ["weekly", "Weekly"],
+  ["", "— use contract —"],
+  ...FREQUENCIES.map(f => [f.value, f.label] as [string, string]),
 ];
 
 // The same options, keyed for display — so the read-only view names a frequency
-// the way the picker does without a second list to keep in step.
-const FREQ_LABEL: Record<string, string> = Object.fromEntries(FREQ_OPTIONS);
+// the way the picker does without a second list to keep in step. Legacy stored
+// spellings ("annual", "semi-annual") resolve through frequencyLabel().
+const FREQ_LABEL: Record<string, string> = {
+  ...Object.fromEntries(FREQ_OPTIONS),
+  ...FREQUENCY_LABEL,
+};
 
 const REASON_TEXT: Record<string, string> = {
   not_set: "No deadlines yet — tell us how often this bordereau is due, and when it starts.",
@@ -230,9 +243,18 @@ export default function ProgramCalendar({
 
   // The frequency actually in force — the override if there is one, otherwise
   // the contract's. It decides which deadline control makes sense: a day of the
-  // month for monthly/quarterly, days-after-the-period for weekly.
-  const effectiveFreq =
-    (form.frequency_override || sched?.contract_frequency || "").toLowerCase();
+  // month for every calendar-aligned frequency, days-after-the-period for weekly.
+  //
+  // NORMALISED, not raw. A contract can carry a legacy spelling like
+  // "semi-annual" or "annual"; the server resolves those to the stored tokens
+  // and hands the result back as `effective_frequency`, so preferring it here
+  // keeps this component from having to know the aliases. It falls back to the
+  // raw values while an unsaved override is still being typed.
+  const effectiveFreq = (
+    form.frequency_override
+    || sched?.effective_frequency
+    || sched?.contract_frequency
+    || "").toLowerCase();
   const isWeekly = effectiveFreq === "weekly";
 
   async function save() {
@@ -380,7 +402,9 @@ export default function ProgramCalendar({
   // "This quarter" for a quarterly one — calling a quarter "this month" would
   // be wrong in exactly the place the reader is trusting the label.
   const currentLabel = effectiveFreq === "quarterly" ? "This quarter"
-    : effectiveFreq === "weekly" ? "This week" : "This month";
+    : effectiveFreq === "weekly" ? "This week"
+    : effectiveFreq === "half_yearly" ? "This half-year"
+    : effectiveFreq === "yearly" ? "This year" : "This month";
 
   // The next thing actually owed: earliest unsent period by due date. Rows
   // arrive newest-deadline-last, so a scan is enough — no sort needed. "Due
@@ -604,30 +628,31 @@ export default function ProgramCalendar({
           {/* The whole rule in plain words, built from the numbers actually in the
               fields above, so the reader can check the setting against what will
               happen without saving to find out. */}
-          <div style={{ fontSize: 12, color: "var(--p-muted)", margin: "10px 0 2px" }}>
+          <ul style={{ fontSize: 12, color: "var(--p-muted)", margin: "10px 0 12px",
+            padding: "0 0 0 16px", listStyle: "disc outside" }}>
             {!isWeekly && (
-              <>
-                Each bordereau is due on the <b>{ordinal(form.due_day_of_month)}</b> of
-                the month after the period it covers.{" "}
-              </>
+              <li style={LI}>
+                Due on the <b>{ordinal(form.due_day_of_month)}</b> of the month after
+                the period it covers.
+              </li>
             )}
-            You get three reminders: <b>{form.soon_window_days} day
-            {Number(form.soon_window_days) === 1 ? "" : "s"} before</b> the due date,
-            again <b>on the day</b>, and once more <b>after it passes</b>. Each is
-            sent once, not repeated. There is no grace period — one day past the due
-            date counts as overdue.
-          </div>
-          <div style={{ fontSize: 12, color: "var(--p-muted)", margin: "2px 0 12px" }}>
+            <li style={LI}>
+              Reminders: <b>{form.soon_window_days} day
+              {Number(form.soon_window_days) === 1 ? "" : "s"} before</b>, on the day,
+              and once after it is late.
+            </li>
+            <li style={LI}>Each reminder is sent once, not repeated.</li>
+            <li style={LI}>No grace period — one day late is overdue.</li>
+            <li style={LI}>
             {/* Says which fields the contract actually drives, and — the part the
                 old wording left out — that filling one STOPS it tracking the
                 contract, since an override always wins over the contract value. */}
             {overridden.length === 0 ? (
               contractGives.length === 2 ? (
                 <>
-                  The first two come from the contract
+                  Frequency and start date come from the contract
                   {` (${FREQ_LABEL[sched!.contract_frequency!] ?? sched!.contract_frequency}, from ${fmtDate(sched!.contract_anchor)})`}
-                  . Change one only if this program differs — it then stops following
-                  the contract.
+                  . Change either one and this program stops following it.
                 </>
               ) : contractGives.length === 1 ? (
                 <>
@@ -662,7 +687,8 @@ export default function ProgramCalendar({
                 )}
               </>
             )}
-          </div>
+            </li>
+          </ul>
           <button className="btn pri" onClick={save} disabled={saving || !canSave}
             title={canSave ? "" : `Set ${missing.join(" and ")} first`}>
             {saving ? "Saving…" : "Save deadlines"}
@@ -725,15 +751,18 @@ export default function ProgramCalendar({
             </div>
           ) : (
             <div className="card" style={{ marginTop: 18 }}>
-              {/* Header laid out on the SAME column grid as the table, so the Due
-                  date filter sits over Due date, Status over Status, and Clear
-                  over the right (Sent) column.
+              {/* ONE line: the title on the left, the filters on the right, every
+                  control the same height and centred on it (fbar-even — the bar
+                  the Programmes list uses). It used to sit on the table's column
+                  grid with the captions stacked above the boxes, which left the
+                  title, the captions and the boxes at three different heights.
 
-                  Each filter carries a VISIBLE caption. They used to be labelled
-                  by aria-label alone, so a sighted reader saw two bare date boxes
-                  with a dash between them and no way to tell what they filtered. */}
-              <div className="card-h" style={{ display: "grid",
-                gridTemplateColumns: "36% 26% 22% 16%", alignItems: "end", gap: 0 }}>
+                  Each filter still carries a VISIBLE caption, now beside it.
+                  They used to be labelled by aria-label alone, so a sighted
+                  reader saw two bare date boxes with a dash between them and no
+                  way to tell what they filtered. */}
+              <div className="card-h" style={{ flexWrap: "wrap", justifyContent: "space-between",
+                gap: 12 }}>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
                   <h3 style={{ margin: 0 }}>{programName || "Deadlines"}</h3>
                   {/* Always says how many of the whole set is on screen when that
@@ -746,33 +775,37 @@ export default function ProgramCalendar({
                       : `${rows.length} deadlines`}
                   </span>
                 </div>
-                <div style={{ paddingLeft: 12 }}>
-                  <div className="sub" style={{ marginBottom: 3 }}>Due between</div>
-                  <div className="fbar-daterange">
-                    <input type="date" className="fbar-date" aria-label="Due on or after"
-                      value={dueFrom} onChange={e => setDueFrom(e.target.value)} />
-                    <span className="sub">–</span>
-                    <input type="date" className="fbar-date" aria-label="Due on or before"
-                      value={dueTo} onChange={e => setDueTo(e.target.value)} />
+                <div className="fbar-even" style={{ justifyContent: "flex-end" }}>
+                  <div className="fbar-pair">
+                    <span className="fbar-cap">Due between</span>
+                    <div className="fbar-daterange">
+                      <input type="date" className="fbar-date" aria-label="Due on or after"
+                        value={dueFrom} onChange={e => setDueFrom(e.target.value)} />
+                      <span className="sub">–</span>
+                      <input type="date" className="fbar-date" aria-label="Due on or before"
+                        value={dueTo} onChange={e => setDueTo(e.target.value)} />
+                    </div>
                   </div>
-                </div>
-                <div style={{ paddingLeft: 12 }}>
-                  <div className="sub" style={{ marginBottom: 3 }}>Status</div>
-                  <select className="fbar-select" aria-label="Filter by status"
-                    value={statusFilter}
-                    onChange={e => setStatusFilter(e.target.value as CalendarStatus | "")}>
-                    <option value="">Show all ({rows.length})</option>
-                    {presentStatuses.map(st => (
-                      <option key={st} value={st}>
-                        {STATUS_META[st].label} ({counts[st] ?? 0})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  {filtersActive && (
-                    <span className="linkish" onClick={clearFilters}>Clear filters</span>
-                  )}
+                  <div className="fbar-pair">
+                    <span className="fbar-cap">Status</span>
+                    <select className="fbar-select" aria-label="Filter by status"
+                      value={statusFilter}
+                      onChange={e => setStatusFilter(e.target.value as CalendarStatus | "")}>
+                      <option value="">Show all ({rows.length})</option>
+                      {presentStatuses.map(st => (
+                        <option key={st} value={st}>
+                          {STATUS_META[st].label} ({counts[st] ?? 0})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {/* Always in the row, only hidden, so the controls beside it do
+                      not jump when a filter is first set. */}
+                  <button type="button" className="fbar-clear" onClick={clearFilters}
+                    style={{ visibility: filtersActive ? "visible" : "hidden" }}
+                    aria-hidden={!filtersActive} tabIndex={filtersActive ? 0 : -1}>
+                    Clear Filters
+                  </button>
                 </div>
               </div>
               <div style={{ padding: "6px 8px" }}>
@@ -864,6 +897,23 @@ export default function ProgramCalendar({
                           </td>
                           <td style={{ padding: "9px 12px", color: "var(--p-muted)" }}>
                             {fmtDate(r.received_at)}
+                            {/* A period can be filed more than once. Saying so
+                                HERE matters: the date beside it is the first
+                                submission, and without this the row would read
+                                as if that were the only one. Silent on a period
+                                filed once, which is almost all of them. */}
+                            {r.version_count > 1 && (
+                              <div className="sub" style={{ marginTop: 3 }}>
+                                {r.version_label}
+                                {r.latest_received_at
+                                  && ` · latest ${fmtDate(r.latest_received_at)}`}
+                              </div>
+                            )}
+                            {r.released_at && (
+                              <div className="sub" style={{ marginTop: 3 }}>
+                                Sent onward {fmtDate(r.released_at)}
+                              </div>
+                            )}
                           </td>
                         </tr>
                       );

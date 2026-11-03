@@ -38,7 +38,21 @@
 .proto-side .shield{width:34px;height:34px;flex:0 0 auto;filter:drop-shadow(0 4px 10px rgba(7,114,130,.45))}
 .proto-side img.shield{width:48px;height:48px;margin:-7px;object-fit:contain}
 .proto-side .brand h1{font-family:var(--p-disp);font-size:20px;letter-spacing:.2px;color:var(--p-side-bright);margin:0;font-weight:700;line-height:1}
-.proto-side .brand .tag{font-size:10px;color:var(--p-side-dim);letter-spacing:1.6px;text-transform:uppercase;margin-top:4px;font-weight:600}
+/* The wordmark block fills what the shield leaves, and is a size container so
+   the tagline can scale to it. "BORDEREAU MANAGEMENT" is two characters longer
+   than the old "Platform" and, at a fixed 10px with 1.6px tracking, wrapped
+   onto a second line. Size and tracking are now both a share of the width
+   available, so the line fits whatever that width is and never breaks.
+   The plain px values come first as the fallback: a browser without container
+   units drops the min() lines and keeps them. nowrap + ellipsis is only a
+   safety net — at these ratios the text lands at ~94% of the width. */
+.proto-side .brand>div{flex:1;min-width:0;container-type:inline-size}
+.proto-side .brand .tag{
+  font-size:9.5px;font-size:min(10px,5.3cqi);
+  letter-spacing:.9px;letter-spacing:min(1.6px,.45cqi);
+  color:var(--p-side-dim);text-transform:uppercase;margin-top:4px;font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
 
 .proto-side .wscard{display:flex;align-items:center;gap:11px;width:calc(100% - 24px);margin:13px 12px 0;padding:9px 10px;border:0;border-radius:12px;text-align:left;cursor:pointer;font:inherit;color:inherit;background:rgba(255,255,255,.045);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),inset 0 1px 0 rgba(255,255,255,.05),0 1px 2px rgba(0,0,0,.28);transition:background .13s,box-shadow .13s}
 .proto-side .wscard:hover{background:rgba(255,255,255,.075);box-shadow:inset 0 0 0 1px rgba(3,162,166,.45),0 4px 12px -4px rgba(0,0,0,.4)}
@@ -46,6 +60,24 @@
    workspace identity, but reads as a label rather than a control. */
 .proto-side .wscard-static,.proto-side .wscard-static:hover{cursor:default;background:rgba(255,255,255,.045);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),inset 0 1px 0 rgba(255,255,255,.05),0 1px 2px rgba(0,0,0,.28)}
 .proto-side .wscard:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+/* The broker's carrier scope. Occupies the same slot as the carrier admin's
+   workspace card and is built from the same parts, because it answers the same
+   question — which organisation am I looking at — and for a broker that
+   question has an answer they can change. */
+.proto-side .ws-scope{position:relative;width:calc(100% - 24px);margin:13px 12px 0}
+.proto-side .ws-scope .wscard{width:100%;margin:0}
+.proto-side .ws-menu{position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:60;
+  padding:5px;border-radius:12px;background:#141a27;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.10),0 18px 40px -14px rgba(0,0,0,.7)}
+.proto-side .ws-menu button{display:flex;align-items:center;gap:8px;width:100%;
+  padding:8px 10px;border:0;border-radius:8px;background:transparent;color:#fff;
+  font:inherit;font-size:12.5px;text-align:left;cursor:pointer}
+.proto-side .ws-menu button:hover{background:rgba(255,255,255,.08)}
+.proto-side .ws-menu button.on{background:rgba(49,73,198,.28)}
+.proto-side .ws-menu .nm{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto-side .ws-menu .ct{flex:0 0 auto;font-size:10.5px;color:rgba(255,255,255,.45)}
+.proto-side .ws-menu-sep{height:1px;margin:5px 6px;background:rgba(255,255,255,.10)}
+.proto-side.collapsed .ws-scope{display:none}
 .proto-side .wscard-ava{position:relative;flex:0 0 auto;width:34px;height:34px}
 .proto-side .wscard-logo{width:34px;height:34px;border-radius:9px;object-fit:contain;background:transparent;padding:0;display:block}
 .proto-side .wscard-fallback{display:flex;align-items:center;justify-content:center;background:var(--p-brand-grad);color:#fff;font-size:12px;font-weight:700;padding:0;box-shadow:0 3px 8px rgba(7,114,130,.35)}
@@ -104,7 +136,7 @@
 .proto-side.collapsed .side-ver{display:none}
 
 /* ---------------- Screen shell ---------------- */
-.proto{background:var(--p-canvas);color:var(--p-ink);min-height:100vh;font-size:14px;line-height:1.45}
+.proto{background:var(--p-canvas);color:var(--p-ink);font-size:14px;line-height:1.45}
 .proto .view{padding:28px 34px 72px;max-width:1220px;animation:proto-rise .22s cubic-bezier(.2,.7,.3,1)}
 /* full-bleed variant: fill the available width (no 1220px cap) */
 .proto .view.full{max-width:none}
@@ -146,6 +178,7 @@
 .proto .card-h .ci{width:18px;height:18px;color:var(--p-faint)}
 .proto .card-h .sub{color:var(--p-faint);font-size:12.5px;font-weight:500}
 .proto .card-h .right{margin-left:auto;display:flex;gap:10px;align-items:center}
+.proto .card-h .info-tip{margin-left:-4px}
 .proto .grid{display:grid;gap:18px}
 /* Grid items default to min-width:auto, so a wide child (e.g. a preview table)
    blows its column past the track and makes the whole page scroll sideways.
@@ -160,13 +193,22 @@
 
 /* ---------------- dashboard: tiles ---------------- */
 .proto .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
-@media(max-width:1000px){.proto .tiles{grid-template-columns:1fr 1fr}}
+.proto .tiles.t3{grid-template-columns:repeat(3,1fr)}
+@media(max-width:1000px){.proto .tiles,.proto .tiles.t3{grid-template-columns:1fr 1fr}}
+/* A ranked-bar row that opens the detail behind its own number. */
+.proto .rb-row{display:block;border-radius:8px;padding:2px 6px;margin:-2px -6px}
+.proto .rb-row:hover{background:var(--p-surface-2)}
 /* 5-up KPI row (Platform Dashboard) — keeps all five tiles on one line on wide
    screens, then steps down. Needs its own media rules: `.tiles.five` outranks
    the `.tiles` ones above regardless of viewport. */
 .proto .tiles.five{grid-template-columns:repeat(5,1fr);gap:14px}
 @media(max-width:1400px){.proto .tiles.five{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:1000px){.proto .tiles.five{grid-template-columns:1fr 1fr}}
+/* 6-up: one tile per seat (Users & Roles). Steps down 6 → 3 → 2, so a row is
+   never left with a single orphan tile. */
+.proto .tiles.six{grid-template-columns:repeat(6,1fr);gap:14px}
+@media(max-width:1500px){.proto .tiles.six{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:1000px){.proto .tiles.six{grid-template-columns:1fr 1fr}}
 .proto .tile{background:var(--p-surface);border:1px solid var(--p-border);border-radius:var(--p-r);padding:17px 18px;box-shadow:var(--p-sh);position:relative;overflow:hidden}
 .proto .tile .k{font-size:11.5px;color:var(--p-muted);font-weight:600;letter-spacing:.2px;display:flex;align-items:center;gap:7px}
 .proto .tile .v{font-family:var(--p-disp);font-size:30px;font-weight:600;margin-top:8px;letter-spacing:-1px;line-height:1}
@@ -202,6 +244,9 @@
 .proto .step .n{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;flex:0 0 auto;font-size:11px;font-weight:700;margin-top:1px}
 .proto .step h4{margin:0 0 4px;font-size:13px;font-weight:600}
 .proto .step p{margin:0;font-size:12.5px;color:var(--p-muted);line-height:1.5}
+.proto .step ul{margin:0;padding-left:16px;font-size:12.5px;color:var(--p-muted);line-height:1.5;list-style:disc outside}
+.proto .step li{margin:0 0 4px;list-style:disc}
+.proto .step li:last-child{margin-bottom:0}
 .proto .step.s1 .n{background:var(--p-crit-soft);color:var(--p-crit-ink)}
 .proto .step.s2 .n{background:var(--p-warn-soft);color:var(--p-warn-ink)}
 .proto .step.s3 .n{background:var(--p-info-soft);color:var(--p-info-ink)}
@@ -325,11 +370,26 @@
 .proto .info-tip{position:relative;display:inline-flex;vertical-align:middle;margin-left:7px;outline:none}
 .proto .info-tip .ic{width:15px;height:15px;color:var(--p-faint);cursor:help}
 .proto .info-tip:hover .ic,.proto .info-tip:focus-within .ic{color:var(--p-primary)}
+/* On a dark card (the dashboard's navy Files Processed card). */
+.proto .on-dark .info-tip .ic{color:rgba(255,255,255,.6)}
+.proto .on-dark .info-tip:hover .ic,.proto .on-dark .info-tip:focus-within .ic{color:#fff}
+/* On a Bordereau Setup tab (components/SetupTabs.tsx). Those tabs are
+   Tailwind, outside .proto, so the icon is sized here; it takes the tab's own
+   text colour — white on the open (dark) tab, grey on the rest. */
+.setup-tab .info-tip{display:inline-flex;vertical-align:middle;outline:none}
+.setup-tab .info-tip .ic{width:14px;height:14px;cursor:help;opacity:.6}
+.setup-tab .info-tip:hover .ic,.setup-tab .info-tip:focus .ic{opacity:1}
+/* Beside a heading in plain Tailwind screens (e.g. a clause with no column in
+   Bordereau Setup) — outside .proto and .setup-tab, so it is sized here too;
+   without this the icon has no size and simply does not show. */
+.tip-inline .info-tip{display:inline-flex;vertical-align:middle;outline:none}
+.tip-inline .info-tip .ic{width:14px;height:14px;cursor:help;color:#9aa3b2}
+.tip-inline .info-tip:hover .ic,.tip-inline .info-tip:focus .ic{color:#1f3a5f}
 .info-tip-bubble{
   position:fixed;
   width:230px;background:#0E1320;color:#fff;font-size:12px;font-weight:500;line-height:1.5;
   padding:9px 11px;border-radius:8px;box-shadow:0 18px 44px -12px rgba(8,12,22,.5);
-  z-index:9999;pointer-events:none;animation:info-tip-rise .12s ease;
+  white-space:pre-line;z-index:9999;pointer-events:none;animation:info-tip-rise .12s ease;
 }
 .info-tip-bubble[data-placement="above"]::after{
   content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);
@@ -348,8 +408,17 @@
 .proto .field select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238B93A2' stroke-width='2'><path d='M6 9l6 6 6-6'/></svg>");background-repeat:no-repeat;background-position:right 11px center;padding-right:34px}
 .proto .field input:focus,.proto .field select:focus,.proto .field textarea:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
 .proto .field .hint{font-size:11.5px;color:var(--p-faint);margin-top:5px}
+/* A field that is shut because something else is answering it — the expiry
+   while a duration is in force. It has to read as "not yours to type", not as
+   broken: the value stays legible (it is the answer the person is checking),
+   only the surface says it is not being typed into. */
+.proto .field input:disabled,.proto .field select:disabled,.proto .field textarea:disabled{background:var(--p-surface-2);color:var(--p-muted);cursor:not-allowed}
 .proto .row2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .proto .ro{background:var(--p-surface-3)!important;color:var(--p-muted)!important;cursor:not-allowed}
+/* Same treatment for anything marked readonly on the element itself, so a
+   derived field (the expiry while a Duration length is chosen) reads as
+   derived without every screen having to remember the class. */
+.proto input[readonly],.proto select[readonly]{background:var(--p-surface-3);color:var(--p-muted);cursor:not-allowed}
 
 /* search box + segmented control */
 .proto .search{display:flex;align-items:center;gap:9px;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:8px 12px;background:var(--p-surface);min-width:250px}
@@ -360,6 +429,11 @@
 .proto .seg button:last-child{border-right:0}
 .proto .seg button.on{background:var(--p-primary-soft);color:var(--p-primary)}
 .proto .seg.sm button{padding:5px 10px;font-size:11.5px}
+/* A segmented control that fills its row in equal parts, each with a count
+   (the Ingestion Panel's All / Needs You / Done). */
+.proto .seg.full{display:flex;flex:1;min-width:0}
+.proto .seg.full button{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 10px;white-space:nowrap}
+.proto .seg .n{font-family:var(--p-mono);font-size:11px;opacity:.75}
 
 /* list filter bar: compact dropdown + date-range inputs (components/ListFilterBar) */
 .proto .fbar-select{
@@ -377,13 +451,65 @@
 }
 .proto .fbar-date:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
 
+/* An even filter row: every control 36px tall and centred on one line, the
+   search taking the spare width. Opt-in (Programmes), so the other lists that
+   use .search / .seg / .fbar-date keep their own sizing. */
+.proto .fbar-even{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.proto .fbar-even > *{flex:0 0 auto}
+.proto .fbar-even > .search{flex:1 1 260px;min-width:220px;height:36px;padding:0 12px;box-sizing:border-box}
+.proto .fbar-even > .seg{height:36px}
+.proto .fbar-even > .seg button{display:inline-flex;align-items:center;padding:0 14px;font-size:12.5px;white-space:nowrap}
+.proto .fbar-even .fbar-date{height:36px;box-sizing:border-box;padding:0 10px;width:148px}
+.proto .fbar-even .fbar-clear{height:36px;padding:0 4px;border:0;background:transparent;font:inherit;font-size:13px;font-weight:600;color:var(--p-primary);cursor:pointer;white-space:nowrap}
+.proto .fbar-even .fbar-clear:hover{text-decoration:underline}
+.proto .fbar-even .fbar-clear:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px;border-radius:4px}
+/* A caption beside its control ("Status [Show all ▾]") — kept visible, on the
+   control's own line, so every piece of the bar sits at the one height. */
+.proto .fbar-even .fbar-pair{display:flex;align-items:center;gap:8px}
+.proto .fbar-even .fbar-cap{font-size:12.5px;font-weight:500;color:var(--p-muted);white-space:nowrap}
+.proto .fbar-even .fbar-select{height:36px;box-sizing:border-box;padding-top:0;padding-bottom:0}
+
+/* A labelled filter: the caption sits ABOVE its control rather than beside it.
+   ListFilterBar's bare row works when a page has one or two dropdowns whose
+   meaning is obvious from their values; Audit Logs has three whose values look
+   alike ("All actions", "Everyone in your reach"), so each says what it filters. */
+.proto .fbar-field{display:flex;flex-direction:column;gap:5px;min-width:170px}
+.proto .fbar-field > .sub{font-size:11.5px;font-weight:600;letter-spacing:.01em}
+.proto .fbar-field .fbar-select{width:100%}
+/* Every control under a caption is the same 36px, so a dropdown, the date
+   inputs and the search box line up exactly; the search takes the spare width. */
+.proto .fbar-field .fbar-select,
+.proto .fbar-field .fbar-date{height:36px;box-sizing:border-box;padding-top:0;padding-bottom:0}
+.proto .fbar-field > .search{height:36px;box-sizing:border-box;padding:0 12px;min-width:0}
+.proto .fbar-field.grow{flex:1 1 260px;min-width:220px}
+.proto .fbar-clear-link{line-height:36px;white-space:nowrap}
+/* Audit Logs: 200 rows a page, scrolled inside the card so the column headings
+   stay in view and the page controls stay just under the last visible row. */
+.proto .tbl-wrap.audit-scroll{max-height:calc(100vh - 300px);min-height:360px;overflow:auto}
+.proto .audit-scroll thead th{position:sticky;top:0;z-index:2;background:var(--p-surface-2)}
+.proto .audit-group-link{display:inline-block;margin-top:4px;padding:0;border:0;background:none;
+  font:inherit;font-size:12.5px;font-weight:600;cursor:pointer}
+
 /* misc */
 .proto .note{font-size:12.5px;color:var(--p-muted);background:var(--p-surface-2);border:1px solid var(--p-border);border-radius:var(--p-r-sm);padding:11px 13px;line-height:1.5}
 .proto .note.warn{background:var(--p-warn-soft);border-color:#EAD7AE;color:var(--p-warn-ink)}
 .proto .note.ok{background:var(--p-ok-soft);border-color:#C5E7D3;color:var(--p-ok-ink)}
+/* Used by several screens for a failure, but never defined — it rendered as a
+   plain grey note. */
+.proto .note.crit{background:var(--p-crit-soft);border-color:#F2C4CB;color:var(--p-crit-ink)}
 .proto .tag-pill{font-family:var(--p-mono);font-size:11px;background:var(--p-surface-3);border:1px solid var(--p-border);border-radius:5px;padding:2px 7px;color:var(--p-muted)}
 .proto .divider{height:1px;background:var(--p-border);margin:18px 0}
 .proto .muted{color:var(--p-muted)}
+/* Standalone small print.
+   `.sub` was only ever defined INSIDE a `td` or a `.card-h`, and `.hint` only
+   inside a `.field`, so using either on its own rendered at full 14px body
+   size — which is what made the contract screens look off next to the rest of
+   the app. These give them the same values outside those contexts. The
+   existing, more specific rules still win where they apply, and every use in
+   the app before this was already inside one of them, so nothing that looked
+   right changes. */
+.proto .sub{color:var(--p-faint);font-size:12px;line-height:1.5}
+.proto .hint{font-size:11.5px;color:var(--p-faint);margin-top:5px;line-height:1.5}
 
 /* dropzone */
 .proto .drop{border:1.5px dashed var(--p-border-2);border-radius:var(--p-r);background:var(--p-surface-2);padding:24px;text-align:center;color:var(--p-muted);transition:.15s}
@@ -634,22 +760,6 @@
 .proto .route.needs{border-color:#EBD9BA;background:#FEFBF5}
 .proto .route.needs::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;
   border-radius:var(--p-r-sm) 0 0 var(--p-r-sm);background:var(--p-warn)}
-.proto .route-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.proto .route-top .who{font-weight:600;font-size:13.5px}
-.proto .route-top .prog{font-size:12.5px;color:var(--p-muted)}
-/* Italic grey because "Any" is not a programme name — and for an API route it
-   means the sender has to name one on every file. */
-.proto .route-top .prog.any{color:var(--p-faint);font-style:italic}
-.proto .route-top .rt{margin-left:auto;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-.proto .route-cnt{font-family:var(--p-mono);font-size:12px;color:var(--p-muted);
-  min-width:14px;text-align:right}
-/* The address is the deliverable of this screen — people are usually about to
-   paste it into an email — so it gets its own line rather than a shared cell. */
-.proto .route-addr{display:flex;align-items:center;gap:9px;margin-top:9px;padding-top:9px;
-  border-top:1px dashed var(--p-border-2)}
-.proto .route-addr code{font-family:var(--p-mono);font-size:11.5px;color:var(--p-muted);
-  word-break:break-all;flex:1}
-.proto .route-sub{font-size:11.5px;color:var(--p-faint);margin-top:7px}
 
 /* ── filter bar + one queue (Files Received) ───────────────────────────── */
 .proto .filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}
@@ -736,3 +846,751 @@
 @media (prefers-reduced-motion:reduce){
   .proto .drawer,.proto .scrim,.proto .chan-hd .caret,.proto .chip,.proto tr.arow{transition:none}
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WRITING A CONTRACT — ported verbatim from the carrier design
+   (docs/kavachio_carrier_centric_design.html), which authors these rules
+   already scoped under .proto.
+
+   Three groups:
+     .trail / .step-c   the step trail across the top of the four-step flow
+     .fh .startpick .lim  step 1: a question, its answer, and what happens when
+                          a file breaks it — one row carrying all three
+     .doc .wording .term  step 2: the section rail, the editable wording, and
+                          the LIVE VALUE chips. A chip is tied to a term from
+                          step 1; hand-typed text is not. That difference is
+                          the whole reason the editor exists.
+   ═════════════════════════════════════════════════════════════════════════ */
+.proto .trail{display:flex;align-items:center;gap:1px;
+  padding:5px;margin-bottom:20px;width:100%;box-sizing:border-box;
+  background:var(--p-surface);border:1px solid var(--p-border);
+  border-radius:var(--p-r);box-shadow:var(--p-sh-sm)}
+.proto .trail .sep{flex:0 0 auto;display:inline-flex;align-items:center;padding:0 3px;color:var(--p-border-2);font-size:15px;font-weight:400}
+.proto .trail .step-c{display:flex;align-items:center;gap:10px;
+  flex:1 1 0;min-width:0;width:100%;padding:7px 13px;border:0;background:transparent;border-radius:var(--p-r-sm);
+  box-shadow:none;font-weight:600;color:var(--p-ink);transition:background .12s}
+.proto .trail .step-c .n{width:20px;height:20px;border-radius:50%;flex:0 0 auto;
+  background:var(--p-surface-3);color:var(--p-muted);font-size:10.5px;
+  display:grid;place-items:center;font-weight:700}
+.proto .trail .step-c .lvbox{display:flex;flex-direction:column;line-height:1.2;text-align:left;min-width:0}
+.proto .trail .step-c .lv{font-size:8.5px;letter-spacing:1.1px;text-transform:uppercase;font-weight:700;color:var(--p-faint)}
+.proto .trail .step-c .nm{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.proto .trail .step-c:not(.on){cursor:pointer}
+.proto .trail .step-c:not(.on):hover{background:var(--p-surface-2)}
+.proto .trail .step-c:not(.on):hover .n{background:var(--p-border-2);color:var(--p-ink)}
+.proto .trail .step-c:focus-visible{outline:2px solid var(--p-primary);outline-offset:-2px}
+.proto .trail .step-c.done .n{background:var(--p-ok);color:#fff}
+.proto .trail .step-c.on{background:var(--p-primary-soft);color:var(--p-primary)}
+.proto .trail .step-c.on .n{background:var(--p-primary);color:#fff}
+.proto .trail .step-c.on .lv{color:var(--p-primary);opacity:.7}
+.proto .trail .step-c.off{color:var(--p-faint)}
+.proto .trail .step-c.off:not(:has(.nm)) .lv{font-size:12.5px;letter-spacing:0;text-transform:none;color:var(--p-faint);font-weight:600}
+.proto .trail .step-c.off .nm{color:var(--p-muted);font-weight:600}
+.proto .trail > span{flex:1 1 0;min-width:0;display:flex!important;align-items:center}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   .wizbody / .secrail   step 1 of Create a Contract, cut into sections
+
+   The Terms step asks a lot in one scroll: two pickers, the basics, then a
+   panel for each group of limits. Nothing about the questions changed — the
+   rail shows ONE section at a time and says which are still short, the way
+   `.doc-rail` below already does for the wording's sections. The four-step
+   `.trail` above stays what it is: the stages of making the contract, not
+   the parts of this one.
+   ───────────────────────────────────────────────────────────────────────── */
+.proto .wizbody{display:grid;grid-template-columns:238px minmax(0,1fr);gap:16px;align-items:start}
+.proto .secrail{background:var(--p-surface);border:1px solid var(--p-border);border-radius:var(--p-r);
+      padding:8px;position:sticky;top:16px;box-shadow:var(--p-sh-sm)}
+.proto .secrail .cap{font-size:9.5px;letter-spacing:1.1px;text-transform:uppercase;font-weight:700;
+      color:var(--p-faint);padding:9px 10px 5px}
+.proto .secitem{display:flex;align-items:flex-start;gap:10px;width:100%;border:0;background:transparent;
+      padding:9px 10px;border-radius:var(--p-r-sm);cursor:pointer;text-align:left;font:inherit;
+      color:var(--p-ink);transition:background .12s}
+.proto .secitem:hover{background:var(--p-surface-2)}
+.proto .secitem .n{width:21px;height:21px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;
+      font-size:11px;font-weight:700;background:var(--p-surface-3);color:var(--p-muted);margin-top:1px}
+.proto .secitem .lvbox{min-width:0}
+.proto .secitem .t{display:block;font-size:12.5px;font-weight:600;line-height:1.35}
+.proto .secitem .m{display:block;font-size:10.5px;color:var(--p-faint);margin-top:2px}
+.proto .secitem.done .n{background:var(--p-ok-soft);color:var(--p-ok-ink)}
+.proto .secitem.todo .t{color:var(--p-muted)}
+/* Short of an answer, and only once Next has been pressed — a form that goes
+   red before anybody has typed reads as broken rather than helpful. */
+.proto .secitem.warn .n{background:var(--p-crit-soft);color:var(--p-crit-ink)}
+.proto .secitem.warn .m{color:var(--p-crit-ink)}
+.proto .secitem.on{background:var(--p-primary-soft)}
+.proto .secitem.on .t{color:var(--p-primary-h)}
+.proto .secitem.on .m{color:var(--p-primary)}
+.proto .secitem.on .n{background:var(--p-primary);color:#fff}
+.proto .secitem:focus-visible{outline:2px solid var(--p-primary);outline-offset:-2px}
+.proto .secrail .tail{border-top:1px solid var(--p-border);margin-top:6px;padding:11px 10px 5px}
+/* The panel and whatever belongs under it (the "upload a signed PDF instead"
+   line) share the grid's second column, so that line sits below the section
+   rather than centred across the whole page beside the rail. */
+.proto .secmain{min-width:0}
+.proto .secnav{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:22px;
+      border-top:1px solid var(--p-border);padding-top:14px}
+.proto .secnav .sub{font-size:11.5px;color:var(--p-faint)}
+.proto .secnav .btn.pri{margin-left:auto}
+/* Narrow: the rail lies down above the panel and scrolls sideways, so the
+   section you are on is still named without eating half the width. */
+@media (max-width:1040px){
+  .proto .wizbody{grid-template-columns:minmax(0,1fr)}
+  .proto .secrail{position:static;display:flex;gap:4px;overflow-x:auto;padding:6px}
+  .proto .secrail .cap,.proto .secrail .tail{display:none}
+  .proto .secitem{width:auto;flex:0 0 auto;white-space:nowrap}
+}
+.proto .doc{display:grid;grid-template-columns:214px minmax(0,1fr);gap:0;border:1px solid var(--p-border);
+      border-radius:var(--p-r);overflow:hidden;background:var(--p-surface)}
+.proto .doc-rail{background:var(--p-surface-2);border-right:1px solid var(--p-border);padding:8px}
+.proto .doc-sec{display:flex;align-items:flex-start;gap:9px;padding:9px 10px;border-radius:var(--p-r-sm);
+      cursor:pointer;margin-bottom:2px;transition:background .12s}
+.proto .doc-sec:hover{background:var(--p-surface-3)}
+.proto .doc-sec.on{background:var(--p-primary-soft)}
+.proto .doc-sec .no{font-family:var(--p-mono);font-size:10.5px;color:var(--p-faint);flex:0 0 auto;margin-top:1px;width:22px}
+.proto .doc-sec .txt{flex:1;min-width:0}
+.proto .doc-sec .rm{flex:0 0 auto;opacity:0;width:19px;height:19px;border-radius:4px;display:grid;
+      place-items:center;color:var(--p-faint);font-size:15px;line-height:1;margin-top:-1px;transition:.12s}
+.proto .doc-sec:hover .rm{opacity:1}
+.proto .doc-sec .rm:hover{background:var(--p-crit-soft);color:var(--p-crit)}
+.proto .doc-sec .keep{flex:0 0 auto;opacity:.45;font-size:11px;margin-top:1px}
+.proto .doc-sec.on .no{color:var(--p-primary)}
+.proto .doc-sec .nm{display:block;font-size:12.5px;font-weight:600;line-height:1.35}
+.proto .doc-sec.on .nm{color:var(--p-primary-h)}
+.proto .doc-sec .st{display:block;font-size:10.5px;color:var(--p-faint);margin-top:2px}
+.proto .doc-body{padding:20px 24px;min-width:0}
+.proto .doc-body h4{margin:0 0 3px;font-family:var(--p-disp);font-size:16px;font-weight:600}
+.proto .wording{border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:16px 18px;
+      font-size:13.5px;line-height:1.85;background:var(--p-surface);min-height:120px}
+.proto .wording:focus{outline:2px solid var(--p-primary);outline-offset:1px}
+/* The empty editor's prompt. Drawn rather than stored, so it can never be
+   mistaken for the clause's text or end up in the signed contract. */
+.proto .wording:empty::before{content:attr(data-placeholder);color:var(--p-faint);pointer-events:none}
+.proto .wording:focus:empty::before{opacity:.6}
+.proto .wording p{margin:0 0 11px}
+.proto .wording p:last-child{margin:0}
+.proto .term{background:var(--p-primary-soft);color:var(--p-primary-h);border-radius:4px;padding:1px 5px;
+      font-weight:600;white-space:nowrap;border-bottom:1.5px solid var(--p-primary)}
+/* A chip whose term can be changed from here says so by behaving like a
+   control: the value is editable in place, and nothing about a coloured
+   rectangle tells you that on its own. */
+.proto .term[data-edit]{cursor:pointer}
+.proto .term[data-edit]:hover{background:var(--p-primary);color:#fff}
+.proto .termbar{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 0}
+.proto .termbar button{border:1px dashed var(--p-border-2);background:var(--p-surface-2);color:var(--p-muted);
+      font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer;transition:.12s}
+.proto .termbar button:hover{border-color:var(--p-primary);color:var(--p-primary);background:var(--p-primary-soft);border-style:solid}
+.proto .segpick{display:flex;background:var(--p-surface-3);border-radius:9px;padding:3px;gap:3px;margin-bottom:18px}
+.proto .segpick button{flex:1;border:0;background:transparent;color:var(--p-muted);font-size:12.5px;font-weight:600;padding:8px 12px;border-radius:7px;transition:.12s}
+.proto .segpick button:hover{color:var(--p-ink)}
+.proto .segpick button.on{background:var(--p-surface);color:var(--p-primary);box-shadow:var(--p-sh-sm)}
+.proto .fh{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:13.5px;font-weight:700;color:var(--p-ink);margin:0 0 13px;letter-spacing:-.005em}
+.proto .fh em{font-style:normal;font-size:11.5px;font-weight:500;color:var(--p-faint);line-height:1.45}
+.proto .startpick{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.proto .startpick .sp{border:1px solid var(--p-border);border-radius:var(--p-r-sm);padding:11px 13px;cursor:pointer;background:var(--p-surface);transition:.12s}
+.proto .startpick .sp:hover{border-color:var(--p-border-2);background:var(--p-surface-2)}
+.proto .startpick .sp.on{border-color:var(--p-primary);background:var(--p-primary-soft);box-shadow:inset 0 0 0 1px var(--p-primary)}
+.proto .startpick .sp b{display:block;font-size:12.5px;font-weight:600;color:var(--p-ink)}
+.proto .startpick .sp span{display:block;font-size:11.5px;color:var(--p-faint);margin-top:4px;line-height:1.5}
+.proto .startpick .sp.on span{color:var(--p-muted)}
+.proto .lim{display:grid;grid-template-columns:minmax(0,1fr) 196px 214px;gap:16px;align-items:center;padding:12px 0;border-bottom:1px solid var(--p-border)}
+.proto .lim:last-of-type{border-bottom:0;padding-bottom:2px}
+.proto .lim .lq{min-width:0}
+.proto .lim .lq b{display:block;font-size:13px;font-weight:600;color:var(--p-ink)}
+.proto .lim .lq span{display:block;font-size:11.5px;color:var(--p-faint);margin-top:2px;line-height:1.45}
+.proto .lim input,.proto .lim select{width:100%;border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);padding:9px 11px;font-size:13px;font-family:inherit;background:var(--p-surface);color:var(--p-ink);transition:.12s}
+.proto .lim input:focus,.proto .lim select:focus{outline:0;border-color:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .lim select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238B93A2' stroke-width='2'><path d='M6 9l6 6 6-6'/></svg>");background-repeat:no-repeat;background-position:right 10px center;padding-right:30px}
+.proto .lim .unit{display:flex;align-items:center;gap:8px}
+.proto .lim .unit em{font-style:normal;font-size:11.5px;font-weight:600;color:var(--p-faint);flex:0 0 auto;min-width:30px}
+.proto .lim .segpick{margin:0;padding:2px}
+.proto .lim .segpick button{padding:7px 8px;font-size:11.5px}
+.proto .lim-h .lq b{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--p-faint)}
+
+/* One GROUP of limits — Cover, then Authority and limits, then Financial
+   terms — drawn as a panel with its name on a band across the top.
+
+   It used to be a small grey uppercase caption with the rows loose underneath
+   it, and the last row of each group had its rule removed (.lim:last-of-type),
+   so nothing at all sat between the end of one group and the name of the next.
+   The caption was lighter than the row above it, which is the wrong way round:
+   the eye reads it as a footnote to what came before rather than a title for
+   what comes after. "What may never be written" is the last line of COVER and
+   was being read as the first line of AUTHORITY AND LIMITS — a carrier
+   answering that question about the wrong thing agrees a term they did not
+   mean, which is not a cosmetic failure.
+
+   So the boundary is drawn rather than implied: a border around the group, its
+   name on a tinted band inside that border, and the rows in a body beneath.
+   The same band the read-only terms table already uses for the same job. */
+.proto .limgrp{border:1px solid var(--p-border);border-radius:var(--p-r-sm);
+  background:var(--p-surface);margin-top:16px;overflow:hidden}
+.proto .limgrp-h{padding:10px 14px;background:var(--p-surface-2);
+  border-bottom:1px solid var(--p-border)}
+/* Darker than a caption, because it is a heading. Its own margins go: the band
+   is what spaces it now. */
+.proto .limgrp-h .sub-h{margin:0;color:var(--p-muted)}
+.proto .limgrp-h .hint{margin-top:3px}
+/* The last row drops its own rule (.lim:last-of-type), so the breathing
+   space under it has to come from here or the ink sits on the border. */
+.proto .limgrp-b{padding:0 14px 10px}
+.proto .startpick.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.proto .rj-quote{margin:16px 0 0;padding:13px 15px;border-left:3px solid var(--p-border-2);background:var(--p-surface-2);border-radius:0 var(--p-r-sm) var(--p-r-sm) 0;font-size:13px;color:var(--p-ink);line-height:1.6}
+.proto .rj-quote .rj-who{margin-top:9px;font-size:11.5px;color:var(--p-faint);font-weight:600}
+
+/* A chip whose term was cleared in step 1. Shown as a visible gap rather than
+   silently dropped: a sentence with a hole in it is a problem somebody can see
+   and fix, and one that quietly lost its number is not. */
+.proto .term.term-missing{background:var(--p-warn-soft);color:var(--p-warn-ink);
+  border-bottom-color:var(--p-warn);font-style:italic}
+/* The per-row "what this becomes", opened from a limit in step 1 so cause and
+   effect sit together at the moment the number is typed. */
+.proto .lim-becomes{grid-column:1/-1;margin:10px 0 2px;padding:11px 13px;
+  background:var(--p-surface-2);border:1px solid var(--p-border);
+  border-radius:var(--p-r-sm);font-size:12.5px;line-height:1.6}
+.proto .lim-becomes .arrow{color:var(--p-faint);margin:0 7px}
+
+/* Reading a contract on screen. The wording is generated, so the app can show
+   the real thing rather than only offering a file — this is the page it reads
+   on: a measure narrow enough to read, the type a contract is set in, and the
+   clause numbers hanging in the margin the way they do on paper. */
+.proto .contract-doc{background:var(--p-surface);border:1px solid var(--p-border);
+  border-radius:var(--p-r-sm);padding:34px 40px;max-width:820px;margin:0 auto}
+.proto .contract-doc h4{font-family:var(--p-disp);font-size:15px;font-weight:600;
+  margin:26px 0 10px;letter-spacing:-.01em}
+.proto .contract-doc h4:first-child{margin-top:0}
+.proto .contract-doc p{margin:0 0 9px;font-size:13.5px;line-height:1.8;
+  padding-left:44px;text-indent:-44px;color:var(--p-ink)}
+.proto .contract-doc .cl{display:inline-block;width:44px;text-indent:0;
+  color:var(--p-faint);font-variant-numeric:tabular-nums}
+
+/* The same page, with the clauses editable in place. Everything here is about
+   keeping it looking like the contract while it is being written: the editor
+   box has no chrome of its own until it is focused, and the heading stays a
+   heading — a label with a Rename beside it — because a heading typed into by
+   accident is damage nobody notices. */
+.proto .contract-doc.editing .sec-e{margin-bottom:22px}
+.proto .contract-doc.editing h4{display:flex;align-items:baseline;gap:0;
+  margin:26px 0 8px}
+.proto .contract-doc.editing .sec-e:first-child h4{margin-top:0}
+.proto .contract-doc.editing h4 .n{width:44px;flex:0 0 auto;color:var(--p-faint);
+  font-weight:500;font-variant-numeric:tabular-nums}
+.proto .contract-doc.editing h4 .tx{flex:0 1 auto;min-width:0}
+.proto .contract-doc.editing h4 .acts{display:inline-flex;gap:10px;margin-left:12px;
+  opacity:0;transition:opacity .12s;font-family:var(--p-sans);font-size:11.5px;
+  font-weight:500;letter-spacing:0}
+.proto .contract-doc.editing .sec-e:hover h4 .acts,
+.proto .contract-doc.editing h4:focus-within .acts{opacity:1}
+.proto .contract-doc.editing h4 .acts .rm{color:var(--p-crit)}
+.proto .contract-doc.editing h4 input.hd{flex:1;min-width:0;font:inherit;
+  border:1px solid var(--p-primary);border-radius:var(--p-r-sm);
+  padding:3px 8px;background:var(--p-surface);color:var(--p-ink);outline:none}
+.proto .contract-doc.editing .wording{border:1px dashed var(--p-border-2);
+  border-radius:var(--p-r-sm);padding:10px 12px;min-height:0;
+  background:transparent;font-size:13.5px;line-height:1.8}
+.proto .contract-doc.editing .wording:focus{background:var(--p-surface);
+  border-style:solid;outline:2px solid var(--p-primary);outline-offset:1px}
+.proto .contract-doc.editing .add-sec{margin-top:6px}
+
+
+/* Placing the signature blocks by hand. The pages ARE the composed contract,
+   so what is dragged sits on the thing it will be printed on rather than on a
+   diagram of it — and the ghost block is the size the server draws, not a size
+   chosen here. */
+/* The pages are READ, not glanced at: "where should this block go" is answered
+   by the words underneath it, so the sheet has to be big enough to have words
+   on it. --pg-w is set by the zoom control; overflow is both axes because a
+   page enlarged past the column has to be scrolled to, not squashed back. */
+.proto .place-doc{display:flex;flex-direction:column;gap:14px;max-height:72vh;
+  overflow:auto;padding:12px;background:var(--p-surface-2);
+  border:1px solid var(--p-border);border-radius:var(--p-r-sm)}
+.proto .place-pg{position:relative;width:100%;max-width:var(--pg-w,520px);
+  flex:none;margin:0 auto;
+  background:#fff;border:1px solid var(--p-border);border-radius:3px;
+  box-shadow:var(--p-sh-sm);overflow:hidden;cursor:crosshair}
+.proto .place-zoom{align-items:center;gap:6px;margin:0 0 10px}
+.proto .place-tgt{display:inline-flex;align-items:center;gap:5px}
+/* Points somebody needs, as points. A paragraph of four of them runs together
+   and gets read as none. */
+.proto .hint ul{margin:6px 0 0;padding-left:16px;display:flex;
+  flex-direction:column;gap:4px}
+.proto .hint li{list-style:disc}
+.proto .place-tie{height:26px;padding:0 6px;font-size:11.5px;max-width:210px;
+  border:1px solid var(--p-border);border-radius:var(--p-r-sm);
+  background:var(--p-surface);color:var(--p-ink)}
+.proto .place-zoom .zval{min-width:38px;text-align:center;
+  font-variant-numeric:tabular-nums}
+.proto .place-pg img{display:block;width:100%;height:100%;object-fit:contain;
+  user-select:none;-webkit-user-drag:none}
+.proto .place-pg .ld{display:grid;place-items:center;height:100%;
+  color:var(--p-faint);font-size:11.5px}
+.proto .place-pg .no{position:absolute;right:5px;bottom:4px;font-size:10px;
+  color:var(--p-faint);font-variant-numeric:tabular-nums}
+.proto .place-blk{position:absolute;cursor:grab;touch-action:none;
+  border:1.5px dashed var(--p-primary);background:var(--p-primary-soft);
+  border-radius:4px;padding:4px 6px;font-size:9.5px;line-height:1.3;
+  color:var(--p-primary-h);overflow:hidden}
+.proto .place-blk:active{cursor:grabbing}
+/* Taking a block back off. A placement with no way to undo it is a decision
+   somebody has to get right first time. */
+.proto .place-blk .rm{position:absolute;top:3px;right:3px;width:17px;height:17px;
+  display:grid;place-items:center;border-radius:50%;cursor:pointer;
+  border:1px solid var(--p-border);background:var(--p-surface);
+  color:var(--p-muted);box-shadow:var(--p-sh-sm)}
+.proto .place-blk .rm:hover{border-color:#c0392b;color:#c0392b}
+.proto .place-blk b{display:block;font-size:9.5px}
+.proto .place-blk .rule{display:block;height:1px;background:var(--p-primary);
+  opacity:.6;margin:12px 0 3px}
+.proto .place-blk .sub{font-size:8.5px}
+
+/* A carrier to work on, chosen at the door. Bigger than a select because it is
+   a decision that scopes the whole session, not a filter. */
+.proto .pickcard{display:flex;flex-direction:column;gap:4px;align-items:flex-start;text-align:left;
+  padding:15px 16px;border:1px solid var(--p-border);border-radius:var(--p-r);
+  background:var(--p-surface);cursor:pointer;font:inherit;color:inherit;
+  box-shadow:var(--p-sh-sm);transition:border-color .12s,box-shadow .12s,transform .12s}
+.proto .pickcard:hover{border-color:var(--p-primary);box-shadow:var(--p-sh);transform:translateY(-1px)}
+.proto .pickcard b{font-size:14px}
+.proto .pickcard:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+
+/* ============================================================================
+   Files — the merged intake screen (Inbox + Ways in)
+   ----------------------------------------------------------------------------
+   "How Files Arrive" and "Files Received" were two sidebar entries that each
+   carried a button to the other. They are one screen with two tabs now: the
+   inbox is daily work and lands first, the ways in are set up once per broker
+   and sit behind tab two.
+   ============================================================================ */
+
+/* ── tiles that filter ──────────────────────────────────────────────────────
+   The tiles and the old chip row showed the same four counts, one row apart,
+   and only the chips did anything. The tile IS the filter now. */
+.proto button.tile{appearance:none;font:inherit;text-align:left;width:100%;
+  cursor:pointer;transition:border-color .12s,transform .12s,box-shadow .12s}
+.proto button.tile:hover{border-color:var(--p-border-2);transform:translateY(-1px)}
+.proto button.tile:focus-visible{outline:2px solid var(--p-primary);outline-offset:2px}
+.proto button.tile[aria-pressed="true"]{border-color:var(--p-primary);
+  box-shadow:0 0 0 1px var(--p-primary),var(--p-sh)}
+.proto button.tile[aria-pressed="true"]::after{background:var(--p-primary)}
+.proto .tile .k .on{font-family:var(--p-mono);font-size:9px;letter-spacing:.06em;
+  text-transform:uppercase;font-weight:700;color:var(--p-primary);
+  background:var(--p-primary-soft);padding:2px 5px;border-radius:var(--p-r-xs)}
+
+/* ── how long it has waited ─────────────────────────────────────────────────
+   The tile says "oldest has waited 6 days" and, sorted newest-first, that file
+   was last in the table. This is the same number on the row itself. */
+.proto .aged{font-family:var(--p-mono);font-size:10px;font-weight:700;
+  color:var(--p-warn-ink);background:var(--p-warn-soft);padding:1px 6px;
+  border-radius:var(--p-r-xs);margin-left:7px;white-space:nowrap;vertical-align:1px}
+/* Which version of its submission a file is — the list shows each submission
+   once, as its latest file. */
+.proto .vchip{font-size:10.5px;font-weight:600;color:var(--p-primary);
+  background:var(--p-primary-soft);padding:1px 6px;border-radius:var(--p-r-xs);
+  margin-left:7px;white-space:nowrap;vertical-align:1px}
+/* What a file is for — period, programme, broker, contract — as one short
+   line of chips under a page title. */
+.proto .about-strip{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.proto .about-strip .chip{display:inline-flex;align-items:baseline;gap:6px;font-size:12.5px;
+  color:var(--p-ink);background:var(--p-surface-2);border:1px solid var(--p-border);
+  border-radius:var(--p-r-pill);padding:3px 10px;white-space:nowrap}
+.proto .about-strip .chip .k{font-size:10px;font-weight:600;text-transform:uppercase;
+  letter-spacing:.05em;color:var(--p-muted)}
+.proto .about-strip .chip.lead{background:var(--p-primary-soft);border-color:transparent;
+  color:var(--p-primary);font-weight:600}
+
+/* ── search + toolbar ─────────────────────────────────────────────────────── */
+.proto .searchbox{position:relative;display:flex;align-items:center;flex:1 1 210px;
+  min-width:170px;max-width:320px}
+.proto .searchbox input{width:100%;font:inherit;font-size:12.5px;
+  border:1px solid var(--p-border-2);border-radius:var(--p-r-sm);
+  background:var(--p-surface);color:var(--p-ink);padding:6px 11px 6px 30px}
+.proto .searchbox input::placeholder{color:var(--p-faint)}
+.proto .searchbox input:focus-visible{outline:2px solid var(--p-primary);outline-offset:1px}
+.proto .searchbox .si{position:absolute;left:9px;width:14px;height:14px;
+  color:var(--p-faint);pointer-events:none}
+
+/* ── bulk decisions ─────────────────────────────────────────────────────────
+   Twenty files held for one broken export used to be twenty drawer opens. */
+.proto .bulkbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:10px 20px;background:var(--p-primary-soft);
+  border-bottom:1px solid var(--p-border);font-size:12.5px;font-weight:600;
+  color:var(--p-primary)}
+.proto .bulkbar .sp{margin-left:auto;display:flex;gap:8px;align-items:center}
+.proto td.cbcell,.proto th.cbcell{width:34px;padding-right:0}
+.proto tr.arow td.cbcell{padding-left:19px}
+.proto .cbcell input[type=checkbox]{width:15px;height:15px;accent-color:var(--p-primary);
+  cursor:pointer;margin:0;vertical-align:middle}
+
+/* ── new arrivals while you were looking ────────────────────────────────────
+   Rows are never reordered under the cursor; the bar is the invitation. */
+.proto .newbar{display:flex;align-items:center;gap:10px;padding:9px 20px;
+  background:var(--p-ok-soft);color:var(--p-ok-ink);font-size:12.5px;font-weight:600;
+  border-bottom:1px solid var(--p-border)}
+
+/* Three across, for any tile row that is not the Inbox's five. */
+.proto .tiles.three{grid-template-columns:repeat(3,1fr)}
+@media(max-width:1000px){.proto .tiles.three{grid-template-columns:1fr 1fr}}
+@media(max-width:700px){.proto .tiles.three{grid-template-columns:1fr}}
+
+/* ── the File column, after the checkbox ────────────────────────────────────
+   `td:where(:first-child){text-align:left}` above was what left-aligned the
+   filename. Adding a select-all checkbox made the checkbox the first child, so
+   the File column silently inherited the centred default and every filename and
+   refusal reason ragged itself around the middle of a 400px cell. The rule
+   follows the checkbox rather than assuming a position. */
+.proto thead th.cbcell + th,
+.proto tbody td.cbcell + td{text-align:left}
+
+/* ============================================================================
+   Ways in — one route, one full-width row
+   ----------------------------------------------------------------------------
+   Three layouts have been tried here. One row per CHANNEL stacked every broker
+   into shared cells, so you matched a name to an address by vertical position.
+   A card per broker fixed that but ran the full width, putting the name and its
+   controls a screen apart. Capping the card at 900px closed that gap and left
+   the card stranded in a container that runs to the edge — a card stopping
+   short of its own container reads as a rendering fault, and the wider the
+   monitor the worse it looks.
+   The cap belonged on the ADDRESS, not on the card. So: a grid row that fills
+   the width, with each thing in a column of its own. Two brokers on one channel
+   now line up, and are compared by reading straight down.
+   ============================================================================ */
+
+/* A channel gets a mark, so the four groups are told apart by shape before any
+   word is read. Tones match CAME_IN_BY on the Inbox tab — the same way in is
+   the same colour on both tabs. */
+.proto .chan-hd .ci{width:26px;height:26px;border-radius:var(--p-r-xs);flex:0 0 auto;
+  display:grid;place-items:center;background:var(--p-surface-3);color:var(--p-muted)}
+.proto .chan-hd .ci.ok{background:var(--p-ok-soft);color:var(--p-ok-ink)}
+.proto .chan-hd .ci.info{background:var(--p-primary-soft);color:var(--p-primary)}
+/* Ink, not faint. A group heading you have to hunt for is not a heading. */
+.proto .chan-hd .ttl{font-size:11px;letter-spacing:.08em;color:var(--p-ink)}
+
+.proto .routes{padding:0 20px 16px;display:grid;gap:10px}
+
+/* White with a real border. The old grey fill on a white card read as
+   "switched off" — which is a state this row can genuinely be in. */
+.proto .route{display:grid;
+  grid-template-columns:minmax(260px,1fr) auto;
+  align-items:center;gap:16px;max-width:none;
+  background:var(--p-surface);border:1px solid var(--p-border);
+  border-radius:var(--p-r-sm);padding:12px 14px;box-shadow:var(--p-sh-sm)}
+@media(max-width:900px){
+  .proto .route{grid-template-columns:1fr;gap:11px}
+  .proto .route .route-acts{justify-content:flex-end}
+}
+
+/* ── column 1 · who, and what you hand them ─────────────────────────────────
+   The address sits directly beneath the broker it belongs to. In its own middle
+   column it was a long way from the name that gave it meaning, and it stretched
+   a fixed proportion of the row whether it held a 46-character +address or the
+   19 characters of "POST /v1/bordereaux". */
+.proto .route-id{display:flex;flex-direction:column;align-items:flex-start;
+  gap:7px;min-width:0}
+.proto .route-id .idtop{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.proto .route .who{font-weight:600;font-size:13.5px}
+.proto .route .prog{font-size:11.5px;color:var(--p-muted);background:var(--p-surface-3);
+  padding:2px 8px;border-radius:var(--p-r-pill);white-space:nowrap}
+/* Italic and unchipped, because "Any" is not a programme name — and for an API
+   route it means the sender has to name one on every file. */
+.proto .route .prog.any{background:none;padding-left:0;color:var(--p-faint);font-style:italic}
+.proto .route-sub{margin-top:0;font-size:11.5px;color:var(--p-faint);line-height:1.5}
+.proto .route-sub.warnt{color:var(--p-warn-ink);font-weight:600}
+
+/* ── column 2 · the address ─────────────────────────────────────────────────
+   What this screen exists to hand somebody, so it is built as the thing it is:
+   a field with its Copy attached. `flex:1` used to stretch it the width of the
+   card, which put the button a screen away from the string it copies. */
+.proto .route-addr{display:flex;align-items:stretch;gap:0;margin-top:0;padding-top:0;
+  width:fit-content;max-width:min(100%,560px);min-width:0;
+  border:1px solid var(--p-border-2);border-radius:var(--p-r-xs);
+  background:var(--p-surface-2);overflow:hidden}
+.proto .route-addr code{flex:1;min-width:0;display:flex;align-items:center;
+  padding:7px 11px;font-family:var(--p-mono);font-size:11.5px;color:var(--p-ink);
+  word-break:break-all;line-height:1.4}
+.proto .route-addr .btn{flex:0 0 auto;border:0;border-left:1px solid var(--p-border-2);
+  border-radius:0;box-shadow:none;background:var(--p-surface);font-size:11.5px;padding:0 13px}
+.proto .route-addr .btn:hover{background:var(--p-primary-soft);color:var(--p-primary)}
+
+/* ── column 3 · the controls ────────────────────────────────────────────────
+   Collect now is safe, and it is what you press when a broker says "I sent it
+   an hour ago" — hiding it behind a ⋯ cost something every time. Only Switch
+   off was ever worth protecting, and it is protected by its confirm dialog
+   rather than by being hard to find. */
+.proto .route-acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* The state IS the control. An "On" badge next to a "Switch off" button was two
+   controls saying one thing. */
+.proto .sw{appearance:none;font:inherit;display:inline-flex;align-items:center;gap:8px;
+  background:none;border:0;padding:2px;cursor:pointer;border-radius:var(--p-r-xs)}
+.proto .sw:disabled{cursor:not-allowed;opacity:.55}
+.proto .sw:focus-visible{outline:2px solid var(--p-primary);outline-offset:1px}
+.proto .sw .track{width:34px;height:19px;border-radius:var(--p-r-pill);flex:0 0 auto;
+  background:var(--p-border-2);position:relative;transition:background .16s}
+.proto .sw .knob{position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;
+  background:#fff;box-shadow:0 1px 2px rgba(14,19,32,.3);transition:transform .16s}
+.proto .sw[aria-checked="true"] .track{background:var(--p-ok)}
+.proto .sw[aria-checked="true"] .knob{transform:translateX(15px)}
+.proto .sw .txt{font-size:12px;font-weight:600;color:var(--p-muted);min-width:20px;text-align:left}
+.proto .sw[aria-checked="true"] .txt{color:var(--p-ok-ink)}
+@media (prefers-reduced-motion: reduce){
+  .proto .sw .track,.proto .sw .knob{transition:none}
+}
+
+/* ============================================================================
+   Ways in, as a panel over the queue
+   ----------------------------------------------------------------------------
+   The tab strip is gone. The screen is the Inbox — the thing opened every
+   morning — and the setup half, opened about once a quarter, is a panel you
+   enter and leave. Going into setup therefore costs you nothing: the filters,
+   the scroll position and the ticked rows are all still there behind it.
+
+   Built on `.drawer` rather than as a new surface, because that already gets
+   the layering right. It matters here: the Settings and "Add a way in" dialogs
+   render INSIDE this panel, and `position: fixed` resolves against a
+   transformed ancestor rather than the viewport — so a panel animated with a
+   transform would clip its own modals. `.drawer.on` sets `transform: none`, so
+   at rest there is no containing block and the modals fill the viewport.
+
+   `visibility` keeps the closed panel out of the tab order while leaving it
+   MOUNTED, which is what lets the page head show a live route count and an
+   attention dot without opening anything.
+   ============================================================================ */
+.proto .drawer.wide{width:min(620px,94vw);visibility:hidden;
+  transition:transform .2s ease,visibility 0s .2s}
+.proto .drawer.wide.on{visibility:visible;transition:transform .2s ease}
+
+/* The panel is ~620px, and a media query cannot know that — it measures the
+   viewport, which is wide. So the panel restates the narrow layout itself. */
+.proto .wayspanel .tiles.three{grid-template-columns:repeat(3,1fr);gap:9px}
+.proto .wayspanel .tile{padding:11px 12px}
+.proto .wayspanel .tile .v{font-size:21px;margin-top:5px}
+.proto .wayspanel .tile .k{font-size:11px}
+.proto .wayspanel .tile .foot{font-size:10.5px;margin-top:4px}
+.proto .wayspanel .route{grid-template-columns:1fr;gap:11px}
+.proto .wayspanel .route-acts{justify-content:flex-start;flex-wrap:wrap}
+.proto .wayspanel .card{box-shadow:none;border-radius:var(--p-r-sm)}
+.proto .wayspanel .chan-hd{padding:11px 14px}
+.proto .wayspanel .routes{padding:0 14px 14px}
+.proto .wayspanel .card-h{padding:12px 14px}
+
+/* The button that opens it, carrying enough state that most days you never
+   have to. */
+.proto .btn .pcount{font-family:var(--p-mono);font-size:10.5px;font-weight:700;
+  background:var(--p-surface-3);color:var(--p-muted);padding:1px 6px;
+  border-radius:var(--p-r-pill)}
+.proto .btn .pdot{position:absolute;top:-3px;right:-3px;width:8px;height:8px;
+  border-radius:50%;background:var(--p-warn);box-shadow:0 0 0 2px var(--p-surface)}
+
+/* The contract record, in two columns. LEFT is the contract; RIGHT is the
+   paper trail about it. Below ~1150px they stack — side by side, neither is
+   wide enough to read a clause in, and the clause is the point. `align-items:
+   start` so the side column does not stretch to the height of a long wording. */
+.proto .rec-split{display:grid;grid-template-columns:minmax(0,1fr);gap:18px}
+@media (min-width:1150px){
+  .proto .rec-split{grid-template-columns:minmax(0,1fr) minmax(320px,360px);align-items:start}
+  /* Sticky only once there is something to sit beside. Stacked, it would pin
+     the card over the content below it. */
+  .proto .rec-side{position:sticky;top:18px}
+}
+.proto .rec-main{min-width:0}
+.proto .rec-side{min-width:0}
+/* The attach form lives in the side column, which is ~320px. Stack its
+   fields at every width rather than columns that only fit on the left. */
+.proto .docform{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
+.proto .docform .field{min-width:0}
+.proto .docform input[type=file]{max-width:100%}
+.proto .rec-side > .card{margin-bottom:18px}
+.proto .rec-side > .card:last-child{margin-bottom:0}
+
+/* Documents as tiles. In a side column a row of name-then-buttons wraps into
+   an unreadable ribbon; a tile keeps each document and its actions together. */
+.proto .doc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.proto .doc-tile{display:flex;flex-direction:column;gap:8px;padding:11px 12px;
+  border:1px solid var(--p-border);border-radius:var(--p-r-sm);background:var(--p-surface-2)}
+.proto .doc-tile .fn{display:block;margin-top:6px;color:var(--p-ink);font-size:12.5px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .doc-tile .sub{margin-top:3px}
+.proto .doc-tile .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto}
+
+/* History as a stepper. It is a sequence — sent, pushed back, revised, agreed,
+   signed — and the line down the left is what says so. */
+.proto .hist{list-style:none;margin:0;padding:0 0 0 22px;position:relative}
+.proto .hist::before{content:"";position:absolute;left:5px;top:6px;bottom:6px;
+  width:2px;background:var(--p-border)}
+.proto .hist li{position:relative;padding:0 0 16px}
+.proto .hist li:last-child{padding-bottom:0}
+.proto .hist .dot{position:absolute;left:-22px;top:3px;width:12px;height:12px;
+  border-radius:50%;background:var(--p-surface);box-shadow:0 0 0 2px var(--p-border)}
+.proto .hist li.now .dot{background:var(--p-primary);box-shadow:0 0 0 3px var(--p-primary-soft)}
+.proto .hist .what{font-size:13px;font-weight:600;color:var(--p-ink);text-transform:capitalize}
+.proto .hist li.now .what{color:var(--p-primary-h)}
+.proto .hist .when{font-size:11px;color:var(--p-faint);margin-top:1px}
+.proto .hist .said{margin-top:5px;font-size:12.5px;color:var(--p-muted);
+  border-left:2px solid var(--p-border-2);padding-left:8px}
+.proto .hist .moved{margin-top:5px;font-size:12px;color:var(--p-muted)}
+.proto .hist .moved .arrow{margin:0 5px;color:var(--p-faint)}
+
+/* ── narrow screens ─────────────────────────────────────────────────────────
+   Everything below is a fixed width giving way. Each breakpoint is the width
+   at which that particular thing stops being readable rather than a round
+   number applied to all of them. */
+
+/* The page header: title and actions share a row until the actions need more
+   than the title can spare, then they stack and the buttons go left-aligned
+   under it rather than stranded on the right. */
+@media(max-width:760px){
+  .proto .page-head{flex-direction:column;gap:12px}
+  .proto .page-head .actions{margin-left:0;width:100%}
+  .proto .page-head .t h2{font-size:21px}
+}
+
+/* The wording editor's section rail. 214px beside the text is most of a narrow
+   screen, so below this the rail becomes a strip above the clause it is
+   picking — still a list, no longer a column. */
+@media(max-width:900px){
+  .proto .doc{grid-template-columns:minmax(0,1fr)}
+  .proto .doc-rail{border-right:0;border-bottom:1px solid var(--p-border);
+    display:flex;gap:6px;overflow-x:auto;padding:8px}
+  .proto .doc-rail .doc-sec{flex:0 0 auto;max-width:190px;margin-bottom:0}
+  .proto .doc-rail > .btn{flex:0 0 auto}
+  .proto .doc-body{padding:16px 18px}
+}
+
+/* An agreed limit is three things across — the question, the value, and what
+   happens when a row breaks it. Under ~820px the value column squeezes the
+   question to two words a line, so they stack and the row keeps its meaning. */
+@media(max-width:820px){
+  .proto .lim{grid-template-columns:minmax(0,1fr);gap:8px;padding:14px 0}
+  .proto .lim.lim-h{display:none}
+  .proto .lim .unit{max-width:260px}
+}
+
+/* Card headers carry a title, a subtitle and sometimes actions. Let the
+   subtitle drop below the title rather than crushing both. */
+@media(max-width:700px){
+  .proto .card-h{flex-wrap:wrap}
+  .proto .card-h .right{margin-left:auto}
+  .proto .view{padding:20px 16px 56px}
+  .proto .doc-grid{grid-template-columns:minmax(0,1fr)}
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Party list (pages/Brokers.tsx) — the bits the shared table rules don't
+   cover: the name beside its avatar, the programme chips, the contract count
+   and the row's chevron.
+   ═════════════════════════════════════════════════════════════════════════ */
+.proto .party-org{display:flex;align-items:center;gap:12px;min-width:0}
+.proto .party-nm{display:block;font-weight:600;color:var(--p-ink);text-decoration:none;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .party-nm:hover{color:var(--p-primary);text-decoration:underline}
+.proto .party-dba{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .party-chips{display:inline-flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px}
+.proto .party-chip{font-size:11.5px;font-weight:600;color:var(--p-muted);background:var(--p-surface-2);
+  border:1px solid var(--p-border);border-radius:var(--p-r-xs);padding:2px 8px;white-space:nowrap;
+  text-decoration:none;transition:border-color .12s,color .12s}
+.proto .party-chip:hover{border-color:var(--p-primary);color:var(--p-primary)}
+.proto .party-count{display:inline-flex;align-items:center;gap:6px;font-weight:600;
+  color:var(--p-ink);font-variant-numeric:tabular-nums}
+.proto .party-count svg{color:var(--p-faint)}
+.proto .party-count.zero{color:var(--p-faint);font-weight:500}
+.proto .party-chev{color:var(--p-border-2);transition:transform .12s,color .12s}
+.proto .party-row:hover .party-chev{color:var(--p-primary);transform:translateX(2px)}
+
+/* Charts take keyboard focus (recharts' accessibility layer). Keep the ring for
+   keyboard users, but a mouse click on a clickable chart should not leave a
+   box drawn around it. */
+.proto .recharts-wrapper:focus:not(:focus-visible),
+.proto .recharts-wrapper :focus:not(:focus-visible){outline:none}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   .wiz — one step of Create a Contract: its parts as a rail down the left,
+   one part at a time in the panel on the right (components: WizardStep in
+   pages/ContractNew.tsx).
+
+   The four STAGES across the top are `.trail` above; this is the level below
+   them. Steps 2, 3 and 4 were a section list, a stack of cards and a
+   two-column form — three shapes for the same job — and each scrolled past
+   what came next. One shape, and the buttons stay where they were.
+   ═════════════════════════════════════════════════════════════════════════ */
+.proto .wiz{display:grid;grid-template-columns:268px minmax(0,1fr);gap:18px;align-items:start}
+
+.proto .wiz-rail{background:var(--p-surface);border:1px solid var(--p-border);border-radius:var(--p-r);
+  padding:8px;box-shadow:var(--p-sh-sm);position:sticky;top:16px;display:grid;gap:2px;align-content:start}
+.proto .wiz-rail .cap{display:flex;align-items:center;gap:6px;padding:8px 10px 6px;
+  font-size:10px;letter-spacing:1.1px;text-transform:uppercase;font-weight:700;color:var(--p-faint)}
+.proto .wiz-rail .cap .ct{margin-left:auto;letter-spacing:0;text-transform:none;font-weight:700}
+.proto .wiz-rail .sec{display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;align-items:start;
+  width:100%;border:0;background:transparent;padding:10px;border-radius:var(--p-r-sm);cursor:pointer;
+  text-align:left;font:inherit;color:var(--p-ink);position:relative;box-shadow:none}
+.proto .wiz-rail .sec:hover{background:var(--p-surface-2)}
+.proto .wiz-rail .sec .n{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
+  font-size:11px;font-weight:700;background:var(--p-surface-3);color:var(--p-muted);margin-top:1px}
+.proto .wiz-rail .sec .txt{min-width:0}
+.proto .wiz-rail .sec .t{display:block;font-size:13.5px;font-weight:600;line-height:1.35;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .wiz-rail .sec .m{display:block;font-size:11.5px;color:var(--p-faint);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proto .wiz-rail .sec.done .n{background:var(--p-ok-soft);color:var(--p-ok-ink)}
+.proto .wiz-rail .sec.warn .n{background:var(--p-warn-soft);color:var(--p-warn-ink)}
+.proto .wiz-rail .sec.warn .m{color:var(--p-warn-ink)}
+.proto .wiz-rail .sec.on{background:var(--p-primary-soft)}
+.proto .wiz-rail .sec.on .t{color:var(--p-primary)}
+.proto .wiz-rail .sec.on .m{color:var(--p-primary);opacity:.75}
+.proto .wiz-rail .sec.on .n{background:var(--p-primary);color:#fff}
+.proto .wiz-rail .sec.on::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;
+  border-radius:0 3px 3px 0;background:var(--p-primary)}
+.proto .wiz-rail .sec:focus-visible{outline:2px solid var(--p-primary);outline-offset:-2px}
+/* Step 2's delete × and its locked mark, in the row's top-right corner. */
+.proto .wiz-rail .sec .rm,.proto .wiz-rail .sec .keep{position:absolute;right:8px;top:9px;
+  font-size:14px;line-height:1;color:var(--p-faint)}
+.proto .wiz-rail .sec .rm{opacity:0;cursor:pointer}
+.proto .wiz-rail .sec:hover .rm,.proto .wiz-rail .sec.on .rm{opacity:1}
+.proto .wiz-rail .sec .rm:hover{color:var(--p-crit)}
+.proto .wiz-rail .tail{border-top:1px solid var(--p-border);margin-top:6px;padding:10px;display:grid;gap:6px}
+.proto .wiz-rail .tail .btn{width:100%;justify-content:center;padding:10px 12px;font-size:12.5px}
+
+.proto .wiz-pane{background:var(--p-surface);border:1px solid var(--p-border);border-radius:var(--p-r);
+  box-shadow:var(--p-sh);display:flex;flex-direction:column;min-height:520px;min-width:0}
+.proto .wiz-pane-h{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;
+  padding:16px 20px 14px;border-bottom:1px solid var(--p-border)}
+.proto .wiz-pane-h h3{margin:0;font-size:16.5px;font-weight:600;letter-spacing:-.1px}
+.proto .wiz-pane-h p{margin:4px 0 0;font-size:13px;color:var(--p-muted);max-width:72ch;line-height:1.55}
+.proto .wiz-pane-h .r{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.proto .wiz-pane-b{flex:1;padding:18px 20px;display:grid;gap:16px;align-content:start;min-width:0}
+.proto .wiz-pane-b>.note,.proto .wiz-pane-b>.hint{margin:0}
+.proto .wiz-pane-f{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:13px 20px;border-top:1px solid var(--p-border)}
+.proto .wiz-pane-f .r{margin-left:auto;display:flex;gap:8px}
+
+@media(max-width:1040px){
+  .proto .wiz{grid-template-columns:1fr}
+  /* The rail becomes a strip of tabs above the panel. */
+  .proto .wiz-rail{position:static;grid-auto-flow:column;grid-auto-columns:minmax(190px,1fr);
+    overflow-x:auto;gap:6px}
+  .proto .wiz-rail .cap{display:none}
+  /* The tail stays reachable — it holds Add a section and the two rewrite
+     buttons, which exist nowhere else on a narrow screen. */
+  .proto .wiz-rail .tail{border-top:0;border-left:1px solid var(--p-border);margin:0;align-content:center}
+}
+
+/* Files Received → Broker Follow-Up: version history timeline (newest first). */
+.proto .ver-tl{list-style:none;margin:4px 0 6px;padding:2px 0 2px 18px;position:relative;border-bottom:1px solid var(--p-border)}
+.proto .ver-tl::before{content:"";position:absolute;left:5px;top:12px;bottom:18px;width:2px;background:var(--p-border)}
+.proto .ver-tl li{position:relative;padding:8px 10px;margin:0 0 6px;border-radius:var(--p-r-sm);font-size:12.5px}
+.proto .ver-tl li.here{background:var(--p-surface-2,rgba(0,0,0,.03));box-shadow:inset 0 0 0 1px var(--p-border)}
+.proto .ver-tl .dot{position:absolute;left:-17px;top:13px;width:10px;height:10px;border-radius:50%;background:var(--p-muted);box-shadow:0 0 0 2px var(--p-surface)}
+.proto .ver-tl .dot.ok{background:var(--p-ok,#16a34a)}
+.proto .ver-tl .dot.warn{background:var(--p-warn,#d97706)}
+.proto .ver-tl .dot.crit{background:var(--p-crit,#dc2626)}
+.proto .ver-tl .dot.info{background:var(--p-info,#2563eb)}
+.proto .ver-tl .row1{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.proto .ver-tl .row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:3px;color:var(--p-muted);font-size:12px}
+.proto .ver-tl .lnk{margin-left:auto;border:0;background:none;padding:0;color:var(--p-info,#2563eb);font-weight:600;font-size:12px;cursor:pointer}
+.proto .ver-tl .lnk:hover{text-decoration:underline}
+
+/* Files Received panel footer: every action on ONE row, same height, Close
+   kept at the right edge — four buttons used to wrap Close onto a line alone. */
+.proto .drawer-f.one-row{flex-wrap:nowrap;align-items:center;gap:8px;padding:14px 16px}
+.proto .drawer-f.one-row .btn{white-space:nowrap;padding-left:12px;padding-right:12px;flex:0 0 auto}

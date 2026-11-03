@@ -8,10 +8,9 @@
  * programme's template, not this contract's" — while there is still time to
  * make one is the entire reason this shows the match level rather than a tick.
  */
-import { AlertTriangle, CheckCircle2, FileSpreadsheet, Plus } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, FileSpreadsheet, Plus } from "lucide-react";
 import Button from "./ui/Button";
 import type { ResolveResult } from "../api/outputTemplate";
-import { SHOW_BDX_TEMPLATE_BUILDER } from "../featureFlags";
 
 const SOURCE_LABEL: Record<string, string> = {
   uploaded: "built from an uploaded sample workbook",
@@ -36,14 +35,12 @@ export function isBroaderThanScope(r: ResolveResult | null): boolean {
   return false;
 }
 
-// The build-a-template flow can be switched off for a demo. This box is one of
-// its doors, so it reads the flag itself rather than making every caller pass
-// the same answer down.
-const CAN_BUILD = SHOW_BDX_TEMPLATE_BUILDER;
-
 export default function OutputTemplateState({
-  resolving, resolved, disabled, uploading, onCreate, onOpen, compact, hideMissing,
+  resolving, resolved, disabled, uploading, onCreate, onOpen, onDownload, compact, hideMissing,
 }: {
+  /** Download the saved template file. Only offered once one exists — before
+   *  creation there is nothing saved to download. */
+  onDownload?: (templateId: number) => void;
   resolving: boolean;
   resolved: ResolveResult | null;
   disabled?: boolean;
@@ -83,10 +80,9 @@ export default function OutputTemplateState({
           Nothing has been agreed for this
           {resolved?.scope.contract_id ? " contract" :
            resolved?.scope.broker_party_id ? " broker" : " programme"} yet.
-          Upload the layout you have been asked for
-          {CAN_BUILD ? ", or create one." : "."}
+          Upload the layout you have been asked for, or create one.
         </div>
-        {!compact && CAN_BUILD && (
+        {!compact && (
           <Button className="mt-2" variant="secondary" onClick={onCreate}>
             <Plus size={14} /> Create Output BDX Template
           </Button>
@@ -104,54 +100,64 @@ export default function OutputTemplateState({
     <Box tone={broader || mismatch ? "warn" : "ok"}
       icon={broader || mismatch ? <AlertTriangle size={14} />
         : <CheckCircle2 size={14} />}>
-      <div className="flex items-start gap-2">
-        <FileSpreadsheet size={14} className="mt-0.5 shrink-0 opacity-70" />
-        <div className="min-w-0">
-          <div className="font-medium truncate">{t.name}</div>
-          <div className="mt-0.5">
-            v{t.version} · {t.output_format.toUpperCase()} ·{" "}
-            {resolved.match_level
-              ? FOUND_VIA[resolved.match_level] ?? resolved.match_level
-              : "already saved"}
-            {t.standard_meta?.jurisdiction && (
-              <> · {t.standard_meta.standard} {t.standard_meta.jurisdiction}</>
+      {/* WHAT IT IS on the left, WHAT YOU CAN DO ABOUT IT on the right. The
+          card is as wide as the section it reports on, and three short lines
+          stacked above two buttons left a band of empty colour beside them —
+          which reads as something failing to load. Below sm they stack, where
+          the width to sit side by side is not there. */}
+      <div className="sm:flex sm:items-start sm:justify-between sm:gap-4">
+        <div className="flex items-start gap-2 min-w-0">
+          <FileSpreadsheet size={14} className="mt-0.5 shrink-0 opacity-70" />
+          <div className="min-w-0">
+            <div className="font-medium truncate">{t.name}</div>
+            <div className="mt-0.5">
+              v{t.version} · {t.output_format.toUpperCase()} ·{" "}
+              {resolved.match_level
+                ? FOUND_VIA[resolved.match_level] ?? resolved.match_level
+                : "already saved"}
+              {t.standard_meta?.jurisdiction && (
+                <> · {t.standard_meta.standard} {t.standard_meta.jurisdiction}</>
+              )}
+            </div>
+            <div className="text-[10.5px] opacity-80 mt-0.5">
+              {SOURCE_LABEL[t.source_kind] ?? t.source_kind} — nothing to upload
+              unless you want to use a new template.
+            </div>
+            {broader && !mismatch && (
+              <div className="mt-1">
+                This is the <b>{resolved.match_level}</b>'s template, not one made
+                for the selection above. It is what a run would use — make a more
+                specific one if this contract reports differently.
+              </div>
+            )}
+            {mismatch && (
+              <div className="mt-1">
+                The setup that runs here — <b>{resolved.setup!.name}</b> — was
+                built against <b>{resolved.setup!.output_template_name}</b>, not
+                this one. A setup learns its mapping from a single output
+                template, so build the setup below against this scope to use it.
+              </div>
             )}
           </div>
-          <div className="text-[10.5px] opacity-80 mt-0.5">
-            {SOURCE_LABEL[t.source_kind] ?? t.source_kind} — nothing you upload
-            here is needed unless you want to replace it.
-          </div>
-          {broader && !mismatch && (
-            <div className="mt-1">
-              This is the <b>{resolved.match_level}</b>'s template, not one made
-              for the selection above. It is what a run would use — make a more
-              specific one if this contract reports differently.
-            </div>
-          )}
-          {mismatch && (
-            <div className="mt-1">
-              The setup that runs here — <b>{resolved.setup!.name}</b> — was
-              built against <b>{resolved.setup!.output_template_name}</b>, not
-              this one. A setup learns its mapping from a single output
-              template, so build the setup below against this scope to use it.
-            </div>
-          )}
         </div>
-      </div>
-      {!compact && (
-        <div className="flex gap-2 mt-2">
-          {onOpen && (
-            <Button variant="secondary" onClick={() => onOpen(t.id)}>
-              Review fields
-            </Button>
-          )}
-          {CAN_BUILD && (
+        {!compact && (
+          <div className="flex flex-wrap gap-2 mt-2 sm:mt-0 sm:shrink-0">
+            {onOpen && (
+              <Button variant="secondary" onClick={() => onOpen(t.id)}>
+                Review fields
+              </Button>
+            )}
+            {onDownload && (
+              <Button variant="secondary" onClick={() => onDownload(t.id)}>
+                <Download size={14} /> Download template
+              </Button>
+            )}
             <Button variant="secondary" onClick={onCreate}>
-              <Plus size={14} /> {broader ? "Create one for this scope" : "Replace it"}
+              <Plus size={14} /> {broader ? "Create one for this scope" : "Upload a new template"}
             </Button>
-          )}
-        </div>
-      )}
+          </div>
+        )}
+      </div>
     </Box>
   );
 }

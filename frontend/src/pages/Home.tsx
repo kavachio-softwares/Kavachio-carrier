@@ -1,24 +1,71 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, downloadFile } from "../api/client";
-import { currentMga, getUser, userRole, ROLE_LABEL, type Role } from "../auth";
-import { fmtStamp } from "../utils/date";
+import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
+import { LayoutDashboard, Layers, Users, FileText, AlertCircle, Activity, Clock, ShieldCheck, UserCheck } from "lucide-react";
+import { api } from "../api/client";
+import { currentMga, getTenantBrand, getUser, isKavachioAdmin, userRole, ROLE_LABEL, type Role } from "../auth";
+import { canAccessPath } from "../access";
+
+import { getBoard, getCalendar, type BoardResponse, type CalendarStatus } from "../api/calendar";
+import { getBrokersPaged, getHierarchy } from "../api/hierarchy";
+import { listContractsPaged } from "../api/contractRecord";
+import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
+import { isHeld, listArrivals, type Arrival } from "../api/intake";
 import { InfoTip } from "../components/InfoTip";
-import { getCalendar, type CalendarStatus } from "../api/calendar";
+import { StatCard } from "../components/StatCard";
+import { ArrivalsCard } from "../components/ArrivalsCard";
+import BrokerPerformance from "../components/BrokerPerformance";
+import { DayFilesDrawer, type DayRuns } from "../components/DayFilesDrawer";
+import { clickedDayIndex } from "../components/BrokerCharts";
+
 
 type Stats = {
   uploads_today: number; uploads_total: number; open_bdx_cycles: number;
+  // This organisation's carrier users (not the carrier admin themselves),
+  // invited ones included. Never the brokers' people.
+  // Sent to the carrier admin only; null for a carrier user.
+  users_total?: number | null; users_invited?: number | null;
+  // Sent to a carrier user only: the broker companies THEY invited.
+  my_brokers?: number | null; my_brokers_pending?: number | null;
   parties_in_directory: number; pending_exceptions: number;
   ai_cache_hit_rate: number | null;
   // --- extended fields for the prototype KPIs (optional until the API adds them) ---
   exception_runs?: number;                                       // # runs with open exceptions
   exceptions_by_severity?: { critical: number; warning: number; info: number };
   runs_this_week?: number;
-  runs_by_day?: number[];                                        // last 7 days, for the sparkline
+  runs_by_day_status?: { clean: number; flagged: number; resolved: number; date?: string }[];
   active_setups?: number;
   active_setup_carriers?: number;
   mapping_tasks_open?: number;                                   // kavachio_admin tile
-  avg_turnaround_min?: number | null;                           // tenant/operator tile
+  pending_signatures?: number;
+  completed_signatures?: number;
+  /** Contracts it is the CARRIER's move on — a colleague's draft, a change the
+   *  broker asked for, and a signature due, together. A superset of
+   *  pending_signatures, which counts only the last of the three. */
+  contracts_waiting?: number;
+  /** Of those, the ones only the carrier admin can move: an uploaded contract
+   *  waiting to be accepted, or one whose terms the broker has agreed and
+   *  which now needs the carrier's signature. */
+  contracts_awaiting_admin?: number;
+  /** The two halves of contracts_waiting, in the order the work happens:
+   *  decide the contract, then sign it. They sum to contracts_waiting. */
+  contracts_pending_review?: number;
+  contracts_pending_signature?: number;
+  /** Terms already settled — the "done" count beside the review half. */
+  contracts_terms_agreed?: number;
+  /** Contracts in force whose term ends within the next
+   *  `contracts_expiring_soon_days` days (30). */
+  contracts_expiring_soon?: number;
+  contracts_expiring_soon_days?: number;
+  /** Contracts a broker sent back asking for changes — the carrier's move. */
+  contracts_changes_requested?: number;
+  /** Broker onboarding requests waiting on the carrier admin. Null for a
+   *  carrier user, who is not the one being asked. */
+  broker_requests_pending?: number | null;
+  /** Still served, but no longer drawn on this screen — the carrier's
+   *  "Avg Turnaround Time" box was hidden. Kept so the shape matches the
+   *  endpoint. */
+  avg_turnaround_min?: number | null;
 };
 // A "run" = a generated output export (carries the validation result).
 type Run = {
@@ -28,28 +75,114 @@ type Run = {
   source_upload_id: number | null;
 };
 const SUBTITLE: Record<Role, string> = {
-  carrier_admin:  "What needs you today, and your most recent bordereau runs.",
+  carrier_admin: "",
   kavachio_admin: "Platform activity and your most recent bordereau runs.",
   // Broker seats do not have a carrier Home yet — the API refuses a broker
   // token on every carrier route, so these are placeholders, not promises.
   broker_admin: "Your contracts and the files you have sent.",
-  operator:     "The files you have sent, and anything that needs fixing.",
+  operator: "The files you have sent, and anything that needs fixing.",
 };
+
+// The month + year filter over the three cards at the foot of the page. What
+// it picks is a PERIOD: "YYYY-MM" (one month), "YYYY" (a whole year) or ALL
+// (every year) — the same three the calendar board takes
+// (submission_calendar_service.ALL_MONTHS and a bare year). Months are local
+// time, the same way the cards always counted "this month".
+const ALL = "all";
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const monthKeyOf = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+const isYear = (p: string) => /^\d{4}$/.test(p);
+/** First and last instant of a period, local time; null for every year. */
+function periodRange(p: string): [Date, Date] | null {
+  if (p === ALL) return null;
+  if (isYear(p)) {
+    const y = Number(p);
+    return [new Date(y, 0, 1), new Date(y + 1, 0, 1, 0, 0, 0, -1)];
+  }
+  const [y, m] = p.split("-").map(Number);
+  return [new Date(y, m - 1, 1), new Date(y, m, 1, 0, 0, 0, -1)];
+}
+/** "September 2026", "2026", or "all years". */
+const periodName = (p: string) => p === ALL ? "all years" : isYear(p) ? p
+  : new Date(Number(p.slice(0, 4)), Number(p.slice(5, 7)) - 1, 1)
+      .toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+/** January … December, for the month dropdown. */
+const MONTH_NAMES = Array.from({ length: 12 }, (_, i) =>
+  new Date(2000, i, 1).toLocaleDateString("en-GB", { month: "long" }));
 
 export default function Home() {
   const mga = currentMga();
   const nav = useNavigate();
   const user = getUser();
   const role = userRole() ?? "operator";
+  // Same role, two seats at a carrier: only the owner is the Carrier Admin.
+  const seat = useCarrierSeat();
+  // The carrier admin's approval flow (server flag, off by default). Off, the
+  // two approval tiles below are not drawn and their row closes up.
+  const approvalsOn = !!getTenantBrand()?.approvals_enabled;
   const [stats, setStats] = useState<Stats | null>(null);
+  // The Bordereau Status day whose files are open in the side drawer.
+  const [statusDay, setStatusDay] = useState<string | null>(null);
   // Whether this tenant still needs first-time setup (carrier + Bordereau).
   const [needsSetup, setNeedsSetup] = useState(false);
   // The dashboard shows a small snapshot; the full, filterable history lives
   // on the dedicated Run history page (/runs).
   const RUNS_PAGE = 5;
   const [runs, setRuns] = useState<Run[]>([]);
+  // How many files have been run for this carrier THIS MONTH. Counted by the
+  // same endpoint the File Submissions screen pages through (with the same
+  // date range), so the two can never disagree. Never `runs.length`, which is
+  // the 5-row snapshot below and stopped at 5 however many files came in.
+  const [runsTotal, setRunsTotal] = useState<number | null>(null);
+  // How many programmes those bordereaux are on. Null when the month holds
+  // more than one page of them — a partial count would read as the whole.
+  const [runsProgrammes, setRunsProgrammes] = useState<number | null>(null);
   // Group 3: deadline counts for the "Deadlines" tile (own submission calendar).
   const [calCounts, setCalCounts] = useState<Partial<Record<CalendarStatus, number>>>({});
+  // The Bordereau Calendar's own counts, so the Overdue Bordereaux box and the
+  // page it opens always show the same numbers. Kept with the month it was
+  // asked for, so a month still loading never shows the last one's figures.
+  const [board, setBoard] = useState<{ period: string; data: BoardResponse } | null>(null);
+  // Every due-month the calendar has — part of what the month filter offers.
+  const [boardMonths, setBoardMonths] = useState<string[]>([]);
+  // "How big is my book" — the two directory sizes, each read from the SAME
+  // endpoint its own screen reads. /dashboard/stats already carries a programme
+  // count (`open_bdx_cycles`) but it counts only app-managed ACTIVE ones, so a
+  // tile fed from it would disagree with the Programmes screen, which lists the
+  // tenant's programmes unfiltered. The broker directory is a union (on a
+  // programme + created here + invited + invitation still pending) that only
+  // /brokers assembles, so re-deriving it anywhere else would drift from the
+  // "N parties" the Party screen prints.
+  const [progCount, setProgCount] = useState<number | null>(null);
+  const [partyCount, setPartyCount] = useState<number | null>(null);
+  const [contractCount, setContractCount] = useState<number | null>(null);
+  // Bordereau setups a colleague has sent up and this carrier admin has not
+  // decided on. The carrier admin's ONLY "waiting on me" — a setup sitting
+  // here is a broker who cannot send a file yet, so it belongs on the first
+  // screen they see rather than somewhere they have to think to look.
+  const [pendingSetups, setPendingSetups] = useState<number | null>(null);
+  // Files no longer has a sidebar entry — the dashboard is its way in. The
+  // card counts the files received this month; the filters and decisions all
+  // stay on /files, so they are not repeated here.
+  // /intake/arrivals has no date filter, so the newest ones are fetched (its
+  // cap, 500) and the month is counted here. It used to fetch 5 and print how
+  // many came back, which could never read more than 5.
+  const ARRIVALS_FETCH = 500;
+  const [arrivals, setArrivals] = useState<Arrival[] | null>(null);
+
+  // ONE period for the cards at the foot of the page — Overdue
+  // Bordereaux and Bordereaux Processed — picked as a month and a
+  // year in the bar above them. "All Months" takes the whole year, "All Years"
+  // everything. It opens on the current month, which is what they all
+  // counted before there was a pick.
+  const [year, setYear] = useState<string>(String(new Date().getFullYear()));
+  const [month, setMonth] = useState<string>(pad2(new Date().getMonth() + 1));
+  const period = year === ALL ? ALL : month === ALL ? year : `${year}-${month}`;
+  const everyMonth = period === ALL;
+  const [monthStart, monthEnd] = periodRange(period) ?? [null, null];
+  // How the cards name the pick.
+  const countWhen = everyMonth ? "across all years" : `in ${periodName(period)}`;
+  const infoWhen = everyMonth ? "" : ` in ${periodName(period)}`;
 
   useEffect(() => {
     api.get<Stats>(`/dashboard/stats`, { params: { mga } }).then(r => setStats(r.data));
@@ -58,6 +191,134 @@ export default function Home() {
   useEffect(() => {
     getCalendar().then(c => setCalCounts(c.counts ?? {})).catch(() => setCalCounts({}));
   }, [mga]);
+
+  // Both carrier seats; Kavachio staff have the box on their own dashboard.
+  useEffect(() => {
+    if (role !== "carrier_admin") return;
+    let live = true;
+    getBoard(period)
+      .then(b => { if (live) { setBoard({ period, data: b }); setBoardMonths(b.months ?? []); } })
+      .catch(() => { if (live) setBoard(null); });
+    return () => { live = false; };
+  }, [mga, role, period]);
+  // The board answers with ANOTHER month when nothing fell due in the one
+  // asked for (the calendar opens on real work) — for this box, that month
+  // simply owed nothing.
+  const boardNow = board?.period === period ? board.data : null;
+  const due = boardNow
+    ? (boardNow.month === period ? boardNow.counts : { on_time: 0, late: 0, never: 0 })
+    : null;
+
+  // Both directories are carrier-scoped. A broker seat carries no tenant, so
+  // these routes answer "no tenant bound to this user" for them — don't ask.
+  const carrierSeat = role === "carrier_admin" || role === "kavachio_admin";
+  // Process Bordereau follows the route rules (access.ts), so its button and
+  // links show exactly to the seats that may open it.
+  const canProcess = canAccessPath("/direct");
+
+  useEffect(() => {
+    if (!carrierSeat) return;
+    getHierarchy()
+      .then(h => setProgCount(h.programmes?.length ?? 0))
+      .catch(() => setProgCount(null));
+    // page_size 1 because only `total` is wanted — it (and `stranded`) are
+    // counted over the whole directory server-side, not over the page, so the
+    // smallest possible page still yields the real figure.
+    // `mine`: the same list the Party screen shows — for a carrier user, the
+    // broker companies they invited.
+    getBrokersPaged({ page: 1, page_size: 1, mine: true })
+      .then(r => setPartyCount(r.total))
+      .catch(() => setPartyCount(null));
+    // Same trick, same reason: sent with no filters so `total` is the carrier's
+    // whole book — which is the unfiltered figure the Contracts screen prints.
+    listContractsPaged({ page: 1, page_size: 1 })
+      .then(r => setContractCount(r.total))
+      .catch(() => setContractCount(null));
+  }, [mga, carrierSeat]);
+
+  // Only the carrier admin can decide on these, so only they are asked to.
+  useEffect(() => {
+    if (!addsCarrierUsers(seat) || !approvalsOn) { setPendingSetups(null); return; }
+    api.get<{ total: number }>("/pipelines", {
+      params: { mga, status: "pending_approval", page: 1, page_size: 1 },
+    })
+      .then(r => setPendingSetups(r.data?.total ?? 0))
+      .catch(() => setPendingSetups(null));
+  }, [mga, seat, approvalsOn]);
+
+  // The carrier admin's dashboard is trimmed to the book counts, the two
+  // approval tiles (flag on) and the two multi-count boxes. Active Setups,
+  // Exceptions to Review, Files Runs This Week, the Pending Contract half of
+  // the contract box and the Exceptions Breakdown chart are not drawn for
+  // them. Keyed on the role, not the seat, so they do not flash in while the
+  // organisation loads. Kavachio staff keep the full set.
+  const carrierAdmin = role === "carrier_admin";
+  // The carrier ADMIN's grid is 12 columns: the three book counts and Pending
+  // Signatures a quarter of a row each, then the approval tiles (flag on) half
+  // a row each. Overdue Bordereaux is not in this grid — it sits at the foot
+  // of the page beside the two link cards. Everyone else's grid is untouched —
+  // `cell` hands the tile back as it is.
+  const adminGrid = carrierAdmin && addsCarrierUsers(seat);
+  const cell = (span: number, node: ReactNode) => adminGrid
+    ? <div style={{ gridColumn: `span ${span}`, display: "grid" }}>{node}</div>
+    : node;
+
+  // Contracts whose terms are settled and which now wait on the carrier's
+  // signature. Falls back to the older signatures-only figure on a server
+  // that does not send the split, so the tile never reads blank.
+  const pendingSignature = stats?.contracts_pending_signature
+    ?? stats?.pending_signatures ?? 0;
+  const expiringSoon = stats?.contracts_expiring_soon ?? 0;
+  const changesRequested = stats?.contracts_changes_requested ?? 0;
+  const expiringDays = stats?.contracts_expiring_soon_days ?? 30;
+
+  // /files is carrier-only (ROUTE_ACCESS), so only a carrier seat that can open
+  // it gets the card — anyone else would be shown links that bounce them back.
+  const showFiles = canAccessPath("/files") && !isKavachioAdmin();
+  useEffect(() => {
+    if (!showFiles) return;
+    listArrivals(ARRIVALS_FETCH)
+      .then(r => setArrivals(r.rows))
+      .catch(() => setArrivals([]));
+  }, [mga, showFiles]);
+  // Every file that reached the carrier in the picked month, accepted or not.
+  const arrivalsInPeriod = arrivals?.filter(a => {
+    const t = a.received_at ? new Date(a.received_at) : null;
+    if (!t) return false;
+    return everyMonth || (!!monthStart && !!monthEnd && t >= monthStart && t <= monthEnd);
+  });
+  const receivedInPeriod = arrivalsInPeriod?.length;
+  // Of those, the ones still On Hold — held at intake and nobody has decided
+  // yet. The same test as the On Hold tile on Files Received, so both agree.
+  const onHoldInPeriod = arrivalsInPeriod?.filter(a =>
+    a.outcome !== "accepted" && isHeld(a) && !a.resolution).length ?? 0;
+  // And the ones whose processing failed — the red "Failed" status on Files
+  // Received: accepted, but the check stopped and nothing was saved.
+  const failedInPeriod = arrivalsInPeriod?.filter(a =>
+    a.outcome === "accepted" && a.run_result === "failed").length ?? 0;
+  // Only the newest ARRIVALS_FETCH come back. When that many did, a pick that
+  // reaches back past the oldest of them may hold more than are counted, and
+  // the number says so ("500+") rather than passing for the whole of it.
+  const oldestArrival = arrivals && arrivals.length >= ARRIVALS_FETCH
+    ? arrivals.reduce<Date | null>((m, a) => {
+        const t = a.received_at ? new Date(a.received_at) : null;
+        return t && (!m || t < m) ? t : m;
+      }, null)
+    : null;
+  const receivedMore = !!oldestArrival
+    && (everyMonth || (!!monthStart && monthStart < oldestArrival));
+
+  // The years the filter offers: this one back to the first with anything in
+  // it — a due date on the calendar or a file received — at most ten. Every
+  // year offers all twelve months.
+  const yearOptions = useMemo(() => {
+    const thisYear = new Date().getFullYear();
+    const seen = [...boardMonths,
+      ...(arrivals ?? []).flatMap(a => a.received_at ? [monthKeyOf(new Date(a.received_at))] : [])]
+      .map(k => Number(k.slice(0, 4))).filter(y => y > 0 && y <= thisYear);
+    const first = Math.max(seen.length ? Math.min(...seen) : thisYear, thisYear - 9);
+    return Array.from({ length: thisYear - first + 1 }, (_, i) => String(thisYear - i));
+  }, [boardMonths, arrivals]);
 
   // Can the operator actually work yet? That hinges on there being an approved
   // Bordereau Setup to process against (`bordereau_ready`) — NOT on the full
@@ -78,9 +339,40 @@ export default function Home() {
       .catch(() => setRuns([]));
   }, [mga]);
 
+  // The total, bought for one row: `page` makes /direct/runs answer with
+  // {items, total}, and the total is counted over the whole date range rather
+  // than over the page. One full page (the endpoint's maximum) also gives the
+  // programmes they are on; past one page that count is left out.
+  // No date range for All Years: the total is then every file ever run.
+  useEffect(() => {
+    let live = true;
+    setRunsTotal(null);
+    setRunsProgrammes(null);
+    api.get<{ total: number; items: { program_id: number | null }[] }>(`/direct/runs`, { params: {
+      mga, page: 1, page_size: 200,
+      ...(monthStart && monthEnd
+        ? { date_from: monthStart.toISOString(), date_to: monthEnd.toISOString() } : {}),
+    } })
+      .then(r => {
+        if (!live) return;
+        const total = r.data?.total ?? null;
+        const items = r.data?.items ?? [];
+        setRunsTotal(total);
+        setRunsProgrammes(total != null && items.length >= total
+          ? new Set(items.map(i => i.program_id).filter(id => id != null)).size
+          : null);
+      })
+      .catch(() => { if (live) { setRunsTotal(null); setRunsProgrammes(null); } });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mga, period]);
+
   const fmt = (v: number | null | undefined) => (v == null ? "—" : v);
-  const runHasExc = (r: Run) => r.status === "has_exceptions" || r.exception_count > 0;
-  // Exception triage for a generated run — matches the Outputs page route.
+  // A not-validated run is never clean: its checks did not run (it carries one
+  // notice entry, so exception_count > 0 already sends it to triage).
+  const runNotValidated = (r: Run) => r.status === "not_validated";
+  const runHasExc = (r: Run) =>
+    r.status === "has_exceptions" || runNotValidated(r) || r.exception_count > 0;
   // In download mode UploadExceptions loads by `download` id; the uploadId in the
   // path is only used for link-building, so 0 is a safe placeholder when absent.
   const goTriage = (r: Run) =>
@@ -90,12 +382,32 @@ export default function Home() {
   const latestExcRun = runs.find(runHasExc);
   const openTriage = () =>
     latestExcRun ? goTriage(latestExcRun)
-    : runs[0]    ? goTriage(runs[0])
-    : nav("/uploads/0/exceptions?from=home");
+      : runs[0] ? goTriage(runs[0])
+        : nav("/uploads/0/exceptions?from=home");
 
   const sev = stats?.exceptions_by_severity;
-  const spark = stats?.runs_by_day;
-  const sparkMax = spark && spark.length ? Math.max(...spark, 1) : 1;
+
+  const pieData = [
+    { name: "Critical", value: sev?.critical || 0, color: "#ef4444" },
+    { name: "Warning", value: sev?.warning || 0, color: "#f59e0b" },
+    { name: "Info", value: sev?.info || 0, color: "#3b82f6" },
+  ].filter(d => d.value > 0);
+
+  if (pieData.length === 0 && stats?.pending_exceptions) {
+    pieData.push({ name: "Uncategorized", value: stats.pending_exceptions, color: "#94a3b8" });
+  }
+
+  // The last seven days, oldest first. Named by each day's real weekday — the
+  // series starts six days ago, not on a Monday.
+  const statusSeries = (stats?.runs_by_day_status ?? []).map((d, i) => ({
+    date: d.date,
+    name: d.date
+      ? new Date(`${d.date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short" })
+      : `Day ${i + 1}`,
+    clean: d.clean || 0,
+    flagged: d.flagged || 0,
+    resolved: d.resolved || 0,
+  }));
 
   // Only a carrier admin can run the org/carrier/Bordereau setup. Until it is
   // done, anyone else gets a single notice instead of a dashboard with nothing
@@ -118,6 +430,131 @@ export default function Home() {
     );
   }
 
+  // Signatures only. The box used to split into Pending Contract and Pending
+  // Signatures; the contract half was taken off the carrier admin's dashboard,
+  // so the number, the red edge and the ⓘ all speak about signatures and
+  // nothing else. Carrier ADMIN only (plus Kavachio staff) — signing is theirs.
+  const signaturesTile = addsCarrierUsers(seat) ? (
+    // Named for the thing and the action ("Contracts to Sign"), not the bare
+    // "Pending Signatures", which did not say whose signature or on what.
+    <StatCard
+      title="Contracts to Sign"
+      value={fmt(pendingSignature)}
+      icon={FileText}
+      // A broker asking for changes is on this desk too — nothing can be
+      // signed until the carrier answers it — so it lights the tile as well.
+      tone={pendingSignature || changesRequested ? "alert" : undefined}
+      subtitle={`${stats?.completed_signatures ?? 0} fully signed`}
+      footer={changesRequested > 0 ? (
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--p-crit)" }}>
+          {changesRequested} {changesRequested === 1 ? "contract has" : "contracts have"}
+          {" "}changes requested by the broker
+        </div>
+      ) : undefined}
+      onClick={() => nav("/contracts?waiting=mine")}
+      info={"Contracts whose terms your broker has agreed and which are now "
+            + "waiting for your signature as the carrier. \"Fully signed\" "
+            + "counts the contracts both you and the broker have signed. A "
+            + "contract the broker has sent back with changes requested is "
+            + "shown in red below — answer it before it can be signed."}
+    />
+  ) : null;
+
+  // Incoming files. NOT RENDERED since 6 Oct 2026 — the user asked for it off
+  // the dashboard. Kept so it can be put back; Files Received is still reached
+  // from the Ingestion button and Bordereau Calendar, and its counts still
+  // feed the Bordereaux Processed tooltip below.
+  const incomingCard = showFiles && (
+    <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/files")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "var(--p-shadow)"; }}>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "var(--p-surface-2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+          </div>
+          <h3 style={{ margin: 0, fontSize: 18 }}>Files Received</h3>
+          <InfoTip text={`All bordereau files your brokers sent${infoWhen}, across `
+            + "every channel — including files on hold or rejected at intake. "
+            + "Below the total, amber counts files on hold (waiting for you to "
+            + "release or discard them) and red counts files whose processing "
+            + "failed (nothing was saved; safe to retry). Click to view them all."} />
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span style={{ fontSize: 32, fontWeight: 600, color: "var(--p-text)" }}>
+            {fmt(receivedInPeriod)}{receivedMore ? "+" : ""}
+          </span>
+          <span style={{ color: "var(--p-muted)", fontSize: 14 }}>
+            {receivedInPeriod === 1 && !receivedMore ? "file" : "files"} {countWhen}
+          </span>
+        </div>
+        {/* Only what needs attention — a zero would just be noise. */}
+        {(onHoldInPeriod > 0 || failedInPeriod > 0) && (
+          <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {onHoldInPeriod > 0 && (
+              <AttentionChip n={onHoldInPeriod} what="on hold — needs your review"
+                bg="#FEF3C7" fg="#B45309" dot="#D97706" />
+            )}
+            {failedInPeriod > 0 && (
+              <AttentionChip n={failedInPeriod} what="failed — processing stopped"
+                bg="#FEE2E2" fg="#B91C1C" dot="#DC2626" />
+            )}
+          </div>
+        )}
+      </div>
+      <div style={{ opacity: 0.3 }}>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </div>
+    </div>
+  );
+
+  // How Files Received becomes Bordereaux Processed. Of the files that
+  // arrived, only those that passed intake are processed; and a bordereau (one
+  // programme + contract + broker + reporting period) re-sent as a correction
+  // is a new VERSION of the same bordereau, so it is counted once — its latest
+  // version. Said with this period's own numbers when they are to hand.
+  const acceptedInPeriod = arrivalsInPeriod?.filter(a => a.outcome === "accepted").length;
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  const processedTip = "A bordereau is one broker's report for one programme, for one month. "
+    + ((receivedInPeriod != null && acceptedInPeriod != null && runsTotal != null && !receivedMore)
+      ? `${acceptedInPeriod} of the ${plural(receivedInPeriod, "file", "files")} received${infoWhen} `
+        + `${acceptedInPeriod === 1 ? "was" : "were"} processed. Re-sent files count once (latest copy), `
+        + `so that's ${plural(runsTotal, "bordereau", "bordereaux")}`
+        + (runsProgrammes != null
+          ? ` across ${plural(runsProgrammes, "programme", "programmes")}. ` : ". ")
+      : "Re-sent files count once (latest copy). ")
+    + "Click to see each result.";
+
+  // Recent runs
+  const recentCard = (
+    <div className="card" style={{ padding: 24, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", border: "none", transition: "transform 0.2s, box-shadow 0.2s" }} onClick={() => nav("/runs?from=home")} onMouseOver={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 10px 15px -3px rgba(15,23,42,0.4), 0 4px 6px -4px rgba(15,23,42,0.4)"; }} onMouseOut={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 8, backgroundColor: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          </div>
+          {/* "Processed" rather than "Completed": a run in this count may
+              have come back with exceptions still open, and calling that
+              completed is the one reading a carrier must not take from
+              this card. */}
+          <h3 style={{ margin: 0, fontSize: 18, color: "white" }}>Bordereaux Processed</h3>
+          <span className="on-dark">
+            <InfoTip text={processedTip} />
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span style={{ fontSize: 32, fontWeight: 600, color: "white" }}>
+            {fmt(runsTotal)}
+          </span>
+          <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 14 }}>
+            {runsTotal === 1 ? "bordereau" : "bordereaux"} {countWhen}
+          </span>
+        </div>
+      </div>
+      <div style={{ opacity: 0.5, color: "white" }}>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </div>
+    </div>
+  );
+
   return (
     <div className="proto">
       <div className="view full">
@@ -126,174 +563,322 @@ export default function Home() {
             <h2>Dashboard</h2>
             <p>{SUBTITLE[role]}</p>
           </div>
-          <div className="actions">
-            <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>
-          </div>
-        </div>
-
-        {/* KPI tiles — wired to /dashboard/stats (see API notes for the new fields) */}
-        <div className="tiles" style={{ marginBottom: 18 }}>
-          {/* Exceptions to review */}
-          <div className="tile alert">
-            <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              Exceptions to Review
-              <InfoTip text="Cells that failed a validation rule and are still waiting on a decision, across every bordereau you've processed. “Open Triage” takes you to your most recent run that has exceptions, where you can approve, fix or dismiss each one." />
-            </div>
-            <div className="v" style={{ color: "var(--p-crit)" }}>
-              {fmt(stats?.pending_exceptions)}
-              {stats?.exception_runs != null && <small> · {stats.exception_runs} runs</small>}
-            </div>
-            {sev && (
-              <div className="sevbar">
-                <i className="c" style={{ flex: sev.critical || 0 }} />
-                <i className="w" style={{ flex: sev.warning || 0 }} />
-                <i className="i" style={{ flex: sev.info || 0 }} />
-              </div>
-            )}
-            <div className="foot"><span className="linkish" onClick={openTriage}>Open Latest Exception Triage →</span></div>
-          </div>
-
-          {/* Runs this week */}
-          <div className="tile">
-            <div className="k">Runs This Week</div>
-            <div className="v">{fmt(stats?.runs_this_week)}</div>
-            {spark && spark.length > 0 && (
-              <div className="spark">
-                {spark.map((n, i) => (
-                  <i key={i}
-                    className={i === spark.length - 1 ? "hi" : undefined}
-                    style={{ height: `${Math.max(10, Math.round((n / sparkMax) * 100))}%` }} />
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Active setups — falls back to open_bdx_cycles (active programs) until
-              the API exposes a dedicated active_setups count. */}
-          <div className="tile">
-            <div className="k">Active Setups</div>
-            <div className="v">{fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}</div>
-            {stats?.active_setup_carriers != null && (
-              <div className="foot">across {stats.active_setup_carriers} carriers</div>
-            )}
-          </div>
-
-          {/* Role-specific 4th tile */}
-          {role === "kavachio_admin" ? (
-            <div className="tile">
-              <div className="k">Mapping Tasks</div>
-              <div className="v">{fmt(stats?.mapping_tasks_open)}</div>
-              <div className="foot"><Link className="linkish" to="/admin/mapping-tasks">Data-Model Queue →</Link></div>
-            </div>
-          ) : (
-            <div className="tile">
-              <div className="k" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                Avg Turnaround
-                <InfoTip text="Average time from a file being uploaded to its validation finishing, over uploads validated in the last 30 days." />
-              </div>
-              <div className="v">
-                {stats?.avg_turnaround_min == null ? "—" : stats.avg_turnaround_min}
-                <small> min</small>
-              </div>
-              <div className="foot">file → validated output</div>
+          {canProcess && (
+            <div className="actions">
+              <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>
             </div>
           )}
+        </div>
 
-          {/* Group 3: Deadlines — surfaces only when something needs attention, so
-              the dashboard stays clean until a bordereau is coming due or missed.
+        {/* KPI tiles — wired to /dashboard/stats (see API notes for the new fields).
 
-              Leads with the WORST state rather than a single blended number. It
-              used to headline `due_soon + overdue` under the word "due soon",
-              which called already-missed deadlines upcoming, and then reported
-              "late" separately — three states, two of them past due, presented as
-              if one of them were still ahead of you. */}
-          {/* HIDDEN FOR NOW, at request — commented out rather than deleted so it
-              can come straight back. Everything it needs is still live: the
-              counts are still fetched above, My Calendar still shows the same
-              deadlines, and the reminder bell still counts them. */}
-          {/* {role !== "kavachio_admin" && (() => {
-            const overdue = calCounts.overdue ?? 0;
-            const upcoming = (calCounts.due_today ?? 0) + (calCounts.due_soon ?? 0);
-            if (overdue + upcoming === 0) return null;
-            return (
-              <div className={`tile${overdue > 0 ? " alert" : ""}`}>
-                <div className="k">Deadlines</div>
-                <div className="v" style={{ color: overdue > 0 ? "var(--p-crit)" : undefined }}>
-                  {overdue > 0 ? overdue : upcoming}
-                  <small>{overdue > 0 ? " overdue" : " due soon"}</small>
+            ONE grid for all of them, so every tile is the same width: four to a
+            row, which lands the book counts on the first row beside Active
+            Setups and the three operational tiles on the second. Two separate
+            grids sized the numbers differently row to row, which read as two
+            unrelated components rather than one panel. */}
+        <div style={{ display: "grid", gridTemplateColumns: adminGrid ? "repeat(12, 1fr)" : seat === "user" ? "repeat(3, 1fr)" : (role === "kavachio_admin" ? "repeat(4, 1fr)" : "repeat(5, 1fr)"), gap: 20, marginBottom: 24 }}>
+          {!carrierAdmin && seat !== "user" && (
+            <StatCard
+              title="Active Setups" value={fmt(stats?.active_setups ?? stats?.open_bdx_cycles)}
+              icon={LayoutDashboard} subtitle=""
+            />
+          )}
+
+          {carrierSeat && (
+            <>
+              {cell(3, <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />)}
+
+              {seat !== "user" && (
+                cell(3, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
+              )}
+
+              {/* The sub-line appears only when something is about to run out
+                  — a "0 expiring" line would be one more thing to read past. */}
+              {cell(3, <StatCard title="Contracts" value={fmt(contractCount)} icon={FileText} onClick={() => nav("/contracts")}
+                subtitle={expiringSoon
+                  ? `${expiringSoon} ${expiringSoon === 1 ? "contract" : "contracts"} expiring in the next ${expiringDays} days`
+                  : ""} />)}
+
+              {carrierAdmin && cell(3, signaturesTile)}
+
+              {/* No Carrier Users tile: carrier users were retired on 29 Sep 2026. */}
+            </>
+          )}
+
+          {!carrierAdmin && (
+            <>
+              <StatCard
+                title="Exceptions to Review" value={fmt(stats?.pending_exceptions)}
+                icon={AlertCircle} tone="alert" subtitle=""
+              />
+
+              <StatCard title="Files Runs This Week" value={fmt(stats?.runs_this_week)} icon={Activity} />
+            </>
+          )}
+
+          {/* Kavachio staff only. This used to be a ternary whose other half
+              was "Avg Turnaround Time" for the carrier seats; that box is
+              hidden now, so there is nothing to fall back to. The figure is
+              still served (`avg_turnaround_min`) and the broker's own
+              dashboard still draws its version of it — only the carrier's box
+              is gone. */}
+          {role === "kavachio_admin" && (
+            <StatCard title="Mapping Tasks" value={fmt(stats?.mapping_tasks_open)} icon={Clock} onClick={() => nav("/admin/mapping-tasks")} />
+          )}
+
+          {/* The OTHER thing that stops on the carrier admin's desk, and the
+              only one the contract tile beside it cannot count: a bordereau
+              setup a colleague finished and sent up. It was already being
+              fetched for this screen and then rendered nowhere, so the one
+              place the admin looks first said nothing about it and the setup
+              sat waiting until somebody happened to open Bordereau Setup.
+
+              Its own tile rather than a line inside "Contract Review": that one
+              counts CONTRACTS and opens the contracts list, and folding a
+              second kind of thing into its number would make the figure and
+              the screen it opens disagree.
+
+              Carrier ADMIN only, like the fetch that feeds it — approving a
+              setup is theirs alone, so for a carrier user this would count
+              work they cannot do. They are told through the bell instead. */}
+          {addsCarrierUsers(seat) && approvalsOn && cell(6,
+            <StatCard
+              title="BDX Setup Review"
+              value={fmt(pendingSetups ?? 0)}
+              icon={ShieldCheck}
+              tone={pendingSetups ? "alert" : undefined}
+              subtitle={pendingSetups
+                ? `${pendingSetups === 1 ? "setup is" : "setups are"} waiting `
+                  + "on you"
+                : `${stats?.active_setups ?? 0} live`}
+              onClick={() => nav("/direct/setups?status=pending_approval")}
+              info={"Bordereau setups your carrier users have finished and sent "
+                    + "up. Nothing about one reaches the broker until you "
+                    + "approve it — not the programme, not the contract and "
+                    + "not the BDX template."}
+            />
+          )}
+
+          {/* The THIRD thing that stops on the carrier admin's desk, and the
+              earliest of the three: a broker a colleague wants to bring on.
+              Nothing has been sent to that broker and nothing exists for them
+              yet — this is the one gate where waiting costs nobody anything,
+              which is exactly why it would otherwise go unnoticed.
+
+              ALWAYS SHOWN, at nought as well. "Nothing is waiting on me" is
+              the answer the admin comes to the dashboard for, and a tile that
+              appears only when there is news is one nobody learns to trust.
+              The count comes back as a number for them and null for a carrier
+              user, so the seat test and the data agree.
+
+              Not folded into BDX Setup Review beside it: that one counts
+              setups and opens the setups list. These are two decisions about
+              two different things, taken weeks apart. */}
+          {addsCarrierUsers(seat) && approvalsOn && cell(6,
+            <StatCard
+              title="Broker Onboarding Pending"
+              value={fmt(stats?.broker_requests_pending ?? 0)}
+              icon={UserCheck}
+              tone={stats?.broker_requests_pending ? "alert" : undefined}
+              subtitle={stats?.broker_requests_pending
+                ? `${stats.broker_requests_pending === 1 ? "broker is" : "brokers are"} `
+                  + "waiting on you"
+                : "nothing waiting"}
+              onClick={() => nav("/brokers/requests")}
+              info={"Brokers your carrier users want to bring on board. Nothing "
+                    + "has been sent to any of them — they hear from Kavachio "
+                    + "only once you approve. Approving sends the invitation; "
+                    + "what they may send you is still settled by the bordereau "
+                    + "setup approval."}
+            />
+          )}
+
+
+          {/* Kavachio staff keep the box where it always was; the carrier
+              admin has it on the first row. */}
+          {!carrierAdmin && signaturesTile}
+
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 24, marginBottom: 24 }}>
+          {/* Processing Volume Chart */}
+          <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
+            <div className="card-h" style={{ marginBottom: 20 }}>
+              <h3>Bordereau Status</h3>
+              <InfoTip text="Clean vs Flagged runs and Resolved exceptions over the last 7 days." />
+            </div>
+            <div style={{ width: "100%", height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart
+                  data={statusSeries}
+                  margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                  barSize={32}
+                  style={{ cursor: "pointer" }}
+                  // A day's column opens the files behind it; the legend
+                  // under the chart does not (clickedDayIndex).
+                  onClick={(st: any, e: any) => {
+                    const i = clickedDayIndex(st, e);
+                    const d = i != null ? statusSeries[i]?.date : undefined;
+                    if (d) setStatusDay(d);
+                  }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} dy={10} />
+                  <YAxis yAxisId="left" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
+                  <YAxis yAxisId="right" orientation="right" allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: "#64748b" }} />
+                  <Tooltip
+                    formatter={(value, name) => [value as number, name]}
+                    labelFormatter={(label) => `${label}`}
+                    contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)" }}
+                    itemStyle={{ color: "#0f172a", fontWeight: 600, textTransform: "capitalize" }}
+                    labelStyle={{ color: "#64748b", marginBottom: 4 }}
+                    cursor={{ fill: '#f1f5f9' }}
+                  />
+                  <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: 13, color: "#64748b", textTransform: "capitalize" }} />
+                  <Bar yAxisId="left" dataKey="clean" name="Clean Files" fill="#10b981" stackId="a" />
+                  <Bar yAxisId="left" dataKey="flagged" name="Flagged Files" fill="#f59e0b" stackId="a" radius={[4, 4, 0, 0]} />
+                  <Line yAxisId="right" type="monotone" dataKey="resolved" name="Resolved Exceptions in Files" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Carrier admin: Broker Performance sits beside Bordereau Status,
+              in place of the Exceptions Breakdown chart. How each broker
+              company is working and putting its issues right — the five that
+              most recently sent this carrier a file. */}
+          {carrierAdmin ? <BrokerPerformance mga={mga} /> : (
+          /* Exceptions Breakdown Pie Chart */
+          <div className="card" style={{ padding: "24px 20px", display: "flex", flexDirection: "column" }}>
+            <div className="card-h" style={{ marginBottom: 20 }}>
+              <h3>Exceptions Breakdown</h3>
+              <InfoTip text="Distribution of open exceptions by severity." />
+            </div>
+            {stats?.pending_exceptions ? (
+              <div style={{ width: "100%", height: 260, position: "relative" }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={pieData}
+                      cx="50%"
+                      cy="45%"
+                      innerRadius={60}
+                      outerRadius={85}
+                      paddingAngle={5}
+                      dataKey="value"
+                    >
+                      {
+                        pieData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.color} />
+                        ))
+                      }
+                    </Pie>
+                    <Tooltip
+                      formatter={(value) => [`${value} exceptions`, 'Count']}
+                      contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)" }}
+                      itemStyle={{ color: "#0f172a", fontWeight: 600 }}
+                    />
+                    <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: 13, color: "#64748b" }} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div style={{
+                  position: "absolute", left: "50%", top: "45%", transform: "translate(-50%, -50%)",
+                  textAlign: "center", pointerEvents: "none",
+                }}>
+                  <div style={{ fontSize: 30, fontWeight: 700, color: "#0f172a", lineHeight: 1 }}>
+                    {fmt(stats.pending_exceptions)}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "#64748b", marginTop: 2 }}>Open</div>
                 </div>
-                <div className="foot">
-                  {overdue > 0 && upcoming > 0 && <span>{upcoming} due soon · </span>}
-                  <Link className="linkish" to="/calendar">My Calendar →</Link>
-                </div>
               </div>
-            );
-          })()} */}
-        </div>
-
-
-        {/* Recent runs — latest 5 generated outputs. Full history: /runs */}
-        <div className="card">
-          <div className="card-h">
-            <h3>Recent Runs</h3>
-            <span className="sub">View your most recently processed bordereaux.</span>
-            <div className="right" style={{ display: "flex", gap: 14 }}>
-              <Link className="linkish" to="/direct">Process Bordereau →</Link>
-              <Link className="linkish" to="/runs?from=home">View All →</Link>
-            </div>
+            ) : (
+              <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--p-faint)", fontSize: 15, fontWeight: 500 }}>
+                No open exceptions! 🎉
+              </div>
+            )}
           </div>
-          {runs.length === 0 ? (
-            <div className="empty">No runs yet — process a Bordereaux and it will appear here.</div>
-          ) : (
-            <div className="tbl-wrap">
-              <table>
-                <thead><tr><th className="l">Output File</th><th>Program</th><th>Policies</th><th>Result</th><th>Generated</th><th></th></tr></thead>
-                <tbody>
-                  {runs.map(r => {
-                    const hasExc = runHasExc(r);
-                    return (
-                      <tr key={r.id}>
-                        <td className="l"><b>{r.filename}</b></td>
-                        <td className="muted">{r.template_name ?? "—"}</td>
-                        <td className="muted">{r.policy_count.toLocaleString()}</td>
-                        <td>
-                          <span className={`badge ${hasExc ? "b-crit" : "b-ok"}`}>
-                            <span className="muted" />
-                            {hasExc ? `${r.exception_count.toLocaleString()} exceptions` : "Clean"}
-                          </span>
-                        </td>
-                        <td className="muted">{fmtStamp(r.created_at, "")}</td>
-                        <td className="muted">
-                          <span className="linkish"
-                            onClick={() => hasExc
-                              ? goTriage(r)
-                              : downloadFile(`/export/downloads/${r.id}/file`, r.filename)
-                                  .catch(() => alert("We couldn't download that file — please try again."))}>
-                            {hasExc ? "Review →" : "Download →"}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {runs.length >= RUNS_PAGE && (
-            <div style={{ padding: "10px 20px", borderTop: "1px solid var(--p-border)" }}>
-              <Link className="linkish" to="/runs?from=home" style={{ fontSize: 12.5 }}>
-                View All Process Bordereaux →
-              </Link>
-            </div>
           )}
         </div>
 
-        {user && (
-          <div className="muted" style={{ fontSize: 11.5, marginTop: 18 }}>
-            Signed in as {user.full_name} · {ROLE_LABEL[role]}
+        {/* How each broker company is working and putting its issues right —
+            the five that most recently sent this carrier a file. The carrier
+            admin has it in the row above. */}
+        {carrierSeat && !carrierAdmin && (
+          <div style={{ marginBottom: 24 }}>
+            <BrokerPerformance mga={mga} />
           </div>
         )}
-      </div>
-    </div>
+
+        {/* ONE month for the cards below — Overdue Bordereaux (carrier admin),
+            and Bordereaux Processed. They used to count the current
+            month only; this lets a carrier look back a month at a time, or at
+            every month together. The cards still open their full lists. */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                      gap: 12, marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center" }}>
+            <h3 style={{ margin: 0, fontSize: 16 }}>Monthly Activity</h3>
+            <InfoTip text={(carrierAdmin ? "Overdue Bordereaux and Bordereaux Processed"
+              : "The cards below") + " count the month and year picked here. All Months "
+              + "counts the whole year; All Years counts everything."} />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* With All Years there is no one year to take a month of. */}
+            <select className="fbar-select" aria-label="Month"
+              value={year === ALL ? ALL : month} disabled={year === ALL}
+              onChange={e => setMonth(e.target.value)}>
+              <option value={ALL}>All Months</option>
+              {MONTH_NAMES.map((name, i) => (
+                <option key={name} value={pad2(i + 1)}>{name}</option>
+              ))}
+            </select>
+            <select className="fbar-select" aria-label="Year"
+              value={year} onChange={e => setYear(e.target.value)}>
+              <option value={ALL}>All Years</option>
+              {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {carrierAdmin ? (
+          /* Carrier admin's foot of the page: Overdue Bordereaux on the left,
+             Bordereaux Processed on the right at the same height. */
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 18 }}>
+            <div style={{ display: "grid" }}>
+              <ArrivalsCard onTime={due?.on_time} late={due?.late} never={due?.never}
+                subtitle={due ? `Due in ${periodName(period)}` : undefined}
+                info={`Bordereaux your brokers owed${infoWhen}, by how they arrived.`} />
+            </div>
+            <div style={{ display: "grid" }}>
+              {recentCard}
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, marginBottom: 18 }}>
+            {recentCard}
+          </div>
+        )}
+
+
+      </div >
+
+      <DayFilesDrawer day={statusDay} from="home"
+        load={dd => api.get<DayRuns>("/dashboard/runs-on-day", {
+          params: { day: dd, mga },
+        }).then(a => a.data)}
+        onClose={() => setStatusDay(null)} />
+    </div >
+  );
+}
+
+/** A small coloured count under a dashboard number: "3 files on hold — …". */
+function AttentionChip({ n, what, bg, fg, dot }:
+    { n: number; what: string; bg: string; fg: string; dot: string }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px",
+                   borderRadius: 999, fontSize: 12.5, fontWeight: 600, background: bg, color: fg }}>
+      <span style={{ width: 7, height: 7, borderRadius: 999, background: dot }} />
+      {n} {n === 1 ? "file" : "files"} {what}
+    </span>
   );
 }
