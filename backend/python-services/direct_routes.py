@@ -635,6 +635,42 @@ def _contract_constants(s, contract_id: Optional[int]) -> dict:
     return consts
 
 
+def _dated_check_inputs(s, pipe, structure, contract_id, period):
+    """(transaction date column, period end) for a run's dated checks — the
+    versions a mid-term change closed or opened (rule_windows.py).
+
+    The column is the setup's own choice (pipeline.governing_date_field, set in
+    the mid-term change's setup step), else the one output column the template
+    maps to premium_transaction_effective_date. The period end is the
+    contract's own calendar row for `period` (programme + broker): a label
+    alone doesn't say where a programme's periods start. Either may be None —
+    the engine then says what it could not check. Never raises: this only
+    feeds dated checks, and a run must not fail for them."""
+    import rule_windows as rw
+    from db import ExpectedSubmission
+    col = None
+    try:
+        col = (getattr(pipe, "governing_date_field", None) or "").strip() or None
+        if col is None:
+            col = rw.date_column_from_structure(structure)
+    except Exception:  # noqa: BLE001
+        col = None
+    end = None
+    try:
+        c = s.get(Contract, contract_id) if (contract_id and period) else None
+        if c is not None and c.program_id:
+            q = (s.query(ExpectedSubmission.period_end)
+                 .filter(ExpectedSubmission.program_id == c.program_id,
+                         ExpectedSubmission.period == str(period).strip()))
+            if c.broker_party_id:
+                q = q.filter(ExpectedSubmission.broker_party_id == c.broker_party_id)
+            row = q.order_by(ExpectedSubmission.period_end.desc()).first()
+            end = row[0] if row else None
+    except Exception:  # noqa: BLE001
+        end = None
+    return col, end
+
+
 # ---- DELIVERY LANE ---------------------------------------------------------
 
 def _multi_table_error(findings: list[dict]) -> str:
@@ -2211,6 +2247,12 @@ async def _render_landing(
         # its compiled SQL references), and their constants are merged.
         governing_ids = _governing_ids(sheet_contracts, eff_contract_id,
                                        asof_extra_ids)
+        # Dated checks (mid-term changes): which column dates each row, and the
+        # last day of the period this file reports — see rule_windows.py.
+        # Only read by the engine when a governing contract has a dated rule.
+        txn_date_column, run_period_end = _dated_check_inputs(
+            s, contracts_pipe, structure, eff_contract_id or next(iter(governing_ids), None),
+            period)
         base_consts = {}
         for cid in governing_ids:
             base_consts.update(_contract_constants(s, cid))
@@ -2313,6 +2355,8 @@ async def _render_landing(
                 rule_rows = cs.execute(
                     text("SELECT rule_id, contract_id, rule_engine, rule_name, "
                          "severity, canonical_target, rule_spec, error_message, "
+                         # the dates a mid-term change gave it, if any
+                         "effective_from, effective_to, source_amendment_id, "
                          f"{rule_scope.tag_select(cs)} "
                          "FROM validation_rule WHERE contract_id = ANY(:cids) "
                          # Only rules cleared to run. A rule paused as
@@ -2385,7 +2429,9 @@ async def _render_landing(
                                 filled_cols=vo.filled_cols_from_mapping(column_mapping),
                                 inactive_cols=vo.inactive_cols(structure),
                                 tenant_id=tenant_id,
-                                rule_settings=rule_settings)
+                                rule_settings=rule_settings,
+                                date_column=txn_date_column,
+                                period_end=run_period_end)
             exceptions = dv.get("exceptions", [])
     except Exception as e:  # noqa: BLE001 — never block delivery on validation
         # …but never call it clean either: the outcome below records it.
@@ -2477,7 +2523,11 @@ async def _render_landing(
         # mismatch from a filter that let nothing through
         routed_rows=vo.routed_row_count(landing_data, supplement_cfg, routing),
         projected_rows=projected_rows, error=validation_error,
-        stats=stats, exceptions=exceptions)
+        stats=stats, exceptions=exceptions,
+        # None of the contract's own checks ran: never "clean" (contract_checks).
+        contract_checks=len(rules),
+        contract_label=(" / ".join(f"“{_cname.get(i) or _fname.get(i) or f'contract {i}'}”"
+                                   for i in governing_ids) or None))
     if status == vo.NOT_VALIDATED:
         exceptions.insert(0, vo.not_validated_entry(status_reason))
     not_checked = vo.not_checked_entry((dv or {}).get("unprocessable"),
@@ -2771,6 +2821,8 @@ async def _render_landing(
         "rows_excluded": (stats or {}).get("rows_excluded"),
         "rules_not_checked": len((not_checked or {}).get("rules") or []),
         "rules_partly_checked": len((not_checked or {}).get("partial") or []),
+        # The contract checks the run had — 0 is "not checked against the contract".
+        "contract_checks": len(rules),
         "datamodel_mapped": datamodel_mapped,
         "datamodel_queued": datamodel_queued,
         "admin_task_id": admin_task_id,
@@ -4342,6 +4394,20 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
             raise HTTPException(
                 400, "no active pipeline for this carrier + program — activate "
                      "one on the Setup page first")
+        # A file is checked against its CONTRACT's checks, and a contract never
+        # set up for this setup has none (contract_checks). Refused before
+        # anything is written: storing the file as checked against nothing is
+        # how a replaced contract's bordereaux came back "Clean".
+        if pipe is not None:
+            import contract_checks as _cc
+            if not _cc.check_count(s, pipe, contract_id):
+                _gov = _cc.governing_ids(s, pipe, contract_id)
+                _named = s.get(Contract, contract_id or (_gov[0] if _gov else 0))
+                raise HTTPException(409, {
+                    "code": _cc.CODE,
+                    "message": _cc.message(_cc.contract_name(_named) if _named
+                                           else "This contract"),
+                    "contract_id": _named.id if _named else None})
 
         # Multi-table DATA sheets would be processed as ONE table each, silently
         # misreading everything under the second header — refuse the run

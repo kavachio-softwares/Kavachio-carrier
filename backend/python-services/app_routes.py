@@ -4593,6 +4593,13 @@ def contract_generate_rules(program_id: int, contract_id: int,
                      WHERE contract_id = :cid
                      ORDER BY clause_id"""),
             {"cid": contract_id}).mappings().all()
+        # A clause a live mid-term change deleted keeps its row (the checks it
+        # closed still name it) but is no longer part of the contract: no rule
+        # is made from it again.
+        import mid_term_routes
+        gone = mid_term_routes.deleted_clause_ids(s, contract_id)
+        if gone:
+            rows = [r for r in rows if r["clause_id"] not in gone]
 
     same_as_bound = bound_template_id == body.output_template_id
     if set_rules and (same_as_bound or other_family):
@@ -4722,6 +4729,7 @@ def contract_generate_rules(program_id: int, contract_id: int,
         contract_id=contract_id, program_id=program_id, tenant_id=tenant_id,
         review_queue=p2.get("review_queue") or [])
 
+
     # The contract now speaks this template's language. Say so on the row, or
     # every reader that looks up a template's contract still finds nothing —
     # which is exactly the empty result this route exists to fix.
@@ -4732,6 +4740,24 @@ def contract_generate_rules(program_id: int, contract_id: int,
             if c.status in (None, "", "drafted"):
                 c.status = "active"
             s.commit()
+
+    # A contract set up AFTER a mid-term change went live: its clauses read as
+    # changed, so the checks just made are the new wording's. Date them from
+    # the change and make the old wording's checks for the days before it, so
+    # a row is checked on the terms that applied on its date
+    # (mid_term_routes.date_setup_checks). None when there is no live change.
+    # After the binding, and never the reason the generation fails: the
+    # contract's checks are made either way, and a retry finishes the history.
+    try:
+        import mid_term_routes
+        mid_term_history = mid_term_routes.date_setup_checks(
+            contract_id=contract_id, program_id=program_id, tenant_id=tenant_id,
+            template_fields=template_fields,
+            output_template_id=body.output_template_id, actor=body.actor or "system")
+    except Exception as e:  # noqa: BLE001
+        print(f"[generate-rules] mid-term history not rebuilt for contract "
+              f"{contract_id}: {e}")
+        mid_term_history = {"error": f"{type(e).__name__}: {e}"[:300]}
 
     _log(tenant_mga, body.actor or _actor(principal), "contract.rules_generated",
          target=f"contract:{contract_id}", principal=principal,
@@ -4748,6 +4774,7 @@ def contract_generate_rules(program_id: int, contract_id: int,
         "created": len(created),
         "review_queue": len(p2["review_queue"]),
         "control_register": len(p2["control_register"]),
+        "mid_term_history": mid_term_history,
     }
 
 

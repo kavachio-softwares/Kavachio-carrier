@@ -46,6 +46,18 @@ export type BrokerContract = {
   previous_term?: boolean;
   /** The renewal that replaced it. */
   renewed_by?: { id: number; name: string | null } | null;
+  /** The mid-term change in progress on it, if any. The lifecycle stays
+   *  "active" while one runs, so this is the only place it shows. */
+  mid_term?: BrokerMidTerm | null;
+};
+
+/** A mid-term change in progress, said from the broker's side. `step` is set
+ *  only when the move is the broker's: read it and agree it (or ask for
+ *  changes), or sign it after the carrier has. */
+export type BrokerMidTerm = {
+  id: number; number: number | null; effective_from: string | null;
+  status: string; status_words: string;
+  step: "agree" | "sign" | null;
 };
 
 /** Mirrors the carrier-side type; `expired` is derived from the term. */
@@ -91,13 +103,22 @@ export type BrokerDashboard = {
     /** Contracts whose terms this broker still has to agree (before signing). */
     terms_to_agree: number;
     terms_agreed: number;
+    /** Mid-term changes to running contracts waiting on this broker — to read
+     *  and agree, and (once the carrier has signed) to sign. */
+    mid_term_to_agree: number;
+    mid_term_to_sign: number;
   };
   /** There is no "waiting on the carrier" queue any more: the carrier's
    *  approval gate, and the broker-side upload that fed it, are both gone. A
    *  broker no longer brings a contract for someone to answer. */
   waiting_on_me: {
+    /** The contract — for a mid-term change, the contract it changes. */
     id: number; name: string; lifecycle: Lifecycle;
     programme: string; carrier: string;
+    /** Read and agree (or ask for changes), or sign. */
+    step: "agree" | "sign";
+    /** Set when what waits is a mid-term change, not the contract itself. */
+    mid_term: BrokerMidTerm | null;
     /** What the broker has to do, in words, not a state name. */
     what: string;
   }[];

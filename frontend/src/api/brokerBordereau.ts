@@ -53,6 +53,9 @@ export const getBrokerMe = () =>
 export type BordereauReadiness = {
   ready: boolean;
   reason: string | null;
+  /** "contract_not_set_up": the setup is live, but the chosen contract has
+   *  no checks on it yet — the carrier still has to set it up. */
+  code?: string | null;
   setup: {
     id: number | null;
     name: string | null;

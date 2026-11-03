@@ -88,7 +88,11 @@ export default function BrokerContracts() {
   // listed are the ones on this page. Counting the page instead would have told
   // a broker with nine waiting that two were.
   const waitingTotal = extra?.waiting_on_me ?? 0;
-  const mine = shown.filter(r => r.whose_turn === "broker");
+  // Waiting on this broker: the contract itself, or a mid-term change to it —
+  // the same two the server counts (broker_routes `_mine`).
+  const turns = shown.filter(r => r.whose_turn === "broker");
+  const changes = shown.filter(r => r.mid_term?.step);
+  const mine = shown.filter(r => r.whose_turn === "broker" || r.mid_term?.step);
 
   return (
     <div className="proto">
@@ -113,8 +117,11 @@ export default function BrokerContracts() {
             {mine.map((m, i) => (
               <span key={m.id}>
                 {i > 0 && ", "}
-                <Link to={`/contracts/${m.id}`} className="linkish">{m.name}</Link>
-                {" "}({STATE[m.lifecycle].label.toLowerCase()})
+                <Link to={m.mid_term?.step ? `/contracts/${m.id}?show=mid-term` : `/contracts/${m.id}`}
+                      className="linkish">{m.name}</Link>
+                {" "}({m.mid_term?.step
+                  ? `mid-term change ${m.mid_term.number} — ${m.mid_term.status_words.toLowerCase()}`
+                  : STATE[m.lifecycle].label.toLowerCase()})
               </span>
             ))}
             {/* Only the ones on this page can be named, so when more are
@@ -127,12 +134,18 @@ export default function BrokerContracts() {
                 </span>
               </>
             )}
-            {mine.some(m => m.lifecycle === "agreed" || m.lifecycle === "signed")
-              ? " The carrier has signed the ones marked terms agreed — they "
-                + "are waiting on your signature, and the contract goes in "
-                + "force the moment you give it."
-              : " Open one to read the terms and either agree them or ask for "
-                + "changes — nothing moves until you do."}
+            {(turns.length > 0 || changes.length === 0) && (
+              turns.some(m => m.lifecycle === "agreed" || m.lifecycle === "signed")
+                ? " The carrier has signed the ones marked terms agreed — they "
+                  + "are waiting on your signature, and the contract goes in "
+                  + "force the moment you give it."
+                : " Open one to read the terms and either agree them or ask for "
+                  + "changes — nothing moves until you do.")}
+            {changes.length > 0 && (
+              " A mid-term change is your carrier changing a running contract "
+              + "from a date: open it to read the change, then agree it or ask "
+              + "for changes — and once the carrier has signed it, sign it too. "
+              + "Files keep being checked on the current terms until it goes live.")}
           </div>
         )}
 
@@ -210,6 +223,27 @@ export default function BrokerContracts() {
                           <span className="d" />{st.label}
                         </span>
                         <div className="sub">{st.note}</div>
+                        {/* A change in progress on a running contract. The
+                            state above stays "Active" while it runs, so
+                            without this the row looked like nothing was asked
+                            of the broker. */}
+                        {c.mid_term && (
+                          <div style={{ marginTop: 6 }}>
+                            <span className={`badge ${c.mid_term.step ? "b-warn" : "b-info"}`}>
+                              <span className="d" />Mid-term change {c.mid_term.number}
+                            </span>
+                            <div className="sub">
+                              {c.mid_term.status_words}
+                              {c.mid_term.effective_from && ` · from ${fmtDate(c.mid_term.effective_from)}`}
+                            </div>
+                            {c.mid_term.step && (
+                              <Link className="linkish" style={{ fontSize: 12.5 }}
+                                    to={`/contracts/${c.id}?show=mid-term`}>
+                                {c.mid_term.step === "sign" ? "Sign the change →" : "Review the change →"}
+                              </Link>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className={canSetUp ? "" : "muted"}>
                         {canSetUp

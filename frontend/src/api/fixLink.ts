@@ -12,7 +12,8 @@ import {
   type ExportDecideResponse, type ExportDecision, type OutputException, type StoredException,
 } from "./validation";
 
-const baseURL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const baseURL = import.meta.env.VITE_API_URL ??
+  `${window.location.protocol}//${window.location.hostname}:8000`;
 const http = axios.create({ baseURL });
 
 export type FixGate = {

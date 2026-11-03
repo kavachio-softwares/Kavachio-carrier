@@ -451,7 +451,9 @@ export default function BrokerBordereau() {
             {contract && !readyLoading && ready && !ready.ready ? (
               <Dropzone file={null} onPick={pickFile} disabled
                 label={<b>Uploads unavailable for this contract</b>}
-                hint="Uploads open once the carrier's bordereau setup is live." />
+                hint={ready.code === "contract_not_set_up"
+                  ? "Uploads open once the carrier has set up this contract's checks."
+                  : "Uploads open once the carrier's bordereau setup is live."} />
             ) : (
               <Dropzone file={file} onPick={pickFile} disabled={!ready?.ready} />
             )}
