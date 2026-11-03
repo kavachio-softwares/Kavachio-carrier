@@ -2095,6 +2095,7 @@ async def _render_landing(
     mark_calendar: bool = True,
     period: Optional[str] = None,
     check_kind: Optional[str] = None,
+    arrival_id: Optional[int] = None,
 ) -> dict:
     """Shared core: project a landing record into the output BDX, validate it
     against the contract rules, persist the downloadable file, and either raise a
@@ -2113,7 +2114,13 @@ async def _render_landing(
 
     ``check_kind`` is what the shared check record (MOPR 40.1, check_record)
     calls this run when the flags above do not say: "preview" for the setup
-    preview. Otherwise a self-check, a re-generate or a run."""
+    preview. Otherwise a self-check, a re-generate or a run.
+
+    ``arrival_id`` is the file arrival this run is for, when there is one. The
+    shared check record reads its submission and version from it, which is how
+    version 2 of a file is known to be the same file as version 1 (MOPR 41
+    follows a problem across them). None is fine: a re-generate finds the
+    arrival from its export instead."""
     with SessionLocal() as s:
         rec = s.get(LandingRecord, landing_id)
         if not rec:
@@ -4459,7 +4466,7 @@ async def _prepare_run(tid: int, *, carrier_party_id: int, program_id: int,
     return {"landing_id": landing_id, "pipeline_id": pipeline_id,
             "contract_id": contract_id, "eff_contract_id": eff_contract_id,
             "run_scope": run_scope, "drift": drift, "supp_stats": supp_stats,
-            "itd": itd_plan,
+            "itd": itd_plan, "arrival_id": arrival_id,
             "layout_changes": layout_changes}
 
 
@@ -4478,7 +4485,7 @@ async def _render_prepared(prep: dict, *, filename: Optional[str], actor: Option
         filename, actor, {}, auto_ingest=not check_only,
         pipeline_id=prep["pipeline_id"], check_only=check_only,
         scope=prep["run_scope"], run_by_user_id=run_by_user_id,
-        mark_calendar=mark_calendar, period=period)
+        mark_calendar=mark_calendar, period=period, arrival_id=prep.get("arrival_id"))
     result["format_drift"] = prep["drift"]
     result["layout_changes"] = prep.get("layout_changes")
     if prep["supp_stats"] is not None:

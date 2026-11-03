@@ -109,3 +109,97 @@ export async function getDataQuality(params: {
   });
   return data;
 }
+
+// MOPR 41 — Exception Resolution Performance (backend fix_performance.py).
+
+/** One problem still open: how old it is and who has to act. */
+export interface OpenProblem {
+  check: string | null;
+  severity: "critical" | "warning" | "info" | null;
+  message: string | null;
+  policy_number: string | null;
+  sheet: string | null;
+  row: number | null;
+  field: string | null;
+  file: string | null;
+  period: string | null;
+  export_id: number | null;
+  program_id: number | null;
+  broker_party_id: number | null;
+  broker_name: string;
+  programme_name: string;
+  /** The broker whose file it is, or "Carrier" for a file no broker sent. */
+  owner: string;
+  found_at: string | null;
+  age_days: number | null;
+  past_target: boolean;
+}
+
+export interface FixGroupRow {
+  broker_party_id: number | null;
+  program_id: number | null;
+  broker_name: string;
+  programme_name: string;
+  owner: string;
+  fixed: number;
+  avg_days: number | null;
+  within_target: number;
+  within_target_pct: number | null;
+  open: number;
+  past_target: number;
+  oldest_days: number | null;
+}
+
+export interface ExceptionResolutionReport {
+  month: string;
+  from: string;
+  to: string;
+  target_days: number;
+  fixed: {
+    problems: number;
+    avg_days: number | null;
+    median_days: number | null;
+    within_target: number;
+    within_target_pct: number | null;
+    by_how: { key: string; label: string; problems: number }[];
+  };
+  found_in_period: number;
+  open: {
+    problems: number;
+    past_target: number;
+    oldest_days: number | null;
+    by_age: { key: string; label: string; problems: number; past_target: boolean }[];
+    page: number;
+    page_size: number;
+    total: number;
+    items: OpenProblem[];
+  };
+  by_broker_programme: FixGroupRow[];
+  programmes: { id: number; name: string }[];
+  brokers: { id: number; name: string }[];
+}
+
+export async function getExceptionResolution(params: {
+  month: string;
+  program_id?: number | null;
+  broker_party_id?: number | null;
+  page?: number;
+  page_size?: number;
+}): Promise<ExceptionResolutionReport> {
+  const { data } = await api.get<ExceptionResolutionReport>("/reports/exception-resolution", {
+    params: {
+      mga: currentMga(), month: params.month,
+      program_id: params.program_id ?? undefined,
+      broker_party_id: params.broker_party_id ?? undefined,
+      page: params.page ?? 1, page_size: params.page_size ?? 10,
+    },
+  });
+  return data;
+}
+
+/** Carrier admin only. Saved in the Audit Logs with the old and new value. */
+export async function setFixTarget(days: number): Promise<{ target_days: number; was: number }> {
+  const { data } = await api.put("/reports/exception-resolution/target", { days },
+    { params: { mga: currentMga() } });
+  return data;
+}

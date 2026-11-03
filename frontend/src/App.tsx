@@ -63,6 +63,7 @@ import RecentRuns from "./pages/RecentRuns";
 import Calendar from "./pages/Calendar";
 import BordereauCalendar from "./pages/BordereauCalendar";
 import DataQuality from "./pages/DataQuality";
+import ExceptionResolution from "./pages/ExceptionResolution";
 // Feature 10 — file intake channels.
 import Files from "./pages/Files";
 import AddUser from "./pages/AddUser";
@@ -253,6 +254,7 @@ export default function App() {
             the place a single programme's schedule is SET. */}
         <Route path="/bordereau-calendar" element={<BordereauCalendar />} />
         <Route path="/data-quality" element={<DataQuality />} />
+        <Route path="/exception-resolution" element={<ExceptionResolution />} />
         {/* How a broker's file reaches you, and everything that has landed —
             one screen with two tabs. The old paths are kept as redirects: they
             are in emails to brokers and in bookmarks, and a link that 404s is a

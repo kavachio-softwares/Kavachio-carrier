@@ -2639,6 +2639,20 @@ class CheckError(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class QualitySetting(Base):
+    """MOPR 41 — a carrier's own target for fixing the problems its checks find.
+
+    One row per carrier, written only when the carrier changes it; none means
+    the default (fix_performance.DEFAULT_TARGET_DAYS). Each change is also in
+    the Audit Logs ("fix_target_updated"), old and new."""
+    __tablename__ = "quality_setting"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, unique=True, index=True, nullable=False)
+    fix_target_days = Column(Integer, nullable=False, default=5)
+    updated_by_user_id = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 def _ensure_column(conn, inspector, table: str, column: str, ddl_type: str) -> None:
     """Add `column` to `table` if it isn't already there. Dialect-agnostic
     column inspection so this works on both SQLite and PostgreSQL."""

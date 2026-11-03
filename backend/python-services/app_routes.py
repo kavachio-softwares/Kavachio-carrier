@@ -5495,6 +5495,89 @@ def report_data_quality(mga: str, month: Optional[str] = None,
         return out
 
 
+def _report_filter_lists(s, tid: int) -> dict:
+    """The carrier's programmes and brokers, for a report's filters."""
+    progs = [{"id": p.id, "name": p.name} for p in (
+        s.query(Program).filter(Program.tenant_id == tid).order_by(Program.name).all())]
+    bp = (s.query(Party.id, Party.legal_name)
+          .join(ProgramBroker, ProgramBroker.broker_party_id == Party.id)
+          .join(Program, Program.id == ProgramBroker.program_id)
+          .filter(Program.tenant_id == tid).distinct().all())
+    return {"programmes": progs,
+            "brokers": sorted(({"id": i, "name": n} for i, n in bp),
+                              key=lambda b: (b["name"] or "").lower())}
+
+
+@router.get("/reports/exception-resolution")
+def report_exception_resolution(mga: str, month: Optional[str] = None,
+                                program_id: Optional[int] = None,
+                                broker_party_id: Optional[int] = None,
+                                page: int = Query(1, ge=1),
+                                page_size: int = Query(10, ge=1, le=100),
+                                principal: Principal = Depends(current_principal)):
+    """MOPR 41 — how fast the problems the checks found were fixed in a month
+    (41.1), against the carrier's target (41.2), and the age and owner of every
+    problem still open now (41.3). See fix_performance.py.
+
+    `month` is YYYY-MM (default: this month), by the day a problem was fixed;
+    the open list is always as of now. `page` / `page_size` page that list."""
+    import check_record
+    import fix_performance as fp
+    month = month or datetime.utcnow().strftime("%Y-%m")
+    try:
+        start, end = check_record.month_bounds(month)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "month must be YYYY-MM")
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        out = fp.summary(s, tid, start, end, program_id=program_id,
+                         broker_party_id=broker_party_id, page=page, page_size=page_size)
+        broker_ids = ({r["broker_party_id"] for r in out["by_broker_programme"]}
+                      | {i["broker_party_id"] for i in out["open"]["items"]}) - {None}
+        prog_ids = ({r["program_id"] for r in out["by_broker_programme"]}
+                    | {i["program_id"] for i in out["open"]["items"]}) - {None}
+        brokers = dict(s.query(Party.id, Party.legal_name)
+                       .filter(Party.id.in_(broker_ids)).all()) if broker_ids else {}
+        progs = dict(s.query(Program.id, Program.name)
+                     .filter(Program.id.in_(prog_ids)).all()) if prog_ids else {}
+        # The owner is who has to act: the broker whose file it is, or the
+        # carrier itself for a file no broker sent.
+        for r in [*out["by_broker_programme"], *out["open"]["items"]]:
+            b, p = r["broker_party_id"], r["program_id"]
+            r["broker_name"] = brokers.get(b) or ("No broker" if not b else f"Broker {b}")
+            r["programme_name"] = progs.get(p) or ("No programme" if not p else f"Programme {p}")
+            r["owner"] = brokers.get(b) if b else "Carrier"
+        out.update(_report_filter_lists(s, tid))
+        out["month"] = month
+        return out
+
+
+class FixTargetBody(BaseModel):
+    days: int
+
+
+@router.put("/reports/exception-resolution/target")
+def set_fix_target(body: FixTargetBody, mga: str,
+                   principal: Principal = Depends(require_carrier_admin("change the fix target"))):
+    """MOPR 41.2 — the carrier's target for fixing a problem, in days. The
+    change is kept in the Audit Logs with the old and new value."""
+    import fix_performance as fp
+    with SessionLocal() as s:
+        tid = resolve_tenant_id(s, principal, mga)
+        try:
+            old, new = fp.set_target_days(s, tid, body.days, principal.user_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if old != new:
+            from audit import actor_columns
+            s.add(ActivityEvent(tenant_id=tid, actor=_actor(principal),
+                                action="fix_target_updated", target="quality:fix_target",
+                                details={"old_days": old, "new_days": new},
+                                **actor_columns(principal)))
+        s.commit()
+        return {"target_days": new, "was": old}
+
+
 @router.get("/dashboard/broker-performance")
 def dashboard_broker_performance(mga: str,
                                  days: int = Query(30, ge=7, le=90),
