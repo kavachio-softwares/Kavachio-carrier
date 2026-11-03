@@ -63,7 +63,8 @@ def world(monkeypatch):
     w = SimpleNamespace(rows={}, marks=[], events=[], other_waiting=None)
     w.rows[("FileArrival", 41)] = SimpleNamespace(
         id=41, tenant_id=3, program_id=7, matched_broker_party_id=12, route_id=None,
-        filename="Atlas_Aug.xlsx", blob_ref="x", resolution=None, contract_id=9)
+        filename="Atlas_Aug.xlsx", blob_ref="x", resolution=None, contract_id=9,
+        reporting_period=None)
     w.rows[("Party", 12)] = SimpleNamespace(id=12, legal_name="Atlas Brokers")
     monkeypatch.setattr(db, "SessionLocal", lambda: _Session(w.rows))
     monkeypatch.setattr(intake_service, "mark_run",
@@ -127,3 +128,32 @@ def test_the_waiting_files_are_found_by_the_sentences_opening_words():
 def test_nothing_to_queue_without_a_tenant_or_programme():
     assert intake_autorun.requeue_waiting(None, 7) == 0
     assert intake_autorun.requeue_waiting(3, None) == 0
+
+
+def test_a_contract_with_no_checks_keeps_the_file_and_asks_the_carrier(world, monkeypatch):
+    """The setup is live, but the file's contract was never set up on it
+    (contract_checks): the run refuses before writing anything, and the file is
+    kept — not failed — until the contract's checks are made."""
+    import sys
+    from fastapi import HTTPException
+    import contract_checks
+
+    async def refuse(*a, **kw):
+        raise HTTPException(409, {"code": contract_checks.CODE, "message": "no checks",
+                                  "contract_id": 9})
+
+    world.rows[("Contract", 9)] = SimpleNamespace(id=9, name="Demoshield-2", filename=None)
+    monkeypatch.setattr(intake_autorun, "_live_pipeline",
+                        lambda *a: SimpleNamespace(carrier_party_id=5))
+    monkeypatch.setattr(intake_service, "read_copy", lambda *a: b"file", raising=False)
+    monkeypatch.setitem(sys.modules, "direct_routes",
+                        SimpleNamespace(_prepare_run=refuse))
+    intake_autorun.run_one(41)
+
+    error = contract_checks.held_error("Demoshield-2")
+    assert world.marks == [(41, {"state": "not_run", "error": error})]
+    assert error.startswith(contract_checks.HELD_PREFIX)
+    assert world.events[0][1]["details"]["contract_id"] == 9
+    # the broker hears "on hold", not "failed"
+    assert submission_service._classify_failure(error)[0] == "on_hold"
+

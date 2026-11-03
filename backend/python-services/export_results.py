@@ -160,8 +160,13 @@ def compute(sheets: dict[str, list[dict]], exceptions: list, *,
             for e in mine:
                 done = settled(e)
                 st = str(e.get("status") or "").lower()
+                rule = e.get("rule_name") or e.get("code") or "Check"
+                if e.get("rule_window_label"):
+                    # A check a mid-term change dated: its two versions are
+                    # counted apart, each named with the days it covers.
+                    rule = f"{rule} ({e['rule_window_label']})"
                 items.append({
-                    "rule": e.get("rule_name") or e.get("code") or "Check",
+                    "rule": rule,
                     "field": e.get("field") or e.get("column") or e.get("field_path"),
                     "severity": e.get("severity") or "warning",
                     "message": e.get("message") or e.get("reason"),

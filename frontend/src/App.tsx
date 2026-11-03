@@ -26,6 +26,7 @@ import ProgramManagement from "./pages/ProgramManagement";
 import AddProgram from "./pages/AddProgram";
 import ContractDetail from "./pages/ContractDetail";
 import ContractRecord from "./pages/ContractRecord";
+import MidTermChange from "./pages/MidTermChange";
 import ContractSignature from "./pages/ContractSignature";
 import Contracts from "./pages/Contracts";
 import ContractNew from "./pages/ContractNew";
@@ -196,6 +197,9 @@ export default function App() {
         {/* Uploading is a dialog now (AddContractModal); old links land on the list. */}
         <Route path="/contracts/upload" element={<Navigate to="/contracts" replace />} />
         <Route path="/contracts/:contractId" element={<ContractRecord />} />
+        {/* A running contract's terms changing from a date — sent to the broker,
+            signed by both, then live. See pages/MidTermChange. */}
+        <Route path="/contracts/:contractId/mid-term" element={<MidTermChange />} />
         {/* Screen only — no signing provider is connected. See the page. */}
         <Route path="/contracts/:contractId/signature" element={<ContractSignature />} />
         <Route path="/programs/:programId/contracts/:contractId" element={<ContractDetail />} />

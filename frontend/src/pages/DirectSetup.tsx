@@ -1401,11 +1401,6 @@ function DirectSetupScreen() {
               <Stat v={clauses.length} k={`Rule${clauses.length === 1 ? "" : "s"} with No Column`}
                 tone={clauses.length > 0 ? "warn" : undefined} />
             </div>
-            <p className="mt-2 text-[11px] text-ink-soft">
-              {buildSummary.outputSheets} output sheet{buildSummary.outputSheets === 1 ? "" : "s"} from{" "}
-              {buildSummary.inputSheets} input sheet{buildSummary.inputSheets === 1 ? "" : "s"} ·{" "}
-              {buildSummary.contracts} contract{buildSummary.contracts === 1 ? "" : "s"} processed
-            </p>
 
             {/* The mapping ladder's verdict (MappingReview) used to sit here.
                 REMOVED from this dialog on purpose: it restated the two tiles

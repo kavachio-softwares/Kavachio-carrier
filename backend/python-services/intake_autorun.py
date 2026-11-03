@@ -36,6 +36,8 @@ from typing import Optional
 
 from sqlalchemy import func, or_, select, update
 
+import contract_checks as _cc
+
 log = logging.getLogger("kavachio.intake.autorun")
 
 _thread: Optional[threading.Thread] = None
@@ -140,7 +142,10 @@ def _waiting(s, tenant_id: int, program_id: int, broker_party_id: Optional[int],
          .filter(FileArrival.tenant_id == tenant_id,
                  FileArrival.outcome == "accepted",
                  FileArrival.run_state == "not_run",
-                 FileArrival.run_error.startswith(_NO_SETUP_PREFIX),
+                 or_(FileArrival.run_error.startswith(_NO_SETUP_PREFIX),
+                     # …or for its contract's checks (contract_checks): the
+                     # setup is live, the contract was never set up on it.
+                     FileArrival.run_error.startswith(_cc.HELD_PREFIX)),
                  or_(FileArrival.program_id == program_id,
                      FileArrival.route_id.in_(
                          select(IntakeRoute.id).where(IntakeRoute.program_id == program_id)))))
@@ -152,7 +157,9 @@ def _waiting(s, tenant_id: int, program_id: int, broker_party_id: Optional[int],
 
 
 def _ask_for_setup(tenant_id: int, program_id: int, broker_party_id: Optional[int],
-                   arrival_id: int, filename: Optional[str]) -> None:
+                   arrival_id: int, filename: Optional[str], *,
+                   contract_id: Optional[int] = None,
+                   contract_name: Optional[str] = None) -> None:
     """Tell the carrier a file is waiting for a Bordereau Setup on its programme.
 
     ONE notice per programme and broker, not one per file: the files are not
@@ -177,7 +184,12 @@ def _ask_for_setup(tenant_id: int, program_id: int, broker_party_id: Optional[in
                      details={"program_id": program_id,
                               "broker_party_id": broker_party_id,
                               "broker_name": broker_name,
-                              "arrival_id": arrival_id, "filename": filename})
+                              "arrival_id": arrival_id, "filename": filename,
+                              # when the setup is live and it is the CONTRACT
+                              # that has no checks on it yet
+                              **({"contract_id": contract_id,
+                                  "contract_name": contract_name}
+                                 if contract_id else {})})
     except Exception:  # noqa: BLE001 — a reminder must never fail the run
         log.warning("could not ask for a setup for arrival %s", arrival_id,
                     exc_info=True)
@@ -319,9 +331,22 @@ def run_one(arrival_id: int) -> None:
         result = asyncio.run(_go())
     except Exception as e:  # noqa: BLE001 — every failure is recorded, never raised
         log.info("auto-run of arrival %s failed: %s", arrival_id, _detail(e))
+        _d = getattr(e, "detail", None)
+        # The setup is live but the file's contract has no checks on it yet:
+        # kept, the carrier told once, and run again when the contract is set
+        # up (contract_checks / requeue_waiting) — exactly as a file that came
+        # before any setup.
+        if isinstance(_d, dict) and _d.get("code") == _cc.CODE:
+            from db import Contract, SessionLocal as _SL
+            with _SL() as _s:
+                _named = _s.get(Contract, _d.get("contract_id") or 0)
+                _name = _cc.contract_name(_named) if _named else "This contract"
+            svc.mark_run(arrival_id, state="not_run", error=_cc.held_error(_name))
+            _ask_for_setup(tenant_id, program_id, broker, arrival_id, filename,
+                           contract_id=_d.get("contract_id"), contract_name=_name)
+            return
         # An ITD older than one already loaded is not a failure to retry: it
         # is kept for the record and not loaded (itd_run.OlderItdFile).
-        _d = getattr(e, "detail", None)
         older_itd = isinstance(_d, dict) and _d.get("code") == "older_itd"
         svc.mark_run(arrival_id, state="not_run" if older_itd else "failed",
                      error=_detail(e))

@@ -70,6 +70,20 @@ _NOT_CHECKED = vo.not_checked_entry([{"rule_id": 1, "rule_name": "r", "message":
     (dict(input_rows=10, routed_rows=4, projected_rows=0), vo.NOT_VALIDATED, "passed its sheet filter"),
     # the setup's sheets are there but empty; rows sit on a tab it does not read
     (dict(input_rows=10, routed_rows=0, projected_rows=0), vo.CLEAN, None),
+    # none of the CONTRACT's checks ran (never set up in Bordereau Setup): the
+    # format checks passing is not "clean" — with or without typed columns
+    (dict(input_rows=5, projected_rows=5, stats=_stats(5, 5), contract_checks=0,
+          contract_label="“Demoshield-2”"),
+     vo.NOT_VALIDATED, "not checked against the contract — “Demoshield-2”"),
+    (dict(input_rows=5, projected_rows=5, stats=None, contract_checks=0),
+     vo.NOT_VALIDATED, "not checked against the contract — the contract"),
+    (dict(input_rows=5, projected_rows=5, stats=_stats(5, 4), exceptions=[_ROW_EXC],
+          contract_checks=0), vo.NOT_VALIDATED, "not checked against the contract"),
+    # with checks, or uncounted (a caller that does not say), as before
+    (dict(input_rows=5, projected_rows=5, stats=_stats(5, 5), contract_checks=12),
+     vo.CLEAN, None),
+    # an empty upload is still not a failure, checks or none
+    (dict(input_rows=0, projected_rows=0, stats=None, contract_checks=0), vo.CLEAN, None),
 ])
 def test_outcome_table(kw, status, reason_has):
     got_status, reason = vo.outcome(**kw)

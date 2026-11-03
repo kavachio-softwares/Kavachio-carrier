@@ -36,7 +36,10 @@ export const NOTIFY: Record<string, {
   // build one — straight to that step. Amber: nothing is late, a file waits.
   bordereau_setup_needed: {
     label: "Setup needed — file waiting", tone: "#b7791f", to: "/programs",
-    link: d => d.program_id ? flowUrl(Number(d.program_id), "setup") : null },
+    // When the setup is live but the file's CONTRACT was never set up on it,
+    // the contract page is where its checks are made (ChecksSetupCard).
+    link: d => d.contract_id ? `/contracts/${d.contract_id}`
+      : d.program_id ? flowUrl(Number(d.program_id), "setup") : null },
 
   // --- waiting on the CARRIER ADMIN --------------------------------------
   // A colleague has finished something that cannot reach the broker until the
@@ -79,6 +82,18 @@ export const NOTIFY: Record<string, {
   // somebody to go and do something.
   contract_pushed_back: {
     label: "Changes requested", tone: "#b7791f", to: "/contracts?waiting=mine",
+    link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
+  // Mid-term change: the broker's two answers, and the change going live.
+  // Agreed waits on the carrier admin's signature; changes requested waits on
+  // whoever revises it; live is news — its checks are dated from today on.
+  contract_mid_term_agreed: {
+    label: "Mid-term change to sign", tone: "#b7791f", to: "/contracts",
+    link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
+  contract_mid_term_changes_requested: {
+    label: "Mid-term change sent back", tone: "#b7791f", to: "/contracts",
+    link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
+  contract_mid_term_live: {
+    label: "Mid-term change live", tone: "#2f855a", to: "/contracts",
     link: d => d.contract_id ? `/contracts/${d.contract_id}` : null },
   // Both of these clear the way to the bordereau setup, which is the next
   // thing the person who raised it has to do — so they are green, and they are

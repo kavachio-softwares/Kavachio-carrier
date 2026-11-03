@@ -3,7 +3,8 @@
  *
  * A broker holds no book of its own — it produces into carriers' programmes.
  * So this screen answers two questions and no others: what have I been given,
- * and what is waiting on me — terms to read, or a signature to give. There is
+ * and what is waiting on me — terms to read, or a signature to give, on a new
+ * contract or on a mid-term change to a running one. There is
  * no queue pointing the other way any more: the carrier's approval gate is
  * gone, so nothing a broker adds sits waiting for an answer.
  */
@@ -188,7 +189,8 @@ export default function BrokerDashboard() {
           {/* Named for WHAT is signed. "Pending Signatures" left a new broker
               asking whose signature, on what — it is always a contract with a
               carrier, agreed and waiting for this broker to sign it. */}
-          <StatCard title="Contracts to Sign" value={c.signatures_pending} icon={PenLine}
+          <StatCard title="Contracts to Sign" value={c.signatures_pending + c.mid_term_to_sign}
+                    icon={PenLine}
                     subtitle={
                       <>
                         {/* A contract still in REVIEW comes before any
@@ -200,10 +202,25 @@ export default function BrokerDashboard() {
                             {c.terms_to_agree} {c.terms_to_agree == 1 ? 'contract' : 'contracts' } waiting for your review
                           </div>
                         )}
+                        {/* A mid-term change waits on the broker the same
+                            way, while its contract still reads "Active" — so
+                            it is named apart: a change to a running contract
+                            is not a new contract. The email was the only
+                            sign of it before. */}
+                        {c.mid_term_to_agree > 0 && (
+                          <div style={{ color: "var(--p-crit)", fontWeight: 600 }}>
+                            {c.mid_term_to_agree} mid-term {c.mid_term_to_agree === 1 ? "change" : "changes"} waiting for your review
+                          </div>
+                        )}
+                        {c.mid_term_to_sign > 0 && (
+                          <div style={{ color: "var(--p-crit)", fontWeight: 600 }}>
+                            {c.mid_term_to_sign} mid-term {c.mid_term_to_sign === 1 ? "change" : "changes"} to sign
+                          </div>
+                        )}
                         <div>{c.signatures_completed} already signed</div>
                       </>
                     }
-                    info="Contracts with your carriers that need you. Waiting for your review: read the terms and agree them or ask for changes. To sign: terms are agreed and your signature is needed before the contract becomes active. Click to open them."
+                    info="Contracts with your carriers that need you. Waiting for your review: read the terms and agree them or ask for changes. To sign: terms are agreed and your signature is needed before the contract becomes active. Mid-term changes: your carrier is changing a running contract from a date — read the change and agree it or ask for changes, then sign it after the carrier does. Click to open them."
                     tone={c.waiting_on_me > 0 ? "alert" : undefined}
                     onClick={c.waiting_on_me > 0 ? () => setWaitingOpen(true) : undefined} />
           <StatCard title="Exceptions to Review" value={c.agency_exceptions} icon={AlertCircle}
@@ -337,15 +354,15 @@ function RecentFiles() {
 
 /** One group of contracts waiting on the broker, under its own heading.
  *
- *  The two are DIFFERENT JOBS and the drawer says so: agreeing terms is
- *  reading and negotiating, signing is executing something already settled.
- *  A single undivided list made them look like one queue, so somebody working
- *  down it met the two in whatever order the ids fell. */
-function WaitingGroup({ heading, note, items, action }: {
-  heading: string; note: string;
-  items: Dash["waiting_on_me"]; action: "agree" | "sign";
+ *  The jobs are DIFFERENT and the drawer says so: agreeing terms is reading
+ *  and negotiating, signing is executing something already settled, and a
+ *  mid-term change is a change to a contract already running. A single
+ *  undivided list made them look like one queue, so somebody working down it
+ *  met them in whatever order the ids fell. Each row carries its own step, so
+ *  the button is the row's, not the group's. */
+function WaitingGroup({ heading, note, items }: {
+  heading: string; note: string; items: Dash["waiting_on_me"];
 }) {
-  if (items.length === 0) return null;
   return (
     <>
       <div style={{ padding: "0 20px" }}>
@@ -355,24 +372,42 @@ function WaitingGroup({ heading, note, items, action }: {
       <div className="tbl-wrap">
         <table>
           <tbody>
-            {items.map(w => (
-              <tr key={w.id}>
-                <td>
-                  <Link to={`/contracts/${w.id}`}><b>{w.name}</b></Link>
-                  <div className="muted" style={{ fontSize: 12 }}>{w.carrier} · {w.programme}</div>
-                </td>
-                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                  {/* The carrier has already signed by the time it waits
-                      on the broker's signature, so go straight to signing. */}
-                  {action === "sign" ? (
-                    <a className="btn sm pri" href={inAppSigningUrl(w.id)}
-                       target="_blank" rel="noreferrer">Sign →</a>
-                  ) : (
-                    <Link className="btn sm pri" to={`/contracts/${w.id}`}>Agree terms →</Link>
-                  )}
-                </td>
-              </tr>
-            ))}
+            {items.map(w => {
+              // A mid-term change opens on the change itself (MidTermCard),
+              // where it is read, agreed and signed.
+              const href = w.mid_term ? `/contracts/${w.id}?show=mid-term` : `/contracts/${w.id}`;
+              return (
+                <tr key={`${w.mid_term ? "mt" : "c"}${w.id}`}>
+                  <td>
+                    <Link to={href}><b>{w.name}</b></Link>
+                    {w.mid_term && (
+                      <div style={{ fontSize: 12, margin: "3px 0" }}>
+                        <span className="badge b-warn"><span className="d" />
+                          Mid-term change {w.mid_term.number}</span>
+                        {w.mid_term.effective_from && (
+                          <span className="muted"> · from {fmtDate(w.mid_term.effective_from)}</span>
+                        )}
+                      </div>
+                    )}
+                    <div className="muted" style={{ fontSize: 12 }}>{w.carrier} · {w.programme}</div>
+                  </td>
+                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    {w.mid_term ? (
+                      <Link className="btn sm pri" to={href}>
+                        {w.step === "sign" ? "Sign the change →" : "Review the change →"}
+                      </Link>
+                    ) : w.step === "sign" ? (
+                      // The carrier has already signed by the time it waits
+                      // on the broker's signature, so go straight to signing.
+                      <a className="btn sm pri" href={inAppSigningUrl(w.id)}
+                         target="_blank" rel="noreferrer">Sign →</a>
+                    ) : (
+                      <Link className="btn sm pri" to={href}>Agree terms →</Link>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -395,13 +430,22 @@ function WaitingDrawer({ open, items, onClose }: {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
-  // The SAME cut the tile makes (broker_routes: terms_to_agree counts
-  // in_review), so the two halves of the tile and the two sections here can
-  // never disagree. A contract waiting on the broker is only ever in_review,
-  // agreed or signed — see contract_types.WITH_BROKER — so these two groups
-  // between them hold every row.
-  const toAgree = items.filter(w => w.lifecycle === "in_review");
-  const toSign = items.filter(w => w.lifecycle !== "in_review");
+  // The SAME cut the tile makes (broker_routes counts each row by its `step`,
+  // contracts and mid-term changes apart), so the lines of the tile and the
+  // sections here can never disagree. Every row is one of the three.
+  const contracts = items.filter(w => !w.mid_term);
+  const groups = [
+    { heading: "Pending Contract", items: contracts.filter(w => w.step === "agree"),
+      note: "Terms to read and agree, or ask for changes." },
+    { heading: "Contracts to Sign", items: contracts.filter(w => w.step === "sign"),
+      note: "Terms already settled — these need your signature." },
+    { heading: "Mid-term Changes", items: items.filter(w => w.mid_term),
+      note: "Your carrier is changing a running contract from a date. Read the "
+          + "change and agree it or ask for changes; once the carrier has signed "
+          + "it, sign it too and it goes live." },
+  ].filter(g => g.items.length > 0);
+  const toAgree = items.filter(w => w.step === "agree");
+  const toSign = items.filter(w => w.step === "sign");
   return (
     <>
       <div className={`scrim${open ? " on" : ""}`} onClick={onClose} />
@@ -418,14 +462,15 @@ function WaitingDrawer({ open, items, onClose }: {
           <button type="button" className="closeb" aria-label="Close" onClick={onClose}>×</button>
         </div>
         <div className="drawer-b" style={{ padding: "0 0 18px" }}>
-          <WaitingGroup heading="Pending Contract" items={toAgree} action="agree"
-                        note="Terms to read and agree, or ask for changes." />
-          {/* The rule between them, drawn only when both are there. */}
-          {toAgree.length > 0 && toSign.length > 0 && (
-            <div style={{ borderTop: "1px solid var(--p-border)", margin: "18px 0 0" }} />
-          )}
-          <WaitingGroup heading="Contracts to Sign" items={toSign} action="sign"
-                        note="Terms already settled — these need your signature." />
+          {groups.map((g, i) => (
+            <div key={g.heading}>
+              {/* The rule between groups, drawn only between two that are there. */}
+              {i > 0 && (
+                <div style={{ borderTop: "1px solid var(--p-border)", margin: "18px 0 0" }} />
+              )}
+              <WaitingGroup heading={g.heading} note={g.note} items={g.items} />
+            </div>
+          ))}
         </div>
       </aside>
     </>

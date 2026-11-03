@@ -112,6 +112,12 @@ ACTION_NAME_KIND = {
     "contract_term_gap_confirmed": "contract",
     "contract_period_corrected": "contract",
     "contract_period_correction_undone": "contract",
+    "contract_mid_term_sent": "contract", "contract_mid_term_agreed": "contract",
+    "contract_mid_term_uploaded": "contract",
+    "contract_checks_set_up": "contract",
+    "contract_mid_term_changes_requested": "contract",
+    "contract_mid_term_signed": "contract", "contract_mid_term_accepted": "contract",
+    "contract_mid_term_live": "contract", "contract_mid_term_withdrawn": "contract",
     "program_created": "program", "program_updated": "program",
     "party_created": "party", "party_updated": "party",
     "broker_added": "broker", "broker_linked": "broker",
@@ -1022,7 +1028,46 @@ def _period_change(names, d):
     return parts
 
 
+def _mid_term(names, d):
+    """A mid-term change step: which change, from when, what moved, and — on
+    the step that carries them — the reason, the broker's request, who signed
+    and how many checks going live closed and opened."""
+    parts = []
+    if d.get("number"):
+        parts.append((f"Mid-term change {d['number']}", None))
+    if d.get("effective_from"):
+        parts.append((f"From {date_words(d['effective_from']) or d['effective_from']}", None))
+    for line in (d.get("changes") or [])[:6]:
+        parts.append((_clip(str(line), 120), None))
+    if d.get("revised"):
+        parts.append(("Revised", None))
+    if d.get("reason"):
+        parts.append((f"Reason: {_clip(d['reason'], 200)}", None))
+    if d.get("note"):
+        parts.append((f"Note: {_clip(d['note'], 200)}", None))
+    if d.get("signer"):
+        side = "carrier" if d.get("side") == "carrier" else "broker"
+        parts.append((f"Signed for the {side} by {_clip(d['signer'], 80)}", None))
+    if d.get("rules_closed") is not None:
+        parts.append((f"{len(d.get('rules_closed') or [])} check(s) ended, "
+                      f"{len(d.get('rules_opened') or [])} new version(s) from the change date",
+                      None))
+    if d.get("rules_opened_from_clauses"):
+        parts.append((f"{len(d['rules_opened_from_clauses'])} check(s) from the changed "
+                      f"clauses, from the change date", None))
+    if d.get("document"):
+        parts.append((f"Document: {_clip(str(d['document']), 120)}", None))
+    if d.get("files_to_recheck"):
+        parts.append((f"{d['files_to_recheck']} file(s) to re-check", None))
+    return parts
+
+
 _SPECIAL = {
+    "contract_mid_term_sent": _mid_term, "contract_mid_term_agreed": _mid_term,
+    "contract_mid_term_uploaded": _mid_term,
+    "contract_mid_term_changes_requested": _mid_term, "contract_mid_term_signed": _mid_term,
+    "contract_mid_term_accepted": _mid_term, "contract_mid_term_live": _mid_term,
+    "contract_mid_term_withdrawn": _mid_term,
     "contract_period_corrected": _period_change,
     "contract_period_correction_undone": _period_change,
     "datamodel.ingest": _rows_saved,

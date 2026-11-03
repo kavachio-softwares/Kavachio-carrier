@@ -360,6 +360,10 @@ _SELF_LOGGED = [
     # Change period (Phase B) writes its own audit row, in the same transaction
     # as the correction or undo it records; its previews write nothing at all.
     ("POST",   re.compile(r"^/contracts/\d+/period(/undo)?(/preview)?$")),
+    # A mid-term change writes its own named row for every step (sent, agreed,
+    # changes requested, signed, live, withdrawn) in the same transaction as
+    # the step; its preview writes nothing.
+    ("POST",   re.compile(r"^/contracts/\d+/mid-term(/preview|/\d+/[a-z-]+)?$")),
     # The secure correction link writes its own audit rows (who, by email).
     ("POST",   re.compile(r"^/fix-link/[^/]+(/.*)?$")),
     # The carrier's delivery rule and channel notify list log themselves.

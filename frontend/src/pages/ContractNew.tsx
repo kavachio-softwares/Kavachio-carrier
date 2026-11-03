@@ -36,6 +36,7 @@ import { FLOW_PARAM, ProgrammeFlowBar } from "../components/ProgrammeFlowBar";
 import { SubSteps } from "../components/FlowStepper";
 import { InfoTip } from "../components/InfoTip";
 import { WordingEditor } from "../components/WordingEditor";
+import { wordingTokenLabels } from "../utils/wordingTokens";
 import { SignaturePlacer, signerTargets }
   from "../components/SignaturePlacer";
 import { TermDurationField, useTermDuration } from "../components/TermDuration";
@@ -192,16 +193,7 @@ export default function ContractNew() {
   /** What a chip is called in the toolbar and in its tooltip. The limits use
    *  the plain-English question from step 1; the handful that are not limits
    *  (the parties, the term) are named here. */
-  const tokenLabels = useMemo(() => {
-    const out: Record<string, string> = {
-      contract_name: "Contract name", inception: "Start date",
-      expiry: "End date", class_of_business: "Class of business",
-      carrier_name: "Carrier", counterparty_name: "Broker",
-      programme_name: "Programme", notice_period_days: "Notice to cancel",
-    };
-    limitSpec.forEach(l => { out[l.name] = l.question; });
-    return out;
-  }, [limitSpec]);
+  const tokenLabels = useMemo(() => wordingTokenLabels(limitSpec), [limitSpec]);
 
   useEffect(() => {
     getContractTypes()
@@ -240,6 +232,12 @@ export default function ContractNew() {
     setBusy("endorse-load");
     try {
       const prior = await getContract(Number(id));
+      // A change to a running contract is made on its own page — sent to the
+      // broker, signed by both, its checks dated — not here.
+      if (prior.mid_term) {
+        nav(`/contracts/${prior.id}/mid-term`);
+        return;
+      }
       setLimits(prior.agreed_limits ?? {});
       setValues(v => ({ ...v, name: prior.name }));
       setProgramId(prior.programme ? String(prior.programme.id) : "");

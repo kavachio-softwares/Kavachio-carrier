@@ -1974,7 +1974,7 @@ def fix_backdating_period_fields(synth_outputs, template_fields):
     fixed = 0
     for entry in (synth_outputs or []):
         clause_txt = ((entry.get("clause") or {}).get("text") or "")
-        for ir in (entry.get("candidates") or []):
+        for idx, ir in enumerate(entry.get("candidates") or []):
             if ir.get("template") != "period_duration":
                 continue
             blob = (clause_txt + " " + str(ir.get("rule_name", "")) + " "
@@ -1999,10 +1999,15 @@ def fix_backdating_period_fields(synth_outputs, template_fields):
             # mapper often emits this instead as a `min` (or a >=/< op+value) whose
             # meaning is inverted: the compiled check then flags every COMPLIANT
             # short / zero / negative span and MISSES the real over-long backdates.
-            # Read N from whichever bound the mapper produced (never hardcoded) and
-            # collapse it to max=N so the direction of the check is unambiguous.
-            threshold = next((p[k] for k in ("max", "min", "value")
-                              if p.get(k) is not None), None)
+            # N is the number the CONTRACT states, as Call 2 read it off the clause
+            # ("more than five (5) days" → 5). The mapper's own bound is only the
+            # fallback: it restates "more than N" as a count ("a minimum of N+1"),
+            # and N+1 kept as the ceiling would let an N+1-day backdate through.
+            # Collapse to max=N so the direction of the check is unambiguous.
+            threshold = _stated_value(entry, idx)
+            if threshold is None:
+                threshold = next((p[k] for k in ("max", "min", "value")
+                                  if p.get(k) is not None), None)
             if threshold is not None:
                 before = (p.get("max"), p.get("min"), p.get("op"), p.get("value"))
                 for k in ("min", "value", "op"):
@@ -2014,6 +2019,185 @@ def fix_backdating_period_fields(synth_outputs, template_fields):
             if changed:
                 ir["params"] = p
                 fixed += 1
+    return fixed
+
+
+def _stated_value(entry, idx):
+    """The number the contract itself states for candidate `idx` of a synth
+    entry, as Call 2 read it off the clause (the intent's `value`), or None.
+
+    Call 3 maps intent i to candidate i, so the two lists line up one-to-one;
+    when they don't (a repair merged or dropped a candidate) nothing is guessed."""
+    clf = entry.get("classification") or (entry.get("clause") or {}).get("classification") or {}
+    intents = clf.get("intents") or []
+    if len(intents) != len(entry.get("candidates") or []) or idx >= len(intents):
+        return None
+    v = (intents[idx] or {}).get("value")
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return v
+
+
+def fix_bounds_off_by_one(synth_outputs):
+    """A single numeric bound one step past the number the contract states, in
+    the direction that lets a breach through.
+
+    Every bound template is INCLUSIVE — max_limit / period_duration flag a value
+    above `max`, min_limit a value below `min`. So whatever the wording, a
+    ceiling the contract states as N is `max = N` ("up to N", "more than N
+    requires referral") or `max = N - 1` ("fewer than N"), and a floor is
+    `min = N` or `min = N + 1` ("more than N"). A ceiling of N + 1 or a floor of
+    N - 1 is never a reading of N: it is the mapper restating "more than N" as a
+    count and then keeping that count as the limit — "more than five (5) days"
+    became max = 6, passing a six-day backdate the contract refers.
+
+    N is the intent's own value (see _stated_value), so nothing is read from
+    wording here. Whole numbers only — a step of one means nothing on a rate or
+    an amount with pence. Mutates the IR in place; returns the count changed."""
+    fixed = 0
+    for entry in (synth_outputs or []):
+        for idx, ir in enumerate(entry.get("candidates") or []):
+            if not isinstance(ir, dict) or ir.get("template") not in (
+                    "max_limit", "min_limit", "period_duration", "range_check"):
+                continue
+            n = _stated_value(entry, idx)
+            if n is None or float(n) != int(n):
+                continue
+            p = ir.get("params") or {}
+            lo, hi = p.get("min"), p.get("max")
+            if lo is not None and hi is not None:
+                continue          # a range or an exact value — not a single bound
+            if isinstance(hi, (int, float)) and not isinstance(hi, bool) and hi == n + 1:
+                p["max"] = n
+            elif isinstance(lo, (int, float)) and not isinstance(lo, bool) and lo == n - 1:
+                p["min"] = n
+            else:
+                continue
+            ir["params"] = p
+            fixed += 1
+    return fixed
+
+
+# What a percentage looks like in a clause — "100%", "20.0 %" — so a share the
+# contract states exactly ("Percentage of Total Risk: 100%") is told apart from
+# an amount.
+_PCT_IN_TEXT = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*%")
+
+
+def fix_limit_clause_exact_bounds(synth_outputs):
+    """A LIMIT clause made into "must equal" — APD per Auto Limit = $200,000
+    checked as every row's APD limit being exactly $200,000.
+
+    Extraction tags every clause with a type, and a `limit` / `sublimit` /
+    `aggregate_cap` clause is, by what that type means, the most a policy may
+    carry: the inner limits listed under "Maximum Limits … subject to the
+    following inner coverage limits" are each a ceiling. The mapper reads the
+    "=" in "Limit = $200,000" as equality on some runs (and as a ceiling on the
+    rest), and the exact version flags every policy written below the limit.
+    Rewrite such a range_check(min == max) to max_limit(max).
+
+    A limit clause can also state a SHARE ("Percentage of Total Risk: 100% per
+    layer") — that is an exact figure, so a value the clause writes as a
+    percentage is left alone. The clause type comes from the extraction, the
+    value from the rule; nothing about the wording is assumed. Mutates the IR in
+    place; returns the count changed."""
+    fixed = 0
+    for entry in (synth_outputs or []):
+        clause = entry.get("clause") or {}
+        if clause.get("clause_type") not in _CEILING_CLAUSE_TYPES:
+            continue
+        pcts = set()
+        for m in _PCT_IN_TEXT.finditer(clause.get("text") or ""):
+            try:
+                pcts.add(float(m.group(1).replace(",", "")))
+            except ValueError:
+                pass
+        for ir in (entry.get("candidates") or []):
+            if not isinstance(ir, dict) or ir.get("template") != "range_check":
+                continue
+            p = ir.get("params") or {}
+            lo, hi = p.get("min"), p.get("max")
+            if (not isinstance(hi, (int, float)) or isinstance(hi, bool)
+                    or lo != hi or not p.get("field")):
+                continue
+            if hi in pcts or hi * 100 in pcts:
+                continue
+            newp = {k: v for k, v in p.items() if k != "min"}
+            ir["template"] = "max_limit"
+            ir["params"] = newp
+            shown = f"{hi:,.0f}" if float(hi) == int(hi) else f"{hi:,}"
+            for key in ("rule_name", "rule_description"):
+                if ir.get(key):
+                    ir[key] = _MUST_EQUAL.sub("must not exceed", ir[key], count=1)
+            ir["error_message"] = (f"{p['field']} is above the contract limit of "
+                                   f"{shown}.")
+            fixed += 1
+    return fixed
+
+
+# Extraction's clause types that state a ceiling (prompt_builder's clause_type
+# list). Kept beside the repair that reads them.
+_CEILING_CLAUSE_TYPES = ("limit", "sublimit", "aggregate_cap")
+_MUST_EQUAL = re.compile(r"\bmust\s+(?:be|equal)\b(?!\s+(?:on|at|no|less|more|"
+                         r"greater|between|within|before|after)\b)", re.I)
+
+
+def contract_period(contract_id):
+    """(inception, expiry) of the contract the rules are being built for, or
+    (None, None) when it can't be read — the date repair below then does nothing."""
+    try:
+        from db import SessionLocal, Contract
+        with SessionLocal() as s:
+            c = s.get(Contract, contract_id)
+            return (c.inception_dt, c.expiry_dt) if c is not None else (None, None)
+    except Exception as exc:  # noqa: BLE001 — a repair, never a reason to fail the run
+        print(f"[Call 3] contract period not read ({exc}) — date bounds left as mapped")
+        return None, None
+
+
+# How the rule's own text says the comparison, before → after the repair: the
+# requirement gains "on or", and the breach (the error message) loses it.
+_STRICT_WORDS = {"<": (re.compile(r"\b(?<!on or )(?:strictly\s+)?before\b", re.I), "on or before"),
+                 ">": (re.compile(r"\b(?<!on or )(?:strictly\s+)?after\b", re.I), "on or after")}
+_BREACH_WORDS = {"<": (re.compile(r"\bon\s+or\s+after\b", re.I), "after"),
+                 ">": (re.compile(r"\bon\s+or\s+before\b", re.I), "before")}
+
+
+def fix_contract_period_date_bounds(synth_outputs, inception, expiry):
+    """A date bound on the contract's OWN first or last day made strict —
+    "policy inception must be before 31 Aug 2027" on a contract that runs to
+    31 Aug 2027.
+
+    The contract's term includes both its first and its last day (a contract
+    "ends on" its expiry date; a mid-term change may start on it), so business
+    dated on either day is inside it. A strict `<` against the expiry, or `>`
+    against the inception, puts that day outside and flags a policy written on
+    it. Which dates are the contract's own comes from the contract record, not
+    from the clause. Only those two dates are touched — a cut-off the contract
+    states for something else keeps whatever comparison it was read with.
+    Mutates the IR in place; returns the count changed."""
+    edges = {"<": str(expiry) if expiry else None, ">": str(inception) if inception else None}
+    if not any(edges.values()):
+        return 0
+    fixed = 0
+    for entry in (synth_outputs or []):
+        for ir in (entry.get("candidates") or []):
+            if not isinstance(ir, dict) or ir.get("template") != "date_bound":
+                continue
+            p = ir.get("params") or {}
+            op = p.get("op")
+            if op not in edges or not edges[op] or str(p.get("date"))[:10] != edges[op]:
+                continue
+            p["op"] = op + "="
+            ir["params"] = p
+            pat, words = _STRICT_WORDS[op]
+            for key in ("rule_name", "rule_description"):
+                if ir.get(key):
+                    ir[key] = pat.sub(words, ir[key])
+            if ir.get("error_message"):
+                pat, words = _BREACH_WORDS[op]
+                ir["error_message"] = pat.sub(words, ir["error_message"])
+            fixed += 1
     return fixed
 
 
@@ -3364,6 +3548,27 @@ class ValidationRuleGenerator:
         if nme:
             print(f"[Call 3] merged {nme} contradictory sibling enum rule(s) "
                   f"into union value set(s)")
+
+        # #7c — A single bound one step past the number the clause states, on the
+        # side that lets a breach through ("more than 5 days" kept as max = 6).
+        # Before #8, which collapses a backdating bound and must see the right N.
+        # See fix_bounds_off_by_one.
+        nob = fix_bounds_off_by_one(synth_outputs)
+        if nob:
+            print(f"[Call 3] moved {nob} bound(s) back onto the number the clause states")
+
+        # #7d — A limit / sub-limit clause made into "must equal" is a ceiling.
+        # See fix_limit_clause_exact_bounds.
+        nlc = fix_limit_clause_exact_bounds(synth_outputs)
+        if nlc:
+            print(f"[Call 3] turned {nlc} exact-value limit rule(s) into ceilings")
+
+        # #7e — A date bound on the contract's own first / last day includes that
+        # day. See fix_contract_period_date_bounds.
+        ndb = fix_contract_period_date_bounds(synth_outputs, *contract_period(contract_id))
+        if ndb:
+            print(f"[Call 3] made {ndb} contract-period date bound(s) include the "
+                  f"contract's first / last day")
 
         # #8 — Re-anchor a "backdating" period rule to PolicyInception → Transaction
         # (processing) date (deterministic, generic; the mapper's field choice for

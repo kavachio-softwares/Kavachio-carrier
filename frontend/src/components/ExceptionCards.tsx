@@ -169,7 +169,9 @@ export function groupByRule(exceptions: StoredException[]): RuleGroup[] {
       g = {
         ruleKey: key,
         ruleId: e.rule_id,
-        ruleName: e.rule_name ?? (e.rule_id != null ? `Rule ${e.rule_id}` : "Unknown rule"),
+        ruleName: (e.rule_name ?? (e.rule_id != null ? `Rule ${e.rule_id}` : "Unknown rule"))
+          // A check a mid-term change dated has two versions, one card each.
+          + (e.rule_window_label ? ` (${e.rule_window_label})` : ""),
         fieldPath: e.field_path,
         severity: (e.severity as Sev) ?? "info",
         count: 0,

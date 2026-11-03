@@ -251,7 +251,9 @@ function groupColPending(pending: StoredException[]): ColRuleGroup[] {
     let g = m.get(key);
     if (!g) {
       g = {
-        key, ruleId: e.rule_id, ruleName: e.rule_name ?? "Validation rule",
+        key, ruleId: e.rule_id,
+        ruleName: (e.rule_name ?? "Validation rule")
+          + (e.rule_window_label ? ` (${e.rule_window_label})` : ""),
         severity: e.severity ?? "info", clause: e.contract_clause_text,
         requirement: e.explanation?.requirement ?? null,
         pending: [], approvable: [], value: null,
@@ -325,7 +327,8 @@ function ExcDetail({ e, saving, onDecide, readOnly = false }: {
         <span className={`badge ${SEV_BADGE[e.severity ?? "info"] ?? "b-info"}`}>
           <span className="d" />{SEV_LABEL[e.severity ?? "info"] ?? e.severity}
         </span>
-        <span className="font-semibold text-xs">{e.rule_name ?? "Validation rule"}</span>
+        <span className="font-semibold text-xs">{e.rule_name ?? "Validation rule"}
+          {e.rule_window_label ? ` (${e.rule_window_label})` : ""}</span>
         {e.rule_id != null && <span className="text-[10px] font-mono text-ink-soft">RULE-{e.rule_id}</span>}
         {saved && (
           <span className="ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded"
