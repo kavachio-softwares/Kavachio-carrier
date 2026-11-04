@@ -186,6 +186,9 @@ export type StoredException = {
   /** Set when this row's date is covered by no version of the contract, so it
    *  was checked against the current one — names that contract and its period. */
   contract_period_note?: string | null;
+  /** Set on a check a mid-term change dated: the days this version covers
+   *  ("until 15 Aug 2026", "from 16 Aug 2026"). Its other version has its own. */
+  rule_window_label?: string | null;
 };
 
 export type StoredRun = {
@@ -321,6 +324,8 @@ export type OutputException = {
   aggregate?: AggregateMarker | null;
   /** See StoredException.contract_period_note. */
   contract_period_note?: string | null;
+  /** See StoredException.rule_window_label. */
+  rule_window_label?: string | null;
   contract_id?: number; contract_clause_text?: string | null;
   contract_clause_page?: number | null;
   policy_number?: string | null; actual_value?: string | null;
@@ -387,6 +392,7 @@ export function outputExcToStored(x: OutputException, i: number): StoredExceptio
     source_sheet: x.sheet ?? null,
     aggregate: x.aggregate ?? aggregateFromReason(x.reason, x.policy_number),
     contract_period_note: x.contract_period_note ?? null,
+    rule_window_label: x.rule_window_label ?? null,
     // Hand-enumerated mapper: a field missing here is silently dropped for the
     // whole output lane (every ?download=<id> screen), so it must be listed.
     explanation: x.explanation ?? null,

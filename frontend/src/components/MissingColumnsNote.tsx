@@ -598,9 +598,6 @@ export function BuildGapTabs({ data, tab, onTab }: {
       ) : (
         <UnmappedClausesList items={clauses} maxHeight="16rem" />
       )}
-      <p className="mt-2.5 text-[11px] text-ink-soft">
-        Both lists stay on the setup — under Contract Rules in Configured Bordereau Setups.
-      </p>
     </div>
   );
 }

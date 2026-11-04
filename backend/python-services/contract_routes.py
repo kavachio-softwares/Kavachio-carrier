@@ -845,6 +845,15 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         # and the corrections made (newest first, never the internal note).
         # Carrier side, full record, only while the switch is on.
         "period_change": _period_change_info(s, c, p) if with_docs else None,
+        # Mid-term change: whether one can be made now, the one in progress
+        # (status, who must act, what it changes) and those already live.
+        # Full record only.
+        "mid_term": _mid_term_info(s, c, p) if with_docs else None,
+        # Whether files sent under this contract can be checked against it:
+        # its checks for the live Bordereau Setup that would run them, and the
+        # two ways to make them when it has none (contract_checks). Carrier only.
+        "checks_setup": (_checks_setup_info(s, c)
+                         if with_docs and p is not None and not p.is_broker else None),
         "submitted_at": _iso_utc(c.submitted_at),
         "created_at": _iso_utc(c.created_at),
 
@@ -953,6 +962,29 @@ def _treaty_summary(s, c: Contract) -> Optional[dict]:
         return None
     import treaty_routes
     return treaty_routes.record_summary(s, c)
+
+
+def _checks_setup_info(s, c: Contract) -> Optional[dict]:
+    """See contract_checks.state. Never what stops a contract opening.
+    None for a treaty: its checks come from the reinsurance setup."""
+    if (c.contract_type or "") == "insurer_reinsurer":
+        return None
+    try:
+        import contract_checks
+        return contract_checks.state(s, c, _effective_lifecycle(c))
+    except Exception:  # noqa: BLE001
+        log.exception("checks setup state for contract %s", c.id)
+        return None
+
+
+def _mid_term_info(s, c: Contract, p: Principal | None) -> Optional[dict]:
+    """See mid_term_routes.record_block. Never what stops a contract opening."""
+    try:
+        import mid_term_routes
+        return mid_term_routes.record_block(s, c, p)
+    except Exception:  # noqa: BLE001
+        log.exception("mid-term change block for contract %s", c.id)
+        return None
 
 
 def _rule_tallies(s, contract_ids: list[int]) -> dict[int, dict]:
@@ -3788,83 +3820,13 @@ def endorsement_preview(contract_id: int, body: EndorsementIn,
 @router.post("/contracts/{contract_id}/endorsement")
 def endorsement_create(contract_id: int, body: EndorsementIn,
                        p: Principal = Depends(current_principal)):
-    """Endorse the contract: compose the document, attach it, move the terms.
-
-    Refused when nothing actually changed — an endorsement that amends nothing
-    is a document nobody can act on, and it would still count against the
-    numbering as if something had happened.
-    """
+    """Retired. This applied changed terms at once, without the broker. A
+    change to a running contract is now a mid-term change (mid_term_routes.py):
+    the broker agrees, both sides sign, and its checks are dated."""
     _require_carrier(p)
-    with SessionLocal() as s:
-        c = _contract_access(s, p, contract_id)
-        state = _effective_lifecycle(c)
-        if state not in ("active", "expired"):
-            raise HTTPException(
-                409, f"this contract is {state}. An endorsement changes a "
-                     f"contract that is running — a draft is changed by "
-                     f"editing its terms, and one that has ended is not "
-                     f"changed at all.")
-
-        old, new, changes, number, sections = _endorsement_context(s, c, body)
-        if not changes:
-            raise HTTPException(400, {
-                "message": "Nothing has changed, so there is nothing to "
-                           "endorse. Change a term first.",
-                "errors": {"agreed_limits": "no change"}})
-
-        import contract_wording as cw
-        counterparty = (s.get(Party, c.broker_party_id)
-                        if c.broker_party_id else None)
-        from db import Tenant
-        carrier = s.get(Tenant, c.tenant_id) if c.tenant_id else None
-        carrier_name = (getattr(carrier, "legal_name", None)
-                        or getattr(carrier, "tenant_name", None))
-
-        data = cw.compose_endorsement_pdf(
-            contract_name=c.name or c.filename, number=number,
-            carrier_name=carrier_name,
-            counterparty_name=getattr(counterparty, "legal_name", None),
-            effective_from=body.effective_from, sections=sections)
-        filename = f"Endorsement {number} — {(c.name or 'contract').strip()}.pdf"
-
-        # Stored, unlike the wording. See compose_endorsement_pdf: an
-        # endorsement records a change that happened on a date, so it must not
-        # be regenerated later from terms that have moved on since.
-        blob_ref, blob = storage.store_or_keep(
-            "contract-documents", c.tenant_id, filename, data, "application/pdf")
-
-        # Attached ALONGSIDE the wording, not replacing it. Both are active and
-        # rule generation reads the pair, with the endorsed value winning.
-        doc = ContractDocument(
-            tenant_id=c.tenant_id, contract_id=c.id, kind="endorsement",
-            filename=filename, version=f"endorsement-{number}",
-            blob_ref=blob_ref, blob=blob,
-            fingerprint=hashlib.sha256(data).hexdigest(),
-            effective_from=_as_date(body.effective_from),
-            is_active=True, uploaded_by_user_id=p.user_id,
-            extracted={"changes": changes, "note": body.note,
-                       "endorsement_number": number},
-        )
-        s.add(doc)
-
-        # The contract's live terms move to the endorsed values. What they WERE
-        # is not lost — the endorsement document records every from/to, which is
-        # exactly the history somebody asks for later.
-        c.commercial_terms = new or None
-        # Keep the authored wording's own record of its sections in step with
-        # the terms, so re-composing the contract quotes the endorsed numbers.
-        s.commit()
-        s.refresh(c)
-
-        rec = _record(s, c, p=p)
-        rec["endorsement"] = {
-            "number": number, "document_id": doc.id, "changes": changes,
-            "effective_from": body.effective_from,
-        }
-        # Attaching an endorsement changes what the rules SHOULD be, and the
-        # rules on file were read without it.
-        rec["rules_stale"] = True
-        return rec
+    raise HTTPException(410, "Changes to a running contract are made as a mid-term "
+                             "change now — open the contract and choose Mid-term "
+                             "change.")
 
 
 # =============================================================================
@@ -3881,8 +3843,18 @@ def endorsement_create(contract_id: int, body: EndorsementIn,
 
 
 def _signatures(s, contract_id: int) -> list[ContractSignature]:
+    """The CONTRACT's signatures. A mid-term change is signed on its own
+    document (contract_document.amendment_id set) and those signatures are the
+    change's, not the contract's: counting them here would let a change's
+    signature stand in for the contract's in every gate that reads this."""
+    from sqlalchemy import or_
+    change_docs = (s.query(ContractDocument.id)
+                   .filter(ContractDocument.contract_id == contract_id,
+                           ContractDocument.amendment_id.isnot(None)))
     return (s.query(ContractSignature)
-            .filter(ContractSignature.contract_id == contract_id)
+            .filter(ContractSignature.contract_id == contract_id,
+                    or_(ContractSignature.document_id.is_(None),
+                        ContractSignature.document_id.notin_(change_docs)))
             .order_by(ContractSignature.signed_at.asc()).all())
 
 
@@ -4992,6 +4964,128 @@ def reflect_setup(contract_id: int, p: Principal = Depends(current_principal)):
     return out
 
 
+class UseSetupIn(BaseModel):
+    """Which live setup to make the checks for — the one a run under this
+    contract would use when left out."""
+    pipeline_id: Optional[int] = None
+
+
+@router.post("/contracts/{contract_id}/checks/use-setup")
+def use_setup(contract_id: int, body: UseSetupIn,
+              p: Principal = Depends(current_principal)):
+    """Set a contract up on a Bordereau Setup that already exists — "use the
+    previous input and output templates".
+
+    The setup's input template, column mapping and output template are not
+    touched. The contract's checks are made for that output template the way
+    Bordereau Setup makes them: from its clauses by the clause → rule step
+    (app_routes.contract_generate_rules — no document re-read, cached AI
+    answers), or for a contract written here with no clauses, from its typed
+    terms (_write_checks). Then the contract is put on the setup in the place
+    of the contract it replaced (contract_checks.link), the files that were
+    waiting for its checks are run, and a mid-term change in progress has its
+    checks worked out again against the checks the contract now has.
+
+    For an in-force contract (active, or ended and still taking its late
+    months). Takes minutes: the same model calls the setup makes."""
+    import contract_checks
+    from db import Pipeline
+    _require_carrier(p)
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        lifecycle = _effective_lifecycle(c)
+        if lifecycle not in contract_checks.RUNNABLE:
+            raise HTTPException(409, f"Only a contract in force is set up for "
+                                     f"bordereaux; this one is {lifecycle}.")
+        pipe = (s.get(Pipeline, body.pipeline_id) if body.pipeline_id
+                else contract_checks.serving_setup(s, c))
+        if (pipe is None or pipe.status != "active" or pipe.tenant_id != c.tenant_id
+                or pipe.program_id != c.program_id
+                or pipe.broker_party_id not in (None, c.broker_party_id)):
+            raise HTTPException(409, "There is no live Bordereau Setup for this "
+                                     "contract's programme and broker to use — "
+                                     "build one in Bordereau Setup.")
+        if not pipe.output_template_id:
+            raise HTTPException(409, "That setup has no output template.")
+        import direct_routes
+        from types import SimpleNamespace
+        if direct_routes._contracts_not_yet_settled(
+                s, [SimpleNamespace(contract_id=c.id)], tenant_id=c.tenant_id):
+            raise HTTPException(409, "This contract has not been signed or accepted "
+                                     "yet, so a setup can't run it.")
+        program_id, pipe_id, tenant_id = c.program_id, pipe.id, c.tenant_id
+        template_id, broker_of_setup = pipe.output_template_id, pipe.broker_party_id
+        clauses, terms = _has_clauses(s, c.id), bool(c.commercial_terms or {})
+
+    if clauses:
+        import app_routes
+        made = app_routes.contract_generate_rules(
+            program_id, contract_id,
+            app_routes.ContractGenerateRulesBody(output_template_id=template_id),
+            principal=p)
+    elif terms:
+        with SessionLocal() as s:
+            c = s.get(Contract, contract_id)
+            written, _rules, unmapped = _write_checks(
+                s, c, s.get(ExportTemplate, template_id))
+            s.commit()
+        made = {"created": written, "unmapped": unmapped}
+    else:
+        raise HTTPException(409, "This contract has no clauses and no agreed terms "
+                                 "to make checks from. Read its document first.")
+
+    # A change already live when it was set up: its checks dated, and the old
+    # wording's made for the days before it. Run here as well as inside the
+    # generation, so a contract whose checks were made but whose history was
+    # not (interrupted, or made before this existed) is finished by a retry.
+    history = (made or {}).get("mid_term_history")
+    if history is None:
+        import app_routes
+        import mid_term_routes
+        with SessionLocal() as s:
+            tpl = s.get(ExportTemplate, template_id)
+            fields = app_routes._template_fields_from_structure(tpl.structure) if tpl else []
+        history = mid_term_routes.date_setup_checks(
+            contract_id=contract_id, program_id=program_id, tenant_id=tenant_id,
+            template_fields=fields, output_template_id=template_id,
+            actor=f"user:{p.user_id}")
+    with SessionLocal() as s:
+        c = s.get(Contract, contract_id)
+        pipe = s.get(Pipeline, pipe_id)
+        linked = contract_checks.link(s, pipe, c)
+        s.commit()
+        n = contract_checks.check_count(s, pipe, c.id)
+        refreshed = None
+        try:
+            import mid_term_routes
+            refreshed = mid_term_routes.refresh_open_change(s, c, p)
+            s.commit()
+        except Exception:  # noqa: BLE001 — the checks are made; the change says why
+            s.rollback()
+            log.exception("contract %s: mid-term change plan not refreshed", c.id)
+        from audit import log_activity
+        log_activity(c.tenant_id, _actor_name(s, p), "contract_checks_set_up",
+                     target=f"contract:{c.id}",
+                     details={"contract_id": c.id, "name": c.name or c.filename,
+                              "program_id": c.program_id, "pipeline_id": pipe.id,
+                              "setup_name": pipe.name, "output_template_id": template_id,
+                              "checks": n, "created": (made or {}).get("created"),
+                              "linked": linked["linked"], "replaced": linked["replaced"],
+                              "mid_term_refreshed": refreshed},
+                     principal=p)
+        rec = _record(s, c, p=p)
+    import intake_autorun
+    queued = intake_autorun.requeue_waiting(tenant_id, program_id, broker_of_setup)
+    rec["checks_made"] = {"checks": n, "created": (made or {}).get("created"),
+                          "skipped": (made or {}).get("skipped"),
+                          "linked": linked["linked"], "replaced": linked["replaced"],
+                          "files_queued": queued, "mid_term_refreshed": refreshed,
+                          # a change already live when it was set up: the old
+                          # wording's checks, dated up to the change
+                          "mid_term_history": history}
+    return rec
+
+
 # =============================================================================
 #  Documents
 # =============================================================================
@@ -5759,6 +5853,18 @@ async def generate_rules(contract_id: int,
         if _effective_lifecycle(c) in ("terminated", "superseded"):
             raise HTTPException(409, "this contract has ended — its rules are "
                                      "history and are not regenerated")
+        # A re-read deletes every rule and writes them again with new ids. On a
+        # contract with mid-term changes that would erase the dated versions —
+        # rows before a change would be checked on the new terms. Refused
+        # whether or not the switch is on: the dates are in the rules either way.
+        from db import ContractAmendment
+        if (s.query(ContractAmendment)
+                .filter(ContractAmendment.contract_id == c.id,
+                        ContractAmendment.kind == "mid_term",
+                        ContractAmendment.status.notin_(("withdrawn",))).first()):
+            raise HTTPException(409, "This contract has mid-term changes. Re-reading it "
+                                     "would replace every check and lose the dates the "
+                                     "changes gave them, so it is not re-read.")
 
         docs = (s.query(ContractDocument)
                 .filter(ContractDocument.contract_id == c.id,

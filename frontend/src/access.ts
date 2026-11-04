@@ -152,6 +152,10 @@ export const ROUTE_ACCESS: {
   { pattern: "/contracts", requires: "carrier_admin", only: ["carrier_admin"] },
   { pattern: "/contracts/new", requires: "carrier_admin", only: ["carrier_admin"] },
   { pattern: "/contracts/upload", requires: "carrier_admin", only: ["carrier_admin"] },
+  // Making or revising a mid-term change is the carrier's; the broker agrees
+  // and signs it on the contract record itself.
+  { pattern: "/contracts/:contractId/mid-term", requires: "carrier_admin",
+    only: ["carrier_admin"] },
   // The record itself is open to both SIDES, because both have business with
   // it: the carrier decides on it, and the broker has to attach the documents
   // it defers to and correct it after a rejection. The API scopes what each

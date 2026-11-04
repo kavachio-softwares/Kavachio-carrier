@@ -13,6 +13,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, Check } from "lucide-react";
 import type { BrokerContract } from "../api/broker";
 import { fmtDate } from "../utils/date";
+import { InfoTip } from "./InfoTip";
 
 /** A programme a broker can send a bordereau for, with the contracts on it. */
 export type BrokerProgramme = {
@@ -59,13 +60,31 @@ function Row({ title, sub, badge }: { title: string; sub?: ReactNode; badge?: Re
   );
 }
 
+/** The pick as the closed box shows it: one line, the name first. The detail
+ *  lines stay on the open list, where they are what tells options apart. */
+function Picked({ title, aside, badge }: { title: string; aside?: string | null; badge?: ReactNode }) {
+  return (
+    <div style={{ minWidth: 0, flex: 1, display: "flex", alignItems: "center", gap: 8 }}>
+      <span style={{ fontSize: 13.5, fontWeight: 600, color: "var(--p-ink)",
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+      {aside && (
+        <span style={{ fontSize: 12, color: "var(--p-muted)", whiteSpace: "nowrap",
+          overflow: "hidden", textOverflow: "ellipsis" }}>· {aside}</span>
+      )}
+      {badge && <span style={{ marginLeft: "auto", flex: "none" }}>{badge}</span>}
+    </div>
+  );
+}
+
 /** One dropdown for both pickers: the closed box shows the pick in full. */
-function ChoicePicker<T>({ items, value, onChange, keyOf, render, placeholder, empty }: {
+function ChoicePicker<T>({ items, value, onChange, keyOf, render, renderPicked, placeholder, empty }: {
   items: T[];
   value: number | "";
   onChange: (id: number) => void;
   keyOf: (t: T) => number;
   render: (t: T) => ReactNode;
+  /** The closed box; defaults to `render`. */
+  renderPicked?: (t: T) => ReactNode;
   placeholder: string;
   empty: string;
 }) {
@@ -94,7 +113,8 @@ function ChoicePicker<T>({ items, value, onChange, keyOf, render, placeholder, e
 
   // Nothing to choose between: shown flat, not as a control that opens onto
   // a single, unavoidable answer.
-  if (items.length === 1) return <div style={flat}>{render(items[0])}</div>;
+  const picked = renderPicked ?? render;
+  if (items.length === 1) return <div style={flat}>{picked(items[0])}</div>;
   if (items.length === 0) {
     return <div style={{ ...flat, fontSize: 13.5, color: "var(--p-faint)" }}>{empty}</div>;
   }
@@ -116,7 +136,7 @@ function ChoicePicker<T>({ items, value, onChange, keyOf, render, placeholder, e
           transition: ".12s", textAlign: "left",
         }}
       >
-        {current ? render(current) : (
+        {current ? picked(current) : (
           <span style={{ flex: 1, fontSize: 13.5, color: "var(--p-faint)" }}>{placeholder}</span>
         )}
         <ChevronDown size={15} strokeWidth={2}
@@ -166,6 +186,7 @@ export function ProgrammePicker({ value, onChange, programmes }: {
   return (
     <ChoicePicker items={programmes} value={value} onChange={onChange} keyOf={p => p.id}
       placeholder="Select Programme…" empty="No programme yet"
+      renderPicked={p => <Picked title={p.name} aside={p.carrier} />}
       render={p => (
         <Row title={p.name}
           sub={[p.code, p.carrier,
@@ -186,6 +207,42 @@ function termOf(c: BrokerContract): string | null {
   return c.expiry_dt ? `In force until ${fmtDate(c.expiry_dt)}` : null;
 }
 
+/** Previous term / Ended. On the closed box the term's detail sits behind the
+ *  badge's ⓘ instead of a line of its own. */
+function contractBadge(c: BrokerContract, withTip: boolean): ReactNode {
+  const tip = withTip ? termNote(c) : null;
+  const info = tip && (
+    // A click on the ⓘ must not also open the dropdown it sits in.
+    <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex" }}>
+      <InfoTip text={tip} />
+    </span>
+  );
+  if (c.previous_term) {
+    return <span className="badge b-info" style={{ flex: "none" }}
+      title={withTip ? undefined : (c.renewed_by?.name ? `Renewed as ${c.renewed_by.name}` : "Renewed")}>
+      <span className="d" />Previous term{info}</span>;
+  }
+  if (c.lifecycle === "expired") {
+    return <span className="badge b-warn" style={{ flex: "none" }}><span className="d" />Ended{info}</span>;
+  }
+  return null;
+}
+
+/** What the badge means, in a sentence. */
+function termNote(c: BrokerContract): string | null {
+  if (c.previous_term) {
+    const by = c.renewed_by?.name ? ` as ${c.renewed_by.name}` : "";
+    const span = c.inception_dt && c.expiry_dt
+      ? ` (${fmtDate(c.inception_dt)} – ${fmtDate(c.expiry_dt)})` : "";
+    return `Renewed${by}. Use this previous term${span} only for its months not yet sent.`;
+  }
+  if (c.lifecycle === "expired") {
+    return `Term ended${c.expiry_dt ? ` on ${fmtDate(c.expiry_dt)}` : ""}. `
+      + "You can still send bordereaux for the months up to then.";
+  }
+  return null;
+}
+
 export function ContractPicker({ value, onChange, contracts }: {
   value: number | "";
   onChange: (id: number) => void;
@@ -196,16 +253,12 @@ export function ContractPicker({ value, onChange, contracts }: {
       // The contract in force first; a previous term after it.
       items={[...contracts].sort((a, b) => Number(!!a.previous_term) - Number(!!b.previous_term))}
       placeholder="Select Contract…" empty="No active contract yet"
+      renderPicked={c => <Picked title={c.name || c.filename || `Contract ${c.id}`}
+        badge={contractBadge(c, true)} />}
       render={c => (
         <Row title={c.name || c.filename || `Contract ${c.id}`}
           sub={[c.code, c.carrier.name, termOf(c)].filter(Boolean).join(" · ")}
-          badge={c.previous_term
-            ? <span className="badge b-info" style={{ flex: "none" }}
-                title={c.renewed_by?.name ? `Renewed as ${c.renewed_by.name}` : "Renewed"}>
-                <span className="d" />Previous term</span>
-            : c.lifecycle === "expired"
-            ? <span className="badge b-warn" style={{ flex: "none" }}><span className="d" />Ended</span>
-            : null} />
+          badge={contractBadge(c, false)} />
       )} />
   );
 }

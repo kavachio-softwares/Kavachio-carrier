@@ -11,7 +11,10 @@ each saved as a clean file:
     setup's sheet filter let no row through), so nothing was projected into
     the output at all;
   · rows were projected, but every one was set aside as blank or a summary row
-    before a rule saw it.
+    before a rule saw it;
+  · the contract had no checks for the setup that ran it (never set up in
+    Bordereau Setup), so only the date and amount formats were looked at —
+    "not checked against the contract".
 
 `outcome` turns those into status 'not_validated' with a plain-words reason,
 and the two entry builders give the review screens something to show:
@@ -34,6 +37,9 @@ from __future__ import annotations
 
 CLEAN, HAS_EXCEPTIONS, NOT_VALIDATED = "clean", "has_exceptions", "not_validated"
 NOT_CHECKED = "not_checked"
+# The reason a run with none of its contract's checks starts with — the screens
+# show it as the headline.
+NOT_AGAINST_CONTRACT = "not checked against the contract"
 
 # direct_lane.eval_rule's column-rule kinds that can write a value. Anything
 # else evaluates to None on every row, so it fills nothing.
@@ -158,7 +164,8 @@ _UNKNOWN = object()
 
 
 def outcome(*, input_rows: int, projected_rows: int, error=None, stats=None,
-            exceptions=(), routed_rows=_UNKNOWN) -> tuple[str, str | None]:
+            exceptions=(), routed_rows=_UNKNOWN, contract_checks=None,
+            contract_label=None) -> tuple[str, str | None]:
     """(status, reason) for a run. `reason` is None unless not_validated.
 
     `input_rows`      rows the uploaded file carried (0 when unknown)
@@ -171,6 +178,12 @@ def outcome(*, input_rows: int, projected_rows: int, error=None, stats=None,
                       None when the file has none of them. Left out, a file
                       with rows and no output reads as a sheet mismatch. A
                       routed sheet that is merely empty (0) is not a failure.
+    `contract_checks` how many of the contract's own checks the run had. 0 is
+                      a file NOT CHECKED AGAINST THE CONTRACT — at most its
+                      date and amount formats were looked at — and is never
+                      clean. None (unknown — a caller that does not count
+                      them) leaves the status as the rest decides.
+    `contract_label`  the contract(s) named in that reason.
     """
     if not projected_rows:
         if routed_rows is _UNKNOWN:
@@ -195,6 +208,12 @@ def outcome(*, input_rows: int, projected_rows: int, error=None, stats=None,
         return NOT_VALIDATED, (
             f"every one of the {projected_rows:,} output row(s) was set aside as "
             f"blank, a summary or a repeated header, so no row was checked")
+    if projected_rows and contract_checks == 0:
+        return NOT_VALIDATED, (
+            f"{NOT_AGAINST_CONTRACT} — {contract_label or 'the contract'} has no "
+            f"checks for this Bordereau Setup yet, so at most the date and amount "
+            f"formats were looked at. The carrier has to set the contract up in "
+            f"Bordereau Setup")
     return (HAS_EXCEPTIONS if countable(exceptions) else CLEAN), None
 
 
@@ -232,7 +251,11 @@ def not_checked_entry(unprocessable, partial=None) -> dict | None:
         for c in u.get("columns") or []:
             if c not in cols:
                 cols.append(c)
-    n, k = len(items), len(partial)
+    # A changed check (mid-term change) that skipped rows with no transaction
+    # date ran, but not on those rows — said apart from a sheet it skipped.
+    undated = [p for p in partial if p.get("kind") == "undated_rows"]
+    by_sheet = [p for p in partial if p.get("kind") != "undated_rows"]
+    n, k = len(items), len(by_sheet)
     parts = []
     if n:
         s = f"{n} check{'s' if n != 1 else ''} could not be run on this file"
@@ -242,12 +265,17 @@ def not_checked_entry(unprocessable, partial=None) -> dict | None:
         parts.append(s)
     if k:
         skipped = []
-        for p in partial:
+        for p in by_sheet:
             for sh in p.get("sheets") or []:
                 if sh not in skipped:
                     skipped.append(sh)
         parts.append(f"{k} check{'s' if k != 1 else ''} ran on only some sheets, "
                      f"not on {_shown(skipped)}")
+    if undated:
+        u = len(undated)
+        parts.append(f"{u} check{'s' if u != 1 else ''} changed mid-term "
+                     f"{'were' if u != 1 else 'was'} not run on rows with no "
+                     f"transaction effective date")
     summary = "; ".join(parts)
     return {
         "severity": "info",
@@ -265,5 +293,7 @@ def not_checked_entry(unprocessable, partial=None) -> dict | None:
         "columns": cols,
         "partial": [{"rule_id": p.get("rule_id"), "rule_name": p.get("rule_name"),
                      "columns": p.get("columns") or [], "sheets": p.get("sheets") or [],
-                     "message": p.get("message")} for p in partial],
+                     "message": p.get("message"),
+                     **({"kind": p["kind"], "rows": p.get("rows") or {}}
+                        if p.get("kind") else {})} for p in partial],
     }

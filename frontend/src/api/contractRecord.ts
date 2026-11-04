@@ -229,6 +229,15 @@ export type ContractRecord = {
     large_days: number;
     history: PeriodHistoryEntry[];
   } | null;
+  /** Mid-term changes: whether one can be made now, the one in progress and
+   *  those already live. Full record only. */
+  mid_term?: MidTermBlock | null;
+  /** Whether files sent under this contract can be checked against it — its
+   *  checks for the live Bordereau Setup that would run them (carrier only;
+   *  null while the contract is not in force). */
+  checks_setup?: ChecksSetup | null;
+  /** Set on the answer to "make the checks with the existing setup". */
+  checks_made?: ChecksMade | null;
   /** The Renew area (server rule: expired, or active within the renewal
    *  window, and not already renewed). `existing` and `opens_on` are sent to
    *  the carrier only. */
@@ -1323,3 +1332,269 @@ export const periodReview = (id: number) =>
             rules_other_dates: { rule_id: number; name: string | null; dates: string[] }[];
             term: { inception_dt: string | null; expiry_dt: string | null } }>(
     `/contracts/${id}/period-review`).then(r => r.data);
+
+
+// ── mid-term change: a running contract's terms change from a date ─────────
+// The contract stays the same contract. The change goes to the broker, is
+// agreed and signed, and only then goes live: each check it touches is closed
+// the day before the effective date and a new version opened on it, so every
+// bordereau row is checked by the version in force on its transaction
+// effective date. Until then files keep being checked on the current terms.
+
+export type MidTermStatus =
+  | "with_broker" | "changes_requested" | "agreed" | "carrier_signed"
+  | "signed" | "pending" | "live" | "withdrawn";
+
+export type MidTermBoundary = { old_until: string; new_from: string; sentence: string };
+
+export type MidTermRules = {
+  closing: { rule_id: number; rule_name: string | null; key: string | null;
+             value: string | null; until: string | null;
+             /** set when the check ends because its clause was re-worded or deleted */
+             clause?: string | null }[];
+  opening: { replaces: number | null; rule_name: string | null; key: string;
+             value: string | null; from: string | null; new_check: boolean;
+             switched_off: boolean; message: string | null }[];
+  unchecked: { key: string; question: string; to: string; reason: string;
+               rule_id?: number }[];
+  needs_choice: { key: string; question: string;
+                  candidates: { rule_id: number; rule_name: string | null;
+                                column: string | null }[] }[];
+};
+
+export type MidTermSetup = {
+  pipeline_id: number; name: string; status: string | null;
+  template_id: number | null; date_column: string | null; saved: string | null;
+  suggested: string | null; columns?: string[];
+};
+
+export type MidTermRecheck = {
+  export_id: number; filename: string; period: string | null;
+  period_end: string | null; checked_at: string | null;
+};
+
+/** A clause the change re-words, adds or deletes — as the server worked it out
+ *  from the carrier's edits. `auto`: re-worded only because its term moved. */
+export type MidTermClauseChange = {
+  index: number | null; ref: string | null; clause_id: number | null;
+  action: "amended" | "added" | "removed";
+  title: string | null; from_title: string | null; section: string | null;
+  from_text: string | null; to_text: string | null;
+  auto?: boolean | null; term?: string | null;
+};
+
+/** The checks re-worded and new clauses make (Bordereau Setup's own rule
+ *  generation, run on those clauses only). */
+export type MidTermClauseChecks = {
+  state: "none" | "ready" | "not_worked_out" | "failed" | "no_setup" | null;
+  error: string | null;
+  opening: { clause: string | null; clause_ref: string | null; clause_index: number | null;
+             rule_name: string | null; column: string | null; severity: string | null;
+             from: string | null; executable: boolean; switched_off: boolean;
+             needs_review: boolean; message: string | null }[];
+  no_column: { clause: string | null; clause_ref: string | null;
+               clause_index: number | null; reason: string }[];
+};
+
+/** After a change is live: does each setup already feed the checks it added? */
+export type MidTermSetupFollowUp = {
+  no_setup: boolean; new_checks: number; all_ready: boolean;
+  recommended: "same_templates" | "new_templates";
+  setup_link: string;
+  clauses_without_column?: { clause: string | null; reason: string }[];
+  setups: { pipeline_id: number; name: string; status: string | null; edit_link: string;
+            unmapped: string[]; no_column: string[];
+            checks: { rule_id: number; rule_name: string | null; columns: string[];
+                      state: "ready" | "unmapped" | "no_column" }[] }[];
+};
+
+export type MidTermChange = {
+  id: number; number: number | null; status: MidTermStatus; status_words: string;
+  road: string | null; effective_from: string | null;
+  boundary: MidTermBoundary | null; reason: string | null;
+  changes: EndorsementChange[]; created_at: string | null;
+  clause_changes?: MidTermClauseChange[];
+  executed_date: string | null;
+  document: { id: number; filename: string } | null;
+  rules?: MidTermRules | null; checks_unchanged?: number | null;
+  clause_checks?: MidTermClauseChecks | null;
+  setups?: MidTermSetup[];
+  signatures?: Record<string, { signer_name: string; signer_title: string | null;
+                                method: string; signed_at: string | null }>;
+  actions?: ("agree" | "request_changes" | "sign" | "withdraw" | "revise" | "apply" | "accept")[];
+  history?: { step: string; note: string | null; at: string | null; by: string | null }[];
+  held?: { message: string; blockers: { code: string; message: string }[] } | null;
+  applied?: { closed: number[]; opened: { rule_id: number; replaces: number | null }[];
+              new_checks?: number[];
+              clauses?: { amended: number[]; added: number[]; deleted: number[] };
+              recheck: MidTermRecheck[]; at: string } | null;
+  setup_follow_up?: MidTermSetupFollowUp | null;
+  change_request?: string | null;
+  request?: MidTermInput | null;
+};
+
+export type MidTermBlock = {
+  can_start: boolean; why_not: string | null;
+  open: MidTermChange | null; history: MidTermChange[];
+  latest_live_from: string | null;
+};
+
+/** A clause edit as the carrier makes it, on the clauses as they read today. */
+export type MidTermClauseEdit = {
+  ref?: string | null; action: "amended" | "added" | "removed";
+  title?: string | null; text?: string | null; section?: string | null;
+};
+
+export type MidTermInput = {
+  effective_from?: string | null;
+  reason?: string | null;
+  agreed_limits: AgreedLimits;
+  choices?: Record<string, number[]>;
+  date_columns?: Record<string, string>;
+  sections?: WordingSection[] | null;
+  clauses?: MidTermClauseEdit[];
+  /** an uploaded change document (uploadMidTermDocument) — it IS the document */
+  document_id?: number | null;
+  /** …already signed by both sides: accepted and live, no broker round */
+  signed?: boolean;
+  /** ask for the checks re-worded and new clauses make (slow the first time) */
+  work_out_checks?: boolean;
+};
+
+export type MidTermPreview = {
+  number: number; effective_from: string | null; boundary: MidTermBoundary | null;
+  road: string; is_uploaded: boolean;
+  current_terms: AgreedLimits; new_terms: AgreedLimits;
+  changes: EndorsementChange[]; rules: MidTermRules; checks_unchanged: number;
+  clause_changes: MidTermClauseChange[]; clause_checks: MidTermClauseChecks;
+  document: { id: number; filename: string } | null; signed: boolean;
+  setups: MidTermSetup[]; recheck: MidTermRecheck[]; sections: WordingSection[];
+  blockers: { code: string; message: string; field?: string }[]; ok: boolean;
+};
+
+/** One of the contract's clauses as it reads today. An uploaded contract's
+ *  ref is "c:<clause id>"; a written one's is "s:<section key>", whose `body`
+ *  keeps its terms as {{tokens}}. */
+export type MidTermClause = {
+  ref: string; clause_id: number | null; title: string | null; section: string | null;
+  text: string; body?: string; origin?: string | null; page: number | null;
+  kind: string | null; checks: number;
+};
+
+export type MidTermStart = MidTermBlock & {
+  contract: { id: number; name: string; inception_dt: string | null;
+              expiry_dt: string | null; is_uploaded: boolean;
+              programme: string | null; counterparty: string | null };
+  current_terms: (AgreedLimits & Record<string, { read_from_clause?: boolean;
+                  read_from_checks?: boolean; clause_id?: number | null;
+                  quote?: string | null }>) | null;
+  terms_error?: string | null;
+  setups: MidTermSetup[] | null;
+  clauses: MidTermClause[] | null;
+  tokens: Record<string, string> | null;
+};
+
+/** What Kavachio read from an uploaded change document. */
+export type MidTermDocumentRead = {
+  document: { id: number; filename: string };
+  read: { effective_from: string | null; reason: string | null;
+          terms: Record<string, string | number>;
+          term_quotes?: Record<string, string | null>;
+          clauses: MidTermClauseEdit[] } | Record<string, never>;
+  error: string | null;
+};
+
+/** Upload a signed change document (PDF) and read what it changes. Nothing
+ *  about the contract changes until the change is sent. */
+export const uploadMidTermDocument = (id: number, file: File) => {
+  const fd = new FormData();
+  fd.append("file", file);
+  return api.post<MidTermDocumentRead>(`/contracts/${id}/mid-term/document`, fd)
+            .then(r => r.data);
+};
+
+/** The carrier admin accepts a signed change document a carrier user uploaded. */
+/** A contract's checks for the setup that runs its files. `needs_checks`: a
+ *  live setup exists but the contract was never set up on it — Process
+ *  Bordereau stays closed for it until it is. */
+export type ChecksSetup = {
+  state: "ready" | "needs_checks" | "no_setup";
+  checks: number;
+  /** Set when the contract's checks change on a date (a mid-term change):
+   *  the setup's column that dates each row — null when nobody has said, and
+   *  the dated checks then leave rows unchecked. */
+  dates?: { dated_checks: number; column: string | null; saved: string | null;
+            columns: string[] } | null;
+  setup: {
+    id: number; name: string; broker_party_id: number | null;
+    output_template: { id: number; name: string } | null;
+    lists_contract: boolean;
+  } | null;
+  new_setup_link: string;
+  edit_link?: string;
+};
+
+export type ChecksMade = {
+  checks: number; created: number | null; skipped: string | null;
+  linked: "already" | "renewal_chain" | "replaced" | "serves_all" | "added";
+  replaced: number[]; files_queued: number;
+  mid_term_refreshed: { id: number; number: number | null; status: string } | null;
+  /** Mid-term changes already live when the contract was set up: the checks
+   *  from the current wording start on the change date, and the earlier
+   *  wording's checks are made for the days before it. */
+  mid_term_history: {
+    changes: number[]; clauses: number; current_checks_dated: number;
+    earlier_checks: number; error: string | null;
+  } | null;
+};
+
+/** Make the contract's checks for an existing live setup's output template
+ *  and put it on that setup. Slow — the same model calls Bordereau Setup makes. */
+/** Save which column of a setup's output dates each row (the transaction
+ *  effective date) — what dated checks place rows by. */
+export const saveSetupDateColumn = (pipelineId: number, column: string) =>
+  api.put(`/pipelines/${pipelineId}`, { governing_date_field: column }).then(r => r.data);
+
+export const makeChecksWithSetup = (id: number, pipelineId?: number | null) =>
+  api.post<ContractRecord>(`/contracts/${id}/checks/use-setup`,
+                           { pipeline_id: pipelineId ?? null }).then(r => r.data);
+
+export const acceptMidTerm = (id: number, changeId: number) =>
+  api.post<ContractRecord>(`/contracts/${id}/mid-term/${changeId}/accept`).then(r => r.data);
+
+export const getMidTerm = (id: number) =>
+  api.get<MidTermStart>(`/contracts/${id}/mid-term`).then(r => r.data);
+
+/** What this change would say and do. Writes nothing. */
+export const previewMidTerm = (id: number, body: MidTermInput) =>
+  api.post<MidTermPreview>(`/contracts/${id}/mid-term/preview`, body).then(r => r.data);
+
+/** Make the change and send it to the broker. */
+export const sendMidTerm = (id: number, body: MidTermInput) =>
+  api.post<ContractRecord>(`/contracts/${id}/mid-term`, body).then(r => r.data);
+
+export const reviseMidTerm = (id: number, changeId: number, body: MidTermInput) =>
+  api.post<ContractRecord>(`/contracts/${id}/mid-term/${changeId}/revise`, body)
+     .then(r => r.data);
+
+export const agreeMidTerm = (id: number, changeId: number) =>
+  api.post<ContractRecord>(`/contracts/${id}/mid-term/${changeId}/agree`).then(r => r.data);
+
+export const requestMidTermChanges = (id: number, changeId: number, note: string) =>
+  api.post<ContractRecord>(`/contracts/${id}/mid-term/${changeId}/request-changes`, { note })
+     .then(r => r.data);
+
+export const withdrawMidTerm = (id: number, changeId: number, note?: string) =>
+  api.post<ContractRecord>(`/contracts/${id}/mid-term/${changeId}/withdraw`, { note })
+     .then(r => r.data);
+
+/** A typed signature on the change document — the carrier first, then the
+ *  broker, whose signature puts it live. */
+export const signMidTerm = (id: number, changeId: number,
+                            body: { signer_name?: string; signer_title?: string }) =>
+  api.post<ContractRecord>(`/contracts/${id}/mid-term/${changeId}/sign`, body)
+     .then(r => r.data);
+
+export const applyMidTerm = (id: number, changeId: number, body: MidTermInput) =>
+  api.post<ContractRecord>(`/contracts/${id}/mid-term/${changeId}/apply`, body)
+     .then(r => r.data);

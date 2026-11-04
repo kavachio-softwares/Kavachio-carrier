@@ -47,6 +47,7 @@ from itd_routes import router as itd_router
 from intake_api_routes import router as intake_api_router
 from carrier_routes import router as carrier_router
 from contract_routes import router as contract_router
+from mid_term_routes import router as mid_term_router
 # The carrier's own business-segment list, assigned when a programme is made.
 from segment_routes import router as segment_router
 # Create-a-Contract step 4 — Signatures. Two routers on purpose: the carrier's
@@ -86,7 +87,7 @@ app = FastAPI(title="BDX Mapper", version="0.3.0")
 import os as _os
 _cors_origins = [o.strip() for o in _os.getenv(
     "CORS_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173",
+    "http://localhost:5173,http://127.0.0.1:5173,http://192.168.2.92:5173",
 ).split(",") if o.strip()]
 
 # Password-reset & invite emails link to APP_BASE_URL, so that origin must be
@@ -139,6 +140,9 @@ app.include_router(intake_api_router)
 # paths sit at /contracts/… and do not overlap the programme-scoped upload
 # routes on app_router.
 app.include_router(contract_router)
+# Mid-term changes to a running contract: send, agree, sign, go live
+# (mid_term_routes.py).
+app.include_router(mid_term_router)
 app.include_router(segment_router)
 # The signing round: set one up and watch it (/esign/…), and sign one from an
 # emailed link (/esign/sign/…). The public router is registered FIRST so its
@@ -1818,6 +1822,7 @@ def export_template_contract_mapping(template_id: int,
                 text(
                     "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                     "severity, canonical_target, rule_spec, error_message, "
+                    "effective_from, effective_to, source_amendment_id, "
                     f"source_verbatim_text, generation_confidence, {rule_scope.tag_select(cs)} "
                     "FROM validation_rule "
                     "WHERE contract_id = :cid AND rule_status != 'disabled' "
@@ -1897,6 +1902,7 @@ def export_template_build_rules(template_id: int,
             text(
                 "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                 "severity, canonical_target, rule_spec, error_message, "
+                "effective_from, effective_to, source_amendment_id, "
                 f"{rule_scope.tag_select(cs)} "
                 "FROM validation_rule "
                 "WHERE contract_id = :cid AND rule_status != 'disabled'"
@@ -1917,9 +1923,11 @@ def export_template_build_rules(template_id: int,
         empty_records.append({"sheet": sname, "records": []})
 
     from duckdb_validation import run_validation as _duck_validate
+    import rule_windows as _rw
     dv = _duck_validate(
         empty_records, rules, contract=contract_info,
         template_id=template_id, schema_cols=schema_cols,
+        date_column=_rw.date_column_from_structure(structure),
     )
     try:
         _audit.log_activity(
@@ -2776,11 +2784,18 @@ def _attach_recommendations(excs: list) -> list:
         with CanonicalSession() as cs:
             rows = cs.execute(
                 text("SELECT rule_id, rule_spec, generation_confidence, "
-                     "source_verbatim_text, source_page_number, rule_description "
+                     "source_verbatim_text, source_page_number, rule_description, "
+                     "rule_name "
                      "FROM validation_rule WHERE rule_id = ANY(:ids)"),
                 {"ids": rule_ids},
             ).mappings().all()
         spec_by_id = {row["rule_id"]: row["rule_spec"] for row in rows}
+        # The check's CURRENT name. A run stores the name as it was when it
+        # ran, so a check renamed since (a mid-term version named for the
+        # wrong value, a title corrected by hand) kept its old name on every
+        # earlier run's screen. The id is the check; the name is read from it.
+        name_by_id = {row["rule_id"]: row["rule_name"] for row in rows
+                      if row["rule_name"]}
         # Stored description — the fallback wording for legacy (pre-IR) rules,
         # which have no template for the explainer to read.
         desc_by_id = {row["rule_id"]: row["rule_description"] for row in rows}
@@ -2808,6 +2823,8 @@ def _attach_recommendations(excs: list) -> list:
             continue
         e = dict(e)
         spec = spec_by_id.get(e.get("rule_id"))
+        if name_by_id.get(e.get("rule_id")):
+            e["rule_name"] = name_by_id[e["rule_id"]]
         # An aggregate's limit, so its total can be shown against it ("7,700
         # over the 100,000 limit") instead of as a bare sum that matches no
         # cell. Display only — nothing that checks a file reads it.
@@ -3465,6 +3482,7 @@ def export_validate(
             text(
                 "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                 "severity, canonical_target, rule_spec, error_message, "
+                "effective_from, effective_to, source_amendment_id, "
                 f"source_verbatim_text, source_page_number, {rule_scope.tag_select(cs)} "
                 "FROM validation_rule "
                 "WHERE contract_id = :cid AND rule_status != 'disabled'"
@@ -3494,6 +3512,7 @@ def export_validate(
     _dv, dv_error = None, None
     try:
         from duckdb_validation import run_validation as _duck_validate
+        import rule_windows as _rw
         _dv = _duck_validate(
             records,
             contract_validation_rules,
@@ -3504,6 +3523,9 @@ def export_validate(
             # rather than run on empty cells (validation_outcome).
             filled_cols=_vo.filled_cols_from_structure(structure),
             inactive_cols=_vo.inactive_cols(structure),
+            # A check a mid-term change dated runs on the rows its dates cover
+            # (rule_windows.py); the template's tagged column dates each row.
+            date_column=_rw.date_column_from_structure(structure),
         )
         exceptions = _dv["exceptions"]
         unprocessable = _dv["unprocessable"]
@@ -3736,6 +3758,7 @@ def export_generate(
                 text(
                     "SELECT rule_id, contract_id, rule_engine, rule_name, rule_description, "
                     "severity, canonical_target, rule_spec, error_message, "
+                    "effective_from, effective_to, source_amendment_id, "
                     f"source_verbatim_text, source_page_number, {rule_scope.tag_select(cs)} "
                     "FROM validation_rule "
                     "WHERE contract_id = :cid AND rule_status != 'disabled'"
@@ -3799,6 +3822,7 @@ def export_generate(
     _dv, dv_error = None, None
     try:
         from duckdb_validation import run_validation as _duck_validate
+        import rule_windows as _rw
         _dv = _duck_validate(
             records,
             contract_validation_rules or [],
@@ -3809,6 +3833,9 @@ def export_generate(
             # rather than run on empty cells (validation_outcome).
             filled_cols=_vo.filled_cols_from_structure(structure),
             inactive_cols=_vo.inactive_cols(structure),
+            # A check a mid-term change dated runs on the rows its dates cover
+            # (rule_windows.py); the template's tagged column dates each row.
+            date_column=_rw.date_column_from_structure(structure),
         )
         exceptions = _dv["exceptions"]
         unprocessable = _dv["unprocessable"]

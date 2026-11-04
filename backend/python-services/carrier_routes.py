@@ -429,6 +429,18 @@ def contract_bordereau_status(scope: CarrierScope = Depends(contract_scope)):
                               scope.broker_party_id, scope.contract_id)
         if pipe is not None:
             held_by = "broker" if pipe.broker_party_id is not None else "programme"
+            # A live setup is not enough: the file is checked against the
+            # CONTRACT's checks, and a contract never set up on this setup has
+            # none (contract_checks). Same answer the run itself gives.
+            import contract_checks as cc
+            if not cc.check_count(s, pipe, scope.contract_id):
+                from db import Contract
+                named = s.get(Contract, scope.contract_id) if scope.contract_id else None
+                return {"ready": False, "code": cc.CODE,
+                        "reason": cc.message(cc.contract_name(named) if named
+                                             else "this contract",
+                                             for_broker=scope.principal.is_broker),
+                        "setup": _payload(pipe, held_by)}
             return {"ready": True, "reason": None, "setup": _payload(pipe, held_by)}
 
         # The pre-pipeline fallback direct_run still honours: an approved

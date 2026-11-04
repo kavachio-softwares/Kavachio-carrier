@@ -1576,7 +1576,8 @@ def derive_endorsement_changes(old_limits: dict, new_limits: dict) -> list[dict]
 def build_endorsement_sections(*, contract_name: str | None, number: int,
                                effective_from: str | None,
                                changes: list[dict],
-                               note: str | None = None) -> list[dict]:
+                               note: str | None = None,
+                               clause_changes: list[dict] | None = None) -> list[dict]:
     """The endorsement, in the shape endorsements are actually written.
 
     Values are baked here rather than tokenised, and that is deliberate — the
@@ -1584,8 +1585,14 @@ def build_endorsement_sections(*, contract_name: str | None, number: int,
     because the term is live. An endorsement records what a term WAS and what
     it BECAME on a given date; if those numbers moved afterwards the endorsement
     would be describing a change that never happened.
+
+    `clause_changes` (mid_term_change.clause_changes) re-word the Agreement
+    itself: a clause amended is quoted in full as it now reads, a clause added
+    is quoted with its heading, a clause deleted is named. They follow the
+    terms' changes, numbered on from them.
     """
-    if not changes:
+    clause_changes = clause_changes or []
+    if not changes and not clause_changes:
         return []
 
     head = [
@@ -1612,6 +1619,22 @@ def build_endorsement_sections(*, contract_name: str | None, number: int,
         else:
             lines.append(f"{i}.  {ch['question']}, previously {ch['from']}, "
                          f"no longer applies.")
+    for i, cl in enumerate(clause_changes, start=len(changes) + 1):
+        was = cl.get("from_title") or cl.get("title") or "the clause"
+        if cl.get("action") == "added":
+            where = f" under “{cl['section']}”" if cl.get("section") else ""
+            lines.append(f"{i}.  The following clause is added{where}, headed "
+                         f"“{cl.get('title') or 'Additional clause'}”:\n"
+                         f"{(cl.get('to_text') or '').strip()}")
+        elif cl.get("action") == "removed":
+            lines.append(f"{i}.  The clause headed “{was}” is deleted and no "
+                         f"longer applies.")
+        else:
+            renamed = (f", headed “{cl['title']}”"
+                       if cl.get("title") and cl.get("title") != was else "")
+            lines.append(f"{i}.  The clause headed “{was}” is deleted and replaced "
+                         f"by the following{renamed}:\n"
+                         f"{(cl.get('to_text') or '').strip()}")
     out.append({"key": "endorsement_changes", "title": "Amendments",
                 "body": "\n".join(lines), "origin": "from your changes"})
 

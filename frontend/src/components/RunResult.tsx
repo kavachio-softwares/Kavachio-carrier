@@ -41,7 +41,10 @@ export type RunException = {
   /** On the "not_checked" entry: rules that did not run at all… */
   rules?: { rule_name?: string; columns?: string[] }[];
   /** …and rules that ran on only some of their sheets. */
-  partial?: { rule_name?: string; sheets?: string[]; columns?: string[] }[];
+  partial?: { rule_name?: string; sheets?: string[]; columns?: string[];
+              /** "undated_rows": a check a mid-term change dated skipped rows
+               *  with no transaction effective date (its message names them). */
+              kind?: string; message?: string }[];
 };
 
 export type GoverningContract = {
@@ -138,6 +141,9 @@ export type RunResp = {
   check_only?: boolean;
   /** Why the run is "not_validated" (null otherwise). */
   status_reason?: string | null;
+  /** How many of the contract's own checks the run had. 0 = "not checked
+   *  against the contract" (never set up in Bordereau Setup). */
+  contract_checks?: number | null;
   /** Rows the checks ran over, and rows set aside as blank/summary rows. Null
    *  when there was nothing to check with. */
   rows_total?: number | null;
@@ -226,10 +232,17 @@ export function RunResult({
   const spine = result.status === "clean" ? "ok" : "warn";
   const listFindings = findings === "always" || isCheck;
   const notValidated = result.status === "not_validated";
+  // None of the contract's checks ran — the contract was never set up for
+  // this setup. Said as the headline, not as a cause buried in a sentence.
+  const notAgainstContract = notValidated && result.contract_checks === 0;
   // The grouped "checks not run" entry is a note about the run, not a finding.
   const notChecked = result.exceptions.find(e => e.error_class === "not_checked");
   const findingsList = result.exceptions.filter(e => e.error_class !== "not_checked");
   const notRun = notChecked?.rules?.length ?? result.rules_not_checked ?? 0;
+  // A check a mid-term change dated may skip rows with no transaction date —
+  // said apart from a check that skipped a whole sheet.
+  const undated = (notChecked?.partial ?? []).filter(p => p.kind === "undated_rows");
+  const bySheet = (notChecked?.partial ?? []).filter(p => p.kind !== "undated_rows");
 
   // "See all rows": the full output (every sheet, all rows) with the same
   // highlighting as the download, expanded IN PLACE rather than in a modal.
@@ -272,7 +285,9 @@ export function RunResult({
         style={{ margin: "18px 0", display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
         <div style={{ flex: 1, minWidth: 220 }}>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 3 }}>
-            {notValidated
+            {notAgainstContract
+              ? <span style={{ color: "var(--p-warn-ink)" }}>Not checked against the contract</span>
+              : notValidated
               ? <span style={{ color: "var(--p-warn-ink)" }}>
                   Not validated — {result.status_reason ?? "the checks did not run on this file"}
                 </span>
@@ -286,7 +301,9 @@ export function RunResult({
                 </>}
           </div>
           <div style={{ color: "var(--p-muted)", fontSize: 13 }}>
-            {isCheck
+            {notAgainstContract
+              ? "The contract has no checks for this Bordereau Setup yet, so at most the date and amount formats were looked at. The carrier has to set the contract up in Bordereau Setup; then process the file again."
+              : isCheck
               ? "Self-check only — nothing was sent or saved. Fix any issues and check again, or Generate BDX to send."
               : actions
                 ? "Output generated. Exceptions don't block the file — review, or fix and re-run."
@@ -294,7 +311,7 @@ export function RunResult({
                 // what they can do is read the list below and send a fixed file.
                 : "Sent. Exceptions don't block the file — the carrier has it either way. Fix what's listed below and send again if you need to."}
           </div>
-          {result.rows_validated != null && (
+          {result.rows_validated != null && !notAgainstContract && (
             <div style={{ color: "var(--p-muted)", fontSize: 12.5, marginTop: 3 }}>
               {result.rows_validated.toLocaleString()} of {(result.rows_total ?? 0).toLocaleString()} rows checked
               {result.rows_excluded
@@ -366,14 +383,24 @@ export function RunResult({
               ? <InfoTip text={`Map these in Bordereau Setup, or add or switch them on in the output template, to run them: ${notChecked.columns.join(", ")}.`} />
               : notChecked.message}
           </>}
-          {!!notChecked.partial?.length && (
+          {!!bySheet.length && (
             <div style={{ marginTop: notRun ? 6 : 0 }}>
               <strong>
-                {notChecked.partial.length} check{notChecked.partial.length === 1 ? "" : "s"} ran on only some sheets.
+                {bySheet.length} check{bySheet.length === 1 ? "" : "s"} ran on only some sheets.
               </strong>{" "}
-              {notChecked.partial.slice(0, 5).map(p =>
+              {bySheet.slice(0, 5).map(p =>
                 `${p.rule_name ?? "A check"} skipped ${(p.sheets ?? []).join(", ")}`).join("; ")}
-              {notChecked.partial.length > 5 ? ` and ${notChecked.partial.length - 5} more` : ""}.
+              {bySheet.length > 5 ? ` and ${bySheet.length - 5} more` : ""}.
+            </div>
+          )}
+          {!!undated.length && (
+            <div style={{ marginTop: notRun || bySheet.length ? 6 : 0 }}>
+              <strong>
+                {undated.length} check{undated.length === 1 ? "" : "s"} changed mid-term
+                {" "}{undated.length === 1 ? "was" : "were"} not run on rows with no transaction
+                effective date.
+              </strong>{" "}
+              <InfoTip text={undated.map(p => `${p.rule_name ?? "A check"}: ${p.message ?? ""}`).join("\n")} />
             </div>
           )}
         </div>
@@ -436,7 +463,9 @@ export function RunResult({
         if (distinct.size === 1 && withContract.length === gcs.length) {
           return (
             <div className="note" style={{ marginBottom: 18 }}>
-              All output sheets validated against <strong>{nameOf(gcs[0])}</strong>.
+              {notAgainstContract
+                ? <>Output sheets written for <strong>{nameOf(gcs[0])}</strong> — none of its checks ran.</>
+                : <>All output sheets validated against <strong>{nameOf(gcs[0])}</strong>.</>}
             </div>
           );
         }

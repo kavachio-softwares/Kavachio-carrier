@@ -403,7 +403,8 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
 
     Pagination is OPT-IN — without `page` the plain list comes back exactly as
     before. `status` takes the screen's own vocabulary: "mine" means whose_turn
-    is the broker, anything else is matched against the lifecycle. Both facts
+    is the broker, or a mid-term change to the contract is waiting on them;
+    anything else is matched against the lifecycle. Both facts
     are derived per row rather than stored, so the filter runs HERE — and it
     runs BEFORE the page is cut, so the total counts what the filter kept
     rather than what the page happened to hold.
@@ -413,10 +414,14 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
         # and before the page is cut. The screen states it above the table as
         # the reason to open the page at all, so a number that shrank as you
         # paged would be answering a different question.
-        waiting = sum(1 for r in out if r["whose_turn"] == "broker")
+        # On the broker: the contract itself, or a mid-term change to it.
+        def _mine(r):
+            return (r["whose_turn"] == "broker"
+                    or bool((r.get("mid_term") or {}).get("step")))
+        waiting = sum(1 for r in out if _mine(r))
         if status:
             out = [r for r in out
-                   if (r["whose_turn"] == "broker" if status == "mine"
+                   if (_mine(r) if status == "mine"
                        else r["lifecycle"] == status)]
         if page is None:
             return out
@@ -459,6 +464,9 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
         # A superseded contract that a renewal replaced is the PREVIOUS TERM:
         # still pickable on Process Bordereau for its own late months.
         renewal_of = {c.renews_contract_id: c for c in rows if c.renews_contract_id}
+        import mid_term_routes
+        changes = mid_term_routes.open_changes(
+            s, [c.id for c in rows if c.id not in held])
         out = []
         for c in rows:
             if c.id in held:
@@ -486,6 +494,10 @@ def broker_contracts(carrier_id: Optional[int] = Query(None),
                 "whose_turn": contract_routes._whose_turn(
                     c, contract_routes._unsigned_sides(
                         contract_routes._signatures(s, c.id))),
+                # The mid-term change in progress, if any — its `step` says
+                # when it is waiting on this broker. The lifecycle above stays
+                # "active" while it runs.
+                "mid_term": changes.get(c.id),
                 "has_wording": bool((c.wording_sections or {}).get("sections"))
                                or bool(c.blob_ref or c.blob),
                 "programme": {"id": c.program_id,
@@ -573,11 +585,21 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
             rows = (s.query(Contract)
                       .filter(Contract.program_id.in_(prog_ids),
                               Contract.broker_party_id == bid).all())
+            import mid_term_routes
+            changes = mid_term_routes.open_changes(s, [c.id for c in rows])
             for c in rows:
                 carrier_name = carriers.get(
                     next((l.tenant_id for l in links
                           if l.program_id == c.program_id), None), "—")
                 state = contract_routes._effective_lifecycle(c)
+                row = {
+                    "id": c.id,
+                    "name": c.name or c.filename or f"Contract {c.id}",
+                    "lifecycle": state,
+                    "programme": progs.get(c.program_id, "—"),
+                    "carrier": carrier_name,
+                    "mid_term": None,
+                }
 
                 # The broker's OWN queue. `agreed` is in it too: terms both
                 # sides settled are waiting on the broker's signature, and a
@@ -586,15 +608,23 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                     c, contract_routes._unsigned_sides(
                         contract_routes._signatures(s, c.id)))
                 if turn == "broker":
+                    step = "agree" if state == "in_review" else "sign"
                     on_me.append({
-                        "id": c.id,
-                        "name": c.name or c.filename or f"Contract {c.id}",
-                        "lifecycle": state,
-                        "programme": progs.get(c.program_id, "—"),
-                        "carrier": carrier_name,
+                        **row, "step": step,
                         "what": ("read the terms and agree them or ask for "
-                                 "changes" if state == "in_review"
-                                 else "sign it"),
+                                 "changes" if step == "agree" else "sign it"),
+                    })
+
+                # A mid-term change on a RUNNING contract is the broker's move
+                # too — while the contract's own lifecycle still says "active",
+                # so the turn above never sees it.
+                ch = changes.get(c.id)
+                if ch and ch["step"]:
+                    on_me.append({
+                        **row, "step": ch["step"], "mid_term": ch,
+                        "what": ("read the change and agree it or ask for "
+                                 "changes" if ch["step"] == "agree"
+                                 else "sign the change"),
                     })
 
                 # LIVE means in force, not merely approved. Since a contract
@@ -626,7 +656,14 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
             signatures_completed = (s.query(func.count(EsignEnvelope.id))
                 .filter(EsignEnvelope.contract_id.in_([c.id for c in rows]),
                         EsignEnvelope.status == "completed").scalar() or 0)
-        terms_to_agree = sum(1 for w in on_me if w["lifecycle"] == "in_review")
+        # Counted by the row's own step, the same cut the drawer makes. A
+        # contract and a mid-term change are counted apart: the tile names
+        # each, so a broker can tell a new contract from a change to a
+        # running one before opening anything.
+        def _count(step, mid_term):
+            return sum(1 for w in on_me
+                       if w["step"] == step and bool(w["mid_term"]) == mid_term)
+        terms_to_agree = _count("agree", False)
 
         # OPEN exceptions on the files that are still live — the same list the
         # tile opens (/broker/exceptions), so the number and the page behind it
@@ -697,10 +734,14 @@ def broker_dashboard(carrier_id: Optional[int] = Query(None),
                 "overdue_periods": overdue_periods,
                 "contracts_expiring": expiring,
                 "next_expiry": next_expiry.isoformat() if next_expiry else None,
-                "signatures_pending": len(on_me) - terms_to_agree,
+                "signatures_pending": _count("sign", False),
                 "signatures_completed": int(signatures_completed),
                 "terms_to_agree": terms_to_agree,
                 "terms_agreed": terms_agreed,
+                # Mid-term changes to running contracts waiting on this
+                # broker: to read and agree, and to sign.
+                "mid_term_to_agree": _count("agree", True),
+                "mid_term_to_sign": _count("sign", True),
             },
             # The queue only this broker can move.
             "waiting_on_me": on_me,

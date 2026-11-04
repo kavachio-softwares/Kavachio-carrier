@@ -22,6 +22,8 @@ import {
   Send, ShieldCheck, Trash2, Upload, XCircle, CalendarRange, Undo2,
 } from "lucide-react";
 import { ChangePeriodDialog, UndoPeriodDialog } from "../components/ChangePeriodDialog";
+import { MidTermCard } from "../components/MidTermCard";
+import { ChecksSetupCard } from "../components/ChecksSetupCard";
 import { currentMga, getTenantBrand, isBrokerSeat } from "../auth";
 import { SignaturePlacer, signerTargets }
   from "../components/SignaturePlacer";
@@ -79,6 +81,14 @@ import {
 const HISTORY_ACTION: Record<string, string> = {
   period_corrected: "Dates corrected",
   period_correction_undone: "Date correction undone",
+  mid_term_sent: "Mid-term change sent to the broker",
+  mid_term_uploaded: "Signed mid-term change document uploaded",
+  mid_term_agreed: "Broker agreed the mid-term change",
+  mid_term_changes_requested: "Broker asked for changes to the mid-term change",
+  mid_term_signed: "Mid-term change signed",
+  mid_term_accepted: "Mid-term change accepted",
+  mid_term_live: "Mid-term change live",
+  mid_term_withdrawn: "Mid-term change withdrawn",
 };
 /** The two fields a date correction moves, as History names them. */
 const DATE_FIELD_LABEL: Record<string, string> = {
@@ -1298,6 +1308,39 @@ function ContractRecordView() {
           </div>
         )}
 
+        {/* A mid-term change waiting on the broker. The contract's own state
+            stays "Active" while one runs, so the line above never says it,
+            and the change itself sits well down the summary. */}
+        {(() => {
+          const ch = rec.mid_term?.open;
+          if (!ch || !isBrokerSeat()) return null;
+          const step = ch.actions?.includes("agree") ? "agree"
+            : ch.actions?.includes("sign") ? "sign" : null;
+          if (!step) return null;
+          return (
+            <div className="note warn" style={{
+              marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap",
+              alignItems: "center", justifyContent: "space-between",
+            }}>
+              <div>
+                <b>Mid-term change {ch.number} is waiting for {step === "sign"
+                  ? "your signature" : "your review"}.</b>{" "}
+                {step === "sign"
+                  ? `The carrier has signed it. It applies from ${fmtDate(ch.effective_from)} once you sign.`
+                  : `The carrier wants to change this contract from ${fmtDate(ch.effective_from)}. `
+                    + "Read the change, then agree it or ask for changes."}
+              </div>
+              <button className="btn sm pri" type="button" onClick={() => {
+                setTab("summary");
+                requestAnimationFrame(() => document.getElementById("mid-term-change")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" }));
+              }}>
+                {step === "sign" ? "Sign the change ↓" : "Review the change ↓"}
+              </button>
+            </div>
+          );
+        })()}
+
         {/* The gate. Named early because while it stands, most of the page's
             actions are refused and the reason is not otherwise visible. */}
         {rec.missing_references.length > 0 && (
@@ -1757,7 +1800,15 @@ function ContractRecordView() {
             {rec.lifecycle === "active" && !isBrokerSeat() && isTreaty && (
               <TreatySetupNudge contractId={id} />
             )}
-            {rec.lifecycle === "active" && !isBrokerSeat() && !isTreaty
+            {/* Whether this contract's files can be checked against it, and
+                the two ways to set it up when they can't (the server's
+                `checks_setup`). The plain "next: set up" note stays only for a
+                record the server did not answer for. Not for a treaty: its
+                checks come from the reinsurance setup above. */}
+            {!isBrokerSeat() && !isTreaty && rec.checks_setup && (
+              <ChecksSetupCard rec={rec} onRecord={r => setRec(r)} onNotice={setNote} />
+            )}
+            {rec.lifecycle === "active" && !isBrokerSeat() && !isTreaty && !rec.checks_setup
               && rec.programme && rec.counterparty && (
               <div className="note" style={{
                 marginTop: 12, display: "flex", gap: 14, flexWrap: "wrap",
@@ -1905,6 +1956,11 @@ function ContractRecordView() {
                 </div>
               );
             })()}
+
+            {/* Mid-term change: the one in progress (who acts next, from the
+                server's `actions`) and those already live, with the files to
+                re-check. Both sides see it and act from it. */}
+            <MidTermCard rec={rec} onRecord={r => setRec(r)} onNotice={setNote} />
 
             {/* Said once, above the buttons, because no state name on this
                 page says it: the contract is inside the carrier and the broker
@@ -2132,6 +2188,22 @@ function ContractRecordView() {
               {rec.period_change?.can_change && !isBrokerSeat() && (
                 <button className="btn" type="button" onClick={() => setShowPeriod(true)}>
                   <CalendarRange size={13} /> Change period
+                </button>
+              )}
+              {/* Mid-term change: terms both sides agree to change from a date.
+                  Change period stays for dates that were entered wrongly. */}
+              {rec.mid_term?.can_start && (
+                <Link className="btn" to={`/contracts/${rec.id}/mid-term`}>
+                  <PenLine size={13} /> Mid-term change
+                </Link>
+              )}
+              {/* Shown, not hidden, when the contract is not set up yet: a
+                  change dates the contract's checks, so it waits for them —
+                  the card above says how to make them. */}
+              {!rec.mid_term?.can_start && rec.mid_term?.why_not
+                && rec.checks_setup && rec.checks_setup.state !== "ready" && (
+                <button className="btn" type="button" disabled title={rec.mid_term.why_not}>
+                  <PenLine size={13} /> Mid-term change
                 </button>
               )}
               {a.terminate && (

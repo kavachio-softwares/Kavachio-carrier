@@ -340,6 +340,12 @@ export default function BrokerBordereau() {
                 + "moment it's processed, no second step needed."} />
             </h2>
           </div>
+          <div className="actions">
+            <button className="btn ghost" disabled={!contract}
+              onClick={() => setShowHistory(v => !v)}>
+              <History size={15} /> {showHistory ? "Hide" : "View"} What I've Sent
+            </button>
+          </div>
         </div>
 
         {err && (
@@ -378,19 +384,18 @@ export default function BrokerBordereau() {
               <label>
                 Contract
                 <InfoTip text={"Each contract has its own rules, so the same "
-                  + "spreadsheet can pass under one and fail under another."} />
+                  + "spreadsheet can pass under one and fail under another."
+                  // Named rather than hidden: a broker looking for a contract
+                  // they know they sent should find out why it is not here.
+                  + (waiting.length === 1
+                    ? ` ${waiting[0].name ?? waiting[0].filename ?? `Contract ${waiting[0].id}`}`
+                      + " is not listed — it is not active yet."
+                    : waiting.length > 1
+                    ? ` ${waiting.length} of your contracts are not listed — they are not active yet.`
+                    : "")} />
               </label>
               <ContractPicker value={contractId}
                 onChange={id => setContractId(id)} contracts={onProgramme} />
-            </div>
-          )}
-
-          {/* An ended contract is still owed the bordereaux of its term — say
-              so, rather than leaving the broker to wonder why it is offered. */}
-          {contract?.lifecycle === "expired" && (
-            <div className="note" style={{ marginBottom: 16 }}>
-              This contract’s term ended{contract.expiry_dt ? <> on <b>{fmtDate(contract.expiry_dt)}</b></> : null}.
-              You can still send bordereaux for the months up to then.
             </div>
           )}
 
@@ -408,20 +413,7 @@ export default function BrokerBordereau() {
                   + "today's date. A July file sent in September is still "
                   + "July's."} />
               </label>
-              <PeriodPicker value={period} onChange={setPeriod} periods={periods} />
-            </div>
-          )}
-
-          {/* Named rather than hidden: a broker looking for a contract they know
-              they sent should find out WHY it is not selectable. */}
-          {waiting.length > 0 && (
-            <div className="note" style={{ marginBottom: 16 }}>
-              {waiting.length === 1
-                ? <><b>{waiting[0].name ?? waiting[0].filename
-                        ?? `Contract ${waiting[0].id}`}</b> is not listed — it is
-                    not active yet.</>
-                : <><b>{waiting.length} of your contracts</b> are not listed —
-                    they are not active yet.</>}
+              <PeriodPicker value={period} onChange={setPeriod} periods={periods} hideDue />
             </div>
           )}
 
@@ -438,31 +430,34 @@ export default function BrokerBordereau() {
               <b>Not ready yet.</b> {ready.reason}
             </div>
           )}
-          {contract && !readyLoading && ready?.ready && (
-            <div className="note" style={{ marginBottom: 16, display: "flex",
-              alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              Using setup <b>{ready.setup?.name ?? "the programme's"}</b>
-              <span className="tag-pill">Active</span>
-              {ready.setup?.output_template && (
-                <>→ <b>{ready.setup.output_template.name}</b></>
-              )}
-              {ready.setup?.held_by === "programme" && (
-                <span style={{ fontSize: 11.5, color: "var(--p-faint)" }}>
-                  — the programme's shared setup, not one built for you.
-                </span>
-              )}
-              {/* The blank layout this setup reads — the file to fill in before
-                  dropping it below. Only for a real setup: the legacy fallback
-                  has no id and no sample of its own to rebuild. */}
-              {ready.setup?.id != null && path && (
+          {/* The upload, with the blank layout its setup reads beside it — the
+              file to fill in before dropping it here. Only for a real setup:
+              the legacy fallback has no id and no sample of its own. */}
+          <div className="field" style={{ marginBottom: 0 }}>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 10, marginBottom: 7 }}>
+              <label style={{ marginBottom: 0 }}>
+                Upload Bordereau
+                <InfoTip text={"The broker spreadsheet for this contract and month — "
+                  + ".xlsx, .xls or .csv."} />
+              </label>
+              {contract && !readyLoading && ready?.ready && ready.setup?.id != null && path && (
                 <button className="btn" style={{ marginLeft: "auto" }} onClick={downloadTemplate}>
-                  <Download size={14} /> Bordereau Input Template
+                  <Download size={14} /> Download Bordereau Input Template
                 </button>
               )}
             </div>
-          )}
-
-          <Dropzone file={file} onPick={pickFile} disabled={!ready?.ready} />
+            {/* No live setup for this contract: say so in the box itself
+                rather than offering a drop target that does nothing. */}
+            {contract && !readyLoading && ready && !ready.ready ? (
+              <Dropzone file={null} onPick={pickFile} disabled
+                label={<b>Uploads unavailable for this contract</b>}
+                hint={ready.code === "contract_not_set_up"
+                  ? "Uploads open once the carrier has set up this contract's checks."
+                  : "Uploads open once the carrier's bordereau setup is live."} />
+            ) : (
+              <Dropzone file={file} onPick={pickFile} disabled={!ready?.ready} />
+            )}
+          </div>
 
           <div style={{ marginTop: 18, display: "flex", gap: 10, alignItems: "center" }}>
             {/* Hidden for now, the same as on the carrier's screen — Generate
@@ -477,11 +472,6 @@ export default function BrokerBordereau() {
               Generate BDX
             </button>
             <button className="btn" onClick={clearForm} disabled={busy}>Clear</button>
-            <button className="btn ghost" style={{ marginLeft: "auto" }}
-              disabled={!contract}
-              onClick={() => setShowHistory(v => !v)}>
-              <History size={15} /> {showHistory ? "Hide" : "View"} What I've Sent
-            </button>
           </div>
         </div>
 

@@ -10,7 +10,10 @@ declare module "axios" {
   }
 }
 
-const baseURL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+// No VITE_API_URL → API on port 8000 of whatever host served the page, so
+// localhost and LAN-IP access (e.g. http://192.168.2.92:5173) both work.
+const baseURL = import.meta.env.VITE_API_URL ??
+  `${window.location.protocol}//${window.location.hostname}:8000`;
 
 export const api = axios.create({ baseURL });
 

@@ -1310,10 +1310,216 @@ def run_type_checks(con, tables, column_types, max_rows=10_000):
     return out
 
 
+class _DatedRun:
+    """The dated rules of one run — the versions a mid-term change closed or
+    opened (rule_windows.py) — and how each is run.
+
+    A dated ROW check runs over a filtered copy of every sheet: a view, in its
+    own schema, holding only the rows whose transaction date its window covers.
+    The rule's compiled SQL is not touched — it names the sheet as it always
+    did, and the schema search path decides which rows that name means. So a
+    total, a uniqueness check or a self-join inside the SQL sees the window's
+    rows only, and every row keeps its __rowid, so exceptions land on the cell
+    they came from.
+
+    A dated TOTAL check (D4) runs over the whole file, as the version in force
+    on the last day of the reporting period; the other versions of it simply do
+    not apply to this period.
+
+    Rules with no window are passed through untouched, and a run without a
+    single dated rule does no extra work at all.
+    """
+
+    def __init__(self, con, tables, rules, date_column, period_end):
+        import rule_windows as rw
+        self._rw = rw
+        self.con, self.tables = con, tables
+        self.date_column = (str(date_column).strip() or None) if date_column else None
+        self.windows: dict = {}   # id(rule) → window, for row-windowed rules
+        self.shown: dict = {}     # id(rule) → window, for every dated rule that runs
+        self.not_run: list = []   # (rule, why, kind)
+        self._schemas: dict = {}  # window → schema name
+        self._undated: dict = {}  # sheet → [__rowid] with no readable date
+        self._notes: dict = {}    # rule_name → what to say about undated rows
+        self._date_expr = None
+
+        pairs = [(r, rw.window_of(r)) for r in (rules or [])]
+        if not any(w for _, w in pairs):
+            self.rules = list(rules or [])
+            return
+        day = None
+        if any(w and _aggregate_marker(r) for r, w in pairs):
+            day = rw.as_date(period_end) or self._latest_date()
+        kept = []
+        for r, w in pairs:
+            if w is None:
+                kept.append(r)
+                continue
+            if _aggregate_marker(r):
+                if day is None:
+                    self.not_run.append((r, (
+                        f"Not checked — this total changed mid-term ({rw.label(w)}), and "
+                        f"this file has no reporting period or transaction dates to tell "
+                        f"which version of it applies."), rw.NO_DATE_COLUMN_KIND))
+                elif rw.covers(w, day):
+                    self.shown[id(r)] = w
+                    kept.append(r)
+                # Any other version of the total is not in force for this
+                # period: it does not apply, which is not a failure to check.
+                continue
+            if not self._has_date_column():
+                self.not_run.append((r, (
+                    f"Not checked — this check changed mid-term ({rw.label(w)}), and the "
+                    f"setup names no transaction effective date column, so Kavachio can't "
+                    f"tell which rows it applies to. Choose the column in Bordereau "
+                    f"Setup to run it."), rw.NO_DATE_COLUMN_KIND))
+                continue
+            self.windows[id(r)] = w
+            self.shown[id(r)] = w
+            kept.append(r)
+        self.rules = kept
+
+    # ── the transaction date ──────────────────────────────────────────────
+    def _expr(self) -> str:
+        if self._date_expr is None:
+            from contract_upload_services.rule_compiler import _date
+            self._date_expr = _date(self.date_column)
+        return self._date_expr
+
+    def _sheets_with_date(self) -> list:
+        if not self.date_column:
+            return []
+        return [sh for sh, t in self.tables.items()
+                if self.date_column in (t.get("columns") or [])]
+
+    def _has_date_column(self) -> bool:
+        return bool(self._sheets_with_date())
+
+    def _latest_date(self):
+        """The last transaction date in the file — the period's end when the
+        run was not told which period it is."""
+        best = None
+        for sh in self._sheets_with_date():
+            try:
+                d = self.con.execute(
+                    f"SELECT MAX({self._expr()}) FROM main.{_qid(sh)}").fetchone()[0]
+            except Exception:
+                d = None
+            d = self._rw.as_date(d)
+            if d and (best is None or d > best):
+                best = d
+        return best
+
+    # ── running a row-windowed rule ───────────────────────────────────────
+    def _schema_for(self, window) -> str:
+        name = self._schemas.get(window)
+        if name:
+            return name
+        name = f"__window_{len(self._schemas) + 1}"
+        self.con.execute(f"CREATE SCHEMA {name}")
+        dated = set(self._sheets_with_date())
+        for sh in self.tables:
+            cond = (self._rw.window_predicate(self._expr(), window)
+                    if sh in dated else "FALSE")
+            self.con.execute(f"CREATE VIEW {name}.{_qid(sh)} AS "
+                             f"SELECT * FROM main.{_qid(sh)} WHERE {cond}")
+        self._schemas[window] = name
+        return name
+
+    def scope(self, rule):
+        """Context for running `rule`: its window's rows, or the whole sheet."""
+        import contextlib
+        window = self.windows.get(id(rule))
+        if window is None:
+            return contextlib.nullcontext()
+
+        @contextlib.contextmanager
+        def _scoped():
+            self.con.execute(f"SET search_path = '{self._schema_for(window)},main'")
+            try:
+                yield
+            finally:
+                self.con.execute("SET search_path = 'main'")
+        return _scoped()
+
+    # ── what the screens are told ─────────────────────────────────────────
+    def label(self, rule, found: list) -> None:
+        """Tag a dated rule's exceptions with the window they were judged in,
+        so a reader can tell 'Commission Schedule (until 15 Aug 2026)' from
+        its successor. rule_name itself is never changed."""
+        window = self.shown.get(id(rule))
+        if window is None:
+            return
+        start, end = window
+        tag = {"from": start.isoformat() if start else None,
+               "to": end.isoformat() if end else None}
+        text = self._rw.label(window)
+        for e in found:
+            e["rule_window"] = tag
+            e["rule_window_label"] = text
+
+    def _undated_rows(self, sheet) -> list:
+        if sheet not in self._undated:
+            if sheet in set(self._sheets_with_date()):
+                q = (f"SELECT __rowid FROM main.{_qid(sheet)} "
+                     f"WHERE {self._expr()} IS NULL ORDER BY 1")
+            else:
+                q = f"SELECT __rowid FROM main.{_qid(sheet)} ORDER BY 1"
+            try:
+                self._undated[sheet] = [r[0] for r in self.con.execute(q).fetchall()]
+            except Exception:
+                self._undated[sheet] = []
+        return self._undated[sheet]
+
+    def note_undated(self, rule, sql: str) -> None:
+        """D2: a row with no readable transaction date is not checked by a
+        changed check — record which rows, on the sheets this rule reads."""
+        window = self.windows.get(id(rule))
+        if window is None:
+            return
+        name = rule.get("rule_name") or f"Rule {rule.get('rule_id')}"
+        note = self._notes.setdefault(name, {"rule_id": rule.get("rule_id"),
+                                             "labels": [], "rows": {}})
+        lab = self._rw.label(window)
+        if lab not in note["labels"]:
+            note["labels"].append(lab)
+        for sh in dict.fromkeys(re.findall(r'FROM\s+"([^"]+)"', sql or "")):
+            if sh in self.tables:
+                rows = self._undated_rows(sh)
+                if rows:
+                    note["rows"].setdefault(sh, set()).update(rows)
+
+    def undated_notes(self) -> list:
+        """One `partially_checked` entry per changed check that skipped rows,
+        however many versions of it ran."""
+        out = []
+        for name, note in self._notes.items():
+            rows = {sh: sorted(r) for sh, r in note["rows"].items() if r}
+            if not rows:
+                continue
+            n = sum(len(r) for r in rows.values())
+            where = "; ".join(
+                f"{sh} row{'s' if len(r) != 1 else ''} "
+                f"{', '.join(str(x) for x in r[:10])}{' …' if len(r) > 10 else ''}"
+                for sh, r in rows.items())
+            versions = " or ".join(note["labels"])
+            out.append({
+                "rule_id": note["rule_id"], "rule_name": name,
+                "kind": self._rw.UNDATED_KIND,
+                "columns": [self.date_column] if self.date_column else [],
+                "sheets": list(rows), "rows": rows,
+                "message": (f"Not checked on {n} row{'s' if n != 1 else ''} with no "
+                            f"transaction effective date ({self.date_column}) — {where}. "
+                            f"This check changed mid-term, so Kavachio can't tell which "
+                            f"version applies ({versions})."),
+            })
+        return out
+
+
 def run_validation(records_by_sheet, rules, contract=None, template_id=None,
                    session=None, max_exc=500, schema_cols=None, column_types=None,
                    filled_cols=None, inactive_cols=None, tenant_id=None,
-                   rule_settings=None):
+                   rule_settings=None, date_column=None, period_end=None):
     """Validate the resolved output records against the contract rules using
     DuckDB.
 
@@ -1343,6 +1549,14 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
     "own_tolerance_rule_ids": [...], "policy_columns": {sheet: column}} — see
     contract_margin.apply_rule_settings. Applied in memory, nothing written
     back; None leaves every rule exactly as stored.
+
+    `date_column` (optional) is the output column holding each row's
+    transaction effective date, and `period_end` the last day of the reporting
+    period. They matter only for DATED rules — the versions a mid-term change
+    closed or opened (rule_windows.py): each runs over the rows its window
+    covers, a dated total runs whole as the version in force on `period_end`,
+    and rows with no readable date are listed in `partially_checked`. With no
+    dated rule in the run, both are ignored.
 
     Returns:
       {
@@ -1435,6 +1649,14 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
             except Exception as _ms:
                 print(f"[DuckDB] contract margin / policy totals skipped: {_ms}")
 
+        # Dated checks — the versions a mid-term change closed or opened. Each
+        # runs only over the rows its window covers (rule_windows.py); every
+        # other rule is untouched and runs over every row as before.
+        dated = _DatedRun(con, tables, rules, date_column, period_end)
+        for rule, why, kind in dated.not_run:
+            _flag(rule, why, sh, rule_hash(rule), kind=kind)
+        rules = dated.rules
+
         for rule in rules:
             if len(exceptions) >= max_exc:
                 truncated = True
@@ -1494,8 +1716,9 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
                     cleaned = runnable
 
             try:
-                found = execute_rule(con, cleaned, rule, contract,
-                                     max_exc - len(exceptions))
+                with dated.scope(rule):
+                    found = execute_rule(con, cleaned, rule, contract,
+                                         max_exc - len(exceptions))
             except Exception as exec_err:
                 # No LLM fallback — if the created query can't run against this
                 # data, the clause is reported as not validated (highlighted).
@@ -1504,6 +1727,8 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
                 continue
 
             rules_ok += 1
+            dated.label(rule, found)
+            dated.note_undated(rule, cleaned)
             exceptions.extend(found)
             # Cache the SQL actually used (status ok) for audit / rule_sql view.
             try:
@@ -1523,6 +1748,7 @@ def run_validation(records_by_sheet, rules, contract=None, template_id=None,
             except Exception:
                 pass
 
+        partially_checked.extend(dated.undated_notes())
         con.close()
     finally:
         if own_session:

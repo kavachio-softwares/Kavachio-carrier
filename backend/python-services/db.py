@@ -22,7 +22,7 @@ from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, Float, Index, Integer, String, JSON, DateTime, Date,
     ForeignKey, Text, LargeBinary, Boolean, Numeric, inspect, UniqueConstraint,
-    func, text,
+    func, text, BigInteger,
 )
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.orm import declarative_base, deferred, sessionmaker, relationship
@@ -976,6 +976,41 @@ class ContractApproval(Base):
     # Added by migration 15; NULL on every row that proposed nothing.
     proposed_changes = Column("approval_proposed_changes", JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class ContractAmendment(Base):
+    """A mid-term change to a running contract (mid_term_change.py).
+
+    The contract stays the same row — same id, same files, same setup. This is
+    the change itself: what moves, from which date, and how far it has got
+    (with the broker, agreed, signed, live). Nothing about the contract or its
+    checks changes until it goes live; then each changed check is closed the
+    day before `effective_date` and its new version opened on it
+    (validation_rule.effective_to / effective_from / source_amendment_id).
+
+    The table predates this feature (data_model.py's contract_amendment, made
+    by the v4 model migration) and was empty until it. Only the columns that
+    exist are mapped; the SCD-2 bookkeeping columns keep their server defaults.
+    """
+    __tablename__ = "contract_amendment"
+    id = Column("contract_amendment_id", Integer, primary_key=True)
+    tenant_id = Column(BigInteger, nullable=False)
+    # The table carries the contract twice: the ops column (NOT NULL, the FK)
+    # and the canonical one. Both are written, always the same id.
+    ops_contract_id = Column("contract_id", BigInteger, nullable=False)
+    contract_id = Column("contract_amendment_contract_id", Integer, index=True)
+    number = Column("contract_amendment_number", Text, nullable=True)
+    kind = Column("contract_amendment_type", Text, nullable=True)
+    effective_date = Column("contract_amendment_effective_date", Date, nullable=True)
+    executed_date = Column("contract_amendment_executed_date", Date, nullable=True)
+    description = Column("contract_amendment_description", Text, nullable=True)
+    changes = Column("contract_amendment_changes", JSON, nullable=True)
+    supersedes_id = Column("contract_amendment_supersedes_id", Integer, nullable=True)
+    approved_by_id = Column("contract_amendment_approved_by_id", Integer, nullable=True)
+    status = Column("status", String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    modified_at = Column(DateTime(timezone=True), server_default=func.now(),
+                         onupdate=func.now())
 
 
 # ============================================================================

@@ -31,7 +31,8 @@ import { InfoTip } from "../components/InfoTip";
 
 // Copy lives here, not in the API, because it is interface language rather than
 // data — the backend has no opinion on what "the old-fashioned way" means.
-const API_BASE: string = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const API_BASE: string = import.meta.env.VITE_API_URL ??
+  `${window.location.protocol}//${window.location.hostname}:8000`;
 
 const CHANNEL_COPY: Record<Channel, { title: string; sub: string; hint: string }> = {
   upload: {

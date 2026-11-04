@@ -497,6 +497,59 @@ def period_change_email_html(name: str | None, carrier: str, program_name: str,
 </body></html>"""
 
 
+def mid_term_email_html(name: str | None, carrier: str, program_name: str,
+                        contract_name: str, code: str, number: int, effective: str,
+                        changes: list[str], reason: str, link: str | None,
+                        live: bool = False) -> str:
+    """A mid-term change to a broker's contract: sent for their agreement, or
+    now live. The changes, the date they apply from, the carrier's reason and
+    a link to the contract — nothing else is passed in."""
+    greeting = f"Hi {escape_html(name)}," if (name or "").strip() else "Hi,"
+    c, p = escape_html(carrier), escape_html(program_name)
+    k, n = escape_html(code), escape_html(contract_name)
+    e, r = escape_html(effective), escape_html(reason or "—")
+    items = "".join(f"<li>{escape_html(x)}</li>" for x in changes) or "<li>—</li>"
+    if live:
+        title = f"Mid-term change {number} is now live"
+        lead = (f"Both sides have signed mid-term change {number} to your contract on "
+                f"<b>{p}</b>. From <b>{e}</b>, rows in your bordereaux are checked on "
+                f"the new terms; rows dated earlier keep the previous ones.")
+        cta = "Open the contract"
+    else:
+        title = f"Mid-term change {number} needs your agreement"
+        lead = (f"<b>{c}</b> has proposed a change to your contract on <b>{p}</b>, "
+                f"applying from <b>{e}</b>. Nothing changes until you agree it and both "
+                f"sides have signed.")
+        cta = "Review the change"
+    button = (f'<p style="margin:18px 0 6px"><a href="{escape_html(link)}" '
+              f'style="display:inline-block;background:#0E1320;color:#fff;'
+              f'text-decoration:none;font-size:14px;font-weight:600;padding:11px 18px;'
+              f'border-radius:10px">{cta}</a></p>') if link else ""
+    return f"""\
+<!doctype html><html><body style="margin:0;background:#F3F4F7;font-family:Inter,Arial,sans-serif">
+  <div style="max-width:600px;margin:0 auto;padding:44px 20px">
+    <div style="background:#fff;border:1px solid #E5E8EE;border-radius:16px;padding:48px 46px;
+                box-shadow:0 10px 26px -10px rgba(14,19,32,.12)">
+      <div style="font-family:'Space Grotesk',Inter,Arial,sans-serif;font-size:20px;font-weight:700;
+                  color:#0E1320;margin-bottom:6px">Kavachio</div>
+      <div style="font-size:13px;color:#8B93A2;margin-bottom:22px">Bordereau Management</div>
+      <h1 style="font-size:18px;color:#0E1320;margin:0 0 10px">{title}</h1>
+      <p style="font-size:14px;color:#0E1320;line-height:1.6;margin:0 0 10px">{greeting}</p>
+      <p style="font-size:14px;color:#566071;line-height:1.6;margin:0 0 10px">{lead}</p>
+      <ul style="font-size:14px;color:#566071;line-height:1.7;margin:0 0 14px;padding-left:20px">
+        <li>Contract: <b>{n}</b> ({k})</li>
+        {items}
+        <li>Reason: {r}</li>
+      </ul>
+      {button}
+      <p style="font-size:12px;color:#8B93A2;line-height:1.6;margin:22px 0 0">
+        This is a notice from your carrier on Kavachio.
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
 def bordereau_sent_email_html(program_name: str, period: str, due_date: str | None,
                               sent_date: str) -> str:
     """A broker sending a processed bordereau on to the carrier. The file
