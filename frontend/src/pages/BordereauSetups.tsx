@@ -76,12 +76,9 @@ export default function BordereauSetups() {
   // ?program_id= opens the list filtered to one programme (the Programmes
   // stepper links here once a programme's setups are all in place).
   const [params, setParams] = useSearchParams();
-  // Which kind of setup to list — a filter, like the others. ?tab=reinsurance
-  // (the dashboard, Reinsurance Bordereaux and a treaty's setup link here)
-  // opens it on the reinsurance setups.
-  const [setupType, setSetupType] = useState<"" | SetupType>(
-    params.get("tab") === "reinsurance" ? "reinsurance"
-      : params.get("tab") === "broker" ? "broker" : "");
+  // Which kind of setup to list — a filter, like the others. Always opens on
+  // all setup types.
+  const [setupType, setSetupType] = useState<"" | SetupType>("");
   void setParams;
   // The treaties' setups — one per live treaty, few enough to filter here.
   const [riItems, setRiItems] = useState<SetupListItem[] | null>(null);
@@ -348,7 +345,8 @@ export default function BordereauSetups() {
                       <option value="">Choose the treaty…</option>
                       {(riItems ?? []).map(t => (
                         <option key={t.contract_id} value={String(t.contract_id)}>
-                          {t.treaty}{t.status ? ` — ${RI_STATUS[t.status].label.toLowerCase()}` : " — not set up yet"}
+                          {t.treaty}{t.status ? ` — ${RI_STATUS[t.status].label.toLowerCase()}`
+                            : t.has_wording === false ? " — signed wording needed first" : " — not set up yet"}
                         </option>
                       ))}
                     </select>

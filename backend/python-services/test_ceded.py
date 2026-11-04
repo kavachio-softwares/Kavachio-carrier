@@ -17,7 +17,7 @@ import main
 import treaty_email
 import treaty_routes
 from auth_tokens import mint_access_token
-from db import (AppUser, CededBordereau, ExportTemplate, LandingRecord,
+from db import (AppUser, CededBordereau, Contract, ExportTemplate, LandingRecord,
                 OutputExport, Party, PartyContact, Program, SessionLocal, Tenant)
 from intake_models import FileArrival
 
@@ -67,7 +67,9 @@ def w():
         s.add(br); s.commit()
         pr = Program(tenant_id=car.id, name="Spectrum Property", is_app_managed=True)
         s.add(pr); s.commit()
-        tmpl = ExportTemplate(tenant_id=car.id, name=f"tmpl-{sfx}",
+        # The broker's bordereau set up on the programme — the input template
+        # a reinsurance setup reading the brokers' bordereaux requires.
+        tmpl = ExportTemplate(tenant_id=car.id, name=f"tmpl-{sfx}", program_id=pr.id,
                               structure=STRUCTURE, is_active=1)
         s.add(tmpl); s.commit()
         f = (s.query(AppUser).filter(AppUser.role == "kavachio_admin")
@@ -117,7 +119,32 @@ def _treaty(w, structure, name, *, setup=True, **setup_over):
     return cid
 
 
+def _pdf(*pages: str) -> bytes:
+    import fitz
+    doc = fitz.open()
+    for text in pages:
+        doc.new_page().insert_text((72, 72), text)
+    return doc.tobytes()
+
+
+def _wording(cid, *pages: str):
+    """The treaty's signed wording — required before it can be configured."""
+    from db import ContractDocument
+    pages = pages or ("Quota share treaty. The reinsured cedes premium to the reinsurers.",)
+    with SessionLocal() as s:
+        if not s.query(ContractDocument).filter(
+                ContractDocument.contract_id == cid,
+                ContractDocument.is_executed_copy.is_(True)).first():
+            c = s.get(__import__("db").Contract, cid)
+            s.add(ContractDocument(tenant_id=c.tenant_id, contract_id=cid,
+                                   kind="contract", filename="signed treaty.pdf",
+                                   is_executed_copy=True, is_active=True,
+                                   fingerprint=os.urandom(8).hex(), blob=_pdf(*pages)))
+            s.commit()
+
+
 def _setup(w, cid, activate=True, **over):
+    _wording(cid)
     d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
     body = {**d["defaults"], **over}
     r = client.put(f"/reinsurance/setups/{cid}", headers=w["ch"], json=body)
@@ -348,6 +375,7 @@ def test_nothing_is_prepared_until_the_treaty_is_set_up(w, mail):
 
 def test_a_carrier_user_sends_the_setup_for_approval(w):
     cid = _treaty(w, _qs(w, 12), "QS approval", setup=False)
+    _wording(cid)
     with SessionLocal() as s:
         f = s.query(AppUser).filter(AppUser.role == "kavachio_admin").order_by(AppUser.id).first()
         u = AppUser(tenant_id=w["t"], email=f"u-{os.urandom(3).hex()}@x.test",
@@ -391,7 +419,9 @@ def test_setup_layout_recipients_and_csv(w, mail):
     sw = next(x for x in d["statements"] if x["reinsurer_party_id"] == w["swiss"])
     f = client.get(f"/reinsurance/bordereaux/{d['id']}/statements/{sw['id']}/file",
                    headers=w["ch"]).content.decode("utf-8-sig")
-    assert f.splitlines()[0] == "Policy No,Ceded,Your share %"
+    # The columns chosen, in their order — a sheet built from the treaty adds
+    # nothing of its own (Your share % is a column like any other there).
+    assert f.splitlines()[0] == "Policy No,Ceded"
     mail.clear()
     client.post(f"/reinsurance/bordereaux/{d['id']}/send", headers=w["ch"], json={})
     swiss_mail = [m for m in mail if "attachments" in m and "swiss" in m["to"]]
@@ -512,6 +542,7 @@ def test_lloyds_risk_sheet_layout(w, mail, monkeypatch):
     added = [c["key"] for c in cols if c.get("added")]
     assert {"ceded_premium", "ceding_commission", "net_premium", "share_pct"} <= set(added)
 
+    _wording(cid)
     d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
     body = {**d["defaults"], "layout": prop["layout"], "layout_file": prop["layout_file"]}
     bad = [{**c, "keep": False} if c["heading"] == "Coverholder Name" else c for c in cols]
@@ -652,7 +683,7 @@ def test_check_saves_nothing(w, mail, monkeypatch):
         assert s.query(CededBordereau).filter(CededBordereau.contract_id == cid).count() == 0
     lst = client.get("/reinsurance/bordereaux", headers=w["ch"]).json()
     t = next(x for x in lst["treaties"] if x["contract_id"] == cid)
-    assert t["input_file"] == "b.xlsx" and t["output"] == "kavachio"
+    assert t["input_file"] == "b.xlsx" and t["output"] == "contract"
 
 
 def test_a_brokers_setup_takes_an_input_file_too(w, mail, monkeypatch):
@@ -760,10 +791,14 @@ def test_rules_are_read_from_the_treaty_wording(w, monkeypatch):
         c.wording_sections = {"sections": [{"key": "excl", "title": "Exclusions",
                                             "body": "This treaty excludes risks in Cuba and Iran."}]}
         s.commit()
+    # Read from the SIGNED wording only — a draft written in Kavachio is not it.
+    r = client.post(f"/reinsurance/setups/{cid}/rules/extract", headers=w["ch"])
+    assert r.status_code == 409 and "signed wording" in r.text
+    _wording(cid, "This treaty excludes risks in Cuba and Iran.")
     r = client.post(f"/reinsurance/setups/{cid}/rules/extract", headers=w["ch"])
     assert r.status_code == 200, r.text
     got = r.json()
-    assert got["found"] == 2 and got["read_from"]
+    assert got["found"] == 2 and got["read_from"] == "signed treaty.pdf"
     wording = [x for x in got["rules"] if x["source"] == "wording"]
     assert {x["kind"] for x in wording} == {"excluded", "max"}
     assert wording[0]["clause"]
@@ -930,3 +965,280 @@ def test_a_treatys_agreed_limits_check_its_reinsurance_bordereau(w, mail):
     chk = next(c for c in cb["checks"] if c["id"] == "limit_max_sum_insured")
     assert chk["severity"] == "critical" and [it["policy"] for it in chk["items"]] == ["PL1"]
     assert chk["recommendation"] == "500000" and cb["can_send"] is False
+
+
+def test_a_sheet_built_from_the_treatys_terms(w, mail):
+    """Not Kavachio's standard columns: the treaty's own — what its type works
+    out, what its terms quote, and every field a rule checks — each saying
+    which term put it there; saved and filled like any other layout."""
+    period = "2027-06"
+    _inward(w, [("PT1", 300_000, 1000, None, None)], period=period)
+    r = client.post("/contracts", headers=w["ch"], json={
+        "program_id": w["p"], "contract_type": "insurer_reinsurer", "name": "QS sheet",
+        "inception_dt": "2027-01-01", "expiry_dt": "2027-12-31",
+        "year_of_account": "2027", "notice_period_days": 90, "create_as": "draft",
+        "treaty": _qs(w, 40),
+        "agreed_limits": {"max_sum_insured": {"value": 500_000, "severity": "critical"}}})
+    cid = r.json()["id"]
+    p = client.post(f"/reinsurance/setups/{cid}/layout/contract", headers=w["ch"])
+    assert p.status_code == 200, p.text
+    p = p.json()
+    by = {c["key"]: c for c in p["columns"]}
+    assert p["layout"]["source"] == "contract"
+    assert "Cession 40%" in by["ceded_pct"]["why"]
+    assert "Ceding commission 30%" in by["ceding_commission"]["why"]
+    assert "agreed limit" in by["sum_insured"]["why"]           # from max_sum_insured
+    assert "USD" in by["currency"]["why"] and "share_pct" in by
+
+    d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
+    _setup(w, cid, **{**d["defaults"], "layout": p["layout"], "columns": p["columns"]})
+    saved = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()["setup"]
+    assert saved["layout"]["source"] == "contract"
+    assert any(c.get("why") for c in saved["columns"])
+    cb = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                     json={"contract_id": cid, "period": period}).json()
+    st = cb["statements"][0]
+    f = client.get(f"/reinsurance/bordereaux/{cb['id']}/statements/{st['id']}/file",
+                   headers=w["ch"])
+    ws = openpyxl.load_workbook(io.BytesIO(f.content)).worksheets[0]
+    heads = [c.value for c in ws[1]]
+    assert heads == [c["heading"] for c in p["columns"]]
+    row = dict(zip(heads, [c.value for c in ws[2]]))
+    assert row["Policy"] == "PT1" and row["Statement period"] == period
+
+
+def test_columns_read_from_the_programmes_contracts(w, monkeypatch):
+    """A programme has contracts as well as treaties: the setup lists them, and
+    the columns a ticked contract asks for are added — matched to an input
+    column where one is headed the same, never twice, and only from contracts
+    on the programmes this treaty protects."""
+    import contract_output_fields as cof
+    r = client.post("/contracts", headers=w["ch"], json={
+        "program_id": w["p"], "contract_type": "insurer_reinsurer", "name": "QS contracts",
+        "inception_dt": "2027-01-01", "expiry_dt": "2027-12-31",
+        "year_of_account": "2027", "notice_period_days": 90, "create_as": "draft",
+        "treaty": _qs(w, 40)})
+    cid = r.json()["id"]
+    with SessionLocal() as s:
+        mine = Contract(tenant_id=w["t"], program_id=w["p"], broker_party_id=w["b"],
+                        contract_type="insurer_broker", name="Spectrum binder", status="active")
+        gone = Contract(tenant_id=w["t"], program_id=w["p"], contract_type="insurer_broker",
+                        name="Old binder", status="superseded")
+        other = Program(tenant_id=w["t"], name="Elsewhere", is_app_managed=True)
+        s.add_all([mine, gone, other]); s.commit()
+        far = Contract(tenant_id=w["t"], program_id=other.id, contract_type="insurer_broker",
+                       name="Elsewhere binder", status="active")
+        s.add(far); s.commit()
+        ids = {"mine": mine.id, "gone": gone.id, "far": far.id}
+
+    listed = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()["options"]["contracts"]
+    names = {k["id"]: k for k in listed}
+    assert ids["mine"] in names and names[ids["mine"]]["broker"] == "CRC"
+    assert ids["gone"] not in names and ids["far"] not in names
+    assert cid not in names                                      # the treaty is not "a contract"
+    treaties = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()["options"]["treaties"]
+    assert treaties[0]["id"] == cid and treaties[0]["this"] and w["p"] in treaties[0]["program_ids"]
+
+    calls = []
+
+    def fake(s, contract_ids, known=None, **kw):
+        calls.append((contract_ids, known))
+        return {"fields": [
+            {"field": "flood zone", "source_field": None, "required": True,
+             "reason": "Flood is sublimited", "contract_reference": "Flood limited to 1m"},
+            {"field": "Policy", "source_field": None, "required": True, "reason": "dup"},
+        ], "clause_count": 3}
+    monkeypatch.setattr(cof, "analyze", fake)
+    p = client.post(f"/reinsurance/setups/{cid}/layout/contract-columns", headers=w["ch"],
+                    json={"contract_ids": [ids["mine"]], "headings": ["Policy", "Statement period"]})
+    assert p.status_code == 200, p.text
+    p = p.json()
+    assert [c["heading"] for c in p["columns"]] == ["Flood Zone"]     # "Policy" already there
+    col = p["columns"][0]
+    assert col["by"] == "Spectrum binder" and "Flood is sublimited" in col["why"]
+    assert col["clause"] == "Flood limited to 1m" and col["key"] == "col:Flood Zone"
+    assert p["unfilled"] == ["Flood Zone"] and p["clause_count"] == 3
+    assert calls == [([ids["mine"]], ["Policy", "Statement period"])]
+
+    for bad in (ids["far"], ids["gone"], cid):
+        assert client.post(f"/reinsurance/setups/{cid}/layout/contract-columns", headers=w["ch"],
+                           json={"contract_ids": [bad], "headings": []}).status_code == 400
+
+
+def test_input_and_output_templates_are_required(w):
+    """A setup needs an input template — the carrier's own file, or a broker
+    bordereau template on a programme the treaty protects — and an output one."""
+    with SessionLocal() as s:
+        bare = Program(tenant_id=w["t"], name="No template yet", is_app_managed=True)
+        s.add(bare); s.commit()
+        bare_id = bare.id
+    r = client.post("/contracts", headers=w["ch"], json={
+        "program_id": bare_id, "contract_type": "insurer_reinsurer", "name": "QS bare",
+        "inception_dt": "2027-01-01", "expiry_dt": "2027-12-31",
+        "year_of_account": "2027", "notice_period_days": 90, "create_as": "draft",
+        "treaty": _qs(w, 20)})
+    cid = r.json()["id"]
+    _wording(cid)
+    d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
+    r = client.put(f"/reinsurance/setups/{cid}", headers=w["ch"], json=d["defaults"])
+    assert r.status_code == 400
+    assert "input template is required" in r.json()["detail"]["errors"]["input_layout"]
+
+    # On a programme with a broker template: the input is there, but no output.
+    cid = _treaty(w, _qs(w, 20), "QS no output", setup=False)
+    _wording(cid)
+    d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
+    r = client.put(f"/reinsurance/setups/{cid}", headers=w["ch"],
+                   json={**d["defaults"], "layout": {"source": "contract"}, "columns": []})
+    assert r.status_code == 400
+    assert "output template is required" in r.json()["detail"]["errors"]["layout"]
+    r = client.put(f"/reinsurance/setups/{cid}", headers=w["ch"], json=d["defaults"])
+    assert r.status_code == 200, r.text
+
+
+
+def test_a_treaty_cannot_be_configured_until_its_signed_wording_is_supplied(w):
+    """26.3 — each treaty is configured from its own signed wording: with
+    none, its setup is not saved or activated, and it says so."""
+    cid = _treaty(w, _qs(w, 14), "QS no wording", setup=False)
+    d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
+    assert d["wording"] is None and "signed wording" in d["wording_needed"]
+    item = next(i for i in client.get("/reinsurance/setups", headers=w["ch"]).json()["items"]
+                if i["contract_id"] == cid)
+    assert item["has_wording"] is False
+    r = client.put(f"/reinsurance/setups/{cid}", headers=w["ch"], json=d["defaults"])
+    assert r.status_code == 409 and "signed wording" in r.json()["detail"]["errors"]["wording"]
+
+    _wording(cid)
+    d = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
+    assert d["wording"]["source"] == "signed_copy"
+    assert d["wording"]["filename"] == "signed treaty.pdf"
+    assert client.put(f"/reinsurance/setups/{cid}", headers=w["ch"],
+                      json=d["defaults"]).status_code == 200
+
+
+# ── 27.1 / 27.2: the calculation basis, with its dates ──────────────────────
+def test_a_term_changed_from_a_date_applies_from_that_date(w, mail):
+    """Cession 40% from inception, 25% from 1 March: January is ceded at 40%,
+    March at 25% — each statement worked out with the term in force."""
+    for per in ("2027-07", "2027-09"):
+        _inward(w, [("PD1", 100_000, 1000, None, None)], period=per)
+    cid = _treaty(w, _qs(w, 40), "QS dated")
+    b = client.get(f"/contracts/{cid}/basis", headers=w["ch"]).json()
+    cession = next(t for t in b["terms"] if t["term"] == "cession_pct")
+    assert [v["value"] for v in cession["versions"]] == [40]
+    assert cession["versions"][0]["source"] == "structure"
+
+    bad = client.post(f"/contracts/{cid}/basis", headers=w["ch"], json={
+        "term": "cession_pct", "value": 140, "effective_from": "2027-08-01"})
+    assert bad.status_code == 400 and "at most 100" in bad.text
+    bad = client.post(f"/contracts/{cid}/basis", headers=w["ch"], json={
+        "term": "cession_pct", "value": 25, "effective_from": "2026-12-01"})
+    assert bad.status_code == 400 and "incepts" in bad.text
+    r = client.post(f"/contracts/{cid}/basis", headers=w["ch"], json={
+        "term": "cession_pct", "value": 25, "effective_from": "2027-08-01",
+        "note": "Endorsement 2 — cession reduced"})
+    assert r.status_code == 200, r.text
+    cession = next(t for t in r.json()["terms"] if t["term"] == "cession_pct")
+    assert [(v["effective_from"], v["value"]) for v in cession["versions"]] == \
+        [("2027-01-01", 40), ("2027-08-01", 25)]
+
+    jul = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                      json={"contract_id": cid, "period": "2027-07"}).json()
+    sep = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                      json={"contract_id": cid, "period": "2027-09"}).json()
+    pct = lambda cb: {ln["ceded_pct"] for ln in cb["lines"]}   # noqa: E731
+    assert pct(jul) == {40} and pct(sep) == {25}
+
+    # Removed: September goes back to 40%.
+    entry = cession["versions"][1]["id"]
+    assert client.delete(f"/contracts/{cid}/basis/{entry}", headers=w["ch"]).status_code == 200
+    sep = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                      json={"contract_id": cid, "period": "2027-09"}).json()
+    assert pct(sep) == {40}
+
+
+def test_sliding_scale_and_profit_commission_terms(w):
+    import treaty_basis as tb
+    cid = _treaty(w, _qs(w, 40), "QS commissions", setup=False)
+    scale = {"provisional_pct": 30, "method": "linear",
+             "points": [{"loss_ratio": 50, "rate": 35}, {"loss_ratio": 70, "rate": 25}]}
+    r = client.post(f"/contracts/{cid}/basis", headers=w["ch"], json={
+        "term": "sliding_scale", "value": scale, "effective_from": "2027-01-01"})
+    assert r.status_code == 200, r.text
+    saved = next(t for t in r.json()["terms"] if t["term"] == "sliding_scale")["versions"][-1]["value"]
+    assert (saved["min_pct"], saved["max_pct"]) == (25, 35)
+    # 40% → top of the scale; 60% → halfway; 80% → bottom.
+    assert [tb.sliding_rate(saved, lr) for lr in (40, 60, 80)] == [35, 30, 25]
+    assert tb.sliding_rate({**saved, "method": "step"}, 60) == 35
+    ev = client.post(f"/contracts/{cid}/basis/evaluate", headers=w["ch"], json={
+        "term": "sliding_scale", "value": scale, "premium": 100_000, "losses": 40_000}).json()
+    assert ev["rate_pct"] == 35 and ev["adjustment"] == 5_000      # 35% earned vs 30% charged
+    assert client.post(f"/contracts/{cid}/basis", headers=w["ch"], json={
+        "term": "sliding_scale", "value": {"provisional_pct": 30, "points": [{"loss_ratio": 50, "rate": 35}]},
+        "effective_from": "2027-01-01"}).status_code == 400            # one point is no scale
+
+    pc = {"rate_pct": 20, "expense_pct": 5, "deficit_years": 3}
+    r = client.post(f"/contracts/{cid}/basis", headers=w["ch"], json={
+        "term": "profit_commission", "value": pc, "effective_from": "2027-01-01"})
+    assert r.status_code == 200, r.text
+    ev = client.post(f"/contracts/{cid}/basis/evaluate", headers=w["ch"], json={
+        "term": "profit_commission", "value": pc, "premium": 100_000, "losses": 40_000,
+        "ceding_commission": 30_000}).json()
+    # 100,000 − 30,000 − 40,000 − 5,000 expenses = 25,000 profit; 20% of it.
+    assert ev["profit"] == 25_000 and ev["commission"] == 5_000
+    ev = client.post(f"/contracts/{cid}/basis/evaluate", headers=w["ch"], json={
+        "term": "profit_commission", "value": pc, "premium": 100_000, "losses": 80_000,
+        "ceding_commission": 30_000}).json()
+    assert ev["commission"] == 0 and ev["deficit_carried_forward"] == 15_000
+
+    # The provisional rate is charged on each line while the scale is in force.
+    with SessionLocal() as s:
+        from db import Contract
+        import treaty_routes
+        c = s.get(Contract, cid)
+        st = tb.structure_at(s, c, treaty_routes.load_structure(s, c.id, names=False), "2027-02")
+        assert st["terms"]["ceding_commission_pct"] == 30
+        assert {t["term"] for t in st["_basis"]["terms"]} >= {"cession_pct", "sliding_scale"}
+
+
+def test_an_endorsement_moves_the_calculation_basis_from_its_date(w, mail):
+    """Endorsing a treaty's cession and commission makes each a dated term,
+    by that endorsement, from its effective date — later periods use it,
+    earlier ones keep what they had."""
+    for per in ("2027-04", "2027-10"):
+        _inward(w, [("PE1", 100_000, 1000, None, None)], period=per)
+    cid = _treaty(w, _qs(w, 40), "QS endorsed")
+    with SessionLocal() as s:
+        from db import Contract
+        c = s.get(Contract, cid)
+        c.lifecycle = "active"
+        s.commit()
+    pv = client.post(f"/contracts/{cid}/endorsement/preview", headers=w["ch"], json={
+        "agreed_limits": {}, "effective_from": "2027-07-01",
+        "basis": [{"term": "cession_pct", "layer": None, "value": 30},
+                  {"term": "ceding_commission_pct", "layer": None, "value": 30}]}).json()
+    ch = {x["key"]: x for x in pv["changes"]}
+    assert ch["basis:cession_pct:"]["from"] == "40%" and ch["basis:cession_pct:"]["to"] == "30%"
+    assert "basis:ceding_commission_pct:" not in ch            # 30 → 30 is no change
+    assert any(t["term"] == "cession_pct" and t["value"] == 40 for t in pv["basis"])
+
+    assert client.post(f"/contracts/{cid}/endorsement", headers=w["ch"], json={
+        "agreed_limits": {}, "basis": [{"term": "cession_pct", "value": 30}]}).status_code == 400
+    r = client.post(f"/contracts/{cid}/endorsement", headers=w["ch"], json={
+        "agreed_limits": {}, "effective_from": "2027-07-01",
+        "basis": [{"term": "cession_pct", "layer": None, "value": 30}]})
+    assert r.status_code == 200, r.text
+    doc_id = r.json()["endorsement"]["document_id"]
+    b = client.get(f"/contracts/{cid}/basis", headers=w["ch"]).json()
+    v = next(t for t in b["terms"] if t["term"] == "cession_pct")["versions"][-1]
+    assert (v["effective_from"], v["value"], v["source"], v["document_id"]) == \
+        ("2027-07-01", 30, "endorsement", doc_id)
+    assert v["note"] == "Endorsement 1"
+
+    apr = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                      json={"contract_id": cid, "period": "2027-04"}).json()
+    oct_ = client.post("/reinsurance/bordereaux", headers=w["ch"],
+                       json={"contract_id": cid, "period": "2027-10"}).json()
+    assert {ln["ceded_pct"] for ln in apr["lines"]} == {40}
+    assert {ln["ceded_pct"] for ln in oct_["lines"]} == {30}

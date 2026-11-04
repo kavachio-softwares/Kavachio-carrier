@@ -1,25 +1,29 @@
 /**
  * Section 3 of a reinsurance bordereau setup — the file each reinsurer gets.
  *
- * Three ways to lay it out, like a broker's output template:
+ * Three ways to lay it out, like a broker's output template (Kavachio's own
+ * standard layout is no longer offered; a setup saved with it keeps it until
+ * another is chosen):
  *
- *   Kavachio's layout   pick, rename and order Kavachio's columns
  *   Your own file       the carrier already sends an Excel or CSV — upload it
  *                       once and every statement is that file, filled in
  *   Lloyd's risk sheet  no file of its own: the territory's published columns,
  *                       then the treaty's reinsurance columns
+ *   From the treaty     built from the treaty itself: what its type works out,
+ *                       what its terms quote, every field a treaty rule checks —
+ *                       each column saying which term put it there
  *
  * For the last two every column says what fills it, read from its heading
  * (the same AI pass a broker's sample gets) and changeable here.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle, ArrowDown, ArrowUp, FileSpreadsheet, Loader2, Search, Sparkles, Upload,
+  AlertTriangle, ArrowDown, ArrowUp, FileSpreadsheet, Loader2, Plus, Search, Sparkles, Upload, X,
 } from "lucide-react";
 import { InfoTip } from "../InfoTip";
 import { fieldErrors } from "../../api/contractRecord";
 import {
-  lloydsLayout, uploadLayout, type LayoutProposal, type LayoutSource,
+  lloydsLayout, treatyLayout, uploadLayout, type LayoutProposal, type LayoutSource,
   type SetupColumn, type SetupRecord, type SetupValues,
 } from "../../api/ceded";
 import { getStandards, type Standard } from "../../api/outputTemplate";
@@ -33,11 +37,11 @@ type Props = {
 };
 
 // The broker setup's two ways to get an output template — upload one, or
-// create one from the Lloyd's standard — plus Kavachio's own columns.
+// create one from the Lloyd's standard — plus one built from the treaty.
 const SOURCES: { key: LayoutSource; label: string }[] = [
+  { key: "contract", label: "Create from the treaty's terms" },
   { key: "uploaded", label: "Upload output template" },
   { key: "standard", label: "Create from Lloyd's risk sheet" },
-  { key: "kavachio", label: "Kavachio standard layout" },
 ];
 
 /** A layout as it was last seen for each source, so switching back and forth
@@ -59,6 +63,10 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
   const [jurisdiction, setJurisdiction] = useState("");
   const [q, setQ] = useState("");
   const [onlyTicked, setOnlyTicked] = useState(true);
+  // A column the carrier adds to a built sheet.
+  const [adding, setAdding] = useState(false);
+  const [newHeading, setNewHeading] = useState("");
+  const [newKey, setNewKey] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   // What is saved is held for its own source from the start.
@@ -89,9 +97,9 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
     setErr(""); setUnfilled([]);
     const back = held.current[next];
     if (back) { change(back); return; }
-    if (next === "kavachio") {
-      change({ layout: { source: "kavachio" }, columns: rec.defaults.columns,
-               layout_file: null, file_format: "xlsx" });
+    if (next === "contract") {
+      // Built straight away — there is nothing to choose first.
+      void read("treaty", () => treatyLayout(cid));
     } else {
       change({ layout: { source: next }, columns: [], layout_file: null });
     }
@@ -101,7 +109,11 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
     setBusy(label); setErr("");
     try {
       const p = await fn();
-      change({ layout: p.layout, columns: p.columns, layout_file: p.layout_file,
+      // Building again from the treaty keeps the columns the carrier added.
+      const mine = label === "treaty"
+        ? v.columns.filter(c => c.why === "Added by you"
+            && !p.columns.some(x => x.heading === c.heading)) : [];
+      change({ layout: p.layout, columns: [...p.columns, ...mine], layout_file: p.layout_file,
                file_format: p.file_format });
       setUnfilled(p.unfilled);
     } catch (e) {
@@ -140,6 +152,26 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
   }
 
   const hasLayout = source !== "kavachio" && v.columns.length > 0;
+  // A sheet Kavachio writes fresh (built from the treaty or the Lloyd's sheet)
+  // is the carrier's to change: add, rename, reorder and remove columns. An
+  // uploaded file is filled in exactly as it is — its columns are the file's.
+  const editable = source === "contract" || source === "standard";
+  const MAP = "__map";
+  // What can fill a column chosen here; an input column is chosen on Field Mapping.
+  const fillOpts = [
+    { group: "Worked out for the treaty", opts: figureOpts },
+    { group: "The same on every line", opts: rec.options.context },
+  ];
+  const fillValue = (key: string) =>
+    fillOpts.some(g => g.opts.some(o => o.key === key)) ? key : MAP;
+  function addColumn() {
+    const heading = newHeading.trim();
+    if (!heading) return;
+    change({ columns: [...v.columns, {
+      key: newKey === MAP ? "" : newKey, heading, column_index: null, keep: true,
+      required: false, ref: null, why: "Added by you" }] });
+    setNewHeading(""); setNewKey(""); setAdding(false);
+  }
   const kept = v.columns.filter(c => c.keep !== false);
   const blank = kept.filter(c => !hasData(c.key)).length;
 
@@ -152,7 +184,7 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
     <div>
       <div className="fh" style={{ marginTop: 0 }}>
         Output columns
-        <InfoTip text="Upload the Excel or CSV you already send, create one from the Lloyd's risk sheet, or use Kavachio's columns — the same choices as a broker's output template. Every Excel file also has a summary sheet with the reinsurer's share and totals." />
+        <InfoTip text="Build it from the treaty's own terms, upload the Excel or CSV you already send, or create one from the Lloyd's risk sheet — the same choices as a broker's output template. Every Excel file also has a summary sheet with the reinsurer's share and totals." />
       </div>
       <div className="seg" style={{ marginBottom: 12, flexWrap: "wrap" }}>
         {SOURCES.map(s => (
@@ -162,9 +194,14 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
       </div>
       {bad("layout")}
 
-      {/* ── Kavachio's own ── */}
+      {/* ── Kavachio's own — no longer offered; a setup saved with it keeps it ── */}
       {source === "kavachio" && (
         <>
+          <div className="note warn" style={{ marginBottom: 12 }}>
+            <b>This setup uses Kavachio&rsquo;s standard layout, which is no longer offered.</b>{" "}
+            It keeps working until you choose another above —{" "}
+            <b>Create from the treaty&rsquo;s terms</b> builds the sheet from this treaty.
+          </div>
           <div className="seg sm" style={{ display: "flex", width: "fit-content", marginBottom: 12 }}>
             {(["xlsx", "csv"] as const).map(f => (
               <button key={f} type="button" className={v.file_format === f ? "on" : ""}
@@ -294,10 +331,29 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
         </div>
       )}
 
+      {/* ── built from the treaty ── */}
+      {source === "contract" && (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
+                      marginBottom: hasLayout ? 12 : 0 }}>
+          <button className={`btn ${hasLayout ? "" : "pri"}`} type="button" disabled={!!busy}
+                  onClick={() => read("treaty", () => treatyLayout(cid))}>
+            <Sparkles size={14} /> {hasLayout ? "Build again from the treaty" : "Build from the treaty's terms"}
+          </button>
+          <span className="sub" style={{ flex: "1 1 320px" }}>
+            {hasLayout
+              ? `${kept.length} of ${v.columns.length} columns in the file — each says which term of the treaty put it there.`
+              : "One column for what the treaty's type works out (cession, commission, recoveries…), "
+                + "for what its terms quote, and for every field a treaty rule checks — "
+                + "from its terms, its wording and its agreed limits."}
+          </span>
+        </div>
+      )}
+
       {busy && (
         <div className="note" style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
           <Loader2 size={14} className="animate-spin" />
           {busy === "upload" ? "Reading your columns…"
+            : busy === "treaty" ? "Reading the treaty's terms and rules…"
             : "Reading the Lloyd's columns — this can take a minute the first time…"}
         </div>
       )}
@@ -307,8 +363,12 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
       {hasLayout && !busy && (
         <>
           <div className="sub" style={{ marginBottom: 8 }}>
-            Which of your input columns fills each one is set on the{" "}
-            <b>Field Mapping</b> step.
+            {editable
+              ? <>Add, rename, reorder or remove any column — it is your sheet. Which of
+                  your input columns fills one is set on the <b>Field Mapping</b> step.</>
+              : <>These are your file&rsquo;s own columns, filled in as they are — to add
+                  one, add it to the file and upload it again. Which of your input columns
+                  fills each is set on the <b>Field Mapping</b> step.</>}
           </div>
           {source === "standard" && (
             <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
@@ -334,16 +394,52 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
                   <tr key={i} style={c.keep === false ? { opacity: .6 } : undefined}>
                     <td>
                       <label style={{ ...LBL, whiteSpace: "normal" }}>
-                        {source === "standard" && (
+                        {(source === "standard" || source === "contract") && (
                           <input type="checkbox" checked={c.keep !== false}
                                  disabled={c.required && c.keep !== false}
                                  title={c.required ? "Mandatory in the Lloyd's standard" : undefined}
                                  onChange={e => setCol(i, { keep: e.target.checked })} />
                         )}
-                        {c.added
+                        {editable && !c.required
                           ? <input value={c.heading} onChange={e => setCol(i, { heading: e.target.value })} />
                           : <span>{c.heading}</span>}
+                        {editable && (
+                          <span style={{ display: "flex", gap: 2, marginLeft: "auto", flex: "0 0 auto" }}>
+                            <button className="btn sm ghost" type="button" aria-label="Move up"
+                                    disabled={i === 0} onClick={e => { e.preventDefault(); moveCol(i, -1); }}>
+                              <ArrowUp size={12} /></button>
+                            <button className="btn sm ghost" type="button" aria-label="Move down"
+                                    disabled={i === v.columns.length - 1}
+                                    onClick={e => { e.preventDefault(); moveCol(i, 1); }}>
+                              <ArrowDown size={12} /></button>
+                            <button className="btn sm ghost" type="button" aria-label="Remove column"
+                                    disabled={c.required}
+                                    title={c.required ? "Mandatory in the Lloyd's standard" : "Remove this column"}
+                                    onClick={e => { e.preventDefault();
+                                      change({ columns: v.columns.filter((_, j) => j !== i) }); }}>
+                              <X size={12} /></button>
+                          </span>
+                        )}
                       </label>
+                      {editable && c.why === "Added by you" && (
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+                          <span className="sub" style={{ flex: "0 0 auto" }}>Filled from</span>
+                          <select value={fillValue(c.key)} style={{ maxWidth: 320 }}
+                                  onChange={e => setCol(i, { key: e.target.value === MAP
+                                    ? (c.key.startsWith("field:") || c.key.startsWith("col:") ? c.key : "")
+                                    : e.target.value })}>
+                            <option value={MAP}>An input column — chosen on Field Mapping</option>
+                            {fillOpts.map(g => (
+                              <optgroup key={g.group} label={g.group}>
+                                {g.opts.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+                              </optgroup>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      {c.why && (
+                        <div className="sub" style={{ marginTop: 3, fontSize: 11.5 }}>{c.why}</div>
+                      )}
                       {(c.required || c.added) && (
                         <div style={{ marginTop: 3 }}>
                           {c.required && <span className="badge b-info" style={{ fontSize: 10.5 }}>Mandatory</span>}
@@ -359,7 +455,39 @@ export default function CededLayoutSection({ cid, rec, v, change, bad }: Props) 
               </tbody>
             </table>
           </div>
-          {source === "standard" && (
+          {editable && (adding ? (
+            <div className="card pad" style={{ marginTop: 10, boxShadow: "none" }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+                <div className="field" style={{ marginBottom: 0, flex: "1 1 220px" }}>
+                  <label>Heading in the file</label>
+                  <input autoFocus value={newHeading} onChange={e => setNewHeading(e.target.value)}
+                         placeholder="e.g. Risk location"
+                         onKeyDown={e => { if (e.key === "Enter") addColumn(); }} />
+                </div>
+                <div className="field" style={{ marginBottom: 0, flex: "1 1 260px" }}>
+                  <label>Filled from</label>
+                  <select value={newKey || MAP} onChange={e => setNewKey(e.target.value)}>
+                    <option value={MAP}>An input column — chosen on Field Mapping</option>
+                    {fillOpts.map(g => (
+                      <optgroup key={g.group} label={g.group}>
+                        {g.opts.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+                      </optgroup>
+                    ))}
+                  </select>
+                </div>
+                <button className="btn pri" type="button" disabled={!newHeading.trim()} onClick={addColumn}>
+                  Add column
+                </button>
+                <button className="btn" type="button" onClick={() => setAdding(false)}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button className="btn sm" type="button" style={{ marginTop: 10 }}
+                    onClick={() => { setAdding(true); setNewHeading(""); setNewKey(""); }}>
+              <Plus size={12} /> Add a column
+            </button>
+          ))}
+          {(source === "standard" || source === "contract") && (
             <div className="seg sm" style={{ marginTop: 12 }}>
               {(["xlsx", "csv"] as const).map(f => (
                 <button key={f} type="button" className={v.file_format === f ? "on" : ""}

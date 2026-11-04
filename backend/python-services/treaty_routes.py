@@ -48,7 +48,7 @@ import treaty_types as tt
 from app_routes import _iso_utc, assert_tenant_owns, resolve_tenant_id
 from auth_deps import Principal, current_principal
 from db import (
-    Contract, ContractDocument, ContractSignature, Party, PartyContact, Program,
+    AppUser, Contract, ContractDocument, ContractSignature, Party, PartyContact, Program,
     ReinsurerAccessEvent, ReinsurerAccessLink, ReinsurerApproval,
     SessionLocal, Tenant, Treaty,
     TreatyLayer, TreatyProgramme, TreatyShare,
@@ -291,7 +291,30 @@ def record_summary(s, c: Contract) -> Optional[dict]:
         "approvals": ({k: v for k, v in approvals(s, c, st).items()
                        if k in ("approved", "total", "changes_requested",
                                 "all_approved")} if st else None),
+        # 26.3 — its lifecycle, documentation and configuration, kept apart,
+        # and the signed wording it is configured from.
+        **_statuses(s, c),
+        # A master treaty: how much is written and signed, party by party.
+        "placement": _placement_summary(s, c),
     }
+
+
+def _placement_summary(s, c: Contract) -> Optional[dict]:
+    import treaty_placement as tp
+    try:
+        return tp.summary(s, c)
+    except Exception as e:  # noqa: BLE001
+        log.warning("treaty %s: placement unavailable: %s", c.id, e)
+        return None
+
+
+def _statuses(s, c: Contract) -> dict:
+    import treaty_wording
+    try:
+        return treaty_wording.statuses(s, c)
+    except Exception as e:  # noqa: BLE001 — the record still shows without them
+        log.warning("treaty %s: statuses unavailable: %s", c.id, e)
+        return {}
 
 
 def _state(c: Contract) -> str:
@@ -480,6 +503,455 @@ def put_treaty(contract_id: int, body: StructureIn,
         s.commit()
         s.refresh(c)
         return _treaty_payload(s, c, p)
+
+
+# ── an endorsement uploaded on a treaty: read, reviewed, applied ────────────
+def _endorsement_doc(s, c: Contract, doc_id: int) -> ContractDocument:
+    d = s.get(ContractDocument, doc_id)
+    if d is None or d.contract_id != c.id or d.kind != "endorsement":
+        raise HTTPException(404, "no such endorsement on this treaty")
+    return d
+
+
+@router.get("/contracts/{contract_id}/endorsements/{doc_id}")
+def get_endorsement(contract_id: int, doc_id: int, p: Principal = Depends(current_principal)):
+    """The endorsement, what was read from it, what it has applied, and the
+    terms it could change — as in force just before its date."""
+    import treaty_endorsement as te
+    _cr()._require_carrier(p)
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        out = te.payload(s, c, _endorsement_doc(s, c, doc_id))
+        out["can_edit"] = _cr()._speaks_for_carrier(p) and _state(c) not in CLOSED_STATES
+        s.commit()                                 # a first validation is cached
+        return out
+
+
+@router.get("/contracts/{contract_id}/documents/{doc_id}/pages/{page}")
+def document_page(contract_id: int, doc_id: int, page: int,
+                  p: Principal = Depends(current_principal)):
+    """One page of a treaty's document, as an image — the review's viewer."""
+    import esign_pdf
+    import treaty_endorsement as te
+    _cr()._require_carrier(p)
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        d = s.get(ContractDocument, doc_id)
+        if d is None or d.contract_id != c.id:
+            raise HTTPException(404, "no such document on this treaty")
+        try:
+            pdf = te.pdf(s, d)
+        except Exception:  # noqa: BLE001 — a file that will not open has no pages
+            raise HTTPException(409, "this document could not be opened")
+    n = esign_pdf.page_count(pdf)
+    if page < 1 or page > n:
+        raise HTTPException(404, f"the document has {n} page(s)")
+    return Response(content=esign_pdf.render_page_png(pdf, page, scale=1.6),
+                    media_type="image/png")
+
+
+@router.post("/contracts/{contract_id}/endorsements/{doc_id}/read")
+async def read_endorsement(contract_id: int, doc_id: int,
+                           p: Principal = Depends(current_principal)):
+    """Read the endorsement for the terms it changes and its clauses, each
+    with its page. Applies nothing."""
+    import treaty_endorsement as te
+    cr = _cr()
+    cr._require_carrier(p)
+
+    def work():
+        with SessionLocal() as s:
+            c = _treaty_contract(s, p, contract_id)
+            d = _endorsement_doc(s, c, doc_id)
+            try:
+                te.read(s, c, d)
+            except LookupError:
+                raise HTTPException(409, "Set out the treaty's structure first.")
+            except ValueError:
+                raise HTTPException(409, "No text could be read from this endorsement — "
+                                         "it may be a scan. Enter its changes by hand.")
+            s.commit()
+            out = te.payload(s, c, d)
+            out["can_edit"] = cr._speaks_for_carrier(p)
+            return out
+    try:
+        return await run_in_threadpool(work)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 — the changes can still be entered by hand
+        log.warning("treaty %s: endorsement %s read failed: %s", contract_id, doc_id, e)
+        raise HTTPException(502, "The endorsement could not be read just now. Try again, "
+                                 "or enter its changes by hand.")
+
+
+class EndorsementConfirmIn(BaseModel):
+    effective_date: Optional[str] = None
+    endorsement_number: Optional[str] = None
+    changes: list = []
+    clauses: list = []
+
+
+@router.post("/contracts/{contract_id}/endorsements/{doc_id}/confirm")
+def confirm_endorsement(contract_id: int, doc_id: int, body: EndorsementConfirmIn,
+                        p: Principal = Depends(current_principal)):
+    """Apply the reviewed endorsement: each term a dated version from its
+    effective date, its clauses among the treaty's. Replaces what it applied
+    before; on any error nothing changes."""
+    import treaty_basis as tb
+    import treaty_endorsement as te
+    cr = _cr()
+    cr._assert_speaks_for_carrier(p, "apply a treaty endorsement")
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        if _state(c) in CLOSED_STATES:
+            raise HTTPException(409, f"this treaty is {_state(c)}")
+        d = _endorsement_doc(s, c, doc_id)
+        who = s.get(AppUser, p.user_id) if p.user_id else None
+        try:
+            te.confirm(s, c, d, effective_date=body.effective_date, changes=body.changes,
+                       clauses=body.clauses, number=(body.endorsement_number or "").strip() or None,
+                       user_id=p.user_id, who=(who.full_name or who.email) if who else None)
+        except tb.BasisError as e:
+            s.rollback()
+            raise HTTPException(400, {"message": str(e), "errors": e.errors})
+        s.commit()
+        out = te.payload(s, c, d)
+        out["can_edit"] = True
+        return out
+
+
+# ── 27.1 / 27.2: the calculation basis, with its dates ──────────────────────
+@router.get("/contracts/{contract_id}/basis")
+def get_basis(contract_id: int, p: Principal = Depends(current_principal)):
+    """Every term the treaty's figures are worked out from, each with its
+    versions: the structure's value from inception, then each dated change."""
+    import treaty_basis as tb
+    _cr()._require_carrier(p)
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        return {**tb.schedule(s, c), "can_edit": _cr()._speaks_for_carrier(p)
+                and _state(c) not in CLOSED_STATES}
+
+
+class BasisIn(BaseModel):
+    term: str
+    layer: Optional[int] = None
+    value: Any
+    effective_from: str
+    note: Optional[str] = None
+    source: str = "manual"
+
+
+@router.post("/contracts/{contract_id}/basis")
+def add_basis(contract_id: int, body: BasisIn, p: Principal = Depends(current_principal)):
+    """A dated change to one term — it applies from its date; statements for
+    earlier periods keep the terms they were worked out with."""
+    import treaty_basis as tb
+    cr = _cr()
+    cr._assert_speaks_for_carrier(p, "change a treaty's calculation basis")
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        if _state(c) in CLOSED_STATES:
+            raise HTTPException(409, f"this treaty is {_state(c)}")
+        who = s.get(AppUser, p.user_id) if p.user_id else None
+        try:
+            tb.add(s, c, term=body.term, layer=body.layer, value=body.value,
+                   effective_from=body.effective_from, note=body.note, source=body.source,
+                   user_id=p.user_id, who=(who.full_name or who.email) if who else None)
+        except tb.BasisError as e:
+            raise HTTPException(400, {"message": str(e), "errors": e.errors})
+        s.commit()
+        return {**tb.schedule(s, c), "can_edit": True}
+
+
+@router.delete("/contracts/{contract_id}/basis/{entry_id}")
+def remove_basis(contract_id: int, entry_id: int, p: Principal = Depends(current_principal)):
+    """Remove a dated change entered in error — kept, marked removed."""
+    import treaty_basis as tb
+    cr = _cr()
+    cr._assert_speaks_for_carrier(p, "change a treaty's calculation basis")
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        if not tb.remove(s, c, entry_id, p.user_id):
+            raise HTTPException(404, "no such change on this treaty")
+        s.commit()
+        return {**tb.schedule(s, c), "can_edit": True}
+
+
+class EvaluateIn(BaseModel):
+    term: str                       # sliding_scale | profit_commission
+    value: dict
+    premium: float
+    losses: float
+    ceding_commission: Optional[float] = None
+    deficit_brought_forward: float = 0.0
+
+
+@router.post("/contracts/{contract_id}/basis/evaluate")
+def evaluate_basis(contract_id: int, body: EvaluateIn,
+                   p: Principal = Depends(current_principal)):
+    """What a sliding scale or a profit commission gives on given figures —
+    the formula shown working before it is saved."""
+    import treaty_basis as tb
+    _cr()._require_carrier(p)
+    with SessionLocal() as s:
+        _treaty_contract(s, p, contract_id)
+    kind = {"sliding_scale": "sliding", "profit_commission": "profit"}.get(body.term)
+    if kind is None:
+        raise HTTPException(400, "only a sliding scale or a profit commission is evaluated")
+    # The year's figures are amounts — none of them below nothing.
+    bad = {k: "cannot be negative" for k, v in (
+        ("premium", body.premium), ("losses", body.losses),
+        ("ceding_commission", body.ceding_commission),
+        ("deficit_brought_forward", body.deficit_brought_forward))
+        if v is not None and v < 0}
+    if bad:
+        raise HTTPException(400, {"message": "Premium, losses, commission and any deficit "
+                                             "cannot be negative.", "errors": bad})
+    try:
+        cfg = tb.clean_value(kind, body.value)
+    except tb.BasisError as e:
+        raise HTTPException(400, {"message": str(e), "errors": e.errors})
+    if kind == "sliding":
+        return tb.sliding_adjustment(cfg, premium=body.premium, losses=body.losses)
+    return tb.profit_commission(cfg, premium=body.premium,
+                                ceding_commission=body.ceding_commission or 0.0,
+                                losses=body.losses,
+                                deficit_brought_forward=body.deficit_brought_forward)
+
+
+# ── a master treaty: placement and each reinsurer's signature ───────────────
+@router.get("/contracts/{contract_id}/placement")
+def get_placement(contract_id: int, p: Principal = Depends(current_principal)):
+    """Each layer's placement — written and signed — and every reinsurer's
+    line, signature and document evidence."""
+    import treaty_placement as tp
+    _cr()._require_carrier(p)
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        out = tp.placement(s, c)
+        out["can_record"] = {str(pid): tp.signing_block(s, c, pid)
+                             for pid in _panel_party_ids(s, c)}
+        s.commit()
+        return out
+
+
+class PartySignatureIn(BaseModel):
+    signer_name: str
+    signer_title: Optional[str] = None
+    signer_email: Optional[str] = None
+    # The evidence: its signed line slip, or the signed treaty wording.
+    document_id: int
+    note: Optional[str] = None
+
+
+@router.post("/contracts/{contract_id}/placement/{party_id}/signature")
+def record_party_signature(contract_id: int, party_id: int, body: PartySignatureIn,
+                           p: Principal = Depends(current_principal)):
+    """Record a reinsurer's signature given on paper — always against document
+    evidence: its own signed line slip, or the signed treaty wording."""
+    import treaty_placement as tp
+    cr = _cr()
+    cr._assert_speaks_for_carrier(p, "record a reinsurer's signature")
+    name = (body.signer_name or "").strip()
+    if not name:
+        raise HTTPException(400, "Name the person who signed for the reinsurer.")
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        why = tp.signing_block(s, c, party_id)
+        if why:
+            raise HTTPException(409, f"It cannot be recorded — {why}.")
+        d = s.get(ContractDocument, body.document_id)
+        ok = (d is not None and d.contract_id == c.id and d.is_active
+              and (d.blob_ref or d.blob is not None)
+              and ((d.kind == "signed_line" and d.party_id in (None, party_id))
+                   or (d.kind == "contract" and d.is_executed_copy)))
+        if not ok:
+            raise HTTPException(400, "Choose the evidence: this reinsurer's signed line "
+                                     "slip, or the signed treaty wording, attached to "
+                                     "the treaty.")
+        party = s.get(Party, party_id)
+        tp.record(s, c, party_id, signer_name=name,
+                  signer_title=(body.signer_title or "").strip() or None,
+                  signer_email=(body.signer_email or "").strip() or None,
+                  method="recorded", document_id=d.id, note=body.note,
+                  user_id=p.user_id)
+        if party_id == c.broker_party_id:
+            s.add(ContractSignature(
+                tenant_id=c.tenant_id, contract_id=c.id, side="counterparty",
+                signer_name=name, signer_title=(body.signer_title or "").strip() or None,
+                signer_email=(body.signer_email or "").strip() or None,
+                method="recorded", by_user_id=p.user_id, signed_at=_now(),
+                document_id=d.id,
+                note=f"Signed on paper for {getattr(party, 'legal_name', 'the lead')}; "
+                     f"recorded against {d.filename}."))
+            s.flush()
+            cr.settle_signatures(s, c)
+        s.commit()
+        out = tp.placement(s, c)
+        out["can_record"] = {str(pid): tp.signing_block(s, c, pid)
+                             for pid in _panel_party_ids(s, c)}
+        return out
+
+
+@router.delete("/contracts/{contract_id}/placement/{party_id}/signature")
+def withdraw_party_signature(contract_id: int, party_id: int,
+                             p: Principal = Depends(current_principal)):
+    """Withdraw a reinsurer's signature recorded in error — kept, marked
+    withdrawn. The lead's is the treaty's own signature: withdrawn there."""
+    import treaty_placement as tp
+    cr = _cr()
+    cr._assert_speaks_for_carrier(p, "withdraw a reinsurer's signature")
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        if party_id == c.broker_party_id:
+            raise HTTPException(409, "The lead reinsurer's signature is the treaty's "
+                                     "counterparty signature — withdraw it on the "
+                                     "treaty's signature page.")
+        if not tp.withdraw(s, c, party_id, p.user_id):
+            raise HTTPException(404, "That reinsurer has not signed.")
+        s.commit()
+        out = tp.placement(s, c)
+        out["can_record"] = {str(pid): tp.signing_block(s, c, pid)
+                             for pid in _panel_party_ids(s, c)}
+        return out
+
+
+# ── 26.3: configured from its signed wording ────────────────────────────────
+def _wording_payload(s, c: Contract) -> dict:
+    import treaty_wording as tw
+    st = load_structure(s, c.id, names=True)
+    ex = c.extracted if isinstance(c.extracted, dict) else {}
+    return {**tw.statuses(s, c),
+            "treaty": c.name, "contract_id": c.id,
+            "structure": st,
+            "record": {"name": c.name, "inception_dt": str(c.inception_dt) if c.inception_dt else None,
+                       "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None,
+                       "year_of_account": c.year_of_account,
+                       "notice_period_days": c.notice_period_days,
+                       "executed_date": str(c.executed_date) if c.executed_date else None},
+            "reading": ex.get("wording_reading"),
+            "review": ex.get("wording_review"),
+            "editable_dates": _structure_editable(c)}
+
+
+@router.get("/contracts/{contract_id}/wording")
+def get_wording(contract_id: int, p: Principal = Depends(current_principal)):
+    """The treaty's signed wording, its three statuses, the latest reading of
+    its terms (each with its page) and what was confirmed from it."""
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        out = _wording_payload(s, c)
+        s.commit()                      # a first validation is cached on the document
+        return out
+
+
+@router.get("/contracts/{contract_id}/wording/pages/{page}")
+def wording_page(contract_id: int, page: int, p: Principal = Depends(current_principal)):
+    """One page of the signed wording, as an image — the review's viewer."""
+    import esign_pdf
+    import treaty_wording as tw
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        pdf = tw.wording_pdf(s, c)
+    if pdf is None:
+        raise HTTPException(404, "no signed wording on file")
+    n = esign_pdf.page_count(pdf)
+    if page < 1 or page > n:
+        raise HTTPException(404, f"the wording has {n} page(s)")
+    return Response(content=esign_pdf.render_page_png(pdf, page, scale=1.6),
+                    media_type="image/png")
+
+
+@router.post("/contracts/{contract_id}/wording/read")
+async def read_wording(contract_id: int, p: Principal = Depends(current_principal)):
+    """Read the signed wording for its terms — every one with the page it came
+    from and the words it quotes. Saves the reading, configures nothing."""
+    import treaty_wording as tw
+    cr = _cr()
+    cr._require_carrier(p)
+
+    def work():
+        with SessionLocal() as s:
+            c = _treaty_contract(s, p, contract_id)
+            try:
+                tw.read(s, c)
+            except ValueError:
+                raise HTTPException(409, "Upload the signed treaty wording first.")
+            except LookupError:
+                raise HTTPException(409, "No text could be read from the signed wording "
+                                         "— it may be a scan. Enter its terms by hand.")
+            s.commit()
+            return _wording_payload(s, c)
+    try:
+        return await run_in_threadpool(work)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 — the terms can still be entered by hand
+        log.warning("treaty %s: wording read failed: %s", contract_id, e)
+        raise HTTPException(502, "The wording could not be read just now. Try again, "
+                                 "or enter its terms by hand.")
+
+
+class WordingConfirmIn(BaseModel):
+    treaty: dict
+    name: Optional[str] = None
+    inception_dt: Optional[str] = None
+    expiry_dt: Optional[str] = None
+    year_of_account: Optional[str] = None
+    notice_period_days: Optional[int] = None
+    effective_date: Optional[str] = None
+    sources: dict = {}
+
+
+@router.post("/contracts/{contract_id}/wording/confirm")
+def confirm_wording(contract_id: int, body: WordingConfirmIn,
+                    p: Principal = Depends(current_principal)):
+    """Confirm the terms reviewed against the signed wording: they become the
+    treaty's structure — the signed wording is the authority on what was
+    agreed — and what was confirmed, by whom and from which page, is kept.
+    The treaty's lifecycle is not touched."""
+    import treaty_wording as tw
+    cr = _cr()
+    cr._assert_speaks_for_carrier(p, "confirm a treaty's terms from its wording")
+    with SessionLocal() as s:
+        c = _treaty_contract(s, p, contract_id)
+        if tw.signed_wording(s, c) is None:
+            raise HTTPException(409, "Upload the signed treaty wording first.")
+        before = load_structure(s, c.id, names=False)
+        clean = _validate(s, c, body.treaty)
+        save_structure(s, c, clean, p.user_id)
+        lead = tt.lead_of(clean)
+        if lead is not None and lead != c.broker_party_id:
+            c.broker_party_id = lead
+        notes = []
+        # The record's own dates move only while its terms do; a signed
+        # treaty's are corrected with Change period, never silently here.
+        dates = {"inception_dt": body.inception_dt, "expiry_dt": body.expiry_dt}
+        if _structure_editable(c):
+            from contract_routes import _as_date
+            for k, v in dates.items():
+                if v:
+                    setattr(c, k, _as_date(v))
+            if body.year_of_account:
+                c.year_of_account = body.year_of_account
+            if body.notice_period_days is not None:
+                c.notice_period_days = body.notice_period_days
+            if body.name:
+                c.name = body.name
+            regenerate_wording(s, c, clean)
+        elif any(v and str(getattr(c, k) or "") != v for k, v in dates.items()):
+            notes.append("The wording's dates differ from the treaty's. A signed "
+                         "treaty's dates are corrected with Change period.")
+        who = s.get(AppUser, p.user_id) if p.user_id else None
+        tw.record_review(s, c, user_id=p.user_id,
+                         who=(who.full_name or who.email) if who else None,
+                         sources=body.sources, effective_date=body.effective_date,
+                         before=before, after=load_structure(s, c.id, names=False))
+        s.commit()
+        out = _wording_payload(s, c)
+        out["notes"] = notes
+        return out
 
 
 class ProgrammesIn(BaseModel):
@@ -765,7 +1237,7 @@ async def upload_signed_treaty(
             tenant_id=c.tenant_id, contract_id=c.id, kind="contract",
             filename=file.filename, blob_ref=blob_ref, blob=blob,
             fingerprint=hashlib.sha256(data).hexdigest(),
-            is_executed_copy=True, is_active=True,
+            is_executed_copy=True, is_active=True, version="v1",
             uploaded_by_user_id=p.user_id))
         c.filename = file.filename
         if reading:
@@ -1033,6 +1505,22 @@ def _carrier_name(s, c: Optional[Contract]) -> str:
             or "The carrier")
 
 
+def _client_ip(ip: Optional[str]) -> Optional[str]:
+    """The address a request came from — None when it is this machine's own
+    (loopback): behind the local dev server every request arrives from
+    127.0.0.1, which says nothing about who opened the link."""
+    import ipaddress
+    if not ip:
+        return None
+    try:
+        a = ipaddress.ip_address(ip)
+        if getattr(a, "ipv4_mapped", None):
+            a = a.ipv4_mapped
+        return None if a.is_loopback or a.is_unspecified else ip
+    except ValueError:
+        return ip
+
+
 def _event(s, link: ReinsurerAccessLink, type_: str, *,
            actor: Optional[str] = None, request: Request | None = None,
            detail: dict | None = None) -> None:
@@ -1040,7 +1528,7 @@ def _event(s, link: ReinsurerAccessLink, type_: str, *,
     agent = None
     if request is not None:
         fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-        ip = fwd or (request.client.host if request.client else None)
+        ip = _client_ip(fwd or (request.client.host if request.client else None))
         agent = request.headers.get("user-agent")
     s.add(ReinsurerAccessEvent(
         link_id=link.id, contract_id=link.contract_id, tenant_id=link.tenant_id,
@@ -1085,8 +1573,13 @@ def _signing(s, c: Contract) -> dict:
     cr = _cr()
     why = cr.counterparty_signing_block(s, c)
     sigs = cr._signatures(s, c.id)
+    import treaty_placement as tp
+    panel = sorted(_panel_party_ids(s, c))
     return {"lead_party_id": c.broker_party_id, "can_request": why is None,
             "why_not": why,
+            # Every reinsurer signs for its own lines (a master treaty).
+            "parties": [{"party_id": pid, "why_not": tp.signing_block(s, c, pid)}
+                        for pid in panel],
             "carrier_signed": any(g.side == "carrier" for g in sigs),
             "counterparty_signed": any(g.side == "counterparty" for g in sigs)}
 
@@ -1230,21 +1723,20 @@ def share_with_reinsurer(contract_id: int, body: ShareIn,
             raise HTTPException(409, "set up the treaty structure before "
                                      "sharing it")
         panel = _panel_party_ids(s, c)
-        if body.sign:
-            why = cr.counterparty_signing_block(s, c)
-            if why:
-                raise HTTPException(409, f"the reinsurer cannot sign yet — {why}")
+        import treaty_placement as tp
         sends = []
         for cid in dict.fromkeys(body.contact_ids):
             contact = s.get(PartyContact, cid)
             if contact is None or contact.party_id not in panel:
                 raise HTTPException(400, "one of those people is not a contact "
                                          "at a reinsurer on this treaty")
-            if body.sign and contact.party_id != c.broker_party_id:
-                raise HTTPException(
-                    400, "the lead reinsurer signs the treaty — pick someone "
-                         "there. The other reinsurers approve their lines on "
-                         "their own links.")
+            if body.sign:
+                # Each reinsurer signs for its own lines, once it may.
+                why = tp.signing_block(s, c, contact.party_id)
+                if why:
+                    party = s.get(Party, contact.party_id)
+                    raise HTTPException(409, f"{getattr(party, 'legal_name', 'That reinsurer')} "
+                                             f"cannot sign yet — {why}")
             if not (contact.email or "").strip():
                 raise HTTPException(400, f"{contact.full_name} has no email "
                                          f"address to send the link to")
@@ -1503,10 +1995,14 @@ def _my_approval(s, c: Contract, link: ReinsurerAccessLink,
 
 
 def _my_signature(s, c: Contract, link: ReinsurerAccessLink) -> Optional[dict]:
+    import treaty_placement as tp
     if link.sign_requested_at is None:
         return None
-    mine = _link_signature(s, link)
-    why = None if mine else _cr().counterparty_signing_block(s, c)
+    # Its organisation's signature for its own lines — given on this link or
+    # another of its people's (one signature per reinsurer).
+    mine = tp.live_signatures(s, c).get(link.party_id) or (
+        _link_signature(s, link) if link.party_id == c.broker_party_id else None)
+    why = None if mine else tp.signing_block(s, c, link.party_id)
     return {
         "requested_at": _iso(link.sign_requested_at),
         "signed": None if mine is None else {
@@ -1548,27 +2044,34 @@ def sign_treaty(token: str, body: SignIn, request: Request,
         if link.sign_requested_at is None:
             raise HTTPException(403, "You have not been asked to sign this "
                                      "treaty. Ask the carrier if you should.")
-        if link.party_id != c.broker_party_id:
-            raise HTTPException(403, "The lead reinsurer signs this treaty.")
-        if _link_signature(s, link) is not None:
+        import treaty_placement as tp
+        lead = link.party_id == c.broker_party_id
+        if link.party_id in tp.live_signatures(s, c) or (lead and _link_signature(s, link)):
             raise HTTPException(409, "You have already signed this treaty.")
-        why = cr.counterparty_signing_block(s, c)
+        why = tp.signing_block(s, c, link.party_id)
         if why:
             raise HTTPException(409, f"It cannot be signed now — {why}.")
         fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-        ip = fwd or (request.client.host if request.client else None)
+        ip = _client_ip(fwd or (request.client.host if request.client else None))
         party = s.get(Party, link.party_id)
         org = getattr(party, "legal_name", None)
         title = (body.signer_title or "").strip() or None
-        s.add(ContractSignature(
-            tenant_id=c.tenant_id, contract_id=c.id, side="counterparty",
-            signer_name=name, signer_title=title, signer_email=link.email,
-            method="link", by_user_id=None, signed_at=_now(),
-            note=(f"Signed for {org or 'the reinsurer'} on the private treaty "
-                  f"link sent to {link.email}, after the emailed code was "
-                  f"entered" + (f" (IP {ip})" if ip else "") + ".")))
-        s.flush()
-        _sigs, both, blocked_by = cr.settle_signatures(s, c)
+        # Its own lines, under the shared wording — every reinsurer's.
+        tp.record(s, c, link.party_id, signer_name=name, signer_title=title,
+                  signer_email=link.email, method="link", link_id=link.id, ip=ip)
+        both, blocked_by = False, None
+        if lead:
+            # The lead's is also the treaty's counterparty signature: with the
+            # carrier's, it puts the treaty in force.
+            s.add(ContractSignature(
+                tenant_id=c.tenant_id, contract_id=c.id, side="counterparty",
+                signer_name=name, signer_title=title, signer_email=link.email,
+                method="link", by_user_id=None, signed_at=_now(),
+                note=(f"Signed for {org or 'the reinsurer'} on the private treaty "
+                      f"link sent to {link.email}, after the emailed code was "
+                      f"entered" + (f" (IP {ip})" if ip else "") + ".")))
+            s.flush()
+            _sigs, both, blocked_by = cr.settle_signatures(s, c)
         _event(s, link, "signed", actor=link.email, request=request,
                detail={"signer_name": name, "signer_title": title})
         s.commit()
@@ -1607,7 +2110,7 @@ def _answer(token: str, session: str, request: Request, status: str,
         state = _state(c)
         ip = None
         fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-        ip = fwd or (request.client.host if request.client else None)
+        ip = _client_ip(fwd or (request.client.host if request.client else None))
         s.add(ReinsurerApproval(
             contract_id=c.id, tenant_id=c.tenant_id, party_id=link.party_id,
             link_id=link.id, status=status, signer_name=signer_name,

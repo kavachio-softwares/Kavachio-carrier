@@ -296,6 +296,12 @@ ACTION_WORDS = {
     # reinsurance treaties
     "treaty_structure_saved":         "Saved a treaty's structure",
     "signed_treaty_uploaded":         "Uploaded a signed treaty",
+    "treaty_wording_read":            "Read a treaty's signed wording",
+    "treaty_term_changed":            "Changed a treaty's calculation basis from a date",
+    "treaty_endorsement_read":        "Read an uploaded treaty endorsement",
+    "treaty_endorsement_applied":     "Applied a treaty endorsement's terms and clauses",
+    "treaty_term_change_removed":     "Removed a dated change to a treaty's terms",
+    "treaty_terms_confirmed":         "Confirmed a treaty's terms from its wording",
     "reinsurance_bordereau_prepared": "Prepared a reinsurance bordereau",
     "reinsurance_exception_decided": "Decided reinsurance bordereau exceptions",
     "reinsurance_bordereau_validated": "Fixed & validated a reinsurance bordereau",

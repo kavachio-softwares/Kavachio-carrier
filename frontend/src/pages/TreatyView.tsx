@@ -589,8 +589,11 @@ function SignCard({ token, v, onView, onLock }: {
               <input type="checkbox" checked={consent} style={{ marginTop: 3 }}
                      onChange={e => setConsent(e.target.checked)} />
               <span>
-                I am authorised to sign for <b>{org}</b>, and I sign this treaty,
-                as shown on this page and in its wording, on its behalf.
+                I am authorised to sign for <b>{org}</b>, and I sign its lines on this
+                treaty — {v.layers.filter(l => l.your_share)
+                  .map(l => `${l.name} ${l.your_share!.share_pct}%`).join(", ") || "its share"} — under
+                the treaty&rsquo;s wording, shared by every reinsurer on it, on its behalf.
+                My name, the time and this device are recorded.
               </span>
             </label>
             <div className="rowacts">

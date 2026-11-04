@@ -20,6 +20,7 @@ import Button from "../components/ui/Button";
 import DecidedBy from "../components/DecidedBy";
 import { fieldErrors } from "../api/contractRecord";
 import {
+  ruleSource,
   decideCeded, getCeded, validateCeded, type CededDecision, type CededDetail,
   type CheckItem, type TreatyCheck,
 } from "../api/ceded";
@@ -218,7 +219,7 @@ function Triage({ d, onSaved }: { d: CededDetail; onSaved: (d: CededDetail) => v
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
                       {c.field && <span className="badge b-mut"><span className="d" />Field: {c.field}</span>}
                       <span className="badge b-mut"><span className="d" />
-                        {c.source === "wording" ? "Treaty wording" : "Treaty terms"}
+                        {ruleSource(c)}
                       </span>
                     </div>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -274,7 +275,7 @@ function CheckSummary({ d }: { d: CededDetail }) {
                   </td>
                   <td>{r.severity === "untested" ? "—" : (
                     <span className={`badge ${SEV_BADGE[r.severity] ?? "b-mut"}`}><span className="d" />{SEV_LABEL[r.severity] ?? r.severity}</span>)}</td>
-                  <td className="sub">{r.source === "wording" ? "Treaty wording" : "Treaty terms"}</td>
+                  <td className="sub">{ruleSource(r)}</td>
                   <td>{result}</td>
                 </tr>
               );
@@ -326,7 +327,7 @@ function RuleReview({ d, check, onSaved }: {
                   <span className="d" />{SEV_LABEL[check.severity] ?? check.severity}
                 </span>
                 {check.field && <span className="tag-pill">{check.field}</span>}
-                <span className="badge b-mut"><span className="d" />{check.source === "wording" ? "Treaty wording" : "Treaty terms"}</span>
+                <span className="badge b-mut"><span className="d" />{ruleSource(check)}</span>
                 <span className="muted" style={{ marginLeft: "auto", fontSize: 12.5 }}>
                   {check.rows} {check.rows === 1 ? "policy" : "policies"} affected
                 </span>
@@ -354,7 +355,8 @@ function RuleReview({ d, check, onSaved }: {
                   {showDetails && (
                     <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--p-border)", fontSize: 13 }}>
                       <div className="sub" style={{ marginBottom: 4 }}>
-                        Where this comes from — {check.source === "wording" ? "the treaty wording" : "the treaty's terms"}
+                        Where this comes from — {check.source === "endorsement" ? ruleSource(check)
+                          : check.source === "wording" ? "the treaty wording" : "the treaty's terms"}
                       </div>
                       {check.clause
                         ? <div style={{ fontStyle: "italic", color: "var(--p-ink)" }}>&ldquo;{check.clause}&rdquo;</div>

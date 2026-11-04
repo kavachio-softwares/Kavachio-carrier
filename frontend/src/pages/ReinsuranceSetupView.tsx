@@ -14,7 +14,7 @@
  * yet has nothing to show, so it goes straight there.
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Navigate, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft, CalendarDays, FileSpreadsheet, FileUp, Info, ListChecks, Pencil,
   ShieldCheck, Unlink, Columns3, AlertTriangle,
@@ -132,9 +132,11 @@ export default function ReinsuranceSetupView() {
   const lay = v.layout ?? { source: "kavachio" as const };
   const outputName = lay.source === "uploaded" ? (lay.filename ?? "Your output template")
     : lay.source === "standard" ? `Lloyd's risk sheet${lay.standard?.jurisdiction ? ` (${lay.standard.jurisdiction})` : ""}`
+    : lay.source === "contract" ? "Built from the treaty's terms"
     : "Kavachio standard layout";
   const progs = rec.options.programmes.filter(p => v.program_ids == null || v.program_ids.includes(p.id));
-  const toLook = facts.blank.length + facts.untested.length + facts.noContact.length;
+  const toLook = facts.blank.length + facts.untested.length + facts.noContact.length
+    + (rec.wording ? 0 : 1);
 
   const sampleRows = (pv?.table?.rows ?? []).slice(0, 5);
 
@@ -193,6 +195,15 @@ export default function ReinsuranceSetupView() {
         <p className="mb-3 flex items-center gap-2 rounded-md bg-surface-2 px-3 py-2 text-[12.5px] text-ink-muted">
           <Info size={14} className="shrink-0" /> Read-only. Press Edit to change anything.
         </p>
+        {!rec.wording && (
+          <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
+            <b>Signed wording needed.</b> This treaty is configured from its signed wording,
+            and none has been supplied. {status === "active"
+              ? "The setup keeps running, but it cannot be changed until the signed copy is attached or the treaty is signed."
+              : "It cannot be saved or activated until the signed copy is attached or the treaty is signed."}{" "}
+            <Link className="underline" to={`/contracts/${rec.contract_id}`}>Open the treaty</Link>
+          </div>
+        )}
         {v.note && status === "draft" && (
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
             <b>Sent back:</b> {v.note}
@@ -241,6 +252,9 @@ export default function ReinsuranceSetupView() {
               <JumpTile n={toLook} warn={toLook > 0} label="things to look at"
                 onClick={() => setTab(facts.blank.length ? "mapping" : facts.untested.length ? "rules" : "overview")}
                 detail={toLook > 0 && <>
+                  {/* 26.3 — configured from the signed wording. */}
+                  {!rec.wording && <GapLine onClick={() => nav(`/contracts/${rec.contract_id}`)}>
+                    No signed treaty wording supplied</GapLine>}
                   {facts.blank.length > 0 && <GapLine onClick={() => setTab("mapping")}>
                     {facts.blank.length} output column{facts.blank.length > 1 ? "s" : ""} no input fills</GapLine>}
                   {facts.untested.length > 0 && <GapLine onClick={() => setTab("rules")}>
@@ -297,6 +311,7 @@ export default function ReinsuranceSetupView() {
             <p className="mb-3 text-[12.5px] text-ink-muted">
               {lay.source === "uploaded" ? "Built from the template you uploaded — its own columns, filled in as they are."
                 : lay.source === "standard" ? "Built from the Lloyd's risk sheet, with the treaty's reinsurance columns after it."
+                : lay.source === "contract" ? "Built from the treaty's terms — what its type works out, what its terms quote, and every field a treaty rule checks."
                 : "Kavachio's reinsurance columns, chosen and named on the setup."}
               {v.file_format !== "csv" && " An Excel file also has a summary sheet with the reinsurer's share and totals."}
             </p>

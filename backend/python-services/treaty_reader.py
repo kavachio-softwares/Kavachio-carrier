@@ -65,6 +65,17 @@ Rules:
   percentage OF THAT LAYER. Mark exactly one reinsurer per layer as lead when the
   document names a leader; otherwise mark none.
 - notice_period_days: the notice of cancellation in days (3 months -> 90).
+- A SLIDING-SCALE commission goes in terms.sliding_scale as
+  {{"provisional_pct": n, "method": "linear" or "step",
+    "points": [{{"loss_ratio": n, "rate": n}}, ...]}} — every point of the scale
+  the wording states, in order; "step" when the rate does not slide between
+  points. Also set ceding_commission_pct to the provisional rate.
+- A PROFIT commission goes in terms.profit_commission as
+  {{"rate_pct": n, "expense_pct": n or 0, "deficit_years": n or 0}} — its rate,
+  the reinsurers' management expense allowance as a % of premium, and how many
+  years a deficit is carried forward (0 when it is not). Wordings differ from
+  company to company: report what THIS one says, and use null for a part it
+  does not state.
 - Dates as YYYY-MM-DD.
 
 Return ONLY this JSON object:
@@ -118,12 +129,30 @@ def _date(v: Any) -> Optional[str]:
     return s if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s) else None
 
 
+# Asked as well when the wording is read for REVIEW (treaty_wording): where
+# each fact came from, so the person confirming it can look.
+SOURCES_PROMPT = """
+The document is split into pages, each starting "=== Page N ===".
+Also return, next to the object's other keys:
+  "effective_date": "YYYY-MM-DD or null — the date the treaty takes effect, if
+                     the wording states one apart from inception",
+  "sources": {{ "<path>": {{ "page": N, "quote": "the exact words, at most 25" }} }}
+with one entry for EVERY fact you returned that the document states. The path
+is one of: name, inception_dt, expiry_dt, year_of_account, notice_period_days,
+executed_date, effective_date, treaty_type, terms.<term name>,
+layers.<layer index from 0>.terms.<layer term name>,
+layers.<layer index>.shares.<share index from 0>. Pages are 1 to {pages}.
+"""
+
+
 def read_treaty(text: str, parties: list[tuple[int, str]],
-                *, call=None) -> dict:
+                *, call=None, with_sources: bool = False,
+                pages: Optional[int] = None) -> dict:
     """The document's text → what the upload form is filled with.
 
     `call` is the model call (prompt → JSON text); injectable so tests run
-    without the network."""
+    without the network. `with_sources`: each fact also comes back with the
+    page and the words it was read from (the text carries page markers)."""
     if call is None:
         from contract_upload_services.gemini_service import call_gemini
 
@@ -132,7 +161,11 @@ def read_treaty(text: str, parties: list[tuple[int, str]],
                                seed=7, thinking_budget=2048,
                                max_output_tokens=8192)
     body = (text or "")[:MAX_CHARS]
-    raw = call(PROMPT.format(vocab=_vocabulary()) + body)
+    prompt = PROMPT.format(vocab=_vocabulary())
+    if with_sources:
+        prompt = prompt.replace("DOCUMENT:\n", SOURCES_PROMPT.format(pages=pages or "?")
+                                + "\nDOCUMENT:\n")
+    raw = call(prompt + body)
     try:
         got = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
     except (ValueError, TypeError):
@@ -181,7 +214,7 @@ def read_treaty(text: str, parties: list[tuple[int, str]],
         notice = int(notice) if notice not in (None, "") else None
     except (TypeError, ValueError):
         notice = None
-    return {
+    out = {
         "name": (str(got.get("name") or "").strip() or None),
         "inception_dt": _date(got.get("inception_dt")),
         "expiry_dt": _date(got.get("expiry_dt")),
@@ -191,3 +224,8 @@ def read_treaty(text: str, parties: list[tuple[int, str]],
         "treaty": clean if clean.get("treaty_type") else None,
         "unmatched_reinsurers": unmatched,
     }
+    if with_sources:
+        import treaty_wording
+        out["effective_date"] = _date(got.get("effective_date"))
+        out["sources"] = treaty_wording.clean_sources(got.get("sources"), pages)
+    return out

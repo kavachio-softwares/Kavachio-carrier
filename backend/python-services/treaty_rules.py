@@ -182,7 +182,10 @@ def clean(rules: list[dict]) -> list[dict]:
             "params": r.get("params") if isinstance(r.get("params"), dict) else {},
             "severity": _severity(r.get("severity"), "warning"),
             "enabled": bool(r.get("enabled", True)),
-            "source": "wording" if r.get("source") == "wording" else "terms",
+            # An endorsement's rule saved here only carries the carrier's
+            # switch and severity — the rule itself stays the endorsement's.
+            "source": r.get("source") if r.get("source") in ("wording", "endorsement")
+                      else "terms",
             "clause": (str(r["clause"])[:600] if r.get("clause") else None)})
     return out
 
@@ -252,6 +255,29 @@ def extract(text: str, *, call: Optional[Callable[[str], str]] = None) -> list[d
                          source="wording", clause=(str(r.get("clause") or "")[:600] or None),
                          **params))
     return out
+
+
+def from_endorsement(found: list[dict], *, document_id: int, label: str,
+                     effective_from: Optional[str]) -> list[dict]:
+    """Rules read from an endorsement's clauses (extract), made the
+    endorsement's: their own ids, the endorsement they come from, and the date
+    they apply from — a statement for an earlier period is not checked
+    against them."""
+    out = []
+    for i, r in enumerate(found, start=1):
+        out.append({**r, "id": f"endorsement{document_id}_{i}_{r['subject']}_{r['kind']}"[:60],
+                    "source": "endorsement", "endorsement": label,
+                    "document_id": document_id, "effective_from": effective_from})
+    return out
+
+
+def in_force_on(rules: list[dict], on: Optional[str]) -> list[dict]:
+    """The rules that apply to a period starting `on`: an endorsement's from
+    its effective date; every other rule always."""
+    if not on:
+        return rules
+    return [r for r in rules if r.get("source") != "endorsement"
+            or not r.get("effective_from") or str(r["effective_from"]) <= str(on)]
 
 
 # ── running them ────────────────────────────────────────────────────────────
@@ -347,6 +373,8 @@ def check(rules: list[dict], rows: list[dict]) -> list[dict]:
             reco, options = recommend(r)
             out.append({"id": r["id"], "label": r["label"], "severity": r["severity"],
                         "source": r.get("source"), "clause": r.get("clause"),
+                        "endorsement": r.get("endorsement"),
+                        "effective_from": r.get("effective_from"),
                         "kind": r["kind"], "subject": r["subject"],
                         "field": SUBJECT_LABEL.get(r["subject"]),
                         "recommendation": reco, "options": options,

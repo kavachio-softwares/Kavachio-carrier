@@ -15,19 +15,24 @@
  * Contacts are the party's own (Parties → the reinsurer → Contacts). A link is
  * tied to one contact: delete the contact and their link stops opening.
  */
+import {
+  Ban, CheckCircle2,
+  Download,
+  Eye, KeyRound, Lock, Mail, MessageSquare,
+  PenLine,
+  RefreshCw, Send,
+  ShieldCheck,
+  XCircle,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  Ban, CheckCircle2, Eye, KeyRound, Lock, Mail, MessageSquare, RefreshCw, Send,
-  ShieldCheck, Download, XCircle, PenLine,
-} from "lucide-react";
-import { InfoTip } from "../InfoTip";
 import { fieldErrors } from "../../api/contractRecord";
 import {
   getReinsurerAccess, resendReinsurerLink, revokeReinsurerLink,
   shareWithReinsurers, type AccessEvent, type AccessLink, type ReinsurerAccess,
 } from "../../api/treaty";
 import { fmtDate, fmtStamp } from "../../utils/date";
+import { InfoTip } from "../InfoTip";
 
 const STATUS: Record<AccessLink["status"], { label: string; cls: string }> = {
   active: { label: "Active", cls: "b-ok" },
@@ -59,13 +64,23 @@ const APPROVAL: Record<string, { label: string; cls: string }> = {
   pending: { label: "Waiting", cls: "b-mut" },
 };
 
+/** What each link event is called — shared with the treaty's History, where
+ *  every reinsurer's link activity is shown alongside the treaty's own steps. */
+export const ACCESS_EVENT_LABEL: Record<string, string> =
+  Object.fromEntries(Object.entries(EVENT).map(([k, v]) => [k, v.label]));
+
+/** This machine's own address — what every request shows when it comes
+ *  through the local dev server. Says nothing about who opened the link. */
+export function isLoopback(ip: string): boolean {
+  return /^(127\.|::1$|::ffff:127\.|0\.0\.0\.0$)/.test(ip.trim());
+}
+
 export function ReinsurerSharing({ contractId }: { contractId: number }) {
   const [data, setData] = useState<ReinsurerAccess | null>(null);
   const [picked, setPicked] = useState<number[]>([]);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
-  const [showAll, setShowAll] = useState(false);
 
   const load = useCallback(() => {
     getReinsurerAccess(contractId).then(setData)
@@ -96,7 +111,6 @@ export function ReinsurerSharing({ contractId }: { contractId: number }) {
 
   const activeFor = new Map(data.links.filter(l => l.status === "active")
     .map(l => [l.contact_id, l]));
-  const events = showAll ? data.events : data.events.slice(0, 15);
 
   return (
     <div>
@@ -330,45 +344,12 @@ export function ReinsurerSharing({ contractId }: { contractId: number }) {
         </div>
       </div>
 
-      {/* ── history ── */}
-      <div className="card">
-        <div className="card-h">
-          <h3>Access history</h3>
-          <InfoTip text="Every link sent, every code, every unlock, view and download — with the time and the address it came from." />
-        </div>
-        <div style={{ padding: "6px 20px 12px" }}>
-          {data.events.length === 0 ? (
-            <div className="empty" style={{ padding: 16 }}>Nothing yet.</div>
-          ) : events.map(e => {
-            const ev = EVENT[e.type] ?? { label: e.type, icon: Eye };
-            const Icon = ev.icon;
-            return (
-              <div className="evt" key={e.id}>
-                <span className="t">{fmtStamp(e.at)}</span>
-                <Icon size={14} style={{ color: "var(--p-muted)", flex: "0 0 auto",
-                                         marginTop: 2 }} />
-                <span style={{ flex: 1 }}>
-                  <b>{ev.label}</b>{" "}
-                  <span className="muted">
-                    {e.type === "sent" || e.type === "revoked"
-                      ? `— ${e.who ?? ""}${e.party_name ? ` at ${e.party_name}` : ""}`
-                        + (e.actor ? `, by ${e.actor}` : "")
-                      : `— ${e.who ?? ""}${e.party_name ? `, ${e.party_name}` : ""}`}
-                    {e.type === "downloaded" && e.detail?.filename
-                      ? ` · ${String(e.detail.filename)}` : ""}
-                  </span>
-                  {e.ip && <div className="sub">from {e.ip}</div>}
-                </span>
-              </div>
-            );
-          })}
-          {data.events.length > 15 && (
-            <button className="btn sm ghost" type="button"
-                    onClick={() => setShowAll(v => !v)}>
-              {showAll ? "Show fewer" : `Show all ${data.events.length}`}
-            </button>
-          )}
-        </div>
+      {/* One history: what each person did with their link is shown in the
+          treaty's History, beside the treaty's own steps. */}
+      <div className="note" style={{ marginBottom: 14 }}>
+        Everything each person has done with their link — opened it, viewed and
+        downloaded, approved, asked for a change, signed — is in the treaty&rsquo;s{" "}
+        <b>History</b>, on the Summary tab, in order with the treaty&rsquo;s own steps.
       </div>
     </div>
   );

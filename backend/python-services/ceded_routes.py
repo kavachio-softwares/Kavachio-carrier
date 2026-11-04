@@ -132,8 +132,14 @@ def rules_for(s, c: Contract, st: Optional[dict] = None) -> list[dict]:
     su = setup_of(s, c)
     if not st:
         return []
+    import treaty_endorsement
+    # The terms' rules, the endorsements' rules (each from its date — only
+    # those in force for the period when `st` is a period's structure), and
+    # the wording's rules as saved.
+    endorsed = trr.in_force_on(treaty_endorsement.treaty_rules(s, c),
+                               (st.get("_basis") or {}).get("as_of"))
     return trr.merge(su.rules if su is not None else None,
-                     trr.derive(st, c.inception_dt, c.expiry_dt, c.commercial_terms))
+                     trr.derive(st, c.inception_dt, c.expiry_dt, c.commercial_terms) + endorsed)
 
 
 def own_layout(su: Optional[CededSetup]) -> Optional[dict]:
@@ -180,8 +186,31 @@ def data_part(key: Optional[str]) -> str:
 
 
 def statement_key(s, tid: int, c: Contract, period: str) -> str:
-    """What a statement is built from: the input data, and the setup."""
-    return f"{source_key_for(s, tid, c, period)}|{setup_key(setup_of(s, c))}"
+    """What a statement is built from: the input data, the setup, and the
+    treaty's terms IN FORCE for the period (27.1, 27.2) — so a draft follows a
+    dated change to its cession, limits or commission."""
+    return (f"{source_key_for(s, tid, c, period)}|{setup_key(setup_of(s, c))}"
+            f"|{basis_key(s, c, period)}")
+
+
+def basis_key(s, c: Contract, period: str) -> str:
+    """A fingerprint of the terms in force for `period` — each one's value and
+    the version it comes from."""
+    import treaty_basis
+    st = _tr().load_structure(s, c.id, names=False)
+    if not st:
+        return "none"
+    used = (treaty_basis.structure_at(s, c, st, period).get("_basis") or {}).get("terms") or []
+    raw = json.dumps(sorted(([u["term"], u["layer"], u["id"], u["value"]] for u in used),
+                            key=lambda x: (x[0], -1 if x[1] is None else x[1])),
+                     sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+
+def basis_part(key: Optional[str]) -> str:
+    """The calculation-basis third of a statement's key ("" on older ones)."""
+    parts = (key or "").split("|")
+    return parts[2] if len(parts) > 2 else ""
 
 
 def source_key_for(s, tid: int, c: Contract, period: str) -> str:
@@ -325,6 +354,10 @@ def live_checks(s, c: Contract, cb: CededBordereau) -> tuple[list[dict], int]:
 def gather(s, c: Contract, period: str, st: dict) -> dict:
     """Read the inward bordereaux for `period` and cede them under `st`.
     Writes nothing — build() saves it, the setup preview just shows it."""
+    import treaty_basis
+    # The terms IN FORCE for this period (27.1, 27.2): a cession, a layer's
+    # limit or a commission changed from a date applies from that date.
+    st = treaty_basis.structure_at(s, c, st, period)
     tr = _tr()
     tid = c.tenant_id
     own = own_layout(setup_of(s, c))
@@ -505,7 +538,7 @@ def _write_statements(s, c: Contract, cb: CededBordereau, st: dict) -> None:
                else ce.default_columns(st.get("treaty_type")))
     fmt = (su.file_format if su is not None else None) or "xlsx"
     layout = (su.layout if su is not None else None) or {}
-    own = layout.get("source") in ("uploaded", "standard")
+    own = layout.get("source") in ("uploaded", "standard", "contract")
     for pid, part in split.items():
         name = parties.get(pid) or f"Reinsurer {pid}"
         ctx = cl.context(period=cb.period, treaty=c.name or f"Treaty {c.id}",
@@ -799,6 +832,12 @@ def detail(cb_id: int, p: Principal = Depends(current_principal)):
             # A draft built before its setup last changed — rebuilt the next
             # time the statements list is opened, or by Prepare again.
             "setup_changed": cb.status in OPEN and current_key != cb.source_key,
+            # The treaty's terms for this period changed after it was SENT — a
+            # dated change reaching back into it. What was sent stays as it
+            # was; the carrier decides whether to issue a correction.
+            "basis_changed": cb.status not in OPEN and cb.status != "superseded"
+                             and bool(basis_part(cb.source_key))
+                             and basis_part(current_key) != basis_part(cb.source_key),
             # The treaty's rules the rows broke, with what is decided on each
             # row now; a Critical one stops Send while a row of it is open.
             "checks": checks,
@@ -807,7 +846,8 @@ def detail(cb_id: int, p: Principal = Depends(current_principal)):
             # Every rule the rows were checked against — broken or not — for
             # the exceptions' Check Summary.
             "rules": [{k: r.get(k) for k in ("id", "label", "kind", "subject",
-                                             "severity", "source", "clause")}
+                                             "severity", "source", "clause",
+                                             "endorsement", "effective_from")}
                       for r in (rules_for(s, c, st) if st else []) if r.get("enabled", True)],
             "send_blocked_by": stop,
             "can_send": cb.status == "draft" and bool(stmts) and not stop
@@ -1198,6 +1238,64 @@ def dashboard_counts(s, tid: int, period: Optional[str] = None) -> dict:
 #  The setup — how a treaty's statements are made and sent
 # =============================================================================
 
+# A programme's contract that no longer governs it — not offered to read from.
+_GONE = ("terminated", "superseded", "expired")
+
+
+def _programme_contracts(s, c: Contract, program_ids: list[int]) -> list[dict]:
+    """The contracts on the programmes this treaty protects — the broker
+    contracts (binders) beside the treaties — that a reinsurance bordereau's
+    columns can also be read from."""
+    if not program_ids:
+        return []
+    progs = {x.id: x.name for x in s.query(Program).filter(Program.id.in_(program_ids))}
+    rows = (s.query(Contract)
+            .filter(Contract.tenant_id == c.tenant_id, Contract.id != c.id,
+                    Contract.program_id.in_(program_ids),
+                    or_(Contract.contract_type.is_(None),
+                        Contract.contract_type != _tr().REINSURER),
+                    or_(Contract.status.is_(None), Contract.status.notin_(_GONE)))
+            .order_by(Contract.program_id, Contract.id.desc()).limit(60).all())
+    brokers = {x.id: x.legal_name for x in s.query(Party).filter(
+        Party.id.in_({r.broker_party_id for r in rows if r.broker_party_id} or {0}))}
+    return [{"id": r.id, "name": r.name or r.filename or f"Contract {r.id}",
+             "program_id": r.program_id, "programme": progs.get(r.program_id),
+             "broker": brokers.get(r.broker_party_id), "status": r.status}
+            for r in rows]
+
+
+def _programme_treaties(s, c: Contract, program_ids: list[int]) -> list[dict]:
+    """The treaties protecting those programmes — this one among them — each
+    with the programmes (of those) it protects."""
+    from db import TreatyProgramme
+    tr = _tr()
+    if not program_ids:
+        return []
+    by: dict[int, set[int]] = {}
+    for tp in s.query(TreatyProgramme).filter(TreatyProgramme.program_id.in_(program_ids)):
+        by.setdefault(tp.contract_id, set()).add(tp.program_id)
+    homes = (s.query(Contract.id, Contract.program_id)
+             .filter(Contract.tenant_id == c.tenant_id, Contract.contract_type == tr.REINSURER,
+                     Contract.program_id.in_(program_ids)).all())
+    for cid, pid in homes:
+        by.setdefault(cid, set()).add(pid)
+    by.setdefault(c.id, set()).update(x for x in [c.program_id] if x in program_ids)
+    rows = (s.query(Contract).filter(Contract.id.in_(list(by) or [0]),
+                                     Contract.tenant_id == c.tenant_id,
+                                     Contract.contract_type == tr.REINSURER).all())
+    out = []
+    for r in rows:
+        state = tr._state(r)
+        if r.id != c.id and state in tr.CLOSED_STATES:
+            continue
+        st = tr.load_structure(s, r.id, names=False) or {}
+        out.append({"id": r.id, "name": r.name or f"Treaty {r.id}",
+                    "type_label": tt.label(st.get("treaty_type")), "status": state,
+                    "program_ids": sorted(by[r.id]), "this": r.id == c.id})
+    out.sort(key=lambda t: (not t["this"], t["name"].lower()))
+    return out
+
+
 def _setup_json(s, c: Contract, su: Optional[CededSetup], p: Principal) -> dict:
     tr = _tr()
     st = tr.load_structure(s, c.id, names=False) or {}
@@ -1215,8 +1313,12 @@ def _setup_json(s, c: Contract, su: Optional[CededSetup], p: Principal) -> dict:
         contacts.setdefault(ct.party_id, []).append(
             {"id": ct.id, "name": ct.full_name, "email": ct.email})
     heads = {k: (h, kind) for k, h, kind in ce.LINE_COLUMNS}
+    sheet = _treaty_sheet(s, c, st)
     return {
         "contract_id": c.id, "treaty": c.name or f"Treaty {c.id}",
+        # The signed wording the treaty is configured from — None until it is
+        # supplied, and until then the setup cannot be saved or activated.
+        "wording": signed_wording(s, c), "wording_needed": WORDING_NEEDED,
         "type_label": tt.label(st.get("treaty_type")),
         "has_structure": bool(st),
         "setup": None if su is None else {
@@ -1230,16 +1332,22 @@ def _setup_json(s, c: Contract, su: Optional[CededSetup], p: Principal) -> dict:
             "cc": su.cc or [], "send_mode": su.send_mode, "note": su.note,
             "submitted_at": _iso(su.submitted_at), "approved_at": _iso(su.approved_at),
             "updated_at": _iso(su.updated_at)},
+        # A new setup's sheet is built from the treaty's terms — Kavachio's
+        # standard layout is no longer offered (a setup saved with it keeps it).
         "defaults": {"frequency": "monthly", "due_days": DUE_DAYS,
                      "program_ids": None,
-                     "columns": ce.default_columns(st.get("treaty_type")),
-                     "layout": {"source": "kavachio"},
+                     "columns": sheet[1],
+                     "layout": sheet[0],
                      "input_layout": {"source": "brokers"},
                      "rules": trr.derive(st, c.inception_dt, c.expiry_dt, c.commercial_terms) if st else [],
                      "file_format": "xlsx", "recipients": {}, "cc": [],
                      "send_mode": "manual"},
         "options": {
             "programmes": protected,
+            # Their contracts — a column can be read from these as well.
+            "contracts": _programme_contracts(s, c, [x["id"] for x in protected]),
+            # …and the treaties protecting them, this one included.
+            "treaties": _programme_treaties(s, c, [x["id"] for x in protected]),
             "reinsurers": [{"party_id": pid, "name": parties.get(pid),
                             "contacts": contacts.get(pid, [])} for pid in panel],
             "columns": [{"key": k, "label": h, "kind": kind}
@@ -1296,17 +1404,18 @@ def _inputs(s, c: Contract) -> list[dict]:
     that file's columns. What
     the reinsurance bordereau is read from."""
     own = own_layout(setup_of(s, c))
-    if own:
-        return [{"template_id": 0, "name": own.get("filename") or "Your file",
-                 "version": None, "active": True, "program_id": None,
-                 "programme": "Your file", "own": True,
-                 "files": len(_own_inputs(s, c)),
-                 "columns": [{"name": cc.get("name"), "field": cc.get("field"),
-                              "sheet": own.get("sheet_name")}
-                             for cc in own.get("columns") or []]}]
+    # The carrier's own file first, when the setup reads one — and the
+    # brokers' templates too, so switching back to them finds them.
+    mine = [{"template_id": 0, "name": own.get("filename") or "Your file",
+             "version": None, "active": True, "program_id": None,
+             "programme": "Your file", "own": True,
+             "files": len(_own_inputs(s, c)),
+             "columns": [{"name": cc.get("name"), "field": cc.get("field"),
+                          "sheet": own.get("sheet_name")}
+                         for cc in own.get("columns") or []]}] if own else []
     ids = _protected_ids(s, c)
     if not ids:
-        return []
+        return mine
     names = {p.id: p.name for p in s.query(Program).filter(Program.id.in_(ids))}
     live = {}
     for o, _v in _live_exports(s, c.tenant_id, ids):
@@ -1332,7 +1441,7 @@ def _inputs(s, c: Contract) -> list[dict]:
                     "program_id": t.program_id,
                     "programme": names.get(t.program_id),
                     "files": live.get(t.id, 0), "columns": cols})
-    return out
+    return mine + out
 
 
 def _all_fields() -> list[dict]:
@@ -1432,31 +1541,40 @@ async def _file_layout(p: Principal, contract_id: int, data: bytes,
     return lay
 
 
+# A treaty is configured FROM ITS SIGNED WORDING (26.3): every treaty has its
+# own, and until it is supplied the treaty cannot be configured — no setup is
+# saved or activated, and its rules are read from nothing else.
+WORDING_NEEDED = ("Supply the treaty's signed wording first — attach the signed "
+                  "copy on the treaty's Documents, or have it signed in Kavachio. "
+                  "A treaty is configured from its signed wording.")
+
+
+def signed_wording(s, c: Contract) -> Optional[dict]:
+    """The treaty's signed wording — marked as the signed copy and validated,
+    or the sealed PDF of its signing round — or None. See treaty_wording."""
+    import treaty_wording
+    return treaty_wording.signed_wording(s, c)
+
+
+def _require_wording(s, c: Contract) -> None:
+    if signed_wording(s, c) is None:
+        raise HTTPException(409, {"message": WORDING_NEEDED,
+                                  "errors": {"wording": WORDING_NEEDED}})
+
+
 def _treaty_text(s, c: Contract) -> tuple[str, Optional[str]]:
-    """The treaty's wording as text, and where it came from: the signed copy
-    or the wording attached, else the wording written in Kavachio."""
-    cr = _cr()
-    from db import ContractDocument
-    docs = (s.query(ContractDocument)
-            .filter(ContractDocument.contract_id == c.id,
-                    ContractDocument.kind == "contract",
-                    ContractDocument.is_active.is_(True))
-            .order_by(ContractDocument.is_executed_copy.desc(),
-                      ContractDocument.created_at.desc()).all())
-    for d in docs:
-        data = cr._doc_bytes(d)
-        if data:
-            try:
-                text = cr._parse_to_text(data, d.filename or "treaty.pdf")
-            except Exception as e:  # noqa: BLE001
-                log.warning("treaty %s: could not read %s: %s", c.id, d.filename, e)
-                continue
-            if (text or "").strip():
-                return text, d.filename
-    secs = ((c.wording_sections or {}).get("sections")
-            if isinstance(c.wording_sections, dict) else None) or []
-    text = "\n\n".join(f"{x.get('title') or ''}\n{x.get('body') or ''}" for x in secs)
-    return text, ("the wording written in Kavachio" if text.strip() else None)
+    """The treaty's SIGNED wording as text, and its name — never the draft:
+    rules are read from what was signed."""
+    import treaty_wording
+    w = signed_wording(s, c)
+    if w is None:
+        return "", None
+    try:
+        text = "\n".join(treaty_wording.page_texts(treaty_wording.wording_pdf(s, c)))
+    except Exception as e:  # noqa: BLE001
+        log.warning("treaty %s: could not read %s: %s", c.id, w["filename"], e)
+        return "", None
+    return (text, w["filename"]) if text.strip() else ("", None)
 
 
 @router.post("/reinsurance/setups/{contract_id}/rules/extract")
@@ -1472,8 +1590,7 @@ async def extract_treaty_rules(contract_id: int,
         text, source = _treaty_text(s, c)
         current = rules_for(s, c)
     if not source:
-        raise HTTPException(409, "This treaty has no wording to read — attach the "
-                                 "signed treaty or write its wording first")
+        raise HTTPException(409, WORDING_NEEDED)
     try:
         found = await run_in_threadpool(trr.extract, text)
     except Exception as e:  # noqa: BLE001
@@ -1493,7 +1610,8 @@ def _set_layout_file(su: CededSetup, layout: dict, b64: Optional[str]) -> None:
     """Keep the carrier's file with the setup. A save without one keeps the
     file already held; Kavachio's own layout needs none."""
     import base64
-    if (layout or {}).get("source") in (None, "kavachio"):
+    if (layout or {}).get("source") in (None, "kavachio", "contract"):
+        # Kavachio's own layout and one built from the treaty need no file.
         su.layout_blob = None
         return
     if b64:
@@ -1549,6 +1667,110 @@ async def layout_upload(contract_id: int, file: UploadFile = File(...),
         c = cr._contract_access(s, p, contract_id)
         return _proposal(s, c, structure, source="uploaded", data=data,
                          filename=filename)
+
+
+def _treaty_sheet(s, c: Contract, st: dict) -> tuple[dict, list[dict]]:
+    """(layout, columns) of the sheet built from this treaty's terms."""
+    if not st:
+        return {"source": "contract", "sheet_name": "Lines",
+                "header_row": 0, "data_start_row": 1}, []
+    available, _by, _names = _available(s, c)
+    layout, cols = cl.from_treaty(st, rules_for(s, c, st), available=available,
+                                  label_of=cl.label,
+                                  programmes=max(1, len(_protected_ids(s, c))))
+    layout["filename"] = f"{(c.name or 'treaty').strip()} — from the treaty"
+    return layout, cols
+
+
+@router.post("/reinsurance/setups/{contract_id}/layout/contract")
+def layout_contract(contract_id: int, p: Principal = Depends(current_principal)):
+    """Build the sheet from the treaty itself — its type, its terms and every
+    rule it holds (terms, wording, agreed limits) — instead of Kavachio's
+    standard columns. Each column says which term put it there. Saves
+    nothing; the setup screen shows it to review."""
+    cr = _cr()
+    cr._require_carrier(p)
+    with SessionLocal() as s:
+        c = cr._contract_access(s, p, contract_id)
+        st = _tr().load_structure(s, c.id, names=False) or {}
+        if not st:
+            raise HTTPException(409, "this treaty has no structure yet — set its "
+                                     "type and terms first")
+        available, _by, names = _available(s, c)
+        layout, cols = _treaty_sheet(s, c, st)
+        return {"layout": layout, "columns": cols, "layout_file": None,
+                "file_format": "xlsx",
+                "unfilled": [x["heading"] for x in cols
+                             if not cl.fillable(x["key"], available, set(names.values()))]}
+
+
+class ContractColumnsIn(BaseModel):
+    contract_ids: list[int] = []
+    # Headings the sheet already has — a contract column is not added twice.
+    headings: list[str] = []
+
+
+@router.post("/reinsurance/setups/{contract_id}/layout/contract-columns")
+async def layout_contract_columns(contract_id: int, body: ContractColumnsIn,
+                                  p: Principal = Depends(current_principal)):
+    """The columns the programmes' contracts ask the bordereau to report — read
+    as a broker's output template reads its contract (its extracted clauses and
+    rules; the document is not read again). Saves nothing: added to the sheet
+    being created, to review."""
+    import re as _re
+    import contract_output_fields as cof
+    cr = _cr()
+    cr._require_carrier(p)
+    with SessionLocal() as s:
+        c = cr._contract_access(s, p, contract_id)
+        allowed = {x["id"]: x for x in _programme_contracts(
+            s, c, [x["id"] for x in _tr().programmes(s, c)])}
+        bad = [i for i in body.contract_ids if i not in allowed]
+        if bad:
+            raise HTTPException(400, "only contracts on the programmes this treaty protects")
+        tid = resolve_tenant_id(s, p)
+        # The input side: its fields, and its column headings by their norm.
+        available, by_name, names = _available(s, c)
+        seen = {cl._norm(h) for h in body.headings}
+        out: list[dict] = []
+        unfilled: list[str] = []
+        clauses = 0
+        for cid in body.contract_ids:
+            meta = allowed[cid]
+            res = await run_in_threadpool(cof.analyze, s, [cid], list(body.headings),
+                                          tenant_id=tid)
+            clauses += int(res.get("clause_count") or 0)
+            for f in res.get("fields") or []:
+                heading = str(f.get("field") or "").strip()
+                # The model writes "effective date"; the sheet says "Effective Date".
+                if heading and heading == heading.lower():
+                    heading = heading.title()
+                if not heading or cl._norm(heading) in seen:
+                    continue
+                seen.add(cl._norm(heading))
+                src = f.get("source_field")
+                n = cl._norm(heading)
+                # Filled from the input when it carries the field, or a column
+                # headed the same; otherwise left to match on Field Mapping.
+                if src and _re.fullmatch(r"[a-z0-9_]+", src):
+                    key = f"{cl.FIELD}{src}"
+                    filled = src in available
+                elif n in names:
+                    key, filled = f"{cl.COL}{names[n]}", True
+                elif n in by_name:
+                    key, filled = f"{cl.FIELD}{by_name[n]}", True
+                else:
+                    key, filled = f"{cl.COL}{heading[:200]}", False
+                if not filled:
+                    unfilled.append(heading)
+                reason = (f.get("reason") or "The contract asks for it").strip()
+                out.append({"key": key, "heading": heading, "column_index": None,
+                            "keep": True, "required": bool(f.get("required")),
+                            "ref": None, "added": True,
+                            "why": f"{meta['name']}: {reason}"[:300],
+                            "by": meta["name"],
+                            "clause": f.get("contract_reference")})
+        return {"columns": out, "clause_count": clauses, "unfilled": unfilled}
 
 
 class StandardIn(BaseModel):
@@ -1612,6 +1834,8 @@ def list_setups(p: Principal = Depends(current_principal)):
                 "contract_id": c.id, "treaty": c.name or f"Treaty {c.id}",
                 "type_label": tt.label((st or {}).get("treaty_type")),
                 "lifecycle": state, "has_structure": bool(st),
+                # Configured from its signed wording — none yet, none set up.
+                "has_wording": signed_wording(s, c) is not None,
                 "programmes": len(_protected_ids(s, c)),
                 "status": su.status if su is not None else None,
                 "frequency": su.frequency if su is not None else None,
@@ -1670,7 +1894,8 @@ def _clean_setup(s, c: Contract, body: SetupIn) -> dict:
     layout = dict(body.layout or {"source": "kavachio"})
     source = layout.get("source") or "kavachio"
     if source not in cl.SOURCES:
-        errors["layout"] = "Choose Kavachio's layout, your own file or the Lloyd's risk sheet."
+        errors["layout"] = ("Choose Kavachio's layout, your own file, the Lloyd's "
+                            "risk sheet or one built from the treaty.")
         source = "kavachio"
     if source == "kavachio":
         known = {k for k, _h, _kind in ce.LINE_COLUMNS}
@@ -1695,7 +1920,8 @@ def _clean_setup(s, c: Contract, body: SetupIn) -> dict:
                          "column_index": int(idx) if idx is not None else None,
                          "keep": bool(col.get("keep", True)),
                          "required": bool(col.get("required")), "ref": col.get("ref"),
-                         **({"added": True} if col.get("added") else {})})
+                         **({"added": True} if col.get("added") else {}),
+                         **({"why": str(col["why"])[:300]} if col.get("why") else {})})
         layout = {k: layout.get(k) for k in ("source", "filename", "sheet_name",
                                             "header_row", "data_start_row", "standard")}
         if source == "uploaded":
@@ -1708,7 +1934,12 @@ def _clean_setup(s, c: Contract, body: SetupIn) -> dict:
         if missing:
             errors["columns"] = ("The Lloyd's standard makes these mandatory: "
                                  + ", ".join(missing[:5]))
-    if not any(c.get("keep", True) and c["key"] for c in cols):
+    if not cols:
+        # An output template is required, as an input one is.
+        errors.setdefault("layout", "An output template is required — upload yours, "
+                                    "or create one from the treaty's terms or the "
+                                    "Lloyd's risk sheet.")
+    elif not any(c.get("keep", True) and c["key"] for c in cols):
         errors.setdefault("columns", "Choose at least one column.")
     if body.file_format not in ("xlsx", "csv"):
         errors["file_format"] = "Excel or CSV."
@@ -1733,6 +1964,16 @@ def _clean_setup(s, c: Contract, body: SetupIn) -> dict:
                "columns": icols}
     else:
         inp = {"source": "brokers"}
+        # An input template is required: read from the brokers' bordereaux,
+        # the programmes it reads must have a bordereau template set up.
+        want = set(int(x) for x in body.program_ids) if body.program_ids else None
+        if not [t for t in _inputs(s, c) if not t.get("own")
+                and (want is None or t.get("program_id") is None
+                     or t.get("program_id") in want)]:
+            errors["input_layout"] = (
+                "An input template is required — upload your own input file, or "
+                "set up the broker's bordereau on a programme this treaty "
+                "protects first.")
     st = _tr().load_structure(s, c.id, names=False) or {}
     panel = {sh.get("reinsurer_party_id") for lay in st.get("layers") or []
              for sh in lay.get("shares") or []}
@@ -1776,6 +2017,7 @@ def save_setup(contract_id: int, body: SetupIn,
         c = cr._contract_access(s, p, contract_id)
         if (c.contract_type or "") != _tr().REINSURER:
             raise HTTPException(404, "not a reinsurance treaty")
+        _require_wording(s, c)
         vals = _clean_setup(s, c, body)
         su = setup_of(s, c)
         if su is None:
@@ -1830,6 +2072,7 @@ def activate_setup(contract_id: int, p: Principal = Depends(current_principal)):
             raise HTTPException(409, "save the setup first")
         if not _tr().load_structure(s, c.id, names=False):
             raise HTTPException(409, "the treaty has no structure yet")
+        _require_wording(s, c)
         now = _now()
         if cr._speaks_for_carrier(p):
             su.status = "active"

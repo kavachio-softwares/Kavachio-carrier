@@ -35,6 +35,8 @@ import AddProgram from "./pages/AddProgram";
 import ContractDetail from "./pages/ContractDetail";
 import ContractRecord from "./pages/ContractRecord";
 import MidTermChange from "./pages/MidTermChange";
+import TreatyWordingReview from "./pages/TreatyWordingReview";
+import TreatyEndorsementReview from "./pages/TreatyEndorsementReview";
 import ContractSignature from "./pages/ContractSignature";
 import Contracts from "./pages/Contracts";
 import ContractNew from "./pages/ContractNew";
@@ -227,6 +229,8 @@ export default function App() {
         {/* A running contract's terms changing from a date — sent to the broker,
             signed by both, then live. See pages/MidTermChange. */}
         <Route path="/contracts/:contractId/mid-term" element={<MidTermChange />} />
+        <Route path="/contracts/:contractId/wording" element={<TreatyWordingReview />} />
+        <Route path="/contracts/:contractId/endorsements/:docId" element={<TreatyEndorsementReview />} />
         {/* Screen only — no signing provider is connected. See the page. */}
         <Route path="/contracts/:contractId/signature" element={<ContractSignature />} />
         <Route path="/programs/:programId/contracts/:contractId" element={<ContractDetail />} />

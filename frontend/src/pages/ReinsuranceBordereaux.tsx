@@ -218,7 +218,8 @@ export default function ReinsuranceBordereaux() {
                 : "your brokers' bordereaux"}</b></span>
               <span className="sub">→</span>
               <span>Output <b>{picked.output === "uploaded" ? (picked.output_file ?? "your output template")
-                : picked.output === "standard" ? "Lloyd's risk sheet" : "Kavachio's columns"}</b></span>
+                : picked.output === "standard" ? "Lloyd's risk sheet"
+                : picked.output === "contract" ? "a sheet built from the treaty's terms" : "Kavachio's columns"}</b></span>
               <span className="tag-pill">{{ monthly: "Monthly", quarterly: "Quarterly",
                 annually: "Yearly" }[freq]}</span>
               <Link className="linkish" style={{ marginLeft: "auto" }}

@@ -16,7 +16,9 @@
 import { api } from "./client";
 
 // ── the spec ─────────────────────────────────────────────────────────────────
-export type TreatyFieldKind = "money" | "pct" | "int" | "text" | "select";
+export type TreatyFieldKind = "money" | "pct" | "int" | "text" | "select"
+  /** 27.2 — a sliding-scale or profit commission, as its own small structure. */
+  | "sliding" | "profit";
 
 export type TreatyField = {
   name: string;
@@ -125,7 +127,130 @@ export type TreatyRecordSummary = {
   /** How many reinsurers on the panel have approved the treaty as it is now. */
   approvals: { approved: number; total: number; changes_requested: number;
                all_approved: boolean } | null;
+} & Partial<TreatyStatuses> & { placement?: PlacementSummary | null };
+
+// ── a master treaty: placement and each reinsurer's signature ───────────────
+export type WrittenStatus = "unplaced" | "partially_placed" | "fully_placed" | "over_placed";
+export type SignedStatus = "unsigned" | "partially_signed" | "fully_signed";
+
+export type PlacementSummary = {
+  written_status: WrittenStatus; written_label: string;
+  signed_status: SignedStatus; signed_label: string;
+  parties: number; parties_signed: number;
 };
+
+export type PartySignature = {
+  id: number | null; signer_name: string; signer_title: string | null;
+  signer_email: string | null; method: "link" | "esign" | "recorded"; method_label: string;
+  signed_at: string | null;
+  evidence: { document_id: number; filename: string | null; kind: string; has_file: boolean } | null;
+  /** Its line has changed since it signed — the signature is for the old one. */
+  stale: boolean;
+};
+
+export type PlacementLine = {
+  party_id: number | null; name: string | null; share_pct: number; is_lead: boolean;
+  slip_reference: string | null; signature: PartySignature | null;
+  status: "signed" | "awaiting" | "line_changed";
+};
+
+export type PlacementLayer = {
+  index: number; name: string; written_pct: number; signed_pct: number; retained_pct: number;
+  written_status: WrittenStatus; written_label: string;
+  signed_status: SignedStatus; signed_label: string;
+  lines: PlacementLine[];
+};
+
+export type Placement = PlacementSummary & {
+  has_structure: boolean; lead_party_id: number | null;
+  wording: SignedWording | null;
+  layers: PlacementLayer[];
+  /** Each reinsurer's own documents (signed line slips), by party id. */
+  evidence: Record<string, { document_id: number; filename: string | null; kind: string }[]>;
+  /** Why each reinsurer cannot sign now — null when it can. */
+  can_record: Record<string, string | null>;
+};
+
+export const getPlacement = (contractId: number) =>
+  api.get<Placement>(`/contracts/${contractId}/placement`).then(r => r.data);
+
+export const recordPartySignature = (contractId: number, partyId: number, body: {
+  signer_name: string; signer_title?: string | null; signer_email?: string | null;
+  document_id: number; note?: string | null;
+}) => api.post<Placement>(`/contracts/${contractId}/placement/${partyId}/signature`, body)
+  .then(r => r.data);
+
+export const withdrawPartySignature = (contractId: number, partyId: number) =>
+  api.delete<Placement>(`/contracts/${contractId}/placement/${partyId}/signature`)
+    .then(r => r.data);
+
+// ── 26.3: configured from its signed wording ────────────────────────────────
+export type SignedWording = {
+  source: "signed_copy" | "esigned"; filename: string | null;
+  document_id?: number; envelope_id?: number; version?: string | null;
+  uploaded_at?: string | null; uploaded_by?: string | null;
+  validation: { status: string; label: string; pages: number };
+};
+
+/** Three statuses, never merged: an expired treaty stays expired however
+ *  complete its documentation and configuration are. */
+export type TreatyStatuses = {
+  lifecycle: string;
+  documentation: { status: "missing" | "received"; label: string };
+  configuration: { status: "not_started" | "in_progress" | "pending_approval" | "approved";
+                   label: string; terms_confirmed: boolean; setup: string | null };
+  wording: SignedWording | null;
+};
+
+/** Where a term was read from in the signed wording. Keyed by path:
+ *  "inception_dt", "terms.cession_pct", "layers.0.terms.limit", "layers.0.shares.1". */
+export type TermSources = Record<string, { page: number; quote: string | null }>;
+
+export type WordingReading = {
+  name: string | null; inception_dt: string | null; expiry_dt: string | null;
+  year_of_account: string | null; notice_period_days: number | null;
+  executed_date: string | null; effective_date?: string | null;
+  treaty: TreatyInput | null; unmatched_reinsurers: string[];
+  sources: TermSources; pages: number; read_at: string;
+  document: { filename: string | null; version?: string | null };
+};
+
+export type WordingReview = {
+  confirmed_at: string; confirmed_by: string | null; effective_date: string | null;
+  document: { filename: string | null; version?: string | null };
+  sources: TermSources; changed: boolean;
+};
+
+export type WordingRecord = TreatyStatuses & {
+  treaty: string; contract_id: number;
+  structure: TreatyStructure | null;
+  record: { name: string | null; inception_dt: string | null; expiry_dt: string | null;
+            year_of_account: string | null; notice_period_days: number | null;
+            executed_date: string | null };
+  reading: WordingReading | null;
+  review: WordingReview | null;
+  editable_dates: boolean;
+  notes?: string[];
+};
+
+export const getWording = (contractId: number) =>
+  api.get<WordingRecord>(`/contracts/${contractId}/wording`).then(r => r.data);
+
+export const readWording = (contractId: number) =>
+  api.post<WordingRecord>(`/contracts/${contractId}/wording/read`).then(r => r.data);
+
+export const confirmWording = (contractId: number, body: {
+  treaty: TreatyInput; sources: TermSources; effective_date?: string | null;
+  name?: string | null; inception_dt?: string | null; expiry_dt?: string | null;
+  year_of_account?: string | null; notice_period_days?: number | null;
+}) => api.post<WordingRecord>(`/contracts/${contractId}/wording/confirm`, body).then(r => r.data);
+
+/** One page of the signed wording, as an image URL (fetched with the session). */
+export async function wordingPageUrl(contractId: number, page: number): Promise<string> {
+  const r = await api.get<Blob>(`/contracts/${contractId}/wording/pages/${page}`,
+                                { responseType: "blob" });
+  return URL.createObjectURL(r.data);
+}
 
 /** One reinsurer's answer to the treaty. `stale` = it answered an earlier
  *  version; the treaty has changed since, so it has to answer again. */
@@ -286,8 +411,8 @@ export const getReinsurerAccess = (contractId: number) =>
   api.get<ReinsurerAccess>(`/contracts/${contractId}/reinsurer-access`)
     .then(r => r.data);
 
-/** `sign` asks them to SIGN the treaty on the link — the lead reinsurer only,
- *  once the carrier has signed. */
+/** `sign` asks them to SIGN the treaty on the link — each reinsurer signs for
+ *  its own lines, once the carrier has signed. */
 export const shareWithReinsurers = (contractId: number, contactIds: number[],
                                     sign = false) =>
   api.post<ReinsurerAccess & {
@@ -588,4 +713,105 @@ export async function uploadSignedTreaty(body: {
   const { data } = await api.post<{ id: number; lifecycle: string }>(
     "/treaties/upload", form);
   return data;
+}
+
+// ── 27.1 / 27.2: the calculation basis, with the dates it applies from ──────
+export type BasisKind = "pct" | "money" | "int" | "profit" | "sliding";
+export type SlidingScale = {
+  provisional_pct: number; method: "linear" | "step";
+  points: { loss_ratio: number; rate: number }[];
+  min_pct?: number; max_pct?: number;
+};
+export type ProfitCommission = { rate_pct: number; expense_pct: number; deficit_years: number };
+
+export type BasisVersion = {
+  /** null for the structure's own value, which applies from inception. */
+  id: number | null; effective_from: string | null;
+  value: number | SlidingScale | ProfitCommission;
+  source: "structure" | "manual" | "wording" | "endorsement";
+  note: string | null; entered_by: string | null; entered_at?: string | null;
+};
+export type BasisTerm = {
+  term: string; label: string; kind: BasisKind; level: "treaty" | "layer";
+  layer: number | null; layer_name: string | null; versions: BasisVersion[];
+};
+export type Basis = {
+  treaty_type: TreatyTypeKey | null; inception: string | null; expiry: string | null;
+  terms: BasisTerm[]; can_edit: boolean;
+};
+
+export const getBasis = (contractId: number) =>
+  api.get<Basis>(`/contracts/${contractId}/basis`).then(r => r.data);
+
+export const addBasis = (contractId: number, body: {
+  term: string; layer?: number | null; value: unknown; effective_from: string;
+  note?: string | null; source?: string;
+}) => api.post<Basis>(`/contracts/${contractId}/basis`, body).then(r => r.data);
+
+export const removeBasis = (contractId: number, entryId: number) =>
+  api.delete<Basis>(`/contracts/${contractId}/basis/${entryId}`).then(r => r.data);
+
+export type SlidingResult = { loss_ratio: number; rate_pct: number; commission: number;
+                              provisional: number; adjustment: number };
+export type ProfitResult = { premium: number; ceding_commission: number; losses: number;
+                             expenses: number; deficit_brought_forward: number; profit: number;
+                             commission: number; deficit_carried_forward: number };
+
+export const evaluateBasis = (contractId: number, body: {
+  term: "sliding_scale" | "profit_commission"; value: unknown; premium: number;
+  losses: number; ceding_commission?: number | null; deficit_brought_forward?: number;
+}) => api.post<SlidingResult & ProfitResult>(`/contracts/${contractId}/basis/evaluate`, body)
+  .then(r => r.data);
+
+// ── an endorsement uploaded on a treaty: read, reviewed, applied ────────────
+export type EndorsementChangeRow = {
+  term: string; layer: number | null; label?: string; kind?: BasisKind;
+  value: unknown; page?: number | null; quote?: string | null;
+};
+export type EndorsementClauseRow = { title: string; text: string; page?: number | null };
+
+export type EndorsementReading = {
+  endorsement_number: string | null; effective_date: string | null;
+  changes: EndorsementChangeRow[];
+  /** Read from it, but not a term this treaty has, or not a sound value. */
+  other_changes: { text: string; page: number | null }[];
+  clauses: EndorsementClauseRow[]; pages: number; read_at: string;
+};
+
+export type EndorsementRecord = {
+  document: { id: number; filename: string | null; version: string | null;
+              effective_from: string | null; uploaded_at: string | null; has_file: boolean;
+              validation: { status: string; label: string; pages: number };
+              drafted_here: boolean };
+  reading: EndorsementReading | null;
+  review: { confirmed_at: string; confirmed_by: string | null; effective_date: string | null;
+            endorsement_number: string | null; changes: EndorsementChangeRow[];
+            clauses: EndorsementClauseRow[] } | null;
+  applied: { id: number; term: string; layer: number | null; value: unknown; effective_from: string }[];
+  /** Rules read from its clauses when it was applied — checked from its date. */
+  rules: { id: string; label: string; severity: "critical" | "warning"; clause: string | null;
+           effective_from: string | null }[];
+  rules_error: string | null;
+  terms: { term: string; layer: number | null; label: string; layer_name: string | null;
+           kind: BasisKind; value_before: unknown }[];
+  treaty: string; contract_id: number; can_edit: boolean;
+};
+
+export const getEndorsement = (contractId: number, docId: number) =>
+  api.get<EndorsementRecord>(`/contracts/${contractId}/endorsements/${docId}`).then(r => r.data);
+
+export const readEndorsement = (contractId: number, docId: number) =>
+  api.post<EndorsementRecord>(`/contracts/${contractId}/endorsements/${docId}/read`).then(r => r.data);
+
+export const confirmEndorsement = (contractId: number, docId: number, body: {
+  effective_date: string | null; endorsement_number: string | null;
+  changes: EndorsementChangeRow[]; clauses: EndorsementClauseRow[];
+}) => api.post<EndorsementRecord>(`/contracts/${contractId}/endorsements/${docId}/confirm`, body)
+  .then(r => r.data);
+
+/** One page of a treaty's document, as an image URL (fetched with the session). */
+export async function documentPageUrl(contractId: number, docId: number, page: number): Promise<string> {
+  const r = await api.get<Blob>(`/contracts/${contractId}/documents/${docId}/pages/${page}`,
+                                { responseType: "blob" });
+  return URL.createObjectURL(r.data);
 }

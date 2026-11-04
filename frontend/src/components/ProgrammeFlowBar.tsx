@@ -46,8 +46,6 @@ export function ProgrammeFlowBar({ programId, at, children }: {
   const go = (stage: number) => () => nav(`/programs/${programId}/setup?stage=${stage}`);
 
   const steps: FlowStep[] = [
-    { key: "programme", label: "Configure program", sub: prog.name,
-      state: "done", enabled: true, onClick: go(1) },
     { key: "brokers", label: "Assign brokers",
       sub: brokersDone ? `${plural(brokers.length, "broker")} assigned` : "No broker yet",
       state: brokersDone ? "done" : "todo", enabled: true, onClick: go(2) },
@@ -61,7 +59,7 @@ export function ProgrammeFlowBar({ programId, at, children }: {
   // This screen IS the step it stands for: highlighted, and going "to" it from
   // here would leave the work on screen, so it is not a way out.
   steps.forEach((s, i) => {
-    s.open = i + 1 === at;
+    s.open = i + 2 === at;   // the broker steps are 2–4; the programme is common
     if (s.open) {
       if (s.state !== "done") s.state = "current";
       s.enabled = true;

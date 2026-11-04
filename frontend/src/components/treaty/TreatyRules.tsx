@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { fieldErrors } from "../../api/contractRecord";
 import {
+  ruleSource,
   extractTreatyRules, type SetupRecord, type SetupValues, type TreatyCheck, type TreatyRule,
 } from "../../api/ceded";
 
@@ -33,7 +34,7 @@ export function TreatyRulesStep({ cid, rec, v, change, readOnly = false }: {
   const [note, setNote] = useState("");
   // The broker setup's Contract Rules list, for a treaty: filter chips, a
   // search, and one row per rule that opens to its clause and settings.
-  const [filter, setFilter] = useState<"terms" | "wording" | "all">("all");
+  const [filter, setFilter] = useState<"terms" | "wording" | "endorsement" | "all">("all");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<string | null>(null);
 
@@ -67,9 +68,12 @@ export function TreatyRulesStep({ cid, rec, v, change, readOnly = false }: {
     return [...new Set(inputCols.filter(c => c.field && fields.includes(c.field)).map(c => c.name))];
   };
 
-  const terms = rules.filter(r => r.source !== "wording");
+  const terms = rules.filter(r => r.source !== "wording" && r.source !== "endorsement");
   const wording = rules.filter(r => r.source === "wording");
-  const pool = filter === "terms" ? terms : filter === "wording" ? wording : rules;
+  // Read from the treaty's applied endorsements — each from its date.
+  const endorsed = rules.filter(r => r.source === "endorsement");
+  const pool = filter === "terms" ? terms : filter === "wording" ? wording
+    : filter === "endorsement" ? endorsed : rules;
   const listed = pool.filter(r => !q.trim()
     || `${r.label} ${colsOf(r).join(" ")}`.toLowerCase().includes(q.trim().toLowerCase()));
 
@@ -104,6 +108,7 @@ export function TreatyRulesStep({ cid, rec, v, change, readOnly = false }: {
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         {chip("terms", "Treaty Terms", terms.length)}
         {chip("wording", "Treaty Wording", wording.length)}
+        {endorsed.length > 0 && chip("endorsement", "Endorsements", endorsed.length)}
         {chip("all", "All rules", rules.length)}
         <label className="ml-auto flex w-56 max-w-full items-center gap-1.5 rounded-md border border-border bg-white px-2 py-1">
           <Search size={12} className="shrink-0 text-ink-soft" />
@@ -119,6 +124,7 @@ export function TreatyRulesStep({ cid, rec, v, change, readOnly = false }: {
           <p className="px-3 py-3 text-xs text-ink-muted" style={{ margin: 0 }}>
             {q ? "No rule matches that."
               : filter === "wording" ? "None yet — read them from the treaty wording above."
+              : filter === "endorsement" ? "None — they are read from an endorsement when it is applied to the treaty."
               : "No rules in this group."}
           </p>
         )}
@@ -138,7 +144,7 @@ export function TreatyRulesStep({ cid, rec, v, change, readOnly = false }: {
                     {!r.enabled && <span className="rounded-full bg-surface-2 px-1.5 text-[10px] font-bold text-ink-muted">Off</span>}
                   </span>
                   <span className="block truncate text-[11px] text-ink-muted">
-                    {r.source === "wording" ? "From the treaty wording" : "From the treaty terms"}
+                    {ruleSource(r, true)}
                   </span>
                 </span>
                 <span className="hidden max-w-[16rem] flex-wrap justify-end gap-1 sm:flex">

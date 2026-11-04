@@ -151,7 +151,17 @@ export type ContractActions = {
 
 /** `evidence`: what a large date correction rests on (Change period). The
  *  server never sends it to a broker. */
-export type ContractDocumentKind = "contract" | "reference" | "endorsement" | "evidence";
+export type ContractDocumentKind =
+  "contract" | "reference" | "endorsement" | "evidence" | "schedule" | "amendment"
+  /** One reinsurer's signed line slip on a master treaty. */
+  | "signed_line";
+
+/** Whether a document opens and can be read — checked when a signed wording
+ *  is attached (26.3). */
+export type DocumentValidation = {
+  status: "valid" | "no_text" | "unreadable" | "missing_file";
+  label: string; pages: number; chars?: number; checked_at?: string;
+};
 
 export type ContractDocument = {
   id: number;
@@ -167,6 +177,14 @@ export type ContractDocument = {
   created_at: string | null;
   /** False when the bytes are no longer stored — offering "download" would lie. */
   has_file: boolean;
+  /** v1, v2… — each upload of a kind is its next version. */
+  version?: string | null;
+  /** The reinsurer a signed line slip belongs to. */
+  party_id?: number | null;
+  /** A treaty endorsement whose terms and clauses have been applied. */
+  endorsement_applied?: boolean;
+  uploaded_by?: string | null;
+  validation?: DocumentValidation | null;
 };
 
 export type ContractRecord = {
@@ -963,6 +981,8 @@ export const uploadDocument = (
     effectiveFrom?: string | null;
     /** Mark this as the SIGNED copy rather than a draft. */
     isExecutedCopy?: boolean;
+    /** The reinsurer a signed line slip belongs to. */
+    partyId?: number | null;
   },
 ) => {
   const fd = new FormData();
@@ -971,6 +991,7 @@ export const uploadDocument = (
   if (opts.satisfiesReference) fd.append("satisfies_reference", opts.satisfiesReference);
   if (opts.effectiveFrom) fd.append("effective_from", opts.effectiveFrom);
   if (opts.isExecutedCopy) fd.append("is_executed_copy", "true");
+  if (opts.partyId) fd.append("party_id", String(opts.partyId));
   return api.post<{
     document: ContractDocument;
     missing_references: string[];
@@ -1041,8 +1062,17 @@ export async function downloadDocument(
 export async function openDocument(
   id: number, documentId: number,
 ): Promise<{ url: string; type: string }> {
-  const blob = await fetchDocument(id, documentId);
-  return { url: URL.createObjectURL(blob), type: blob.type };
+  // As a PDF — a Word file is converted on the server, so it reads in the
+  // page too. Only a file that cannot be converted comes back as itself.
+  try {
+    const r = await api.get(`/contracts/${id}/documents/${documentId}/view`,
+                            { responseType: "blob" });
+    const blob = r.data as Blob;
+    return { url: URL.createObjectURL(blob), type: blob.type || "application/pdf" };
+  } catch {
+    const blob = await fetchDocument(id, documentId);
+    return { url: URL.createObjectURL(blob), type: blob.type };
+  }
 }
 
 /**
@@ -1173,12 +1203,20 @@ export type EndorsementPreview = {
   changes: EndorsementChange[];
   sections: WordingSection[];
   current_limits: AgreedLimits;
+  /** A treaty's calculation terms an endorsement can change, each with its
+   *  value in force on the endorsement's date. */
+  basis?: { term: string; layer: number | null; label: string; layer_name: string | null;
+            kind: "pct" | "money" | "int" | "sliding" | "profit";
+            /** A number, or a sliding scale / profit commission. */
+            value: unknown }[];
   contract: { id: number; name: string; inception_dt: string | null;
               expiry_dt: string | null };
 };
 
 export type EndorsementInput = {
   agreed_limits: AgreedLimits;
+  /** A treaty's calculation basis it changes — each a dated term from its date. */
+  basis?: { term: string; layer: number | null; value: unknown }[];
   effective_from?: string | null;
   note?: string | null;
   sections?: WordingSection[];

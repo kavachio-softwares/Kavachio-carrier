@@ -72,6 +72,18 @@ TREATY_FIELDS: dict[str, dict[str, Any]] = {
     "profit_commission_pct": {
         "label": "Profit commission", "kind": "pct",
         "hint": "Your share of the reinsurers' profit on the treaty."},
+    # 27.2 — the commission terms as each treaty writes them (they vary from
+    # company to company, so they are entered, never assumed). Checked by
+    # treaty_basis.clean_value; each is the value from inception on the
+    # treaty's Calculation basis.
+    "profit_commission": {
+        "label": "Profit commission", "kind": "profit",
+        "hint": "Your share of the reinsurers' profit: its rate, their expense "
+                "allowance, and how long a deficit is carried forward."},
+    "sliding_scale": {
+        "label": "Sliding-scale commission", "kind": "sliding",
+        "hint": "A commission that moves with the loss ratio: the provisional "
+                "rate charged, and the scale it is adjusted on."},
 
     # ── surplus ──
     "retention_line": {"label": "Retention (one line)", "kind": "money",
@@ -150,7 +162,7 @@ TREATY_TYPES: dict[str, dict[str, Any]] = {
         "proportional": True,
         "blurb": "A fixed share of every risk is ceded.",
         "fields": ["cession_pct", "treaty_limit", "event_limit",
-                   "ceding_commission_pct", "profit_commission_pct"],
+                   "ceding_commission_pct", "sliding_scale", "profit_commission"],
         "required": ["currency", "cession_pct"],
         "layer_fields": [], "layer_required": [], "multi_layer": False,
         "default_layer": "Quota share",
@@ -160,7 +172,7 @@ TREATY_TYPES: dict[str, dict[str, Any]] = {
         "proportional": True,
         "blurb": "You keep a fixed line per risk and cede what is above it.",
         "fields": ["retention_line", "lines", "event_limit",
-                   "ceding_commission_pct"],
+                   "ceding_commission_pct", "sliding_scale", "profit_commission"],
         "required": ["currency", "retention_line", "lines"],
         "layer_fields": [], "layer_required": [], "multi_layer": False,
         "default_layer": "Surplus",
@@ -258,8 +270,30 @@ def label(treaty_type: str | None) -> str | None:
 
 
 # ── cleaning ─────────────────────────────────────────────────────────────────
+def _scale_fact(v: Any) -> str | None:
+    """A sliding scale in one line, for the treaty's summary."""
+    if not isinstance(v, dict) or not v.get("points"):
+        return None
+    pts = v["points"]
+    return (f"provisional {v.get('provisional_pct'):g}%, "
+            f"{pts[0]['rate']:g}% at {pts[0]['loss_ratio']:g}% loss ratio to "
+            f"{pts[-1]['rate']:g}% at {pts[-1]['loss_ratio']:g}%")
+
+
+def _profit_fact(v: Any) -> str | None:
+    if not isinstance(v, dict) or v.get("rate_pct") is None:
+        return None
+    out = f"{v['rate_pct']:g}% of profit"
+    if v.get("expense_pct"):
+        out += f", {v['expense_pct']:g}% expenses"
+    if v.get("deficit_years"):
+        out += f", deficit carried {v['deficit_years']} yr"
+    return out
+
+
 def _blank(v: Any) -> bool:
-    return v is None or (isinstance(v, str) and not v.strip())
+    return (v is None or (isinstance(v, str) and not v.strip())
+            or (isinstance(v, dict) and not v))
 
 
 def _num(v: Any) -> float | None:
@@ -301,6 +335,13 @@ def _clean_value(name: str, f: dict, raw: Any, errors: dict, path: str) -> Any:
             errors[path] = f"{f['label']} has to be a whole number."
             return None
         return int(n)
+    if kind in ("profit", "sliding"):
+        import treaty_basis
+        try:
+            return treaty_basis.clean_value(kind, raw)
+        except treaty_basis.BasisError as e:
+            errors[path] = f"{f['label']}: {e}"
+            return None
     if kind == "select":
         allowed = {o["value"] for o in f.get("options") or []}
         if raw not in allowed:
@@ -351,6 +392,16 @@ def validate(structure: dict, *, reinsurer_ids: set[int] | None = None,
     for name in t["required"]:
         if name not in terms and f"terms.{name}" not in errors:
             errors[f"terms.{name}"] = f"{TREATY_FIELDS[name]['label']} is required."
+    # The profit commission's rate is what the wording and the summary quote.
+    # A structure saved before it was held in full keeps its rate as one.
+    pc_pct = _num(raw_terms.get("profit_commission_pct"))
+    if "profit_commission" in terms:
+        terms["profit_commission_pct"] = terms["profit_commission"]["rate_pct"]
+    elif ("profit_commission" in t["fields"] and pc_pct is not None
+          and 0 < pc_pct <= 100 and "terms.profit_commission" not in errors):
+        terms["profit_commission"] = {"rate_pct": pc_pct, "expense_pct": 0.0,
+                                      "deficit_years": 0}
+        terms["profit_commission_pct"] = pc_pct
 
     raw_layers = [lay for lay in (structure.get("layers") or [])
                   if isinstance(lay, dict)]
@@ -574,7 +625,9 @@ def summarise(structure: dict | None) -> dict | None:
         fact("Limit per risk", money(terms.get("treaty_limit"), cur))
         fact("Event limit", money(terms.get("event_limit"), cur))
         fact("Ceding commission", pct(terms.get("ceding_commission_pct")))
-        fact("Profit commission", pct(terms.get("profit_commission_pct")))
+        fact("Sliding-scale commission", _scale_fact(terms.get("sliding_scale")))
+        fact("Profit commission", _profit_fact(terms.get("profit_commission"))
+             or pct(terms.get("profit_commission_pct")))
     elif key == "surplus":
         line = _num(terms.get("retention_line"))
         n = terms.get("lines")
@@ -587,6 +640,8 @@ def summarise(structure: dict | None) -> dict | None:
         fact("Max per risk", money(line + cap, cur)
              if line is not None and cap is not None else None)
         fact("Ceding commission", pct(terms.get("ceding_commission_pct")))
+        fact("Sliding-scale commission", _scale_fact(terms.get("sliding_scale")))
+        fact("Profit commission", _profit_fact(terms.get("profit_commission")))
         if line is not None and cap:
             tower = {"unit": "money", "currency": cur, "bands": [
                 {"label": "Your retention", "kind": "retention",
@@ -727,6 +782,52 @@ SECTION_PREFIX = "treaty_"
 SECTION_ORIGIN = "from your treaty structure"
 
 
+def _scale_clause(scale: dict, pct) -> list[str]:
+    """The sliding-scale commission, as a treaty states it: the provisional
+    rate, the scale point by point, and how it reads between points."""
+    pts = scale.get("points") or []
+    if len(pts) < 2:
+        return []
+    lines = [f"at a loss ratio of {pct(pts[0]['loss_ratio'])} or less, {pct(pts[0]['rate'])}"]
+    lines += [f"at a loss ratio of {pct(p['loss_ratio'])}, {pct(p['rate'])}" for p in pts[1:-1]]
+    lines.append(f"at a loss ratio of {pct(pts[-1]['loss_ratio'])} or more, "
+                 f"{pct(pts[-1]['rate'])}")
+    between = ("Between two points of the scale the commission is the rate at the "
+               "lower point." if scale.get("method") == "step" else
+               "Between two points of the scale the commission slides "
+               "proportionately.")
+    return [
+        f"The Reinsurers allow the Reinsured a provisional commission of "
+        f"{pct(scale.get('provisional_pct'))} on premium ceded.",
+        "The commission is adjusted on the loss ratio of this treaty — losses "
+        "incurred as a percentage of premium ceded — according to the following "
+        "scale: " + "; ".join(lines) + ".",
+        between,
+        "The difference between the commission so adjusted and the provisional "
+        "commission allowed is paid by or to the Reinsured, as the case may be.",
+    ]
+
+
+def _profit_clause(pc: dict, pct) -> list[str]:
+    """The profit commission: its rate, how profit is reckoned, and the
+    deficit carried forward — as agreed, nothing assumed."""
+    out = [f"A profit commission of {pct(pc.get('rate_pct'))} of the Reinsurers' "
+           f"profit on this treaty is payable to the Reinsured."]
+    less = ["the commission allowed", "the losses incurred"]
+    if pc.get("expense_pct"):
+        less.append(f"the Reinsurers' management expenses of {pct(pc['expense_pct'])} "
+                    f"of premium ceded")
+    if pc.get("deficit_years"):
+        less.append("any deficit brought forward")
+    out.append("Profit is the premium ceded less " + ", ".join(less[:-1])
+               + f" and {less[-1]}.")
+    if pc.get("deficit_years"):
+        yrs = int(pc["deficit_years"])
+        out.append(f"A deficit is carried forward to the following year, for no "
+                   f"more than {yrs} year{'s' if yrs != 1 else ''}.")
+    return out
+
+
 def build_sections(structure: dict | None) -> list[dict]:
     """The treaty's clauses, numbered from 1; contract_wording.renumber puts
     them in their real place once they are merged.
@@ -851,13 +952,19 @@ def build_sections(structure: dict | None) -> list[dict]:
             if terms.get("premium") is not None else "",
         ])
 
+    scale = terms.get("sliding_scale") if isinstance(terms.get("sliding_scale"), dict) else None
+    profit = terms.get("profit_commission") if isinstance(terms.get("profit_commission"), dict) else None
     add("commission", "Commission", [
+        # A sliding scale's provisional rate IS the commission charged; the
+        # fixed rate is stated only when there is no scale.
         f"The Reinsurers allow the Reinsured a ceding commission of "
         f"{pct(terms.get('ceding_commission_pct'))} on premium ceded."
-        if terms.get("ceding_commission_pct") is not None else "",
-        f"A profit commission of {pct(terms.get('profit_commission_pct'))} of "
-        f"the Reinsurers' profit on this treaty is payable to the Reinsured."
-        if terms.get("profit_commission_pct") is not None else "",
+        if terms.get("ceding_commission_pct") is not None and not scale else "",
+        *(_scale_clause(scale, pct) if scale else []),
+        *(_profit_clause(profit, pct) if profit else
+          [f"A profit commission of {pct(terms.get('profit_commission_pct'))} of "
+           f"the Reinsurers' profit on this treaty is payable to the Reinsured."
+           if terms.get("profit_commission_pct") is not None else ""]),
     ])
 
     add("panel", "Subscribing reinsurers", [

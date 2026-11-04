@@ -703,6 +703,9 @@ class ContractDocument(Base):
     # What rule generation filters on. Superseding is a flag flip, never a
     # delete — see the class docstring.
     is_active = Column("contract_document_is_active", Boolean, default=True)
+    # The reinsurer a document belongs to on a master treaty — its signed
+    # line slip (migration 44). None for the treaty's own documents.
+    party_id = Column("contract_document_party_id", Integer, nullable=True)
     # Parsed text + whatever the extractor made of it, cached so re-running rule
     # generation does not re-parse every attachment.
     extracted = Column("contract_document_extracted", JSON, nullable=True)
@@ -1387,6 +1390,60 @@ class ReinsurerAccessLink(Base):
     sign_requested_by_user_id = Column("ral_sign_requested_by", Integer, nullable=True)
     created_at = Column("ral_created_at", DateTime(timezone=True),
                         default=datetime.utcnow, server_default=func.now())
+
+
+class TreatyTerm(Base):
+    """One dated change to a treaty's calculation basis (migration 45): this
+    term has this value FROM this date — cession, lines, a layer's attachment
+    or limit, a commission. The structure holds the value from inception.
+    See treaty_basis."""
+    __tablename__ = "treaty_term"
+    id = Column("tt_id", Integer, primary_key=True)
+    tenant_id = Column("tt_tenant_id", Integer, nullable=True, index=True)
+    contract_id = Column("tt_contract_id", Integer, ForeignKey("contract.contract_id"),
+                         nullable=False, index=True)
+    term = Column("tt_term", String, nullable=False)
+    layer_index = Column("tt_layer_index", Integer, nullable=True)
+    value = Column("tt_value", JSON, nullable=False)
+    effective_from = Column("tt_effective_from", Date, nullable=False)
+    note = Column("tt_note", Text, nullable=True)
+    source = Column("tt_source", String, nullable=False, default="manual")
+    # The endorsement a change was made by (contract_document), when it was.
+    document_id = Column("tt_document_id", Integer, nullable=True)
+    created_by_user_id = Column("tt_created_by", Integer, nullable=True)
+    created_by_name = Column("tt_created_by_name", String, nullable=True)
+    created_at = Column("tt_created_at", DateTime(timezone=True),
+                        default=datetime.utcnow, server_default=func.now())
+    removed_at = Column("tt_removed_at", DateTime(timezone=True), nullable=True)
+    removed_by_user_id = Column("tt_removed_by", Integer, nullable=True)
+
+
+class TreatyPartySignature(Base):
+    """One reinsurer's signature on a master treaty — for its own lines, under
+    the treaty's shared wording (migration 44). Signed on its private link, in
+    the signing round (the lead) or on paper and recorded by the carrier
+    against document evidence. Withdrawn, never deleted."""
+    __tablename__ = "treaty_party_signature"
+    id = Column("tps_id", Integer, primary_key=True)
+    tenant_id = Column("tps_tenant_id", Integer, nullable=True, index=True)
+    contract_id = Column("tps_contract_id", Integer, ForeignKey("contract.contract_id"),
+                         nullable=False, index=True)
+    party_id = Column("tps_party_id", Integer, ForeignKey("party.party_id"), nullable=False)
+    signer_name = Column("tps_signer_name", String, nullable=False)
+    signer_title = Column("tps_signer_title", String, nullable=True)
+    signer_email = Column("tps_signer_email", String, nullable=True)
+    method = Column("tps_method", String, nullable=False)
+    document_id = Column("tps_document_id", Integer, nullable=True)
+    wording_document_id = Column("tps_wording_document_id", Integer, nullable=True)
+    lines = Column("tps_lines", JSON, nullable=True)
+    link_id = Column("tps_link_id", Integer, nullable=True)
+    ip = Column("tps_ip", String, nullable=True)
+    note = Column("tps_note", Text, nullable=True)
+    recorded_by_user_id = Column("tps_recorded_by", Integer, nullable=True)
+    signed_at = Column("tps_signed_at", DateTime(timezone=True),
+                       default=datetime.utcnow, server_default=func.now())
+    withdrawn_at = Column("tps_withdrawn_at", DateTime(timezone=True), nullable=True)
+    withdrawn_by_user_id = Column("tps_withdrawn_by", Integer, nullable=True)
 
 
 class ReinsurerApproval(Base):

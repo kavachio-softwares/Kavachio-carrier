@@ -2,7 +2,7 @@
 The layout of a reinsurance bordereau when the carrier does not use
 Kavachio's own — the reinsurance counterpart of a broker's output template.
 
-THREE WAYS TO LAY ONE OUT
+FOUR WAYS TO LAY ONE OUT
   kavachio   Kavachio's columns (ceded_engine.LINE_COLUMNS), chosen and
              renamed on the setup screen. The default.
   uploaded   The carrier already sends its reinsurers a file — an Excel or CSV
@@ -11,6 +11,10 @@ THREE WAYS TO LAY ONE OUT
   standard   No file of its own, so one is built the way a broker's is: from
              the Lloyd's risk sheet (the bundled Coverholder Reporting
              Standards), with the reinsurance columns added after it.
+  contract   Built from the TREATY itself (from_treaty): the columns its type
+             works out, the ones its terms quote, and one for every field a
+             treaty rule checks — terms, wording and agreed limits — each
+             saying which term put it there.
 
 WHAT A COLUMN IS FILLED FROM
   Each column carries a `key`:
@@ -42,7 +46,7 @@ FIELD = "field:"
 # An output column copied from ONE input column, by that column's heading.
 COL = "col:"
 SHARE = ("share_pct", "Your share %", "pct")
-SOURCES = ("kavachio", "uploaded", "standard")
+SOURCES = ("kavachio", "uploaded", "standard", "contract")
 MAX_BYTES = 5 * 1024 * 1024
 
 # The same on every line of one statement — what a Lloyd's sheet asks for in
@@ -281,6 +285,92 @@ def propose(structure: dict, *, source: str, available: set[str],
               "header_row": int(sh.get("header_row") or 0),
               "data_start_row": int(sh.get("data_start_row") or 1)}
     return layout, cols
+
+
+# ── built from the treaty's terms ───────────────────────────────────────────
+def from_treaty(st: dict, rules: list[dict], *, available: set[str],
+                label_of, programmes: int = 1) -> tuple[dict, list[dict]]:
+    """(layout, columns) for a sheet built from the treaty — its type, its
+    terms and its rules — rather than Kavachio's standard columns. Every
+    column carries `why`: the term that put it there."""
+    import treaty_rules as trr
+    terms = st.get("terms") or {}
+    ttype = st.get("treaty_type") or ""
+    cur = (terms.get("currency") or "").strip().upper()
+    pct = lambda v: f"{ce.num(v):g}%" if ce.num(v) is not None else None   # noqa: E731
+    money = lambda v: (f"{cur + ' ' if cur else ''}{ce.num(v):,.0f}"       # noqa: E731
+                       if ce.num(v) is not None else None)
+    heads = {k: h for k, h, _ in ce.LINE_COLUMNS}
+    out: list[dict] = []
+
+    def add(key: str, why: str, heading: Optional[str] = None) -> None:
+        for c in out:
+            if c["key"] == key:
+                if why not in c["why"]:
+                    c["why"] = f"{c['why']} · {why}"
+                return
+        out.append({"key": key, "heading": heading or heads.get(key) or label_of(key),
+                    "column_index": None, "keep": True, "required": False,
+                    "ref": None, "why": why})
+
+    # Who and when — every statement says which period and treaty it is.
+    add("period", "Every statement is for one period", "Statement period")
+    if cur:
+        add("currency", f"The treaty is written in {cur}", "Currency")
+    if programmes > 1:
+        add("programme", f"The treaty protects {programmes} programmes")
+    add("policy", "Identifies each risk ceded")
+    add("insured", "Identifies each risk ceded")
+
+    # What the treaty's type works out.
+    if ttype in ("xol", "stop_loss"):
+        lay = (st.get("layers") or [{}])[0]
+        att, lim = money(lay.get("attachment")), money(lay.get("limit"))
+        span = f" — {lim} xs {att}" if att and lim else ""
+        add("claim", "Losses are recovered claim by claim")
+        add("claim_incurred", f"Recovery is worked from the incurred loss{span}")
+        if len(st.get("layers") or []) > 1 or ttype == "xol":
+            add("layer", f"{len(st.get('layers') or [])} layer(s){span}")
+        add("recovery", f"What each layer recovers{span}")
+    else:
+        basis = pct(terms.get("cession_pct"))
+        if ttype == "surplus":
+            line, n = money(terms.get("retention_line")), ce.num(terms.get("lines"))
+            add("sum_insured", f"Surplus is ceded on sum insured — retention {line}"
+                               + (f", {n:g} lines" if n else "") if line else
+                               "Surplus is ceded on sum insured")
+        add("gross_premium", "The cession is worked on gross premium")
+        add("ceded_pct", f"Cession {basis}" if basis else "Each risk's cession")
+        add("ceded_premium", f"Premium ceded{' at ' + basis if basis else ''}")
+        comm = pct(terms.get("ceding_commission_pct"))
+        if comm:
+            add("ceding_commission", f"Ceding commission {comm}")
+        add("net_premium", "Premium due to the reinsurer, after commission")
+        add("claims_paid", "Losses are shared at the cession")
+        add("claims_outstanding", "Losses are shared at the cession")
+    add(SHARE[0], "Each reinsurer's share of the layer", SHARE[1])
+
+    # Every field a treaty rule checks — the terms, the wording, the limits.
+    figure = {"premium": "gross_premium", "sum_insured": "sum_insured",
+              "claims": "claim_incurred", "policy": "policy"}
+    for r in rules:
+        if not r.get("enabled", True):
+            continue
+        subj = r.get("subject")
+        src = {"wording": "treaty wording"}.get(r.get("source"), "treaty terms")
+        if str(r.get("id", "")).startswith("limit_"):
+            src = "agreed limit"
+        why = f"Checked by a rule ({src}): {r.get('label')}"
+        if subj in figure:
+            add(figure[subj], why)
+            continue
+        fields = trr.SUBJECT_FIELDS.get(subj) or ()
+        f = next((x for x in fields if x in available), fields[0] if fields else None)
+        if f:
+            add(f"{FIELD}{f}", why)
+    layout = {"source": "contract", "sheet_name": "Lines",
+              "header_row": 0, "data_start_row": 1}
+    return layout, out
 
 
 # ── the carrier's own INPUT file ────────────────────────────────────────────

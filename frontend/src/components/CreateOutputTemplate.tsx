@@ -703,7 +703,7 @@ function ProposalRow({ f, kept, appended, onToggle, standardName, contractName }
   );
 }
 
-function ChoiceCard({ icon, title, body, disabled, onClick }: {
+export function ChoiceCard({ icon, title, body, disabled, onClick }: {
   icon: React.ReactNode; title: string;
   /** A sentence, or a few short points shown as a list. */
   body: string | string[];

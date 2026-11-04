@@ -1,25 +1,24 @@
 /**
  * One treaty's reinsurance bordereau setup — laid out like a broker's
- * Bordereau Setup: numbered steps across the top, Next at the foot of each,
- * Save Draft / Activate fixed at the bottom.
+ * Bordereau Setup.
  *
- *   1 Setup Details         the treaty, the programmes that feed it, and the
- *                           schedule (monthly / quarterly / yearly, due days)
- *   2 Input & Output    the upload boxes (input template, output template,
- *     Templates         the treaty), then the input and the output columns
- *   3 Field Mapping     each output column and the input column that fills
- *                       it, with an example value
- *   4 Recipients &      who receives it at each reinsurer, who is copied,
- *     Sending           on Send or automatically
+ * A NEW setup is three steps, as the broker's:
+ *   1 Setup Details         the treaty and the programmes that feed it
+ *   2 Documents             the input template, the output template and the
+ *                           signed wording — then the input columns
+ *   3 Output BDX Template   the file each reinsurer receives
+ * and "Set Up Bordereau Pipeline" at the foot saves it with the mapping and
+ * the treaty's rules worked out, then offers Review Mapping or Activate.
  *
- * No Preview step: Field Mapping shows example values, and Check on the
- * Reinsurance Bordereaux page works a whole statement out without saving.
+ * A SAVED setup is edited on the broker Edit's tabs: Treaty Rules, Map Input &
+ * Output Columns, Output BDX Template and Due Dates (schedule and recipients),
+ * with Activate / Save Draft held at the foot of the screen.
  */
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, CheckCircle2, Columns3, FileSpreadsheet,
-  Info, ListChecks, Save, Send, Trash2, Unlink,
+  FileText, Info, ListChecks, Save, Send, ShieldCheck, Trash2, Unlink,
 } from "lucide-react";
 import { Modal } from "../components/ui/Modal";
 import OutputGrid from "../components/treaty/OutputGrid";
@@ -31,7 +30,7 @@ import { SetupTabs, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { InfoTip } from "../components/InfoTip";
 import CededLayoutSection from "../components/treaty/CededLayoutSection";
 import {
-  FieldMappingStep, InputTemplateStep, treatyRuleLine,
+  FieldMappingStep, InputTemplateStep, treatyRuleLine, unmatchedOutputs,
 } from "../components/treaty/CededMappingSteps";
 import CededDocumentsStep from "../components/treaty/CededDocumentsStep";
 import { TreatyRulesStep } from "../components/treaty/TreatyRules";
@@ -50,8 +49,7 @@ const FREQ = [
 ] as const;
 
 const TAB_KEYS: SetupTab[] = [
-  { key: "details", label: "" }, { key: "documents", label: "" },
-  { key: "mapping", label: "" }, { key: "rules", label: "" }, { key: "recipients", label: "" },
+  { key: "details", label: "" }, { key: "documents", label: "" }, { key: "output", label: "" },
 ];
 // A saved setup's tabs, in the broker Edit's order.
 const EDIT_KEYS: SetupTab[] = [
@@ -80,11 +78,15 @@ export default function ReinsuranceSetupEdit() {
   const [deleting, setDeleting] = useState(false);
   // The output's column controls, opened from the grid as the broker's are.
   const [columnsOpen, setColumnsOpen] = useState(false);
+  // What "Set Up Bordereau Pipeline" made — the broker's "Mapping Generated".
+  const [built, setBuilt] = useState<{ columns: number; matched: number; rules: number } | null>(null);
 
   function load(r: SetupRecord) {
     setRec(r);
     setSaved(!!r.setup);
-    const vals = r.setup ?? r.defaults;
+    // A new setup starts with no output template: it is uploaded or created
+    // on Documents, as on the broker setup — not built behind the user's back.
+    const vals = r.setup ?? { ...r.defaults, layout: { source: "contract" as const }, columns: [] };
     setV({ ...vals, program_ids: vals.program_ids ?? r.options.programmes.map(p => p.id) });
     setCcText((vals.cc ?? []).join(", "));
     setDirty(false);
@@ -154,8 +156,8 @@ export default function ReinsuranceSetupEdit() {
 
   const detailsBody = (<>
             <p className="sub" style={{ marginBottom: 14 }}>
-              The treaty this setup is for, the programmes whose bordereaux make up its
-              statements, and how often they are sent.
+              The treaty this setup is for, and the programmes whose bordereaux make up
+              its statements.
             </p>
             <div className="grid g-2" style={{ gap: 14, marginBottom: 18 }}>
               <div className="field" style={{ marginBottom: 0 }}>
@@ -177,24 +179,68 @@ export default function ReinsuranceSetupEdit() {
               Programmes that feed it
               <InfoTip text="The bordereaux of these programmes make up each statement. Only programmes this treaty protects can be chosen." />
             </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {/* Each programme with what it holds — its treaties (this one among
+                  them) and its broker contracts — so it is clear what feeds it. */}
+              <div className="grid g-2" style={{ gap: 10 }}>
                 {rec.options.programmes.map(p => {
                   const on = (v.program_ids ?? []).includes(p.id);
+                  const treaties = (rec.options.treaties ?? []).filter(t => t.program_ids.includes(p.id));
+                  const contracts = (rec.options.contracts ?? []).filter(k => k.program_id === p.id);
                   return (
-                    <label key={p.id} className={`badge ${on ? "b-ok" : ""}`}
-                           style={{ border: "1px solid var(--p-border-2)", padding: "6px 11px",
-                                    fontSize: 12.5, cursor: "pointer",
-                                    background: on ? undefined : "var(--p-surface)" }}>
-                      <input type="checkbox" checked={on} style={{ margin: 0 }}
-                             onChange={e => change({ program_ids: e.target.checked
-                               ? [...(v.program_ids ?? []), p.id]
-                               : (v.program_ids ?? []).filter(x => x !== p.id) })} />
-                      {p.name}
+                    <label key={p.id} style={{ display: "block", cursor: "pointer", padding: "10px 12px",
+                             border: `1px solid ${on ? "var(--p-ok, #0f766e)" : "var(--p-border-2)"}`,
+                             borderRadius: 10, background: on ? "var(--p-ok-bg, #f0fdf9)" : "var(--p-surface)" }}>
+                      <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <input type="checkbox" checked={on} style={{ margin: 0 }}
+                               onChange={e => change({ program_ids: e.target.checked
+                                 ? [...(v.program_ids ?? []), p.id]
+                                 : (v.program_ids ?? []).filter(x => x !== p.id) })} />
+                        <b style={{ fontSize: 13 }}>{p.name}</b>
+                        {p.is_home && <span className="badge b-mut" style={{ fontSize: 10 }}>Home programme</span>}
+                      </span>
+                      <span style={{ display: "block", marginTop: 8, paddingLeft: 22, fontSize: 12.5 }}>
+                        <span className="sub" style={{ display: "block", fontSize: 11, textTransform: "uppercase",
+                              letterSpacing: ".03em", marginBottom: 3 }}>
+                          Treaties ({treaties.length})
+                        </span>
+                        {treaties.length === 0 && <span className="sub">None</span>}
+                        {treaties.map(t => (
+                          <span key={t.id} style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
+                            <ShieldCheck size={12} style={{ alignSelf: "center", flexShrink: 0 }} />
+                            {t.this ? <b>{t.name}</b>
+                              : <Link className="linkish" to={`/contracts/${t.id}`}
+                                      onClick={e => e.stopPropagation()}>{t.name}</Link>}
+                            <span className="sub">
+                              {[t.type_label, t.status && t.status[0].toUpperCase() + t.status.slice(1)]
+                                .filter(Boolean).join(" · ")}
+                            </span>
+                            {t.this && <span className="badge b-ok" style={{ fontSize: 10 }}>This treaty</span>}
+                          </span>
+                        ))}
+                        <span className="sub" style={{ display: "block", fontSize: 11, textTransform: "uppercase",
+                              letterSpacing: ".03em", margin: "8px 0 3px" }}>
+                          Contracts ({contracts.length})
+                        </span>
+                        {contracts.length === 0 && <span className="sub">None</span>}
+                        {contracts.map(k => (
+                          <span key={k.id} style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
+                            <FileText size={12} style={{ alignSelf: "center", flexShrink: 0 }} />
+                            <Link className="linkish" to={`/contracts/${k.id}`}
+                                  onClick={e => e.stopPropagation()}>{k.name}</Link>
+                            <span className="sub">
+                              {[k.broker, k.status && k.status[0].toUpperCase() + k.status.slice(1)]
+                                .filter(Boolean).join(" · ")}
+                            </span>
+                          </span>
+                        ))}
+                      </span>
                     </label>
                   );
                 })}
               </div>
               {bad("program_ids")}
+          </>);
+  const scheduleBody = (<>
             <div className="fh" style={{ marginTop: 24 }}>Schedule</div>
               <div className="grid g-2" style={{ gap: 14 }}>
                 <div className="field" style={{ marginBottom: 0 }}>
@@ -287,6 +333,43 @@ export default function ReinsuranceSetupEdit() {
   // A saved setup is EDITED as the broker setup's Edit screen is: the same
   // tabs, the same tables. A setup not saved yet is built step by step.
   const editing = !!rec.setup;
+  // What the build needs, as the broker's "Still needed" names it.
+  const programmesOk = (v.program_ids ?? []).length > 0;
+  const inputOk = v.input_layout?.source === "own"
+    ? v.input_layout.columns.length > 0
+    : rec.options.inputs.some(t => !t.own);
+  const outputOk = (v.layout?.source ?? "kavachio") !== "kavachio"
+    && v.columns.some(c => c.keep !== false);
+  const missing: { tab: string; what: string }[] = [
+    ...(!rec.has_structure ? [{ tab: "details", what: "the treaty's structure" }] : []),
+    ...(!programmesOk ? [{ tab: "details", what: "a programme that feeds it" }] : []),
+    ...(!rec.wording ? [{ tab: "documents", what: "the signed wording" }] : []),
+    ...(!inputOk ? [{ tab: "documents", what: "the input template" }] : []),
+    ...(!outputOk ? [{ tab: "output", what: "the output template" }] : []),
+  ];
+  // Only what can be done on THIS step — as on the broker setup.
+  const missingHere = missing.filter(m => tab === "output" || m.tab === tab
+    || (tab === "documents" && m.tab === "details")).map(m => m.what);
+  const unmatched = unmatchedOutputs(rec, v);
+
+  async function buildSetup() {
+    setBusy("build"); setErr(""); setNote(""); setErrors({});
+    try {
+      const r = await saveSetup(cid, values!);
+      const sv = r.setup ?? r.defaults;
+      const cols = sv.columns.filter(c => c.keep !== false);
+      setBuilt({ columns: cols.length,
+                 matched: cols.length - unmatchedOutputs(r, sv).length,
+                 rules: (sv.rules ?? []).filter(x => x.enabled).length });
+      load(r);
+    } catch (e) {
+      const fe = fieldErrors(e);
+      setErr(fe.message);
+      setErrors(fe.errors as Record<string, string>);
+    } finally {
+      setBusy("");
+    }
+  }
   const tabs: SetupTab[] = editing ? [
     { key: "rules", label: "Treaty Rules",
       count: (v.rules ?? []).filter(r => r.enabled).length || undefined,
@@ -299,15 +382,15 @@ export default function ReinsuranceSetupEdit() {
     { key: "calendar", label: "Due Dates", warn: !!errors.cc,
       info: "Which programmes feed it, how often a statement is made, when it is due, and who receives it." },
   ] : [
-    { key: "details", label: "Setup Details", step: 1 },
-    { key: "documents", label: "Input & Output Templates", step: 2,
-      warn: !!errors.input_layout || !!errors.columns || !!errors.layout
-        || (v.input_layout?.source !== "own" && rec.options.inputs.length === 0) },
-    { key: "mapping", label: "Field Mapping", step: 3 },
-    { key: "rules", label: "Treaty Rules", step: 4,
-      count: (v.rules ?? []).filter(r => r.enabled).length || undefined },
-    { key: "recipients", label: "Recipients & Sending", step: 5,
-      warn: !!errors.cc },
+    { key: "details", label: "Setup Details", step: 1, warn: !!errors.program_ids },
+    { key: "documents", label: "Documents", step: 2,
+      warn: !!errors.input_layout || (!!programmesOk && !inputOk),
+      disabled: !programmesOk, disabledReason: "Choose the programmes that feed it first" },
+    { key: "output", label: "Output BDX Template", step: 3,
+      warn: !!errors.columns || !!errors.layout,
+      disabled: !programmesOk || !inputOk,
+      disabledReason: !programmesOk ? "Choose the programmes that feed it first"
+        : "Add the input template on Documents first" },
   ];
   const nextTab = editing ? undefined : tabs[tabs.findIndex(t => t.key === tab) + 1];
 
@@ -320,6 +403,7 @@ export default function ReinsuranceSetupEdit() {
   const lay = v.layout ?? { source: "kavachio" as const };
   const outputName = lay.source === "uploaded" ? (lay.filename ?? "Your output template")
     : lay.source === "standard" ? `Lloyd's risk sheet${lay.standard?.jurisdiction ? ` (${lay.standard.jurisdiction})` : ""}`
+    : lay.source === "contract" ? "Built from the treaty's terms"
     : "Kavachio standard layout";
   const own = v.input_layout?.source === "own" ? v.input_layout : null;
   const inputName = own ? (own.filename ?? "Your input template") : "Your brokers' bordereaux";
@@ -391,7 +475,14 @@ export default function ReinsuranceSetupEdit() {
               The file each reinsurer receives — its share of every line, in delivery order,
               under the names the file will carry.
             </p>
-            <OutputGrid headings={kept.map(c => c.heading)} rows={(pv?.table?.rows ?? []).slice(0, 5)}
+            {/* Sample values matched by heading, not position — a column just
+                moved, added or removed never shows another column's values
+                while the preview catches up. */}
+            <OutputGrid headings={kept.map(c => c.heading)}
+              rows={(pv?.table?.rows ?? []).slice(0, 5).map(r => kept.map(c => {
+                const j = pv?.table?.headings.indexOf(c.heading) ?? -1;
+                return j >= 0 ? r[j] : null;
+              }))}
               sheet={lay.sheet_name || "Lines"} period={pv?.period ?? null}
               footer={<>
                 <button type="button" onClick={() => setColumnsOpen(o => !o)}
@@ -423,7 +514,7 @@ export default function ReinsuranceSetupEdit() {
                   <b>{v.send_mode === "auto" ? "Automatically" : "When you press Send"}</b></div>
               </div>
             </div>
-            <div className="proto" style={{ background: "transparent" }}>{detailsBody}</div>
+            <div className="proto" style={{ background: "transparent" }}>{detailsBody}{scheduleBody}</div>
           </Card>
         )}
         {tab === "calendar" && (
@@ -444,7 +535,7 @@ export default function ReinsuranceSetupEdit() {
           : "Set up once per treaty — then every period each reinsurer gets its own statement, worked out from your brokers' bordereaux."}
         action={rec.setup ? (
           // A saved setup is read on its view page; Edit came from there.
-          <Button variant="secondary" onClick={() => nav(`/reinsurance/setups/${cid}`)}>
+          <Button variant="secondary" onClick={() => nav(`/reinsurance/setups/${cid}?tab=${tab}`)}>
             <ArrowLeft size={15} /> Back to setup
           </Button>
         ) : (
@@ -453,13 +544,23 @@ export default function ReinsuranceSetupEdit() {
           </Button>
         )} />
       <PageBody>
-        {(!rec.has_structure || (rec.setup?.note && status === "draft") || (status === "active" && dirty)
+        {(!rec.has_structure || !rec.wording || (rec.setup?.note && status === "draft") || (status === "active" && dirty)
           || (status === "pending_approval" && rec.carrier_admin) || err || note) && (
         <div className="proto" style={{ background: "transparent" }}>
         {!rec.has_structure && (
           <div className="note warn" style={{ marginBottom: 14 }}>
             This treaty has no structure yet, so nothing can be ceded under it.{" "}
             <Link className="linkish" to={`/contracts/${cid}?tab=treaty`}>Set out its structure</Link>
+          </div>
+        )}
+        {/* 26.3 — a treaty is configured from its signed wording. */}
+        {!rec.wording && (
+          <div className="note warn" style={{ marginBottom: 14 }}>
+            <b>Signed wording needed.</b> This treaty is configured from its signed
+            wording, and none has been supplied — so this setup cannot be saved or
+            activated yet. Attach the signed copy on the treaty (Documents → Wording,
+            &ldquo;This is the signed copy&rdquo;), or have the treaty signed in Kavachio.{" "}
+            <Link className="linkish" to={`/contracts/${cid}`}>Open the treaty</Link>
           </div>
         )}
         {rec.setup?.note && status === "draft" && (
@@ -507,69 +608,72 @@ export default function ReinsuranceSetupEdit() {
             {detailsBody}
           </div>
 
-          {/* ---- 2 Input & Output Templates ----
-              One step for both sides, as the broker setup's Documents tab:
-              the upload boxes, then what each side gave. */}
-          <div role="tabpanel" aria-label="Input and Output Templates" hidden={tab !== "documents"}>
-            <CededDocumentsStep cid={cid} rec={rec} v={v} change={change} />
+          {/* ---- 2 Documents ----
+              The upload boxes — input, output, signed wording — then what the
+              input gave, as the broker setup's Documents tab. */}
+          <div role="tabpanel" aria-label="Documents" hidden={tab !== "documents"}>
+            <CededDocumentsStep cid={cid} rec={rec} v={v} change={change}
+              onOutputStep={inputOk ? () => setTab("output") : undefined} />
 
             <div className="fh" style={{ marginTop: 26 }}>
               Input columns
               <InfoTip text="What the reinsurance bordereau is read from: your own input template when you upload one, else your brokers' bordereaux on the programmes this treaty protects." />
             </div>
             <InputTemplateStep cid={cid} rec={rec} v={v} change={change} bad={bad} listOnly />
-
-            <div style={{ marginTop: 26 }}>
-              <CededLayoutSection cid={cid} rec={rec} v={v} change={change} bad={bad} />
-            </div>
           </div>
 
-          {/* ---- 3 Field Mapping ---- */}
-          <div role="tabpanel" aria-label="Field Mapping" hidden={tab !== "mapping"}>
-            <p className="sub" style={{ marginBottom: 14 }}>
-              Map each column of the reinsurer&rsquo;s file to the input column
-              that fills it. Calculated columns are worked out for the treaty from
-              the input column you pick.
-            </p>
-            <FieldMappingStep rec={rec} v={v} pv={pv} change={change} />
+          {/* ---- 3 Output BDX Template ---- */}
+          <div role="tabpanel" aria-label="Output BDX Template" hidden={tab !== "output"}>
+            <CededLayoutSection cid={cid} rec={rec} v={v} change={change} bad={bad} />
+          </div>
           </div>
 
-          {/* ---- 4 Treaty Rules ---- */}
-          <div role="tabpanel" aria-label="Treaty Rules" hidden={tab !== "rules"}>
-            <TreatyRulesStep cid={cid} rec={rec} v={v} change={change} />
-          </div>
-
-          {/* ---- 5 Recipients & Sending ---- */}
-          <div role="tabpanel" aria-label="Recipients and sending" hidden={tab !== "recipients"}>
-            {recipientsBody}
-          </div>
-
-          {/* What comes next, by name — as on the broker setup. */}
-          {nextTab && (
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20,
-                          paddingTop: 14, borderTop: "1px solid var(--p-border)" }}>
-              <button className="btn" type="button" onClick={() => setTab(nextTab.key)}>
+          {/* The action, and — when it is off — WHY, in words on the page; then
+              the way forward by name. As the broker setup's footer. */}
+          <div className="-mx-5 -mb-5 mt-6 flex flex-wrap items-center gap-x-4
+            gap-y-3 rounded-b-lg border-t border-border bg-surface-2/60 px-5 py-4">
+            <Button onClick={buildSetup} disabled={!!busy || missing.length > 0}
+              title={missing.length ? `Still needed: ${missing.map(m => m.what).join("; ")}` : undefined}
+              className="!px-5 !py-2.5 !text-[13.5px] !rounded-lg
+                shadow-md hover:shadow-lg hover:brightness-110 transition disabled:hover:brightness-100
+                disabled:shadow-none disabled:!opacity-100 disabled:!bg-surface-2
+                disabled:!text-ink-soft disabled:ring-1 disabled:ring-inset disabled:ring-border">
+              {busy === "build" ? "Setting up…" : "Set Up Bordereau Pipeline"}
+            </Button>
+            {!busy && missingHere.length > 0 && (
+              <span className="inline-flex items-center gap-1.5 text-[12.5px] text-warn">
+                <AlertTriangle size={14} className="shrink-0" />
+                Still needed: {missingHere.join(", ")}
+              </span>
+            )}
+            {nextTab && (
+              <Button variant="secondary" className="ml-auto" disabled={nextTab.disabled}
+                title={nextTab.disabled ? nextTab.disabledReason : undefined}
+                onClick={() => setTab(nextTab.key)}>
                 Next: {nextTab.label} <ArrowRight size={14} />
-              </button>
-            </div>
-          )}
+              </Button>
+            )}
           </div>
         </Card>
         )}
 
-        {/* Save / Activate, fixed at the bottom like the broker setup's bar. */}
+        {/* Save / Activate, fixed at the bottom like the broker setup's bar —
+            on a saved setup only; a new one is built from the footer above. */}
+        {editing && <>
         <div className="fixed bottom-0 right-0 z-30 px-8 py-3 bg-white/95 backdrop-blur
           border-t border-border shadow-[0_-1px_8px_rgba(17,24,39,0.06)]"
           style={{ left: "var(--sidebar-w, 256px)" }}>
           <div className="flex flex-wrap items-center gap-2">
             {(status !== "active" || dirty) && (
-              <Button onClick={activate} disabled={!!busy || !rec.has_structure}>
+              <Button onClick={activate} disabled={!!busy || !rec.has_structure || !rec.wording}
+                title={!rec.wording ? rec.wording_needed : undefined}>
                 {rec.carrier_admin
                   ? <><CheckCircle2 size={15} /> Activate Setup</>
                   : <><Send size={15} /> Send for Approval</>}
               </Button>
             )}
-            <Button variant="secondary" onClick={save} disabled={!!busy}>
+            <Button variant="secondary" onClick={save} disabled={!!busy || !rec.wording}
+              title={!rec.wording ? rec.wording_needed : undefined}>
               <Save size={15} /> Save Draft
             </Button>
             {editing && rec.carrier_admin && (
@@ -585,10 +689,76 @@ export default function ReinsuranceSetupEdit() {
                 statements are prepared every period.
               </span>
             )}
+            {unmatched.length > 0 && (
+              <button type="button" onClick={() => setTab("mapping")}
+                title={unmatched.map(c => c.heading).join(", ")}
+                className="ml-auto inline-flex items-center gap-1 text-xs text-amber-600 hover:underline">
+                <AlertTriangle size={13} /> {unmatched.length} Output Column{unmatched.length === 1 ? "" : "s"} Not Matched · show me
+              </button>
+            )}
           </div>
         </div>
         <div style={{ height: 68 }} aria-hidden="true" />
+        </>}
       </PageBody>
+      <Modal open={!!built} size="md" title="Mapping Generated"
+        onClose={() => setBuilt(null)}
+        footer={<div className="flex items-center justify-end gap-2">
+          <Button variant="secondary" onClick={() => {
+            setBuilt(null);
+            nav(`/reinsurance/setups/${cid}/edit?tab=mapping`);
+          }}>Review Mapping</Button>
+          {status === "active" ? (
+            <span className="inline-flex items-center gap-1 px-2 text-sm font-medium text-emerald-700">
+              <CheckCircle2 size={15} /> Active
+            </span>
+          ) : (
+            <Button disabled={!!busy || !rec.wording} onClick={() => {
+              setBuilt(null);
+              act("activate", () => activateSetup(cid), rec.carrier_admin
+                ? "Active. Statements for this treaty are now prepared every period."
+                : "Sent to your carrier admin to approve.");
+            }}>
+              {rec.carrier_admin
+                ? <><CheckCircle2 size={15} /> Activate Setup</>
+                : <><Send size={15} /> Send for Approval</>}
+            </Button>
+          )}
+        </div>}>
+        {built && (
+          <div className="space-y-3 text-sm">
+            <p className="text-ink-muted">
+              The setup for <b className="text-ink">{rec.treaty}</b> is saved as a draft, with
+              each output column matched to the input column that fills it and the treaty&rsquo;s
+              rules worked out from its terms.
+            </p>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="rounded-lg border border-border px-3 py-2">
+                <div className="text-lg font-semibold">{built.matched}/{built.columns}</div>
+                <div className="text-[11.5px] text-ink-muted">Output columns matched</div>
+              </div>
+              <div className="rounded-lg border border-border px-3 py-2">
+                <div className="text-lg font-semibold">{built.rules}</div>
+                <div className="text-[11.5px] text-ink-muted">Treaty rules</div>
+              </div>
+              <div className="rounded-lg border border-border px-3 py-2">
+                <div className="text-lg font-semibold">{FREQ.find(f => f.key === v.frequency)?.label}</div>
+                <div className="text-[11.5px] text-ink-muted">Due {v.due_days} days after</div>
+              </div>
+            </div>
+            {built.matched < built.columns && (
+              <div className="flex items-start gap-2 rounded-md bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
+                <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                {built.columns - built.matched} output column(s) have no input column yet —
+                they are blank until you match them on Review Mapping.
+              </div>
+            )}
+            <p className="text-[12.5px] text-ink-muted">
+              Schedule and recipients can be changed on the setup&rsquo;s Due Dates tab.
+            </p>
+          </div>
+        )}
+      </Modal>
       <Modal open={deleting} size="md" title="Delete this draft setup?"
         onClose={() => { if (!busy) setDeleting(false); }}
         footer={<div className="flex items-center justify-end gap-2">

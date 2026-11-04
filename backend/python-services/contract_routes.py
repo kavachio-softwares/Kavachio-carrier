@@ -70,7 +70,12 @@ router = APIRouter()
 # The kinds of document a contract can hold. See ContractDocument for what each
 # one MEANS — the difference between a reference and an endorsement is the whole
 # reason this is not a single blob column.
-DOC_KINDS = ("contract", "reference", "endorsement", "evidence")
+# A treaty also carries its schedule and amendments (26.3); "contract" marked
+# as the signed copy is its signed treaty wording.
+DOC_KINDS = ("contract", "reference", "endorsement", "evidence", "schedule", "amendment",
+             # One reinsurer's signed line slip on a master treaty — the evidence
+             # its signature is recorded against (treaty_placement).
+             "signed_line")
 
 
 def _doc_visible(d: ContractDocument, p: Principal | None) -> bool:
@@ -241,11 +246,21 @@ def _missing_references(c: Contract, docs: list[ContractDocument]) -> list[str]:
     return missing
 
 
-def _doc_dict(d: ContractDocument) -> dict:
+def _doc_dict(d: ContractDocument, names: Optional[dict] = None) -> dict:
+    ex = d.extracted if isinstance(d.extracted, dict) else {}
     return {
         "id": d.id,
         "kind": d.kind,
         "filename": d.filename,
+        "version": d.version,
+        "party_id": d.party_id,
+        "uploaded_by": (names or {}).get(d.uploaded_by_user_id),
+        # Whether it opens and can be read — checked when a wording is attached.
+        "validation": ex.get("validation"),
+        # A treaty endorsement whose terms and clauses are on the treaty: read
+        # and applied, or drafted in Kavachio (applied when it was made).
+        "endorsement_applied": d.kind == "endorsement"
+                               and bool(ex.get("review") or ex.get("endorsement_number")),
         "satisfies_reference": d.satisfies_reference,
         "effective_from": str(d.effective_from) if d.effective_from else None,
         # The signed copy, as opposed to a draft. Reported from outside — see
@@ -257,6 +272,14 @@ def _doc_dict(d: ContractDocument) -> dict:
         # cannot be re-read, and a screen offering "download" for it lies.
         "has_file": bool(d.blob_ref or d.blob),
     }
+
+
+def _uploader_names(s, docs) -> dict:
+    ids = {d.uploaded_by_user_id for d in docs if d.uploaded_by_user_id}
+    if not ids:
+        return {}
+    return {u.id: (u.full_name or u.email)
+            for u in s.query(AppUser).filter(AppUser.id.in_(ids))}
 
 
 def _store_authored_clauses(s, c: Contract, sections: list[dict] | None) -> int:
@@ -858,7 +881,7 @@ def _record(s, c: Contract, *, with_docs: bool = True,
         "created_at": _iso_utc(c.created_at),
 
         # ── documents ──
-        "documents": [_doc_dict(d) for d in docs] if with_docs else None,
+        "documents": [_doc_dict(d, _uploader_names(s, docs)) for d in docs] if with_docs else None,
         # Does this contract HAVE a wording — not "is there a file". A contract
         # written here has one: its sections, structured, on this record and
         # typeset on its page. Tying this to a blob was what made an authored
@@ -3770,6 +3793,10 @@ class EndorsementIn(BaseModel):
     # Sections as the builder left them, when the carrier has edited the
     # generated wording. Absent means "use what you generate".
     sections: Optional[list] = None
+    # A treaty's calculation basis it changes — [{term, layer, value}]: cession,
+    # lines, a layer's attachment or limit, the ceding commission. Each
+    # becomes a dated term from `effective_from` (treaty_basis).
+    basis: list = []
 
 
 def _endorsement_context(s, c: Contract, body: EndorsementIn):
@@ -3779,6 +3806,12 @@ def _endorsement_context(s, c: Contract, body: EndorsementIn):
     old = c.commercial_terms or {}
     new = ct.clean_agreed_limits(body.agreed_limits)
     changes = cw.derive_endorsement_changes(old, new)
+    if body.basis and (c.contract_type or "") == "insurer_reinsurer":
+        import treaty_basis as tb
+        try:
+            changes = changes + tb.endorsement_changes(s, c, body.basis, body.effective_from)
+        except tb.BasisError as e:
+            raise HTTPException(400, {"message": str(e), "errors": e.errors})
     number = 1 + (s.query(ContractDocument)
                   .filter(ContractDocument.contract_id == c.id,
                           ContractDocument.kind == "endorsement")
@@ -3811,6 +3844,10 @@ def endorsement_preview(contract_id: int, body: EndorsementIn,
             "changes": changes,
             "sections": sections,
             "current_limits": old,
+            # A treaty's terms an endorsement can change, as in force on its date.
+            "basis": (__import__("treaty_basis").endorsable(
+                s, c, _as_date(body.effective_from))
+                if (c.contract_type or "") == "insurer_reinsurer" else []),
             "contract": {"id": c.id, "name": c.name or c.filename,
                          "inception_dt": str(c.inception_dt) if c.inception_dt else None,
                          "expiry_dt": str(c.expiry_dt) if c.expiry_dt else None},
@@ -3824,9 +3861,100 @@ def endorsement_create(contract_id: int, body: EndorsementIn,
     change to a running contract is now a mid-term change (mid_term_routes.py):
     the broker agrees, both sides sign, and its checks are dated."""
     _require_carrier(p)
-    raise HTTPException(410, "Changes to a running contract are made as a mid-term "
-                             "change now — open the contract and choose Mid-term "
-                             "change.")
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        state = _effective_lifecycle(c)
+        if state not in ("active", "expired"):
+            raise HTTPException(
+                409, f"this contract is {state}. An endorsement changes a "
+                     f"contract that is running — a draft is changed by "
+                     f"editing its terms, and one that has ended is not "
+                     f"changed at all.")
+
+        old, new, changes, number, sections = _endorsement_context(s, c, body)
+        if not changes:
+            raise HTTPException(400, {
+                "message": "Nothing has changed, so there is nothing to "
+                           "endorse. Change a term first.",
+                "errors": {"agreed_limits": "no change"}})
+        basis_moves = [ch["basis"] for ch in changes if ch.get("basis")]
+        if basis_moves and not _as_date(body.effective_from):
+            raise HTTPException(400, {
+                "message": "An endorsement that changes the treaty's calculation basis "
+                           "needs the date it takes effect.",
+                "errors": {"effective_from": "required"}})
+
+        import contract_wording as cw
+        counterparty = (s.get(Party, c.broker_party_id)
+                        if c.broker_party_id else None)
+        from db import Tenant
+        carrier = s.get(Tenant, c.tenant_id) if c.tenant_id else None
+        carrier_name = (getattr(carrier, "legal_name", None)
+                        or getattr(carrier, "tenant_name", None))
+
+        data = cw.compose_endorsement_pdf(
+            contract_name=c.name or c.filename, number=number,
+            carrier_name=carrier_name,
+            counterparty_name=getattr(counterparty, "legal_name", None),
+            effective_from=body.effective_from, sections=sections)
+        filename = f"Endorsement {number} — {(c.name or 'contract').strip()}.pdf"
+
+        # Stored, unlike the wording. See compose_endorsement_pdf: an
+        # endorsement records a change that happened on a date, so it must not
+        # be regenerated later from terms that have moved on since.
+        blob_ref, blob = storage.store_or_keep(
+            "contract-documents", c.tenant_id, filename, data, "application/pdf")
+
+        # Attached ALONGSIDE the wording, not replacing it. Both are active and
+        # rule generation reads the pair, with the endorsed value winning.
+        doc = ContractDocument(
+            tenant_id=c.tenant_id, contract_id=c.id, kind="endorsement",
+            filename=filename, version=f"endorsement-{number}",
+            blob_ref=blob_ref, blob=blob,
+            fingerprint=hashlib.sha256(data).hexdigest(),
+            effective_from=_as_date(body.effective_from),
+            is_active=True, uploaded_by_user_id=p.user_id,
+            extracted={"changes": changes, "note": body.note,
+                       "endorsement_number": number},
+        )
+        s.add(doc)
+
+        # The contract's live terms move to the endorsed values. What they WERE
+        # is not lost — the endorsement document records every from/to, which is
+        # exactly the history somebody asks for later.
+        c.commercial_terms = new or None
+        # A treaty's calculation basis moves FROM the endorsement's date: each
+        # changed term is a dated version, made by this endorsement — earlier
+        # periods keep the terms they were worked out with (treaty_basis).
+        if basis_moves:
+            import treaty_basis as tb
+            s.flush()
+            who = s.get(AppUser, p.user_id) if p.user_id else None
+            for mv in basis_moves:
+                try:
+                    tb.add(s, c, term=mv["term"], layer=mv["layer"], value=mv["value"],
+                           effective_from=body.effective_from,
+                           note=f"Endorsement {number}", source="endorsement",
+                           user_id=p.user_id,
+                           who=(who.full_name or who.email) if who else None,
+                           document_id=doc.id)
+                except tb.BasisError as e:
+                    s.rollback()
+                    raise HTTPException(400, {"message": str(e), "errors": e.errors})
+        # Keep the authored wording's own record of its sections in step with
+        # the terms, so re-composing the contract quotes the endorsed numbers.
+        s.commit()
+        s.refresh(c)
+
+        rec = _record(s, c, p=p)
+        rec["endorsement"] = {
+            "number": number, "document_id": doc.id, "changes": changes,
+            "effective_from": body.effective_from,
+        }
+        # Attaching an endorsement changes what the rules SHOULD be, and the
+        # rules on file were read without it.
+        rec["rules_stale"] = True
+        return rec
 
 
 # =============================================================================
@@ -4171,6 +4299,12 @@ def unsign_contract(contract_id: int, signature_id: int,
         if p.is_broker:
             _assert_speaks_for_broker(p, "withdraw a signature")
         s.delete(sg)
+        # On a master treaty the lead's counterparty signature is also its
+        # signature for its own lines — withdrawn together.
+        if sg.side == "counterparty" and (c.contract_type or "") == "insurer_reinsurer" \
+                and c.broker_party_id:
+            import treaty_placement
+            treaty_placement.withdraw(s, c, c.broker_party_id, p.user_id)
         if _effective_lifecycle(c) == "signed":
             c.lifecycle = "agreed" if c.broker_party_id else "draft"
         s.commit()
@@ -5098,7 +5232,7 @@ def list_documents(contract_id: int, p: Principal = Depends(current_principal)):
                 .filter(ContractDocument.contract_id == c.id)
                 .order_by(ContractDocument.created_at.desc()).all())
         return {
-            "documents": [_doc_dict(d) for d in docs if _doc_visible(d, p)],
+            "documents": [_doc_dict(d, _uploader_names(s, docs)) for d in docs if _doc_visible(d, p)],
             "missing_references": _missing_references(c, docs),
             # What the wording ASKED for, whether or not it has been supplied —
             # so the screen can show the request next to the answer.
@@ -5118,6 +5252,8 @@ async def upload_document(
     # which is exactly why it is a flag on the document and not a status the
     # app derives.
     is_executed_copy: bool = Form(default=False),
+    # The reinsurer a signed line slip belongs to (kind "signed_line").
+    party_id: Optional[int] = Form(default=None),
     p: Principal = Depends(current_principal),
 ):
     """Attach a document to a contract.
@@ -5179,10 +5315,26 @@ async def upload_document(
                          f"contract's dates are not corrected that way while it "
                          f"is {state.replace('_', ' ')}.")
 
+        if kind == "signed_line":
+            # Belongs to one reinsurer that writes a line on this treaty.
+            import treaty_placement as tp
+            import treaty_routes as trt
+            st = trt.load_structure(s, c.id, names=False)
+            if not party_id or not tp.lines_of(st, party_id):
+                raise HTTPException(400, "A signed line slip belongs to a reinsurer "
+                                         "with a line on this treaty — choose which.")
         blob_ref, blob = await run_in_threadpool(
             storage.store_or_keep, "contract-documents", c.tenant_id,
             file.filename, data, file.content_type)
 
+        # Each upload of a kind is its next version (v1, v2…) — a replaced
+        # wording is retired, not overwritten, so the versions stay countable.
+        q_before = s.query(ContractDocument).filter(
+            ContractDocument.contract_id == c.id, ContractDocument.kind == kind)
+        if kind == "signed_line":
+            # Versions per reinsurer: each has its own slip.
+            q_before = q_before.filter(ContractDocument.party_id == party_id)
+        n_before = q_before.count()
         if kind == "contract":
             # A contract has ONE wording. The previous is retired rather than
             # deleted, so the rules it produced stay explainable.
@@ -5201,8 +5353,16 @@ async def upload_document(
             effective_from=_as_date(effective_from),
             is_executed_copy=is_executed_copy or None,
             is_active=True, uploaded_by_user_id=p.user_id,
+            version=f"v{n_before + 1}",
+            party_id=party_id if kind == "signed_line" else None,
         )
         s.add(doc)
+        # A signed wording is checked as it arrives (26.3): it counts as the
+        # treaty's signed wording only if it opens.
+        if kind == "contract" and is_executed_copy:
+            s.flush()
+            import treaty_wording
+            treaty_wording.validate(s, doc)
 
         # Keep the contract row's own filename pointing at the live wording —
         # every existing screen reads it, and they should not all have to learn
@@ -5303,6 +5463,33 @@ def download_document(contract_id: int, document_id: int,
             content=data, media_type=_media_type(doc.filename),
             headers={"Content-Disposition":
                      _content_disposition(doc.filename or "document")})
+
+
+@router.get("/contracts/{contract_id}/documents/{document_id}/view")
+async def view_document(contract_id: int, document_id: int,
+                        p: Principal = Depends(current_principal)):
+    """The document as a PDF, to read in the page — a Word file converted on
+    the server (the same conversion signing uses), a PDF as it is. 409 when it
+    cannot be converted: the download is the way to it then."""
+    import esign_pdf
+    with SessionLocal() as s:
+        c = _contract_access(s, p, contract_id)
+        doc = s.get(ContractDocument, document_id)
+        if not doc or doc.contract_id != c.id or not _doc_visible(doc, p):
+            raise HTTPException(404, "document not found")
+        data = storage.resolve_bytes(doc.blob_ref, doc.blob)
+        name = doc.filename or "document"
+    if data is None:
+        raise HTTPException(404, "the file for this document is no longer stored")
+    try:
+        pdf = await run_in_threadpool(esign_pdf.ensure_pdf, data, name)
+    except Exception as e:  # noqa: BLE001 — not a format that converts
+        log.info("document %s could not be shown as a PDF: %s", document_id, e)
+        raise HTTPException(409, "This file cannot be shown in the page — download it instead.")
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition":
+                             _content_disposition(f"{stem}.pdf").replace("attachment", "inline", 1)})
 
 
 @router.get("/contracts/{contract_id}/contract.pdf")

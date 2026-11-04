@@ -350,6 +350,12 @@ _FRIENDLY = {
     # --- reinsurance treaties (treaty_routes)
     ("PUT",    "/contracts/{id}/treaty"):            "treaty_structure_saved",
     ("POST",   "/treaties/upload"):                  "signed_treaty_uploaded",
+    ("POST",   "/contracts/{id}/wording/read"):      "treaty_wording_read",
+    ("POST",   "/contracts/{id}/basis"):             "treaty_term_changed",
+    ("POST",   "/contracts/{id}/endorsements/{id}/read"): "treaty_endorsement_read",
+    ("POST",   "/contracts/{id}/endorsements/{id}/confirm"): "treaty_endorsement_applied",
+    ("DELETE", "/contracts/{id}/basis/{id}"):        "treaty_term_change_removed",
+    ("POST",   "/contracts/{id}/wording/confirm"):   "treaty_terms_confirmed",
     ("POST",   "/reinsurance/bordereaux"):           "reinsurance_bordereau_prepared",
     ("POST",   "/reinsurance/bordereaux/{id}/decide"): "reinsurance_exception_decided",
     ("POST",   "/reinsurance/bordereaux/{id}/validate"): "reinsurance_bordereau_validated",

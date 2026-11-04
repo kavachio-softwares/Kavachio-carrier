@@ -19,6 +19,8 @@
  * Reinsurers are parties the carrier keeps; none of them has a seat in
  * Kavachio. Each share is the carrier's record of a signed line.
  */
+import { OptionalCommission } from "./CommissionEditors";
+import type { ProfitCommission, SlidingScale } from "../../api/treaty";
 import { useEffect, useMemo, useState } from "react";
 import { Plus, Star, Trash2 } from "lucide-react";
 import { InfoTip } from "../InfoTip";
@@ -42,6 +44,9 @@ const num = (v: unknown) => {
   const n = Number(String(v ?? "").replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
 };
+
+/** Fields drawn as their own editors, not as one input. */
+const COMMISSION_KINDS = new Set(["sliding", "profit"]);
 
 export function placedOf(layer: TreatyLayer): number {
   return Math.round(layer.shares.reduce((a, s) => a + num(s.share_pct), 0) * 10000) / 10000;
@@ -243,13 +248,23 @@ export function TreatyEditor({
               <InfoTip text="What this kind of treaty is defined by. Required ones are starred." />
             </div>
             <div className="grid g-3" style={{ gap: 14, marginBottom: 18 }}>
-              {spec.fields.filter(f => f.required).map(f =>
+              {spec.fields.filter(f => f.required && !COMMISSION_KINDS.has(f.kind)).map(f =>
                 field(f, value.terms[f.name], v => setTerm(f.name, v),
                       `terms.${f.name}`))}
-              {spec.fields.filter(f => !f.required).map(f =>
+              {spec.fields.filter(f => !f.required && !COMMISSION_KINDS.has(f.kind)).map(f =>
                 field(f, value.terms[f.name], v => setTerm(f.name, v),
                       `terms.${f.name}`))}
             </div>
+            {/* 27.2 — the sliding-scale and profit commission, as this treaty
+                writes them. Each is the value from inception on its
+                Calculation basis; later changes are dated there. */}
+            {spec.fields.filter(f => COMMISSION_KINDS.has(f.kind)).map(f => (
+              <OptionalCommission key={f.name} kind={f.kind as "sliding" | "profit"}
+                label={f.label} hint={f.hint} disabled={disabled}
+                value={value.terms[f.name] as SlidingScale | ProfitCommission | null | undefined}
+                onChange={v => setTerm(f.name, v)}
+                error={err(`terms.${f.name}`)} />
+            ))}
 
             {/* 3 · layers and their panels */}
             <div className="fh">

@@ -20,7 +20,7 @@
  * stays quiet grey, and a filled box turns green whichever it was.
  */
 import { ReactNode, useEffect, useRef, useState } from "react";
-import { CheckCircle2, UploadCloud } from "lucide-react";
+import { CheckCircle2, Sparkles, UploadCloud } from "lucide-react";
 
 export const DROP_TONES = {
   required: {
@@ -48,7 +48,11 @@ export function DropBadge({ required }: { required?: boolean }) {
 
 /** The box itself: border state, drag handling and the click target. Shared by
  *  the single- and multi-file variants so the two can never drift apart. */
-function Zone({ tone, filled, disabled, onFiles, multiple, accept, inputRef, children, box }: {
+function Zone({ tone, filled, disabled, onFiles, multiple, accept, inputRef, children, box,
+                clickable = true }: {
+  /** Off when the box offers two buttons — a click on the box would be
+   *  ambiguous, so only the buttons act. Drag & drop still uploads. */
+  clickable?: boolean;
   /** Extra classes for the box, e.g. a fixed height so boxes side by side
    *  match. */
   box?: string;
@@ -65,7 +69,7 @@ function Zone({ tone, filled, disabled, onFiles, multiple, accept, inputRef, chi
   const t = DROP_TONES[tone];
   return (
     <div
-      onClick={() => { if (!disabled) inputRef.current?.click(); }}
+      onClick={() => { if (!disabled && clickable) inputRef.current?.click(); }}
       onDragOver={e => { e.preventDefault(); if (!disabled) setDrag(true); }}
       onDragLeave={() => setDrag(false)}
       onDrop={e => {
@@ -76,7 +80,7 @@ function Zone({ tone, filled, disabled, onFiles, multiple, accept, inputRef, chi
       }}
       className={`rounded-lg border-2 border-dashed p-4 text-center transition select-none ${box ?? ""}
         ${disabled ? "cursor-not-allowed opacity-50 border-border bg-surface-2"
-          : `cursor-pointer ${drag ? "border-navy bg-navy/5"
+          : `${clickable ? "cursor-pointer" : ""} ${drag ? "border-navy bg-navy/5"
               : filled ? "border-emerald-300 bg-emerald-50/40" : t.idle}`}`}>
       <input
         ref={inputRef} type="file" className="hidden" disabled={disabled}
@@ -122,8 +126,11 @@ function Prompt({ tone, hint }: { tone: DropTone; hint?: string }) {
 
 /** ONE file. */
 export function FileDrop({
-  box, label, icon, file, onPick, accept, hint, tone, required, disabled, disabledNote,
+  box, label, icon, file, onPick, accept, hint, tone, required, disabled, disabledNote, altAction,
 }: {
+  /** A second way to fill the box, offered inside it beside the upload — as
+   *  the broker setup's output template: upload one, or create one. */
+  altAction?: { label: string; onClick: () => void; hint?: string };
   label: string;
   icon: ReactNode;
   file: File | null;
@@ -147,7 +154,7 @@ export function FileDrop({
 
   return (
     <Zone box={box} tone={tone} filled={!!file} disabled={disabled} accept={accept} inputRef={ref}
-      onFiles={fs => onPick(fs[0] ?? null)}>
+      clickable={!altAction || !!file} onFiles={fs => onPick(fs[0] ?? null)}>
       <Head icon={icon} label={label} tone={tone} filled={!!file} required={required} />
       {file ? (
         <div className="flex items-center justify-center gap-1.5 text-[11px] text-emerald-700">
@@ -161,6 +168,28 @@ export function FileDrop({
         </div>
       ) : disabled ? (
         <div className="text-[11px] text-ink-muted">{disabledNote ?? "Not available yet"}</div>
+      ) : altAction ? (
+        <div className="text-[11px] text-ink-muted">
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <button type="button"
+              onClick={e => { e.stopPropagation(); ref.current?.click(); }}
+              className={`inline-flex items-center gap-1 rounded-md border border-border
+                bg-white px-2.5 py-1 font-medium transition hover:border-brand
+                hover:bg-surface-2 ${DROP_TONES[tone].cta}`}>
+              <UploadCloud size={12} /> Upload BDX Layout
+            </button>
+            <span className="text-ink-soft">or</span>
+            <button type="button"
+              onClick={e => { e.stopPropagation(); altAction.onClick(); }}
+              className="inline-flex items-center gap-1 rounded-md border border-border
+                bg-white px-2.5 py-1 font-medium text-ink transition
+                hover:border-brand hover:bg-surface-2">
+              <Sparkles size={12} /> {altAction.label}
+            </button>
+          </div>
+          {hint ? <div className="mt-1.5 opacity-80">{hint}</div> : null}
+          {altAction.hint ? <div className="mt-0.5 text-ink-soft">{altAction.hint}</div> : null}
+        </div>
       ) : (
         <Prompt tone={tone} hint={hint} />
       )}

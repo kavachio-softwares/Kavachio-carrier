@@ -739,6 +739,9 @@ def test_the_reinsurer_signs_the_treaty_on_the_document(w, monkeypatch):
     assert rec["unsigned_sides"] == []
     assert {g["signer_name"] for g in rec["signatures"]} == {"Dana", "Sam Swiss"}
     assert rec["lifecycle"] in ("signed", "active")
+    # Signed in Kavachio, the sealed PDF is the treaty's signed wording (26.3).
+    su = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
+    assert su["wording"]["source"] == "esigned"
 
 
 # ── the lead reinsurer signs on its link ────────────────────────────────────
@@ -760,13 +763,66 @@ def test_a_signing_link_waits_for_the_carrier_to_sign_first(w, sent):
     assert r.status_code == 409 and "carrier signs first" in r.text
 
 
-def test_only_the_lead_reinsurer_is_asked_to_sign(w, sent):
-    cid = _carrier_signed(w)
-    client.post(f"/contracts/{cid}/sign", headers=w["ch"],
-                json={"signer_name": "Dana"})
+def test_a_master_treaty_is_signed_party_by_party(w, sent):
+    """Each reinsurer signs for its own lines under the one shared wording —
+    on its link, or on paper recorded against evidence — and the placement
+    says how much is written and how much is signed, layer by layer."""
+    cid = _carrier_signed(w)                    # layer 1: 60 + 40, layer 2: 50 + 40
+    pl = client.get(f"/contracts/{cid}/placement", headers=w["ch"]).json()
+    l1, l2 = pl["layers"]
+    assert (l1["written_status"], l2["written_status"]) == ("fully_placed", "partially_placed")
+    assert l2["written_pct"] == 90 and l2["retained_pct"] == 10
+    assert pl["written_status"] == "partially_placed" and pl["signed_status"] == "unsigned"
+    # Not before the carrier has signed.
+    assert "carrier signs first" in pl["can_record"][str(w["munich"])]
+
+    client.post(f"/contracts/{cid}/sign", headers=w["ch"], json={"signer_name": "Dana"})
+    # Munich — not the lead — is asked to sign, and signs its own lines.
     r = client.post(f"/contracts/{cid}/reinsurer-access", headers=w["ch"],
                     json={"contact_ids": [w["c_munich"]], "sign": True})
-    assert r.status_code == 400 and "lead reinsurer" in r.text
+    assert r.status_code == 200, r.text
+    lid, token, code = sent[-1]
+    h = _unlock(token, code)
+    assert client.get(f"/treaty-view/{token}", headers=h).json()["signature"]["can_sign"]
+    r = client.post(f"/treaty-view/{token}/sign", headers=h, json={
+        "signer_name": "Mia Munich", "signer_title": "Underwriter", "consent": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["in_force"] is False             # the lead has not signed
+    pl = client.get(f"/contracts/{cid}/placement", headers=w["ch"]).json()
+    mia = next(x for x in pl["layers"][0]["lines"] if x["party_id"] == w["munich"])
+    assert mia["status"] == "signed" and mia["signature"]["method"] == "link"
+    assert pl["layers"][0]["signed_pct"] == 40 and pl["signed_status"] == "partially_signed"
+    assert pl["parties_signed"] == 1 and pl["parties"] == 2
+
+    # Swiss (the lead) signed on paper: recorded only against evidence.
+    rec = client.post(f"/contracts/{cid}/placement/{w['swiss']}/signature", headers=w["ch"],
+                      json={"signer_name": "Sam Swiss", "document_id": 999999})
+    assert rec.status_code == 400
+    slip = client.post(f"/contracts/{cid}/documents", headers=w["ch"],
+                       files={"file": ("swiss-line.pdf", b"%PDF-1.4 slip", "application/pdf")},
+                       data={"kind": "signed_line", "party_id": str(w["swiss"])})
+    assert slip.status_code == 200, slip.text
+    doc_id = slip.json()["document"]["id"]
+    assert slip.json()["document"]["party_id"] == w["swiss"]
+    rec = client.post(f"/contracts/{cid}/placement/{w['swiss']}/signature", headers=w["ch"],
+                      json={"signer_name": "Sam Swiss", "document_id": doc_id})
+    assert rec.status_code == 200, rec.text
+    pl = rec.json()
+    sam = next(x for x in pl["layers"][0]["lines"] if x["party_id"] == w["swiss"])
+    assert sam["signature"]["method"] == "recorded"
+    assert sam["signature"]["evidence"]["filename"] == "swiss-line.pdf"
+    # Every line signed; layer 2 is still only 90% written.
+    assert pl["layers"][0]["signed_status"] == "fully_signed"
+    assert pl["layers"][1]["signed_status"] == "fully_signed"
+    assert pl["written_status"] == "partially_placed"
+    t = client.get(f"/contracts/{cid}", headers=w["ch"]).json()
+    assert t["lifecycle"] == "active"                # the lead's signature puts it in force
+    assert t["treaty"]["placement"]["signed_status"] == "fully_signed"
+
+    # Munich's withdrawn: signed again only by Swiss.
+    pl = client.delete(f"/contracts/{cid}/placement/{w['munich']}/signature",
+                       headers=w["ch"]).json()
+    assert pl["signed_status"] == "partially_signed" and pl["parties_signed"] == 1
 
 
 def test_the_lead_reinsurer_signs_on_its_link_and_the_treaty_goes_live(w, sent):
@@ -811,3 +867,91 @@ def test_the_lead_reinsurer_signs_on_its_link_and_the_treaty_goes_live(w, sent):
     mine = next(x for x in acc["links"] if x["id"] == lid)
     assert mine["sign_requested_at"] and mine["signed_at"]
     assert any(e["type"] == "signed" for e in acc["events"])
+
+
+# ── 26.3: configured from its signed wording ────────────────────────────────
+def _pdf(*pages):
+    import fitz
+    doc = fitz.open()
+    for t in pages:
+        doc.new_page().insert_text((72, 72), t)
+    return doc.tobytes()
+
+
+def test_a_treaty_is_configured_from_its_signed_wording(w):
+    """Documentation and configuration are statuses of their own; only a
+    document marked as the signed copy, that opens, is the signed wording; it
+    is read page by page with sources, and the confirmed terms configure it."""
+    import json as _j
+    import treaty_reader
+    cid = _create(w).json()["id"]
+    rec = client.get(f"/contracts/{cid}", headers=w["ch"]).json()["treaty"]
+    assert rec["documentation"]["status"] == "missing"
+    assert rec["configuration"]["status"] == "not_started"
+    assert rec["lifecycle"] == "draft"
+
+    # An unmarked wording is not the signed wording; a marked one that will
+    # not open is not either.
+    up = lambda data, signed: client.post(              # noqa: E731
+        f"/contracts/{cid}/documents", headers=w["ch"],
+        files={"file": ("wording.pdf", data, "application/pdf")},
+        data={"kind": "contract", "is_executed_copy": str(signed).lower()})
+    assert up(_pdf("draft"), False).status_code == 200
+    assert client.get(f"/contracts/{cid}/wording", headers=w["ch"]).json()["wording"] is None
+    r = up(b"not a pdf at all", True)
+    assert r.status_code == 200 and r.json()["document"]["validation"]["status"] == "unreadable"
+    assert client.get(f"/contracts/{cid}/wording", headers=w["ch"]).json()["wording"] is None
+    r = up(_pdf("Quota share treaty between the reinsured and Swiss Re.",
+                "Cession 35 percent. Currency USD."), True)
+    doc = r.json()["document"]
+    assert doc["validation"]["status"] == "valid" and doc["version"] == "v3"
+    wd = client.get(f"/contracts/{cid}/wording", headers=w["ch"]).json()
+    assert wd["documentation"]["status"] == "received"
+    assert wd["wording"]["validation"]["pages"] == 2 and wd["wording"]["uploaded_by"]
+    assert client.get(f"/contracts/{cid}/wording/pages/2",
+                      headers=w["ch"]).headers["content-type"] == "image/png"
+
+    # Read: each term with its page.
+    answer = _j.dumps({"treaty_type": "quota_share", "terms": {"cession_pct": 35, "currency": "USD"},
+                       "layers": [{"name": "QS", "terms": {}, "shares": [
+                           {"reinsurer": "Swiss Re", "share_pct": 100, "is_lead": True}]}],
+                       "effective_date": "2027-01-01",
+                       "sources": {"terms.cession_pct": {"page": 2, "quote": "Cession 35 percent"},
+                                   "terms.currency": {"page": 2, "quote": "Currency USD"},
+                                   "treaty_type": {"page": 1, "quote": "Quota share treaty"},
+                                   "bogus": {"page": 9, "quote": "out of range"}}})
+    real = treaty_reader.read_treaty
+    import pytest as _pt
+    mp = _pt.MonkeyPatch()
+    mp.setattr(treaty_reader, "read_treaty",
+               lambda text, parties, **kw: real(text, parties, **{**kw, "call": lambda p: answer}))
+    try:
+        r = client.post(f"/contracts/{cid}/wording/read", headers=w["ch"])
+    finally:
+        mp.undo()
+    assert r.status_code == 200, r.text
+    reading = r.json()["reading"]
+    assert reading["sources"]["terms.cession_pct"] == {"page": 2, "quote": "Cession 35 percent"}
+    assert "bogus" not in reading["sources"] and reading["effective_date"] == "2027-01-01"
+    assert r.json()["configuration"]["status"] == "in_progress"
+
+    # Confirm: the reviewed terms become the structure, with their sources kept.
+    st = reading["treaty"]
+    st["layers"][0]["shares"][0]["reinsurer_party_id"] = w["swiss"]
+    r = client.post(f"/contracts/{cid}/wording/confirm", headers=w["ch"], json={
+        "treaty": st, "sources": reading["sources"], "effective_date": "2027-01-01"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["structure"]["terms"]["cession_pct"] == 35
+    assert out["review"]["sources"]["terms.currency"]["page"] == 2
+    assert out["review"]["document"]["version"] == "v3"
+    assert out["lifecycle"] == "draft"               # the lifecycle is its own
+
+
+def test_placement_statuses():
+    import treaty_placement as tp
+    assert [tp.written_status(x) for x in (0, 60, 99.999, 100, 100.004, 110)] == \
+        ["unplaced", "partially_placed", "fully_placed", "fully_placed", "fully_placed",
+         "over_placed"]
+    assert [tp.signed_status(sg, wr) for sg, wr in ((0, 100), (40, 100), (90, 90), (100, 100))] == \
+        ["unsigned", "partially_signed", "fully_signed", "fully_signed"]

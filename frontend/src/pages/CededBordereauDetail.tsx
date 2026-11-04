@@ -160,6 +160,15 @@ export default function CededBordereauDetail() {
             )}
           </div>
         )}
+        {d.basis_changed && (
+          <div className="note warn" style={{ marginBottom: 14 }}>
+            <b>The treaty&rsquo;s terms for {d.period} have changed since this was sent.</b>{" "}
+            A dated change on its Calculation basis (or an endorsement) reaches back into this
+            period. What was sent stays as it was — the figures were worked out with the terms
+            in force then.{" "}
+            <Link className="linkish" to={`/contracts/${d.contract_id}?tab=basis`}>See the terms</Link>
+          </div>
+        )}
         {d.status === "superseded" && (
           <div className="note" style={{ marginBottom: 14 }}>
             A newer version of this statement has been sent.{" "}

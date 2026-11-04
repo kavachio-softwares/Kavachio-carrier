@@ -1,7 +1,12 @@
 /**
- * Configure Program — the whole setup as one flow on one screen:
- *   1. the programme, 2. its brokers, 3. their contracts, 4. each broker's
- *   Bordereau Setup (built on its own screen, reached from step 4 here).
+ * Configure Program — the whole setup on one screen. First the programme,
+ * common to both sides; then two tabs:
+ *   Broker       its brokers, their contracts, and each broker's Bordereau
+ *                Setup (built on its own screen, reached from here).
+ *   Reinsurance  the treaties protecting the programme and each one's
+ *                reinsurance bordereau setup — the carrier's own, irrespective
+ *                of the brokers (?tab=reinsurance). Optional: a programme
+ *                takes files without a treaty.
  *
  * The same screen picks up an existing programme at /programs/:id/setup?stage=N
  * — the Programmes list sends every row and every pill there, so the stepper
@@ -40,7 +45,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { PROGRAMME_FREQUENCIES } from "../constants/frequency";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Copy, FileText, Plus, Upload, UserPlus } from "lucide-react";
+import { Check, Copy, FileText, Plus, Upload, UserPlus } from "lucide-react";
 import { api } from "../api/client";
 import { currentMga } from "../auth";
 import { PageBody, PageHeader } from "../components/Layout";
@@ -58,6 +63,8 @@ import { InviteSentModal } from "../components/InviteSentModal";
 import AddContractModal from "../components/AddContractModal";
 import { fetchContractOriginal, fetchDocument, getContract } from "../api/contractRecord";
 import { getProgrammeTreaties } from "../api/treaty";
+import ProgrammeTreatiesStep from "../components/treaty/ProgrammeTreatiesStep";
+import { SetupTabs, useSetupTab, type SetupTab } from "../components/SetupTabs";
 import { Pagination } from "../components/Pagination";
 import { addsCarrierUsers, useCarrierSeat } from "../hooks/useCarrierSeat";
 import { getSegments, addSegment, type Segment } from "../api/segments";
@@ -155,6 +162,8 @@ export default function AddProgram() {
   // list is open.
   const [programId, setProgramId] = useState<number | null>(null);
   const [configuring, setConfiguring] = useState(false);
+  // Step 1 folds to a line once configured; this opens its details again.
+  const [showProgramme, setShowProgramme] = useState(false);
   const [assigning, setAssigning] = useState(false);
   // Brokers an earlier attempt already put on the programme. The server
   // refuses a second add ("already on this programme", 409), so a retry after
@@ -198,11 +207,12 @@ export default function AddProgram() {
   const [contractSaved, setContractSaved] = useState(false);
   // Which section is on screen. The stepper at the top moves between them; each
   // section also moves on to the next by itself once it is saved.
-  const [stage, setStage] = useState<1 | 2 | 3 | 4>(1);
-  // How many treaties protect this programme, for the link to its
-  // Reinsurance page (Phase 26.2). Reinsurance is not a step of the set-up —
-  // a programme takes files without it — so it is a link, not a fifth pill.
+  const [stage, setStage] = useState<2 | 3 | 4>(2);
+  // How many treaties protect this programme (added in step 3), and how many
+  // have their reinsurance bordereau in use (step 4). Optional: a programme
+  // takes files without a treaty, so neither ever holds a step up.
   const [treatyCount, setTreatyCount] = useState<number | null>(null);
+  const [treatiesInUse, setTreatiesInUse] = useState(0);
   useEffect(() => {
     if (programId == null) return;
     getProgrammeTreaties(programId).then(d => setTreatyCount(d.live_count))
@@ -245,7 +255,7 @@ export default function AddProgram() {
       setRequested(new Set((p.brokers_awaiting ?? [])
         .map(b => b.broker_party_id).filter((id): id is number => id != null)));
       const want = Number(search.get("stage"));
-      setStage(want >= 1 && want <= 4 ? (want as 1 | 2 | 3 | 4) : 2);
+      setStage(want >= 2 && want <= 4 ? (want as 2 | 3 | 4) : 2);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resumeId]);
@@ -501,12 +511,6 @@ export default function AddProgram() {
     `/direct/setup?program_id=${programId}&broker_party_id=${brokerId}&flow=1`;
   const steps: FlowStep[] = [
     {
-      key: "programme", label: "Configure program",
-      sub: locked ? name.trim() : "Name and how often it reports",
-      state: locked ? "done" : "current", enabled: true,
-      onClick: () => setStage(1),
-    },
-    {
       key: "brokers", label: "Assign brokers",
       sub: assigned.size > 0 ? plural(assigned.size, "broker") + " assigned"
         : locked ? "Who sends you files" : "After the programme is saved",
@@ -517,7 +521,8 @@ export default function AddProgram() {
     },
     {
       key: "contracts", label: "Contracts",
-      sub: contractsDone ? "Every broker has a contract"
+      sub: contractsDone
+        ? "Every broker has a contract"
         : assigned.size > 0 ? `${withContract.length} of ${assigned.size} brokers have a contract`
         : "After brokers are assigned",
       state: contractsDone ? "done" : "todo",
@@ -541,9 +546,23 @@ export default function AddProgram() {
       onClick: () => setStage(4),
     },
   ];
+  // The programme is common to both; then two sides: the brokers' flow, and
+  // the carrier's own reinsurance — apart, as neither waits on the other.
+  // Both open once the programme is saved.
+  const sides: SetupTab[] = [
+    { key: "broker", label: "Broker",
+      info: "The brokers who send you business for this programme, their contracts and their bordereau setups.",
+      disabled: !locked, disabledReason: "Configure the programme first" },
+    { key: "reinsurance", label: "Reinsurance",
+      ...(treatyCount ? { count: treatyCount, warn: treatiesInUse < treatyCount } : {}),
+      info: "The treaties protecting this programme and each one's reinsurance bordereau — irrespective of the brokers.",
+      disabled: !locked, disabledReason: "Configure the programme first" },
+  ];
+  const [wantSide, setSide] = useSetupTab(sides);
+  const side = locked ? wantSide : "broker";
   // Whichever section is open is the current step, unless it is already done.
   steps.forEach((st, i) => {
-    st.open = i + 1 === stage;
+    st.open = i + 2 === stage;
     if (st.open && st.state !== "done") st.state = "current";
   });
 
@@ -568,10 +587,38 @@ export default function AddProgram() {
           </div>
         )}
 
-        <FlowStepper steps={steps} label="Configure program steps" />
-
-        {stage === 1 && (
-          <Card title={<Step n={1}>Programme</Step>}>
+        {/* The programme — common to Broker and Reinsurance. Once configured it
+            folds to a line; its details can still be opened to read. */}
+        <Card className="mb-5"
+          title={<span className="flex items-center gap-2">
+            <Step n={1}>Configure program</Step>
+            {locked && <span className="inline-flex items-center gap-1 rounded-full bg-ok/10 px-2 py-0.5 text-[11px] font-medium text-ok">
+              <Check size={11} strokeWidth={3} /> Configured</span>}
+          </span>}
+          action={locked ? (
+            <button type="button" className="text-xs font-medium text-navy hover:underline"
+              onClick={() => setShowProgramme(v => !v)}>
+              {showProgramme ? "Hide details" : "Show details"}
+            </button>
+          ) : undefined}>
+          {locked && !showProgramme ? (
+            // Each value under the same label as on the form, so the folded
+            // line says what it is.
+            <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-5">
+              {([
+                ["Programme name", name.trim()],
+                ["Business segment", segment],
+                ["Product line", productLine.trim()],
+                ["BDX frequency", PROGRAMME_FREQUENCIES.find(f => f.value === frequency)?.label ?? frequency],
+                ["Status", status ? status[0].toUpperCase() + status.slice(1) : ""],
+              ] as const).map(([label, value]) => (
+                <div key={label} className="min-w-0">
+                  <dt className="text-xs font-medium text-ink-muted">{label}</dt>
+                  <dd className={`m-0 truncate ${label === "Programme name" ? "font-semibold" : ""}`}>{value || "—"}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : (<>
             {/* Locked once saved: this form only ever CREATES, so editing a
                 field after step 1 would change nothing — and look as if it had. */}
             <fieldset disabled={locked} className="m-0 min-w-0 border-0 p-0">
@@ -659,40 +706,37 @@ export default function AddProgram() {
               </div>
             </fieldset>
 
-            <div className="mt-5 flex items-center justify-end border-t border-border pt-4">
-              {!locked ? (
+            {!locked && (
+              <div className="mt-5 flex items-center justify-end border-t border-border pt-4">
                 <button
                   className="rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark disabled:opacity-50"
                   onClick={configure} disabled={configuring || !name.trim()}
                   title={name.trim() ? undefined : "Give the programme a name first"}>
                   {configuring ? "Configuring…" : "Configure Program"}
                 </button>
-              ) : (
-                <div className="flex w-full items-center justify-between gap-3">
-                  <p className="text-sm font-medium text-ok">
-                    {resumeId != null ? "Programme configured." : "Programme configured — now assign its brokers."}
-                    {programId != null && (
-                      <Link to={`/programs/${programId}/reinsurance`}
-                            className="ml-3 font-semibold text-navy hover:underline">
-                        Reinsurance: {treatyCount == null ? "…"
-                          : treatyCount === 0 ? "none yet"
-                          : `${treatyCount} treat${treatyCount === 1 ? "y" : "ies"}`} →
-                      </Link>
-                    )}
-                  </p>
-                  <button
-                    className="shrink-0 rounded bg-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-navy-dark"
-                    onClick={() => setStage(2)}>
-                    Next: Assign brokers →
-                  </button>
-                </div>
-              )}
-            </div>
-          </Card>
+              </div>
+            )}
+          </>)}
+        </Card>
+
+        {/* Step 2: what the programme is set up for — its brokers, or its
+            reinsurance. Shown before the programme is saved, shut, so it
+            reads as what comes next. */}
+        <div className="mb-2 text-base font-semibold">
+          <Step n={2}>Set it up for brokers and reinsurance</Step>
+        </div>
+        <SetupTabs tabs={sides} current={side} onChange={setSide} />
+        {!locked && (
+          <div className="rounded border border-dashed border-border px-3 py-4 text-center text-sm text-ink-muted">
+            Configure the programme first — then assign its brokers, or set up its reinsurance.
+          </div>
         )}
 
+        {locked && side === "broker" && (<>
+        <FlowStepper steps={steps} label="Broker set-up steps" />
+
         {stage === 2 && (
-          <Card title={<Step n={2}>Assign brokers</Step>}
+          <Card title={<Step n={1}>Assign brokers</Step>}
             action={
               <button type="button"
                 className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-medium hover:border-navy disabled:opacity-50"
@@ -833,7 +877,7 @@ export default function AddProgram() {
 
         {stage === 3 && assigned.size > 0 && programId != null && (
           <div>
-            <Card title={<Step n={3}>Add contracts</Step>}>
+            <Card title={<Step n={2}>Add contracts</Step>}>
               <p className="mb-3 text-xs leading-relaxed text-ink-muted">
                 A contract is what each broker's bordereaux are checked against.{" "}
                 <b className="font-medium text-ink">Raise a contract</b> to set the terms now, or{" "}
@@ -977,7 +1021,7 @@ export default function AddProgram() {
         )}
 
         {stage === 4 && programId != null && (
-          <Card title={<Step n={4}>Bordereau setup</Step>}>
+          <Card title={<Step n={3}>Bordereau setup</Step>}>
             <p className="mb-3 text-xs leading-relaxed text-ink-muted">
               A setup says what each broker's file must look like, built from their
               contract. A broker's file can be checked once their setup is in use.
@@ -1033,6 +1077,28 @@ export default function AddProgram() {
               <p className={`text-xs ${setupDone ? "text-ok" : "text-ink-muted"}`}>
                 {setupDone ? "Everything is in place — files for this programme can be checked."
                   : "You can come back to this from the Programmes list at any time."}
+              </p>
+              <button type="button"
+                className="shrink-0 rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"
+                onClick={() => nav("/programs")}>
+                Back to Programmes
+              </button>
+            </div>
+          </Card>
+        )}
+        </>)}
+
+        {/* The carrier's own reinsurance: its treaties and each one's
+            reinsurance bordereau setup. Irrespective of the brokers — open as
+            soon as the programme is saved, and nothing here waits on them. */}
+        {side === "reinsurance" && programId != null && (
+          <Card title={<>Reinsurance <span className="ml-1 text-xs font-normal text-ink-muted">optional</span></>}>
+            <ProgrammeTreatiesStep programId={programId}
+              onChange={(live, inUse) => { setTreatyCount(live); setTreatiesInUse(inUse); }} />
+            <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-4">
+              <p className="text-xs text-ink-muted">
+                A treaty's reinsurance bordereau reads your brokers' bordereaux where their setups are in use —
+                or your own input template, uploaded in its setup.
               </p>
               <button type="button"
                 className="shrink-0 rounded border border-border px-3 py-1.5 text-sm hover:bg-surface-2"

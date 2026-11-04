@@ -26,6 +26,10 @@
  * Nothing is written until the last step. A programme or broker created inline
  * is the exception, and says so: those are shared things.
  */
+import {
+  DEFAULT_PROFIT, DEFAULT_SCALE, ProfitCommissionEditor, SlidingScaleEditor, profitText, scaleText,
+} from "../components/treaty/CommissionEditors";
+import type { ProfitCommission, SlidingScale } from "../api/treaty";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Check, Download, FileText, PenLine, Plus, Trash2 } from "lucide-react";
@@ -208,6 +212,17 @@ export default function ContractNew() {
   const [endorseId, setEndorseId] = useState("");
   const [endorsable, setEndorsable] = useState<ContractRecordT[]>([]);
   const [endorseFrom, setEndorseFrom] = useState("");
+  // A treaty's calculation terms the endorsement changes: "term:layer" → new value.
+  const [endorseBasis, setEndorseBasis] = useState<Record<string, string>>({});
+  // The sliding-scale and profit commission an endorsement replaces, as their
+  // own small structures: "term:layer" → the new terms.
+  const [endorseComm, setEndorseComm] = useState<Record<string, SlidingScale | ProfitCommission>>({});
+  const basisMoves: { term: string; layer: number | null; value: unknown }[] = [
+    ...Object.entries(endorseBasis).filter(([, v]) => v.trim() !== "")
+      .map(([k, v]) => ({ k, value: Number(v) as unknown })),
+    ...Object.entries(endorseComm).map(([k, v]) => ({ k, value: v as unknown })),
+  ].map(({ k, value }) => { const [term, layer] = k.split(":");
+    return { term, layer: layer === "" ? null : Number(layer), value }; });
   const [endorseNote, setEndorseNote] = useState("");
   const [endorsePv, setEndorsePv] = useState<EndorsementPreview | null>(null);
 
@@ -291,9 +306,10 @@ export default function ContractNew() {
     try {
       setEndorsePv(await previewEndorsement(Number(endorseId), {
         agreed_limits: limits, effective_from: endorseFrom || null,
-        note: endorseNote || null }));
+        note: endorseNote || null, basis: basisMoves }));
     } catch (e) { setMessage(fieldErrors(e).message); }
-  }, [endorseId, limits, endorseFrom, endorseNote]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endorseId, limits, endorseFrom, endorseNote, JSON.stringify(basisMoves)]);
 
   useEffect(() => {
     if (kind !== "endorse" || !endorseId) return;
@@ -308,7 +324,7 @@ export default function ContractNew() {
     try {
       const r = await createEndorsement(Number(endorseId), {
         agreed_limits: limits, effective_from: endorseFrom || null,
-        note: endorseNote || null, sections: endorsePv?.sections });
+        note: endorseNote || null, sections: endorsePv?.sections, basis: basisMoves });
       nav(`/contracts/${r.id}`, { state: { notice:
         `Endorsement ${r.endorsement.number} attached. The wording and the `
         + `endorsement are both active — re-read the contract to rebuild its `
@@ -1628,6 +1644,80 @@ export default function ContractNew() {
       done: limitsSet(g.key) > 0, short: false,
       body: <>{limitsHead}{limitPanel(g)}{limitsFold}</>,
     })),
+    // A treaty: the calculation basis it changes, from its effective date.
+    ...(endorsePv?.basis?.length ? [{
+      key: "basis", label: "Calculation basis",
+      meta: basisMoves.length ? `${basisMoves.length} changed` : "Unchanged",
+      done: basisMoves.length > 0, short: false,
+      body: (
+        <>
+          <div className="fh">
+            The calculation basis — change what moved
+            <InfoTip text="Each term you change becomes a dated term from this endorsement's effective date: statements for later periods use it, earlier ones keep what they were worked out with." />
+          </div>
+          <div className="hint" style={{ marginBottom: 10 }}>
+            Applies from {endorseFrom || "the endorsement's effective date (set it on “What this endorsement says”)"}.
+            Leave a term empty to keep it as it is.
+          </div>
+          <div className="tbl-wrap">
+            <table className="panel-tbl" style={{ textAlign: "left" }}>
+              <thead><tr><th>Term</th><th>In force{endorseFrom ? ` on ${endorseFrom}` : " today"}</th>
+                <th style={{ width: 200 }}>From this endorsement</th></tr></thead>
+              <tbody>
+                {endorsePv.basis.map(t => {
+                  const k = `${t.term}:${t.layer ?? ""}`;
+                  if (t.kind === "sliding" || t.kind === "profit") {
+                    // A commission term: changed as a whole, with its editor.
+                    const now = t.value as SlidingScale | ProfitCommission | null;
+                    const next = endorseComm[k];
+                    return (
+                      <tr key={k} style={{ verticalAlign: "top" }}>
+                        <td><b style={{ fontWeight: 600 }}>{t.label}</b></td>
+                        <td className="sub">{t.kind === "sliding"
+                          ? scaleText(now as SlidingScale) : profitText(now as ProfitCommission)}</td>
+                        <td>
+                          {next ? (
+                            <>
+                              {t.kind === "sliding"
+                                ? <SlidingScaleEditor value={next as SlidingScale}
+                                    onChange={v => setEndorseComm(m => ({ ...m, [k]: v }))} />
+                                : <ProfitCommissionEditor value={next as ProfitCommission}
+                                    onChange={v => setEndorseComm(m => ({ ...m, [k]: v }))} />}
+                              <button className="btn sm" type="button" style={{ marginTop: 6 }}
+                                      onClick={() => setEndorseComm(m => {
+                                        const c = { ...m }; delete c[k]; return c; })}>
+                                Keep as it is</button>
+                            </>
+                          ) : (
+                            <button className="btn sm" type="button"
+                                    onClick={() => setEndorseComm(m => ({ ...m, [k]:
+                                      now ?? (t.kind === "sliding" ? DEFAULT_SCALE : DEFAULT_PROFIT) }))}>
+                              {now ? "Change it" : "Agree it from this date"}</button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return (
+                    <tr key={k}>
+                      <td><b style={{ fontWeight: 600 }}>{t.label}</b>
+                        {t.layer_name && <div className="sub">{t.layer_name}</div>}</td>
+                      <td className="mono">{t.value == null ? "—"
+                        : t.kind === "pct" ? `${t.value}%` : Number(t.value).toLocaleString()}</td>
+                      <td>
+                        <input inputMode="decimal" value={endorseBasis[k] ?? ""}
+                               placeholder={t.kind === "pct" ? "new %" : "new value"}
+                               onChange={e => setEndorseBasis(m => ({ ...m, [k]: e.target.value }))} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ),
+    }] : []),
     { key: "attach", label: "What this endorsement says",
       meta: endorseChanges
         ? `${endorseChanges} change${endorseChanges !== 1 ? "s" : ""}`

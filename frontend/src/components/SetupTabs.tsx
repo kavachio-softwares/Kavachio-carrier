@@ -15,7 +15,9 @@ import { InfoTip } from "./InfoTip";
 export type SetupTabKey = "details" | "documents" | "overview" | "mapping"
   | "contracts" | "output" | "attention" | "calendar"
   // A treaty's reinsurance bordereau setup (pages/ReinsuranceSetupEdit.tsx).
-  | "recipients" | "preview" | "input" | "rules";
+  | "recipients" | "preview" | "input" | "rules"
+  // Configure Program's two sides (pages/AddProgram.tsx).
+  | "broker" | "reinsurance";
 
 export type SetupTab = {
   key: SetupTabKey;

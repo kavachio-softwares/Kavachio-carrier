@@ -22,6 +22,7 @@ import { Calculator, FileSpreadsheet, Loader2, Upload } from "lucide-react";
 import { fieldErrors } from "../../api/contractRecord";
 import { Combo } from "../DirectMappingWidgets";
 import {
+  ruleSource,
   uploadInputSample, type InputLayout, type SetupColumn, type SetupPreview,
   type SetupRecord, type SetupValues,
 } from "../../api/ceded";
@@ -52,6 +53,44 @@ function uniqueColumns(cols: { name: string; field: string | null }[]) {
     by.set(c.name, fs);
   }
   return [...by.entries()].map(([name, fields]) => ({ name, fields }));
+}
+
+/** The fields an output column reads, and whether it is worked out. */
+function needsOf(rec: SetupRecord, c: SetupColumn): { fields: string[]; how: string | null } {
+  if (c.key.startsWith("field:")) return { fields: [c.key.slice(6)], how: null };
+  // Copied from one exact input column.
+  if (c.key.startsWith("col:")) return { fields: [], how: null };
+  // The cession % is the treaty's, not a column's.
+  if (c.key === "ceded_pct") return { fields: [], how: null };
+  const d = rec.options.derived[c.key];
+  if (!d) return { fields: [], how: null };
+  return { fields: d.fields, how: d.how === "Copied" ? null : d.how };
+}
+
+const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+/** The ONE input column filling it — named, or (of those sharing its field)
+ *  the one headed like the output, else the first: the one read. */
+function currentInputOf(rec: SetupRecord, inputCols: { name: string; fields: string[] }[],
+                        c: SetupColumn): string {
+  if (c.key.startsWith("col:")) {
+    const n = c.key.slice(4);
+    return inputCols.some(ic => ic.name === n) ? n : "";
+  }
+  const { fields } = needsOf(rec, c);
+  const hits = inputCols.filter(ic => ic.fields.some(f => fields.includes(f)));
+  return (hits.find(h => norm(h.name) === norm(c.heading)) ?? hits[0])?.name ?? "";
+}
+
+/** Output columns no input column fills yet — the edit bar's "not matched". */
+export function unmatchedOutputs(rec: SetupRecord, v: SetupValues): SetupColumn[] {
+  const inputCols = uniqueColumns(inputsOf(rec, v).flatMap(t =>
+    t.columns.map(c => ({ name: c.name, field: c.field }))));
+  return v.columns.filter(c => c.keep !== false).filter(c => {
+    const ctx = !c.key.startsWith("field:") && !c.key.startsWith("col:")
+      && needsOf(rec, c).fields.length === 0 && !!c.key;
+    return !ctx && !currentInputOf(rec, inputCols, c);
+  });
 }
 
 /** Which input fields the reinsurer's file reads. */
@@ -277,31 +316,9 @@ export function FieldMappingStep({ rec, v, change, readOnly = false, hideStrip =
     rec.options.columns.find(c => c.key === k)?.label
     ?? rec.options.context.find(c => c.key === k)?.label
     ?? (k === rec.options.share.key ? rec.options.share.label : k);
-  const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
-  /** The fields an output column reads, and whether it is worked out. */
-  function needs(c: SetupColumn): { fields: string[]; how: string | null } {
-    if (c.key.startsWith("field:")) return { fields: [c.key.slice(6)], how: null };
-    // Copied from one exact input column.
-    if (c.key.startsWith("col:")) return { fields: [], how: null };
-    // The cession % is the treaty's, not a column's.
-    if (c.key === "ceded_pct") return { fields: [], how: null };
-    const d = rec.options.derived[c.key];
-    if (!d) return { fields: [], how: null };
-    return { fields: d.fields, how: d.how === "Copied" ? null : d.how };
-  }
-
-  /** The ONE input column filling it — named, or (of those sharing its field)
-   *  the one headed like the output, else the first: the one read. */
-  function currentInput(c: SetupColumn): string {
-    if (c.key.startsWith("col:")) {
-      const n = c.key.slice(4);
-      return inputCols.some(ic => ic.name === n) ? n : "";
-    }
-    const { fields } = needs(c);
-    const hits = inputCols.filter(ic => ic.fields.some(f => fields.includes(f)));
-    return (hits.find(h => norm(h.name) === norm(c.heading)) ?? hits[0])?.name ?? "";
-  }
+  const needs = (c: SetupColumn) => needsOf(rec, c);
+  const currentInput = (c: SetupColumn) => currentInputOf(rec, inputCols, c);
 
   /** A copy column fills from one input column; a figure is worked out. */
   const isCalc = (c: SetupColumn) => !!needs(c).how;
@@ -383,7 +400,7 @@ export function FieldMappingStep({ rec, v, change, readOnly = false, hideStrip =
             <span className={r.severity === "critical" ? "text-danger" : "text-amber-700"}>
               {r.severity === "critical" ? "Critical" : "Warning"}</span>
             <span className="font-semibold normal-case text-emerald-700">
-              {r.source === "wording" ? "Treaty wording" : "Treaty terms"}</span>
+              {ruleSource(r)}</span>
           </span>
           {r.label}{r.clause ? <> — <i className="text-ink-muted">{r.clause}</i></> : null}
         </span>

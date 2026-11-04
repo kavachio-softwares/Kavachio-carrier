@@ -86,6 +86,9 @@ export type CededDetail = CededSummary & {
   versions: { id: number; version_no: number; status: CededStatus; sent_at: string | null }[];
   /** The inward files changed since this was prepared. */
   stale: boolean;
+  /** Sent, and the treaty's terms for its period changed since — a dated
+   *  change reaching back into it. What was sent stays as it was. */
+  basis_changed?: boolean;
   can_send: boolean;
   columns: { key: string; label: string; kind: "text" | "money" | "pct" }[];
   sent?: { emails: number; of: number; no_contact: (string | null)[] };
@@ -208,9 +211,14 @@ export type SetupColumn = {
   ref?: string | null;
   /** A reinsurance column added after the Lloyd's ones. */
   added?: boolean;
+  /** Built from the treaty: the term that put this column in the sheet. */
+  why?: string;
+  /** Read from a programme's contract: which one, and the clause quoted. */
+  by?: string;
+  clause?: string | null;
 };
 
-export type LayoutSource = "kavachio" | "uploaded" | "standard";
+export type LayoutSource = "kavachio" | "uploaded" | "standard" | "contract";
 
 export type InputLayout =
   | { source: "brokers" }
@@ -235,13 +243,16 @@ export type TreatyRule = {
   subject: string; params: Record<string, unknown>;
   severity: "critical" | "warning"; enabled: boolean;
   /** "terms": from the treaty's structure; "wording": read from its wording. */
-  source: "terms" | "wording"; clause: string | null;
+  source: "terms" | "wording" | "endorsement"; clause: string | null;
+  /** Read from an endorsement's clauses: which one, and the date it applies from. */
+  endorsement?: string | null; effective_from?: string | null;
 };
 
 /** A rule the rows broke — or could not be tested ("untested"). */
 export type TreatyCheck = {
   id: string; label: string; severity: "critical" | "warning" | "untested";
   source?: string | null; clause?: string | null; rows: number;
+  endorsement?: string | null; effective_from?: string | null;
   examples: { policy: string | null; value: string | null; why: string }[];
   why?: string;
   kind?: TreatyRule["kind"]; subject?: string; field?: string | null;
@@ -299,11 +310,20 @@ export type InputTemplate = {
   columns: { name: string; field: string | null; sheet: string | null }[];
 };
 
+/** The treaty's signed wording — what it is configured from (26.3). */
+export type SignedWording = {
+  source: "signed_copy" | "esigned"; filename: string | null;
+  document_id?: number; envelope_id?: number;
+};
+
 export type SetupRecord = {
   contract_id: number;
   treaty: string;
   type_label: string | null;
   has_structure: boolean;
+  /** None until supplied — and until then the setup cannot be saved. */
+  wording?: SignedWording | null;
+  wording_needed?: string;
   setup: (SetupValues & { status: SetupStatus; note: string | null;
                           has_layout_file?: boolean;
                           submitted_at: string | null; approved_at: string | null;
@@ -311,6 +331,12 @@ export type SetupRecord = {
   defaults: SetupValues;
   options: {
     programmes: { id: number; name: string; is_home: boolean }[];
+    /** The contracts on those programmes — columns can be read from them too. */
+    contracts?: { id: number; name: string; program_id: number | null; programme: string | null;
+                  broker: string | null; status: string | null }[];
+    /** The treaties protecting those programmes — this one marked `this`. */
+    treaties?: { id: number; name: string; type_label: string | null; status: string | null;
+                 program_ids: number[]; this: boolean }[];
     reinsurers: { party_id: number; name: string | null;
                   contacts: { id: number; name: string | null; email: string | null }[] }[];
     columns: { key: string; label: string; kind: string }[];
@@ -336,6 +362,8 @@ export type SetupRecord = {
 export type SetupListItem = {
   contract_id: number; treaty: string; type_label: string | null;
   lifecycle: string; has_structure: boolean; programmes: number;
+  /** A signed wording is on file — none, and the treaty cannot be configured. */
+  has_wording?: boolean;
   status: SetupStatus | null; frequency: Frequency | null;
   send_mode: "manual" | "auto" | null; updated_at: string | null;
 };
@@ -378,6 +406,16 @@ export const uploadLayout = (contractId: number, file: File) => {
 export const lloydsLayout = (contractId: number, jurisdiction: string, standardId?: string) =>
   api.post<LayoutProposal>(`/reinsurance/setups/${contractId}/layout/standard`,
     { jurisdiction, standard_id: standardId ?? null }).then(r => r.data);
+
+/** A sheet built from the treaty itself — its type, terms and rules. */
+export const treatyLayout = (contractId: number) =>
+  api.post<LayoutProposal>(`/reinsurance/setups/${contractId}/layout/contract`).then(r => r.data);
+
+/** The columns the programmes' contracts ask for, beyond `headings`. */
+export const contractColumns = (contractId: number, contractIds: number[], headings: string[]) =>
+  api.post<{ columns: SetupColumn[]; clause_count: number; unfilled: string[] }>(
+    `/reinsurance/setups/${contractId}/layout/contract-columns`,
+    { contract_ids: contractIds, headings }).then(r => r.data);
 
 export const listSetups = () =>
   api.get<{ items: SetupListItem[] }>("/reinsurance/setups").then(r => r.data.items);
@@ -437,3 +475,18 @@ export const extractTreatyRules = (contractId: number) =>
 /** Delete a draft setup (an active one is refused). */
 export const deleteSetup = (contractId: number) =>
   api.delete<{ ok: boolean }>(`/reinsurance/setups/${contractId}`).then(r => r.data);
+
+
+/** Where a treaty rule comes from, in words — its terms, its wording, or an
+ *  endorsement (from its date). */
+export function ruleSource(r: { source?: string | null; endorsement?: string | null;
+                                effective_from?: string | null }, long = false): string {
+  if (r.source === "wording") return long ? "From the treaty wording" : "Treaty wording";
+  if (r.source === "endorsement") {
+    const from = r.effective_from
+      ? ` · from ${new Date(r.effective_from).toLocaleDateString(undefined,
+          { day: "2-digit", month: "short", year: "numeric" })}` : "";
+    return `${long ? "From " : ""}${r.endorsement ?? "Endorsement"}${from}`;
+  }
+  return long ? "From the treaty terms" : "Treaty terms";
+}
