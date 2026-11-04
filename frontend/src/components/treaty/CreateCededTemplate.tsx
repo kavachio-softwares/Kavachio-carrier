@@ -11,14 +11,13 @@
  *   published columns, the mandatory ones and those the bordereaux can fill
  *   ticked, then the treaty's reinsurance columns.
  *
- *   The treaty and contracts — the treaty's type, terms and rules decide the
- *   columns, each with the term that put it there.
+ *   The treaty — its type, terms and rules decide the columns, each with
+ *   the term that put it there.
  *
- * Either way the programmes feeding the treaty have CONTRACTS as well as the
- * treaty, and "Read the terms from" lists both: the treaty (always read — the
- * statement is its) and each programme's contract, ticked by default. What a
- * ticked contract asks the bordereau to report is added as further columns,
- * read as a broker's output template reads its contract.
+ * Only the treaty is read. The broker contracts on the programmes it protects
+ * are NOT: a reinsurance statement is owed on the treaty's terms, and the
+ * treaty stands apart from the brokers. A column a contract would have added
+ * can still be added by hand when the columns are reviewed.
  *
  * Either way the proposal is reviewed — tick or untick each column — before
  * anything is added to the setup, and nothing is saved until the setup is.
@@ -32,7 +31,7 @@ import { ChoiceCard } from "../CreateOutputTemplate";
 import { getStandards, type Standard } from "../../api/outputTemplate";
 import { fieldErrors } from "../../api/contractRecord";
 import {
-  contractColumns, lloydsLayout, treatyLayout, type LayoutProposal, type SetupRecord,
+  lloydsLayout, treatyLayout, type LayoutProposal, type SetupRecord,
   type SetupValues,
 } from "../../api/ceded";
 
@@ -57,15 +56,10 @@ export default function CreateCededTemplate({ open, onClose, onCreated, cid, rec
   const [proposal, setProposal] = useState<LayoutProposal | null>(null);
   // Columns unticked in the proposal, by position.
   const [dropped, setDropped] = useState<Set<number>>(new Set());
-  // The programmes' contracts NOT read — all are read unless unticked.
-  const [skipped, setSkipped] = useState<Set<number>>(new Set());
-  const [clauses, setClauses] = useState(0);
-  const [warn, setWarn] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setMode("choose"); setErr(null); setProposal(null); setDropped(new Set()); setSheetName("");
-    setSkipped(new Set()); setClauses(0); setWarn(null);
     getStandards().then(d => {
       setStandards(d.standards);
       const first = d.standards[0];
@@ -84,14 +78,10 @@ export default function CreateCededTemplate({ open, onClose, onCreated, cid, rec
 
   const own = v.input_layout?.source === "own" ? v.input_layout : null;
   const progs = rec.options.programmes.filter(p => v.program_ids == null || v.program_ids.includes(p.id));
-  const contracts = (rec.options.contracts ?? [])
-    .filter(k => k.program_id == null || progs.some(p => p.id === k.program_id));
-  const reading = contracts.filter(k => !skipped.has(k.id));
   const scope: [string, string | null][] = [
     ["Treaty", rec.treaty],
     ["Treaty type", rec.type_label],
     ["Programmes", progs.map(p => p.name).join(", ") || null],
-    ["Contracts", contracts.length ? `${contracts.length} on the programmes` : null],
     ["Input", own ? (own.filename ?? "Your input file") : "Your brokers' bordereaux"],
   ];
 
@@ -101,18 +91,6 @@ export default function CreateCededTemplate({ open, onClose, onCreated, cid, rec
       const p = m === "standard"
         ? await lloydsLayout(cid, jurisdiction, standardId || undefined)
         : await treatyLayout(cid);
-      // Then what the ticked contracts ask for, after the sheet's own columns.
-      setWarn(null); setClauses(0);
-      if (reading.length) {
-        try {
-          const more = await contractColumns(cid, reading.map(k => k.id), p.columns.map(c => c.heading));
-          p.columns = [...p.columns, ...more.columns];
-          p.unfilled = [...(p.unfilled ?? []), ...more.unfilled];
-          setClauses(more.clause_count);
-        } catch (e) {
-          setWarn(`The contracts could not be read (${fieldErrors(e).message}) — the columns below are the ${m === "standard" ? "standard's and the treaty's" : "treaty's"} only.`);
-        }
-      }
       setProposal(p);
       // What the proposal itself leaves out starts unticked.
       setDropped(new Set(p.columns.flatMap((c, i) => c.keep === false ? [i] : [])));
@@ -128,8 +106,7 @@ export default function CreateCededTemplate({ open, onClose, onCreated, cid, rec
     .filter(i => !dropped.has(i) || locked(i)), [proposal, dropped, mode]); // eslint-disable-line react-hooks/exhaustive-deps
   const kept = keptIdx.map(i => proposal!.columns[i]);
   const unfilled = (proposal?.unfilled ?? []).filter(h => kept.some(c => c.heading === h)).length;
-  const fromTreaty = kept.filter(c => !c.by && (mode === "contract" || c.added)).length;
-  const fromContracts = kept.filter(c => !!c.by).length;
+  const fromTreaty = kept.filter(c => mode === "contract" || c.added).length;
   const leftOut = (proposal?.columns.length ?? 0) - kept.length;
   const stdLabel = proposal?.layout.standard
     ? `${proposal.layout.standard.label} (${proposal.layout.standard.jurisdiction})` : std?.label ?? "The standard";
@@ -180,13 +157,8 @@ export default function CreateCededTemplate({ open, onClose, onCreated, cid, rec
           </div>
         )}
         {busy && <div className="text-sm text-ink-muted">
-          Working out the columns{reading.length ? ` — reading ${reading.length} contract${reading.length === 1 ? "" : "s"}` : ""}…
+          Working out the columns from the treaty…
         </div>}
-        {warn && proposal && (
-          <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-[12px] text-amber-800">
-            <AlertTriangle size={15} className="mt-0.5 shrink-0" /><div>{warn}</div>
-          </div>
-        )}
 
         {mode === "choose" && (
           <div className="space-y-3">
@@ -202,11 +174,10 @@ export default function CreateCededTemplate({ open, onClose, onCreated, cid, rec
                   : "No reporting standard is bundled with this deployment."}
                 disabled={!standards.length}
                 onClick={() => setMode("standard")} />
-              <ChoiceCard icon={<FileText size={17} />} title="Treaty and contracts"
+              <ChoiceCard icon={<FileText size={17} />} title="Treaty"
                 body={rec.has_structure
-                  ? ["Based on your treaty and the programmes' contracts",
-                     "A column for what the treaty works out, for what its terms quote, and for every field a treaty rule checks",
-                     "Plus what each contract asks the bordereau to report"]
+                  ? ["Based on your treaty only",
+                     "A column for what the treaty works out, for what its terms quote, and for every field a treaty rule checks"]
                   : "Set out the treaty's structure first."}
                 disabled={!rec.has_structure}
                 onClick={() => setMode("contract")} />
@@ -226,53 +197,12 @@ export default function CreateCededTemplate({ open, onClose, onCreated, cid, rec
                   <li><b>{std?.label ?? "The standard"}</b> gives the full list of allowed columns.</li>
                   <li><b>Your input bordereaux</b> show which ones you can actually fill.</li>
                   <li><b>Your treaty</b> adds the reinsurance columns the standard doesn&apos;t have.</li>
-                  {reading.length > 0 && <li><b>The contracts you tick</b> add what they ask for that the standard doesn&apos;t have.</li>}
                 </>) : (<>
                   <li>Columns come from what <b>{rec.treaty}</b> sets out — its type, terms and rules.</li>
-                  {reading.length > 0 && <li>Plus what <b>the contracts you tick</b> ask the bordereau to report.</li>}
                   <li>Each column says which term or clause put it there.</li>
                 </>)}
               </ul>
               <div className="mt-1 text-ink-muted">You&apos;ll review the result before anything is added.</div>
-            </div>
-
-            <div>
-              <div className="mb-1 text-[12.5px] font-medium text-ink">Read the terms from</div>
-              <div className="max-h-48 space-y-1 overflow-auto rounded-lg border border-border bg-white p-2">
-                <label className="flex items-start gap-2 rounded px-1.5 py-1 text-[12.5px]">
-                  <input type="checkbox" className="mt-0.5" checked disabled
-                    title="Always read — the statement is this treaty's" />
-                  <span className="min-w-0">
-                    <b>{rec.treaty}</b>
-                    <span className="ml-1.5 rounded-full bg-navy/10 px-1.5 py-0.5 text-[10px] font-semibold text-navy">Treaty</span>
-                    <span className="block text-[11.5px] text-ink-muted">
-                      Always read — {mode === "standard" ? "its reinsurance columns" : "its type, terms and rules"}
-                    </span>
-                  </span>
-                </label>
-                {contracts.map(k => (
-                  <label key={k.id} className="flex cursor-pointer items-start gap-2 rounded px-1.5 py-1 text-[12.5px] hover:bg-surface-2">
-                    <input type="checkbox" className="mt-0.5" disabled={busy} checked={!skipped.has(k.id)}
-                      onChange={() => setSkipped(prev => {
-                        const n = new Set(prev);
-                        if (n.has(k.id)) n.delete(k.id); else n.add(k.id);
-                        return n;
-                      })} />
-                    <span className="min-w-0">
-                      <b>{k.name}</b>
-                      <span className="ml-1.5 rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold text-ink-muted">Contract</span>
-                      <span className="block text-[11.5px] text-ink-muted">
-                        {[k.programme, k.broker].filter(Boolean).join(" · ") || "On a programme this treaty protects"}
-                      </span>
-                    </span>
-                  </label>
-                ))}
-                {contracts.length === 0 && (
-                  <div className="px-1.5 py-1 text-[11.5px] text-ink-soft">
-                    No contracts on the programmes this treaty protects.
-                  </div>
-                )}
-              </div>
             </div>
 
             <div className={`grid grid-cols-1 items-end gap-3 ${mode === "standard" ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
@@ -329,13 +259,6 @@ export default function CreateCededTemplate({ open, onClose, onCreated, cid, rec
                 <li>Checked against {own ? "your input file" : "your brokers' bordereau templates"}</li>
                 {mode === "standard" && fromTreaty > 0 && (
                   <li>{fromTreaty} reinsurance column{fromTreaty === 1 ? " is" : "s are"} added at the end from the treaty</li>
-                )}
-                {fromContracts > 0 && (
-                  <li>{fromContracts} column{fromContracts === 1 ? " comes" : "s come"} from the
-                    contracts{clauses > 0 && ` (read from ${clauses} clause${clauses === 1 ? "" : "s"})`}</li>
-                )}
-                {!warn && reading.length > 0 && fromContracts === 0 && (
-                  <li>The contracts ask for nothing the sheet doesn&apos;t already have</li>
                 )}
                 {unfilled > 0 && (
                   <li>{unfilled} ticked column{unfilled === 1 ? " has" : "s have"} no data in your input — left

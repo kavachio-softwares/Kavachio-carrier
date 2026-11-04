@@ -119,7 +119,7 @@ export default function Brokers() {
        two it is depends on facts about somebody else's book, and a second
        button would let a carrier discover them by seeing which one worked. */
     <Link to="/users/new?for=broker" className="btn pri">
-      <UserPlus size={15} /> Invite a party
+      <UserPlus size={15} /> Invite a broker
     </Link>
   );
 
@@ -129,12 +129,12 @@ export default function Brokers() {
         <div className="page-head">
           <div className="t">
             <h2>
-              Party
+              Brokers
               <InfoTip text={(seat === "user"
                   ? "The broker companies you invited, and how far each one reaches. "
-                  : "The party organisations that produce into your programmes. ")
-                + "Open a party to see its contracts and people across "
-                + "every programme. Put a party on a programme from that "
+                  : "The broker organisations that produce into your programmes. ")
+                + "Open a broker to see its contracts and people across "
+                + "every programme. Put a broker on a programme from that "
                 + "programme's page."} />
             </h2>
           </div>
@@ -153,8 +153,8 @@ export default function Brokers() {
             <span>
               <b>
                 {stranded === 1
-                  ? "One party is not on a programme yet"
-                  : `${stranded} parties are not on a programme yet`}
+                  ? "One broker is not on a programme yet"
+                  : `${stranded} brokers are not on a programme yet`}
               </b>
               , so {stranded === 1 ? "it" : "they"} cannot produce anything.
             </span>
@@ -167,9 +167,9 @@ export default function Brokers() {
           <div className="card">
             <div className="empty">
               <Users2 size={22} style={{ margin: "0 auto 10px", display: "block" }} />
-              <b style={{ color: "var(--p-ink)" }}>No parties yet</b>
+              <b style={{ color: "var(--p-ink)" }}>No brokers yet</b>
               <div style={{ maxWidth: 420, margin: "4px auto 14px" }}>
-                A party is created by inviting its first admin — that person is
+                A broker is created by inviting its first admin — that person is
                 what makes the organisation reachable.
               </div>
               {invite}
@@ -183,14 +183,14 @@ export default function Brokers() {
             <div className="card-h" style={{ gap: 14, flexWrap: "wrap" }}>
               <div className="search">
                 <Search className="ic" />
-                <input placeholder="Search parties…" value={q}
+                <input placeholder="Search brokers…" value={q}
                   onChange={e => setQ(e.target.value)} />
               </div>
               <div className="right">
                 <span className="sub">
                   {needle
                     ? `${total} match${total === 1 ? "" : "es"}`
-                    : `${total} part${total === 1 ? "y" : "ies"}`}
+                    : `${total} broker${total === 1 ? "" : "s"}`}
                 </span>
               </div>
             </div>
@@ -199,7 +199,7 @@ export default function Brokers() {
               <table>
                 <thead>
                   <tr>
-                    <th>Party</th>
+                    <th>Broker</th>
                     <th>Status</th>
                     <th>Programmes</th>
                     <th>Contracts</th>
@@ -212,11 +212,16 @@ export default function Brokers() {
                     const extra = b.programmes.length - MAX_CHIPS;
                     const look = invited ? ONBOARDING.invited
                       : b.onboarding_status ? ONBOARDING[b.onboarding_status] : undefined;
+                    // A broker on no programme has nothing to open yet — no
+                    // contracts, no files — so its row is not a way in until
+                    // it is put on a programme.
+                    const opens = b.programmes.length > 0;
                     return (
                       <tr
                         key={b.id}
-                        className="click party-row"
-                        onClick={() => nav(`/brokers/${b.id}`)}
+                        className={opens ? "click party-row" : "party-row"}
+                        onClick={opens ? () => nav(`/brokers/${b.id}`) : undefined}
+                        title={opens ? undefined : "Put this broker on a programme to open it."}
                       >
                         <td>
                           {/* A link as well as a clickable row: the row alone gives
@@ -225,13 +230,17 @@ export default function Brokers() {
                           <div className="party-org">
                             <OrgAvatar name={b.legal_name} />
                             <div style={{ minWidth: 0 }}>
-                              <Link
-                                to={`/brokers/${b.id}`}
-                                onClick={e => e.stopPropagation()}
-                                className="party-nm"
-                              >
-                                {b.legal_name}
-                              </Link>
+                              {opens ? (
+                                <Link
+                                  to={`/brokers/${b.id}`}
+                                  onClick={e => e.stopPropagation()}
+                                  className="party-nm"
+                                >
+                                  {b.legal_name}
+                                </Link>
+                              ) : (
+                                <span className="party-nm">{b.legal_name}</span>
+                              )}
                               {invited && b.invitation ? (
                                 <div className="sub">
                                   Invited {b.invitation.email}
@@ -315,7 +324,7 @@ export default function Brokers() {
                         </td>
 
                         <td>
-                          <ChevronRight size={16} className="party-chev" />
+                          {opens && <ChevronRight size={16} className="party-chev" />}
                         </td>
                       </tr>
                     );
@@ -323,12 +332,12 @@ export default function Brokers() {
                 </tbody>
               </table>
               {shown.length === 0 && (
-                <div className="empty">No party matches “{q}”.</div>
+                <div className="empty">No broker matches “{q}”.</div>
               )}
             </div>
 
             <Pagination page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
-              totalItems={total} onPageChange={setPage} noun="parties" />
+              totalItems={total} onPageChange={setPage} noun="brokers" />
           </div>
         )}
       </div>

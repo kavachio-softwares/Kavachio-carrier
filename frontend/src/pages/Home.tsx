@@ -156,6 +156,7 @@ export default function Home() {
   // "N parties" the Party screen prints.
   const [progCount, setProgCount] = useState<number | null>(null);
   const [partyCount, setPartyCount] = useState<number | null>(null);
+  const [reinsurerCount, setReinsurerCount] = useState<number | null>(null);
   const [contractCount, setContractCount] = useState<number | null>(null);
   const [brokerCount, setBrokerCount] = useState<number | null>(null);
   const [treatyCount, setTreatyCount] = useState<number | null>(null);
@@ -245,6 +246,14 @@ export default function Home() {
     getBrokersPaged({ page: 1, page_size: 1, mine: true })
       .then(r => setPartyCount(r.total))
       .catch(() => setPartyCount(null));
+    // Reinsurers are parties too — kept in the Party directory (/parties), not
+    // on /brokers. Counted the way that screen counts them when filtered to
+    // reinsurers (inactive included), so the tile and the list agree.
+    api.get<{ total: number }>("/parties", {
+      params: { mga, party_type: "reinsurer", include_inactive: true, page: 1, page_size: 1 },
+    })
+      .then(r => setReinsurerCount(r.data?.total ?? 0))
+      .catch(() => setReinsurerCount(null));
     // Same trick, same reason: sent with no filters so `total` is the carrier's
     // whole book — which is the unfiltered figure the Contracts screen prints.
     listContractsPaged({ page: 1, page_size: 1 })
@@ -657,7 +666,15 @@ export default function Home() {
               {cell(3, <StatCard title="Programmes" value={fmt(progCount)} icon={Layers} onClick={() => nav("/programs")} subtitle="" />)}
 
               {seat !== "user" && (
-                cell(3, <StatCard title="Parties" value={fmt(partyCount)} icon={Users} onClick={() => nav("/brokers")} subtitle="" />)
+                cell(3, <StatCard title="Parties" icon={Users} subtitle=""
+                  value={partyCount == null || reinsurerCount == null
+                    ? fmt(partyCount ?? reinsurerCount) : fmt(partyCount + reinsurerCount)}
+                  info={"Brokers send you business. Reinsurers are the companies you cede risk to."}
+                  split={[
+                    { label: "Brokers", value: fmt(partyCount), onClick: () => nav("/brokers") },
+                    { label: "Reinsurers", value: fmt(reinsurerCount),
+                      onClick: () => nav("/parties?type=reinsurer") },
+                  ]} />)
               )}
 
               {/* The sub-line appears only when something is about to run out

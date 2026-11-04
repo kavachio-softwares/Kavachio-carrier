@@ -29,6 +29,9 @@ export default function Parties() {
   // ?type=reinsurer opens the list already filtered — the treaty screens link
   // here that way.
   const [params] = useSearchParams();
+  // Opened as ?type=reinsurer (the dashboard's Reinsurers count, the treaty
+  // screens) the page IS the reinsurer list: no carriers, no type filter.
+  const onlyReinsurers = params.get("type") === "reinsurer";
   const [type, setType] = useState(params.get("type") ?? "");
   const [adding, setAdding] = useState(false);
   const [status, setStatus] = useState("");
@@ -64,15 +67,20 @@ export default function Parties() {
     reload();
   }
 
-  function clearFilters() { setQ(""); setType(""); setStatus(""); }
+  function clearFilters() { setQ(""); setType(onlyReinsurers ? "reinsurer" : ""); setStatus(""); }
 
   return (
     <div className="proto">
       <div className="view full">
         <div className="page-head">
           <div className="t">
-            <h2>Carriers &amp; Reinsurers</h2>
-            <p>Your directory of carriers, and of the reinsurers you cede to.</p>
+            {onlyReinsurers ? (<>
+              <h2>Reinsurers</h2>
+              <p>The reinsurers you cede risk to.</p>
+            </>) : (<>
+              <h2>Carriers &amp; Reinsurers</h2>
+              <p>Your directory of carriers, and of the reinsurers you cede to.</p>
+            </>)}
           </div>
           {isAdmin && (
             <div className="actions">
@@ -91,22 +99,24 @@ export default function Parties() {
           <div className="card-h" style={{ gap: 14, flexWrap: "wrap" }}>
             <div className="search">
               <Search className="ic" />
-              <input placeholder="Search carriers and reinsurers…" value={q}
+              <input placeholder={onlyReinsurers ? "Search reinsurers…" : "Search carriers and reinsurers…"} value={q}
                 onChange={e => setQ(e.target.value)} />
             </div>
-            <select className="fbar-select" aria-label="Filter by type"
-              value={type} onChange={e => setType(e.target.value)}>
-              <option value="">All Types</option>
-              <option value="carrier">Carriers</option>
-              <option value="reinsurer">Reinsurers</option>
-            </select>
+            {!onlyReinsurers && (
+              <select className="fbar-select" aria-label="Filter by type"
+                value={type} onChange={e => setType(e.target.value)}>
+                <option value="">All Types</option>
+                <option value="carrier">Carriers</option>
+                <option value="reinsurer">Reinsurers</option>
+              </select>
+            )}
             <select className="fbar-select" aria-label="Filter by status"
               value={status} onChange={e => setStatus(e.target.value)}>
               <option value="">All Statuses</option>
               <option value="active">Active</option>
               <option value="inactive">Inactive</option>
             </select>
-            {(q !== "" || type !== "" || status !== "") && (
+            {(q !== "" || (!onlyReinsurers && type !== "") || status !== "") && (
               <div className="right">
                 <span className="linkish" onClick={clearFilters}>Clear Filters</span>
               </div>
@@ -118,7 +128,7 @@ export default function Parties() {
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Type</th>
+                  {!onlyReinsurers && <th>Type</th>}
                   <th>Status</th>
                   <th>Actions</th>
                   </tr>
@@ -133,11 +143,13 @@ export default function Parties() {
                         <b>{p.legal_name}</b>
                         {p.dba_name && <div className="sub">dba {p.dba_name}</div>}
                       </td>
-                      <td>
-                        <span className={`badge ${isCarrier ? "b-info" : "b-mut"}`}>
-                          <span className="d" />{TYPE_LABEL[p.party_type] ?? p.party_type}
-                        </span>
-                      </td>
+                      {!onlyReinsurers && (
+                        <td>
+                          <span className={`badge ${isCarrier ? "b-info" : "b-mut"}`}>
+                            <span className="d" />{TYPE_LABEL[p.party_type] ?? p.party_type}
+                          </span>
+                        </td>
+                      )}
                       <td>
                         <span className={`badge ${p.is_active ? "b-ok" : "b-mut"}`}>
                           <span className="d" />{p.is_active ? "Active" : "Inactive"}
@@ -159,12 +171,12 @@ export default function Parties() {
               </tbody>
             </table>
             {totalItems === 0 && (
-              <div className="empty">No parties match the filter.</div>
+              <div className="empty">{onlyReinsurers ? "No reinsurers match the filter." : "No parties match the filter."}</div>
             )}
           </div>
           {totalItems > 0 && (
             <Pagination page={page} pageCount={pageCount} pageSize={PAGE_SIZE}
-              totalItems={totalItems} onPageChange={setPage} noun="parties" />
+              totalItems={totalItems} onPageChange={setPage} noun={onlyReinsurers ? "reinsurers" : "parties"} />
           )}
         </div>
         <AddReinsurerModal open={adding} onClose={() => setAdding(false)}
