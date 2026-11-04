@@ -249,7 +249,7 @@ Some brokers send **cumulative (inception-to-date)** files. Kavachio sends the c
 | Kavachio | `/admin/dashboard`, `/tenants` (carriers, Onboard Carrier), `/admin/users`, `/admin/mapping-tasks` (Data Mapping Queue), `/direct` (process a file) |
 | Carrier | `/home`, `/programs`, `/program-management`, `/programs/new`, `/brokers` (+ `/requests`, `/:id`, `/:id/files`), `/parties` (my brokers), `/contracts` (+ `/new`, `/:id`, `/signatures`), `/direct/setups` (Bordereau Setup) + `/direct/setup`, `/outputs/templates/:id`, `/files` (Files Received + Ingestion Channels), `/bordereau-calendar`, `/calendar`, `/runs` (File Submissions), `/rule-library`, `/users`, `/tenant` (Company), `/profile` |
 | Broker | `/broker` (dashboard), `/broker/contracts`, `/broker/bordereau` (Process Bordereau), `/broker/runs`, `/broker/calendar`, `/broker/exceptions`; `/broker/team-activity` and `/broker/files-by-carrier` still exist, unlinked |
-| Shared | `/uploads/:id/exceptions` (+ `/rule/:ruleId`), `/audit`, `/welcome` |
+| Shared | `/uploads/:id/exceptions` (+ `/rule/:ruleId`), `/audit`, `/welcome`; `/policies` (Policy Search, carrier + broker only, no sidebar entry; Phase 2 branch) |
 
 `/journey` (a 3D scroll story page) exists **only on one dev PC**. It is excluded locally and is not in git (section 13).
 
@@ -366,6 +366,7 @@ One plain line per pushed change: **date · commit · author · what it does for
 
 | Date | Commit | Author | Change |
 |---|---|---|---|
+| 2026-11-04 | next | dinesh-choudhary-aspl | **Policy Search (43.1, Phase 2):** carriers and brokers search and filter their own policies (programme, broker, state, cover dates, month) from the processed bordereaux, opened from "Search Policies" on the Dashboard and File Submissions, not the sidebar; Kavachio admin has no access. |
 | 2026-10-16 | `53065df` | DineshC1994 | Renewals can't overlap the previous term (gaps confirmed once); uploaded renewals keep a "Make it active" card; Change period date correction behind a switch, with evidence, undo and a broker email; a broker shared between carriers can hold contracts with each; all shown in Audit Logs. |
 | 2026-10-14 | `0be18f1` | DineshC1994 | Renewal end to end (copy terms, 30-day window, supersede on activation, signed PDF for uploaded renewals, files routed across the chain or held for a person to pick); Documents panel text shortened. |
 | 2026-10-14 | `702ba8d` | sachinargade01 | Prior Period Files: a new contract version closes the previous one's end date at the new start. |

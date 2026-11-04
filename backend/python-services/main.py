@@ -67,6 +67,9 @@ from ceded_routes import router as ceded_router, public_router as ceded_public_r
 # No tables of its own — see submission_service.
 from fix_link_routes import router as fix_link_router
 from submission_routes import router as submission_router
+# Policy Search (Phase 2, 43.1): the policies inside the processed bordereaux,
+# for the carrier and broker seats (policy_search.py).
+from policy_routes import router as policy_router
 from ingester import _ensure_canonical_upload, _ensure_tenant, ingest_record
 from mapper import (
     apply_spec_multi,
@@ -164,6 +167,7 @@ app.include_router(submission_router)
 # ITD handling: a setup's ITD settings, a file's row comparison, a feed's
 # running total (itd_routes.py).
 app.include_router(itd_router)
+app.include_router(policy_router)
 
 
 def _mark_deprecated_aliases() -> None:

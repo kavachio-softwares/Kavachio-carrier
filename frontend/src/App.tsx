@@ -66,6 +66,7 @@ import RecentRuns from "./pages/RecentRuns";
 import Calendar from "./pages/Calendar";
 import BordereauCalendar from "./pages/BordereauCalendar";
 import DataQuality from "./pages/DataQuality";
+import PolicySearch from "./pages/PolicySearch";
 import ExceptionResolution from "./pages/ExceptionResolution";
 // Feature 10 — file intake channels.
 import Files from "./pages/Files";
@@ -262,6 +263,9 @@ export default function App() {
             the place a single programme's schedule is SET. */}
         <Route path="/bordereau-calendar" element={<BordereauCalendar />} />
         <Route path="/data-quality" element={<DataQuality />} />
+        {/* Policy Search (43.1) — carrier and broker seats; no sidebar entry,
+            opened from the Dashboard and File Submissions. */}
+        <Route path="/policies" element={<PolicySearch />} />
         <Route path="/exception-resolution" element={<ExceptionResolution />} />
         {/* How a broker's file reaches you, and everything that has landed —
             one screen with two tabs. The old paths are kept as redirects: they

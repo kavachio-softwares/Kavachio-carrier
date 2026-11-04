@@ -283,6 +283,9 @@ function subScreenOwner(pathname: string, search: string): string | null {
   // Files has no sidebar entry — it is opened from the Dashboard — so /files
   // (and /intake, which redirects there) keeps Dashboard lit.
   if (under("/intake") || under("/files")) return "/home";
+  // Policies has no sidebar entry either — both seats open it from their
+  // Dashboard, so that stays lit.
+  if (under("/policies")) return isBrokerSeat() ? "/broker" : "/home";
 
   if (under("/parties")) return "/parties";
   if (under("/tenants")) return "/tenants";

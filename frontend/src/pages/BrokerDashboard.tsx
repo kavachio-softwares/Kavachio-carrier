@@ -132,6 +132,10 @@ export default function BrokerDashboard() {
               <InfoTip text={`${d.broker.name} — your team, your carriers, and what needs you today.`} />
             </h2>
           </div>
+          {/* Policies has no sidebar entry: this is its way in. */}
+          <div className="actions">
+            <Link className="btn" to="/policies">Search Policies</Link>
+          </div>
         </div>
 
         {note && <div className="note ok" style={{ marginBottom: 16 }}>{note}</div>}

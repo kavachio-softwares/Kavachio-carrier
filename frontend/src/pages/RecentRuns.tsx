@@ -151,6 +151,10 @@ export default function RecentRuns() {
               here would only bounce them to the dashboard — send them there
               outright and say so. */}
           <div className="actions">
+            {/* The policies inside these files, searched one by one. */}
+            {canAccessPath("/policies") && (
+              <button className="btn" onClick={() => navigate("/policies")}>Search Policies</button>
+            )}
             {canAccessPath("/direct") ? (
               <button className="btn" onClick={() => navigate("/direct")}>
                 ← Process Bordereau

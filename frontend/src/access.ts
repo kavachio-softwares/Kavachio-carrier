@@ -237,6 +237,11 @@ export const ROUTE_ACCESS: {
   { pattern: "/data-quality", requires: "carrier_admin" },
   // MOPR 41 — how fast problems get fixed, and what is still open.
   { pattern: "/exception-resolution", requires: "carrier_admin" },
+  // Policy Search (43.1) — the policies inside the processed bordereaux. The
+  // carrier sees its whole book, a broker only what it sent; Kavachio is not
+  // a party to policy data, so `only` keeps it out by rank. The server refuses
+  // it too (policy_search.seat_of).
+  { pattern: "/policies", requires: "broker_admin", only: ["carrier_admin", "broker_admin"] },
   // How files reach this carrier, and everything that has landed. Carrier-only:
   // the routes name the carrier's brokers and their folder addresses.
   { pattern: "/files", requires: "carrier_admin" },

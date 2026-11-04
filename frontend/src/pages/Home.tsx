@@ -626,9 +626,13 @@ export default function Home() {
             <h2>Dashboard</h2>
             <p>{SUBTITLE[role]}</p>
           </div>
-          {canProcess && (
+          {(canProcess || canAccessPath("/policies")) && (
             <div className="actions">
-              <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>
+              {/* Policies has no sidebar entry: this is its way in. */}
+              {canAccessPath("/policies") && (
+                <Link className="btn" to="/policies">Search Policies</Link>
+              )}
+              {canProcess && <Link className="btn pri" to="/direct">＋ Process Bordereaux</Link>}
             </div>
           )}
         </div>
