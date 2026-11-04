@@ -297,6 +297,7 @@ ACTION_WORDS = {
     "treaty_structure_saved":         "Saved a treaty's structure",
     "signed_treaty_uploaded":         "Uploaded a signed treaty",
     "treaty_wording_read":            "Read a treaty's signed wording",
+    "treaty_clauses_read":            "Read a treaty's clauses and rules",
     "treaty_term_changed":            "Changed a treaty's calculation basis from a date",
     "treaty_endorsement_read":        "Read an uploaded treaty endorsement",
     "treaty_endorsement_applied":     "Applied a treaty endorsement's terms and clauses",

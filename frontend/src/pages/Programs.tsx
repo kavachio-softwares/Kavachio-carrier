@@ -18,7 +18,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { frequencyLabel } from "../constants/frequency";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Layers, ChevronRight, Plus, Search, Copy, Check } from "lucide-react";
 import { InfoTip } from "../components/ui/InfoTip";
 import { PageBody, PageHeader } from "../components/Layout";
@@ -28,7 +28,7 @@ import { Sk } from "../components/ui/Skeleton";
 import { getHierarchy, onProgramme, type HierarchyProgramme } from "../api/hierarchy";
 import { getTreatyCounts } from "../api/treaty";
 import { Pagination } from "../components/Pagination";
-import { ProgrammeStepper, flowUrl, nextStep, programmeSteps } from "../components/ProgrammeStepper";
+import { ProgrammeStepper, flowUrl, nextStep, programmeSteps, reinsuranceUrl } from "../components/ProgrammeStepper";
 import { fmtDate, localDayStart, localDayEnd } from "../utils/date";
 
 /** Rows per page — the same ten the other lists show. Paged client-side: the
@@ -80,6 +80,29 @@ type StepFilter = typeof STEP_FILTERS[number]["v"];
 const stuckOn = (p: HierarchyProgramme): StepFilter =>
   (programmeSteps(p).find(s => s.state === "current")?.key as StepFilter | undefined) ?? "ready";
 
+/** The programme's reinsurance side in one pill: none (quiet — a programme
+ *  takes files without a treaty), treaties with setups still to do (amber),
+ *  or every treaty set up (green). Opens Configure Program's Reinsurance tab. */
+function ReinsurancePill({ to, treaties, inUse }: { to: string; treaties: number; inUse: number }) {
+  const nav = useNavigate();
+  const plural = (n: number) => `${n} treat${n === 1 ? "y" : "ies"}`;
+  const [text, tone, hint] = treaties === 0
+    ? ["None", "bg-surface-2 text-ink-soft", "No treaty protects this programme — add one on its Reinsurance tab."]
+    : inUse >= treaties
+    ? [`${plural(treaties)} set up`, "bg-success/10 text-success",
+       "Every treaty's reinsurance bordereau is in use."]
+    : [`${plural(treaties)} · ${inUse} of ${treaties} set up`, "bg-warn/10 text-warn",
+       `${treaties - inUse} treat${treaties - inUse === 1 ? "y has" : "ies have"} no reinsurance bordereau in use yet.`];
+  return (
+    <button type="button" title={hint} aria-label={`Reinsurance: ${hint}`}
+      onClick={e => { e.stopPropagation(); nav(to); }}
+      className={`whitespace-nowrap rounded-md px-2 py-0.5 text-[11.5px] font-semibold ${tone}
+                  hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-navy`}>
+      {text}
+    </button>
+  );
+}
+
 export default function Programs() {
   const nav = useNavigate();
   const [rows, setRows] = useState<HierarchyProgramme[] | null>(null);
@@ -104,8 +127,10 @@ export default function Programs() {
   // A programme with none is not broken, so it says "None" quietly rather
   // than in the red the stepper keeps for what stops files.
   const [treatyCounts, setTreatyCounts] = useState<Record<string, number>>({});
+  const [treatiesInUse, setTreatiesInUse] = useState<Record<string, number>>({});
   useEffect(() => {
-    getTreatyCounts().then(setTreatyCounts).catch(() => setTreatyCounts({}));
+    getTreatyCounts().then(r => { setTreatyCounts(r.counts); setTreatiesInUse(r.inUse); })
+      .catch(() => setTreatyCounts({}));
   }, []);
 
   // Filtered BEFORE the page slice, so the pager counts what you can see.
@@ -229,7 +254,8 @@ export default function Programs() {
                 <thead>
                   <tr>
                     <th>Programme</th>
-                    <th>How far it's got</th>
+                    {/* The programme's two sides, as on Configure Program. */}
+                    <th>Broker</th>
                     <th>Reinsurance</th>
                     {/* Named for what the button is: the one thing that moves
                         this programme along the steps beside it. */}
@@ -274,14 +300,9 @@ export default function Programs() {
                         <ProgrammeStepper programme={p} />
                       </td>
                       <td className="whitespace-nowrap align-middle">
-                        <Link to={`/programs/${p.id}/reinsurance`}
-                              onClick={e => e.stopPropagation()}
-                              className="text-[12.5px] font-semibold text-navy hover:underline"
-                              title="The treaties protecting this programme">
-                          {treatyCounts[String(p.id)]
-                            ? `${treatyCounts[String(p.id)]} treat${treatyCounts[String(p.id)] === 1 ? "y" : "ies"}`
-                            : <span className="font-medium text-ink-muted">None</span>}
-                        </Link>
+                        <ReinsurancePill to={reinsuranceUrl(p.id)}
+                          treaties={treatyCounts[String(p.id)] ?? 0}
+                          inUse={treatiesInUse[String(p.id)] ?? 0} />
                       </td>
                       <td className="whitespace-nowrap text-right align-middle">
                         {next ? (
@@ -314,9 +335,12 @@ export default function Programs() {
             )}
 
             <p className="mt-3 border-t border-border pt-3 text-xs text-ink-muted">
-              Each programme goes Programme → Brokers → Contract → Setup. Green is
-              done, red is what's stopping files. Click a row to go straight to
-              where that programme is up to, or click any step to open it.
+              <b className="font-medium text-ink">Broker</b>: Brokers → Contract → Setup — green
+              is done, red is what's stopping files.{" "}
+              <b className="font-medium text-ink">Reinsurance</b>: the treaties protecting the
+              programme and how many have their reinsurance bordereau set up — optional,
+              and irrespective of the brokers. Click a row to go to where its brokers are
+              up to, or click any pill to open it.
             </p>
           </Card>
         )}

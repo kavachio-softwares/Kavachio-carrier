@@ -189,17 +189,17 @@ export default function BordereauSetups() {
             search={{ value: q, onChange: setQ, placeholder: "Search setups…" }}
             selects={[
               {
+                key: "programme", ariaLabel: "Filter by programme",
+                value: program, onChange: setProgram,
+                options: [{ value: "", label: "All programmes" },
+                  ...programOptions.map(p => ({ value: String(p.id), label: p.name }))],
+              },
+              {
                 key: "type", ariaLabel: "Filter by setup type",
                 value: setupType, onChange: v => setSetupType(v as "" | SetupType),
                 options: [{ value: "", label: "All setup types" },
                   { value: "broker", label: "Broker bordereau" },
                   { value: "reinsurance", label: "Reinsurance bordereau" }],
-              },
-              {
-                key: "programme", ariaLabel: "Filter by programme",
-                value: program, onChange: setProgram,
-                options: [{ value: "", label: "All programmes" },
-                  ...programOptions.map(p => ({ value: String(p.id), label: p.name }))],
               },
               {
                 key: "status", ariaLabel: "Filter by status",
@@ -241,8 +241,8 @@ export default function BordereauSetups() {
               <table>
                 <thead>
                   <tr>
-                    <th>Setup type</th>
                     <th>Programme / Treaty</th>
+                    <th>Setup type</th>
                     <th>Broker / Treaty type</th>
                     <th>Status</th>
                     <th>Modified</th>
@@ -256,10 +256,10 @@ export default function BordereauSetups() {
                     return (
                       <tr key={`ri-${r.contract_id}`} style={{ cursor: "pointer" }}
                           onClick={() => nav(to)}>
-                        <td><span className={`badge ${SETUP_TYPE.reinsurance.cls}`}>
-                          <ShieldCheck size={11} /> {SETUP_TYPE.reinsurance.label}</span></td>
                         <td><b>{r.treaty}</b>
                           <div className="sub">{r.programmes} programme{r.programmes === 1 ? "" : "s"} feed it</div></td>
+                        <td><span className={`badge ${SETUP_TYPE.reinsurance.cls}`}>
+                          <ShieldCheck size={11} /> {SETUP_TYPE.reinsurance.label}</span></td>
                         <td>{r.type_label ?? "—"}
                           {r.frequency && (
                             <div className="sub">
@@ -280,9 +280,9 @@ export default function BordereauSetups() {
                   })}
                   {brokerRows.map(r => (
                     <tr key={r.id}>
+                      <td><b>{r.program_name ?? "—"}</b></td>
                       <td><span className={`badge ${SETUP_TYPE.broker.cls}`}>
                         <Upload size={11} /> {SETUP_TYPE.broker.label}</span></td>
-                      <td><b>{r.program_name ?? "—"}</b></td>
                       <td>{r.broker_name ?? "—"}</td>
                       <td>
                         <span className={`badge ${STATUS_BADGE[r.status] ?? "b-mut"}`}>

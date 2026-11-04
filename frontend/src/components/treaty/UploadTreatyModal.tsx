@@ -5,7 +5,8 @@
  * layers, who holds what. So the carrier gives only what the document cannot
  * know — which of THEIR programmes it is for — and the file. Kavachio reads it
  * (POST /treaties/read) and fills the form; the carrier checks what was read,
- * adds any reinsurer not yet on file, and confirms. Saving puts it in force
+ * adds any reinsurer not yet on file, and confirms. Saving reads the signed
+ * copy for its clauses and rules (treaty_wording) and puts it in force
  * (or sends it to the carrier admin, for a carrier user).
  *
  * A file with no readable text, or a reading that fails, still works: the
@@ -176,7 +177,7 @@ export function UploadTreatyModal({ open, onClose, programId: initialProgramId, 
               onClick={() => setStage("file")}>Back</button>
       <button className="btn" type="button" onClick={onClose}>Cancel</button>
       <button className="btn pri" type="button" disabled={busy} onClick={save}>
-        {busy ? "Uploading…" : "Upload and put in force"}
+        {busy ? "Uploading and reading its clauses and rules…" : "Upload and put in force"}
       </button>
     </>
   ) : (

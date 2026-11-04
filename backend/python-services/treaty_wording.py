@@ -252,3 +252,99 @@ def clean_sources(raw: Any, pages: Optional[int] = None) -> dict:
         out[str(path)[:120]] = {"page": page,
                                 "quote": (str(v.get("quote") or "").strip()[:300] or None)}
     return out
+
+
+# ── an uploaded signed treaty, read for its clauses and rules ───────────────
+CLAUSES_PROMPT = """You read a signed REINSURANCE TREATY and list its clauses,
+in the order they appear. A clause is a numbered article or titled section of
+the wording (e.g. "Article 4 — Exclusions", "Territorial Scope"). Copy each
+clause's words as written — never summarise, never invent one.
+
+The wording is split into pages, each starting "=== Page N ===".
+
+Return ONLY this JSON:
+{"clauses": [
+  {"title": "the clause's heading, as written",
+   "text": "the clause's full text, as written",
+   "page": the page number it starts on}
+]}
+
+WORDING:
+"""
+
+
+def read_clauses(texts: list[str], *, call=None) -> list[dict]:
+    """The treaty's clauses — title, text and the page each starts on. `call`
+    is injectable for tests."""
+    import json
+    body = "\n".join(f"=== Page {i} ===\n{t}" for i, t in enumerate(texts, start=1))
+    if not body.strip():
+        return []
+    if call is None:
+        from contract_upload_services.gemini_service import call_gemini
+
+        def call(prompt: str) -> str:
+            return call_gemini(prompt, label="TREATY_CLAUSES", temperature=0, seed=7,
+                               thinking_budget=2048, max_output_tokens=32768)
+    raw = call(CLAUSES_PROMPT + body[:120000])
+    try:
+        got = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+    except (ValueError, TypeError):
+        log.warning("treaty clauses: model returned no JSON")
+        return []
+    out = []
+    for cl in got.get("clauses") or []:
+        if not isinstance(cl, dict) or not str(cl.get("text") or "").strip():
+            continue
+        try:
+            page = int(cl.get("page"))
+        except (TypeError, ValueError):
+            page = None
+        out.append({"title": (str(cl.get("title") or "").strip()[:300] or None),
+                    "text": str(cl["text"]).strip(),
+                    "page": page if page and 1 <= page <= len(texts) else None})
+    return out
+
+
+def store_clauses(s, c, clauses: list[dict]) -> int:
+    """Put the clauses where every contract's clauses live (clauses_extracted),
+    replacing those read before. Clauses only: a treaty's rules are its own
+    (treaty_rules), not bordereau column checks."""
+    from sqlalchemy import text as _sql
+    s.execute(_sql("DELETE FROM clauses_extracted WHERE contract_id = :cid "
+                   "AND created_by = 'treaty_wording'"), {"cid": c.id})
+    for i, cl in enumerate(clauses, start=1):
+        s.execute(_sql("""
+            INSERT INTO clauses_extracted
+                (contract_id, clause_type, title, text, page_number, section_header,
+                 rule_generation_status, generated_rule_count,
+                 extraction_confidence, created_by, updated_by)
+            VALUES
+                (:cid, 'other', :title, :text, :page, :header,
+                 'pending', 0, 1.0, 'treaty_wording', 'treaty_wording')
+        """), {"cid": c.id, "title": cl.get("title"), "text": cl["text"],
+               "page": cl.get("page"), "header": f"{i}. {cl.get('title') or 'Clause'}"})
+    return len(clauses)
+
+
+def read_clauses_and_rules(s, c, *, call_clauses=None, call_rules=None) -> dict:
+    """Read the signed wording for its clauses and for the conditions the
+    ceded business must meet (treaty_rules.extract). The clauses are stored
+    with the contract; the rules are kept on the treaty (extracted
+    "wording_rules") and are the wording rules a new setup starts from.
+    Raises ValueError with no signed wording, LookupError with no text."""
+    from sqlalchemy.orm.attributes import flag_modified
+    import treaty_rules as trr
+    if signed_wording(s, c) is None:
+        raise ValueError("no signed wording")
+    texts = page_texts(wording_pdf(s, c))
+    if not any(t.strip() for t in texts):
+        raise LookupError("no text")
+    clauses = read_clauses(texts, call=call_clauses)
+    stored = store_clauses(s, c, clauses)
+    rules = trr.extract("\n".join(texts), call=call_rules)
+    c.extracted = {**(c.extracted if isinstance(c.extracted, dict) else {}),
+                   "wording_rules": rules,
+                   "wording_rules_read_at": _now()}
+    flag_modified(c, "extracted")
+    return {"clauses": stored, "rules": len(rules)}

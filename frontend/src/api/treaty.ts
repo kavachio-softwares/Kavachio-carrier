@@ -239,6 +239,12 @@ export const getWording = (contractId: number) =>
 export const readWording = (contractId: number) =>
   api.post<WordingRecord>(`/contracts/${contractId}/wording/read`).then(r => r.data);
 
+/** Read the signed wording for its clauses and its rules — done when a signed
+ *  treaty is uploaded; again here, or for one uploaded before that. */
+export const readTreatyClauses = (contractId: number) =>
+  api.post<{ clauses: number; rules: number }>(`/contracts/${contractId}/wording/clauses`)
+    .then(r => r.data);
+
 export const confirmWording = (contractId: number, body: {
   treaty: TreatyInput; sources: TermSources; effective_date?: string | null;
   name?: string | null; inception_dt?: string | null; expiry_dt?: string | null;
@@ -337,9 +343,12 @@ export const detachTreaty = (programId: number, contractId: number) =>
     `/programs/${programId}/treaties/${contractId}`).then(r => r.data);
 
 /** Live treaties per programme id, for the Programmes list. */
+/** Per programme id: its live treaties, and how many of them have their
+ *  reinsurance bordereau setup in use. */
 export const getTreatyCounts = () =>
-  api.get<{ counts: Record<string, number> }>("/treaty-counts", { silent: true })
-    .then(r => r.data.counts);
+  api.get<{ counts: Record<string, number>; in_use?: Record<string, number> }>(
+    "/treaty-counts", { silent: true })
+    .then(r => ({ counts: r.data.counts, inUse: r.data.in_use ?? {} }));
 
 // ── the reinsurer's private link — carrier side ──────────────────────────────
 export type AccessLinkStatus = "active" | "revoked" | "expired" | "closed";

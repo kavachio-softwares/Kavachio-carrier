@@ -518,6 +518,46 @@ def test_a_signed_treaty_is_uploaded_and_put_in_force(w):
     assert t["can_edit"] is False and t["can_edit_programmes"] is True
 
 
+def test_an_uploaded_treaty_is_read_for_its_clauses_and_rules(w, monkeypatch):
+    import json as _j
+    import fitz
+    import treaty_rules
+    import treaty_wording
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "Article 1 Exclusions. Marine cargo is excluded "
+                                         "from this treaty in all territories.")
+    pdf = doc.tobytes()
+    monkeypatch.setattr(treaty_wording, "read_clauses", lambda texts, call=None: [
+        {"title": "Article 1 Exclusions", "text": "Marine cargo is excluded.", "page": 1}])
+    monkeypatch.setattr(treaty_rules, "extract", lambda text, call=None: [
+        treaty_rules._rule("wording_1_class_of_business_excluded", "Marine cargo is excluded",
+                           "excluded", "class_of_business", severity="critical",
+                           source="wording", clause="Marine cargo is excluded.",
+                           values=["Marine cargo"])])
+    r = client.post("/treaties/upload", headers=w["ch"], data={
+        "program_id": w["p1"], "name": "Signed QS read",
+        "inception_dt": "2027-01-01", "expiry_dt": "2099-12-31",
+        "year_of_account": "2027", "notice_period_days": 90,
+        "treaty": _j.dumps({"treaty_type": "quota_share",
+                            "terms": {"currency": "USD", "cession_pct": 30},
+                            "layers": [{"name": "QS", "shares": [
+                                {"reinsurer_party_id": w["hann"], "share_pct": 100,
+                                 "is_lead": True}]}]}),
+    }, files={"file": ("signed.pdf", pdf, "application/pdf")})
+    assert r.status_code == 200, r.text
+    cid = r.json()["id"]
+    got = client.get(f"/programs/{w['p1']}/contracts/{cid}", headers=w["ch"]).json()
+    assert [c["title"] for c in got["clauses"]] == ["Article 1 Exclusions"]
+    assert got["clauses"][0]["page_number"] == 1
+    rec = client.get(f"/reinsurance/setups/{cid}", headers=w["ch"]).json()
+    assert "wording_1_class_of_business_excluded" in [x["id"] for x in rec["defaults"]["rules"]]
+    # Read again on demand — replaces, never duplicates.
+    r = client.post(f"/contracts/{cid}/wording/clauses", headers=w["ch"])
+    assert r.status_code == 200 and r.json() == {"clauses": 1, "rules": 1}
+    got = client.get(f"/programs/{w['p1']}/contracts/{cid}", headers=w["ch"]).json()
+    assert len(got["clauses"]) == 1
+
+
 def test_an_upload_without_a_starred_lead_is_refused(w):
     import json as _j
     r = client.post("/treaties/upload", headers=w["ch"], data={

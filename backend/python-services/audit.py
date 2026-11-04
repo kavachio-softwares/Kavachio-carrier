@@ -351,6 +351,7 @@ _FRIENDLY = {
     ("PUT",    "/contracts/{id}/treaty"):            "treaty_structure_saved",
     ("POST",   "/treaties/upload"):                  "signed_treaty_uploaded",
     ("POST",   "/contracts/{id}/wording/read"):      "treaty_wording_read",
+    ("POST",   "/contracts/{id}/wording/clauses"):   "treaty_clauses_read",
     ("POST",   "/contracts/{id}/basis"):             "treaty_term_changed",
     ("POST",   "/contracts/{id}/endorsements/{id}/read"): "treaty_endorsement_read",
     ("POST",   "/contracts/{id}/endorsements/{id}/confirm"): "treaty_endorsement_applied",

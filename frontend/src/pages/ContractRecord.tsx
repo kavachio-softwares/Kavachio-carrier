@@ -17,6 +17,7 @@ import TreatyPlacementCard from "../components/treaty/TreatyPlacementCard";
 import TreatyBasisPanel from "../components/treaty/TreatyBasisPanel";
 import { ACCESS_EVENT_LABEL, isLoopback } from "../components/treaty/ReinsurerSharing";
 import { getReinsurerAccess, type AccessEvent } from "../api/treaty";
+import { TreatyWordingRules } from "../components/treaty/TreatyWordingRules";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { canAccessPath } from "../access";
 import {
@@ -1125,8 +1126,9 @@ function ContractRecordView() {
     { key: "contract", label: "The contract", show: true },
     { key: "agreed", label: "What was agreed",
       show: !!rec.agreed_limits && Object.keys(rec.agreed_limits).length > 0 },
+    // A treaty's always: its rules are there, and its wording can be read.
     { key: "clauses", label: "Clauses",
-      show: !!clauses?.length || !!clauseRules.length },
+      show: !!clauses?.length || !!clauseRules.length || (isTreaty && !isBrokerSeat()) },
     { key: "wording", label: "The wording",
       show: authored || wEditing || canWriteWording },
   ] as const).filter(t => t.show);
@@ -3461,6 +3463,9 @@ function ContractRecordView() {
         </>)}
 
         {curTab === "clauses" && (<>
+        {isTreaty && !isBrokerSeat() && (
+          <TreatyWordingRules contractId={id} clauseCount={clauses?.length ?? 0} onRead={load} />
+        )}
         {/* ── what it says ──
             The clauses of this contract. For one written here they are its
             wording with the terms resolved — a clause row is READ, so it holds
@@ -3565,7 +3570,7 @@ function ContractRecordView() {
                             <span className={`badge ${
                               r.severity === "critical" ? "b-crit" : "b-warn"}`}>
                               <span className="d" />
-                              {r.severity === "critical" ? "Stopped" : "Flagged"}
+                              {r.severity === "critical" ? "Critical" : "Warning"}
                             </span>
                           </td>
                         </tr>

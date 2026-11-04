@@ -138,7 +138,11 @@ def rules_for(s, c: Contract, st: Optional[dict] = None) -> list[dict]:
     # the wording's rules as saved.
     endorsed = trr.in_force_on(treaty_endorsement.treaty_rules(s, c),
                                (st.get("_basis") or {}).get("as_of"))
-    return trr.merge(su.rules if su is not None else None,
+    # Before a setup has saved its own, the wording rules are those read from
+    # the signed treaty when it was uploaded (treaty_wording).
+    saved = su.rules if su is not None and su.rules is not None else (
+        (c.extracted or {}).get("wording_rules") if isinstance(c.extracted, dict) else None)
+    return trr.merge(saved,
                      trr.derive(st, c.inception_dt, c.expiry_dt, c.commercial_terms) + endorsed)
 
 
@@ -1339,7 +1343,7 @@ def _setup_json(s, c: Contract, su: Optional[CededSetup], p: Principal) -> dict:
                      "columns": sheet[1],
                      "layout": sheet[0],
                      "input_layout": {"source": "brokers"},
-                     "rules": trr.derive(st, c.inception_dt, c.expiry_dt, c.commercial_terms) if st else [],
+                     "rules": rules_for(s, c, st) if st else [],
                      "file_format": "xlsx", "recipients": {}, "cc": [],
                      "send_mode": "manual"},
         "options": {

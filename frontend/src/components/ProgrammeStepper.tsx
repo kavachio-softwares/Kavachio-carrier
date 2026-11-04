@@ -41,12 +41,16 @@ export const hasSettledContract = (b: HierarchyBroker) => b.contracts.some(c => 
 const ENDED = new Set(["expired", "terminated", "superseded"]);
 const openContract = (b: HierarchyBroker) => b.contracts.find(c => !ENDED.has(c.lifecycle ?? ""));
 
-/** The Configure Program flow for an existing programme, opened at one step
- *  (1 programme · 2 brokers · 3 contracts · 4 bordereau setup), so the stepper
- *  across its top is on screen whichever stage you arrive at. */
+/** The Configure Program flow for an existing programme, opened on its Broker
+ *  tab at one step (2 brokers · 3 contracts · 4 bordereau setup — the
+ *  programme itself is common, above the tabs), so the stepper is on screen
+ *  whichever stage you arrive at. */
 export const STAGE: Record<Step["key"], number> = { programme: 1, brokers: 2, contract: 3, setup: 4 };
 export const flowUrl = (programId: number, key: Step["key"]) =>
-  `/programs/${programId}/setup?stage=${STAGE[key]}`;
+  `/programs/${programId}/setup?tab=broker&stage=${STAGE[key]}`;
+/** The same screen on its Reinsurance tab — the programme's treaties. */
+export const reinsuranceUrl = (programId: number) =>
+  `/programs/${programId}/setup?tab=reinsurance`;
 
 /** Where the NEXT bordereau setup can be built: the first programme with a
  *  broker who has a settled contract and no finished setup — the same broker
@@ -215,15 +219,17 @@ export const programmeReady = (p: HierarchyProgramme) =>
 
 export function ProgrammeStepper({ programme }: { programme: HierarchyProgramme }) {
   const nav = useNavigate();
-  const steps = programmeSteps(programme);
+  // The broker side only: the programme itself is common to both sides and
+  // is configured once the row exists.
+  const steps = programmeSteps(programme).filter(s => s.key !== "programme");
   return (
-    <ol className="flex flex-wrap items-center gap-1" aria-label={`How far ${programme.name} has got`}>
+    <ol className="flex flex-wrap items-center gap-1" aria-label={`How far ${programme.name}'s brokers have got`}>
       {steps.map((s, i) => {
         // Green once done. Red for the step that is stopping files once brokers
         // are already on the programme (contract or setup missing). Grey for
         // steps not reached — including "Brokers" on a brand-new programme,
         // which is a start, not a problem.
-        const blocking = s.state === "current" && (s.partial || i >= 2);
+        const blocking = s.state === "current" && (s.partial || s.key !== "brokers");
         const tone = s.state === "done" ? "bg-success/10 text-success"
           : blocking ? "bg-danger/10 text-danger"
           : "bg-surface-2 text-ink-soft";

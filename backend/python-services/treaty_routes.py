@@ -863,6 +863,50 @@ def wording_page(contract_id: int, page: int, p: Principal = Depends(current_pri
                     media_type="image/png")
 
 
+def _read_clauses_and_rules(contract_id: int) -> Optional[dict]:
+    """Read an uploaded treaty for its clauses and rules; never fails the
+    upload — the treaty is saved either way and can be read again."""
+    import treaty_wording as tw
+    try:
+        with SessionLocal() as s:
+            c = s.get(Contract, contract_id)
+            got = tw.read_clauses_and_rules(s, c)
+            s.commit()
+            return got
+    except Exception as e:  # noqa: BLE001
+        log.warning("treaty %s: clauses and rules not read: %s", contract_id, e)
+        return None
+
+
+@router.post("/contracts/{contract_id}/wording/clauses")
+async def read_wording_clauses(contract_id: int, p: Principal = Depends(current_principal)):
+    """Read the signed wording for its clauses and its rules — again, or for a
+    treaty uploaded before this was done."""
+    import treaty_wording as tw
+    cr = _cr()
+    cr._require_carrier(p)
+
+    def work():
+        with SessionLocal() as s:
+            c = _treaty_contract(s, p, contract_id)
+            try:
+                got = tw.read_clauses_and_rules(s, c)
+            except ValueError:
+                raise HTTPException(409, "Upload the signed treaty wording first.")
+            except LookupError:
+                raise HTTPException(409, "No text could be read from the signed wording "
+                                         "— it may be a scan.")
+            s.commit()
+            return got
+    try:
+        return await run_in_threadpool(work)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.warning("treaty %s: clauses read failed: %s", contract_id, e)
+        raise HTTPException(502, "The wording could not be read just now. Try again.")
+
+
 @router.post("/contracts/{contract_id}/wording/read")
 async def read_wording(contract_id: int, p: Principal = Depends(current_principal)):
     """Read the signed wording for its terms — every one with the page it came
@@ -1066,7 +1110,9 @@ def detach_treaty(program_id: int, contract_id: int,
 @router.get("/treaty-counts")
 def treaty_counts(p: Principal = Depends(current_principal)):
     """Live treaties per programme, for the Programmes list — one call for the
-    whole page rather than one per row."""
+    whole page rather than one per row. `in_use`: of those, how many have their
+    reinsurance bordereau setup in use."""
+    from ceded_routes import setup_of   # ceded_routes imports this module
     cr = _cr()
     cr._require_carrier(p)
     with SessionLocal() as s:
@@ -1074,6 +1120,8 @@ def treaty_counts(p: Principal = Depends(current_principal)):
         treaties = {c.id: c for c in s.query(Contract).filter(
             Contract.tenant_id == tid, Contract.contract_type == REINSURER)}
         counts: dict[int, int] = {}
+        in_use: dict[int, int] = {}
+        active: dict[int, bool] = {}
         seen: set[tuple[int, int]] = set()
         pairs = [(tp.program_id, tp.contract_id) for tp in
                  s.query(TreatyProgramme).filter(
@@ -1084,7 +1132,13 @@ def treaty_counts(p: Principal = Depends(current_principal)):
                 continue
             seen.add((pid, cid))
             counts[pid] = counts.get(pid, 0) + 1
-        return {"counts": {str(k): v for k, v in counts.items()}}
+            if cid not in active:
+                su = setup_of(s, treaties[cid])
+                active[cid] = su is not None and su.status == "active"
+            if active[cid]:
+                in_use[pid] = in_use.get(pid, 0) + 1
+        return {"counts": {str(k): v for k, v in counts.items()},
+                "in_use": {str(k): v for k, v in in_use.items()}}
 
 
 @router.get("/reinsurers/{party_id}/treaties")
@@ -1193,8 +1247,10 @@ async def upload_signed_treaty(
     attached as the executed wording, and it is accepted (by the carrier admin,
     which puts it in force) or sent up to them (by a carrier user).
 
-    The file is NOT read for rules. Rules are checks on a bordereau's columns,
-    and a treaty is not checked against bordereaux.
+    The file is read for its clauses and for the conditions the ceded
+    business must meet (treaty_wording.read_clauses_and_rules) — not for the
+    bordereau column rules a broker's contract gets. A reading that fails
+    leaves the treaty saved; it can be read again from its Clauses.
     """
     import json
     cr = _cr()
@@ -1247,6 +1303,7 @@ async def upload_signed_treaty(
             except ValueError:
                 pass
         s.commit()
+    await run_in_threadpool(_read_clauses_and_rules, cid)
     # The uploaded road from here: the carrier admin's acceptance puts it in
     # force; a carrier user's sends it up to them.
     return await run_in_threadpool(
