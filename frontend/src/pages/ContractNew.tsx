@@ -1133,7 +1133,7 @@ export default function ContractNew() {
         )}
         <div className="fh">
           What are you making?
-          <InfoTip text="They end in different places, so this is the first question." />
+          <InfoTip text="A broker contract and a reinsurance treaty are set up, approved and signed differently, so choose this first." />
         </div>
         <div className="startpick">
           {KINDS.map(k => (
@@ -1238,7 +1238,7 @@ export default function ContractNew() {
               <>
                 <div className="fh">
                   The contract you are changing
-                  <InfoTip text="None of this moves — an endorsement changes terms, not parties." />
+                  <InfoTip text="An endorsement changes only terms. It can't change who the contract is with or its programme; for that, create a new contract." />
                 </div>
                 <div className="grid g-3" style={{ marginBottom: 18 }}>
                   <div className="field" style={{ marginBottom: 0 }}>
@@ -1275,7 +1275,7 @@ export default function ContractNew() {
             rearrange themselves. */}
         <div className="fh">
           Who is it with?
-          <InfoTip text="This decides what the contract has to state." />
+          <InfoTip text="The type of party (broker or reinsurer) decides which terms and clauses the contract needs." />
         </div>
         {/* Two across, not the three the class assumes: there are two
             types, and a trailing empty column reads as a missing option. */}

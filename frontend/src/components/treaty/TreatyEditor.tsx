@@ -245,7 +245,7 @@ export function TreatyEditor({
             {/* 2 · the treaty's own numbers */}
             <div className="fh" style={{ marginTop: 0 }}>
               {spec.label} terms
-              <InfoTip text="What this kind of treaty is defined by. Required ones are starred." />
+              <InfoTip text="The terms that make up this type of treaty, such as cession for a quota share, or retention and limit for excess of loss. Fields marked * must be filled in." />
             </div>
             <div className="grid g-3" style={{ gap: 14, marginBottom: 18 }}>
               {spec.fields.filter(f => f.required && !COMMISSION_KINDS.has(f.kind)).map(f =>

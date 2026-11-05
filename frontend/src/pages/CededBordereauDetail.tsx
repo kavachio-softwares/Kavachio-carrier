@@ -301,7 +301,7 @@ export default function CededBordereauDetail() {
           <div className="card-h">
             <FileSpreadsheet size={16} className="ci" />
             <h3>Each reinsurer&rsquo;s statement</h3>
-            <InfoTip text="Every line × the reinsurer's share of that line's layer. This is what each one is sent." />
+            <InfoTip text="Each policy line's ceded amount × this reinsurer's share of it. Example: 400 ceded × a 25% share = 100 for this reinsurer. This is the statement the reinsurer is sent." />
           </div>
           <div className="tbl-wrap">
             <table>

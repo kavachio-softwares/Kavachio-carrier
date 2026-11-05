@@ -45,113 +45,104 @@ from typing import Any
 TREATY_FIELDS: dict[str, dict[str, Any]] = {
     # ── shared by every type ──
     "currency": {"label": "Treaty currency", "kind": "text", "example": "USD",
-                 "hint": "The currency every amount on this treaty is in."},
+                 "hint": "The currency all amounts on this treaty are in: limits, retentions, premiums and claims. Example: USD."},
     "basis": {"label": "Attachment basis", "kind": "select",
               "options": [{"value": "risks_attaching", "label": "Risks attaching"},
                           {"value": "losses_occurring", "label": "Losses occurring"}],
-              "hint": "Whether cover follows the policies written in the "
-                      "period, or the losses that happen in it."},
+              "hint": "Which claims the treaty covers. Risks attaching: policies that start during the treaty year are covered for their whole life, even if the loss happens after the year ends. Losses occurring: losses that happen during the treaty year are covered, whenever the policy started."},
     "reinsurance_broker": {
         "label": "Reinsurance broker", "kind": "text", "example": "Gallagher Re",
-        "hint": "Who placed it, if anyone. They are not on Kavachio either — "
-                "this is a name for the record."},
+        "hint": "The broker who placed this treaty with the reinsurers, if there was one. For your records only; they don't get access to Kavachio. Example: Gallagher Re."},
     "placement_reference": {
         "label": "Placement reference", "kind": "text", "example": "GRE-2027-0418",
-        "hint": "The slip or placement number the market knows it by."},
+        "hint": "The reference the broker or market uses for this placement, as printed on the slip. Example: GRE-2027-0418."},
 
     # ── quota share ──
     "cession_pct": {"label": "Cession", "kind": "pct", "example": "40",
-                    "hint": "The share of every risk passed to the reinsurers."},
+                    "hint": "The percentage of every policy's premium and claims passed to the reinsurers. Example: 40%. On a 1,000 premium, 400 goes to the reinsurers, and they pay 40% of every claim."},
     "treaty_limit": {"label": "Limit per risk", "kind": "money",
-                     "hint": "The most the treaty pays on any one risk."},
+                     "hint": "The most the reinsurers pay on any one policy. Anything above this is yours. Example: 5,000,000."},
     "event_limit": {"label": "Event limit", "kind": "money",
-                    "hint": "The most it pays for all risks in one event."},
+                    "hint": "The most the reinsurers pay in total for all claims from one event, such as a storm or flood, however many policies it hits."},
     "ceding_commission_pct": {
         "label": "Ceding commission", "kind": "pct", "example": "30",
-        "hint": "Paid back to you by the reinsurers on the premium ceded."},
+        "hint": "The percentage of the ceded premium the reinsurers give back to you to cover the cost of writing the business. Example: 30%. On 400 ceded premium, you get 120 back, so the reinsurers keep 280."},
     "profit_commission_pct": {
         "label": "Profit commission", "kind": "pct",
-        "hint": "Your share of the reinsurers' profit on the treaty."},
+        "hint": "Extra commission paid to you when the treaty makes a profit for the reinsurers, as a percentage of that profit."},
     # 27.2 — the commission terms as each treaty writes them (they vary from
     # company to company, so they are entered, never assumed). Checked by
     # treaty_basis.clean_value; each is the value from inception on the
     # treaty's Calculation basis.
     "profit_commission": {
         "label": "Profit commission", "kind": "profit",
-        "hint": "Your share of the reinsurers' profit: its rate, their expense "
-                "allowance, and how long a deficit is carried forward."},
+        "hint": "Extra commission paid to you when the treaty makes a profit for the reinsurers. Profit = ceded premium − ceding commission − claims − their expense allowance − any loss carried from earlier years. You get the rate % of that profit. Example: premium 1,000, commission 300, claims 400, expenses 50: profit 250, and at a 20% rate you get 50. If the year makes a loss, it is carried forward for the number of years you set."},
     "sliding_scale": {
         "label": "Sliding-scale commission", "kind": "sliding",
-        "hint": "A commission that moves with the loss ratio: the provisional "
-                "rate charged, and the scale it is adjusted on."},
+        "hint": "A ceding commission that depends on how claims turn out. You're paid a provisional rate during the year. At year end it's recalculated from the scale using the actual loss ratio (claims ÷ premium): fewer claims means a higher rate, more claims a lower one. The difference is paid to you or paid back. Example: provisional 27.5%; scale 35% at a 55% loss ratio down to 25% at 65%."},
 
     # ── surplus ──
     "retention_line": {"label": "Retention (one line)", "kind": "money",
-                       "hint": "What you keep on any one risk."},
+                       "hint": "The amount you keep yourself on each policy, called one \"line\". The treaty takes multiples of it on top. Example: 1,000,000."},
     "lines": {"label": "Number of lines", "kind": "int", "example": "9",
-              "hint": "How many times the retention the treaty can take."},
+              "hint": "How many times your retention the treaty can take on one policy. Example: 1,000,000 retention × 9 lines means up to 9,000,000 ceded, so a policy can be up to 10,000,000 in total."},
 
     # ── excess of loss ──
     "cover_basis": {"label": "Cover basis", "kind": "select",
                     "options": [{"value": "per_risk", "label": "Per risk"},
                                 {"value": "per_event", "label": "Per event"}],
-                    "hint": "Whether each layer responds to one risk's loss "
-                            "or to everything one event causes."},
+                    "hint": "Per risk: a layer pays for a large loss on one policy. Per event: a layer pays for the total of all claims one event causes, such as a hurricane, across every policy it hits."},
 
     # ── stop loss ──
     "measure": {"label": "Measured as", "kind": "select",
                 "options": [{"value": "loss_ratio", "label": "Loss ratio"},
                             {"value": "amount", "label": "Aggregate amount"}],
-                "hint": "What the attachment point is expressed in."},
+                "hint": "How the point where cover starts is written. Loss ratio: a percentage of the year's premium, for example cover starts at 75%. Aggregate amount: a total of the year's claims, for example cover starts at 15,000,000."},
     "subject_premium": {"label": "Subject premium", "kind": "money",
-                        "hint": "The year's premium the loss ratio is taken on."},
+                        "hint": "The year's total premium that the loss ratio is measured against. Example: 20,000,000 premium and 15,000,000 of claims gives a 75% loss ratio."},
 
     # ── facultative ──
     "risk_reference": {"label": "Policy or risk reference", "kind": "text",
                        "example": "POL-88213",
-                       "hint": "The one risk this certificate covers."},
+                       "hint": "The policy number of the single policy this certificate covers. Example: POL-88213."},
     "insured_name": {"label": "Insured", "kind": "text",
-                     "hint": "Who the risk belongs to."},
+                     "hint": "The person or company insured under that policy."},
     "sum_insured": {"label": "Sum insured", "kind": "money",
-                    "hint": "The full value of the risk, before any is ceded."},
+                    "hint": "The full insured value of the policy, before any of it is ceded."},
     "share_ceded_pct": {"label": "Share ceded", "kind": "pct", "example": "50",
-                        "hint": "How much of the risk the reinsurers take."},
+                        "hint": "The percentage of this policy passed to the reinsurers. Example: 50% of a 10,000,000 sum insured means 5,000,000 ceded."},
     "premium": {"label": "Reinsurance premium", "kind": "money",
-                "hint": "What is paid for the ceded share."},
+                "hint": "The premium you pay the reinsurers for the share they take."},
 }
 
 LAYER_FIELDS: dict[str, dict[str, Any]] = {
     "retention": {"label": "Retention", "kind": "money",
-                  "hint": "Losses below this stay with you (the layer "
-                          "attaches here)."},
+                  "hint": "The part of a loss you pay yourself before this layer starts paying. Example: with a 1,000,000 retention, on a 1,500,000 loss you pay 1,000,000 and the layer pays 500,000."},
     "limit": {"label": "Limit", "kind": "money",
-              "hint": "The most this layer pays above its retention."},
+              "hint": "The most this layer pays on top of its retention. Example: 4,000,000 above 1,000,000 pays the part of a loss between 1,000,000 and 5,000,000."},
     "reinstatements": {"label": "Reinstatements", "kind": "int",
-                       "hint": "How many times the limit can be restored "
-                               "after a loss."},
+                       "hint": "How many times the layer's limit can be topped back up during the year after claims use it. Example: 1 reinstatement means the full limit can be paid out twice in the year."},
     "reinstatement_premium_pct": {"label": "Reinstatement premium",
                                   "kind": "pct",
-                                  "hint": "Charged, as a % of the original "
-                                          "premium, to restore the limit."},
+                                  "hint": "The extra premium you pay to top the limit back up, as a percentage of the layer's original premium. Example: 100% means paying the full original premium again for a full reinstatement."},
     "rate_on_line_pct": {"label": "Rate on line", "kind": "pct",
-                         "hint": "Premium as a percentage of the limit."},
+                         "hint": "The layer's premium as a percentage of its limit. Example: 10% on a 4,000,000 limit means a 400,000 premium."},
     "deposit_premium": {"label": "Deposit premium", "kind": "money",
-                        "hint": "Paid up front, adjusted at the end of the year."},
+                        "hint": "The premium paid at the start of the year. At year end it's recalculated on the actual premium income, and the difference is paid to the reinsurers or refunded to you."},
     "attachment_pct": {"label": "Attaches at (loss ratio)", "kind": "pct",
                        "when": {"field": "measure", "equals": "loss_ratio"},
                        "example": "75",
-                       "hint": "The loss ratio at which the cover starts."},
+                       "hint": "The loss ratio at which the stop loss starts paying. Example: 75%. On 20,000,000 premium, cover starts once the year's claims pass 15,000,000."},
     "limit_pct": {"label": "Cover (loss ratio points)", "kind": "pct",
                   "when": {"field": "measure", "equals": "loss_ratio"},
                   "example": "30",
-                  "hint": "How many loss-ratio points above the attachment "
-                          "are paid."},
+                  "hint": "How far above the start the cover goes, in loss-ratio points. Example: 30 points above 75% pays the claims between 75% and 105% of premium."},
     "attachment_amount": {"label": "Attaches at (amount)", "kind": "money",
                           "when": {"field": "measure", "equals": "amount"},
-                          "hint": "The aggregate loss at which cover starts."},
+                          "hint": "The total of the year's claims at which the stop loss starts paying. Example: 15,000,000."},
     "limit_amount": {"label": "Cover (amount)", "kind": "money",
                      "when": {"field": "measure", "equals": "amount"},
-                     "hint": "The most paid above the attachment."},
+                     "hint": "The most the stop loss pays above that point. Example: 6,000,000 pays the claims between 15,000,000 and 21,000,000."},
 }
 
 COMMON_TREATY = ["currency", "basis", "reinsurance_broker", "placement_reference"]
