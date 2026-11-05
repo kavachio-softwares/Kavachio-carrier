@@ -995,3 +995,21 @@ def test_placement_statuses():
          "over_placed"]
     assert [tp.signed_status(sg, wr) for sg, wr in ((0, 100), (40, 100), (90, 90), (100, 100))] == \
         ["unsigned", "partially_signed", "fully_signed", "fully_signed"]
+
+
+def test_a_stop_loss_basis_lists_only_the_terms_its_measure_uses(monkeypatch):
+    """Measured as a loss ratio, a stop loss attaches at a %: its amount terms
+    are not used (nor worked out) and are not offered on the Calculation basis.
+    Measured as an amount, only the amounts are."""
+    import datetime as _dt
+    import treaty_basis as tb
+    monkeypatch.setattr(tb, "_entries", lambda s, c: [])
+    c = type("C", (), {"inception_dt": _dt.date(2026, 1, 1), "expiry_dt": None})()
+    layer = {"name": "Layer 1", "terms": {"attachment_pct": 80, "limit_pct": 20,
+                                          "attachment_amount": 1, "limit_amount": 2}}
+    lr = tb.schedule(None, c, {"treaty_type": "stop_loss",
+                               "terms": {"measure": "loss_ratio"}, "layers": [layer]})
+    assert {t["term"] for t in lr["terms"]} == {"attachment_pct", "limit_pct"}
+    am = tb.schedule(None, c, {"treaty_type": "stop_loss",
+                               "terms": {"measure": "amount"}, "layers": [layer]})
+    assert {t["term"] for t in am["terms"]} == {"attachment_amount", "limit_amount"}

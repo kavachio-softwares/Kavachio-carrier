@@ -235,7 +235,16 @@ def schedule(s, c, st: Optional[dict] = None) -> dict:
     rows = _entries(s, c)
     inception = c.inception_dt.isoformat() if c.inception_dt else None
     out = []
+    import treaty_types as tt
     for sp in spec(st.get("treaty_type")):
+        # A term that only applies under one setting is left out under the
+        # other: a stop loss measured as a loss ratio attaches at a % (its
+        # amount pair is not used, nor worked out), and one measured as an
+        # amount attaches at the amount entered.
+        f = (tt.LAYER_FIELDS if sp["level"] == "layer" else tt.TREATY_FIELDS).get(sp["term"]) or {}
+        w = f.get("when")
+        if w and (st.get("terms") or {}).get(w["field"]) != w["equals"]:
+            continue
         for li in ([None] if sp["level"] == "treaty"
                    else list(range(len(st.get("layers") or [])))):
             base = _base_value(st, sp["term"], li)

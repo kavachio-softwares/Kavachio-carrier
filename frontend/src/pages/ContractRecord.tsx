@@ -3949,10 +3949,12 @@ function ContractRecordView() {
               {active.length === 0 ? (
                 <div className="empty" style={{ padding: "12px 10px", textAlign: "left" }}>
                   <b>{documentsEmptyMessage({ authored, filename: rec.filename }).title}</b>
-                  <ul style={{ margin: "6px 0 0", paddingLeft: 18, listStyle: "disc outside" }}>
-                    {documentsEmptyMessage({ authored, filename: rec.filename }).bullets
-                      .map(b => <li key={b} style={{ display: "list-item", listStyle: "disc outside" }}>{b}</li>)}
-                  </ul>
+                  {documentsEmptyMessage({ authored, filename: rec.filename }).bullets.length > 0 && (
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18, listStyle: "disc outside" }}>
+                      {documentsEmptyMessage({ authored, filename: rec.filename }).bullets
+                        .map(b => <li key={b} style={{ display: "list-item", listStyle: "disc outside" }}>{b}</li>)}
+                    </ul>
+                  )}
                 </div>
               ) : (
                 /* One compact row per document — name, one line of what it

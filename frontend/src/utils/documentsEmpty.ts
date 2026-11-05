@@ -19,8 +19,8 @@ export type DocumentsEmpty = { title: string; bullets: string[] };
 export function documentsEmptyMessage(c: DocumentsEmptyInput): DocumentsEmpty {
   if (c.authored) {
     return {
-      title: "No extra files needed",
-      bullets: ["The contract wording is written above."],
+      title: "No other documents",
+      bullets: [],
     };
   }
   if ((c.filename || "").trim()) {
